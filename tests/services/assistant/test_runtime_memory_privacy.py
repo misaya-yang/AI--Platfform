@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -124,10 +126,10 @@ class ScopedMemoryDatabase:
                     "owner_proven": self.owner_proven,
                 }
             ]
-        assert "s.tenant_id = $1" in sql
-        assert "s.user_id = $2" in sql
-        assert "c.tenant_id = $1" in sql
-        assert "c.user_id = $2" in sql
+        assert "s.tenant_id = $1::varchar" in sql
+        assert "s.user_id = $2::varchar" in sql
+        assert "c.tenant_id = $1::varchar" in sql
+        assert "c.user_id = $2::varchar" in sql
         tenant_id, user_id, source_path = args
         if (
             self.source_id is None
@@ -231,7 +233,7 @@ class ScopedMemoryDatabase:
                 self.source_id = str(source_id)
             self.metadata = json.loads(str(raw_metadata))
             return {"source_id": self.source_id}
-        if "AND metadata->>'indexing_token' = $4" in sql:
+        if "AND metadata->>'indexing_token' = $4::text" in sql:
             source_id, tenant_id, user_id, indexing_token = args
             if (
                 source_id == self.source_id
@@ -491,6 +493,76 @@ def test_scoped_identifiers_do_not_use_lossy_scope_identity() -> None:
     encoded = MemorySourceStore._safe_component("tenant/a")
     assert encoded.startswith("~")
     assert MemorySourceStore._safe_component(encoded) != encoded
+
+
+@pytest.mark.asyncio
+async def test_index_source_explicitly_types_every_asyncpg_parameter(tmp_path: Path) -> None:
+    class TypedSqlRecordingDatabase(ScopedMemoryDatabase):
+        def __init__(self, **kwargs: object) -> None:
+            super().__init__(**kwargs)
+            self.sql_statements: list[str] = []
+
+        async def fetch(self, sql: str, *args: object) -> list[dict[str, object]]:
+            self.sql_statements.append(sql)
+            return await super().fetch(sql, *args)
+
+        async def fetchrow(self, sql: str, *args: object) -> dict[str, object] | None:
+            self.sql_statements.append(sql)
+            return await super().fetchrow(sql, *args)
+
+        async def execute(self, sql: str, *args: object) -> str:
+            self.sql_statements.append(sql)
+            return await super().execute(sql, *args)
+
+        async def executemany(
+            self,
+            sql: str,
+            rows: list[tuple[object, ...]],
+        ) -> None:
+            self.sql_statements.append(sql)
+            await super().executemany(sql, rows)
+
+    source_path = str(tmp_path / "MEMORY.md")
+    database = TypedSqlRecordingDatabase(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        source_path=source_path,
+        source_id=None,
+        chunk_ids=[],
+        cross_worker_lock=True,
+    )
+
+    indexed = await MemoryIndexer(database).index_source(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        source_path=source_path,
+        source_type="long_term",
+        content="# Durable memory\n\nOne scoped fact.",
+    )
+
+    untyped_parameters = [
+        match.group(0)
+        for sql in database.sql_statements
+        for match in re.finditer(r"\$\d+\b(?!::)", sql)
+    ]
+    untyped_module_parameters = re.findall(
+        r"\$\d+\b(?!::)",
+        inspect.getsource(MemoryIndexer),
+    )
+    assert indexed.chunk_count == 1
+    assert untyped_parameters == []
+    assert untyped_module_parameters == []
+    assert any(
+        "pg_advisory_lock(hashtextextended($1::text" in sql for sql in database.sql_statements
+    )
+    assert any(
+        "INSERT INTO assistant_memory_sources" in sql and "md5($6::text)" in sql
+        for sql in database.sql_statements
+    )
+    assert any(
+        "INSERT INTO assistant_memory_chunks" in sql and "$10::jsonb" in sql
+        for sql in database.sql_statements
+    )
 
 
 @pytest.mark.asyncio

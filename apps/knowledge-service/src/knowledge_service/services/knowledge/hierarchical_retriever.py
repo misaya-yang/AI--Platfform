@@ -16,8 +16,49 @@ from qdrant_client.http import models as qmodels
 
 from ...core.observability.logging import get_logger
 from .hierarchical_indexer import IndexLevel
+from .vector_store import CollectionReadAuthorityError
 
 logger = get_logger(__name__)
+
+_UNRELEASED_MULTIMODAL_CONTENT_TYPES = frozenset(
+    {"image", "page_image", "mixed", "multimodal", "vision"}
+)
+
+
+def _contains_unreleased_multimodal_content_type(
+    value: Any,
+    *,
+    depth: int = 0,
+) -> bool:
+    """Detect stale image modalities at any bounded payload depth."""
+
+    if depth > 12:
+        return True
+    if isinstance(value, dict):
+        for raw_key, nested in value.items():
+            normalized_key = "".join(
+                character
+                for character in str(raw_key).lower()
+                if character.isalnum()
+            )
+            if normalized_key in {"contenttype", "mediatype", "modality"}:
+                normalized_value = str(nested or "").strip().lower()
+                if (
+                    normalized_value in _UNRELEASED_MULTIMODAL_CONTENT_TYPES
+                    or normalized_value.startswith("image/")
+                ):
+                    return True
+            if _contains_unreleased_multimodal_content_type(
+                nested,
+                depth=depth + 1,
+            ):
+                return True
+    elif isinstance(value, (list, tuple)):
+        return any(
+            _contains_unreleased_multimodal_content_type(item, depth=depth + 1)
+            for item in value
+        )
+    return False
 
 
 class RetrievalStrategy(str, Enum):
@@ -26,6 +67,10 @@ class RetrievalStrategy(str, Enum):
     CASCADE = "cascade"  # L1 -> L2 -> L3 sequential
     PARALLEL = "parallel"  # All levels at once, RRF fusion
     ADAPTIVE = "adaptive"  # Auto-select based on query
+
+
+class HierarchicalAuthorityError(RuntimeError):
+    """Raised when PostgreSQL lifecycle authority cannot be established."""
 
 
 @dataclass
@@ -110,6 +155,7 @@ class HierarchicalRetriever:
         include_context: bool = True,
         score_threshold: float | None = None,
         base_collection: str | None = None,
+        tenant_id: str | None = None,
     ) -> tuple[list[HierarchicalResult], RetrievalMetadata]:
         """
         Perform hierarchical retrieval.
@@ -140,6 +186,11 @@ class HierarchicalRetriever:
             return [], RetrievalMetadata(strategy=strategy.value)
 
         vector_dim = len(query_vector)
+        if not tenant_id and self.db and hasattr(self.db, "get_dataset"):
+            dataset = await self.db.get_dataset(dataset_id)
+            tenant_id = str((dataset or {}).get("tenant_id") or "").strip() or None
+        if not tenant_id:
+            raise ValueError("hierarchical retrieval requires tenant_id scope")
         if base_collection:
             base = base_collection
         else:
@@ -166,6 +217,7 @@ class HierarchicalRetriever:
                 l2_top_k=l2_top_k,
                 score_threshold=score_threshold,
                 metadata=metadata,
+                tenant_id=tenant_id,
             )
         else:  # PARALLEL
             results = await self._parallel_retrieve(
@@ -176,11 +228,17 @@ class HierarchicalRetriever:
                 top_k=top_k,
                 score_threshold=score_threshold,
                 metadata=metadata,
+                tenant_id=tenant_id,
             )
 
         # Add context if requested
         if include_context and results:
-            results = await self._enrich_with_context(results, dataset_id, vector_dim)
+            results = await self._enrich_with_context(
+                results,
+                dataset_id,
+                vector_dim,
+                tenant_id,
+            )
 
         metadata.total_time_ms = (time.time() - start_time) * 1000
 
@@ -197,6 +255,7 @@ class HierarchicalRetriever:
         l2_top_k: int,
         score_threshold: float | None,
         metadata: RetrievalMetadata,
+        tenant_id: str,
     ) -> list[HierarchicalResult]:
         """
         Cascade retrieval: L1 -> L2 -> L3.
@@ -214,12 +273,22 @@ class HierarchicalRetriever:
                 collection=l1_collection,
                 query_vector=query_vector,
                 top_k=l1_top_k,
+                tenant_id=tenant_id,
+                dataset_id=dataset_id,
             )
-            metadata.l1_candidates = len(l1_results)
-            metadata.filtered_documents = [r["document_id"] for r in l1_results]
+        except CollectionReadAuthorityError:
+            raise
         except Exception as e:
             logger.debug(f"L1 search failed (may not exist): {e}")
             l1_results = []
+        l1_results = await self._filter_active_layer(
+            l1_results,
+            dataset_id=dataset_id,
+            tenant_id=tenant_id,
+            require_segments=False,
+        )
+        metadata.l1_candidates = len(l1_results)
+        metadata.filtered_documents = [r["document_id"] for r in l1_results]
 
         metadata.l1_time_ms = (time.time() - l1_start) * 1000
 
@@ -246,11 +315,21 @@ class HierarchicalRetriever:
                 query_vector=query_vector,
                 top_k=l2_top_k,
                 filter=doc_filter,
+                tenant_id=tenant_id,
+                dataset_id=dataset_id,
             )
-            metadata.l2_candidates = len(l2_results)
+        except CollectionReadAuthorityError:
+            raise
         except Exception as e:
             logger.debug(f"L2 search failed (may not exist): {e}")
             l2_results = []
+        l2_results = await self._filter_active_layer(
+            l2_results,
+            dataset_id=dataset_id,
+            tenant_id=tenant_id,
+            require_segments=True,
+        )
+        metadata.l2_candidates = len(l2_results)
 
         metadata.l2_time_ms = (time.time() - l2_start) * 1000
 
@@ -267,6 +346,14 @@ class HierarchicalRetriever:
             top_k=top_k * 2,  # Fetch more, then filter
             filter=doc_filter,
             score_threshold=score_threshold,
+            tenant_id=tenant_id,
+            dataset_id=dataset_id,
+        )
+        l3_results = await self._filter_active_layer(
+            l3_results,
+            dataset_id=dataset_id,
+            tenant_id=tenant_id,
+            require_segments=True,
         )
 
         metadata.l3_time_ms = (time.time() - l3_start) * 1000
@@ -297,6 +384,7 @@ class HierarchicalRetriever:
         top_k: int,
         score_threshold: float | None,
         metadata: RetrievalMetadata,
+        tenant_id: str,
     ) -> list[HierarchicalResult]:
         """
         Parallel retrieval: Search all levels at once, RRF fusion.
@@ -312,18 +400,59 @@ class HierarchicalRetriever:
         time.time()
 
         tasks = [
-            self._search_collection(l1_collection, query_vector, top_k * 2),
-            self._search_collection(l2_collection, query_vector, top_k * 2),
             self._search_collection(
-                l3_collection, query_vector, top_k * 3, score_threshold=score_threshold
+                l1_collection,
+                query_vector,
+                top_k * 2,
+                tenant_id=tenant_id,
+                dataset_id=dataset_id,
+            ),
+            self._search_collection(
+                l2_collection,
+                query_vector,
+                top_k * 2,
+                tenant_id=tenant_id,
+                dataset_id=dataset_id,
+            ),
+            self._search_collection(
+                l3_collection,
+                query_vector,
+                top_k * 3,
+                score_threshold=score_threshold,
+                tenant_id=tenant_id,
+                dataset_id=dataset_id,
             ),
         ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
+        for result in results:
+            if isinstance(result, CollectionReadAuthorityError):
+                raise result
+
         l1_results = results[0] if not isinstance(results[0], Exception) else []
         l2_results = results[1] if not isinstance(results[1], Exception) else []
         l3_results = results[2] if not isinstance(results[2], Exception) else []
+        l1_results, l2_results, l3_results = await asyncio.gather(
+            self._filter_active_layer(
+                l1_results,
+                dataset_id=dataset_id,
+                tenant_id=tenant_id,
+                require_segments=False,
+            ),
+            self._filter_active_layer(
+                l2_results,
+                dataset_id=dataset_id,
+                tenant_id=tenant_id,
+                require_segments=True,
+            ),
+            self._filter_active_layer(
+                l3_results,
+                dataset_id=dataset_id,
+                tenant_id=tenant_id,
+                require_segments=True,
+            ),
+        )
 
         metadata.l1_candidates = len(l1_results) if isinstance(l1_results, list) else 0
         metadata.l2_candidates = len(l2_results) if isinstance(l2_results, list) else 0
@@ -402,6 +531,8 @@ class HierarchicalRetriever:
         top_k: int,
         filter: qmodels.Filter | None = None,
         score_threshold: float | None = None,
+        tenant_id: str | None = None,
+        dataset_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Search a single collection."""
         try:
@@ -411,6 +542,8 @@ class HierarchicalRetriever:
                 top_k=top_k,
                 query_filter=filter,
                 score_threshold=score_threshold,
+                tenant_id=tenant_id,
+                dataset_id=dataset_id,
             )
 
             # Convert to dicts
@@ -423,15 +556,113 @@ class HierarchicalRetriever:
                 for r in results
             ]
 
+        except CollectionReadAuthorityError:
+            raise
         except Exception as e:
             logger.debug(f"Search failed for {collection}: {e}")
             return []
+
+    async def _filter_active_layer(
+        self,
+        results: list[dict[str, Any]],
+        *,
+        dataset_id: str,
+        tenant_id: str,
+        require_segments: bool,
+    ) -> list[dict[str, Any]]:
+        """Apply PostgreSQL document/segment lifecycle authority to one layer."""
+
+        results = [
+            item
+            for item in results
+            if not _contains_unreleased_multimodal_content_type(item)
+        ]
+        if not results:
+            return []
+        if not self.db:
+            raise HierarchicalAuthorityError(
+                "hierarchical active-state database authority is unavailable"
+            )
+        filter_documents = getattr(self.db, "filter_active_document_ids", None)
+        if not callable(filter_documents):
+            raise HierarchicalAuthorityError("hierarchical document authority is unavailable")
+
+        document_ids = list(
+            dict.fromkeys(
+                str(item.get("document_id") or "").strip()
+                for item in results
+                if str(item.get("document_id") or "").strip()
+            )
+        )
+        try:
+            active_documents = await filter_documents(
+                dataset_id=dataset_id,
+                tenant_id=tenant_id,
+                document_ids=document_ids,
+            )
+        except Exception as exc:
+            raise HierarchicalAuthorityError(
+                "hierarchical document authority failed"
+            ) from exc
+        normalized_documents = {
+            str(document_id or "").strip()
+            for document_id in (active_documents or set())
+            if str(document_id or "").strip()
+        }
+        if not normalized_documents.issubset(set(document_ids)):
+            raise HierarchicalAuthorityError(
+                "hierarchical document authority returned an unexpected document"
+            )
+        filtered = [
+            item
+            for item in results
+            if str(item.get("document_id") or "").strip() in normalized_documents
+        ]
+        if not require_segments or not filtered:
+            return filtered
+
+        filter_segments = getattr(self.db, "filter_active_segment_ids", None)
+        if not callable(filter_segments):
+            raise HierarchicalAuthorityError("hierarchical segment authority is unavailable")
+        segment_ids = list(
+            dict.fromkeys(
+                str(item.get("segment_id") or item.get("id") or "").strip()
+                for item in filtered
+                if str(item.get("segment_id") or item.get("id") or "").strip()
+            )
+        )
+        try:
+            active_segments = await filter_segments(
+                dataset_id=dataset_id,
+                tenant_id=tenant_id,
+                segment_ids=segment_ids,
+            )
+        except Exception as exc:
+            raise HierarchicalAuthorityError(
+                "hierarchical segment authority failed"
+            ) from exc
+        normalized_segments = {
+            str(segment_id or "").strip()
+            for segment_id in (active_segments or set())
+            if str(segment_id or "").strip()
+        }
+        if not normalized_segments.issubset(set(segment_ids)):
+            raise HierarchicalAuthorityError(
+                "hierarchical segment authority returned an unexpected segment"
+            )
+        return [
+            item
+            for item in filtered
+            if str(item.get("segment_id") or item.get("id") or "").strip()
+            in normalized_segments
+        ]
 
     async def _enrich_with_context(
         self,
         results: list[HierarchicalResult],
         dataset_id: str,
         vector_dim: int,
+        tenant_id: str,
     ) -> list[HierarchicalResult]:
         """Add parent context to L3 results."""
         if not self.db:
@@ -442,13 +673,19 @@ class HierarchicalRetriever:
 
         # Fetch document summaries
         summaries = {}
-        for doc_id in doc_ids:
-            try:
-                summary = await self.db.get_document_summary(doc_id)
-                if summary:
-                    summaries[doc_id] = summary.get("summary", "")
-            except Exception:
-                pass
+        get_summary = getattr(self.db, "get_document_summary_scoped", None)
+        if callable(get_summary):
+            for doc_id in doc_ids:
+                try:
+                    summary = await get_summary(
+                        document_id=doc_id,
+                        dataset_id=dataset_id,
+                        tenant_id=tenant_id,
+                    )
+                    if summary:
+                        summaries[doc_id] = summary.get("summary", "")
+                except Exception as exc:
+                    logger.debug("Scoped document-summary enrichment failed: %s", exc)
 
         parent_ids = {
             r.metadata.get("parent_segment_id")
@@ -456,13 +693,19 @@ class HierarchicalRetriever:
             if r.metadata.get("parent_segment_id")
         }
         parent_context = {}
-        for parent_id in parent_ids:
-            try:
-                seg = await self.db.get_segment(parent_id)
-                if seg:
-                    parent_context[parent_id] = seg.get("summary") or seg.get("text", "")
-            except Exception:
-                pass
+        get_segment = getattr(self.db, "get_segment_scoped", None)
+        if callable(get_segment):
+            for parent_id in parent_ids:
+                try:
+                    seg = await get_segment(
+                        segment_id=parent_id,
+                        dataset_id=dataset_id,
+                        tenant_id=tenant_id,
+                    )
+                    if seg:
+                        parent_context[parent_id] = seg.get("summary") or seg.get("text", "")
+                except Exception as exc:
+                    logger.debug("Scoped parent-context enrichment failed: %s", exc)
 
         # Enrich results
         for result in results:

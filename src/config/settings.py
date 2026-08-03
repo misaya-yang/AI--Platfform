@@ -269,6 +269,9 @@ class KnowledgeQdrantSettings(BaseModel):
     timeout_seconds: float = 120.0
     max_retries: int = 5
     retry_base_delay: float = 2.0  # Increased base delay for better recovery
+    bm25_v2_enabled: bool = False
+    bm25_v2_capability_ttl_seconds: float = 300.0
+    bm25_v2_readiness_ttl_seconds: float = 0.0
 
 
 class KnowledgeProviderSettings(BaseModel):

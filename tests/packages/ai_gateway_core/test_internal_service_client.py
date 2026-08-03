@@ -277,6 +277,46 @@ async def test_internal_service_client_does_not_retry_post_without_idempotency_k
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("idempotency_key", ["", "   "])
+async def test_internal_service_client_does_not_retry_post_with_blank_idempotency_key(
+    idempotency_key: str,
+) -> None:
+    calls = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503, json={"retry": False})
+
+    client = InternalServiceClient(
+        InternalServiceClientConfig(
+            name="knowledge-service",
+            base_url="http://knowledge-service.test",
+            retry_policy=RetryPolicy(
+                max_attempts=2,
+                base_delay_ms=0,
+                max_delay_ms=0,
+                retry_status_codes=frozenset({503}),
+            ),
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        response = await client.request(
+            "POST",
+            "/api/v1/knowledge/retrieve",
+            headers={"Idempotency-Key": idempotency_key},
+            json={"q": "hello"},
+        )
+    finally:
+        await client.close()
+
+    assert response.status_code == 503
+    assert calls == 1
+
+
+@pytest.mark.asyncio
 async def test_internal_service_client_rate_limiter_applies_to_retry_attempts() -> None:
     calls = 0
     acquired = 0

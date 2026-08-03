@@ -12,13 +12,15 @@ Tests include:
 
 from __future__ import annotations
 
+import contextlib
 import re
 import statistics
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
-
+from knowledge_service.auth.user_context import UserContext
 from knowledge_service.services.knowledge.chunking import (
     AutomaticChunker,
     Chunk,
@@ -34,6 +36,7 @@ from knowledge_service.services.knowledge.chunking import (
     flatten_chunks,
     process_document,
 )
+from knowledge_service.services.knowledge.chunking_manager import ChunkingManager
 
 # ============ Test Data Directory ============
 
@@ -601,10 +604,11 @@ class TestImageAwareChunking:
 
         chunks = chunker.chunk(SAMPLE_WITH_IMAGES)
 
-        # Some chunks should be flagged as having images
-        [c for c in chunks if c.metadata.get("has_image")]
-        # Note: Only chunks created by _chunk_with_image_awareness get this flag
-        # Structured documents use HeadingChunker instead
+        image_chunks = [c for c in chunks if c.metadata.get("has_image")]
+
+        assert image_chunks
+        assert all("[Image]" in chunk.text for chunk in image_chunks)
+        assert all(chunk.metadata.get("chunk_type") == "image_context" for chunk in image_chunks)
 
 
 class TestChunkQualityMetrics:
@@ -781,9 +785,9 @@ class TestRealDocuments:
     def test_pdf_extraction_available(self):
         """Test that PDF extraction is available"""
         try:
-            import fitz
+            import fitz as _fitz
 
-            assert True
+            assert _fitz is not None
         except ImportError:
             pytest.skip("PyMuPDF (fitz) not installed")
 
@@ -791,7 +795,8 @@ class TestRealDocuments:
     def test_automatic_chunking_on_pdfs(self, pdf_files):
         """Test automatic chunking on real PDF documents"""
         try:
-            import fitz
+            import fitz as _fitz
+            assert _fitz is not None
         except ImportError:
             pytest.skip("PyMuPDF not installed")
 
@@ -843,7 +848,8 @@ class TestRealDocuments:
     def test_hierarchical_vs_recursive(self, pdf_files):
         """Compare hierarchical and recursive chunking on PDFs"""
         try:
-            import fitz
+            import fitz as _fitz
+            assert _fitz is not None
         except ImportError:
             pytest.skip("PyMuPDF not installed")
 
@@ -934,6 +940,110 @@ class TestPerformance:
 
             # Should be reasonably fast
             assert avg_ms < 1000, f"{name} chunking too slow"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_chunking_manager_segment_toggle_is_database_authoritative(
+    enabled: bool,
+) -> None:
+    row = {
+        "segment_id": "segment-a",
+        "dataset_id": "dataset-a",
+        "document_id": "document-a",
+        "vector_id": "point-a",
+        "enabled": not enabled,
+    }
+    saved: list[dict] = []
+    payload_calls: list[tuple[bool, bool]] = []
+
+    class Database:
+        @contextlib.asynccontextmanager
+        async def segment_index_update_lease(
+            self,
+            dataset_id: str,
+            document_id: str,
+            segment_id: str,
+        ):
+            assert (dataset_id, document_id, segment_id) == (
+                "dataset-a",
+                "document-a",
+                "segment-a",
+            )
+            yield self
+
+        async def get_segment(self, segment_id: str, *, connection=None):
+            assert connection in (None, self)
+            assert segment_id == "segment-a"
+            return dict(row)
+
+        async def get_document(self, document_id: str, *, connection=None):
+            assert connection is self
+            assert document_id == "document-a"
+            return {
+                "document_id": "document-a",
+                "dataset_id": "dataset-a",
+                "enabled": True,
+                "archived": False,
+                "status": "completed",
+                "metadata": {},
+            }
+
+        async def update_segment_fields(
+            self,
+            segment_id: str,
+            fields: dict,
+            *,
+            connection=None,
+        ):
+            assert connection in (None, self)
+            assert segment_id == "segment-a"
+            saved.append(dict(fields))
+            row.update(fields)
+
+    class Knowledge:
+        async def require_dataset_access(
+            self,
+            _user,
+            dataset_id: str,
+            *,
+            required: str,
+        ):
+            assert (dataset_id, required) == ("dataset-a", "editor")
+            return {
+                "dataset_id": "dataset-a",
+                "tenant_id": "tenant-a",
+                "index_config": {},
+            }
+
+    class VectorStore:
+        async def set_segment_payload_enabled(self, **kwargs):
+            assert kwargs["lifecycle_lease_held"] is True
+            assert kwargs["segment_id"] == "segment-a"
+            payload_calls.append((kwargs["enabled"], row["enabled"]))
+            return ["custom-base", "custom-base_sections"]
+
+    manager = ChunkingManager(
+        SimpleNamespace(),
+        Database(),  # type: ignore[arg-type]
+        VectorStore(),  # type: ignore[arg-type]
+        Knowledge(),
+    )
+
+    result = await manager.set_segment_enabled(
+        UserContext(user_id="editor-a", tenant_id="tenant-a"),
+        "dataset-a",
+        "segment-a",
+        enabled,
+    )
+
+    assert result["enabled"] is enabled
+    assert saved[0]["enabled"] is enabled
+    assert saved[0]["disabled_by"] == (None if enabled else "editor-a")
+    assert (saved[0]["disabled_at"] is None) is enabled
+    # Both transitions keep PostgreSQL inactive until every owned Qdrant
+    # collection has acknowledged the payload state.
+    assert payload_calls == [(enabled, False)]
 
 
 if __name__ == "__main__":

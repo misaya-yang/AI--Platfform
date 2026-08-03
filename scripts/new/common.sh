@@ -204,7 +204,8 @@ check_postgres_health() {
 }
 
 check_redis_health() {
-    docker exec "$(redis_container)" redis-cli -a "${REDIS_PASSWORD:?REDIS_PASSWORD is required}" ping 2>/dev/null | grep -q PONG
+    docker exec "$(redis_container)" sh -c \
+        'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli ping' 2>/dev/null | grep -q PONG
 }
 
 check_qdrant_health() {

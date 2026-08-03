@@ -165,6 +165,7 @@ def build_rag_trace_payload(
 
     trace_metadata: dict[str, Any] = {
         "dataset_id": dataset_id,
+        "answer_source": "retrieval_only",
         "gen_ai.retrieval.query.text": redact_preview(query),
         "retrieval.dataset_ids": [dataset_id] if dataset_id else [],
         "error_summary": redact_preview(error_summary) if error_summary else None,

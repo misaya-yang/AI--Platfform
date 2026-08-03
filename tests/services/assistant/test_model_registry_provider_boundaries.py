@@ -131,6 +131,7 @@ async def test_model_database_row_failure_redacts_exception_logs(
                     "provider_id": "openai",
                     "model_id": "model-safe-id",
                     "display_name": "Safe display name",
+                    "access_level": "public",
                     "input_price_per_1k": _ExplodingPrice(),
                 }
             ]
@@ -143,6 +144,45 @@ async def test_model_database_row_failure_redacts_exception_logs(
     assert sentinel not in caplog.text
     assert "exception_type=RuntimeError" in caplog.text
     assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_database_catalog_rows_preserve_valid_access_and_skip_dirty_rows() -> None:
+    registry = ModelRegistry(use_default_models=False)
+
+    loaded = registry.replace_models_from_database_rows(
+        [
+            {
+                "provider_id": "openai",
+                "model_id": "public-model",
+                "display_name": "Public model",
+                "access_level": "public",
+            },
+            {
+                "provider_id": "openai",
+                "model_id": "premium-model",
+                "display_name": "Premium model",
+                "access_level": "premium",
+            },
+            {
+                "provider_id": "openai",
+                "model_id": "admin-model",
+                "display_name": "Admin model",
+                "access_level": "admin",
+            },
+            {
+                "provider_id": "openai",
+                "model_id": "dirty-model",
+                "display_name": "Dirty model",
+                "access_level": "corrupt",
+            },
+        ]
+    )
+
+    assert loaded == 3
+    assert registry.get_model("public-model").access_level.value == "public"
+    assert registry.get_model("premium-model").access_level.value == "premium"
+    assert registry.get_model("admin-model").access_level.value == "admin"
+    assert registry.get_model("dirty-model") is None
 
 
 @pytest.mark.asyncio
@@ -1568,6 +1608,274 @@ async def test_anthropic_non_argument_client_tool_delta_fails_closed(
             pass
 
     assert exc_info.value.error_type == "invalid_tool_input"
+
+
+@pytest.mark.asyncio
+async def test_openai_qwen_tool_continuations_strip_empty_identity_fields() -> None:
+    """Qwen repeats empty identity fields while streaming argument fragments."""
+
+    first_arguments = '{"todos":['
+    final_arguments = '{"content":"review","status":"pending"}]}'
+    lines = [
+        _sse(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_qwen_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "todo_write",
+                                        "arguments": "",
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ]
+            }
+        ),
+        _sse(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "",
+                                        "arguments": first_arguments,
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ]
+            }
+        ),
+        _sse(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "",
+                                    "type": "function",
+                                    "function": {"arguments": final_arguments},
+                                }
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ]
+            }
+        ),
+        _sse({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+        _sse(
+            {
+                "choices": [],
+                "usage": {"prompt_tokens": 11, "completion_tokens": 7},
+            }
+        ),
+        "data: [DONE]",
+    ]
+    registry = ModelRegistry(use_default_models=False)
+
+    deltas = [
+        delta
+        async for delta in registry._stream_openai(
+            _FakeClient(_StreamContext(_FakeResponse(lines=lines))),
+            "/v1/chat/completions",
+            {"stream": True},
+        )
+    ]
+
+    tool_deltas = [delta.tool_calls for delta in deltas if delta.tool_calls]
+    assert "id" not in tool_deltas[1][0]
+    assert "name" not in tool_deltas[1][0]["function"]
+    assert "id" not in tool_deltas[2][0]
+
+    accumulator: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    counter = 0
+    for chunks in tool_deltas:
+        counter = merge_stream_tool_calls(chunks, accumulator, order, counter)
+
+    assert [accumulator[key] for key in order] == [
+        {
+            "id": "call_qwen_1",
+            "type": "function",
+            "function": {
+                "name": "todo_write",
+                "arguments": first_arguments + final_arguments,
+            },
+        }
+    ]
+    assert any(delta.finish_reason == "tool_calls" for delta in deltas)
+    assert deltas[-1].usage == {"input_tokens": 11, "output_tokens": 7}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "orphan_call",
+    [
+        {
+            "index": 7,
+            "id": "",
+            "type": "function",
+            "function": {"name": "todo_write", "arguments": "{}"},
+        },
+        {
+            "index": 7,
+            "type": "function",
+            "function": {"arguments": "{}"},
+        },
+    ],
+)
+async def test_openai_rejects_orphan_tool_continuation(
+    orphan_call: dict[str, Any],
+) -> None:
+    lines = [
+        _sse(
+            {
+                "choices": [
+                    {
+                        "delta": {"tool_calls": [orphan_call]},
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            }
+        )
+    ]
+    registry = ModelRegistry(use_default_models=False)
+
+    with pytest.raises(ProviderStreamError) as exc_info:
+        async for _ in registry._stream_openai(
+            _FakeClient(_StreamContext(_FakeResponse(lines=lines))),
+            "/v1/chat/completions",
+            {"stream": True},
+        ):
+            pass
+
+    assert exc_info.value.error_type == "invalid_event"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rebound_field",
+    [
+        {"id": "call_rebound", "function": {"arguments": "{}"}},
+        {"function": {"name": "different_tool", "arguments": "{}"}},
+    ],
+)
+async def test_openai_rejects_tool_continuation_identity_rebinding(
+    rebound_field: dict[str, Any],
+) -> None:
+    initial_call = {
+        "index": 0,
+        "id": "call_qwen_1",
+        "type": "function",
+        "function": {"name": "todo_write", "arguments": ""},
+    }
+    continuation = {"index": 0, "type": "function", **rebound_field}
+    lines = [
+        _sse(
+            {
+                "choices": [
+                    {
+                        "delta": {"tool_calls": [initial_call]},
+                        "finish_reason": None,
+                    }
+                ]
+            }
+        ),
+        _sse(
+            {
+                "choices": [
+                    {
+                        "delta": {"tool_calls": [continuation]},
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            }
+        ),
+    ]
+    registry = ModelRegistry(use_default_models=False)
+
+    with pytest.raises(ProviderStreamError) as exc_info:
+        async for _ in registry._stream_openai(
+            _FakeClient(_StreamContext(_FakeResponse(lines=lines))),
+            "/v1/chat/completions",
+            {"stream": True},
+        ):
+            pass
+
+    assert exc_info.value.error_type == "invalid_event"
+
+
+@pytest.mark.asyncio
+async def test_openai_rejects_tool_call_id_reuse_across_indexes() -> None:
+    lines = [
+        _sse(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_shared",
+                                    "type": "function",
+                                    "function": {"name": "todo_write", "arguments": ""},
+                                }
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ]
+            }
+        ),
+        _sse(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 1,
+                                    "id": "call_shared",
+                                    "type": "function",
+                                    "function": {"name": "todo_write", "arguments": "{}"},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            }
+        ),
+    ]
+    registry = ModelRegistry(use_default_models=False)
+
+    with pytest.raises(ProviderStreamError) as exc_info:
+        async for _ in registry._stream_openai(
+            _FakeClient(_StreamContext(_FakeResponse(lines=lines))),
+            "/v1/chat/completions",
+            {"stream": True},
+        ):
+            pass
+
+    assert exc_info.value.error_type == "invalid_event"
 
 
 @pytest.mark.asyncio

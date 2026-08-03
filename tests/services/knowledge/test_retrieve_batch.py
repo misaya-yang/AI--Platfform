@@ -12,6 +12,7 @@ from knowledge_service.services.knowledge.retrieval import (
 )
 from knowledge_service.services.knowledge.retrieval_service import RetrievalService
 from knowledge_service.services.knowledge.text_reranker import RerankResult
+from knowledge_service.services.knowledge.vector_store import CollectionReadAuthorityError
 
 
 def _mock_result(query: str, metadata: dict | None = None) -> SimpleNamespace:
@@ -27,6 +28,28 @@ def _mock_result(query: str, metadata: dict | None = None) -> SimpleNamespace:
     )
 
 
+def _readable_dataset(dataset_id: str) -> dict:
+    return {
+        "dataset_id": dataset_id,
+        "tenant_id": "tenant-a",
+        "collection_name": "kb-demo-collection",
+        "index_config": {},
+    }
+
+
+class ReadableVectorStore:
+    async def require_collection_readable(self, *_args, **_kwargs):
+        return {"tenant_id": "tenant-a", "dataset_id": "kb-demo"}
+
+
+class RejectedReadAuthorityStore:
+    def __init__(self, reason: str):
+        self.reason = reason
+
+    async def require_collection_readable(self, *_args, **_kwargs):
+        raise CollectionReadAuthorityError(self.reason)
+
+
 class FakeDatabase:
     def __init__(self, rows):
         self.rows = rows
@@ -36,11 +59,16 @@ class FakeDatabase:
         self.calls.append(kwargs)
         return self.rows
 
+    async def filter_active_segment_ids(self, *, segment_ids, **_kwargs):
+        return set(segment_ids)
+
 
 def _make_bm25_service(rows):
     async def _require_dataset_access(user, dataset_id, required="viewer"):
         return {
             "dataset_id": dataset_id,
+            "tenant_id": "tenant-a",
+            "collection_name": "kb-demo-collection",
             "index_config": {},
             "embedding_provider": "local",
             "embedding_model": "hash-384",
@@ -59,12 +87,17 @@ def _make_bm25_service(rows):
         ),
         database,
     )
+    svc.vector_store = ReadableVectorStore()
     svc._ks = SimpleNamespace(
         require_dataset_access=_require_dataset_access,
-        _resolve_fusion_config=lambda **_kwargs: {
+        _resolve_fusion_config=lambda **kwargs: {
             "method": "rrf",
-            "dense_weight": 0.5,
-            "bm25_weight": 0.5,
+            "dense_weight": kwargs.get("dense_weight")
+            if kwargs.get("dense_weight") is not None
+            else 0.5,
+            "bm25_weight": kwargs.get("bm25_weight")
+            if kwargs.get("bm25_weight") is not None
+            else 0.5,
             "rrf_k": 60,
         },
         _is_multimodal_dataset=lambda _dataset: False,
@@ -116,6 +149,9 @@ class FakeHybridDatabase:
             },
         ]
 
+    async def filter_active_segment_ids(self, *, segment_ids, **_kwargs):
+        return set(segment_ids)
+
 
 class FakeHybridVectorStore:
     def __init__(self, probe: RecallProbe):
@@ -128,6 +164,9 @@ class FakeHybridVectorStore:
     async def ping(self, timeout_seconds=1.0):
         _ = timeout_seconds
         return True
+
+    async def require_collection_readable(self, *_args, **_kwargs):
+        return {"tenant_id": "tenant-a", "dataset_id": "kb-demo"}
 
     async def search(self, **kwargs):
         self.calls.append(kwargs)
@@ -162,8 +201,15 @@ class FakeHybridVectorStore:
         self.native_calls.append(kwargs)
         raise RuntimeError("native RRF unavailable in fallback test")
 
-    async def retrieve_vectors(self, *, collection_name, point_ids):
-        _ = collection_name
+    async def retrieve_vectors(
+        self,
+        *,
+        collection_name,
+        point_ids,
+        tenant_id,
+        dataset_id,
+    ):
+        _ = collection_name, tenant_id, dataset_id
         self.retrieve_vectors_calls += 1
         return {
             point_id: [float(index + 1), 1.0]
@@ -250,6 +296,7 @@ def _make_hybrid_service(probe: RecallProbe):
         probe.access_calls += 1
         return {
             "dataset_id": dataset_id,
+            "tenant_id": "tenant-a",
             "collection_name": "kb-demo-collection",
             "index_config": {},
             "embedding_provider": "local",
@@ -274,10 +321,14 @@ def _make_hybrid_service(probe: RecallProbe):
     svc.vector_store = vector_store
     svc._ks = SimpleNamespace(
         require_dataset_access=_require_dataset_access,
-        _resolve_fusion_config=lambda **_kwargs: {
+        _resolve_fusion_config=lambda **kwargs: {
             "method": "rrf",
-            "dense_weight": 0.5,
-            "bm25_weight": 0.5,
+            "dense_weight": kwargs.get("dense_weight")
+            if kwargs.get("dense_weight") is not None
+            else 0.5,
+            "bm25_weight": kwargs.get("bm25_weight")
+            if kwargs.get("bm25_weight") is not None
+            else 0.5,
             "rrf_k": 60,
         },
         _is_multimodal_dataset=lambda _dataset: False,
@@ -352,6 +403,39 @@ async def test_dense_retrieval_propagates_dense_recall_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_mmr_collection_authority_race_fails_closed_without_ranked_fallback(
+    monkeypatch,
+):
+    probe = RecallProbe()
+    svc, _, _ = _make_hybrid_service(probe)
+
+    class MmrAuthorityRaceStore(FakeHybridVectorStore):
+        async def retrieve_vectors(self, **_kwargs):
+            raise CollectionReadAuthorityError("scope changed before MMR vector fetch")
+
+    svc.vector_store = MmrAuthorityRaceStore(probe)
+
+    async def _get_cached_embedder(_config, dimension=None):
+        return FakeEmbedder()
+
+    monkeypatch.setattr(
+        "knowledge_service.services.knowledge.retrieval_service.get_cached_embedder",
+        _get_cached_embedder,
+    )
+
+    with pytest.raises(ValidationFailedError, match="scope changed before MMR"):
+        await svc.retrieve(
+            user=SimpleNamespace(),
+            dataset_id="kb-demo",
+            query="original full question",
+            top_k=1,
+            mode="hybrid",
+            rerank=False,
+            mmr=True,
+        )
+
+
+@pytest.mark.asyncio
 async def test_bm25_retrieval_uses_postgres_fts_candidates():
     svc, database = _make_bm25_service(
         [
@@ -391,6 +475,10 @@ async def test_bm25_retrieval_uses_postgres_fts_candidates():
     )
 
     assert [result.segment_id for result in results] == ["seg-1", "seg-2"]
+    assert [result.metadata["_bm25_score"] for result in results] == [
+        results[0].metadata["_bm25_score"],
+        results[0].metadata["_bm25_score"],
+    ]
     assert database.calls[0]["dataset_id"] == "kb-demo"
     assert "alpha" in database.calls[0]["terms"]
     assert meta["bm25_hits_raw_count"] == 2
@@ -404,6 +492,189 @@ async def test_bm25_retrieval_uses_postgres_fts_candidates():
         "total_ms",
     }
     assert all(value >= 0 for value in meta["timings_ms"].values())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    ["stored bm25_v2 active", "malformed immutable scope"],
+)
+async def test_pg_only_bm25_rejects_unsafe_collection_before_fts(reason):
+    svc, database = _make_bm25_service(
+        [
+            {
+                "segment_id": "must-not-return",
+                "dataset_id": "kb-demo",
+                "document_id": "doc-a",
+                "text": "unsafe fallback",
+                "metadata": {},
+            }
+        ]
+    )
+    svc.vector_store = RejectedReadAuthorityStore(reason)
+
+    with pytest.raises(ValidationFailedError, match=reason):
+        await svc.retrieve(
+            user=SimpleNamespace(),
+            dataset_id="kb-demo",
+            query="unsafe fallback",
+            mode="bm25",
+            rerank=False,
+            mmr=False,
+        )
+    assert database.calls == []
+
+
+@pytest.mark.asyncio
+async def test_native_authority_race_rejects_hybrid_without_pg_fallback(monkeypatch):
+    probe = RecallProbe()
+    svc, database, _ = _make_hybrid_service(probe)
+
+    class NativeAuthorityRaceStore(FakeHybridVectorStore):
+        async def hybrid_search_multi_native(self, **kwargs):
+            self.native_calls.append(kwargs)
+            raise CollectionReadAuthorityError("scope changed after preflight")
+
+    store = NativeAuthorityRaceStore(probe)
+    svc.vector_store = store
+
+    async def _get_cached_embedder(_config, dimension=None):
+        return FakeEmbedder()
+
+    monkeypatch.setattr(
+        "knowledge_service.services.knowledge.retrieval_service.get_cached_embedder",
+        _get_cached_embedder,
+    )
+
+    with pytest.raises(ValidationFailedError, match="scope changed after preflight"):
+        await svc.retrieve(
+            user=SimpleNamespace(),
+            dataset_id="kb-demo",
+            query="original full question",
+            mode="hybrid",
+            rerank=False,
+            mmr=False,
+        )
+    assert len(store.native_calls) == 1
+    assert database.calls == []
+    assert store.calls == []
+
+
+@pytest.mark.asyncio
+async def test_dense_candidates_are_filtered_by_postgres_active_authority(monkeypatch):
+    probe = RecallProbe()
+    probe.bm25_started.set()
+    svc, database, _ = _make_hybrid_service(probe)
+    authority_calls = []
+
+    async def filter_active(*, dataset_id, tenant_id, segment_ids):
+        authority_calls.append((dataset_id, tenant_id, list(segment_ids)))
+        return {"dense-original"}
+
+    database.filter_active_segment_ids = filter_active
+
+    async def _get_cached_embedder(_config, dimension=None):
+        return FakeEmbedder()
+
+    monkeypatch.setattr(
+        "knowledge_service.services.knowledge.retrieval_service.get_cached_embedder",
+        _get_cached_embedder,
+    )
+
+    results, meta = await svc.retrieve(
+        user=SimpleNamespace(),
+        dataset_id="kb-demo",
+        query="original full question",
+        top_k=5,
+        mode="dense",
+        rerank=False,
+        mmr=False,
+    )
+
+    assert [result.segment_id for result in results] == ["dense-original"]
+    assert authority_calls == [
+        ("kb-demo", "tenant-a", ["shared", "dense-original"])
+    ]
+    assert meta["inactive_candidates_filtered"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_mode", ["error", "unexpected"])
+async def test_dense_active_authority_failure_is_fail_closed(monkeypatch, failure_mode):
+    probe = RecallProbe()
+    probe.bm25_started.set()
+    svc, database, _ = _make_hybrid_service(probe)
+
+    async def filter_active(**_kwargs):
+        if failure_mode == "error":
+            raise RuntimeError("postgres unavailable")
+        return {"foreign-segment"}
+
+    database.filter_active_segment_ids = filter_active
+
+    async def _get_cached_embedder(_config, dimension=None):
+        return FakeEmbedder()
+
+    monkeypatch.setattr(
+        "knowledge_service.services.knowledge.retrieval_service.get_cached_embedder",
+        _get_cached_embedder,
+    )
+
+    expected = "authority failed" if failure_mode == "error" else "unexpected segment"
+    with pytest.raises(ValidationFailedError, match=expected):
+        await svc.retrieve(
+            user=SimpleNamespace(),
+            dataset_id="kb-demo",
+            query="original full question",
+            mode="dense",
+            rerank=False,
+            mmr=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_native_hybrid_candidates_share_postgres_active_authority(monkeypatch):
+    probe = RecallProbe()
+    svc, database, _ = _make_hybrid_service(probe)
+    store = FakeNativeHybridVectorStore(probe)
+    svc.vector_store = store
+    authority_calls = []
+
+    async def filter_active(*, dataset_id, tenant_id, segment_ids):
+        authority_calls.append((dataset_id, tenant_id, set(segment_ids)))
+        return {"dense-rewrite"}
+
+    database.filter_active_segment_ids = filter_active
+
+    async def _get_cached_embedder(_config, dimension=None):
+        return FakeEmbedder()
+
+    monkeypatch.setattr(
+        "knowledge_service.services.knowledge.retrieval_service.get_cached_embedder",
+        _get_cached_embedder,
+    )
+
+    batch_results, _ = await svc.retrieve_batch(
+        user=SimpleNamespace(),
+        dataset_id="kb-demo",
+        queries=["original full question", "rewrite query"],
+        top_k=5,
+        mode="hybrid",
+        rerank=False,
+        mmr=False,
+    )
+
+    results = batch_results[0]["results"]
+    assert [result["segment_id"] for result in results] == ["dense-rewrite"]
+    assert authority_calls == [
+        (
+            "kb-demo",
+            "tenant-a",
+            {"shared", "lexical-original", "dense-rewrite"},
+        )
+    ]
+    assert batch_results[0]["meta"]["inactive_candidates_filtered"] == 2
+    assert not database.calls
 
 
 @pytest.mark.asyncio
@@ -500,6 +771,43 @@ async def test_rerank_order_is_not_mixed_with_fusion_scores(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_default_rrf_keeps_legacy_unweighted_fallback_contract(monkeypatch):
+    probe = RecallProbe()
+    svc, _, _ = _make_hybrid_service(probe)
+    rrf_calls = []
+
+    async def _get_cached_embedder(_config, dimension=None):
+        return FakeEmbedder()
+
+    def _rrf(ranked_lists, **kwargs):
+        rrf_calls.append({"ranked_lists": ranked_lists, "kwargs": kwargs})
+        return real_reciprocal_rank_fusion(ranked_lists, **kwargs)
+
+    monkeypatch.setattr(
+        "knowledge_service.services.knowledge.retrieval_service.get_cached_embedder",
+        _get_cached_embedder,
+    )
+    monkeypatch.setattr(
+        "knowledge_service.services.knowledge.retrieval_service.reciprocal_rank_fusion",
+        _rrf,
+    )
+
+    batch_results, _ = await svc.retrieve_batch(
+        user=SimpleNamespace(),
+        dataset_id="kb-demo",
+        queries=["original full question", "rewrite query"],
+        top_k=3,
+        mode="hybrid",
+        rerank=False,
+        mmr=False,
+    )
+
+    assert len(rrf_calls) == 2
+    assert [call["kwargs"] for call in rrf_calls] == [{"k": 60}, {"k": 60}]
+    assert batch_results[0]["meta"]["fusion_semantics"] == "legacy_unweighted_rrf_v1"
+
+
+@pytest.mark.asyncio
 async def test_retrieve_batch_runs_per_query_rrf_then_one_global_rerank_and_mmr(monkeypatch):
     probe = RecallProbe()
     svc, database, vector_store = _make_hybrid_service(probe)
@@ -511,7 +819,7 @@ async def test_retrieve_batch_runs_per_query_rrf_then_one_global_rerank_and_mmr(
         return FakeEmbedder()
 
     def _rrf(ranked_lists, **kwargs):
-        rrf_calls.append(ranked_lists)
+        rrf_calls.append({"ranked_lists": ranked_lists, "kwargs": kwargs})
         return real_reciprocal_rank_fusion(ranked_lists, **kwargs)
 
     class FakeReranker:
@@ -560,29 +868,37 @@ async def test_retrieve_batch_runs_per_query_rrf_then_one_global_rerank_and_mmr(
     batch_results, meta = await svc.retrieve_batch(
         user=SimpleNamespace(),
         dataset_id="kb-demo",
-        queries=["original full question", "rewrite query"],
+        queries=["知识库问题 original", "rewrite query"],
         top_k=2,
         mode="hybrid",
+        dense_weight=0.7,
+        bm25_weight=0.3,
         rerank=True,
         rerank_model="bge-reranker-v2-m3",
         mmr=True,
-        max_parallel=40,
+        max_parallel=10,
     )
 
     results = batch_results[0]["results"]
     result_ids = [result["segment_id"] for result in results]
     assert probe.bm25_started.is_set() and probe.dense_started.is_set()
-    assert probe.access_calls == 1
+    # Initial authorization plus inner and final generation validation.
+    assert probe.access_calls == 3
     assert len(database.calls) == 2
     assert len(vector_store.calls) == 2
     assert len(rrf_calls) == 2
     assert len(rerank_calls) == len(mmr_calls) == 1
-    assert all(len(ranked_lists) == 2 for ranked_lists in rrf_calls)
+    assert all(len(call["ranked_lists"]) == 2 for call in rrf_calls)
+    assert [call["kwargs"]["weights"] for call in rrf_calls] == [
+        {"dense": 0.75, "bm25": 0.25},
+        {"dense": 0.75, "bm25": 0.25},
+    ]
+    assert all(call["kwargs"]["qdrant_weighted"] is True for call in rrf_calls)
     assert all(
         sum("shared" in ranked_ids for ranked_ids in ranked_lists.values()) == 2
-        for ranked_lists in rrf_calls
+        for ranked_lists in (call["ranked_lists"] for call in rrf_calls)
     )
-    assert rerank_calls[0]["query"] == "original full question"
+    assert rerank_calls[0]["query"] == "知识库问题 original"
     assert vector_store.retrieve_vectors_calls == 1
     assert "dense-rewrite" in result_ids
     assert len(result_ids) == len(set(result_ids)) <= 2
@@ -591,8 +907,18 @@ async def test_retrieve_batch_runs_per_query_rrf_then_one_global_rerank_and_mmr(
     assert batch_results[0]["meta"]["rrf_ranked_list_count"] == 4
     assert batch_results[0]["meta"]["rrf_query_count"] == 2
     assert batch_results[0]["meta"]["cross_query_fusion"] == "max"
+    assert batch_results[0]["meta"]["dense_weight"] == 0.75
+    assert batch_results[0]["meta"]["bm25_weight"] == 0.25
+    assert batch_results[0]["meta"]["fusion_semantics"] == "qdrant_weighted_rrf_v1"
     shared = next(result for result in results if result["segment_id"] == "shared")
-    assert shared["metadata"]["_rrf_score_raw"] == round(2 / 61, 6)
+    expected_shared_score = max(
+        real_reciprocal_rank_fusion(
+            call["ranked_lists"],
+            **call["kwargs"],
+        )["shared"]
+        for call in rrf_calls
+    )
+    assert shared["metadata"]["_rrf_score_raw"] == round(expected_shared_score, 6)
 
 
 @pytest.mark.asyncio
@@ -651,9 +977,11 @@ async def test_retrieve_batch_uses_one_native_batch_then_one_global_rerank_and_m
     batch_results, meta = await svc.retrieve_batch(
         user=SimpleNamespace(),
         dataset_id="kb-demo",
-        queries=["original full question", "rewrite query"],
+        queries=["知识库问题 original", "rewrite query"],
         top_k=2,
         mode="hybrid",
+        dense_weight=0.7,
+        bm25_weight=0.3,
         rerank=True,
         rerank_model="bge-reranker-v2-m3",
         mmr=True,
@@ -664,6 +992,10 @@ async def test_retrieve_batch_uses_one_native_batch_then_one_global_rerank_and_m
     assert len(vector_store.native_calls) == 1
     assert len(vector_store.native_calls[0]["routes"]) == 2
     assert vector_store.native_calls[0]["rrf_k"] == 60
+    assert vector_store.native_calls[0]["tenant_id"] == "tenant-a"
+    assert vector_store.native_calls[0]["dataset_id"] == "kb-demo"
+    assert vector_store.native_calls[0]["dense_weight"] == 0.75
+    assert vector_store.native_calls[0]["sparse_weight"] == 0.25
     assert not vector_store.calls and not database.calls
     assert len(rerank_calls) == len(mmr_calls) == 1
     assert pipeline_meta["native_hybrid"] is True
@@ -673,6 +1005,9 @@ async def test_retrieve_batch_uses_one_native_batch_then_one_global_rerank_and_m
     assert pipeline_meta["cross_query_fusion"] == "max"
     assert pipeline_meta["native_batch_request_count"] == 1
     assert pipeline_meta["fusion_applied_by"] == "qdrant"
+    assert pipeline_meta["fusion_semantics"] == "qdrant_weighted_rrf_v1"
+    assert pipeline_meta["dense_weight"] == 0.75
+    assert pipeline_meta["bm25_weight"] == 0.25
     assert [item["metadata"]["global_rank"] for item in results] == [1, 2]
     assert results[0]["segment_id"] == "shared"
     assert results[0]["metadata"]["_rrf_score_raw"] == 0.9
@@ -742,6 +1077,8 @@ async def test_multimodal_cache_rechecks_dataset_access():
             user=SimpleNamespace(user_id="user-1"),
             dataset_id="kb-demo",
             query="cached query",
+            include_images=False,
+            vlm_rerank=False,
         )
 
 
@@ -750,7 +1087,7 @@ async def test_retrieve_batch_supports_per_query_overrides():
     svc = object.__new__(RetrievalService)
 
     async def _require_dataset_access(user, dataset_id, required="viewer"):
-        return {"dataset_id": dataset_id}
+        return _readable_dataset(dataset_id)
 
     calls = []
 
@@ -761,6 +1098,7 @@ async def test_retrieve_batch_supports_per_query_overrides():
         }
 
     svc._ks = SimpleNamespace(require_dataset_access=_require_dataset_access)
+    svc.vector_store = ReadableVectorStore()
     svc._retrieve_queries = _retrieve
 
     batch_results, meta = await RetrievalService.retrieve_batch(
@@ -799,13 +1137,14 @@ async def test_retrieve_batch_deduplicates_queries_before_recall():
     calls = []
 
     async def _require_dataset_access(user, dataset_id, required="viewer"):
-        return {"dataset_id": dataset_id}
+        return _readable_dataset(dataset_id)
 
     async def _retrieve(**kwargs):
         calls.append(kwargs)
         return [_mock_result(kwargs["query"])], {}
 
     svc._ks = SimpleNamespace(require_dataset_access=_require_dataset_access)
+    svc.vector_store = ReadableVectorStore()
     svc._retrieve_queries = _retrieve
 
     batch_results, meta = await RetrievalService.retrieve_batch(
@@ -832,13 +1171,14 @@ async def test_retrieve_batch_single_query_uses_one_global_pipeline():
     calls = []
 
     async def _require_dataset_access(user, dataset_id, required="viewer"):
-        return {"dataset_id": dataset_id}
+        return _readable_dataset(dataset_id)
 
     async def _retrieve(**kwargs):
         calls.append(kwargs)
         return [_mock_result(kwargs["query"])], {}
 
     svc._ks = SimpleNamespace(require_dataset_access=_require_dataset_access)
+    svc.vector_store = ReadableVectorStore()
     svc._retrieve_queries = _retrieve
 
     batch_results, meta = await RetrievalService.retrieve_batch(
@@ -865,13 +1205,14 @@ async def test_retrieve_batch_default_top_k_follows_unique_query_count(query_cou
     calls = []
 
     async def _require_dataset_access(user, dataset_id, required="viewer"):
-        return {"dataset_id": dataset_id}
+        return _readable_dataset(dataset_id)
 
     async def _retrieve(**kwargs):
         calls.append(kwargs)
         return [], {}
 
     svc._ks = SimpleNamespace(require_dataset_access=_require_dataset_access)
+    svc.vector_store = ReadableVectorStore()
     svc._retrieve_queries = _retrieve
 
     _, meta = await RetrievalService.retrieve_batch(
@@ -891,13 +1232,14 @@ async def test_retrieve_batch_explicit_top_k_overrides_dynamic_default():
     calls = []
 
     async def _require_dataset_access(user, dataset_id, required="viewer"):
-        return {"dataset_id": dataset_id}
+        return _readable_dataset(dataset_id)
 
     async def _retrieve(**kwargs):
         calls.append(kwargs)
         return [], {}
 
     svc._ks = SimpleNamespace(require_dataset_access=_require_dataset_access)
+    svc.vector_store = ReadableVectorStore()
     svc._retrieve_queries = _retrieve
 
     _, meta = await RetrievalService.retrieve_batch(
@@ -917,6 +1259,9 @@ async def test_retrieve_batch_keeps_successful_candidates_after_partial_failure(
     svc, _ = _make_bm25_service([])
 
     class PartialDatabase:
+        async def filter_active_segment_ids(self, *, segment_ids, **_kwargs):
+            return set(segment_ids)
+
         async def search_segments_text(self, **kwargs):
             if "broken" in kwargs["terms"]:
                 raise RuntimeError("simulated recall failure")
@@ -954,12 +1299,10 @@ async def test_retrieve_batch_keeps_successful_candidates_after_partial_failure(
 async def test_retrieve_batch_handles_empty_query_list():
     svc = object.__new__(RetrievalService)
 
-    batch_results, meta = await RetrievalService.retrieve_batch(
-        svc,
-        user=SimpleNamespace(),
-        dataset_id="kb-demo",
-        queries=["", "   ", None],
-    )
-
-    assert batch_results == []
-    assert meta == {"error": "No valid queries provided"}
+    with pytest.raises(ValidationFailedError, match=r"query\[0\]"):
+        await RetrievalService.retrieve_batch(
+            svc,
+            user=SimpleNamespace(),
+            dataset_id="kb-demo",
+            queries=["", "   ", None],
+        )

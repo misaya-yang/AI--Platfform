@@ -745,9 +745,20 @@ Respond in JSON format:
 
         tasks = [run_one(tc) for tc in test_cases]
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        failures = [result for result in results if isinstance(result, BaseException)]
+        if failures:
+            # A partial batch must never shrink the denominator and masquerade
+            # as a complete evaluation. Preserve the first failure as the
+            # causal exception while making incompleteness explicit.
+            raise RuntimeError(
+                f"QA batch incomplete: {len(failures)} of {len(test_cases)} cases failed"
+            ) from failures[0]
 
-        # Filter out exceptions
-        return [r for r in results if isinstance(r, QATestResult)]
+        if len(results) != len(test_cases) or not all(
+            isinstance(result, QATestResult) for result in results
+        ):
+            raise RuntimeError("QA batch incomplete: invalid result cardinality")
+        return [result for result in results if isinstance(result, QATestResult)]
 
     def aggregate_test_results(
         self,

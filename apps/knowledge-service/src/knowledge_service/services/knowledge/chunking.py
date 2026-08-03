@@ -26,9 +26,12 @@ import logging
 import re
 import threading
 from abc import ABC, abstractmethod
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+
+from ...core.exceptions import ValidationFailedError
 
 # Token counting with tiktoken (GPT-4 compatible)
 try:
@@ -41,6 +44,378 @@ except ImportError:
     _DEFAULT_ENCODING = None
 
 logger = logging.getLogger(__name__)
+
+MAX_CHUNK_OUTPUTS = 10_000
+MAX_WHOLE_ENCODER_INPUT_BYTES = 4 * 1024 * 1024
+SAFE_HEADING_PATTERNS = (
+    r"^#{1,6}\s+.+$",
+    r"^第[一二三四五六七八九十\d]+[章节条款]",
+    r"^[A-Z][A-Z \t]{4,}:?$",
+)
+_SAFE_PAGE_MARKERS = frozenset({r"\f", "\f"})
+_SAFE_CHUNKING_MODES = frozenset(
+    {
+        "automatic",
+        "auto",
+        "fixed_size",
+        "fixed",
+        "custom",
+        "paragraph",
+        "page",
+        "heading",
+        "section",
+        "separator",
+        "recursive",
+        "hierarchical",
+        "parent_child",
+        "qa",
+    }
+)
+_SAFE_CHUNKING_KEYS = frozenset(
+    {
+        "mode",
+        "chunk_size",
+        "chunk_overlap",
+        "overlap",
+        "max_chunk_size",
+        "min_chunk_size",
+        "use_token_count",
+        "token_limit",
+        "max_tokens",
+        "min_chunk_tokens",
+        "max_chunk_tokens",
+        "separators",
+        "separator",
+        "primary_separator",
+        "keep_separator",
+        "regex_pattern",
+        "regex",
+        "heading_level",
+        "heading_patterns",
+        "min_paragraph_length",
+        "merge_short_paragraphs",
+        "parent_chunk_size",
+        "parent_overlap",
+        "parent_chunk_overlap",
+        "child_chunk_size",
+        "child_overlap",
+        "child_chunk_overlap",
+        "parent_mode",
+        "parent_token_limit",
+        "child_token_limit",
+        "question_prefix",
+        "answer_prefix",
+        "preserve_images",
+        "image_context_chars",
+        "remove_extra_spaces",
+        "remove_urls_emails",
+        "normalize_whitespace",
+        "strip_html",
+        "extract_metadata",
+        "metadata_fields",
+        "page_marker",
+        "strict_section_traceability",
+        "segmentation",
+    }
+)
+_CHUNKING_INTEGER_BOUNDS = {
+    "chunk_size": (50, 100_000),
+    "chunk_overlap": (0, 50_000),
+    "overlap": (0, 50_000),
+    "max_chunk_size": (50, 100_000),
+    "min_chunk_size": (50, 100_000),
+    "token_limit": (1, 100_000),
+    "max_tokens": (1, 100_000),
+    "min_chunk_tokens": (1, 100_000),
+    "max_chunk_tokens": (1, 100_000),
+    "min_paragraph_length": (1, 100_000),
+    "parent_chunk_size": (50, 100_000),
+    "parent_overlap": (0, 50_000),
+    "parent_chunk_overlap": (0, 50_000),
+    "child_chunk_size": (10, 100_000),
+    "child_overlap": (0, 50_000),
+    "child_chunk_overlap": (0, 50_000),
+    "parent_token_limit": (1, 100_000),
+    "child_token_limit": (1, 100_000),
+    "image_context_chars": (0, 1_000_000),
+}
+_CHUNKING_BOOLEAN_FIELDS = frozenset(
+    {
+        "use_token_count",
+        "keep_separator",
+        "merge_short_paragraphs",
+        "preserve_images",
+        "remove_extra_spaces",
+        "remove_urls_emails",
+        "normalize_whitespace",
+        "strip_html",
+        "extract_metadata",
+        "strict_section_traceability",
+    }
+)
+
+
+def require_chunk_output_budget(chunks: Any) -> None:
+    if not isinstance(chunks, (list, tuple)) or len(chunks) > MAX_CHUNK_OUTPUTS:
+        raise ValidationFailedError(
+            f"chunking output exceeds the {MAX_CHUNK_OUTPUTS} chunk limit"
+        )
+
+
+def _append_bounded_output(output: list[Any], item: Any) -> None:
+    if len(output) >= MAX_CHUNK_OUTPUTS:
+        raise ValidationFailedError(
+            f"chunking output exceeds the {MAX_CHUNK_OUTPUTS} chunk limit"
+        )
+    output.append(item)
+
+
+def _extend_bounded_output(output: list[Any], items: list[Any]) -> None:
+    if len(output) + len(items) > MAX_CHUNK_OUTPUTS:
+        raise ValidationFailedError(
+            f"chunking output exceeds the {MAX_CHUNK_OUTPUTS} chunk limit"
+        )
+    output.extend(items)
+
+
+def _require_literal_split_budget(text: str, separator: str) -> None:
+    """Reject an eager split before Python materializes more than the output cap."""
+    if not separator:
+        return
+    matches = 0
+    start = 0
+    while True:
+        index = text.find(separator, start)
+        if index < 0:
+            return
+        matches += 1
+        if matches >= MAX_CHUNK_OUTPUTS:
+            raise ValidationFailedError(
+                f"chunking output exceeds the {MAX_CHUNK_OUTPUTS} chunk limit"
+            )
+        start = index + len(separator)
+
+
+def _require_regex_split_budget(text: str, pattern: str) -> None:
+    for matches, _match in enumerate(re.finditer(pattern, text), start=1):
+        if matches >= MAX_CHUNK_OUTPUTS:
+            raise ValidationFailedError(
+                f"chunking output exceeds the {MAX_CHUNK_OUTPUTS} chunk limit"
+            )
+
+
+def _require_token_window_input_budget(
+    text: str,
+    token_limit: int,
+    overlap_tokens: int = 0,
+) -> None:
+    """Bound token-list materialization before calling a whole-text encoder."""
+    overlap = min(max(int(overlap_tokens), 0), max(token_limit - 1, 0))
+    step = max(int(token_limit) - overlap, 1)
+    max_input_units = step * MAX_CHUNK_OUTPUTS
+    if len(text) > max_input_units:
+        raise ValidationFailedError(
+            f"chunking output exceeds the {MAX_CHUNK_OUTPUTS} chunk limit"
+        )
+    if len(text.encode("utf-8")) > max_input_units:
+        raise ValidationFailedError(
+            f"chunking output exceeds the {MAX_CHUNK_OUTPUTS} chunk limit"
+        )
+
+
+def _require_whole_encoder_input_budget(text: str) -> None:
+    if len(text) > MAX_WHOLE_ENCODER_INPUT_BYTES:
+        raise ValidationFailedError(
+            "text exceeds the safe whole-tokenizer materialization limit"
+        )
+    if len(text.encode("utf-8")) > MAX_WHOLE_ENCODER_INPUT_BYTES:
+        raise ValidationFailedError(
+            "text exceeds the safe whole-tokenizer materialization limit"
+        )
+
+
+def _reject_custom_chunking_regex_surfaces(value: Any) -> None:
+    if isinstance(value, dict):
+        for raw_key, nested in value.items():
+            key = str(raw_key).strip().lower().replace("-", "_")
+            if key == "mode" and str(nested or "").strip().lower() == "regex":
+                raise ValidationFailedError("custom regex chunking is disabled")
+            if key in {"regex", "regex_pattern"} and nested:
+                raise ValidationFailedError("custom regex chunking is disabled")
+            if (
+                key == "heading_patterns"
+                and nested
+                and (
+                    not isinstance(nested, (list, tuple))
+                    or tuple(nested) != SAFE_HEADING_PATTERNS
+                )
+            ):
+                raise ValidationFailedError("custom heading regex patterns are disabled")
+            if (
+                key == "page_marker"
+                and nested not in (None, "")
+                and (not isinstance(nested, str) or nested not in _SAFE_PAGE_MARKERS)
+            ):
+                raise ValidationFailedError("custom page marker regex is disabled")
+            _reject_custom_chunking_regex_surfaces(nested)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _reject_custom_chunking_regex_surfaces(item)
+
+
+def validate_persisted_chunking_config(value: Any) -> dict[str, Any]:
+    """Validate raw persisted chunking config before it can amplify work."""
+
+    if value in (None, {}):
+        return {}
+    if not isinstance(value, dict):
+        raise ValidationFailedError("chunking config must be an object")
+
+    unknown = {str(key) for key in value}.difference(_SAFE_CHUNKING_KEYS)
+    if unknown:
+        raise ValidationFailedError(
+            f"unsupported chunking config field: {sorted(unknown)[0]}"
+        )
+    _reject_custom_chunking_regex_surfaces(
+        {
+            key: value.get(key)
+            for key in (
+                "mode",
+                "regex",
+                "regex_pattern",
+                "heading_patterns",
+                "page_marker",
+            )
+            if key in value
+        }
+    )
+
+    mode = str(value.get("mode") or "automatic").strip().lower()
+    if mode not in _SAFE_CHUNKING_MODES:
+        raise ValidationFailedError("unsupported chunking mode")
+
+    for key, (minimum, maximum) in _CHUNKING_INTEGER_BOUNDS.items():
+        candidate = value.get(key)
+        if candidate is None:
+            continue
+        if (
+            isinstance(candidate, bool)
+            or not isinstance(candidate, int)
+            or not minimum <= candidate <= maximum
+        ):
+            raise ValidationFailedError(
+                f"chunking {key} must be an integer between {minimum} and {maximum}"
+            )
+    for key in _CHUNKING_BOOLEAN_FIELDS:
+        candidate = value.get(key)
+        if candidate is not None and not isinstance(candidate, bool):
+            raise ValidationFailedError(f"chunking {key} must be a boolean")
+
+    for key, maximum in {
+        "separator": 1_024,
+        "primary_separator": 1_024,
+        "heading_level": 32,
+        "parent_mode": 32,
+        "question_prefix": 128,
+        "answer_prefix": 128,
+    }.items():
+        candidate = value.get(key)
+        if candidate is not None and (
+            not isinstance(candidate, str) or len(candidate) > maximum
+        ):
+            raise ValidationFailedError(f"chunking {key} is invalid")
+
+    separators = value.get("separators")
+    if separators is not None and (
+        not isinstance(separators, list)
+        or not 1 <= len(separators) <= 32
+        or any(
+            not isinstance(separator, str)
+            or not separator
+            or len(separator) > 1_024
+            for separator in separators
+        )
+    ):
+        raise ValidationFailedError("chunking separators are invalid")
+    metadata_fields = value.get("metadata_fields")
+    if metadata_fields is not None and (
+        not isinstance(metadata_fields, list)
+        or len(metadata_fields) > 32
+        or any(
+            not isinstance(field_name, str)
+            or not field_name
+            or len(field_name) > 64
+            for field_name in metadata_fields
+        )
+    ):
+        raise ValidationFailedError("chunking metadata_fields are invalid")
+    segmentation = value.get("segmentation")
+    if segmentation is not None:
+        if not isinstance(segmentation, dict) or set(segmentation) != {"max_tokens"}:
+            raise ValidationFailedError("chunking segmentation is invalid")
+        max_tokens = segmentation.get("max_tokens")
+        if (
+            isinstance(max_tokens, bool)
+            or not isinstance(max_tokens, int)
+            or not 1 <= max_tokens <= 100_000
+        ):
+            raise ValidationFailedError(
+                "chunking segmentation.max_tokens must be an integer between 1 and 100000"
+            )
+
+    chunk_size = int(value.get("chunk_size") or 2_000)
+    explicit_overlap = (
+        value.get("chunk_overlap")
+        if value.get("chunk_overlap") is not None
+        else value.get("overlap")
+    )
+    if explicit_overlap is None:
+        if bool(value.get("use_token_count", True)):
+            token_limit = int(
+                value.get("token_limit")
+                or value.get("max_tokens")
+                or value.get("chunk_size")
+                or 500
+            )
+            overlap = 50 if mode in {"automatic", "auto", "hierarchical"} else max(
+                int(token_limit * 0.1),
+                20,
+            )
+        else:
+            overlap = 300
+    else:
+        overlap = int(explicit_overlap)
+    if overlap >= chunk_size:
+        raise ValidationFailedError("chunking overlap must be smaller than chunk_size")
+    min_chunk_size = int(value.get("min_chunk_size") or 400)
+    max_chunk_size = int(value.get("max_chunk_size") or 3_000)
+    if min_chunk_size > max_chunk_size:
+        raise ValidationFailedError("min_chunk_size must not exceed max_chunk_size")
+    child_size = int(value.get("child_chunk_size") or 2_000)
+    child_overlap_raw = (
+        value.get("child_overlap")
+        if value.get("child_overlap") is not None
+        else value.get("child_chunk_overlap")
+    )
+    child_overlap = overlap if child_overlap_raw is None else int(child_overlap_raw)
+    if child_overlap >= child_size:
+        raise ValidationFailedError("child overlap must be smaller than child_chunk_size")
+    parent_size = int(value.get("parent_chunk_size") or 8_000)
+    parent_overlap_raw = (
+        value.get("parent_overlap")
+        if value.get("parent_overlap") is not None
+        else value.get("parent_chunk_overlap")
+    )
+    parent_overlap = (
+        child_overlap if parent_overlap_raw is None else int(parent_overlap_raw)
+    )
+    if parent_overlap >= parent_size:
+        raise ValidationFailedError("parent overlap must be smaller than parent_chunk_size")
+    min_tokens = value.get("min_chunk_tokens")
+    max_tokens = value.get("max_chunk_tokens")
+    if min_tokens is not None and max_tokens is not None and min_tokens > max_tokens:
+        raise ValidationFailedError("min_chunk_tokens must not exceed max_chunk_tokens")
+    return dict(value)
 
 # =============================================================================
 # Multilingual Token Counter (Best Practice: 256-512 tokens for RAG)
@@ -99,8 +474,8 @@ class TokenCounter:
                 return self._cache[cache_key]
 
         # Detect language composition
-        arabic_chars = len(_ARABIC_RANGE.findall(text))
-        cjk_chars = len(_CJK_RANGE.findall(text))
+        arabic_chars = sum(1 for _match in _ARABIC_RANGE.finditer(text))
+        cjk_chars = sum(1 for _match in _CJK_RANGE.finditer(text))
         total_chars = len(text)
 
         arabic_ratio = arabic_chars / max(total_chars, 1)
@@ -114,7 +489,7 @@ class TokenCounter:
             result = self._count_arabic_tokens(text, arabic_ratio)
         elif self.encoder:
             try:
-                result = len(self.encoder.encode(text))
+                result = self._count_encoded_tokens(text)
             except (UnicodeEncodeError, ValueError, TypeError) as e:
                 # 特定编码错误使用 fallback，其他错误继续抛出
                 logger.debug(f"Token encoding failed for text length {len(text)}: {e}")
@@ -125,6 +500,17 @@ class TokenCounter:
         # Cache result with LRU eviction (thread-safe)
         self._add_to_cache(cache_key, result)
         return result
+
+    def _count_encoded_tokens(self, text: str) -> int:
+        if not self.encoder:
+            return 0
+        block_chars = 64 * 1024
+        if len(text) <= block_chars:
+            return len(self.encoder.encode(text))
+        total = 0
+        for start in range(0, len(text), block_chars):
+            total += len(self.encoder.encode(text[start : start + block_chars]))
+        return total
 
     def _add_to_cache(self, key: str, value: int) -> None:
         """Add result to cache with LRU eviction. Thread-safe."""
@@ -140,7 +526,7 @@ class TokenCounter:
             self._cache[key] = value
             self._cache_keys.append(key)
 
-    def _count_arabic_tokens(self, text: str, arabic_ratio: float) -> int:
+    def _count_arabic_tokens(self, text: str, _arabic_ratio: float) -> int:
         """
         Count tokens for Arabic text with calibrated heuristics.
 
@@ -163,43 +549,40 @@ class TokenCounter:
         clean_text = _ARABIC_DIACRITICS.sub("", text)
 
         # Split into words (Arabic uses spaces)
-        arabic_words = [w for w in clean_text.split() if _ARABIC_RANGE.search(w)]
-        non_arabic_text = _ARABIC_RANGE.sub(" ", clean_text)
-        non_arabic_words = non_arabic_text.split()
+        arabic_word_count = 0
+        non_arabic_word_count = 0
+        for word_match in re.finditer(r"\S+", clean_text):
+            if _ARABIC_RANGE.search(word_match.group(0)):
+                arabic_word_count += 1
+            else:
+                non_arabic_word_count += 1
 
         # Arabic: ~3.2 tokens per word (calibrated against actual tokenizer)
         # This accounts for the complex morphology of Arabic:
         # - Prefixes: و، ف، ب، ل، ك، ال
         # - Suffixes: ة، ات، ون، ين، etc.
-        arabic_tokens = len(arabic_words) * 3.2
-
-        # Non-Arabic: use tiktoken or heuristic
-        if self.encoder and non_arabic_text.strip():
-            try:
-                non_arabic_tokens = len(self.encoder.encode(non_arabic_text))
-            except Exception:
-                non_arabic_tokens = len(non_arabic_words) * 1.3
-        else:
-            non_arabic_tokens = len(non_arabic_words) * 1.3
+        arabic_tokens = arabic_word_count * 3.2
+        non_arabic_tokens = non_arabic_word_count * 1.3
 
         return int(arabic_tokens + non_arabic_tokens)
 
-    def _estimate_fallback(self, text: str, cjk_ratio: float) -> int:
+    def _estimate_fallback(self, text: str, _cjk_ratio: float) -> int:
         """Fallback estimation when tiktoken unavailable."""
         if not text:
             return 0
 
         # CJK characters
-        cjk_count = len(_CJK_RANGE.findall(text))
+        cjk_count = sum(1 for _match in _CJK_RANGE.finditer(text))
 
         # Arabic characters - count words after removing diacritics
-        arabic_clean = _ARABIC_DIACRITICS.sub("", text)
-        arabic_words = len([w for w in arabic_clean.split() if _ARABIC_RANGE.search(w)])
-
-        # Non-CJK, non-Arabic text
-        remaining = _CJK_RANGE.sub(" ", text)
-        remaining = _ARABIC_RANGE.sub(" ", remaining)
-        word_count = len(remaining.split())
+        arabic_words = 0
+        word_count = 0
+        for word_match in re.finditer(r"\S+", text):
+            word = word_match.group(0)
+            if _ARABIC_RANGE.search(word):
+                arabic_words += 1
+            elif not _CJK_RANGE.fullmatch(word):
+                word_count += 1
 
         # Estimates: CJK ~0.7, Arabic ~3.2/word (calibrated), English ~1.3/word
         cjk_tokens = cjk_count * 0.7
@@ -262,8 +645,8 @@ def detect_text_language(text: str) -> tuple[str, float]:
         return ("en", 0.0)
 
     # Count characters by script
-    arabic_chars = len(_ARABIC_RANGE.findall(text))
-    cjk_chars = len(_CJK_RANGE.findall(text))
+    arabic_chars = sum(1 for _match in _ARABIC_RANGE.finditer(text))
+    cjk_chars = sum(1 for _match in _CJK_RANGE.finditer(text))
     total_chars = len(text.replace(" ", "").replace("\n", ""))
 
     if total_chars == 0:
@@ -373,7 +756,7 @@ def chunk_text(
         else:
             # Save current chunk if non-empty
             if current_chunk.strip():
-                chunks.append(current_chunk.strip())
+                _append_bounded_output(chunks, current_chunk.strip())
 
             # Start new chunk with overlap
             if chunk_overlap > 0 and current_chunk:
@@ -385,7 +768,7 @@ def chunk_text(
 
     # Add final chunk
     if current_chunk.strip():
-        chunks.append(current_chunk.strip())
+        _append_bounded_output(chunks, current_chunk.strip())
 
     return chunks
 
@@ -398,15 +781,16 @@ def _split_by_separators(text: str, separators: list[str]) -> list[str]:
     sep = separators[0]
     remaining_seps = separators[1:]
 
+    _require_literal_split_budget(text, sep)
     parts = text.split(sep)
 
     result = []
     for i, part in enumerate(parts):
         if remaining_seps:
             sub_parts = _split_by_separators(part, remaining_seps)
-            result.extend(sub_parts)
+            _extend_bounded_output(result, sub_parts)
         else:
-            result.append(part)
+            _append_bounded_output(result, part)
 
         # Add separator back (except for last part)
         if i < len(parts) - 1:
@@ -555,7 +939,7 @@ class ChunkingConfig:
         default_factory=lambda: [
             r"^#{1,6}\s+.+$",  # Markdown headings
             r"^第[一二三四五六七八九十\d]+[章节条款]",  # Chinese chapter markers
-            r"^[A-Z][A-Z\s]{4,}:?\s*$",  # ALL CAPS headings (5+ chars)
+            r"^[A-Z][A-Z \t]{4,}:?$",  # ALL CAPS headings (5+ chars)
         ]
     )
 
@@ -593,6 +977,7 @@ class ChunkingConfig:
     # Strict section traceability.
     # When enabled, ensures every chunk has a section_title for downstream citations.
     strict_section_traceability: bool = False
+    _runtime_chunk_count: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         # Normalize optional min/max token constraints (<=0 => disabled)
@@ -609,6 +994,8 @@ class ChunkingConfig:
     def from_dict(cls, data: dict[str, Any]) -> ChunkingConfig:
         if not data:
             return cls()
+
+        validate_persisted_chunking_config(data)
 
         mode_str = str(data.get("mode", "automatic")).lower()
         mode_map = {
@@ -1029,8 +1416,6 @@ class TextPreprocessor:
     @classmethod
     def _extract_keywords(cls, text: str, top_k: int = 10) -> list[str]:
         """Extract keywords via simple TF heuristic (no external dependency)."""
-        # Tokenise: lowercase, alpha-only, 3+ chars
-        words = re.findall(r"\b[a-zA-Z\u4e00-\u9fff]{3,}\b", text.lower())
         stopwords = {
             "the",
             "and",
@@ -1080,7 +1465,13 @@ class TextPreprocessor:
             "most",
         }
         freq: dict[str, int] = {}
-        for w in words:
+        for index, word_match in enumerate(
+            re.finditer(r"\b[a-zA-Z\u4e00-\u9fff]{3,}\b", text, re.IGNORECASE),
+            start=1,
+        ):
+            if index > 100_000:
+                break
+            w = word_match.group(0).lower()
             if w not in stopwords and len(w) >= 3:
                 freq[w] = freq.get(w, 0) + 1
         sorted_words = sorted(freq, key=freq.get, reverse=True)  # type: ignore[arg-type]
@@ -1093,12 +1484,16 @@ class TextPreprocessor:
 
         # Title: first heading or short first line
         if "title" in fields:
-            lines = text.strip().split("\n")
-            if lines:
-                first_line = lines[0].strip()
-                if first_line and len(first_line) < 200:
-                    if first_line.startswith("#") or len(first_line) < 100:
-                        metadata["title"] = first_line.lstrip("#").strip()
+            first_non_whitespace = re.search(r"\S", text)
+            if first_non_whitespace:
+                line_end = text.find("\n", first_non_whitespace.start())
+                if line_end < 0:
+                    line_end = len(text)
+                first_line = text[first_non_whitespace.start() : line_end].strip()
+                if first_line and len(first_line) < 200 and (
+                    first_line.startswith("#") or len(first_line) < 100
+                ):
+                    metadata["title"] = first_line.lstrip("#").strip()
 
         # Date: scan first 1000 chars
         if "date" in fields:
@@ -1122,7 +1517,7 @@ class TextPreprocessor:
 
         # Word / char counts (always useful for traceability)
         if "word_count" in fields or "char_count" in fields:
-            metadata["word_count"] = len(text.split())
+            metadata["word_count"] = sum(1 for _match in re.finditer(r"\S+", text))
             metadata["char_count"] = len(text)
 
         return metadata
@@ -1147,6 +1542,11 @@ class BaseChunker(ABC):
         parent_id: str | None = None,
     ) -> Chunk:
         """Create a Chunk object with computed fields"""
+        if self.config._runtime_chunk_count >= MAX_CHUNK_OUTPUTS:
+            raise ValidationFailedError(
+                f"chunking output exceeds the {MAX_CHUNK_OUTPUTS} chunk limit"
+            )
+        self.config._runtime_chunk_count += 1
         return Chunk(
             text=text.strip(),
             index=index,
@@ -1165,6 +1565,11 @@ class BaseChunker(ABC):
         chunks = []
         start = 0
         text_len = len(text)
+        step = max(chunk_size - min(overlap, chunk_size // 2), 1)
+        if (text_len + step - 1) // step > MAX_CHUNK_OUTPUTS:
+            raise ValidationFailedError(
+                f"chunking output exceeds the {MAX_CHUNK_OUTPUTS} chunk limit"
+            )
 
         while start < text_len:
             end = min(start + chunk_size, text_len)
@@ -1188,7 +1593,7 @@ class BaseChunker(ABC):
 
             chunk_text = text[start:end].strip()
             if chunk_text and len(chunk_text) >= self.config.min_chunk_size:
-                chunks.append(chunk_text)
+                _append_bounded_output(chunks, chunk_text)
 
             # Move start forward - ensure we make progress
             # The step should be at least (chunk_size - overlap) to avoid excessive overlap
@@ -1230,25 +1635,21 @@ class BaseChunker(ABC):
 
         # Ensure overlap is reasonable
         overlap_tokens = min(overlap_tokens, token_limit // 2)
+        _require_token_window_input_budget(text, token_limit, overlap_tokens)
 
         # Split into sentences first for better boundaries
         # Multilingual sentence endings: . ! ? 。！？۔؟
         sentence_pattern = re.compile(r"([.!?。！？۔؟]\s*|\n\n+)")
-        sentences = sentence_pattern.split(text)
-
-        # Rebuild sentences with their endings
-        merged_sentences = []
-        i = 0
-        while i < len(sentences):
-            sentence = sentences[i]
-            # Attach ending punctuation if next element is punctuation
-            if i + 1 < len(sentences) and sentence_pattern.match(sentences[i + 1]):
-                sentence = sentence + sentences[i + 1]
-                i += 2
-            else:
-                i += 1
+        merged_sentences: list[str] = []
+        sentence_start = 0
+        for sentence_match in sentence_pattern.finditer(text):
+            sentence = text[sentence_start : sentence_match.end()]
             if sentence.strip():
-                merged_sentences.append(sentence)
+                _append_bounded_output(merged_sentences, sentence)
+            sentence_start = sentence_match.end()
+        trailing_sentence = text[sentence_start:]
+        if trailing_sentence.strip():
+            _append_bounded_output(merged_sentences, trailing_sentence)
 
         chunks = []
         current_chunk = ""
@@ -1263,20 +1664,20 @@ class BaseChunker(ABC):
             if sentence_tokens > token_limit:
                 # First, flush current chunk
                 if current_chunk.strip():
-                    chunks.append(current_chunk.strip())
+                    _append_bounded_output(chunks, current_chunk.strip())
                     current_chunk = ""
                     current_tokens = 0
 
                 # Split long sentence by words
-                words = sentence.split()
                 word_chunk = ""
                 word_tokens = 0
 
-                for word in words:
+                for word_match in re.finditer(r"\S+", sentence):
+                    word = word_match.group(0)
                     word_token_count = token_counter.count_tokens(word + " ")
                     if word_tokens + word_token_count > token_limit:
                         if word_chunk.strip():
-                            chunks.append(word_chunk.strip())
+                            _append_bounded_output(chunks, word_chunk.strip())
                         word_chunk = word + " "
                         word_tokens = word_token_count
                     else:
@@ -1295,7 +1696,7 @@ class BaseChunker(ABC):
             if current_tokens + sentence_tokens > token_limit:
                 # Flush current chunk
                 if current_chunk.strip():
-                    chunks.append(current_chunk.strip())
+                    _append_bounded_output(chunks, current_chunk.strip())
 
                 # Start new chunk - only include overlap if it fits with new sentence
                 if overlap_buffer and overlap_buffer_tokens + sentence_tokens <= token_limit:
@@ -1325,38 +1726,38 @@ class BaseChunker(ABC):
 
         # Don't forget the last chunk
         if current_chunk.strip():
-            chunks.append(current_chunk.strip())
+            _append_bounded_output(chunks, current_chunk.strip())
 
         # Safety pass: enforce strict token limits
         def _hard_split_by_tokens(t: str) -> list[str]:
             if not t.strip():
                 return []
-            words = t.split()
-            if not words:
-                return [t.strip()]
             out: list[str] = []
             buf = ""
             buf_tokens = 0
-            for w in words:
+            found_word = False
+            for word_match in re.finditer(r"\S+", t):
+                found_word = True
+                w = word_match.group(0)
                 w_tokens = token_counter.count_tokens(w + " ")
                 if buf_tokens + w_tokens > token_limit:
                     if buf.strip():
-                        out.append(buf.strip())
+                        _append_bounded_output(out, buf.strip())
                     buf = w + " "
                     buf_tokens = w_tokens
                 else:
                     buf += w + " "
                     buf_tokens += w_tokens
             if buf.strip():
-                out.append(buf.strip())
-            return out
+                _append_bounded_output(out, buf.strip())
+            return out if found_word else [t.strip()]
 
         final: list[str] = []
         for ch in chunks:
             if token_counter.count_tokens(ch) <= token_limit:
-                final.append(ch)
+                _append_bounded_output(final, ch)
             else:
-                final.extend(_hard_split_by_tokens(ch))
+                _extend_bounded_output(final, _hard_split_by_tokens(ch))
 
         return final
 
@@ -1377,7 +1778,9 @@ class BaseChunker(ABC):
             return []
 
         token_counter = get_token_counter()
+        _require_token_window_input_budget(text, token_limit, overlap_tokens)
         if token_counter.encoder:
+            _require_whole_encoder_input_budget(text)
             tokens = token_counter.encoder.encode(text)
             if not tokens:
                 return []
@@ -1388,6 +1791,10 @@ class BaseChunker(ABC):
             step = token_limit - overlap_tokens if overlap_tokens < token_limit else token_limit
             if step <= 0:
                 step = token_limit
+            if (len(tokens) + step - 1) // step > MAX_CHUNK_OUTPUTS:
+                raise ValidationFailedError(
+                    f"chunking output exceeds the {MAX_CHUNK_OUTPUTS} chunk limit"
+                )
 
             chunks: list[str] = []
             for start in range(0, len(tokens), step):
@@ -1395,49 +1802,57 @@ class BaseChunker(ABC):
                     tokens[start : start + token_limit]
                 ).strip()
                 if chunk_text:
-                    chunks.append(chunk_text)
+                    _append_bounded_output(chunks, chunk_text)
             return chunks
-
-        words = text.split()
-        if not words:
-            return []
 
         # Cap overlap to ensure forward progress.
         overlap_tokens = 0 if token_limit <= 1 else max(0, min(overlap_tokens, token_limit - 1))
 
-        word_tokens = [token_counter.count_tokens(w + " ") for w in words]
         chunks: list[str] = []
+        word_buffer: deque[tuple[str, int]] = deque()
+        buffer_tokens = 0
+        for word_match in re.finditer(r"\S+", text):
+            word = word_match.group(0)
+            word_tokens = token_counter.count_tokens(word + " ")
 
-        i = 0
-        n = len(words)
-        while i < n:
-            total = 0
-            j = i
-            while j < n and total + word_tokens[j] <= token_limit:
-                total += word_tokens[j]
-                j += 1
+            if word_tokens > token_limit:
+                if word_buffer:
+                    _append_bounded_output(
+                        chunks,
+                        " ".join(value for value, _count in word_buffer),
+                    )
+                    word_buffer.clear()
+                    buffer_tokens = 0
+                _append_bounded_output(chunks, word)
+                continue
 
-            if j == i:
-                # Single word exceeds limit; emit it alone to avoid stalling.
-                chunk_text = words[i]
-                j = i + 1
-            else:
-                chunk_text = " ".join(words[i:j])
+            if word_buffer and buffer_tokens + word_tokens > token_limit:
+                _append_bounded_output(
+                    chunks,
+                    " ".join(value for value, _count in word_buffer),
+                )
+                retained: deque[tuple[str, int]] = deque()
+                retained_tokens = 0
+                if overlap_tokens > 0:
+                    for value, count in reversed(word_buffer):
+                        retained.appendleft((value, count))
+                        retained_tokens += count
+                        if retained_tokens >= overlap_tokens:
+                            break
+                word_buffer = retained
+                buffer_tokens = retained_tokens
+                while word_buffer and buffer_tokens + word_tokens > token_limit:
+                    _value, removed_tokens = word_buffer.popleft()
+                    buffer_tokens -= removed_tokens
 
-            if chunk_text.strip():
-                chunks.append(chunk_text.strip())
+            word_buffer.append((word, word_tokens))
+            buffer_tokens += word_tokens
 
-            if overlap_tokens > 0 and j < n:
-                overlap = 0
-                k = j - 1
-                while k >= i and overlap < overlap_tokens:
-                    overlap += word_tokens[k]
-                    k -= 1
-                new_start = k + 1
-                # Ensure forward progress to avoid infinite loops.
-                i = j if new_start <= i else new_start
-            else:
-                i = j
+        if word_buffer:
+            _append_bounded_output(
+                chunks,
+                " ".join(value for value, _count in word_buffer),
+            )
 
         return chunks
 
@@ -1479,7 +1894,9 @@ class ParagraphChunker(BaseChunker):
             return []
 
         # Split by double newlines (paragraphs)
-        paragraphs = re.split(r"\n\s*\n", text)
+        paragraph_pattern = r"\n\s*\n"
+        _require_regex_split_budget(text, paragraph_pattern)
+        paragraphs = re.split(paragraph_pattern, text)
         paragraphs = [p.strip() for p in paragraphs if p.strip()]
 
         chunks = []
@@ -1557,7 +1974,10 @@ class PageChunker(BaseChunker):
 
         # Use page marker (form feed or custom)
         marker = self.config.page_marker
-        pages = text.split("\x0c") if marker == r"\f" else re.split(marker, text)
+        if marker not in {r"\f", "\x0c"}:
+            raise ValidationFailedError("custom page markers are disabled")
+        _require_literal_split_budget(text, "\x0c")
+        pages = text.split("\x0c")
 
         chunks = []
         for i, page in enumerate(pages):
@@ -1615,7 +2035,7 @@ class HeadingChunker(BaseChunker):
         patterns = self.config.heading_patterns or [
             r"^#{1,6}\s+.+$",  # Markdown headings
             r"^第[一二三四五六七八九十\d]+[章节条款]",  # Chinese chapter markers
-            r"^[A-Z][A-Z\s]{4,}:?\s*$",  # ALL CAPS headings (5+ chars)
+            r"^[A-Z][A-Z \t]{4,}:?$",  # ALL CAPS headings (5+ chars)
         ]
 
         combined_pattern = "|".join(f"({p})" for p in patterns)
@@ -1625,6 +2045,7 @@ class HeadingChunker(BaseChunker):
         current_heading = None
         current_content = []
 
+        _require_literal_split_budget(text, "\n")
         for line in text.split("\n"):
             is_heading = bool(re.match(combined_pattern, line, re.MULTILINE))
 
@@ -1719,56 +2140,9 @@ class RegexChunker(BaseChunker):
             return []
 
         pattern = self.config.regex_pattern
-        if not pattern:
-            return RecursiveChunker(self.config).chunk(text)
-
-        try:
-            parts = re.split(pattern, text)
-        except re.error:
-            return RecursiveChunker(self.config).chunk(text)
-
-        chunks = []
-
-        # Use token-based limits when enabled
-        if self.config.use_token_count:
-            token_counter = get_token_counter()
-            token_limit = self.config.token_limit
-            overlap_tokens = max(int(token_limit * 0.15), 10)
-
-            for _i, part in enumerate(parts):
-                part = part.strip()
-                if not part:
-                    continue
-
-                part_tokens = token_counter.count_tokens(part)
-
-                if part_tokens <= token_limit:
-                    chunks.append(self._create_chunk(part, len(chunks)))
-                else:
-                    # Split large parts by tokens
-                    sub_chunks = self._split_by_tokens(
-                        part, token_limit=token_limit, overlap_tokens=overlap_tokens
-                    )
-                    for _j, sub in enumerate(sub_chunks):
-                        chunks.append(self._create_chunk(sub, len(chunks)))
-        else:
-            # Character-based chunking (fallback)
-            recursive_chunker = RecursiveChunker(self.config)
-
-            for _i, part in enumerate(parts):
-                part = part.strip()
-                if not part:
-                    continue
-
-                if len(part) <= self.config.chunk_size:
-                    chunks.append(self._create_chunk(part, len(chunks)))
-                else:
-                    sub_chunks = recursive_chunker.chunk(part)
-                    for sub in sub_chunks:
-                        sub.index = len(chunks)
-                        chunks.append(sub)
-
-        return chunks
+        if pattern:
+            raise ValidationFailedError("custom regex chunking is disabled")
+        raise ValidationFailedError("regex chunking is disabled")
 
 
 class SeparatorChunker(BaseChunker):
@@ -1782,7 +2156,10 @@ class SeparatorChunker(BaseChunker):
         # Use primary separator first
         sep = self.config.primary_separator or separators[0]
         try:
+            _require_literal_split_budget(text, sep)
             parts = text.split(sep)
+        except ValidationFailedError:
+            raise
         except Exception:
             return RecursiveChunker(self.config).chunk(text)
 
@@ -1825,7 +2202,7 @@ class SeparatorChunker(BaseChunker):
                     sub_chunks = recursive_chunker.chunk(part)
                     for sub in sub_chunks:
                         sub.index = len(chunks)
-                        chunks.append(sub)
+                        _append_bounded_output(chunks, sub)
 
         return chunks
 
@@ -1894,6 +2271,7 @@ class RecursiveChunker(BaseChunker):
             ]
 
         # Try splitting with current separator
+        _require_literal_split_budget(text, sep)
         parts = text.split(sep)
 
         # If this separator doesn't actually split (only 1 part), try next
@@ -1914,7 +2292,9 @@ class RecursiveChunker(BaseChunker):
                 # First, flush current buffer if any
                 if current_chunk_parts:
                     completed_text = sep.join(current_chunk_parts)
-                    chunks.append(self._create_chunk(completed_text, len(chunks)))
+                    _append_bounded_output(
+                        chunks, self._create_chunk(completed_text, len(chunks))
+                    )
                     current_chunk_parts = []
                     current_len = 0
 
@@ -1922,14 +2302,16 @@ class RecursiveChunker(BaseChunker):
                 sub_chunks = self._recursive_split(part, remaining_seps, depth + 1)
                 for sub in sub_chunks:
                     sub.index = len(chunks)
-                    chunks.append(sub)
+                    _append_bounded_output(chunks, sub)
 
             else:
                 # If adding this part exceeds size, flush buffer
                 if current_len + sep_len + part_len > self.config.chunk_size:
                     if current_chunk_parts:
                         completed_text = sep.join(current_chunk_parts)
-                        chunks.append(self._create_chunk(completed_text, len(chunks)))
+                        _append_bounded_output(
+                            chunks, self._create_chunk(completed_text, len(chunks))
+                        )
                     current_chunk_parts = [part]
                     current_len = part_len
                 else:
@@ -1941,7 +2323,7 @@ class RecursiveChunker(BaseChunker):
         # Flush final buffer
         if current_chunk_parts:
             completed_text = sep.join(current_chunk_parts)
-            chunks.append(self._create_chunk(completed_text, len(chunks)))
+            _append_bounded_output(chunks, self._create_chunk(completed_text, len(chunks)))
 
         return chunks
 
@@ -1977,6 +2359,7 @@ class RecursiveChunker(BaseChunker):
             ]
 
         # Check if text should be split
+        _require_token_window_input_budget(text, token_limit)
         total_tokens = token_counter.count_tokens(text)
         text_len = len(text)
 
@@ -2017,6 +2400,7 @@ class RecursiveChunker(BaseChunker):
                 for i, t in enumerate(self._split_by_limits(text, token_limit))
             ]
 
+        _require_literal_split_budget(text, sep)
         parts = text.split(sep)
         if len(parts) <= 1:
             return self._recursive_split_tokens(text, remaining_seps, depth + 1)
@@ -2039,14 +2423,16 @@ class RecursiveChunker(BaseChunker):
             if part_too_large:
                 if current_parts:
                     completed_text = sep.join(current_parts)
-                    chunks.append(self._create_chunk(completed_text, len(chunks)))
+                    _append_bounded_output(
+                        chunks, self._create_chunk(completed_text, len(chunks))
+                    )
                     current_parts = []
                     current_tokens = 0
                     current_chars = 0
                 sub_chunks = self._recursive_split_tokens(part, remaining_seps, depth + 1)
                 for sub in sub_chunks:
                     sub.index = len(chunks)
-                    chunks.append(sub)
+                    _append_bounded_output(chunks, sub)
                 continue
 
             # Check if adding this part exceeds limit
@@ -2059,7 +2445,9 @@ class RecursiveChunker(BaseChunker):
             if projected > token_limit or projected_chars > self.config.chunk_size:
                 if current_parts:
                     completed_text = sep.join(current_parts)
-                    chunks.append(self._create_chunk(completed_text, len(chunks)))
+                    _append_bounded_output(
+                        chunks, self._create_chunk(completed_text, len(chunks))
+                    )
                 current_parts = [part]
                 current_tokens = part_tokens
                 current_chars = len(part)
@@ -2095,10 +2483,14 @@ class RecursiveChunker(BaseChunker):
                     chunks[-1].metadata = prev_chunk.metadata
                 else:
                     # Can't merge, add as separate chunk (even if small)
-                    chunks.append(self._create_chunk(completed_text, len(chunks)))
+                    _append_bounded_output(
+                        chunks, self._create_chunk(completed_text, len(chunks))
+                    )
             else:
                 # Normal size or only chunk, add as-is
-                chunks.append(self._create_chunk(completed_text, len(chunks)))
+                _append_bounded_output(
+                    chunks, self._create_chunk(completed_text, len(chunks))
+                )
 
         return chunks
 
@@ -2114,14 +2506,14 @@ class RecursiveChunker(BaseChunker):
         for chunk_text in token_chunks:
             if len(chunk_text) <= char_limit:
                 if chunk_text.strip():
-                    final_chunks.append(chunk_text)
+                    _append_bounded_output(final_chunks, chunk_text)
                 continue
 
             for sub in self._split_with_overlap(
                 chunk_text, char_limit, max(int(self.config.chunk_overlap), 0)
             ):
                 if sub.strip():
-                    final_chunks.append(sub)
+                    _append_bounded_output(final_chunks, sub)
 
         return final_chunks
 
@@ -2208,6 +2600,7 @@ class HierarchicalChunker(BaseChunker):
         child_chunker = (
             FixedSizeChunker(child_config) if use_fixed_window else RecursiveChunker(child_config)
         )
+        child_config._runtime_chunk_count = len(parents)
 
         # Create hierarchical structure
         all_chunks = []
@@ -2217,7 +2610,7 @@ class HierarchicalChunker(BaseChunker):
             parent.metadata["is_parent"] = True
             parent.metadata["chunk_type"] = "parent"
             parent.metadata["parent_index"] = parent_idx
-            all_chunks.append(parent)
+            _append_bounded_output(all_chunks, parent)
 
             # Create children from parent text - RE-SPLIT from parent content
             children = child_chunker.chunk(parent.text)
@@ -2242,7 +2635,7 @@ class HierarchicalChunker(BaseChunker):
                 child.metadata["child_position"] = child_idx
                 child.parent_id = parent.hash_id
 
-                parent.children.append(child)
+                _append_bounded_output(parent.children, child)
 
         return all_chunks
 
@@ -2408,8 +2801,9 @@ class AutomaticChunker(BaseChunker):
         patterns = self.config.heading_patterns or [
             r"^#{1,6}\s+.+$",
             r"^第[一二三四五六七八九十\d]+[章节条款]",
-            r"^[A-Z][A-Z\s]{4,}:?\s*$",
+            r"^[A-Z][A-Z \t]{4,}:?$",
         ]
+        _require_literal_split_budget(text, "\n")
         lines = [line.strip() for line in text.split("\n") if line.strip()]
         if not lines:
             return False
@@ -2434,7 +2828,7 @@ class AutomaticChunker(BaseChunker):
         image_positions = []
         for pattern in self.IMAGE_PATTERNS:
             for match in re.finditer(pattern, text):
-                image_positions.append((match.start(), match.end()))
+                _append_bounded_output(image_positions, (match.start(), match.end()))
 
         if not image_positions:
             return RecursiveChunker(self.config).chunk(text)
@@ -2456,7 +2850,7 @@ class AutomaticChunker(BaseChunker):
                 pre_chunks = RecursiveChunker(self.config).chunk(pre_text)
                 for c in pre_chunks:
                     c.index = len(chunks)
-                    chunks.append(c)
+                    _append_bounded_output(chunks, c)
 
             # Create image chunk with surrounding context
             ctx_start = max(0, img_start - context_size)
@@ -2475,7 +2869,7 @@ class AutomaticChunker(BaseChunker):
                     len(chunks),
                     {"has_image": True, "chunk_type": "image_context"},
                 )
-                chunks.append(chunk)
+                _append_bounded_output(chunks, chunk)
 
             current_pos = ctx_end
 
@@ -2486,7 +2880,7 @@ class AutomaticChunker(BaseChunker):
                 remaining_chunks = RecursiveChunker(self.config).chunk(remaining)
                 for c in remaining_chunks:
                     c.index = len(chunks)
-                    chunks.append(c)
+                    _append_bounded_output(chunks, c)
 
         return chunks if chunks else RecursiveChunker(self.config).chunk(text)
 
@@ -2523,6 +2917,8 @@ def process_document(
     3. Chunk text
     4. Add document-level metadata to chunks
     """
+    validate_persisted_chunking_config(config.to_dict())
+    config._runtime_chunk_count = 0
     if not text:
         return []
 
@@ -2550,6 +2946,10 @@ def process_document(
     # Chunk
     chunker = create_chunker(config)
     chunks = chunker.chunk(processed_text)
+    if len(chunks) > MAX_CHUNK_OUTPUTS:
+        raise ValidationFailedError(
+            f"chunking output exceeds the {MAX_CHUNK_OUTPUTS} chunk limit"
+        )
 
     # VALIDATION LOG: Log chunk statistics
     if chunks:
@@ -2743,8 +3143,17 @@ def flatten_chunks(chunks: list[Chunk]) -> list[Chunk]:
     for chunk in chunks:
         if chunk.children:
             # Has children, use children instead
-            result.extend(flatten_chunks(chunk.children))
+            children = flatten_chunks(chunk.children)
+            if len(result) + len(children) > MAX_CHUNK_OUTPUTS:
+                raise ValidationFailedError(
+                    f"chunking output exceeds the {MAX_CHUNK_OUTPUTS} chunk limit"
+                )
+            result.extend(children)
         else:
+            if len(result) >= MAX_CHUNK_OUTPUTS:
+                raise ValidationFailedError(
+                    f"chunking output exceeds the {MAX_CHUNK_OUTPUTS} chunk limit"
+                )
             result.append(chunk)
     return result
 
@@ -2759,10 +3168,14 @@ def _split_text_strict_by_tokens(text: str, max_tokens: int) -> list[str]:
         if not tokens:
             return []
         chunks: list[str] = []
+        if (len(tokens) + max_tokens - 1) // max_tokens > MAX_CHUNK_OUTPUTS:
+            raise ValidationFailedError(
+                f"chunking output exceeds the {MAX_CHUNK_OUTPUTS} chunk limit"
+            )
         for start in range(0, len(tokens), max_tokens):
             chunk_text = token_counter.encoder.decode(tokens[start : start + max_tokens]).strip()
             if chunk_text:
-                chunks.append(chunk_text)
+                _append_bounded_output(chunks, chunk_text)
         return chunks
     # Fallback: token-aware sentence splitter (best-effort without tiktoken)
     splitter = RecursiveChunker(ChunkingConfig(use_token_count=True, token_limit=max_tokens))
@@ -2787,24 +3200,25 @@ def enforce_token_limits(
     for chunk in chunks:
         # Skip non-text chunks
         if chunk.content_type != ContentType.TEXT:
-            normalized.append(chunk)
+            _append_bounded_output(normalized, chunk)
             continue
 
         if chunk.token_count <= max_tokens:
             if min_tokens is not None and chunk.token_count < min_tokens:
                 chunk.metadata["_too_small"] = True
-            normalized.append(chunk)
+            _append_bounded_output(normalized, chunk)
             continue
 
         # Split oversized chunk
         sub_texts = _split_text_strict_by_tokens(chunk.text, max_tokens)
         if not sub_texts:
-            normalized.append(chunk)
+            _append_bounded_output(normalized, chunk)
             continue
 
         for idx, sub in enumerate(sub_texts):
             meta = {**chunk.metadata, "_split_from": chunk.hash_id, "_split_index": idx}
-            normalized.append(
+            _append_bounded_output(
+                normalized,
                 Chunk(
                     text=sub,
                     metadata=meta,
@@ -2815,7 +3229,7 @@ def enforce_token_limits(
                     image_filename=chunk.image_filename,
                     image_media_type=chunk.image_media_type,
                     vlm_description=chunk.vlm_description,
-                )
+                ),
             )
 
     # Re-index after normalization

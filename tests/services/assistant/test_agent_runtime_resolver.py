@@ -180,6 +180,22 @@ def test_generic_assistant_schema_rejects_reserved_agent_runtime_fields() -> Non
             ChatRequest.model_validate({"message": "hello", field: "forged"})
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"message": "hello", "kb_dataset_ids": [f"dataset-{i}" for i in range(9)]},
+        {"message": "hello", "kb_dataset_ids": ["dataset-a", "dataset-a"]},
+        {"message": "hello", "kb_dataset_ids": ["x" * 129]},
+        {"message": "hello", "kb_include_images": True},
+        {"message": "hello", "kb_top_k": 21},
+        {"message": "hello", "kb_score_threshold": -0.1},
+    ],
+)
+def test_generic_assistant_schema_rejects_unbounded_or_multimodal_kb_scope(payload) -> None:
+    with pytest.raises(ValidationError):
+        ChatRequest.model_validate(payload)
+
+
 @pytest.mark.asyncio
 async def test_production_composition_wires_current_resource_policy(
     monkeypatch: pytest.MonkeyPatch,
@@ -357,7 +373,7 @@ def test_assistant_maps_sealed_retrieval_config_per_dataset() -> None:
             "mode": "auto",
             "top_k": 17,
             "threshold": 0.2,
-            "include_images": True,
+            "include_images": False,
             "config_scope": "per_dataset",
             "by_dataset": {
                 "dataset-a": {
@@ -370,13 +386,13 @@ def test_assistant_maps_sealed_retrieval_config_per_dataset() -> None:
                     "mode": "tool",
                     "top_k": 17,
                     "threshold": 0.85,
-                    "include_images": True,
+                    "include_images": False,
                 },
                 "dataset-c": {
                     "mode": "off",
                     "top_k": 9,
                     "threshold": 0.5,
-                    "include_images": True,
+                    "include_images": False,
                 },
             },
         },
@@ -399,9 +415,42 @@ def test_assistant_maps_sealed_retrieval_config_per_dataset() -> None:
         for dataset_id in ("dataset-a", "dataset-b")
     }
     assert config.kb_mode.value == "auto"
-    assert config.kb_include_images is True
+    assert config.kb_include_images is False
     assert config.kb_top_k == 17
     assert config.kb_score_threshold == 0.2
+
+
+def test_assistant_rejects_signed_multimodal_retrieval_config() -> None:
+    knowledge = {
+        "datasets": ["dataset-a"],
+        "retrieval": {
+            "mode": "auto",
+            "top_k": 5,
+            "threshold": 0.2,
+            "include_images": True,
+            "config_scope": "per_dataset",
+            "by_dataset": {
+                "dataset-a": {
+                    "mode": "auto",
+                    "top_k": 5,
+                    "threshold": 0.2,
+                    "include_images": True,
+                }
+            },
+        },
+    }
+    signer, body = signed_request(knowledge=knowledge)
+    verified = _verify_agent_runtime_request(body, user(), signer)
+
+    class Policy:
+        def allowed_tool_names(self, **_kwargs):
+            return {"search_knowledge_base"}
+
+        def allowed_dataset_ids(self, **_kwargs):
+            return {"dataset-a"}
+
+    with pytest.raises(AgentRuntimeEnvelopeError, match="AGENT_RUNTIME_KNOWLEDGE_INVALID"):
+        _build_agent_runtime_config(verified, tenant_policy=Policy())
 
 
 @pytest.mark.asyncio

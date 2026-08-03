@@ -216,59 +216,16 @@ async def test_connection_credentials(
     payload: dict[str, Any] = Body(...),
     user: UserContext = Depends(get_user_context),
 ):
-    """Test Confluence credentials without creating a connection."""
-    from ...services.knowledge.confluence.client import ConfluenceAPIError, ConfluenceClient
-    from ...services.knowledge.confluence.models import ConfluenceCredentials
-
-    try:
-        # RBAC 检查：测试连接需要与创建连接相同的权限
-        request.app.state.dispatcher.rbac.require(user.roles, "confluence:manage")
-
-        domain = payload.get("domain", "")
-        email = payload.get("email", "")
-        api_token = payload.get("api_token", "")
-
-        logger.info(f"Testing Confluence connection: domain={domain}, email={email}")
-
-        if not all([domain, email, api_token]):
-            return {
-                "status": "error",
-                "message": "Missing required fields: domain, email, api_token",
-            }
-
-        credentials = ConfluenceCredentials(
-            domain=domain,
-            email=email,
-            api_token=api_token,
-        )
-
-        logger.info(f"Created credentials, API URL: {credentials.api_v2_url}")
-
-        async with ConfluenceClient(credentials) as client:
-            result = await client.test_connection()
-            logger.info(f"Test connection result: {result}")
-            return result
-
-    except ConfluenceAPIError as exc:
-        logger.error(
-            "Confluence API error during test: %s, status_code=%s, body=%s",
-            exc,
-            exc.status_code,
-            exc.response_body,
-        )
-        return {
-            "status": "error",
-            "message": f"API error ({exc.status_code}): {str(exc)}",
-        }
-    except Exception as exc:
-        import traceback
-
-        tb = traceback.format_exc()
-        logger.error(f"Connection credentials test failed: {exc}\n{tb}")
-        return {
-            "status": "error",
-            "message": f"Connection test failed: {type(exc).__name__}: {str(exc)}",
-        }
+    """Fail closed until Confluence trusted-origin validation is available."""
+    del payload
+    request.app.state.dispatcher.rbac.require(user.roles, "confluence:manage")
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            "Confluence credential probing is disabled until trusted-origin "
+            "and private-network protections are configured."
+        ),
+    )
 
 
 @router.post(

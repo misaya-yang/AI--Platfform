@@ -149,15 +149,18 @@ class DashScopeImageGenerator:
     DASHSCOPE_BASE_URL, same as before.
     """
 
-    _SUBMIT_PATH = "/api/v1/services/aigc/text2image/image-synthesis"
-    _TASK_PATH_TPL = "/api/v1/tasks/{task_id}"
+    # ``resolve_dashscope("image")`` returns the native API base ending in
+    # ``/api/v1``. Keep only paths relative to that base here so the raw HTTP
+    # client and native SDK consumers share one resolver contract.
+    _SUBMIT_PATH = "/services/aigc/text2image/image-synthesis"
+    _TASK_PATH_TPL = "/tasks/{task_id}"
 
     def __init__(self, api_key: str | None = None, model: str | None = None):
         from ai_gateway_core.config import resolve_dashscope
 
         if api_key:
             self.api_key = api_key
-            self.base_url = "https://dashscope.aliyuncs.com"
+            self.base_url = "https://dashscope.aliyuncs.com/api/v1"
         else:
             resolved_key, resolved_base = resolve_dashscope("image")
             self.api_key = resolved_key or None

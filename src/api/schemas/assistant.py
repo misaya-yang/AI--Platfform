@@ -136,14 +136,19 @@ class AssistantChatRequest(BaseModel):
 
     # Knowledge base settings
     kb_dataset_ids: list[str] = Field(
-        default_factory=list, description="Dataset IDs to search for context"
+        default_factory=list,
+        max_length=8,
+        description="Dataset IDs to search for context (maximum 8)",
     )
     kb_mode: str = Field(default="auto", description="RAG mode: auto, tool, or off")
     kb_top_k: int = Field(default=5, ge=1, le=20, description="Number of KB results to retrieve")
     kb_score_threshold: float = Field(
         default=0.0, ge=0.0, le=1.0, description="Minimum relevance score (0.0 = no filtering)"
     )
-    kb_include_images: bool = Field(default=False, description="Include image results from KB")
+    kb_include_images: bool = Field(
+        default=False,
+        description="Reserved for a future multimodal KB release; must remain false",
+    )
 
     # Web search settings
     web_search_enabled: bool = Field(default=False, description="Enable web search via Tavily")
@@ -205,6 +210,22 @@ class AssistantChatRequest(BaseModel):
         default=None,
         description="Approved tool approval_id binding for resume execution",
     )
+
+    @field_validator("kb_dataset_ids")
+    @classmethod
+    def validate_kb_dataset_ids(cls, value: list[str]) -> list[str]:
+        if any(not dataset_id.strip() or len(dataset_id) > 128 for dataset_id in value):
+            raise ValueError("KB dataset IDs must be non-empty and at most 128 characters")
+        if len(set(value)) != len(value):
+            raise ValueError("KB dataset IDs must be unique")
+        return value
+
+    @field_validator("kb_include_images")
+    @classmethod
+    def reject_unreleased_kb_images(cls, value: bool) -> bool:
+        if value:
+            raise ValueError("Multimodal knowledge retrieval is not enabled in this release")
+        return value
 
 
 class AssistantChatResponse(BaseModel):

@@ -160,7 +160,10 @@ class InternalServiceClient:
         budget = self._cfg.retry_budget
         budget.record_original()
         body_replayable = body is not None
-        idempotency_key = any(k.lower() == "idempotency-key" for k in merged_headers)
+        idempotency_key = any(
+            key.lower() == "idempotency-key" and bool(value.strip())
+            for key, value in merged_headers.items()
+        )
 
         attempt = 1
         metrics = _service_metrics()

@@ -10,6 +10,7 @@ from src.api.v1.quiz import (
     _get_quiz_service,
     _UnavailableModelRegistry,
     generate_quiz,
+    generate_quiz_stream,
     list_quizzes,
 )
 from src.core.auth.user_resolver import UserContext
@@ -36,6 +37,15 @@ def _admin_user() -> UserContext:
         tenant_id="tenant_1",
         is_authenticated=True,
         roles=["admin"],
+    )
+
+
+def _anonymous_user() -> UserContext:
+    return UserContext(
+        user_id="anon:127.0.0.1",
+        tenant_id="public",
+        is_authenticated=False,
+        roles=["guest"],
     )
 
 
@@ -100,6 +110,43 @@ async def test_quiz_generation_uses_assistant_adapter_when_gateway_registry_miss
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail.startswith("No content retrieved")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handler", [generate_quiz, generate_quiz_stream])
+async def test_quiz_generation_rejects_anonymous_callers_before_model_or_kb_work(handler):
+    with pytest.raises(HTTPException) as exc_info:
+        await handler(
+            QuizGenerateRequest(dataset_ids=["dataset_1"]),
+            _request_with_state(),
+            user=_anonymous_user(),
+        )
+
+    assert exc_info.value.status_code == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handler", [generate_quiz, generate_quiz_stream])
+async def test_quiz_generation_applies_the_paid_operation_rate_limit(monkeypatch, handler):
+    observed: list[tuple[object, UserContext, str]] = []
+
+    async def _rate_limited(request, user, operation):
+        observed.append((request, user, operation))
+        raise HTTPException(status_code=429, detail="rate limited")
+
+    monkeypatch.setattr("src.api.v1.quiz.enforce_rate_limit", _rate_limited)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await handler(
+            QuizGenerateRequest(dataset_ids=["dataset_1"]),
+            _request_with_state(),
+            user=_admin_user(),
+        )
+
+    assert exc_info.value.status_code == 429
+    assert len(observed) == 1
+    assert observed[0][1].user_id == "user_1"
+    assert observed[0][2] == "quiz_generate"
 
 
 def test_quiz_generation_uses_local_fallback_registry_when_enabled(monkeypatch):

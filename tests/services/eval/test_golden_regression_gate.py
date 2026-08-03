@@ -7,6 +7,7 @@ from pathlib import Path
 
 from src.services.eval import golden as golden_module
 from src.services.eval.golden import (
+    GATE_METRICS_SCHEMA_VERSION,
     apply_gate,
     evaluate_case,
     evaluate_cases,
@@ -64,7 +65,7 @@ def test_assistant_golden_fixture_validates_and_has_seed_coverage() -> None:
     result = validate_cases(cases)
 
     assert result["valid"] is True
-    assert result["case_count"] >= 10
+    assert result["case_count"] >= 25
     assert any(case["metadata"].get("critical") is True for case in cases)
     assert all("expected_trajectory" in case for case in cases)
     case_ids = {case["case_id"] for case in cases}
@@ -79,6 +80,13 @@ def test_assistant_golden_fixture_validates_and_has_seed_coverage() -> None:
         "assistant.runtime.repeated_unknown_side_effect",
         "assistant.tool.failure_recovery",
         "assistant.export.redaction",
+        "assistant.stateful.plan_retention",
+        "assistant.stateful.tool_pairing",
+        "assistant.stateful.budget_termination",
+        "assistant.stateful.hitl_pause_resume",
+        "assistant.stateful.compaction_retention",
+        "assistant.security.prompt_injection",
+        "assistant.security.tenant_isolation",
     }.issubset(case_ids)
 
 
@@ -99,8 +107,8 @@ def test_observation_fixture_loads_and_joins_every_expectation() -> None:
     result = validate_observations(cases, observations)
 
     assert result["valid"] is True
-    assert result["joined_count"] == 18
-    assert len(observations) == 18
+    assert result["joined_count"] == 25
+    assert len(observations) == 25
 
 
 def test_offline_gate_passes_recorded_observations_without_model_calls(tmp_path: Path) -> None:
@@ -123,14 +131,18 @@ def test_offline_gate_passes_recorded_observations_without_model_calls(tmp_path:
     assert exit_code == 0
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["gate"]["status"] == "pass"
+    assert payload["suite_scope"] == "canonical"
     assert payload["metrics"]["overall_score"] >= 0.85
     assert payload["evidence_scope"] == "recorded_offline_observation"
-    assert payload["observations"]["joined_count"] == 18
+    assert payload["observations"]["joined_count"] == 25
     assert payload["gate"]["hard_blockers_passed"] is True
     assert payload["gate"]["required_hard_blockers"] == [
         "assistant.runtime.policy_bypass",
         "assistant.runtime.repeated_unknown_side_effect",
     ]
+    assert payload["gate"]["stateful_cases_passed"] is True
+    assert payload["metrics"]["stateful_case_count"] == 7
+    assert payload["metrics"]["stateful_pass_rate"] == 1.0
     provenance = payload["provenance"]
     assert len(provenance["dataset"]["sha256"]) == 64
     assert len(provenance["observations"]["sha256"]) == 64
@@ -151,7 +163,9 @@ def test_offline_gate_passes_recorded_observations_without_model_calls(tmp_path:
     assert "Eval Regression Gate" in markdown.read_text(encoding="utf-8")
 
 
-def test_canonical_gate_fails_when_required_hard_blockers_are_missing(tmp_path: Path) -> None:
+def test_canonical_filename_does_not_grant_canonical_hard_blocker_trust(
+    tmp_path: Path,
+) -> None:
     golden = tmp_path / "assistant_regression_v1.jsonl"
     observations = tmp_path / "observations.jsonl"
     output = tmp_path / "latest.json"
@@ -175,13 +189,14 @@ def test_canonical_gate_fails_when_required_hard_blockers_are_missing(tmp_path: 
         ]
     )
 
-    assert exit_code == 1
+    assert exit_code == 0
     payload = json.loads(output.read_text(encoding="utf-8"))
-    assert payload["gate"]["hard_blockers_passed"] is False
-    assert "required hard blockers missing or failing" in payload["gate"]["failures"][-1]
+    assert payload["suite_scope"] == "custom"
+    assert "hard_blockers_passed" not in payload["gate"]
+    assert "stateful_cases_passed" not in payload["gate"]
 
 
-def test_cli_applies_baseline_report_to_recorded_observations(tmp_path: Path) -> None:
+def test_cli_rejects_out_of_range_baseline_report(tmp_path: Path) -> None:
     baseline = tmp_path / "baseline.json"
     output = tmp_path / "latest.json"
     markdown = tmp_path / "latest.md"
@@ -205,20 +220,85 @@ def test_cli_applies_baseline_report_to_recorded_observations(tmp_path: Path) ->
     assert exit_code == 1
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["baseline"]["source"] == str(baseline)
-    assert any("baseline tolerance" in failure for failure in payload["gate"]["failures"])
+    assert any(
+        "baseline overall_score must be a finite number in [0, 1]" in failure
+        for failure in payload["gate"]["failures"]
+    )
 
 
 def test_gate_fails_low_quality_metrics() -> None:
     gate = apply_gate(
         {
+            "schema_version": GATE_METRICS_SCHEMA_VERSION,
+            "case_count": 2,
+            "score_sum": 1.0,
+            "failed_case_count": 1,
             "overall_score": 0.5,
+            "pass_rate": 0.5,
+            "trajectory_case_count": 2,
+            "trajectory_failed_count": 1,
             "trajectory_pass_rate": 0.5,
+            "critical_case_count": 2,
+            "critical_failed_count": 1,
             "critical_pass_rate": 0.5,
+            "stateful_case_count": 0,
+            "stateful_failed_count": 0,
+            "stateful_pass_rate": None,
         }
     )
 
     assert gate["status"] == "fail"
     assert len(gate["failures"]) == 3
+
+
+def test_gate_skips_critical_threshold_when_suite_has_no_critical_cases() -> None:
+    case = golden_case()
+    case["metadata"]["critical"] = False  # type: ignore[index]
+
+    metrics = evaluate_cases([case], {"assistant.runtime.test": replay_observation()})
+    gate = apply_gate(metrics)
+
+    assert metrics["critical_case_count"] == 0
+    assert metrics["critical_pass_rate"] is None
+    assert gate["status"] == "pass"
+    assert gate["skipped_thresholds"] == [
+        "critical_pass_rate:no_critical_cases",
+        "stateful_pass_rate:no_stateful_cases",
+    ]
+
+
+def test_missing_stateful_observation_counts_as_a_stateful_failure() -> None:
+    cases = [golden_case(), golden_case()]
+    for index, case in enumerate(cases, start=1):
+        case["case_id"] = f"assistant.stateful.{index}"
+        case["expected_trajectory"]["stateful"] = {  # type: ignore[index]
+            "minimum_turns": 2,
+            "tool_pairing": {"required": True},
+        }
+    observations = {
+        "assistant.stateful.1": replay_observation(
+            turns=[
+                {
+                    "turn_index": 1,
+                    "tool_calls": [{"call_id": "call-1", "name": "read"}],
+                    "tool_results": [],
+                },
+                {
+                    "turn_index": 2,
+                    "tool_calls": [],
+                    "tool_results": [{"tool_call_id": "call-1", "status": "succeeded"}],
+                },
+            ]
+        )
+    }
+
+    metrics = evaluate_cases(cases, observations)
+    gate = apply_gate(metrics)
+
+    assert metrics["stateful_case_count"] == 2
+    assert metrics["stateful_pass_rate"] == 0.5
+    assert gate["status"] == "fail"
+    assert "stateful hard gate requires zero failed stateful cases" in gate["failures"]
 
 
 def test_golden_redaction_regression_is_a_failure() -> None:
@@ -287,10 +367,21 @@ def test_unknown_assertion_and_missing_observation_fail_closed() -> None:
 def test_zero_critical_rate_is_not_replaced_by_pass_rate() -> None:
     gate = apply_gate(
         {
+            "schema_version": GATE_METRICS_SCHEMA_VERSION,
+            "case_count": 2,
+            "score_sum": 2.0,
+            "failed_case_count": 1,
             "overall_score": 1.0,
-            "pass_rate": 1.0,
+            "pass_rate": 0.5,
+            "trajectory_case_count": 2,
+            "trajectory_failed_count": 0,
             "trajectory_pass_rate": 1.0,
+            "critical_case_count": 1,
+            "critical_failed_count": 1,
             "critical_pass_rate": 0.0,
+            "stateful_case_count": 0,
+            "stateful_failed_count": 0,
+            "stateful_pass_rate": None,
         }
     )
 
@@ -340,15 +431,264 @@ def test_validate_case_rejects_non_object_runtime_expectations() -> None:
 def test_explicit_zero_baseline_score_is_not_replaced_by_average_score() -> None:
     gate = apply_gate(
         {
-            "overall_score": 0.97,
+            "schema_version": GATE_METRICS_SCHEMA_VERSION,
+            "case_count": 1,
+            "score_sum": 1.0,
+            "failed_case_count": 0,
+            "overall_score": 1.0,
+            "pass_rate": 1.0,
+            "trajectory_case_count": 1,
+            "trajectory_failed_count": 0,
             "trajectory_pass_rate": 1.0,
+            "critical_case_count": 1,
+            "critical_failed_count": 0,
             "critical_pass_rate": 1.0,
+            "stateful_case_count": 0,
+            "stateful_failed_count": 0,
+            "stateful_pass_rate": None,
         },
-        baseline_metrics={"overall_score": 0.0, "average_score": 1.0},
+        baseline_metrics={
+            "schema_version": GATE_METRICS_SCHEMA_VERSION,
+            "case_count": 1,
+            "score_sum": 0.0,
+            "failed_case_count": 1,
+            "overall_score": 0.0,
+            "average_score": 1.0,
+            "pass_rate": 0.0,
+            "trajectory_case_count": 1,
+            "trajectory_failed_count": 1,
+            "trajectory_pass_rate": 0.0,
+            "critical_case_count": 1,
+            "critical_failed_count": 1,
+            "critical_pass_rate": 0.0,
+            "stateful_case_count": 0,
+            "stateful_failed_count": 0,
+            "stateful_pass_rate": None,
+        },
     )
 
     assert gate["status"] == "pass"
     assert not any("baseline tolerance" in failure for failure in gate["failures"])
+
+
+def test_gate_rejects_nan_in_metrics_thresholds_and_baseline() -> None:
+    valid_metrics = {
+        "schema_version": GATE_METRICS_SCHEMA_VERSION,
+        "case_count": 1,
+        "score_sum": 1.0,
+        "failed_case_count": 0,
+        "overall_score": 1.0,
+        "pass_rate": 1.0,
+        "trajectory_case_count": 1,
+        "trajectory_failed_count": 0,
+        "trajectory_pass_rate": 1.0,
+        "critical_case_count": 1,
+        "critical_failed_count": 0,
+        "critical_pass_rate": 1.0,
+        "stateful_case_count": 0,
+        "stateful_failed_count": 0,
+        "stateful_pass_rate": None,
+    }
+
+    nan_metrics = apply_gate({**valid_metrics, "overall_score": float("nan")})
+    nan_threshold = apply_gate(
+        valid_metrics,
+        thresholds={"overall_score": float("nan")},
+    )
+    infinite_baseline = apply_gate(
+        valid_metrics,
+        baseline_metrics={"overall_score": float("inf")},
+    )
+
+    assert nan_metrics["status"] == "fail"
+    assert nan_threshold["status"] == "fail"
+    assert infinite_baseline["status"] == "fail"
+    assert "overall_score must be a finite number" in " ".join(nan_metrics["failures"])
+    assert "threshold overall_score must be a finite number" in " ".join(
+        nan_threshold["failures"]
+    )
+    assert "baseline overall_score must be a finite number" in " ".join(
+        infinite_baseline["failures"]
+    )
+
+
+def test_gate_rejects_unknown_threshold_and_count_rate_mismatches() -> None:
+    valid_metrics = {
+        "schema_version": GATE_METRICS_SCHEMA_VERSION,
+        "case_count": 10,
+        "score_sum": 10.0,
+        "failed_case_count": 0,
+        "overall_score": 1.0,
+        "pass_rate": 1.0,
+        "trajectory_case_count": 10,
+        "trajectory_failed_count": 0,
+        "trajectory_pass_rate": 1.0,
+        "critical_case_count": 10,
+        "critical_failed_count": 0,
+        "critical_pass_rate": 1.0,
+        "stateful_case_count": 0,
+        "stateful_failed_count": 0,
+        "stateful_pass_rate": None,
+    }
+
+    unknown_threshold = apply_gate(valid_metrics, thresholds={"future_metric": 0.0})
+    missing_rate = apply_gate({**valid_metrics, "critical_pass_rate": None})
+    inconsistent_rate = apply_gate(
+        {
+            **valid_metrics,
+            "critical_failed_count": 1,
+            "critical_pass_rate": 1.0,
+        }
+    )
+
+    assert unknown_threshold["status"] == "fail"
+    assert "unsupported gate thresholds" in " ".join(unknown_threshold["failures"])
+    assert missing_rate["status"] == "fail"
+    assert "critical_pass_rate must be a finite number" in " ".join(
+        missing_rate["failures"]
+    )
+    assert "critical_pass_rate:no_critical_cases" not in missing_rate["skipped_thresholds"]
+    assert inconsistent_rate["status"] == "fail"
+    assert "inconsistent with critical case counts" in " ".join(
+        inconsistent_rate["failures"]
+    )
+
+
+def test_gate_rejects_forged_score_and_trajectory_receipts() -> None:
+    valid_metrics = {
+        "schema_version": GATE_METRICS_SCHEMA_VERSION,
+        "case_count": 10,
+        "score_sum": 8.0,
+        "failed_case_count": 2,
+        "overall_score": 0.8,
+        "pass_rate": 0.8,
+        "trajectory_case_count": 10,
+        "trajectory_failed_count": 1,
+        "trajectory_pass_rate": 0.9,
+        "critical_case_count": 2,
+        "critical_failed_count": 0,
+        "critical_pass_rate": 1.0,
+        "stateful_case_count": 1,
+        "stateful_failed_count": 0,
+        "stateful_pass_rate": 1.0,
+    }
+
+    forged_score = apply_gate({**valid_metrics, "overall_score": 1.0})
+    forged_trajectory = apply_gate({**valid_metrics, "trajectory_pass_rate": 1.0})
+
+    assert "overall_score is inconsistent with score_sum and case_count" in forged_score[
+        "failures"
+    ]
+    assert (
+        "trajectory_pass_rate is inconsistent with trajectory case counts"
+        in forged_trajectory["failures"]
+    )
+
+
+def test_gate_rejects_impossible_critical_and_stateful_subset_counts() -> None:
+    metrics = {
+        "schema_version": GATE_METRICS_SCHEMA_VERSION,
+        "case_count": 1,
+        "score_sum": 1.0,
+        "failed_case_count": 0,
+        "overall_score": 1.0,
+        "pass_rate": 1.0,
+        "trajectory_case_count": 1,
+        "trajectory_failed_count": 0,
+        "trajectory_pass_rate": 1.0,
+        "critical_case_count": 999,
+        "critical_failed_count": 0,
+        "critical_pass_rate": 1.0,
+        "stateful_case_count": 999,
+        "stateful_failed_count": 0,
+        "stateful_pass_rate": 1.0,
+    }
+
+    gate = apply_gate(
+        metrics,
+        require_critical_coverage=True,
+        require_stateful_coverage=True,
+    )
+
+    assert gate["status"] == "fail"
+    assert "critical_case_count exceeds case_count" in gate["failures"]
+    assert "stateful_case_count exceeds case_count" in gate["failures"]
+
+
+def test_gate_derives_authoritative_rates_and_accepts_four_decimal_display_rounding() -> None:
+    metrics = {
+        "schema_version": GATE_METRICS_SCHEMA_VERSION,
+        "case_count": 3,
+        "score_sum": 3.0,
+        "failed_case_count": 1,
+        "overall_score": 1.0,
+        "pass_rate": 0.6667,
+        "trajectory_case_count": 3,
+        "trajectory_failed_count": 1,
+        "trajectory_pass_rate": 0.6667,
+        "critical_case_count": 3,
+        "critical_failed_count": 1,
+        "critical_pass_rate": 0.6667,
+        "stateful_case_count": 0,
+        "stateful_failed_count": 0,
+        "stateful_pass_rate": None,
+    }
+
+    gate = apply_gate(
+        metrics,
+        thresholds={
+            "overall_score": 0.0,
+            "trajectory_pass_rate": 0.0,
+            "critical_pass_rate": 0.0,
+            "stateful_pass_rate": 0.0,
+            "baseline_tolerance": 0.0,
+        },
+    )
+
+    assert gate["status"] == "pass"
+    assert gate["metrics"]["pass_rate"] == 2 / 3
+    assert gate["metrics"]["trajectory_pass_rate"] == 2 / 3
+    assert gate["metrics"]["critical_pass_rate"] == 2 / 3
+
+
+def test_release_gate_requires_explicit_nonzero_stateful_coverage() -> None:
+    metrics = {
+        "schema_version": GATE_METRICS_SCHEMA_VERSION,
+        "case_count": 1,
+        "score_sum": 1.0,
+        "failed_case_count": 0,
+        "overall_score": 1.0,
+        "pass_rate": 1.0,
+        "trajectory_case_count": 1,
+        "trajectory_failed_count": 0,
+        "trajectory_pass_rate": 1.0,
+        "critical_case_count": 1,
+        "critical_failed_count": 0,
+        "critical_pass_rate": 1.0,
+    }
+
+    gate = apply_gate(metrics, require_stateful_coverage=True)
+
+    assert gate["status"] == "fail"
+    assert "release gate requires non-zero stateful case coverage" in gate["failures"]
+
+
+def test_one_failure_in_large_critical_suite_cannot_round_up_to_pass() -> None:
+    passing_case = golden_case()
+    passing_case["metadata"]["replay"] = replay_observation()  # type: ignore[index]
+    failing_case = golden_case()
+    failing_case["case_id"] = "assistant.runtime.last-failure"
+    failing_case["metadata"]["replay"] = replay_observation(  # type: ignore[index]
+        status="failed"
+    )
+
+    metrics = evaluate_cases([passing_case] * 20_000 + [failing_case])
+    gate = apply_gate(metrics)
+
+    assert metrics["critical_failed_count"] == 1
+    assert metrics["critical_pass_rate"] < 1.0
+    assert gate["status"] == "fail"
+    assert "critical hard gate requires zero failed critical cases" in gate["failures"]
 
 
 def test_external_observation_wins_over_conflicting_inline_replay() -> None:

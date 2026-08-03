@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from unittest.mock import AsyncMock
 
 import pytest
@@ -22,6 +23,23 @@ def _sample_record() -> UsageRecord:
         status="success",
         request_type="proxy_run_wait",
     )
+
+
+@pytest.mark.asyncio
+async def test_pricing_variant_uses_longest_cached_model_prefix_independent_of_order():
+    recorder = UsageRecorder(database=None)
+    recorder._pricing_cache_time = time.time()
+    recorder._pricing_cache = {
+        "gpt-4o": {"input": "0.0025", "output": "0.01", "provider": "openai"},
+        "gpt-4o-mini": {"input": "0.00015", "output": "0.0006", "provider": "openai"},
+    }
+
+    pricing = await recorder._get_model_pricing("gpt-4o-mini-2024-07-18")
+
+    assert pricing is not None
+    assert pricing["input"] == "0.00015"
+    assert pricing["output"] == "0.0006"
+    assert pricing["pricing_status"] == "provider_model"
 
 
 @pytest.mark.asyncio

@@ -289,7 +289,7 @@ async def list_reports(
 ):
     _require_exam_permission(user, "exam:view")
     svc = _get_exam_service(request)
-    return {"reports": await svc.list_reports(exam_id)}
+    return {"reports": await svc.list_reports(exam_id, user.tenant_id)}
 
 
 @router.get("/{exam_id}/reports/{report_id}")
@@ -301,7 +301,7 @@ async def get_report(
 ):
     _require_exam_permission(user, "exam:view")
     svc = _get_exam_service(request)
-    report = await svc.get_report(report_id)
+    report = await svc.get_report(report_id, user.tenant_id)
     if not report or report["exam_id"] != exam_id:
         raise HTTPException(404, "Report not found")
     return report

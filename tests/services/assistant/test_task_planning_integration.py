@@ -1,11 +1,10 @@
 """
 Task Planning Integration Tests
 
-Tests for the integration of TaskPlanner and ToolOrchestrator into AssistantService.
+Tests for TaskPlanner guidance inside AssistantService's canonical AgentLoop.
 This covers:
 - AssistantConfig with enable_task_planning and max_parallel_tools
-- task_planner and tool_orchestrator property accessors
-- _execute_with_planning method
+- task_planner property access
 - Integration into chat_stream with planning mode
 """
 
@@ -17,13 +16,7 @@ from assistant_service.core.assistant_service import (
     AssistantService,
     StreamEventType,
 )
-from assistant_service.core.task_planner import (
-    TaskPlanner,
-)
-from assistant_service.core.tool_orchestrator import (
-    ToolExecutionResult,
-    ToolOrchestrator,
-)
+from assistant_service.core.task_planner import TaskPlanner
 
 from src.core.auth.user_resolver import UserContext
 
@@ -96,6 +89,7 @@ def assistant_service(mock_model_registry, mock_context_manager):
                 session_manager=None,
                 enable_rag_evaluation=False,
             )
+            service.tool_invoker.get_tool_definitions_filtered = AsyncMock(return_value=[])
             return service
 
 
@@ -146,7 +140,7 @@ class TestAssistantConfigTaskPlanning:
 
 
 class TestAssistantServiceProperties:
-    """Test AssistantService task planner and orchestrator properties."""
+    """Test AssistantService task planner properties."""
 
     def test_task_planner_property_creates_instance(self, assistant_service):
         """Test that task_planner property creates instance on demand."""
@@ -178,238 +172,6 @@ class TestAssistantServiceProperties:
 
         assert service._task_planner is custom_planner
         assert service.task_planner is custom_planner
-
-    def test_get_tool_orchestrator_creates_instance(self, assistant_service):
-        """Test that get_tool_orchestrator creates instance on demand."""
-        assert assistant_service._tool_orchestrator is None
-
-        with patch("assistant_service.core.tools.get_tool_registry") as mock_get_registry:
-            mock_registry = MagicMock()
-            mock_get_registry.return_value = mock_registry
-
-            orchestrator = assistant_service.get_tool_orchestrator(max_parallel=3)
-
-        assert orchestrator is not None
-        assert isinstance(orchestrator, ToolOrchestrator)
-        assert orchestrator.max_parallel == 3
-
-    def test_get_tool_orchestrator_returns_cached(self, assistant_service):
-        """Test that orchestrator is cached after first creation."""
-        with patch("assistant_service.core.tools.get_tool_registry") as mock_get_registry:
-            mock_registry = MagicMock()
-            mock_get_registry.return_value = mock_registry
-
-            orch1 = assistant_service.get_tool_orchestrator(max_parallel=5)
-            orch2 = assistant_service.get_tool_orchestrator(max_parallel=10)  # Should be ignored
-
-        assert orch1 is orch2  # Same instance
-
-
-# =============================================================================
-# _execute_with_planning Tests
-# =============================================================================
-
-
-class TestExecuteWithPlanning:
-    """Test _execute_with_planning method."""
-
-    @pytest.mark.asyncio
-    async def test_execute_with_planning_yields_task_planning_event(
-        self, assistant_service, user_context
-    ):
-        """Test that TASK_PLANNING event is yielded."""
-        config = AssistantConfig(enable_task_planning=True)
-
-        # Mock the tool registry
-        with patch("assistant_service.core.tools.get_tool_registry") as mock_get_registry:
-            mock_registry = MagicMock()
-            mock_registry.list_tools.return_value = []
-            mock_get_registry.return_value = mock_registry
-
-            events = []
-            async for event in assistant_service._execute_with_planning(
-                user=user_context,
-                session_id="test-session",
-                message="Search for product specifications",
-                config=config,
-                history=[],
-                retrieved_contexts=[],
-            ):
-                events.append(event)
-
-        # Should have TASK_PLANNING event
-        task_planning_events = [
-            e for e in events if e.event_type == StreamEventType.TASK_PLANNING.value
-        ]
-        assert len(task_planning_events) >= 1
-
-    @pytest.mark.asyncio
-    async def test_execute_with_planning_yields_working_memory_updates(
-        self, assistant_service, user_context
-    ):
-        """Test that WORKING_MEMORY_UPDATE events are yielded."""
-        config = AssistantConfig(enable_task_planning=True)
-
-        with patch("assistant_service.core.tools.get_tool_registry") as mock_get_registry:
-            mock_registry = MagicMock()
-            mock_registry.list_tools.return_value = []
-            mock_get_registry.return_value = mock_registry
-
-            events = []
-            async for event in assistant_service._execute_with_planning(
-                user=user_context,
-                session_id="test-session",
-                message="Compare products",
-                config=config,
-                history=[],
-                retrieved_contexts=[],
-            ):
-                events.append(event)
-
-        # Should have WORKING_MEMORY_UPDATE events
-        memory_events = [
-            e for e in events if e.event_type == StreamEventType.WORKING_MEMORY_UPDATE.value
-        ]
-        assert len(memory_events) >= 1
-
-    @pytest.mark.asyncio
-    async def test_execute_with_planning_sets_goal_in_working_memory(
-        self, assistant_service, user_context
-    ):
-        """Test that goal is set in working memory."""
-        config = AssistantConfig(enable_task_planning=True)
-        message = "Generate a comparison report"
-
-        with patch("assistant_service.core.tools.get_tool_registry") as mock_get_registry:
-            mock_registry = MagicMock()
-            mock_registry.list_tools.return_value = []
-            mock_get_registry.return_value = mock_registry
-
-            events = []
-            async for event in assistant_service._execute_with_planning(
-                user=user_context,
-                session_id="test-session-goal",
-                message=message,
-                config=config,
-                history=[],
-                retrieved_contexts=[],
-            ):
-                events.append(event)
-
-        # Verify working memory has the goal
-        working_memory = assistant_service.get_working_memory("test-session-goal")
-        assert working_memory.goal == message
-
-    @pytest.mark.asyncio
-    async def test_execute_with_planning_handles_error_gracefully(
-        self, assistant_service, user_context
-    ):
-        """Test that errors are handled gracefully."""
-        config = AssistantConfig(enable_task_planning=True)
-
-        # Replace the task planner with one that raises an error
-        mock_planner = MagicMock()
-        mock_planner.create_plan = AsyncMock(side_effect=Exception("Planning failed"))
-        assistant_service._task_planner = mock_planner
-
-        with patch("assistant_service.core.tools.get_tool_registry") as mock_get_registry:
-            mock_registry = MagicMock()
-            mock_registry.list_tools.return_value = []
-            mock_get_registry.return_value = mock_registry
-
-            events = []
-            async for event in assistant_service._execute_with_planning(
-                user=user_context,
-                session_id="test-session-error",
-                message="Test message",
-                config=config,
-                history=[],
-                retrieved_contexts=[],
-            ):
-                events.append(event)
-
-        # Should have an ERROR event
-        error_events = [e for e in events if e.event_type == StreamEventType.ERROR.value]
-        assert len(error_events) >= 1
-        assert "Planning failed" in error_events[0].data["message"]
-
-
-# =============================================================================
-# _format_execution_results Tests
-# =============================================================================
-
-
-class TestFormatExecutionResults:
-    """Test _format_execution_results method."""
-
-    def test_format_empty_results(self, assistant_service):
-        """Test formatting empty results."""
-        result = assistant_service._format_execution_results([])
-        assert result == ""
-
-    def test_format_successful_results(self, assistant_service):
-        """Test formatting successful results."""
-        results = [
-            ToolExecutionResult(
-                task_id="search_1",
-                tool="kb_search",
-                success=True,
-                result={"documents": ["doc1", "doc2"]},
-                duration_ms=150.5,
-            ),
-            ToolExecutionResult(
-                task_id="analyze_1",
-                tool="analyze",
-                success=True,
-                result="Analysis complete",
-                duration_ms=250.0,
-            ),
-        ]
-
-        formatted = assistant_service._format_execution_results(results)
-
-        assert "## Task Execution Results" in formatted
-        assert "search_1" in formatted
-        assert "kb_search" in formatted
-        assert "SUCCESS" in formatted
-        assert "analyze_1" in formatted
-
-    def test_format_failed_results(self, assistant_service):
-        """Test formatting failed results."""
-        results = [
-            ToolExecutionResult(
-                task_id="failed_task",
-                tool="some_tool",
-                success=False,
-                error="Tool execution failed",
-                duration_ms=100.0,
-            ),
-        ]
-
-        formatted = assistant_service._format_execution_results(results)
-
-        assert "FAILED" in formatted
-        assert "Tool execution failed" in formatted
-
-    def test_format_truncates_long_results(self, assistant_service):
-        """Test that long results are truncated."""
-        long_result = "x" * 1000  # Longer than 500 chars
-        results = [
-            ToolExecutionResult(
-                task_id="long_result",
-                tool="test_tool",
-                success=True,
-                result=long_result,
-                duration_ms=100.0,
-            ),
-        ]
-
-        formatted = assistant_service._format_execution_results(results)
-
-        # Result should be truncated to 500 chars + "..."
-        assert "..." in formatted
-        assert len(formatted) < len(long_result)
-
 
 # =============================================================================
 # Integration with chat_stream Tests
@@ -472,16 +234,20 @@ class TestChatStreamWithPlanning:
     async def test_chat_stream_includes_planning_when_enabled(
         self, assistant_service, user_context, mock_model_registry
     ):
-        """Test that planning events are included when enabled."""
-        # Use traditional path (not agent loop) to test task planning
+        """Planning stays inside the canonical AgentLoop and guides its model call."""
         config = AssistantConfig(
             enable_task_planning=True,
             model_id="gpt-4o",
+            # This legacy selector is intentionally ignored by the unified
+            # public turn path; planning must still remain canonical.
             use_agent_loop=False,
         )
 
         # Mock the model streaming
+        model_calls: list[dict] = []
+
         async def mock_stream(*args, **kwargs):
+            model_calls.append(kwargs)
             yield MagicMock(
                 content="Based on the results",
                 tool_calls=None,
@@ -518,19 +284,23 @@ class TestChatStreamWithPlanning:
             e for e in events if e.event_type == StreamEventType.TASK_PLANNING.value
         ]
         assert len(task_planning_events) >= 1
+        assert task_planning_events[0].data["execution_mode"] == "model_guidance"
 
         # Should also have WORKING_MEMORY_UPDATE events
         memory_events = [
             e for e in events if e.event_type == StreamEventType.WORKING_MEMORY_UPDATE.value
         ]
         assert len(memory_events) >= 1
+        assert len(model_calls) == 1
+        model_messages = str(model_calls[0]["messages"])
+        assert "Execution Plan" in model_messages
+        assert "not authorization to call tools" in model_messages
 
     @pytest.mark.asyncio
     async def test_chat_stream_requires_plan_confirmation(
         self, assistant_service, user_context, mock_model_registry
     ):
-        """Test that a plan confirmation gate is emitted when confirm_plan=True."""
-        # Use traditional path (not agent loop) to test task planning
+        """Legacy confirmation fails closed instead of executing without consent."""
         config = AssistantConfig(
             enable_task_planning=True,
             confirm_plan=True,  # When True, user wants to confirm plan before execution
@@ -538,7 +308,11 @@ class TestChatStreamWithPlanning:
             use_agent_loop=False,
         )
 
+        model_call_count = 0
+
         async def mock_stream(*args, **kwargs):
+            nonlocal model_call_count
+            model_call_count += 1
             yield MagicMock(
                 content="Hello",
                 tool_calls=None,
@@ -572,6 +346,12 @@ class TestChatStreamWithPlanning:
 
         status_events = [e for e in events if e.event_type == StreamEventType.STATUS.value]
         assert any("confirm" in str(e.data).lower() for e in status_events)
+        assert any(
+            e.event_type == StreamEventType.RUN_ERROR.value
+            and e.data.get("error") == "plan_confirmation_resume_not_supported"
+            for e in events
+        )
+        assert model_call_count == 0
 
 
 # =============================================================================

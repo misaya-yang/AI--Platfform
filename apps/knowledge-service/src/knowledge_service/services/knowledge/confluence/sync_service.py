@@ -19,15 +19,25 @@ This service coordinates between:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from ....config.settings import Settings
 from ....core.auth.user_resolver import UserContext
+from ....persistence.database import (
+    CONFLUENCE_SYNC_GENERATION_KEY,
+    DOCUMENT_LIFECYCLE_REINDEX_KEY,
+    DOCUMENT_UPLOAD_GENERATION_KEY,
+    SOURCE_OWNED_DOCUMENT_METADATA_KEYS,
+    dataset_index_deletion_fence,
+    dataset_ingestion_identity,
+)
+from ..lexical_config import LexicalConfig
 from .client import ConfluenceAPIError, ConfluenceClient
 from .models import (
     ConfluenceCredentials,
@@ -51,6 +61,9 @@ def _utc_now() -> datetime:
 
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_MAX_CONFLUENCE_IMAGE_BYTES = 3 * 1024 * 1024
+_DEFAULT_MAX_CONFLUENCE_IMAGES_PER_PAGE = 50
 
 
 class ConfluenceSyncError(Exception):
@@ -120,6 +133,129 @@ class ConfluenceSyncService:
         if vlm_service:
             logger.info("VLM service configured - image descriptions enabled")
 
+    async def _delete_bound_document(
+        self,
+        binding: dict[str, Any],
+        document_id: str,
+        *,
+        page: dict[str, Any] | None = None,
+        user: UserContext | None = None,
+    ) -> bool:
+        """Route background deletion through the fenced knowledge lifecycle."""
+        dataset_id = str(binding.get("dataset_id") or "").strip()
+        tenant_id = str(binding.get("tenant_id") or "").strip()
+        created_by = str(binding.get("created_by") or "").strip()
+        if not dataset_id or not tenant_id or not created_by:
+            raise ConfluenceSyncError(
+                "binding deletion requires dataset_id, tenant_id, and created_by"
+            )
+        deletion_user = user or UserContext(
+            user_id=created_by,
+            tenant_id=tenant_id,
+            roles=["user"],
+            is_authenticated=True,
+        )
+        deletion_error: Exception | None = None
+        try:
+            deleted = await self.knowledge_service.delete_document(
+                deletion_user,
+                dataset_id,
+                document_id,
+            )
+        except Exception as exc:
+            deletion_error = exc
+        else:
+            if deleted:
+                return True
+
+        try:
+            already_absent = await self._is_authoritatively_bound_document_absent(
+                binding,
+                page,
+                document_id,
+            )
+        except Exception as evidence_error:
+            if deletion_error is not None:
+                raise deletion_error
+            raise ConfluenceSyncError(
+                f"knowledge document '{document_id}' absence could not be verified"
+            ) from evidence_error
+
+        if already_absent:
+            logger.info(
+                "Document %s is already absent; retained Confluence ownership evidence "
+                "allows page or binding cleanup to resume",
+                document_id,
+            )
+            return False
+        if deletion_error is not None:
+            raise deletion_error
+        raise ConfluenceSyncError(f"knowledge document '{document_id}' was not deleted")
+
+    async def _is_authoritatively_bound_document_absent(
+        self,
+        binding: dict[str, Any],
+        page: dict[str, Any] | None,
+        document_id: str,
+    ) -> bool:
+        """Accept a missing document only when durable Confluence ownership still proves it."""
+        binding_id = str(binding.get("binding_id") or "").strip()
+        if not binding_id or not page:
+            return False
+        if await self.db.get_document(document_id) is not None:
+            return False
+
+        authoritative_binding = await self.db.get_confluence_binding(binding_id)
+        if not authoritative_binding:
+            return False
+        if str(authoritative_binding.get("binding_id") or "").strip() != binding_id:
+            return False
+
+        for field in ("dataset_id", "tenant_id", "connection_id"):
+            expected = str(binding.get(field) or "").strip()
+            actual = str(authoritative_binding.get(field) or "").strip()
+            if expected and actual != expected:
+                return False
+
+        expected_owner = str(
+            binding.get("owner_id") or binding.get("created_by") or ""
+        ).strip()
+        actual_owner = str(
+            authoritative_binding.get("owner_id")
+            or authoritative_binding.get("created_by")
+            or ""
+        ).strip()
+        if not expected_owner or actual_owner != expected_owner:
+            return False
+
+        if str(page.get("binding_id") or "").strip() != binding_id:
+            return False
+        page_record_id = str(page.get("id") or "").strip()
+        confluence_page_id = str(page.get("page_id") or "").strip()
+        if page_record_id:
+            authoritative_page = await self.db.get_confluence_page(page_record_id)
+        elif confluence_page_id:
+            authoritative_page = await self.db.get_confluence_page_by_page_id(
+                binding_id,
+                confluence_page_id,
+            )
+        else:
+            return False
+
+        if not authoritative_page:
+            return False
+        if str(authoritative_page.get("binding_id") or "").strip() != binding_id:
+            return False
+        if str(authoritative_page.get("document_id") or "").strip() != document_id:
+            return False
+        if page_record_id and str(authoritative_page.get("id") or "").strip() != page_record_id:
+            return False
+        return not (
+            confluence_page_id
+            and str(authoritative_page.get("page_id") or "").strip()
+            != confluence_page_id
+        )
+
     async def close(self) -> None:
         """关闭所有客户端连接"""
         for client in self._clients.values():
@@ -130,6 +266,85 @@ class ConfluenceSyncService:
         self._clients.clear()
         self._client_created_at.clear()
         self._client_locks.clear()
+
+    @staticmethod
+    def _as_utc_aware(value: Any) -> datetime | None:
+        """Normalize persisted task timestamps for stale-sync decisions."""
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        if not isinstance(value, datetime):
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    async def _recover_stale_binding_sync(self, binding: dict[str, Any]) -> bool:
+        """Make an orphaned binding/task pair retryable after an explicit TTL.
+
+        Document source generations are intentionally left untouched here.  A
+        new task reaches the same page fingerprint and resumes that generation
+        under the document owner lease.
+        """
+
+        if binding.get("status") != "syncing":
+            return False
+        binding_id = str(binding.get("binding_id") or "").strip()
+        if not binding_id:
+            return False
+
+        active_tasks: list[dict[str, Any]] = []
+        for status in ("pending", "processing"):
+            active_tasks.extend(
+                await self.db.list_confluence_sync_tasks(
+                    binding_id=binding_id,
+                    status=status,
+                    limit=100,
+                )
+            )
+
+        timeout_seconds = max(
+            int(
+                getattr(
+                    self.settings.confluence,
+                    "stale_sync_timeout_seconds",
+                    3600,
+                )
+            ),
+            60,
+        )
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)
+        for task in active_tasks:
+            touched_at = self._as_utc_aware(
+                task.get("updated_at")
+                or task.get("started_at")
+                or task.get("created_at")
+            )
+            # Missing or fresh evidence fails closed; only explicitly stale
+            # durable tasks can be superseded automatically.
+            if touched_at is None or touched_at > cutoff:
+                return False
+
+        recovered_at = _utc_now()
+        for task in active_tasks:
+            await self.db.update_confluence_sync_task(
+                str(task["task_id"]),
+                {
+                    "status": "failed",
+                    "error": "Recovered stale Confluence sync after restart",
+                    "completed_at": recovered_at,
+                },
+            )
+        await self.db.update_confluence_binding(
+            binding_id,
+            {
+                "status": "pending",
+                "last_error": "Recovered stale Confluence sync after restart",
+            },
+        )
+        return True
 
     def _handle_task_exception(self, task: asyncio.Task) -> None:
         """Handle exceptions from background tasks to prevent silent failures."""
@@ -152,6 +367,499 @@ class ConfluenceSyncService:
         task = asyncio.create_task(coro, name=name)
         task.add_done_callback(self._handle_task_exception)
         return task
+
+    async def _build_image_source_metadata(
+        self,
+        *,
+        connection_id: str,
+        tenant_id: str,
+        document_id: str,
+        page: ConfluencePage,
+        sync_generation: str,
+        expected_attachment_manifest: list[dict[str, Any]],
+        sync_images: bool,
+        image_max_size_bytes: int | None,
+    ) -> dict[str, Any]:
+        """Persist Confluence images as a worker-rebuildable source receipt."""
+
+        generation = {
+            "page_id": page.page_id,
+            "page_version": page.version,
+            "content_hash": page.content_hash,
+            "sync_generation": sync_generation,
+            "complete": True,
+        }
+        if not tenant_id:
+            raise ConfluenceSyncError("tenant_id is required for Confluence image sources")
+
+        delete_images = getattr(
+            self._image_storage_service,
+            "delete_document_images",
+            None,
+        )
+        if not callable(delete_images):
+            raise ConfluenceSyncError(
+                "Confluence image storage cleanup is unavailable"
+            )
+        await delete_images(tenant_id, document_id)
+        if not sync_images:
+            if expected_attachment_manifest:
+                raise ConfluenceSyncError(
+                    "Confluence attachment manifest changed during text-only source sync"
+                )
+            return {
+                "extracted_images": [],
+                "skipped_confluence_attachments": [],
+                "image_count": 0,
+                "processing_mode": "text",
+                "_confluence_image_source_generation": generation,
+            }
+
+        processor = await self._get_image_processor(
+            connection_id,
+            max_image_size=image_max_size_bytes,
+        )
+        if processor is None:
+            raise ConfluenceSyncError(
+                "Confluence image source processor is unavailable"
+            )
+
+        image_result = await processor.process_page_images(
+            page_id=page.page_id,
+            document_id=document_id,
+            tenant_id=tenant_id,
+            page_content=page.body_storage,
+            page_title=page.title,
+        )
+        if image_result.errors or image_result.failed_images:
+            raise ConfluenceSyncError(
+                "Confluence image source preparation failed; previous generation retained"
+            )
+
+        skipped_attachments = list(image_result.skipped_attachments or [])
+        actual_attachment_manifest = sorted(
+            [
+                *(
+                    {
+                        "attachment_id": segment.attachment_id,
+                        "filename": segment.filename,
+                        "media_type": segment.media_type,
+                        # The remote declaration is the fingerprint authority;
+                        # downloaded byte length can legitimately differ.
+                        "file_size": (segment.metadata or {}).get(
+                            "attachment_file_size",
+                            segment.file_size,
+                        ),
+                        "updated_at": (segment.metadata or {}).get(
+                            "attachment_updated_at"
+                        ),
+                    }
+                    for segment in image_result.segments
+                ),
+                *(
+                    {
+                        key: value
+                        for key, value in skipped.items()
+                        if key != "reason"
+                    }
+                    for skipped in skipped_attachments
+                ),
+            ],
+            key=lambda item: (str(item["attachment_id"]), str(item["filename"])),
+        )
+        if actual_attachment_manifest != expected_attachment_manifest:
+            raise ConfluenceSyncError(
+                "Confluence attachment manifest changed while source assets were prepared"
+            )
+
+        key_builder = getattr(self._image_storage_service, "_generate_key", None)
+        receipts: list[dict[str, Any]] = []
+        for segment in image_result.segments:
+            storage_url = str(segment.storage_url or "").strip()
+            if not storage_url:
+                raise ConfluenceSyncError(
+                    "Confluence image source receipt is missing storage_url"
+                )
+            storage_key = None
+            if callable(key_builder):
+                storage_key = key_builder(
+                    tenant_id,
+                    document_id,
+                    segment.attachment_id,
+                    segment.filename,
+                )
+            attachment_metadata = segment.metadata or {}
+            context_text = segment.vlm_description or segment.context_text or ""
+            receipts.append(
+                {
+                    "image_id": segment.attachment_id,
+                    "filename": segment.filename,
+                    "storage_url": storage_url,
+                    "storage_key": storage_key,
+                    "mime_type": segment.media_type,
+                    "size_bytes": segment.file_size,
+                    "context_text": context_text,
+                    "source_location": f"confluence:{page.page_id}",
+                    "confluence_attachment_id": segment.attachment_id,
+                    "attachment_updated_at": attachment_metadata.get(
+                        "attachment_updated_at"
+                    ),
+                    "vlm_description": segment.vlm_description,
+                }
+            )
+
+        return {
+            "extracted_images": receipts,
+            "skipped_confluence_attachments": skipped_attachments,
+            "image_count": len(receipts),
+            "processing_mode": "multimodal" if receipts else "text",
+            "_confluence_image_source_generation": generation,
+        }
+
+    async def _resolve_source_generation(
+        self,
+        *,
+        connection_id: str,
+        page: ConfluencePage,
+        sync_images: bool,
+        image_max_size_bytes: int | None = None,
+    ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+        """Derive a retry-stable generation including attachment-only changes."""
+
+        source_attachment_manifest: list[dict[str, Any]] = []
+        processed_attachment_manifest: list[dict[str, Any]] = []
+        max_image_size = int(
+            image_max_size_bytes
+            or getattr(
+                self.image_processor,
+                "max_image_size",
+                _DEFAULT_MAX_CONFLUENCE_IMAGE_BYTES,
+            )
+        )
+        max_images_per_page = int(
+            getattr(
+                self.image_processor,
+                "max_images_per_page",
+                _DEFAULT_MAX_CONFLUENCE_IMAGES_PER_PAGE,
+            )
+        )
+        if sync_images:
+            client = await self._get_client(connection_id)
+            attachments = await client.get_page_image_attachments(
+                page_id=page.page_id,
+                embeddable_only=True,
+            )
+            source_attachment_manifest = sorted(
+                (
+                    {
+                        "attachment_id": attachment.attachment_id,
+                        "filename": attachment.filename,
+                        "media_type": attachment.media_type,
+                        "file_size": attachment.file_size,
+                        "updated_at": attachment.updated_at,
+                    }
+                    for attachment in attachments
+                ),
+                key=lambda item: (str(item["attachment_id"]), str(item["filename"])),
+            )
+            processed_attachment_manifest = [
+                item
+                for item in source_attachment_manifest
+                if int(item["file_size"] or 0) <= max_image_size
+            ][:max_images_per_page]
+        fingerprint = {
+            "page_id": page.page_id,
+            "page_version": page.version,
+            "content_hash": page.content_hash,
+            "attachments": source_attachment_manifest,
+            "image_policy": {
+                "max_image_size_bytes": max_image_size,
+                "max_images_per_page": max_images_per_page,
+            },
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                fingerprint,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return (
+            f"confluence-{digest}",
+            processed_attachment_manifest,
+            source_attachment_manifest,
+        )
+
+    async def _abort_failed_source_generation(
+        self,
+        *,
+        connection: Any,
+        dataset_id: str,
+        document_id: str,
+        generation: str,
+        failure: BaseException,
+    ) -> None:
+        """Release an exactly-owned failed generation for an immediate retry."""
+
+        abort_sync = getattr(self.db, "abort_confluence_document_sync", None)
+        if not callable(abort_sync):
+            raise ConfluenceSyncError(
+                "Confluence source generation abort authority is unavailable"
+            ) from failure
+        async with connection.transaction():
+            aborted = await abort_sync(
+                document_id,
+                dataset_id,
+                generation=generation,
+                error=(
+                    "Confluence source preparation failed "
+                    f"({type(failure).__name__})"
+                ),
+                connection=connection,
+            )
+        if aborted is not True:
+            raise ConfluenceSyncError(
+                "Confluence source generation authority changed during abort"
+            ) from failure
+
+    async def _prepare_existing_page_update(
+        self,
+        *,
+        binding: dict[str, Any],
+        document_id: str,
+        page: ConfluencePage,
+        sync_generation: str | None = None,
+        attachment_manifest: list[dict[str, Any]] | None = None,
+        source_attachment_manifest: list[dict[str, Any]] | None = None,
+    ) -> int:
+        """Publish one canonical, hidden Confluence source generation.
+
+        The document advisory lease is the sole owner boundary shared with the
+        ingestion worker.  The database row is hidden before canonical image
+        assets are replaced, then source state and the durable queued outbox are
+        committed atomically.  This path never mutates segment rows or Qdrant.
+        """
+
+        dataset_id = str(binding.get("dataset_id") or "").strip()
+        tenant_id = str(binding.get("tenant_id") or "").strip()
+        binding_id = str(binding.get("binding_id") or "").strip()
+        normalized_document = str(document_id or "").strip()
+        connection_id = str(binding.get("connection_id") or "").strip()
+        if not dataset_id or not tenant_id or not connection_id or not normalized_document:
+            raise ConfluenceSyncError(
+                "Confluence sync requires dataset, tenant, connection, and document identity"
+            )
+        if self.worker is None:
+            raise ConfluenceSyncError("knowledge worker is unavailable")
+
+        if sync_generation:
+            generation = str(sync_generation)
+            resolved_attachment_manifest = list(attachment_manifest or [])
+            resolved_source_attachment_manifest = list(
+                source_attachment_manifest
+                if source_attachment_manifest is not None
+                else resolved_attachment_manifest
+            )
+        else:
+            (
+                generation,
+                resolved_attachment_manifest,
+                resolved_source_attachment_manifest,
+            ) = await self._resolve_source_generation(
+                connection_id=connection_id,
+                page=page,
+                sync_images=bool(binding.get("sync_images", False)),
+                image_max_size_bytes=binding.get("image_max_size_bytes"),
+            )
+        lease_factory = getattr(self.db, "document_index_update_lease", None)
+        begin_sync = getattr(self.db, "begin_confluence_document_sync", None)
+        prepare_update = getattr(self.db, "prepare_confluence_document_update", None)
+        if (
+            not callable(lease_factory)
+            or not callable(begin_sync)
+            or not callable(prepare_update)
+        ):
+            raise ConfluenceSyncError(
+                "Confluence source generation authority is unavailable"
+            )
+
+        content = extract_plain_text(page.body_storage)
+        source_owner = (
+            {"kind": "binding", "id": binding_id}
+            if binding_id
+            else {
+                "kind": "direct",
+                "id": f"{connection_id}:{page.page_id}",
+            }
+        )
+        base_source_metadata = {
+            "confluence_page_id": page.page_id,
+            "confluence_space_key": page.space_key,
+            "confluence_version": page.version,
+            "confluence_labels": page.labels,
+            "confluence_author": page.author_id,
+            "confluence_updated_at": page.updated_at,
+            "markdown_content": extract_markdown(page.body_storage),
+            "_confluence_attachment_manifest": resolved_source_attachment_manifest,
+        }
+        change_reason = f"Confluence sync: {page.title} (v{page.version})"
+
+        async with lease_factory(dataset_id, normalized_document) as connection:
+            # Commit the hidden owner marker before remote storage work.  A
+            # crash leaves a durable, non-retrievable generation that a later
+            # same-source retry can resume safely under this same lease.
+            async with connection.transaction():
+                dataset = await self.db.get_dataset(
+                    dataset_id,
+                    connection=connection,
+                )
+                if not dataset or str(dataset.get("tenant_id") or "") != tenant_id:
+                    raise ConfluenceSyncError("Confluence dataset authority changed")
+                self._validate_dataset_index_writable(dataset)
+                started = await begin_sync(
+                    normalized_document,
+                    dataset_id,
+                    generation=generation,
+                    source_metadata={
+                        "source_owner": source_owner,
+                        "connection_id": connection_id,
+                        "page_id": page.page_id,
+                        "page_version": page.version,
+                        "content_hash": page.content_hash,
+                    },
+                    connection=connection,
+                )
+                if started is not True:
+                    raise ConfluenceSyncError(
+                        "Confluence document generation is owned by another source update"
+                    )
+
+            try:
+                image_source_metadata = await self._build_image_source_metadata(
+                    connection_id=connection_id,
+                    tenant_id=tenant_id,
+                    document_id=normalized_document,
+                    page=page,
+                    sync_generation=generation,
+                    expected_attachment_manifest=resolved_attachment_manifest,
+                    sync_images=bool(binding.get("sync_images", False)),
+                    image_max_size_bytes=binding.get("image_max_size_bytes"),
+                )
+            except Exception as exc:
+                await self._abort_failed_source_generation(
+                    connection=connection,
+                    dataset_id=dataset_id,
+                    document_id=normalized_document,
+                    generation=generation,
+                    failure=exc,
+                )
+                raise
+            source_metadata = {
+                **base_source_metadata,
+                **image_source_metadata,
+            }
+
+            try:
+                async with connection.transaction():
+                    dataset = await self.db.get_dataset(
+                        dataset_id,
+                        connection=connection,
+                    )
+                    if not dataset or str(dataset.get("tenant_id") or "") != tenant_id:
+                        raise ConfluenceSyncError("Confluence dataset authority changed")
+                    self._validate_dataset_index_writable(dataset)
+                    current_doc = await self.db.get_document(
+                        normalized_document,
+                        connection=connection,
+                    )
+                    metadata = (current_doc or {}).get("metadata") or {}
+                    if not isinstance(metadata, dict):
+                        metadata = {}
+                    if (
+                        not current_doc
+                        or str(current_doc.get("dataset_id") or "") != dataset_id
+                        or current_doc.get("enabled", True) is not True
+                        or current_doc.get("archived", False) is True
+                        or current_doc.get("status") != "syncing"
+                        or DOCUMENT_LIFECYCLE_REINDEX_KEY in metadata
+                        or DOCUMENT_UPLOAD_GENERATION_KEY in metadata
+                    ):
+                        raise ConfluenceSyncError(
+                            "Confluence document is not eligible for source replacement"
+                        )
+
+                    previous_content = str(current_doc.get("content") or "")
+                    # A freshly reserved deterministic Confluence document has no
+                    # published content yet.  Do not create a synthetic empty
+                    # version for that first generation.
+                    if previous_content and previous_content != content:
+                        await self.db.create_document_version(
+                            document_id=normalized_document,
+                            content=previous_content,
+                            content_hash=hashlib.sha256(
+                                previous_content.encode("utf-8")
+                            ).hexdigest(),
+                            change_type="updated",
+                            title=current_doc.get("title"),
+                            metadata=metadata,
+                            change_reason=change_reason,
+                            changed_by=binding.get("created_by"),
+                            confluence_version=current_doc.get("confluence_version"),
+                            confluence_updated_at=current_doc.get("updated_at"),
+                            connection=connection,
+                        )
+
+                    updated = await prepare_update(
+                        normalized_document,
+                        dataset_id,
+                        title=page.title,
+                        content=content,
+                        confluence_version=page.version,
+                        source_metadata=source_metadata,
+                        page_record=(
+                            {
+                                "binding_id": binding_id,
+                                "page_id": page.page_id,
+                                "space_key": page.space_key,
+                                "title": page.title,
+                                "version": page.version,
+                                "content_hash": page.content_hash,
+                                "parent_page_id": page.parent_id,
+                                "status": "synced",
+                                "labels": page.labels,
+                                "web_url": page.web_url,
+                                "author": page.author_id,
+                                "confluence_updated_at": page.updated_at,
+                                "image_count": int(
+                                    image_source_metadata.get("image_count") or 0
+                                ),
+                            }
+                            if binding_id
+                            else None
+                        ),
+                        generation=generation,
+                        connection=connection,
+                    )
+                    if updated is not True:
+                        raise ConfluenceSyncError(
+                            "Confluence document generation changed during source replacement"
+                        )
+            except Exception as exc:
+                await self._abort_failed_source_generation(
+                    connection=connection,
+                    dataset_id=dataset_id,
+                    document_id=normalized_document,
+                    generation=generation,
+                    failure=exc,
+                )
+                raise
+
+        enqueue_claimed = getattr(self.worker, "enqueue_claimed", None)
+        if not callable(enqueue_claimed):
+            raise ConfluenceSyncError("durable claimed-queue publisher is unavailable")
+        await enqueue_claimed(dataset_id, normalized_document)
+        return int(image_source_metadata.get("image_count") or 0)
 
     async def _save_version_before_update(
         self,
@@ -920,10 +1628,6 @@ class ConfluenceSyncService:
             extra_metadata=metadata,
         )
 
-        # 入队处理
-        if self.worker:
-            await self.worker.enqueue(dataset_id, doc["document_id"])
-
         result = {
             "status": "success",
             "document_id": doc["document_id"],
@@ -949,8 +1653,6 @@ class ConfluenceSyncService:
                         page=child_page,
                         created_by=created_by,
                     )
-                    if self.worker:
-                        await self.worker.enqueue(dataset_id, child_doc["document_id"])
                     child_docs.append(
                         {"document_id": child_doc["document_id"], "title": child_doc.get("title")}
                     )
@@ -975,6 +1677,18 @@ class ConfluenceSyncService:
         image_max_size_bytes: int | None = None,
     ) -> dict[str, Any]:
         """从 Confluence 页面创建文档"""
+        dataset = await self.db.get_dataset(dataset_id)
+        if not dataset:
+            raise ConfluenceSyncError(f"Dataset not found: {dataset_id}")
+        self._validate_dataset_index_writable(dataset)
+        effective_tenant_id = str(tenant_id or dataset.get("tenant_id") or "").strip()
+        if not effective_tenant_id:
+            raise ConfluenceSyncError("Confluence dataset tenant_id is required")
+        if tenant_id and str(dataset.get("tenant_id") or "") != str(tenant_id):
+            raise ConfluenceSyncError("Confluence dataset tenant authority changed")
+        if self.worker is None:
+            raise ConfluenceSyncError("knowledge worker is unavailable")
+
         # 检查 body_storage 是否为空
         if not page.body_storage or not page.body_storage.strip():
             logger.warning(
@@ -983,33 +1697,61 @@ class ConfluenceSyncService:
                 f"This will cause 'empty document' error during ingestion."
             )
 
-        # 转换内容
+        # Resolve the complete source fingerprint before creating the durable
+        # hidden row.  Retries of the same page/attachment generation reuse it.
+        (
+            sync_generation,
+            attachment_manifest,
+            source_attachment_manifest,
+        ) = await self._resolve_source_generation(
+            connection_id=connection_id,
+            page=page,
+            sync_images=sync_images,
+            image_max_size_bytes=image_max_size_bytes,
+        )
         content_text = extract_plain_text(page.body_storage)
-        content_markdown = extract_markdown(page.body_storage)
 
         # 日志记录内容长度
         logger.info(
             f"Document content extraction for page {page.page_id}: "
             f"body_storage={len(page.body_storage or '')}, "
             f"content_text={len(content_text)}, "
-            f"content_markdown={len(content_markdown)}"
+            f"content_markdown={len(extract_markdown(page.body_storage))}"
         )
 
-        doc_id = str(uuid.uuid4())
-        metadata = {
-            "confluence_page_id": page.page_id,
-            "confluence_space_key": page.space_key,
-            "confluence_version": page.version,
-            "confluence_labels": page.labels,
-            "confluence_author": page.author_id,
-            "confluence_updated_at": page.updated_at,
-            "markdown_content": content_markdown,
+        doc_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"ai-platform:confluence:{dataset_id}:{connection_id}:{page.page_id}",
+            )
+        )
+        metadata = dict(extra_metadata or {})
+        reserved = SOURCE_OWNED_DOCUMENT_METADATA_KEYS.intersection(metadata)
+        if reserved:
+            raise ConfluenceSyncError("Confluence document metadata contains a reserved key")
+        marker_source = {
+            "source_owner": (
+                {"kind": "binding", "id": binding_id}
+                if binding_id
+                else {
+                    "kind": "direct",
+                    "id": f"{connection_id}:{page.page_id}",
+                }
+            ),
+            "connection_id": connection_id,
+            "page_id": page.page_id,
+            "page_version": page.version,
+            "content_hash": page.content_hash,
         }
-        # 合并额外元数据
-        if extra_metadata:
-            metadata.update(extra_metadata)
+        metadata[CONFLUENCE_SYNC_GENERATION_KEY] = {
+            "generation": sync_generation,
+            "source": marker_source,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "status": "syncing",
+            "version": 1,
+        }
 
-        doc = {
+        initial_doc = {
             "document_id": doc_id,
             "dataset_id": dataset_id,
             "title": page.title,
@@ -1017,92 +1759,85 @@ class ConfluenceSyncService:
             "source_uri": page.web_url or f"confluence://{page.page_id}",
             "mime_type": "text/plain",
             "size_bytes": len(content_text.encode("utf-8")),
-            "status": "uploaded",
+            "status": "syncing",
             "progress": 0,
-            "content": content_text,
+            "content": "",
             "metadata": metadata,
-            # Confluence 专属字段
-            "confluence_page_id": page.page_id,
-            "confluence_binding_id": binding_id,
-            "confluence_version": page.version,
-            "confluence_web_url": page.web_url,
-            "created_by": created_by,
         }
-
-        await self.db.save_document(doc)
-
-        # 记录同步状态
-        if binding_id:
-            await self.db.upsert_confluence_page(
-                binding_id=binding_id,
-                page_id=page.page_id,
-                document_id=doc_id,
-                space_key=page.space_key,
-                title=page.title,
-                version=page.version,
-                content_hash=page.content_hash,
-                parent_page_id=page.parent_id,
-                labels=page.labels,
-                web_url=page.web_url,
-                author=page.author_id,
-                confluence_updated_at=page.updated_at,
-            )
-
-        # 处理图片（如果启用）
-        if sync_images:
-            if not tenant_id:
-                logger.warning(
-                    f"Image sync enabled but tenant_id is missing for page {page.page_id}, "
-                    "skipping image processing"
+        existing_doc = await self.db.get_document(doc_id)
+        if existing_doc is None:
+            try:
+                await self.db.insert_document(
+                    initial_doc,
+                    expected_ingestion_identity=dataset_ingestion_identity(dataset),
                 )
-            else:
-                # 获取或创建 image_processor（使用 binding 配置的图片大小限制）
-                img_processor = await self._get_image_processor(
-                    connection_id, max_image_size=image_max_size_bytes
-                )
-                if not img_processor:
-                    logger.debug(
-                        f"Image processor not available for page {page.page_id}, "
-                        "skipping image processing"
+            except Exception:
+                # Concurrent retries share the deterministic document ID.  A
+                # uniqueness race is resumable only if the authoritative row
+                # now exists; every other insert failure remains fatal.
+                existing_doc = await self.db.get_document(doc_id)
+                if existing_doc is None:
+                    raise
+        elif (
+            str(existing_doc.get("dataset_id") or "") != dataset_id
+            or str(existing_doc.get("source_type") or "") != "confluence"
+        ):
+            raise ConfluenceSyncError("deterministic Confluence document identity conflict")
+
+        # The source transaction may have committed before the process failed
+        # to publish the durable queue wake-up.  Its canonical page receipt is
+        # enough to make a same-generation retry idempotent: republish a queued
+        # item, or return an already processing/completed generation without
+        # replacing source assets again.
+        existing_metadata = (existing_doc or {}).get("metadata") or {}
+        if not isinstance(existing_metadata, dict):
+            existing_metadata = {}
+        source_receipt = existing_metadata.get(
+            "_confluence_image_source_generation"
+        )
+        existing_status = str((existing_doc or {}).get("status") or "")
+        if (
+            isinstance(source_receipt, dict)
+            and source_receipt.get("complete") is True
+            and source_receipt.get("sync_generation") == sync_generation
+            and existing_status in {"queued", "processing", "completed"}
+        ):
+            if existing_status == "queued":
+                enqueue_claimed = getattr(self.worker, "enqueue_claimed", None)
+                if not callable(enqueue_claimed):
+                    raise ConfluenceSyncError(
+                        "durable claimed-queue publisher is unavailable"
                     )
-                else:
-                    try:
-                        image_result = await img_processor.process_page_images(
-                            page_id=page.page_id,
-                            document_id=doc_id,
-                            tenant_id=tenant_id,
-                            page_content=page.body_storage,
-                            page_title=page.title,
-                        )
-                        if image_result.processed_images > 0:
-                            vlm_count = sum(1 for s in image_result.segments if s.vlm_description)
-                            logger.info(
-                                f"Processed {image_result.processed_images} images "
-                                f"for page {page.page_id} "
-                                f"(vlm_descriptions={vlm_count})"
-                            )
-                            # Store image segments in database
-                            for idx, segment in enumerate(image_result.segments):
-                                await self._save_image_segment(
-                                    segment, dataset_id, binding_id, position=idx
-                                )
-                            doc["image_count"] = image_result.processed_images
+                await enqueue_claimed(dataset_id, doc_id)
+            result = dict(existing_doc or {})
+            result["image_count"] = int(
+                existing_metadata.get("image_count")
+                or len(existing_metadata.get("extracted_images") or [])
+            )
+            return result
 
-                            # 修复：更新 confluence_pages 表的 image_count
-                            if binding_id:
-                                await self.db.update_confluence_page_image_count(
-                                    binding_id, page.page_id, image_result.processed_images
-                                )
-                        if image_result.errors:
-                            logger.warning(
-                                "Image processing errors for page %s: %s",
-                                page.page_id,
-                                image_result.errors,
-                            )
-                    except Exception as e:
-                        logger.error(f"Failed to process images for page {page.page_id}: {e}")
-                        # Don't fail the document sync for image errors
+        binding = {
+            "binding_id": binding_id,
+            "connection_id": connection_id,
+            "dataset_id": dataset_id,
+            "tenant_id": effective_tenant_id,
+            "created_by": created_by,
+            "sync_images": sync_images,
+            "image_max_size_bytes": image_max_size_bytes,
+        }
+        image_count = await self._prepare_existing_page_update(
+            binding=binding,
+            document_id=doc_id,
+            page=page,
+            sync_generation=sync_generation,
+            attachment_manifest=attachment_manifest,
+            source_attachment_manifest=source_attachment_manifest,
+        )
 
+        doc = await self.db.get_document(doc_id)
+        if not doc:
+            raise ConfluenceSyncError("Confluence document disappeared after source publish")
+        doc["image_count"] = image_count
         return doc
 
     async def _save_image_segment(
@@ -1270,10 +2005,23 @@ class ConfluenceSyncService:
             是否需要重新处理图片
         """
         try:
-            # 获取已存储的图片段
-            existing_segments = await self.db.get_image_segments_by_document(document_id)
-            if not existing_segments:
-                # 没有已存储的图片，需要处理
+            # The document source receipt, not derived segment rows, is the
+            # authority for attachment generations.
+            document = await self.db.get_document(document_id)
+            metadata = (document or {}).get("metadata") or {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            source_generation = metadata.get(
+                "_confluence_image_source_generation"
+            )
+            receipts = metadata.get("extracted_images")
+            stored_manifest = metadata.get("_confluence_attachment_manifest")
+            if (
+                not isinstance(source_generation, dict)
+                or source_generation.get("complete") is not True
+                or not isinstance(receipts, list)
+                or not isinstance(stored_manifest, list)
+            ):
                 return True
 
             # 获取 Confluence 当前附件
@@ -1282,57 +2030,25 @@ class ConfluenceSyncService:
                 page_id=page_id, embeddable_only=True
             )
 
-            if not current_attachments:
-                # 没有附件但有存储的段落，需要清理
-                return True
-
-            # 构建现有段落的附件ID映射
-            existing_map = {
-                seg.get("image_attachment_id"): seg
-                for seg in existing_segments
-                if seg.get("image_attachment_id")
-            }
-
-            # 检查是否有新增或更新的附件
-            for attachment in current_attachments:
-                existing_seg = existing_map.get(attachment.attachment_id)
-
-                if not existing_seg:
-                    # 新附件
-                    logger.debug(f"New attachment detected: {attachment.filename}")
-                    return True
-
-                # 检查更新时间
-                # 修复：metadata 可能是 JSON 字符串（数据库返回），需要安全处理
-                metadata = existing_seg.get("metadata", {})
-                if isinstance(metadata, str):
-                    try:
-                        metadata = json.loads(metadata)
-                    except (json.JSONDecodeError, TypeError):
-                        metadata = {}
-                if not isinstance(metadata, dict):
-                    metadata = {}
-
-                stored_updated_at = metadata.get("attachment_updated_at")
-                if (
-                    stored_updated_at
-                    and attachment.updated_at
-                    and attachment.updated_at != stored_updated_at
-                ):
-                    logger.debug(
-                        f"Attachment updated: {attachment.filename} "
-                        f"({stored_updated_at} -> {attachment.updated_at})"
-                    )
-                    return True
-
-            # 检查是否有删除的附件
-            current_ids = {a.attachment_id for a in current_attachments}
-            for existing_id in existing_map:
-                if existing_id not in current_ids:
-                    logger.debug(f"Attachment removed: {existing_id}")
-                    return True
-
-            return False
+            current_manifest = sorted(
+                (
+                    {
+                        "attachment_id": attachment.attachment_id,
+                        "filename": attachment.filename,
+                        "media_type": attachment.media_type,
+                        "file_size": attachment.file_size,
+                        "updated_at": attachment.updated_at,
+                    }
+                    for attachment in current_attachments
+                ),
+                key=lambda item: (str(item["attachment_id"]), str(item["filename"])),
+            )
+            # The full source manifest plus the complete-generation marker was
+            # committed only after admitted images and explicit skip receipts
+            # exactly covered the processing manifest.  Requiring every full
+            # source attachment to appear in `extracted_images` would make
+            # policy-skipped and empty attachments rebuild forever.
+            return current_manifest != stored_manifest
 
         except Exception as e:
             logger.warning(f"Failed to check image updates: {e}, will reprocess")
@@ -1565,12 +2281,10 @@ class ConfluenceSyncService:
                 doc_id = page.get("document_id")
                 if doc_id:
                     try:
-                        await self.knowledge_service.delete_document(
-                            dataset_id=binding["dataset_id"],
-                            document_id=doc_id,
-                        )
+                        await self._delete_bound_document(binding, doc_id, page=page)
                     except Exception as e:
                         logger.warning(f"Failed to delete document {doc_id}: {e}")
+                        return False
 
         return await self.db.delete_confluence_binding(binding_id)
 
@@ -1826,7 +2540,11 @@ class ConfluenceSyncService:
             raise ConfluenceSyncError(f"Binding not found: {binding_id}")
 
         # 检查是否已有同步在进行
-        if binding.get("status") == "syncing" and not force_full_sync:
+        if (
+            binding.get("status") == "syncing"
+            and not force_full_sync
+            and not await self._recover_stale_binding_sync(binding)
+        ):
             return SyncResult(
                 started_at=_utc_now(),
                 completed_at=_utc_now(),
@@ -1871,6 +2589,7 @@ class ConfluenceSyncService:
 
         connection_id = binding["connection_id"]
         dataset_id = binding["dataset_id"]
+        await self._require_dataset_index_writable(dataset_id)
         binding["space_id"]
         max_depth = binding.get("max_depth", 10)
 
@@ -1970,30 +2689,19 @@ class ConfluenceSyncService:
                                     if image_updates_needed:
                                         logger.info(
                                             f"Page {page_id} content unchanged but "
-                                            "image updates detected, reprocessing images..."
+                                            "image updates detected, queuing a new source generation"
                                         )
-                                        tenant_id = binding.get("tenant_id")
-                                        if not tenant_id:
-                                            logger.warning(
-                                                f"Binding {binding_id} has no tenant_id, "
-                                                "skipping image reprocess"
-                                            )
-                                        else:
-                                            await self._reprocess_document_images(
-                                                document_id=doc_id,
-                                                connection_id=connection_id,
-                                                page=page,
-                                                dataset_id=dataset_id,
-                                                tenant_id=tenant_id,
-                                                binding_id=binding_id,
-                                                image_max_size_bytes=binding.get(
-                                                    "image_max_size_bytes"
-                                                ),
-                                            )
+                                        await self._prepare_existing_page_update(
+                                            binding=binding,
+                                            document_id=doc_id,
+                                            page=page,
+                                        )
                                         result.synced_pages += 1
                                         continue
                                 except Exception as img_err:
-                                    logger.warning(f"Failed to check/process images: {img_err}")
+                                    raise ConfluenceSyncError(
+                                        "failed to prepare changed Confluence image sources"
+                                    ) from img_err
 
                             result.skipped_pages += 1
                             continue
@@ -2001,52 +2709,11 @@ class ConfluenceSyncService:
                         # 更新现有文档（内容变化时也需要重新处理图片）
                         doc_id = existing.get("document_id")
                         if doc_id:
-                            # 保存版本快照（用于回滚）
-                            await self._save_version_before_update(
-                                doc_id,
-                                page.version,
-                                f"Confluence sync: {page.title} (v{page.version})",
+                            await self._prepare_existing_page_update(
+                                binding=binding,
+                                document_id=doc_id,
+                                page=page,
                             )
-
-                            content_text = extract_plain_text(page.body_storage)
-                            await self.db.update_document_fields(
-                                doc_id,
-                                {
-                                    "content": content_text,
-                                    "confluence_version": page.version,
-                                    "status": "uploaded",
-                                    "progress": 0,
-                                },
-                            )
-
-                            # 内容变化时也重新处理图片（修复：之前只更新文本）
-                            sync_images_enabled = binding.get("sync_images", False)
-                            tenant_id = binding.get("tenant_id")
-                            if sync_images_enabled and tenant_id:
-                                try:
-                                    image_count = await self._reprocess_document_images(
-                                        document_id=doc_id,
-                                        connection_id=connection_id,
-                                        page=page,
-                                        dataset_id=dataset_id,
-                                        tenant_id=tenant_id,
-                                        binding_id=binding_id,
-                                        image_max_size_bytes=binding.get("image_max_size_bytes"),
-                                    )
-                                    if image_count > 0:
-                                        # 更新 confluence_pages 表的 image_count
-                                        await self.db.update_confluence_page_image_count(
-                                            binding_id, page.page_id, image_count
-                                        )
-                                except Exception as img_err:
-                                    logger.warning(
-                                        "Failed to reprocess images for updated page %s: %s",
-                                        page.page_id,
-                                        img_err,
-                                    )
-
-                            if self.worker:
-                                await self.worker.enqueue(dataset_id, doc_id)
                             result.updated_documents.append(doc_id)
                     else:
                         # 创建新文档
@@ -2060,8 +2727,6 @@ class ConfluenceSyncService:
                             tenant_id=binding.get("tenant_id"),
                             image_max_size_bytes=binding.get("image_max_size_bytes"),
                         )
-                        if self.worker:
-                            await self.worker.enqueue(dataset_id, doc["document_id"])
                         result.created_documents.append(doc["document_id"])
 
                     result.synced_pages += 1
@@ -2096,14 +2761,32 @@ class ConfluenceSyncService:
                     if existing and existing.get("document_id"):
                         doc_id = existing["document_id"]
                         try:
-                            await self.knowledge_service.delete_document(
-                                dataset_id=dataset_id,
-                                document_id=doc_id,
+                            newly_deleted = await self._delete_bound_document(
+                                binding,
+                                doc_id,
+                                page=existing,
                             )
-                            result.deleted_documents.append(doc_id)
+                            if newly_deleted:
+                                result.deleted_documents.append(doc_id)
                         except Exception as e:
                             logger.warning(f"Failed to delete document {doc_id}: {e}")
-                    await self.db.delete_confluence_page_by_page_id(binding_id, page_id)
+                            continue
+                    page_deleted = await self.db.delete_confluence_page_by_page_id(
+                        binding_id,
+                        page_id,
+                    )
+                    if not page_deleted:
+                        result.errors.append(
+                            {
+                                "page_id": page_id,
+                                "error": "Failed to delete Confluence page record",
+                            }
+                        )
+                        logger.warning(
+                            "Failed to delete Confluence page record %s for binding %s",
+                            page_id,
+                            binding_id,
+                        )
 
             result.completed_at = _utc_now()
 
@@ -2227,7 +2910,11 @@ class ConfluenceSyncService:
             raise ConfluenceSyncError(f"Binding not found: {binding_id}")
 
         # 检查是否已有同步在进行
-        if binding.get("status") == "syncing" and not force:
+        if (
+            binding.get("status") == "syncing"
+            and not force
+            and not await self._recover_stale_binding_sync(binding)
+        ):
             raise ConfluenceSyncError("A sync is already in progress")
 
         # 创建同步任务（继承 binding 的 owner_id 用于 ACL）
@@ -2273,6 +2960,7 @@ class ConfluenceSyncService:
 
         connection_id = binding["connection_id"]
         dataset_id = binding["dataset_id"]
+        await self._require_dataset_index_writable(dataset_id)
 
         try:
             client = await self._get_client(connection_id)
@@ -2295,24 +2983,11 @@ class ConfluenceSyncService:
                     if existing and existing.get("document_id"):
                         # 更新现有文档
                         doc_id = existing["document_id"]
-
-                        # 保存版本快照（用于回滚）
-                        await self._save_version_before_update(
-                            doc_id, page.version, f"Confluence sync: {page.title} (v{page.version})"
+                        await self._prepare_existing_page_update(
+                            binding=binding,
+                            document_id=doc_id,
+                            page=page,
                         )
-
-                        content_text = extract_plain_text(page.body_storage)
-                        await self.db.update_document_fields(
-                            doc_id,
-                            {
-                                "content": content_text,
-                                "confluence_version": page.version,
-                                "status": "uploaded",
-                                "progress": 0,
-                            },
-                        )
-                        if self.worker:
-                            await self.worker.enqueue(dataset_id, doc_id)
                         result.updated_documents.append(doc_id)
                     else:
                         # 创建新文档
@@ -2326,8 +3001,6 @@ class ConfluenceSyncService:
                             tenant_id=binding.get("tenant_id"),
                             image_max_size_bytes=binding.get("image_max_size_bytes"),
                         )
-                        if self.worker:
-                            await self.worker.enqueue(dataset_id, doc["document_id"])
                         result.created_documents.append(doc["document_id"])
 
                     result.synced_pages += 1
@@ -2428,6 +3101,7 @@ class ConfluenceSyncService:
 
         connection_id = binding["connection_id"]
         dataset_id = binding["dataset_id"]
+        await self._require_dataset_index_writable(dataset_id)
 
         try:
             client = await self._get_client(connection_id)
@@ -2436,98 +3110,10 @@ class ConfluenceSyncService:
             doc_id = page_record.get("document_id")
 
             if doc_id:
-                # 保存版本快照（用于回滚）
-                await self._save_version_before_update(
-                    doc_id, page.version, f"Confluence sync: {page.title} (v{page.version})"
-                )
-
-                # 更新现有文档
-                content_text = extract_plain_text(page.body_storage)
-                await self.db.update_document_fields(
-                    doc_id,
-                    {
-                        "content": content_text,
-                        "confluence_version": page.version,
-                        "status": "uploaded",
-                        "progress": 0,
-                    },
-                )
-
-                # 处理图片（如果启用）- 修复：更新文档时也需要处理图片
-                sync_images = binding.get("sync_images", False)
-                tenant_id = binding.get("tenant_id")
-                image_max_size_bytes = binding.get("image_max_size_bytes")
-                image_count = 0
-
-                if sync_images:
-                    if not tenant_id:
-                        logger.warning(
-                            f"Image sync enabled but tenant_id is missing for page {page_id}, "
-                            "skipping image processing"
-                        )
-                    else:
-                        img_processor = await self._get_image_processor(
-                            connection_id, max_image_size=image_max_size_bytes
-                        )
-                        if img_processor:
-                            try:
-                                # 清理旧的图片段（避免重复）
-                                old_image_count = await self.db.delete_image_segments_by_document(
-                                    doc_id
-                                )
-                                if old_image_count > 0:
-                                    logger.info(
-                                        "Cleaned up %s old image segments for document %s",
-                                        old_image_count,
-                                        doc_id,
-                                    )
-                                    # 同时清理旧的图片关联
-                                    await self.db.delete_image_associations_by_document(doc_id)
-
-                                image_result = await img_processor.process_page_images(
-                                    page_id=page_id,
-                                    document_id=doc_id,
-                                    tenant_id=tenant_id,
-                                    page_content=page.body_storage,
-                                    page_title=page.title,
-                                )
-                                if image_result.processed_images > 0:
-                                    vlm_count = sum(
-                                        1 for s in image_result.segments if s.vlm_description
-                                    )
-                                    logger.info(
-                                        f"Processed {image_result.processed_images} images "
-                                        f"for page {page_id} (vlm_descriptions={vlm_count})"
-                                    )
-                                    # Store image segments in database
-                                    for idx, segment in enumerate(image_result.segments):
-                                        await self._save_image_segment(
-                                            segment, dataset_id, binding_id, position=idx
-                                        )
-                                    image_count = image_result.processed_images
-                                if image_result.errors:
-                                    logger.warning(
-                                        "Image processing errors for page %s: %s",
-                                        page_id,
-                                        image_result.errors,
-                                    )
-                            except Exception as e:
-                                logger.error(f"Failed to process images for page {page_id}: {e}")
-
-                if self.worker:
-                    await self.worker.enqueue(dataset_id, doc_id)
-
-                await self.db.upsert_confluence_page(
-                    binding_id=binding_id,
-                    page_id=page_id,
+                image_count = await self._prepare_existing_page_update(
+                    binding=binding,
                     document_id=doc_id,
-                    space_key=page.space_key,
-                    title=page.title,
-                    version=page.version,
-                    content_hash=page.content_hash,
-                    status="synced",
-                    web_url=page.web_url,
-                    image_count=image_count,
+                    page=page,
                 )
                 return {
                     "status": "success",
@@ -2547,8 +3133,6 @@ class ConfluenceSyncService:
                     tenant_id=binding.get("tenant_id"),
                     image_max_size_bytes=binding.get("image_max_size_bytes"),
                 )
-                if self.worker:
-                    await self.worker.enqueue(dataset_id, doc["document_id"])
                 return {"status": "success", "action": "created", "document_id": doc["document_id"]}
 
         except Exception as e:
@@ -2578,6 +3162,7 @@ class ConfluenceSyncService:
 
         connection_id = binding["connection_id"]
         dataset_id = binding["dataset_id"]
+        await self._require_dataset_index_writable(dataset_id)
 
         if event_type in ("removed", "trashed"):
             # 删除页面
@@ -2585,13 +3170,21 @@ class ConfluenceSyncService:
             if existing and existing.get("document_id"):
                 doc_id = existing["document_id"]
                 try:
-                    await self.knowledge_service.delete_document(
-                        dataset_id=dataset_id,
-                        document_id=doc_id,
-                    )
+                    await self._delete_bound_document(binding, doc_id, page=existing)
                 except Exception as e:
                     logger.warning(f"Failed to delete document {doc_id}: {e}")
-                await self.db.delete_confluence_page_by_page_id(binding_id, page_id)
+                    return None
+                page_deleted = await self.db.delete_confluence_page_by_page_id(
+                    binding_id,
+                    page_id,
+                )
+                if not page_deleted:
+                    logger.warning(
+                        "Failed to delete Confluence page record %s for binding %s",
+                        page_id,
+                        binding_id,
+                    )
+                    return None
                 return doc_id
             return None
 
@@ -2604,35 +3197,10 @@ class ConfluenceSyncService:
         if existing and existing.get("document_id"):
             # 更新现有文档
             doc_id = existing["document_id"]
-
-            # 保存版本快照（用于回滚）
-            await self._save_version_before_update(
-                doc_id, page.version, f"Confluence sync: {page.title} (v{page.version})"
-            )
-
-            content_text = extract_plain_text(page.body_storage)
-            await self.db.update_document_fields(
-                doc_id,
-                {
-                    "content": content_text,
-                    "confluence_version": page.version,
-                    "status": "uploaded",
-                    "progress": 0,
-                },
-            )
-            if self.worker:
-                await self.worker.enqueue(dataset_id, doc_id)
-
-            await self.db.upsert_confluence_page(
-                binding_id=binding_id,
-                page_id=page_id,
+            await self._prepare_existing_page_update(
+                binding=binding,
                 document_id=doc_id,
-                space_key=page.space_key,
-                title=page.title,
-                version=page.version,
-                content_hash=page.content_hash,
-                status="synced",
-                web_url=page.web_url,
+                page=page,
             )
             return doc_id
         else:
@@ -2647,8 +3215,6 @@ class ConfluenceSyncService:
                 tenant_id=binding.get("tenant_id"),
                 image_max_size_bytes=binding.get("image_max_size_bytes"),
             )
-            if self.worker:
-                await self.worker.enqueue(dataset_id, doc["document_id"])
             return doc["document_id"]
 
     # ============ Page Management ============
@@ -2759,21 +3325,24 @@ class ConfluenceSyncService:
                     continue
 
                 # 验证访问权限
-                await self._verify_binding_access(page["binding_id"], user)
+                binding = await self._verify_binding_access(page["binding_id"], user)
 
                 # 如果需要删除文档，先删除知识库中的文档
                 if delete_documents and page.get("document_id"):
                     try:
-                        # 获取 binding 信息以获取 dataset_id
-                        binding = await self.db.get_confluence_binding(page["binding_id"])
-                        if binding and binding.get("dataset_id"):
-                            await self.kb.delete_document(
-                                binding["dataset_id"],
-                                page["document_id"],
+                        if binding.get("dataset_id"):
+                            newly_deleted = await self._delete_bound_document(
+                                binding,
+                                str(page["document_id"]),
+                                page=page,
+                                user=user,
                             )
-                            documents_deleted += 1
+                            if newly_deleted:
+                                documents_deleted += 1
                     except Exception as e:
                         logger.warning(f"Failed to delete document {page.get('document_id')}: {e}")
+                        errors.append({"id": record_id, "error": str(e)})
+                        continue
 
                 # 删除页面记录
                 success = await self.db.delete_confluence_page(record_id)
@@ -2987,9 +3556,14 @@ class ConfluenceSyncService:
         binding = await self.db.get_confluence_binding(binding_id)
         if not binding:
             raise ConfluenceSyncError(f"Binding not found: {binding_id}")
+        await self._require_dataset_index_writable(str(binding["dataset_id"]))
 
         # 检查是否已有同步在进行
-        if binding.get("status") == "syncing" and not force:
+        if (
+            binding.get("status") == "syncing"
+            and not force
+            and not await self._recover_stale_binding_sync(binding)
+        ):
             raise ConfluenceSyncError("A sync is already in progress")
 
         # 创建同步任务（继承 binding 的 owner_id 用于 ACL）
@@ -3030,6 +3604,7 @@ class ConfluenceSyncService:
 
         connection_id = binding["connection_id"]
         dataset_id = binding["dataset_id"]
+        await self._require_dataset_index_writable(dataset_id)
         space_key = binding["space_key"]
         last_sync_at = binding.get("last_sync_at")
 
@@ -3083,47 +3658,34 @@ class ConfluenceSyncService:
                     )
 
                     if existing:
-                        # 检查内容是否真的变化
-                        if existing.get("content_hash") == page.content_hash:
+                        doc_id = existing.get("document_id")
+                        content_changed = existing.get("content_hash") != page.content_hash
+                        images_changed = False
+                        if (
+                            not content_changed
+                            and doc_id
+                            and bool(binding.get("sync_images", False))
+                        ):
+                            # CQL may surface a page whose body hash is stable
+                            # while an attachment changed.  The durable source
+                            # receipt is authoritative for that decision.
+                            images_changed = await self._check_image_updates_needed(
+                                connection_id=connection_id,
+                                page_id=page.page_id,
+                                document_id=str(doc_id),
+                            )
+                        if not content_changed and not images_changed:
                             result.skipped_pages += 1
                             continue
 
                         # 更新现有文档
-                        doc_id = existing.get("document_id")
                         if doc_id:
-                            # 保存版本快照（用于回滚）
-                            await self._save_version_before_update(
-                                doc_id,
-                                page.version,
-                                f"Confluence sync: {page.title} (v{page.version})",
-                            )
-
-                            content_text = extract_plain_text(page.body_storage)
-                            await self.db.update_document_fields(
-                                doc_id,
-                                {
-                                    "content": content_text,
-                                    "confluence_version": page.version,
-                                    "status": "uploaded",
-                                    "progress": 0,
-                                },
-                            )
-                            if self.worker:
-                                await self.worker.enqueue(dataset_id, doc_id)
-                            result.updated_documents.append(doc_id)
-
-                            # 更新页面记录
-                            await self.db.upsert_confluence_page(
-                                binding_id=binding_id,
-                                page_id=page.page_id,
+                            await self._prepare_existing_page_update(
+                                binding=binding,
                                 document_id=doc_id,
-                                space_key=page.space_key,
-                                title=page.title,
-                                version=page.version,
-                                content_hash=page.content_hash,
-                                status="synced",
-                                web_url=page.web_url,
+                                page=page,
                             )
+                            result.updated_documents.append(doc_id)
                     else:
                         # 创建新文档
                         doc = await self._create_document_from_page(
@@ -3136,8 +3698,6 @@ class ConfluenceSyncService:
                             tenant_id=binding.get("tenant_id"),
                             image_max_size_bytes=binding.get("image_max_size_bytes"),
                         )
-                        if self.worker:
-                            await self.worker.enqueue(dataset_id, doc["document_id"])
                         result.created_documents.append(doc["document_id"])
 
                     result.synced_pages += 1
@@ -3184,14 +3744,31 @@ class ConfluenceSyncService:
                         doc_id = page_record.get("document_id")
                         if doc_id:
                             try:
-                                # 直接从数据库删除文档和相关数据
-                                await self.db.delete_document(doc_id)
-                                result.deleted_documents.append(doc_id)
-                                logger.info(f"Deleted document {doc_id} for removed page {page_id}")
+                                newly_deleted = await self._delete_bound_document(
+                                    binding,
+                                    doc_id,
+                                    page=page_record,
+                                )
+                                if newly_deleted:
+                                    result.deleted_documents.append(doc_id)
+                                    logger.info(
+                                        f"Deleted document {doc_id} for removed page {page_id}"
+                                    )
                             except Exception as del_err:
                                 logger.warning(f"Failed to delete document {doc_id}: {del_err}")
+                                continue
                         # 删除页面记录
-                        await self.db.delete_confluence_page_by_page_id(binding_id, page_id)
+                        page_deleted = await self.db.delete_confluence_page_by_page_id(
+                            binding_id,
+                            page_id,
+                        )
+                        if not page_deleted:
+                            logger.warning(
+                                "Failed to delete Confluence page record %s for binding %s",
+                                page_id,
+                                binding_id,
+                            )
+                            continue
                         deleted_count += 1
                         logger.info(f"Removed deleted page {page_id} during incremental sync")
                 except Exception as check_err:
@@ -3295,3 +3872,27 @@ class ConfluenceSyncService:
             # 如果 binding_sync_mode == "manual"，则不加入轮询列表
 
         return polling_bindings
+
+    @staticmethod
+    def _validate_dataset_index_writable(dataset: dict[str, Any]) -> None:
+        """Fail closed while a dataset generation is immutable or deleting."""
+        try:
+            deletion_fence = dataset_index_deletion_fence(dataset)
+        except RuntimeError as exc:
+            raise ConfluenceSyncError(str(exc)) from exc
+        if deletion_fence is not None:
+            raise ConfluenceSyncError(
+                "dataset index deletion is pending; Confluence synchronization is unavailable"
+            )
+        lexical = LexicalConfig.from_index_config(dataset.get("index_config") or {})
+        if lexical.reads_bm25_v2:
+            raise ConfluenceSyncError(
+                "bm25_v2 active mode is read-only; roll back to lexical_v1 shadow "
+                "before Confluence synchronization"
+            )
+
+    async def _require_dataset_index_writable(self, dataset_id: str) -> None:
+        dataset = await self.db.get_dataset(dataset_id)
+        if not dataset:
+            raise ConfluenceSyncError(f"Dataset not found: {dataset_id}")
+        self._validate_dataset_index_writable(dataset)

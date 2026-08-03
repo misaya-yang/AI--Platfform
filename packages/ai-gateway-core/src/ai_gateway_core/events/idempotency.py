@@ -78,6 +78,16 @@ class IdempotencyStore:
         result = await self._redis.set(key, b"1", nx=True, ex=self._ttl)
         return bool(result)
 
+    async def release(self, consumer: str, event_id: str) -> None:
+        """Release a claim when the handler did not complete successfully.
+
+        A claim protects the ACK-after-success path from duplicate delivery.
+        Retaining it after a known handler failure would instead turn a
+        redelivery into a skipped-and-ACKed message, preventing retries and
+        the DLQ policy from ever running.
+        """
+        await self._redis.delete(self._key(consumer, event_id))
+
     def _key(self, consumer: str, event_id: str) -> str:
         return f"{self._prefix}:{consumer}:{event_id}"
 

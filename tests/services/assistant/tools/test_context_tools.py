@@ -629,6 +629,37 @@ async def test_compact_memory_off_never_calls_preflush_hook():
     assert flush is None
     precompact.assert_not_awaited()
     loop._compact_messages_by_turns.assert_awaited_once()
+    assert loop._compact_messages_by_turns.await_args.kwargs["run_budget"] is None
+
+
+@pytest.mark.asyncio
+async def test_compact_real_agent_context_requires_initialized_run_budget():
+    from assistant_service.core.agent.agent_loop import (
+        AgentLoop,
+        AgentLoopConfig,
+        AgentLoopContext,
+    )
+
+    loop = AgentLoop.__new__(AgentLoop)
+    loop.assistant_runtime = None
+    loop._compact_messages_by_turns = AsyncMock()
+    ctx = AgentLoopContext(
+        session_id="session-a",
+        user_id="user-a",
+        tenant_id="tenant-a",
+        message="compact",
+        config=AgentLoopConfig(model_id="qwen3.6-plus"),
+    )
+
+    with pytest.raises(RuntimeError, match="run_budget_not_initialized"):
+        await loop._compact_messages_after_flush(
+            ctx=ctx,
+            messages=_build_messages(user_turns=5),
+            keep_recent_turns=2,
+            reason="budget required",
+        )
+
+    loop._compact_messages_by_turns.assert_not_awaited()
 
 
 @pytest.mark.asyncio

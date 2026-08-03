@@ -213,6 +213,82 @@ class TestS3StorageBackend:
         assert result is True
 
     @pytest.mark.asyncio
+    async def test_delete_prefix_raises_on_per_object_errors(
+        self,
+        s3_backend,
+        mock_s3_client,
+    ):
+        """A 200 response with failed objects must keep the caller's retry authority."""
+
+        async def pages():
+            yield {
+                "Contents": [
+                    {"Key": "test/first.png"},
+                    {"Key": "test/second.png"},
+                ]
+            }
+
+        paginator = MagicMock()
+        paginator.paginate.return_value = pages()
+        mock_s3_client.get_paginator.return_value = paginator
+        mock_s3_client.delete_objects.return_value = {
+            "Deleted": [{"Key": "test/first.png"}],
+            "Errors": [
+                {
+                    "Key": "test/second.png",
+                    "Code": "AccessDenied",
+                }
+            ],
+        }
+
+        with pytest.raises(RuntimeError, match="partially applied"):
+            await s3_backend.delete_prefix("test/")
+
+        mock_s3_client.delete_objects.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_nonempty_prefix_roundtrips_url_to_presigned_key_once(
+        self,
+        mock_s3_client,
+    ):
+        from src.services.storage.image_storage import (
+            ImageStorageService,
+            S3StorageBackend,
+            StorageBackend,
+            StorageConfig,
+        )
+
+        backend = S3StorageBackend(
+            bucket="test-bucket",
+            region="us-east-1",
+            access_key="test-key",
+            secret_key="test-secret",
+            key_prefix="dev",
+        )
+        backend._client = mock_s3_client
+        backend._client_context = MagicMock()
+        mock_s3_client.generate_presigned_url = AsyncMock(
+            return_value="https://signed.invalid/image"
+        )
+        service = ImageStorageService.__new__(ImageStorageService)
+        service.config = StorageConfig(
+            backend=StorageBackend.S3,
+            s3_bucket="test-bucket",
+            s3_region="us-east-1",
+            key_prefix="dev",
+        )
+        service._backend = backend
+
+        direct_url = backend.get_url("knowledge/tenant/document/image.png")
+        result = await service.get_presigned_url(direct_url)
+
+        assert result == "https://signed.invalid/image"
+        call = mock_s3_client.generate_presigned_url.await_args
+        assert call.kwargs["Params"]["Key"] == (
+            "dev/knowledge/tenant/document/image.png"
+        )
+
+    @pytest.mark.asyncio
     async def test_exists_true(self, s3_backend, mock_s3_client):
         """Test S3 exists when file exists"""
         mock_s3_client.head_object = AsyncMock()
@@ -223,7 +299,9 @@ class TestS3StorageBackend:
     @pytest.mark.asyncio
     async def test_exists_false(self, s3_backend, mock_s3_client):
         """Test S3 exists when file doesn't exist"""
-        mock_s3_client.head_object = AsyncMock(side_effect=Exception("Not found"))
+        not_found = Exception("Not found")
+        not_found.response = {"Error": {"Code": "404"}}  # type: ignore[attr-defined]
+        mock_s3_client.head_object = AsyncMock(side_effect=not_found)
 
         result = await s3_backend.exists("test/notfound.png")
         assert result is False
@@ -263,7 +341,7 @@ class TestImageStorageService:
         """Create ImageStorageService instance"""
         from src.services.storage.image_storage import ImageStorageService
 
-        return ImageStorageService(storage_config)
+        return ImageStorageService(storage_config, signing_key="test-signing-key")
 
     @pytest.mark.asyncio
     async def test_upload_image(self, storage_service):
@@ -398,7 +476,10 @@ class TestImageStorageService:
         """Test async context manager"""
         from src.services.storage.image_storage import ImageStorageService
 
-        async with ImageStorageService(storage_config) as service:
+        async with ImageStorageService(
+            storage_config,
+            signing_key="test-signing-key",
+        ) as service:
             url = await service.upload_image(
                 tenant_id=TEST_TENANT_ID,
                 document_id=TEST_DOCUMENT_ID,
@@ -927,7 +1008,10 @@ class TestImageSyncIntegration:
             backend=StorageBackend.LOCAL,
             local_base_path=str(tmp_path),
         )
-        storage_service = ImageStorageService(storage_config)
+        storage_service = ImageStorageService(
+            storage_config,
+            signing_key="test-signing-key",
+        )
 
         # Mock confluence client
         confluence_client = AsyncMock()

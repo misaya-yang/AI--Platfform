@@ -353,6 +353,9 @@ def create_app() -> FastAPI:
     from .api.v1.knowledge import router as knowledge_router
 
     app.include_router(knowledge_router, prefix="/v1")
+    from .api.v1.responses import router as responses_router
+
+    app.include_router(responses_router, prefix="/v1")
 
     # ========== Scalar API 文档（现代化 UI + 可调用）==========
     try:

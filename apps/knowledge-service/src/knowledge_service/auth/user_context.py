@@ -49,6 +49,8 @@ ANONYMOUS_CONTEXT = UserContext(
     tenant_id="default",
     user_tier="anonymous",
     user_type="anonymous",
+    roles=["guest"],
+    is_authenticated=False,
 )
 
 

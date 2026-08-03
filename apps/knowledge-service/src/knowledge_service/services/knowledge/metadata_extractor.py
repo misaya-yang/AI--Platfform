@@ -17,13 +17,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+from ai_gateway_core.config import resolve_dashscope
 
 logger = logging.getLogger(__name__)
 
-DASHSCOPE_BASE_URL = os.getenv(
-    "DASHSCOPE_BASE_URL",
-    "https://dashscope.aliyuncs.com/compatible-mode/v1",
-)
+# Keep the exported module value compatible with the previous environment-read
+# contract. Runtime instances resolve again in ``__init__`` so workers and tests
+# use the current per-domain precedence and URL normalization.
+DASHSCOPE_BASE_URL = f"{resolve_dashscope('chat')[1].rstrip('/')}/v1"
 DEFAULT_MODEL = "qwen3.6-plus"
 
 EXTRACTION_PROMPT = """Extract structured metadata from the following text chunk. Return ONLY a JSON object with:
@@ -77,7 +78,7 @@ class MetadataExtractor:
         self,
         api_key: str = "",
         model: str = DEFAULT_MODEL,
-        base_url: str = DASHSCOPE_BASE_URL,
+        base_url: str | None = None,
         provider: str = "dashscope",
         max_concurrent: int = 5,
         timeout: float = 30.0,
@@ -86,10 +87,12 @@ class MetadataExtractor:
         if provider == "gemini":
             self.api_key = api_key or os.getenv("GOOGLE_API_KEY", "")
             self.model = model if model != DEFAULT_MODEL else "gemini-2.0-flash"
+            self.base_url = base_url or DASHSCOPE_BASE_URL
         else:
-            self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY", "")
+            resolved_key, resolved_base_url = resolve_dashscope("chat")
+            self.api_key = api_key or resolved_key
             self.model = model
-        self.base_url = base_url
+            self.base_url = base_url or f"{resolved_base_url.rstrip('/')}/v1"
         self.max_concurrent = max_concurrent
         self.timeout = timeout
         self._semaphore = asyncio.Semaphore(max_concurrent)

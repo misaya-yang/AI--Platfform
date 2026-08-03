@@ -480,6 +480,10 @@ export interface EvalGateDryRunResponse {
   thresholds: Record<string, number>;
   metrics: Record<string, unknown>;
   failures: string[];
+  skipped_thresholds: string[];
+  coverage: Record<string, unknown>;
+  compatibility: Record<string, unknown>;
+  authoritative_gate: Record<string, unknown>;
   report: Record<string, unknown>;
 }
 

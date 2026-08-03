@@ -6,9 +6,23 @@ import json
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from ...core.exceptions import ValidationFailedError
 from ...core.observability.logging import get_logger
+from ...persistence.database import (
+    CONFLUENCE_SYNC_GENERATION_KEY,
+    DOCUMENT_LIFECYCLE_REINDEX_KEY,
+    DOCUMENT_UPLOAD_GENERATION_KEY,
+    IndexLeaseUnavailableError,
+    dataset_index_deletion_fence,
+)
+from .chunking import validate_persisted_chunking_config
+from .ingestion_service import (
+    _require_extracted_text_budget,
+    _require_extracted_text_counts_budget,
+)
+from .lexical_config import LexicalConfig
 from .processing_mode import ProcessingMode, parse_processing_mode
 from .streaming_loader import StreamingDocumentLoader
 
@@ -58,6 +72,7 @@ class KnowledgeWorker:
         self.vlm_ocr_service = vlm_ocr_service
         self.queue: asyncio.Queue[KnowledgeIngestTask] = asyncio.Queue()
         self._workers: list[asyncio.Task] = []
+        self._recovery_task: asyncio.Task | None = None
         self._running = False
         knowledge_settings = getattr(self.service.settings, "knowledge", None)
         self.large_file_threshold = getattr(
@@ -71,6 +86,26 @@ class KnowledgeWorker:
         )
         self._pdf_split_min_pages = getattr(knowledge_settings, "pdf_split_min_pages_per_part", 5)
         self._ocr_strategy = getattr(knowledge_settings, "ocr_strategy", "hybrid")
+        self._recovery_interval_seconds = max(
+            float(
+                getattr(
+                    knowledge_settings,
+                    "document_recovery_interval_seconds",
+                    60.0,
+                )
+            ),
+            1.0,
+        )
+        self._recovery_threshold_minutes = max(
+            int(
+                getattr(
+                    knowledge_settings,
+                    "document_stuck_threshold_minutes",
+                    15,
+                )
+            ),
+            1,
+        )
 
         # allow KnowledgeService.enqueue_ingest() convenience
         self.service._worker = self
@@ -84,7 +119,6 @@ class KnowledgeWorker:
         """
         if self._running:
             return
-        self._running = True
 
         # Use settings-based concurrency if not explicitly provided
         if concurrency is None:
@@ -97,18 +131,80 @@ class KnowledgeWorker:
             )
 
         num_workers = max(int(concurrency), 1)
+        pool_capacity = getattr(self.service.db, "connection_pool_max_size", None)
+        if not callable(pool_capacity):
+            raise RuntimeError(
+                "knowledge worker requires a verifiable database pool capacity"
+            )
+        required_capacity = num_workers + 2
+        actual_capacity = int(pool_capacity())
+        if actual_capacity < required_capacity:
+            raise RuntimeError(
+                "knowledge worker database pool is too small for document leases: "
+                f"requires at least {required_capacity}, found {actual_capacity}"
+            )
+        self._running = True
         logger.info(f"Starting KnowledgeWorker with {num_workers} parallel workers")
 
         for _ in range(num_workers):
             self._workers.append(asyncio.create_task(self._run()))
+        self._recovery_task = asyncio.create_task(self._recovery_loop())
 
     async def stop(self) -> None:
         self._running = False
-        for t in self._workers:
+        tasks = [*self._workers]
+        if self._recovery_task is not None:
+            tasks.append(self._recovery_task)
+        for t in tasks:
             t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         self._workers = []
+        self._recovery_task = None
 
-    async def enqueue(self, dataset_id: str, document_id: str) -> None:
+    async def _recovery_loop(self) -> None:
+        """Periodically replay atomically claimed durable ingestion rows."""
+
+        while self._running:
+            try:
+                await self.service.recover_stuck_documents(
+                    self._recovery_threshold_minutes,
+                    worker=self,
+                )
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("Knowledge document recovery pass failed")
+            try:
+                await asyncio.sleep(self._recovery_interval_seconds)
+            except asyncio.CancelledError:
+                return
+
+    async def enqueue(self, dataset_id: str, document_id: str) -> bool:
+        """Durably claim one generation before publishing it to local memory."""
+
+        dataset = await self.service.db.get_dataset(dataset_id)
+        if not dataset:
+            raise RuntimeError("dataset was deleted before enqueue")
+        index_config = dataset.get("index_config") or {}
+        if not isinstance(index_config, dict):
+            raise RuntimeError("dataset index_config is invalid")
+        validate_persisted_chunking_config(index_config.get("chunking", {}))
+        claim = getattr(self.service.db, "claim_document_for_enqueue", None)
+        if not callable(claim):
+            raise RuntimeError("durable document enqueue is unavailable")
+        if not await claim(dataset_id, document_id):
+            logger.info(
+                "Skipped duplicate/ineligible document enqueue",
+                extra={"dataset_id": dataset_id, "document_id": document_id},
+            )
+            return False
+        await self.enqueue_claimed(dataset_id, document_id)
+        return True
+
+    async def enqueue_claimed(self, dataset_id: str, document_id: str) -> None:
+        """Publish a generation already claimed by the DB recovery CTE."""
+
         await self.queue.put(KnowledgeIngestTask(dataset_id=dataset_id, document_id=document_id))
         logger.info(
             f"Enqueued document {document_id} for ingestion (dataset={dataset_id}), queue size ~{self.queue.qsize()}"
@@ -121,39 +217,418 @@ class KnowledgeWorker:
             except asyncio.CancelledError:
                 return
             try:
-                await self._process_task(task)
+                lease_factory = getattr(
+                    self.service.db,
+                    "document_index_update_lease",
+                    None,
+                )
+                claim = getattr(
+                    self.service.db,
+                    "claim_queued_document_for_processing",
+                    None,
+                )
+                if not callable(lease_factory) or not callable(claim):
+                    raise RuntimeError("durable document consumer lease is unavailable")
+                async with lease_factory(
+                    task.dataset_id,
+                    task.document_id,
+                ) as lease_connection:
+                    if not await claim(
+                        task.dataset_id,
+                        task.document_id,
+                        connection=lease_connection,
+                    ):
+                        logger.info(
+                            "Skipped stale or duplicate in-memory ingestion task",
+                            extra={
+                                "dataset_id": task.dataset_id,
+                                "document_id": task.document_id,
+                            },
+                        )
+                        continue
+                    generation_prepared = False
+                    try:
+                        await self._prepare_document_generation(
+                            task,
+                            connection=lease_connection,
+                        )
+                        generation_prepared = True
+                        await self._process_task(task)
+                        current = await self.service.db.get_document(
+                            task.document_id,
+                            connection=lease_connection,
+                        )
+                        if not current or str(current.get("status") or "") != "completed":
+                            raise RuntimeError(
+                                "document processor returned without a completed generation"
+                            )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        # The document owner lease is still held here. Only a
+                        # successfully claimed generation may write its failed
+                        # terminal; lease contention and duplicate local tasks
+                        # never enter this branch.
+                        logger.exception(
+                            "KB ingest task failed",
+                            extra={
+                                "dataset_id": task.dataset_id,
+                                "document_id": task.document_id,
+                            },
+                        )
+                        dataset = await self.service.db.get_dataset(
+                            task.dataset_id,
+                            connection=lease_connection,
+                        )
+                        deletion_fence = (
+                            dataset_index_deletion_fence(dataset) if dataset else None
+                        )
+                        lexical_config = LexicalConfig.from_index_config(
+                            (dataset or {}).get("index_config") or {}
+                        )
+                        if dataset and deletion_fence is None and not lexical_config.reads_bm25_v2:
+                            if generation_prepared:
+                                try:
+                                    current = await self.service.db.get_document(
+                                        task.document_id,
+                                        connection=lease_connection,
+                                    )
+                                    if current is not None:
+                                        await self._sweep_document_generation(
+                                            task,
+                                            dataset=dataset,
+                                            document=current,
+                                            connection=lease_connection,
+                                            clear_legacy_image_receipts=False,
+                                        )
+                                except Exception:
+                                    # PostgreSQL status remains the serving authority;
+                                    # retry preflight performs the same exact sweep.
+                                    logger.exception(
+                                        "Failed to compensate a partial document generation",
+                                        extra={
+                                            "dataset_id": task.dataset_id,
+                                            "document_id": task.document_id,
+                                        },
+                                    )
+                            await self.service.db.update_document_status(
+                                task.document_id,
+                                status="failed",
+                                progress=100,
+                                error=str(exc),
+                                connection=lease_connection,
+                            )
+                        else:
+                            logger.warning(
+                                "Skipped failed terminal for a non-writable dataset",
+                                extra={
+                                    "dataset_id": task.dataset_id,
+                                    "document_id": task.document_id,
+                                },
+                            )
+            except IndexLeaseUnavailableError:
+                # Keep the durable queued row untouched. The recovery loop will
+                # publish it again after the lifecycle/deletion barrier clears.
+                logger.info(
+                    "Deferred ingestion while its dataset lifecycle lease is busy",
+                    extra={
+                        "dataset_id": task.dataset_id,
+                        "document_id": task.document_id,
+                    },
+                )
             except asyncio.CancelledError:
                 # Graceful shutdown — mark task as incomplete, not failed.
                 logger.info("Worker cancelled during task processing")
                 return
-            except Exception as exc:
-                # Never let a single ingest failure kill the background worker loop.
+            except Exception:
+                # Dispatch/lease failures before a successful claim must never
+                # overwrite the durable queued state.
                 logger.exception(
-                    "KB ingest task failed",
+                    "KB ingest task could not acquire its durable generation",
                     extra={"dataset_id": task.dataset_id, "document_id": task.document_id},
                 )
-                try:
-                    await self.service.db.update_document_status(
-                        task.document_id,
-                        status="failed",
-                        progress=100,
-                        error=str(exc),
-                    )
-                except Exception as db_err:
-                    logger.warning(f"Failed to mark document as failed: {db_err}")
             finally:
                 self.queue.task_done()
+
+    @staticmethod
+    def _document_metadata(document: dict[str, Any]) -> dict[str, Any]:
+        metadata = document.get("metadata")
+        if metadata is None:
+            return {}
+        if not isinstance(metadata, dict):
+            raise RuntimeError("document metadata is malformed")
+        return dict(metadata)
+
+    @staticmethod
+    def _validate_rebuildable_image_source(
+        document: dict[str, Any],
+        image_segments: list[dict[str, Any]],
+    ) -> None:
+        """Fail before Qdrant deletion when image bytes cannot be rebuilt."""
+
+        metadata = KnowledgeWorker._document_metadata(document)
+        extracted = metadata.get("extracted_images", [])
+        if not isinstance(extracted, list):
+            raise RuntimeError("durable extracted_images receipt must be a list")
+        valid_images = [
+            item
+            for item in extracted
+            if isinstance(item, dict) and str(item.get("storage_url") or "").strip()
+        ]
+        if len(valid_images) != len(extracted):
+            raise RuntimeError(
+                "durable image receipt is incomplete; refusing index generation cleanup"
+            )
+
+        processing_mode = str(
+            metadata.get("processing_mode") or "text_only"
+        ).strip().lower()
+        original_file_key = str(metadata.get("original_file_key") or "").strip()
+        source_type = str(document.get("source_type") or "").strip().lower()
+        confluence_source = metadata.get("_confluence_image_source_generation")
+        confluence_complete = (
+            isinstance(confluence_source, dict)
+            and confluence_source.get("complete") is True
+        )
+
+        if source_type == "confluence" and image_segments and not confluence_complete:
+            raise RuntimeError(
+                "Confluence image rows lack a complete durable source generation"
+            )
+
+        legacy_embedded_count = int(metadata.get("embedded_image_count") or 0)
+        declared_image_count = int(metadata.get("image_count") or 0)
+        has_legacy_image_receipt = bool(metadata.get("images_embedded")) or (
+            legacy_embedded_count > 0
+        )
+        target_is_explicitly_empty = (
+            source_type == "confluence" and confluence_complete and not extracted
+        )
+        image_generation_exists = bool(
+            image_segments
+            or extracted
+            or has_legacy_image_receipt
+            or declared_image_count > 0
+        )
+        rebuildable = bool(original_file_key or valid_images or target_is_explicitly_empty)
+        if image_generation_exists and not rebuildable:
+            raise RuntimeError(
+                "document image generation has no durable rebuild source"
+            )
+        if (
+            image_generation_exists
+            and not target_is_explicitly_empty
+            and processing_mode not in {"multimodal", "scanned"}
+        ):
+            raise RuntimeError(
+                "document image generation is not routed through an image-capable mode"
+            )
+        if (
+            has_legacy_image_receipt
+            and not original_file_key
+            and not target_is_explicitly_empty
+            and len(valid_images) < max(legacy_embedded_count, 1)
+        ):
+            raise RuntimeError(
+                "legacy image receipt cannot be rebuilt completely"
+            )
+
+    async def _sweep_document_generation(
+        self,
+        task: KnowledgeIngestTask,
+        *,
+        dataset: dict[str, Any],
+        document: dict[str, Any],
+        connection: Any,
+        clear_legacy_image_receipts: bool,
+    ) -> None:
+        """Delete one complete DB/Q index generation under the owner lease."""
+
+        tenant_id = str(dataset.get("tenant_id") or "").strip()
+        if not tenant_id:
+            raise RuntimeError("dataset tenant_id is required for generation cleanup")
+        delete_vectors = getattr(
+            self.service.vector_store,
+            "delete_document_points",
+            None,
+        )
+        delete_summary = getattr(self.service.db, "delete_document_summary", None)
+        clear_legacy_receipts = getattr(
+            self.service.db,
+            "clear_document_legacy_image_receipts",
+            None,
+        )
+        if not callable(delete_vectors) or not callable(delete_summary):
+            raise RuntimeError("document generation cleanup is unavailable")
+        if clear_legacy_image_receipts and not callable(clear_legacy_receipts):
+            raise RuntimeError("legacy image receipt cleanup is unavailable")
+
+        # Remote deletion must complete in every owned collection before any
+        # PostgreSQL row is removed. A partial Qdrant failure is retried from
+        # the same durable non-completed generation.
+        await delete_vectors(
+            tenant_id=tenant_id,
+            dataset_id=task.dataset_id,
+            document_id=task.document_id,
+            lifecycle_lease_held=True,
+        )
+        if clear_legacy_image_receipts:
+            cleared = await clear_legacy_receipts(
+                task.document_id,
+                task.dataset_id,
+                connection=connection,
+            )
+            if not cleared:
+                raise RuntimeError(
+                    "legacy image receipt cleanup lost document generation authority"
+                )
+        await self.service.db.delete_segments_by_document(
+            task.document_id,
+            connection=connection,
+        )
+        await delete_summary(
+            task.document_id,
+            connection=connection,
+        )
+
+        metadata = self._document_metadata(document)
+        if clear_legacy_image_receipts:
+            metadata.pop("images_embedded", None)
+            metadata.pop("embedded_image_count", None)
+        for stale_count_key in (
+            "l1_segments",
+            "l2_segments",
+            "l3_segments",
+            "total_vectors",
+        ):
+            metadata.pop(stale_count_key, None)
+        # Generic metadata updates preserve these internal markers from the
+        # authoritative row and reject callers that try to replace them.
+        metadata.pop(DOCUMENT_LIFECYCLE_REINDEX_KEY, None)
+        metadata.pop(DOCUMENT_UPLOAD_GENERATION_KEY, None)
+        metadata.pop(CONFLUENCE_SYNC_GENERATION_KEY, None)
+        await self.service.db.update_document_fields(
+            task.document_id,
+            {
+                "segment_count": 0,
+                "metadata": metadata,
+            },
+            connection=connection,
+        )
+
+    async def _prepare_document_generation(
+        self,
+        task: KnowledgeIngestTask,
+        *,
+        connection: Any,
+    ) -> None:
+        """Validate authority and remove the prior generation before dispatch."""
+
+        dataset = await self.service.db.get_dataset(
+            task.dataset_id,
+            connection=connection,
+        )
+        if not dataset:
+            raise RuntimeError("dataset was deleted before generation cleanup")
+        if dataset_index_deletion_fence(dataset) is not None:
+            raise RuntimeError("dataset index deletion is pending")
+        index_config = dataset.get("index_config") or {}
+        if not isinstance(index_config, dict):
+            raise RuntimeError("dataset index_config is invalid")
+        validate_persisted_chunking_config(index_config.get("chunking", {}))
+        lexical_config = LexicalConfig.from_index_config(dataset.get("index_config") or {})
+        if lexical_config.reads_bm25_v2:
+            raise RuntimeError(
+                "bm25_v2 active mode is read-only; roll back before ingestion"
+            )
+
+        document = await self.service.db.get_document(
+            task.document_id,
+            connection=connection,
+        )
+        if not document or str(document.get("dataset_id") or "") != task.dataset_id:
+            raise RuntimeError("document authority changed before generation cleanup")
+        if str(document.get("status") or "") != "processing":
+            raise RuntimeError("document generation is not owned by this worker")
+        _require_extracted_text_budget(document.get("content"))
+
+        metadata = self._document_metadata(document)
+        if "structured_parsing" in metadata:
+            raise RuntimeError(
+                "structured parsing is disabled until a trusted source receipt exists"
+            )
+        lifecycle = metadata.get(DOCUMENT_LIFECYCLE_REINDEX_KEY)
+        pending_restore = (
+            isinstance(lifecycle, dict)
+            and lifecycle.get("status") == "pending"
+            and lifecycle.get("desired_enabled") is True
+            and lifecycle.get("desired_archived") is False
+        )
+        ordinarily_active = (
+            document.get("enabled", True) is True
+            and document.get("archived", False) is False
+            and DOCUMENT_LIFECYCLE_REINDEX_KEY not in metadata
+        )
+        if not ordinarily_active and not pending_restore:
+            raise RuntimeError("document is inactive before generation cleanup")
+        if (
+            DOCUMENT_UPLOAD_GENERATION_KEY in metadata
+            or CONFLUENCE_SYNC_GENERATION_KEY in metadata
+        ):
+            raise RuntimeError("document source generation is not finalized")
+
+        get_image_segments = getattr(
+            self.service.db,
+            "get_image_segments_by_document",
+            None,
+        )
+        if not callable(get_image_segments):
+            raise RuntimeError("image generation authority is unavailable")
+        image_segments = await get_image_segments(
+            task.document_id,
+            connection=connection,
+        )
+        self._validate_rebuildable_image_source(document, image_segments)
+        await self._sweep_document_generation(
+            task,
+            dataset=dataset,
+            document=document,
+            connection=connection,
+            clear_legacy_image_receipts=True,
+        )
 
     async def _process_task(self, task: KnowledgeIngestTask) -> None:
         """Process a single ingestion task based on processing mode."""
 
+        dataset = await self.service.db.get_dataset(task.dataset_id)
+        if not dataset:
+            raise ValueError(f"Dataset {task.dataset_id} not found")
+        if dataset_index_deletion_fence(dataset) is not None:
+            raise ValueError(
+                "dataset index deletion is pending; queued ingestion is unavailable"
+            )
+        index_config = dataset.get("index_config") or {}
+        if not isinstance(index_config, dict):
+            raise ValueError("dataset index_config is invalid")
+        validate_persisted_chunking_config(index_config.get("chunking", {}))
+        lexical_config = LexicalConfig.from_index_config(dataset.get("index_config") or {})
+        if lexical_config.reads_bm25_v2:
+            raise ValueError(
+                "bm25_v2 active mode is read-only; roll back to lexical_v1 shadow "
+                "before processing queued documents"
+            )
+
         # Get document to check processing mode
         doc = await self.service.db.get_document(task.document_id)
         if not doc:
-            logger.warning(f"Document {task.document_id} not found, skipping")
-            return
+            raise ValueError(f"Document {task.document_id} not found")
+        _require_extracted_text_budget(doc.get("content"))
 
         metadata = doc.get("metadata", {})
+        if isinstance(metadata, dict) and "structured_parsing" in metadata:
+            raise ValueError(
+                "structured parsing is disabled until a trusted source receipt exists"
+            )
         mode_str = metadata.get("processing_mode", "text_only")
         file_size = doc.get("size_bytes", 0)
         is_large_file = file_size > self.large_file_threshold
@@ -180,6 +655,10 @@ class KnowledgeWorker:
         # Route to appropriate processor
         if mode == ProcessingMode.SCANNED:
             await self._process_scanned(task, doc)
+        elif mode == ProcessingMode.MULTIMODAL:
+            # The streaming and hierarchical paths are text-only today. The
+            # standard ingestion path owns the complete image receipt.
+            await self.service.ingest_document(task.dataset_id, task.document_id)
         elif is_large_file:
             # Use streaming processing for large files
             await self._process_large_file(task, doc, mode)
@@ -212,7 +691,11 @@ class KnowledgeWorker:
             progress=2,
         )
 
-        # Load file for detection (avoid full in-memory load for large files)
+        # Load file for detection (avoid full in-memory load for large files).
+        # Detection itself may choose the explicit text fallback, but the
+        # resolved mode must be durably published before dispatch. Otherwise a
+        # multimodal result can be processed as stale ``auto`` and falsely
+        # complete without its image generation.
         temp_path = None
         try:
             if is_large_file:
@@ -231,30 +714,7 @@ class KnowledgeWorker:
             )
 
             mode = detection.recommended_mode
-
-            # Update document metadata with detection result
-            await self.service.db.update_document_status(
-                task.document_id,
-                status="processing",
-                progress=5,
-            )
-            # Update detection_result and processing_mode separately
-            try:
-                await self.service.db.execute(
-                    """UPDATE documents
-                       SET detection_result = $1::jsonb,
-                           metadata = jsonb_set(
-                               COALESCE(metadata, '{}'::jsonb),
-                               '{processing_mode}',
-                               to_jsonb($2::text)
-                           )
-                       WHERE document_id = $3""",
-                    json.dumps(detection.to_dict()),
-                    mode.value,
-                    task.document_id,
-                )
-            except Exception as e:
-                logger.warning(f"Failed to update detection result: {e}")
+            detection_result = detection.to_dict()
 
             logger.info(
                 f"[Worker] Auto-detected {task.document_id}: "
@@ -265,12 +725,54 @@ class KnowledgeWorker:
         except Exception as e:
             logger.warning(f"[Worker] Detection failed, using text_only: {e}")
             mode = ProcessingMode.TEXT_ONLY
+            detection_result = {
+                "fallback": True,
+                "reason": "detection_failed",
+            }
+
+        publish_mode = getattr(
+            self.service.db,
+            "compare_and_swap_document_processing_mode",
+            None,
+        )
+        if not callable(publish_mode):
+            if temp_path:
+                await self._cleanup_temp_file(temp_path)
+            raise RuntimeError("durable auto-detection mode publication is unavailable")
+        try:
+            published = await publish_mode(
+                task.document_id,
+                task.dataset_id,
+                expected_mode="auto",
+                replacement_mode=mode.value,
+                detection_result=detection_result,
+            )
+        except Exception:
+            if temp_path:
+                await self._cleanup_temp_file(temp_path)
+            raise
+        if not published:
+            if temp_path:
+                await self._cleanup_temp_file(temp_path)
+            raise RuntimeError(
+                "auto-detection mode publication lost document generation authority"
+            )
+
+        await self.service.db.update_document_status(
+            task.document_id,
+            status="processing",
+            progress=5,
+        )
 
         # Route to appropriate processor
         if mode == ProcessingMode.SCANNED:
             if temp_path:
                 await self._cleanup_temp_file(temp_path)
             await self._process_scanned(task, doc)
+        elif mode == ProcessingMode.MULTIMODAL:
+            if temp_path:
+                await self._cleanup_temp_file(temp_path)
+            await self.service.ingest_document(task.dataset_id, task.document_id)
         elif is_large_file:
             await self._process_large_file(task, doc, mode, source_path=temp_path)
         else:
@@ -317,6 +819,8 @@ class KnowledgeWorker:
         text_temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".txt")
         text_temp_path = text_temp_file.name
         text_temp_file.close()
+        extracted_text_chars = 0
+        extracted_text_bytes = 0
 
         # Process in batches
         async def on_progress(progress: float) -> None:
@@ -349,6 +853,12 @@ class KnowledgeWorker:
 
                     if batch_text_parts:
                         batch_text = "\n\n".join(batch_text_parts) + "\n\n"
+                        extracted_text_chars += len(batch_text)
+                        extracted_text_bytes += len(batch_text.encode("utf-8"))
+                        _require_extracted_text_counts_budget(
+                            extracted_text_chars,
+                            extracted_text_bytes,
+                        )
                         await asyncio.to_thread(self._append_text, text_temp_path, batch_text)
 
                     logger.info(
@@ -391,6 +901,7 @@ class KnowledgeWorker:
             # Use hierarchical indexer if available
             if self.hierarchical_indexer:
                 full_text = await asyncio.to_thread(self._read_text_full, text_temp_path)
+                full_text = _require_extracted_text_budget(full_text)
                 # Load chunking config from dataset
                 chunking_config = None
                 try:
@@ -572,6 +1083,8 @@ class KnowledgeWorker:
 
         # Render pages to images and OCR in batches
         all_text_parts = []
+        extracted_text_chars = 0
+        extracted_text_bytes = 0
         batch_size = 5
         try:
             for batch_start in range(0, total_pages, batch_size):
@@ -586,7 +1099,15 @@ class KnowledgeWorker:
                 texts = await self.vlm_ocr_service.ocr_pdf_pages(images)
                 for i, text in enumerate(texts):
                     if text and text.strip():
-                        all_text_parts.append(f"[Page {batch_start + i + 1}]\n{text}")
+                        part = f"[Page {batch_start + i + 1}]\n{text}"
+                        separator_size = 2 if all_text_parts else 0
+                        extracted_text_chars += separator_size + len(part)
+                        extracted_text_bytes += separator_size + len(part.encode("utf-8"))
+                        _require_extracted_text_counts_budget(
+                            extracted_text_chars,
+                            extracted_text_bytes,
+                        )
+                        all_text_parts.append(part)
 
                 progress = 5 + int((batch_end / total_pages) * 60)
                 await self.service.db.update_document_status(
@@ -601,7 +1122,7 @@ class KnowledgeWorker:
             )
             return
 
-        full_text = "\n\n".join(all_text_parts)
+        full_text = _require_extracted_text_budget("\n\n".join(all_text_parts))
         logger.info(f"[Worker] VLM OCR extracted {len(full_text)} chars from {total_pages} pages")
 
         # Update document content and re-ingest as text
@@ -639,6 +1160,7 @@ class KnowledgeWorker:
             full_text = await self._extract_text_from_content(
                 content, metadata.get("mime_type", "")
             )
+            full_text = _require_extracted_text_budget(full_text)
 
             if not full_text.strip():
                 await self.service.db.update_document_status(
@@ -764,6 +1286,8 @@ class KnowledgeWorker:
                 f"L1={result.l1_count}, L2={result.l2_count}, L3={result.l3_count}"
             )
 
+        except ValidationFailedError:
+            raise
         except Exception as e:
             logger.error(f"Hierarchical indexing failed for {task.document_id}: {e}")
             # Fallback to standard ingestion
@@ -794,10 +1318,19 @@ class KnowledgeWorker:
                     import fitz  # type: ignore
                 doc = fitz.open(stream=content, filetype="pdf")
                 text_parts = []
+                text_chars = 0
+                text_bytes = 0
                 for page in doc:
-                    text_parts.append(page.get_text() or "")
+                    page_text = page.get_text() or ""
+                    separator_size = 2 if text_parts else 0
+                    text_chars += separator_size + len(page_text)
+                    text_bytes += separator_size + len(page_text.encode("utf-8"))
+                    _require_extracted_text_counts_budget(text_chars, text_bytes)
+                    text_parts.append(page_text)
                 doc.close()
-                return "\n\n".join(text_parts)
+                return _require_extracted_text_budget("\n\n".join(text_parts))
+            except ValidationFailedError:
+                raise
             except Exception as e:
                 logger.warning(f"PDF text extraction failed: {e}")
                 return ""
@@ -810,19 +1343,37 @@ class KnowledgeWorker:
                 import docx
 
                 document = docx.Document(BytesIO(content))
-                return "\n\n".join([para.text for para in document.paragraphs if para.text.strip()])
+                text_parts = []
+                text_chars = 0
+                text_bytes = 0
+                for paragraph in document.paragraphs:
+                    paragraph_text = paragraph.text
+                    if not paragraph_text.strip():
+                        continue
+                    separator_size = 2 if text_parts else 0
+                    text_chars += separator_size + len(paragraph_text)
+                    text_bytes += separator_size + len(paragraph_text.encode("utf-8"))
+                    _require_extracted_text_counts_budget(text_chars, text_bytes)
+                    text_parts.append(paragraph_text)
+                return _require_extracted_text_budget("\n\n".join(text_parts))
+            except ValidationFailedError:
+                raise
             except Exception as e:
                 logger.warning(f"DOCX text extraction failed: {e}")
-                return content.decode("utf-8", errors="ignore")
+                return _require_extracted_text_budget(
+                    content.decode("utf-8", errors="ignore")
+                )
 
         elif "text" in mime or "plain" in mime or "markdown" in mime or "md" in mime:
             # Plain text
-            return content.decode("utf-8", errors="ignore")
+            return _require_extracted_text_budget(content.decode("utf-8", errors="ignore"))
 
         else:
             # Try UTF-8 decoding as fallback
             try:
-                return content.decode("utf-8", errors="ignore")
+                return _require_extracted_text_budget(content.decode("utf-8", errors="ignore"))
+            except ValidationFailedError:
+                raise
             except Exception:
                 return ""
 
@@ -867,12 +1418,32 @@ class KnowledgeWorker:
         if self.vision_processor and getattr(self.vision_processor.embedder, "dimension", None):
             vector_dim = int(self.vision_processor.embedder.dimension)
         collection = f"kb_{task.dataset_id}_{vector_dim}"
+        lexical_config = LexicalConfig.from_index_config(dataset.get("index_config") or {})
+        if lexical_config.reads_bm25_v2:
+            raise ValueError(
+                "bm25_v2 active mode is read-only; roll back to lexical_v1 shadow "
+                "before scanned-document indexing"
+            )
+        tenant_id = str(dataset.get("tenant_id") or "").strip()
+        if not tenant_id:
+            raise ValueError("dataset tenant_id is required for scanned-document indexing")
+        base_collection = str(dataset.get("collection_name") or "")
+        is_base_collection = bool(base_collection) and collection == base_collection
 
         # Ensure collection exists
         await self.service.vector_store.ensure_collection(
             dataset_id=task.dataset_id,
             dimension=vector_dim,
             collection_name=collection,
+            tenant_id=tenant_id,
+            **(
+                {"lexical_config": lexical_config}
+                if lexical_config.configured and is_base_collection
+                else {
+                    "lexical_config": LexicalConfig(),
+                    "allow_lexical_transition": True,
+                }
+            ),
         )
 
         # Clean up existing image segments/vectors to avoid position conflicts
@@ -885,14 +1456,17 @@ class KnowledgeWorker:
                     seg.get("vector_id") for seg in existing_image_segments if seg.get("vector_id")
                 ]
                 if vector_ids:
-                    await self.service.vector_store.delete_points(collection, vector_ids)
+                    await self.service.vector_store.delete_points(
+                        collection,
+                        vector_ids,
+                        tenant_id=tenant_id,
+                        dataset_id=task.dataset_id,
+                    )
                 await self.service.db.delete_image_segments_by_document(task.document_id)
         except Exception as cleanup_err:
             logger.warning(
                 f"[Worker] Failed to cleanup image segments for {task.document_id}: {cleanup_err}"
             )
-
-        tenant_id = str(dataset.get("tenant_id") or "default")
 
         # Download original file to temp
         logger.info(f"[Worker] Downloading original file from storage: {original_key}")
@@ -942,6 +1516,8 @@ class KnowledgeWorker:
 
             # Process each part
             all_extracted_texts: dict[int, str] = {}
+            extracted_text_chars = 0
+            extracted_text_bytes = 0
             total_processed = 0
             total_pages_all = 0
             total_failed = 0
@@ -982,7 +1558,32 @@ class KnowledgeWorker:
                     total_pages_all += result.total_pages
                     total_segments += result.segments_created
                     if result.extracted_texts:
-                        all_extracted_texts.update(result.extracted_texts)
+                        for page_number, page_text_value in result.extracted_texts.items():
+                            page_text = str(page_text_value or "")
+                            new_part = f"[Page {page_number}]\n{page_text}"
+                            old_text = all_extracted_texts.get(page_number)
+                            old_part = (
+                                f"[Page {page_number}]\n{old_text}"
+                                if old_text is not None
+                                else ""
+                            )
+                            separator_size = 2 if old_text is None and all_extracted_texts else 0
+                            next_chars = (
+                                extracted_text_chars
+                                - len(old_part)
+                                + separator_size
+                                + len(new_part)
+                            )
+                            next_bytes = (
+                                extracted_text_bytes
+                                - len(old_part.encode("utf-8"))
+                                + separator_size
+                                + len(new_part.encode("utf-8"))
+                            )
+                            _require_extracted_text_counts_budget(next_chars, next_bytes)
+                            all_extracted_texts[page_number] = page_text
+                            extracted_text_chars = next_chars
+                            extracted_text_bytes = next_bytes
                 else:
                     total_failed += result.total_pages
                     logger.warning(
@@ -1000,6 +1601,7 @@ class KnowledgeWorker:
                 full_text = "\n\n".join(
                     f"[Page {p}]\n{all_extracted_texts[p]}" for p in ordered_pages
                 )
+                full_text = _require_extracted_text_budget(full_text)
                 try:
                     await self.service.db.execute(
                         """UPDATE documents
@@ -1056,6 +1658,7 @@ class KnowledgeWorker:
                 full_text = "\n\n".join(
                     f"[Page {p}]\n{all_extracted_texts[p]}" for p in ordered_pages
                 )
+                full_text = _require_extracted_text_budget(full_text)
                 try:
                     idx_result = await self.hierarchical_indexer.index_document(
                         document_id=task.document_id,

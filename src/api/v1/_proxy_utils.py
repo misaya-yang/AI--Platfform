@@ -9,8 +9,12 @@ Public entry point: ``proxy_to_kb_service(request, user, ...)``.
 """
 from __future__ import annotations
 
+import io
 import os
+import threading
 import time
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Final
 
 from ai_gateway_core.auth.gateway_secret import GatewaySecret
@@ -35,6 +39,134 @@ _INJECTED_IDENTITY_HEADERS: Final = frozenset(
         "x-user-name",
     }
 )
+
+_MIB: Final = 1024 * 1024
+_DEFAULT_JSON_BODY_MB: Final = 4
+_DEFAULT_FILE_BODY_MB: Final = 16
+_DEFAULT_BATCH_BODY_MB: Final = 32
+_MAX_JSON_BODY_MB: Final = 16
+# The request is replayable bytes for signing and one transport retry. Keep the
+# configured file bytes plus multipart allowance below knowledge-service's
+# 50 MiB IdempotencyMiddleware body limit, while a conservative two-copy memory
+# reservation remains inside the process admission budget.
+_MAX_FILE_BODY_MB: Final = 48
+_MAX_BATCH_BODY_MB: Final = 48
+# Multipart boundaries, per-part headers, filenames, and the processing mode
+# are outside the file-byte limits enforced by knowledge-service. Keep that
+# allowance fixed and small so it cannot become a second upload budget.
+_MULTIPART_OVERHEAD_BYTES: Final = 256 * 1024
+_BODY_METHODS: Final = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_UPLOAD_MAX_CONCURRENCY: Final = 2
+_UPLOAD_INFLIGHT_BUDGET_BYTES: Final = 128 * _MIB
+_UPLOAD_MEMORY_RESERVATION_MULTIPLIER: Final = 2
+_RAG_TRACE_RESPONSE_CAPTURE_BYTES: Final = 256 * 1024
+
+
+@dataclass
+class _UploadLease:
+    reserved_bytes: int
+    released: bool = False
+
+
+class _UploadAdmission:
+    """Process-local, fail-fast memory admission for replayable upload bodies."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._active = 0
+        self._reserved_bytes = 0
+
+    def acquire(self, *, envelope_bytes: int) -> _UploadLease:
+        reserved_bytes = envelope_bytes * _UPLOAD_MEMORY_RESERVATION_MULTIPLIER
+        with self._lock:
+            if (
+                self._active >= _UPLOAD_MAX_CONCURRENCY
+                or self._reserved_bytes + reserved_bytes > _UPLOAD_INFLIGHT_BUDGET_BYTES
+            ):
+                raise HTTPException(
+                    status_code=503,
+                    detail="KB upload capacity is temporarily unavailable",
+                    headers={"Retry-After": "1"},
+                )
+            self._active += 1
+            self._reserved_bytes += reserved_bytes
+        return _UploadLease(reserved_bytes=reserved_bytes)
+
+    def release(self, lease: _UploadLease) -> None:
+        with self._lock:
+            if lease.released or self._active <= 0 or self._reserved_bytes < lease.reserved_bytes:
+                raise RuntimeError("KB upload admission lease released more than once")
+            lease.released = True
+            self._active -= 1
+            self._reserved_bytes -= lease.reserved_bytes
+
+
+_upload_admission = _UploadAdmission()
+
+
+def _bounded_env_mb(name: str, default: int, *, maximum: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(1, min(value, maximum))
+
+
+def _request_body_kind(path: str) -> str:
+    parts = tuple(part for part in path.strip("/").split("/") if part)
+    if parts[-2:] == ("documents", "batch-upload"):
+        return "batch-upload"
+    if parts[-2:] == ("documents", "upload"):
+        return "upload"
+    return "json"
+
+
+def _request_body_limit_bytes(path: str) -> int:
+    """Return the hard request envelope for one public KB proxy path."""
+
+    body_kind = _request_body_kind(path)
+    if body_kind == "batch-upload":
+        body_mb = _bounded_env_mb(
+            "KB_MAX_BATCH_SIZE_MB",
+            _DEFAULT_BATCH_BODY_MB,
+            maximum=_MAX_BATCH_BODY_MB,
+        )
+        return body_mb * _MIB + _MULTIPART_OVERHEAD_BYTES
+    if body_kind == "upload":
+        body_mb = _bounded_env_mb(
+            "KB_MAX_FILE_SIZE_MB",
+            _DEFAULT_FILE_BODY_MB,
+            maximum=_MAX_FILE_BODY_MB,
+        )
+        return body_mb * _MIB + _MULTIPART_OVERHEAD_BYTES
+    return (
+        _bounded_env_mb(
+            "KB_MAX_JSON_BODY_MB",
+            _DEFAULT_JSON_BODY_MB,
+            maximum=_MAX_JSON_BODY_MB,
+        )
+        * _MIB
+    )
+
+
+async def _read_bounded_body(request: Request, *, limit_bytes: int) -> bytes:
+    """Consume the ASGI body once, without trusting ``Content-Length``."""
+
+    # CPython BytesIO.getvalue() shares its internal immutable buffer until a
+    # subsequent write, avoiding bytearray -> bytes' final full-size copy.
+    body = io.BytesIO()
+    size = 0
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        size += len(chunk)
+        if size > limit_bytes:
+            raise HTTPException(status_code=413, detail="Request body too large")
+        body.write(chunk)
+    return body.getvalue()
 
 
 def _build_signer() -> GatewaySecret | None:
@@ -109,25 +241,46 @@ def _record_rag_proxy_trace(
     )
 
 
-async def _materialize_proxy_response(response: Response) -> tuple[Response, bytes]:
-    """Buffer streaming proxy responses so retrieve trace capture can parse JSON bodies."""
-    body = getattr(response, "body", b"") or b""
-    if body:
-        return response, body
-    if isinstance(response, StreamingResponse):
-        chunks: list[bytes] = []
-        async for chunk in response.body_iterator:
+async def _capture_retrieve_stream(
+    body_iterator: AsyncIterator[bytes | str],
+    request: Request,
+    user: UserContext,
+    *,
+    path: str,
+    request_body: bytes,
+    response_status: int,
+    started_at: float,
+) -> AsyncIterator[bytes | str]:
+    """Pass through a retrieve stream while retaining only a bounded trace prefix."""
+
+    captured = bytearray()
+    completed = False
+    capture_truncated = False
+    try:
+        async for chunk in body_iterator:
             if chunk:
-                chunks.append(chunk)
-        buffered = b"".join(chunks)
-        materialized = Response(
-            content=buffered,
-            status_code=response.status_code,
-            headers=dict(response.headers),
-            media_type=response.media_type,
-        )
-        return materialized, buffered
-    return response, body
+                encoded = chunk.encode("utf-8") if isinstance(chunk, str) else chunk
+                remaining = _RAG_TRACE_RESPONSE_CAPTURE_BYTES - len(captured)
+                if len(encoded) > remaining:
+                    capture_truncated = True
+                if remaining > 0:
+                    captured.extend(encoded[:remaining])
+            yield chunk
+        completed = True
+    finally:
+        # The trace schema has no stream-incomplete/capture-truncated state.
+        # Skipping those samples prevents a partial JSON prefix from becoming
+        # a false successful zero-document retrieval in the eval denominator.
+        if completed and not capture_truncated:
+            _record_rag_proxy_trace(
+                request,
+                user,
+                path=path,
+                body=request_body,
+                response_status=response_status,
+                response_body=bytes(captured),
+                started_at=started_at,
+            )
 
 
 async def proxy_to_kb_service(
@@ -138,53 +291,78 @@ async def proxy_to_kb_service(
     upstream_prefix: str = "/api/v1/knowledge",
 ) -> Response:
     """Forward a request to knowledge-service, streaming both directions."""
-    upstream_path = f"{upstream_prefix}/{path}" if path else upstream_prefix
-    user_headers = {
-        "X-User-Id": user.user_id,
-        "X-Tenant-Id": user.tenant_id,
-        "X-User-Tier": getattr(user, "tier", "normal"),
-        "X-User-Type": getattr(user, "user_type", "user"),
-        "X-User-Roles": ",".join(getattr(user, "roles", []) or []),
-    }
-    email = getattr(user, "email", None) or getattr(user, "user_email", None)
-    if email:
-        user_headers["X-User-Email"] = email
-    name = getattr(user, "name", None) or getattr(user, "display_name", None)
-    if name:
-        user_headers["X-User-Name"] = name
-
-    started_at = time.time()
     body: bytes | None = None
-    if request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
-        body = await request.body()
-
+    upload_lease: _UploadLease | None = None
+    if request.method.upper() in _BODY_METHODS:
+        limit_bytes = _request_body_limit_bytes(path)
+        if _request_body_kind(path) != "json":
+            upload_lease = _upload_admission.acquire(envelope_bytes=limit_bytes)
     try:
-        response = await _proxy.forward(
-            request,
-            user_headers,
-            upstream_path=upstream_path,
-            body=body,
-        )
-    except HTTPException as exc:
+        if request.method.upper() in _BODY_METHODS:
+            body = await _read_bounded_body(request, limit_bytes=limit_bytes)
+
+        upstream_path = f"{upstream_prefix}/{path}" if path else upstream_prefix
+        user_headers = {
+            "X-User-Id": user.user_id,
+            "X-Tenant-Id": user.tenant_id,
+            "X-User-Tier": getattr(user, "tier", "normal"),
+            "X-User-Type": getattr(user, "user_type", "user"),
+            "X-User-Roles": ",".join(getattr(user, "roles", []) or []),
+        }
+        email = getattr(user, "email", None) or getattr(user, "user_email", None)
+        if email:
+            user_headers["X-User-Email"] = email
+        name = getattr(user, "name", None) or getattr(user, "display_name", None)
+        if name:
+            user_headers["X-User-Name"] = name
+
+        started_at = time.time()
+        try:
+            response = await _proxy.forward(
+                request,
+                user_headers,
+                upstream_path=upstream_path,
+                body=body,
+            )
+        except HTTPException as exc:
+            _record_rag_proxy_trace(
+                request,
+                user,
+                path=path,
+                body=body or b"",
+                response_status=exc.status_code,
+                response_body=b"",
+                started_at=started_at,
+            )
+            raise
+
+        if not is_retrieve_path(path):
+            return response
+        if isinstance(response, StreamingResponse):
+            response.body_iterator = _capture_retrieve_stream(
+                response.body_iterator,
+                request,
+                user,
+                path=path,
+                request_body=body or b"",
+                response_status=response.status_code,
+                started_at=started_at,
+            )
+            return response
+
+        response_body = getattr(response, "body", b"") or b""
+        if len(response_body) > _RAG_TRACE_RESPONSE_CAPTURE_BYTES:
+            return response
         _record_rag_proxy_trace(
             request,
             user,
             path=path,
             body=body or b"",
-            response_status=exc.status_code,
-            response_body=b"",
+            response_status=response.status_code,
+            response_body=response_body,
             started_at=started_at,
         )
-        raise
-
-    response, response_body = await _materialize_proxy_response(response)
-    _record_rag_proxy_trace(
-        request,
-        user,
-        path=path,
-        body=body or b"",
-        response_status=response.status_code,
-        response_body=response_body,
-        started_at=started_at,
-    )
-    return response
+        return response
+    finally:
+        if upload_lease is not None:
+            _upload_admission.release(upload_lease)

@@ -18,7 +18,10 @@ from typing import Any
 
 from qdrant_client.http import models as qmodels
 
+from ...core.exceptions import ValidationFailedError
 from ...core.observability.logging import get_logger
+from .chunking import MAX_CHUNK_OUTPUTS
+from .lexical_config import LexicalConfig
 
 logger = get_logger(__name__)
 
@@ -96,6 +99,53 @@ class HierarchicalIndexer:
     SUMMARY_COLLECTION_SUFFIX = "_summary"
     SECTION_COLLECTION_SUFFIX = "_sections"
 
+    @classmethod
+    def document_collection_names(cls, base_collection: str) -> dict[str, str]:
+        """Return the three collection names used by hierarchical indexing."""
+
+        return {
+            "base": base_collection,
+            "sections": f"{base_collection}{cls.SECTION_COLLECTION_SUFFIX}",
+            "summary": f"{base_collection}{cls.SUMMARY_COLLECTION_SUFFIX}",
+        }
+
+    @staticmethod
+    def document_vector_ids(
+        segments: list[dict[str, Any]],
+        document_summary: dict[str, Any] | None = None,
+    ) -> dict[str, list[str]]:
+        """Partition persisted vector IDs by their hierarchical collection."""
+
+        partitioned: dict[str, list[str]] = {
+            "base": [],
+            "sections": [],
+            "summary": [],
+        }
+        seen: dict[str, set[str]] = {name: set() for name in partitioned}
+
+        def append(bucket: str, value: Any) -> None:
+            vector_id = str(value or "").strip()
+            if vector_id and vector_id not in seen[bucket]:
+                seen[bucket].add(vector_id)
+                partitioned[bucket].append(vector_id)
+
+        for segment in segments:
+            try:
+                level = int(segment.get("level") or IndexLevel.PARAGRAPH)
+            except (TypeError, ValueError):
+                level = int(IndexLevel.PARAGRAPH)
+            vector_id = segment.get("vector_id") or segment.get("segment_id")
+            if level == int(IndexLevel.SECTION):
+                append("sections", vector_id)
+            elif level == int(IndexLevel.DOCUMENT):
+                append("summary", vector_id)
+            else:
+                append("base", vector_id)
+
+        if document_summary:
+            append("summary", document_summary.get("vector_id"))
+        return partitioned
+
     def __init__(
         self,
         vector_store: Any,
@@ -157,16 +207,25 @@ class HierarchicalIndexer:
         levels = levels_override or self.levels
 
         try:
-            # Get embedding dimension
-            vector_dim = await self._get_vector_dimension()
-            base_collection = await self._resolve_base_collection(dataset_id, vector_dim)
-
             l2_segments: list[HierarchicalSegment] = []
             l3_segments: list[HierarchicalSegment] = []
             if IndexLevel.SECTION in levels or IndexLevel.PARAGRAPH in levels:
                 l2_segments, l3_segments = await self._create_l2_l3_chunks(
                     document_id, dataset_id, text, metadata, chunking_config
                 )
+
+            l1_budget = int(IndexLevel.DOCUMENT in levels and self.summary_generator is not None)
+            l2_budget = len(l2_segments) if IndexLevel.SECTION in levels else 0
+            l3_budget = len(l3_segments) if IndexLevel.PARAGRAPH in levels else 0
+            self._require_hierarchical_output_budget(l1_budget, l2_budget, l3_budget)
+
+            if IndexLevel.SECTION in levels and self.summary_generator:
+                await self._summarize_sections(l2_segments)
+
+            # Provider, collection, embedding, and persistence calls are only
+            # allowed after the complete hierarchy has passed its aggregate cap.
+            vector_dim = await self._get_vector_dimension()
+            base_collection = await self._resolve_base_collection(dataset_id, vector_dim)
 
             # L3: Paragraph-level chunks
             if IndexLevel.PARAGRAPH in levels:
@@ -198,6 +257,28 @@ class HierarchicalIndexer:
             result.errors.append(str(e))
 
         return result
+
+    @staticmethod
+    def _require_hierarchical_output_budget(
+        l1_count: int,
+        l2_count: int,
+        l3_count: int,
+    ) -> None:
+        if l1_count + l2_count + l3_count > MAX_CHUNK_OUTPUTS:
+            raise ValidationFailedError(
+                f"hierarchical output exceeds the {MAX_CHUNK_OUTPUTS} chunk limit"
+            )
+
+    async def _summarize_sections(self, segments: list[HierarchicalSegment]) -> None:
+        if not self.summary_generator:
+            return
+        for segment in segments:
+            if len(segment.text) <= 500:
+                continue
+            try:
+                segment.summary = await self.summary_generator.summarize_section(segment.text)
+            except Exception as exc:
+                logger.debug(f"Failed to generate section summary: {exc}")
 
     async def _create_l2_l3_chunks(
         self,
@@ -276,6 +357,11 @@ class HierarchicalIndexer:
         chunker = create_chunker(config)
         parents = chunker.chunk(text)
 
+        child_count = 0
+        for parent in parents:
+            child_count += len(parent.children)
+            self._require_hierarchical_output_budget(0, len(parents), child_count)
+
         l2_segments: list[HierarchicalSegment] = []
         l3_segments: list[HierarchicalSegment] = []
         parent_map: dict[str, str] = {}
@@ -285,13 +371,6 @@ class HierarchicalIndexer:
             segment_id = str(uuid.uuid4())
             parent_map[parent.hash_id] = segment_id
 
-            summary = None
-            if self.summary_generator and len(parent.text) > 500:
-                try:
-                    summary = await self.summary_generator.summarize_section(parent.text)
-                except Exception as e:
-                    logger.debug(f"Failed to generate section summary: {e}")
-
             l2_segments.append(
                 HierarchicalSegment(
                     segment_id=segment_id,
@@ -299,7 +378,7 @@ class HierarchicalIndexer:
                     dataset_id=dataset_id,
                     level=IndexLevel.SECTION,
                     text=parent.text,
-                    summary=summary,
+                    summary=None,
                     position=self.L2_POSITION_OFFSET + idx,
                     metadata={
                         **metadata,
@@ -387,6 +466,7 @@ class HierarchicalIndexer:
             dimension=vector_dim,
             collection_name=base_collection,
         )
+        tenant_id = await self._dataset_tenant_id(dataset_id)
 
         # Generate embeddings
         texts = [s.text for s in segments]
@@ -406,6 +486,7 @@ class HierarchicalIndexer:
                 continue
 
             payload = {
+                "tenant_id": tenant_id,
                 "dataset_id": segment.dataset_id,
                 "document_id": segment.document_id,
                 "segment_id": segment.segment_id,
@@ -467,9 +548,11 @@ class HierarchicalIndexer:
             if vector_success:
                 logger.warning("Vector store succeeded but DB failed - attempting vector cleanup")
                 try:
-                    await self.vector_store.delete(
-                        collection_name=collection,
-                        points_selector=qmodels.PointIdsList(points=[p.id for p in points]),
+                    await self.vector_store.delete_points(
+                        collection,
+                        [str(point.id) for point in points],
+                        tenant_id=tenant_id,
+                        dataset_id=dataset_id,
                     )
                     logger.info("Vector cleanup successful")
                 except Exception as cleanup_error:
@@ -498,6 +581,7 @@ class HierarchicalIndexer:
             dimension=vector_dim,
             collection_name=f"{base_collection}{self.SECTION_COLLECTION_SUFFIX}",
         )
+        tenant_id = await self._dataset_tenant_id(dataset_id)
 
         # Use summary for embedding if available, otherwise full text
         texts = [s.summary or s.text[:2000] for s in segments]
@@ -513,6 +597,7 @@ class HierarchicalIndexer:
                 continue
 
             payload = {
+                "tenant_id": tenant_id,
                 "dataset_id": segment.dataset_id,
                 "document_id": segment.document_id,
                 "segment_id": segment.segment_id,
@@ -564,9 +649,11 @@ class HierarchicalIndexer:
             if vector_success:
                 logger.warning("Section vectors written but DB failed - attempting vector cleanup")
                 try:
-                    await self.vector_store.delete(
-                        collection_name=collection,
-                        points_selector=qmodels.PointIdsList(points=[p.id for p in points]),
+                    await self.vector_store.delete_points(
+                        collection,
+                        [str(point.id) for point in points],
+                        tenant_id=tenant_id,
+                        dataset_id=dataset_id,
                     )
                     logger.info("Section vector cleanup successful")
                 except Exception as cleanup_error:
@@ -590,6 +677,7 @@ class HierarchicalIndexer:
             dimension=vector_dim,
             collection_name=f"{base_collection}{self.SUMMARY_COLLECTION_SUFFIX}",
         )
+        tenant_id = await self._dataset_tenant_id(dataset_id)
 
         # Embed the summary
         vectors = await self._embed_texts([segment.summary or segment.text])
@@ -599,10 +687,15 @@ class HierarchicalIndexer:
             return
 
         payload = {
+            "tenant_id": tenant_id,
             "dataset_id": segment.dataset_id,
             "document_id": segment.document_id,
             "segment_id": segment.segment_id,
             "level": segment.level,
+            # Central lexical shadow writing consumes the canonical ``text``
+            # payload for both v1 and bm25_v2. Summaries are independently
+            # searchable documents, so never leave this field empty.
+            "text": segment.summary or segment.text,
             "summary": segment.summary,
             "keywords": segment.keywords,
             "content_type": "document_summary",
@@ -640,9 +733,11 @@ class HierarchicalIndexer:
                     f"Summary vector written but DB failed - attempting vector cleanup for {segment.document_id}"
                 )
                 try:
-                    await self.vector_store.delete(
-                        collection_name=collection,
-                        points_selector=qmodels.PointIdsList(points=[point.id]),
+                    await self.vector_store.delete_points(
+                        collection,
+                        [str(point.id)],
+                        tenant_id=tenant_id,
+                        dataset_id=dataset_id,
                     )
                     logger.info("Summary vector cleanup successful")
                 except Exception as cleanup_error:
@@ -707,15 +802,74 @@ class HierarchicalIndexer:
         collection_name: str | None = None,
     ) -> str:
         """Ensure Qdrant collection exists."""
+        lexical_config = LexicalConfig()
+        tenant_id = ""
+        base_collection = ""
+        if self.db and hasattr(self.db, "get_dataset"):
+            dataset = await self.db.get_dataset(dataset_id)
+            if dataset:
+                tenant_id = str(dataset.get("tenant_id") or "").strip()
+                base_collection = str(dataset.get("collection_name") or "").strip()
+                lexical_config = LexicalConfig.from_index_config(
+                    dataset.get("index_config") or {}
+                )
+        if not tenant_id:
+            raise ValueError("hierarchical indexing requires dataset tenant_id")
+        if lexical_config.reads_bm25_v2:
+            raise ValueError(
+                "bm25_v2 active mode is read-only; roll back to lexical_v1 shadow "
+                "before hierarchical indexing"
+            )
+        make_collection_name = getattr(self.vector_store, "make_collection_name", None)
+        if callable(make_collection_name):
+            target_collection = make_collection_name(
+                dataset_id,
+                dimension,
+                collection_name,
+            )
+        else:
+            target_collection = collection_name or f"kb_{dataset_id}_{dimension}"
+        if not base_collection:
+            base_collection = (
+                make_collection_name(dataset_id, dimension, None)
+                if callable(make_collection_name)
+                else f"kb_{dataset_id}_{dimension}"
+            )
+        is_base_collection = target_collection == base_collection
         try:
             return await self.vector_store.ensure_collection(
                 dataset_id=dataset_id,
                 dimension=dimension,
                 collection_name=collection_name,
+                tenant_id=tenant_id,
+                **(
+                    {"lexical_config": lexical_config}
+                    if lexical_config.configured and is_base_collection
+                    else (
+                        {
+                            "lexical_config": LexicalConfig(),
+                            "allow_lexical_transition": True,
+                        }
+                        if not is_base_collection
+                        else {}
+                    )
+                ),
             )
         except Exception as e:
+            if lexical_config.configured:
+                raise
             logger.warning(f"Failed to ensure collection {collection_name}: {e}")
             return collection_name or f"kb_{dataset_id}_{dimension}"
+
+    async def _dataset_tenant_id(self, dataset_id: str) -> str:
+        """Resolve the immutable tenant scope used in every Qdrant payload."""
+        if not self.db or not hasattr(self.db, "get_dataset"):
+            raise ValueError("hierarchical indexing requires a dataset store")
+        dataset = await self.db.get_dataset(dataset_id)
+        tenant_id = str((dataset or {}).get("tenant_id") or "").strip()
+        if not tenant_id:
+            raise ValueError("hierarchical indexing requires dataset tenant_id")
+        return tenant_id
 
     async def _resolve_base_collection(self, dataset_id: str, vector_dim: int) -> str:
         """Resolve base collection name for dataset."""
@@ -744,34 +898,62 @@ class HierarchicalIndexer:
         Returns:
             Dictionary mapping collection names to success status
         """
-        vector_dim = await self._get_vector_dimension()
+        dataset = await self.db.get_dataset(dataset_id)
+        tenant_id = str((dataset or {}).get("tenant_id") or "").strip()
+        if not tenant_id:
+            raise ValueError("hierarchical deletion requires dataset tenant_id")
 
-        collections = [
-            f"kb_{dataset_id}_{vector_dim}",
-            f"kb_{dataset_id}_{vector_dim}{self.SECTION_COLLECTION_SUFFIX}",
-            f"kb_{dataset_id}_{vector_dim}{self.SUMMARY_COLLECTION_SUFFIX}",
-        ]
+        base_collection = str((dataset or {}).get("collection_name") or "").strip()
+        if not base_collection:
+            vector_dim = await self._get_vector_dimension()
+            make_collection_name = getattr(self.vector_store, "make_collection_name", None)
+            base_collection = (
+                make_collection_name(dataset_id, vector_dim, None)
+                if callable(make_collection_name)
+                else f"kb_{dataset_id}_{vector_dim}"
+            )
 
-        results = {}
+        segments: list[dict[str, Any]] = []
+        offset = 0
+        page_size = 1000
+        while True:
+            page = await self.db.list_segments(
+                dataset_id=dataset_id,
+                document_id=document_id,
+                limit=page_size,
+                offset=offset,
+            )
+            if not page:
+                break
+            segments.extend(page)
+            if len(page) < page_size:
+                break
+            offset += len(page)
 
-        for collection in collections:
+        document_summary = (
+            await self.db.get_document_summary(document_id)
+            if hasattr(self.db, "get_document_summary")
+            else None
+        )
+        vector_ids = self.document_vector_ids(segments, document_summary)
+        collections = self.document_collection_names(base_collection)
+        results: dict[str, bool] = {}
+
+        for level, collection in collections.items():
+            point_ids = vector_ids[level]
+            if not point_ids:
+                results[collection] = True
+                continue
             success = False
             last_error = None
 
             for attempt in range(max_retries):
                 try:
-                    await self.vector_store.delete(
-                        collection_name=collection,
-                        points_selector=qmodels.FilterSelector(
-                            filter=qmodels.Filter(
-                                must=[
-                                    qmodels.FieldCondition(
-                                        key="document_id",
-                                        match=qmodels.MatchValue(value=document_id),
-                                    )
-                                ]
-                            )
-                        ),
+                    await self.vector_store.delete_points(
+                        collection,
+                        point_ids,
+                        tenant_id=tenant_id,
+                        dataset_id=dataset_id,
                     )
                     success = True
                     break

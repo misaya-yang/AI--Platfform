@@ -7,10 +7,17 @@ import pytest
 from ai_gateway_core.eval.evaluator_executor import (
     EvaluatorExecutor,
     LlmCompleteContext,
+    _critical_cases_gate_passes,
     _parse_llm_score_response,
     _precise_cost_cents,
     build_trajectory_summary,
 )
+
+
+def test_critical_gate_uses_exact_counts_not_rounded_display_rate() -> None:
+    assert _critical_cases_gate_passes(case_count=20_001, passed_count=20_000) is False
+    assert _critical_cases_gate_passes(case_count=20_001, passed_count=20_001) is True
+    assert _critical_cases_gate_passes(case_count=0, passed_count=0) is False
 
 
 def test_precise_eval_cost_is_unknown_without_catalog_pricing() -> None:
@@ -1185,6 +1192,75 @@ async def test_ragas_evaluator_writes_multiple_metric_scores() -> None:
 
 
 @pytest.mark.asyncio
+async def test_retrieval_only_ragas_trace_reviews_answer_metrics_without_judging_them() -> None:
+    repo = FakeEvalRepository()
+    repo.evaluator["name"] = "kb-ragas"
+    repo.evaluator["evaluator_type"] = "ragas"
+    repo.evaluator["filter_config"] = {
+        "metrics": ["context_relevancy", "faithfulness", "response_relevancy"],
+    }
+    repo.trace_detail = {
+        "trace": {
+            "trace_id": "trace-retrieval-only",
+            "trace_family": "rag",
+            "workflow_kind": "rag_retrieval_chain",
+            "input_preview": "refund policy",
+            "output_preview": "2 retrieved documents",
+            "status": "succeeded",
+            "metadata": {
+                "gen_ai.retrieval.query.text": "refund policy",
+            },
+        },
+        "spans": [
+            {
+                "span_kind": "retriever",
+                "attributes": {
+                    "retrieval": {"documents": [{"content_eval": "Refund policy chunk"}]}
+                },
+            }
+        ],
+        "events": [],
+    }
+
+    calls: list[dict[str, Any]] = []
+
+    async def _kb_ragas_evaluate(**kwargs: Any) -> list[dict[str, Any]]:
+        calls.append(kwargs)
+        return [
+            {
+                "metric": "context_relevancy",
+                "score": 0.9,
+                "explanation": "Relevant context.",
+                "label": "pass",
+            }
+        ]
+
+    result = await EvaluatorExecutor(
+        repo,
+        kb_ragas_evaluate=_kb_ragas_evaluate,
+    ).run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-retrieval-only-ragas",
+            "evaluator_id": "eval-1",
+            "trace_id": "trace-retrieval-only",
+        },
+    )
+
+    assert result.status == "succeeded"
+    assert result.scores_written == 3
+    assert len(calls) == 1
+    assert calls[0]["answer"] is None
+    assert calls[0]["metrics"] == ["context_relevancy"]
+    scores = {score["score_name"]: score for score in repo.final_scores.values()}
+    assert scores["context_relevancy"]["label"] == "pass"
+    for metric in ("faithfulness", "response_relevancy"):
+        assert scores[metric]["label"] == "review"
+        assert scores[metric]["metadata"]["failure_kind"] == "semantic_review"
+        assert scores[metric]["metadata"]["answer_source"] == "retrieval_only"
+
+
+@pytest.mark.asyncio
 async def test_ragas_evaluator_applies_pass_threshold_over_service_label() -> None:
     repo = FakeEvalRepository()
     repo.evaluator["evaluator_type"] = "ragas"
@@ -1254,6 +1330,43 @@ def _configure_ragas_trace(repo: FakeEvalRepository) -> None:
             "attributes": {"retrieval": {"documents": [{"content_eval": "chunk"}]}},
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_ragas_answer_relevancy_alias_accepts_canonical_service_metric() -> None:
+    repo = FakeEvalRepository()
+    _configure_ragas_trace(repo)
+    repo.evaluator["filter_config"] = {"metrics": ["answer_relevancy"]}
+
+    async def _kb_ragas_evaluate(**kwargs: Any) -> list[dict[str, Any]]:
+        assert kwargs["metrics"] == ["response_relevancy"]
+        assert kwargs["answer"] == "world"
+        return [
+            {
+                "metric": "response_relevancy",
+                "score": 0.9,
+                "explanation": "The answer addresses the question.",
+                "label": "pass",
+            }
+        ]
+
+    result = await EvaluatorExecutor(
+        repo,
+        kb_ragas_evaluate=_kb_ragas_evaluate,
+    ).run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-ragas-answer-alias",
+            "evaluator_id": "eval-1",
+            "trace_id": "trace-1",
+        },
+    )
+
+    assert result.status == "succeeded"
+    assert result.scores_written == 1
+    score = next(iter(repo.final_scores.values()))
+    assert score["score_name"] == "response_relevancy"
+    assert score["label"] == "pass"
 
 
 @pytest.mark.asyncio

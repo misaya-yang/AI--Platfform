@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 
 from ...core.auth.user_resolver import UserContext
 from ...core.client_ip import get_client_ip_from_request
-from ..deps import get_user_context
+from ..deps import enforce_rate_limit, get_user_context
 
 router = APIRouter(prefix="/assistant/quiz", tags=["quiz"])
 logger = logging.getLogger(__name__)
@@ -224,6 +224,14 @@ def _get_quiz_service(
     return QuizService(db=db, generator=generator, grader=grader)
 
 
+def _require_quiz_generation_actor(user: UserContext) -> None:
+    """Keep paid quiz generation behind an authenticated tenant identity."""
+    if not user.is_authenticated or not user.user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if not user.tenant_id or user.tenant_id == "public":
+        raise HTTPException(status_code=403, detail="Tenant identity required")
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -236,6 +244,8 @@ async def generate_quiz(
     user: UserContext = Depends(get_user_context),
 ):
     """Generate a quiz from KB datasets."""
+    _require_quiz_generation_actor(user)
+    await enforce_rate_limit(request, user, operation="quiz_generate")
     svc = _get_quiz_service(request, user=user)
 
     # Retrieve KB chunks for quiz generation (local service or HTTP proxy)
@@ -299,6 +309,8 @@ async def generate_quiz_stream(
     user: UserContext = Depends(get_user_context),
 ):
     """Generate a quiz with SSE progress events."""
+    _require_quiz_generation_actor(user)
+    await enforce_rate_limit(request, user, operation="quiz_generate")
     svc = _get_quiz_service(request, user=user)
     kb_service = getattr(request.app.state, "knowledge_service", None) or getattr(request.app.state, "kb_proxy", None)
     if kb_service is None:

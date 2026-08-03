@@ -31,6 +31,19 @@ from knowledge_service.services.knowledge.retrieval_config import DEFAULT_CONFIG
 from pydantic import ValidationError
 
 
+def _authenticated_user(**overrides):
+    values = {
+        "user_id": "u1",
+        "tenant_id": "t1",
+        "is_authenticated": True,
+        "is_anonymous": False,
+        "user_type": "user",
+        "roles": ["admin"],
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 def _result(
     sid: str,
     score: float,
@@ -90,7 +103,7 @@ async def test_retrieve_evaluate_computes_metrics():
         k_values=[1, 3],
     )
 
-    user = SimpleNamespace(user_id="u1")
+    user = _authenticated_user()
     resp = await retrieve_evaluate("ds1", payload, svc, user)
 
     # Retrieval config is threaded through to every case (A/B comparable).
@@ -139,7 +152,7 @@ async def test_retrieve_evaluate_graded_relevance():
         k_values=[2],
         return_retrieved=False,
     )
-    resp = await retrieve_evaluate("ds2", payload, svc, SimpleNamespace(user_id="u1"))
+    resp = await retrieve_evaluate("ds2", payload, svc, _authenticated_user())
     # nDCG@2 with grades a=3,b=2 retrieved vs ideal top2 (3,3) is < 1.
     ndcg = resp["metrics"]["2"]["ndcg_at_k"]
     assert 0.0 < ndcg < 1.0
@@ -167,11 +180,11 @@ async def test_preset_config_round_trips_into_executable_eval_request():
     assert payload.rrf_weights == {"vector": 1.0, "keyword": 1.0}
     assert payload.alpha == pytest.approx(0.6)
     assert payload.rerank is True
-    assert payload.rerank_model == "gte-rerank-v2"
+    assert payload.rerank_model == "qwen3-rerank"
     assert payload.mmr is False
 
     svc = FakeKnowledgeService({"q": [("a", 0.9)]})
-    response = await retrieve_evaluate("ds-preset", payload, svc, SimpleNamespace(user_id="u1"))
+    response = await retrieve_evaluate("ds-preset", payload, svc, _authenticated_user())
 
     assert response["case_metadata"][0]["retrieval_metadata"]["pipeline"] == "standard"
     assert svc.calls[0]["fusion_method"] == "rrf"
@@ -259,7 +272,7 @@ async def test_eval_requires_editor_permission():
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        await retrieve_evaluate("ds", payload, svc, SimpleNamespace(user_id="u1"))
+        await retrieve_evaluate("ds", payload, svc, _authenticated_user())
 
     assert exc_info.value.status_code == 403
     assert svc.calls == []
@@ -279,7 +292,7 @@ async def test_eval_has_one_aggregate_service_deadline(monkeypatch: pytest.Monke
     monkeypatch.setattr(knowledge_routes, "RETRIEVAL_EVAL_TIMEOUT_SECONDS", 0.01)
 
     with pytest.raises(HTTPException) as exc_info:
-        await retrieve_evaluate("ds", payload, svc, SimpleNamespace(user_id="u1"))
+        await retrieve_evaluate("ds", payload, svc, _authenticated_user())
 
     assert exc_info.value.status_code == 504
     assert len(svc.calls) == 1
@@ -301,7 +314,7 @@ async def test_eval_deduplicates_metrics_and_preserves_bounded_metadata():
         }
     )
 
-    response = await retrieve_evaluate("ds", payload, svc, SimpleNamespace(user_id="u1"))
+    response = await retrieve_evaluate("ds", payload, svc, _authenticated_user())
     metrics = response["metrics"]["2"]
     assert all(0.0 <= value <= 1.0 for key, value in metrics.items() if key != "k")
     assert metrics["recall_at_k"] == 1.0
@@ -327,7 +340,7 @@ async def test_eval_caps_provider_results_to_the_requested_window():
         }
     )
 
-    response = await retrieve_evaluate("ds", payload, svc, SimpleNamespace(user_id="u1"))
+    response = await retrieve_evaluate("ds", payload, svc, _authenticated_user())
 
     evidence = response["case_metadata"][0]
     assert evidence["provider_retrieved_count"] == 8
@@ -357,45 +370,65 @@ class FakeMultimodalKnowledgeService:
         return [_result("image-a", 0.8, content_type="image")], {"image_fallback": False}
 
 
-async def test_eval_executes_and_reports_multimodal_pipeline():
+async def test_eval_rejects_unreleased_multimodal_pipeline():
     svc = FakeMultimodalKnowledgeService()
-    payload = RetrievalEvalRequestSchema.model_validate(
-        {
-            "include_associated_images": True,
-            "include_images": True,
-            "multimodal_rerank": True,
-            "cases": [{"query": "q", "relevant_segment_ids": ["image-a"]}],
-            "k_values": [1],
-        }
-    )
+    with pytest.raises(ValidationError, match="multimodal retrieval is not enabled"):
+        RetrievalEvalRequestSchema.model_validate(
+            {
+                "include_associated_images": True,
+                "include_images": True,
+                "multimodal_rerank": True,
+                "cases": [{"query": "q", "relevant_segment_ids": ["image-a"]}],
+                "k_values": [1],
+            }
+        )
 
-    response = await retrieve_evaluate("ds", payload, svc, SimpleNamespace(user_id="u1"))
-
-    assert len(svc.calls) == 1
-    assert svc.calls[0]["multimodal_rerank"] is True
-    assert response["case_metadata"][0]["retrieval_metadata"]["pipeline"] == "multimodal"
-    assert response["cases"][0]["retrieved"][0]["content_type"] == "image"
+    assert svc.calls == []
 
 
 class FakeHierarchicalKnowledgeService:
-    vector_store = object()
+    class VectorStore:
+        async def require_hierarchical_collections_readable(
+            self,
+            _collection_name,
+            **_kwargs,
+        ):
+            return None
+
+    class Database:
+        def __init__(self):
+            self.segment_filter_calls = 0
+
+        async def filter_active_document_ids(self, *, document_ids, **_kwargs):
+            return set(document_ids)
+
+        async def filter_active_segment_ids(self, *, segment_ids, **_kwargs):
+            self.segment_filter_calls += 1
+            return set(segment_ids)
+
+    vector_store = VectorStore()
     embedder = object()
-    db = object()
 
     def __init__(self):
         self.access_calls: list[tuple] = []
+        self.db = self.Database()
+        self.multimodal = False
 
     async def require_dataset_access(self, user, dataset_id, required="viewer"):
         self.access_calls.append((user, dataset_id, required))
         return {
+            "dataset_id": dataset_id,
+            "tenant_id": "t1",
+            "content_revision": 1,
             "embedding_provider": "local",
             "embedding_model": "hash-384",
             "embedding_dimension": 384,
             "collection_name": "tenant_ds_384",
+            "index_config": {},
         }
 
     def _is_multimodal_dataset(self, _dataset):
-        return False
+        return self.multimodal
 
     def _resolve_embedding_config(self, **_kwargs):
         return SimpleNamespace(provider="local", model="hash-384", extra={})
@@ -409,10 +442,27 @@ async def test_eval_executes_hierarchical_pipeline_after_viewer_check(monkeypatc
     async def fake_hierarchical_retrieve(**kwargs):
         calls.append(kwargs)
         result = _result("a", 0.9)
-        result.level = 3
+        # L1 summary IDs live in document_summaries, not segments. The route's
+        # final lifecycle recheck must retain this result without consulting
+        # segment authority.
+        result.level = 1
         result.parent_context = "parent"
         result.document_summary = "summary"
-        return [result], SimpleNamespace(
+        result.metadata = {
+            "source_type": "file",
+            "image_url": "https://private.invalid/image.png",
+            "nested": {"associated_images": [{"storage_url": "s3://private"}]},
+        }
+        image_result = _result(
+            "image-a",
+            0.95,
+            metadata={"content_type": "page_image", "image_url": "https://private.invalid"},
+            content_type="image",
+        )
+        image_result.level = 1
+        image_result.parent_context = None
+        image_result.document_summary = None
+        return [image_result, result], SimpleNamespace(
             strategy="cascade",
             l1_candidates=2,
             l2_candidates=1,
@@ -432,7 +482,7 @@ async def test_eval_executes_hierarchical_pipeline_after_viewer_check(monkeypatc
     )
     svc = FakeHierarchicalKnowledgeService()
     monkeypatch.setattr(embedding, "get_cached_embedder", fake_get_cached_embedder)
-    user = SimpleNamespace(user_id="u1", tenant_id="t1")
+    user = _authenticated_user()
     payload = RetrievalEvalRequestSchema.model_validate(
         {
             "hierarchical": True,
@@ -443,10 +493,15 @@ async def test_eval_executes_hierarchical_pipeline_after_viewer_check(monkeypatc
 
     response = await retrieve_evaluate("ds", payload, svc, user)
 
-    assert svc.access_calls == [(user, "ds", "editor"), (user, "ds", "viewer")]
+    assert svc.access_calls == [
+        (user, "ds", "editor"),
+        (user, "ds", "viewer"),
+        (user, "ds", "viewer"),
+    ]
     assert calls[0]["dataset_id"] == "ds"
     assert calls[0]["base_collection"] == "tenant_ds_384"
     assert response["case_metadata"][0]["retrieval_metadata"]["pipeline"] == "hierarchical"
+    assert [item["segment_id"] for item in response["cases"][0]["retrieved"]] == ["a"]
 
     public_response = await retrieve(
         "ds",
@@ -458,6 +513,31 @@ async def test_eval_executes_hierarchical_pipeline_after_viewer_check(monkeypatc
         (user, "ds", "editor"),
         (user, "ds", "viewer"),
         (user, "ds", "viewer"),
+        (user, "ds", "viewer"),
+        (user, "ds", "viewer"),
     ]
     assert public_response["results"][0]["segment_id"] == "a"
+    assert public_response["results"][0]["metadata"] == {
+        "source_type": "file",
+        "nested": {},
+    }
     assert public_response["metadata"]["strategy"] == "cascade"
+    assert svc.db.segment_filter_calls == 0
+
+
+async def test_hierarchical_public_retrieval_rejects_legacy_multimodal_dataset():
+    svc = FakeHierarchicalKnowledgeService()
+    svc.multimodal = True
+    user = _authenticated_user()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await retrieve(
+            "ds",
+            RetrieveRequestSchema(query="q", hierarchical=True, top_k=1),
+            svc,
+            user,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "multimodal dataset retrieval is not enabled" in str(exc_info.value.detail)
+    assert svc.access_calls == [(user, "ds", "viewer")]

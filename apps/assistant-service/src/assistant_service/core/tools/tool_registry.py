@@ -90,13 +90,14 @@ class ToolParameter:
     """Definition of a tool parameter."""
 
     name: str
-    type: str  # string, number, boolean, array, object
+    type: str  # string, integer, number, boolean, array, object
     description: str
     required: bool = True
     default: Any = None
     enum: list[str] | None = None
     items: dict[str, Any] | None = None  # For array types
     properties: dict[str, Any] | None = None  # For object types
+    schema_constraints: dict[str, Any] | None = None
 
 
 @dataclass
@@ -169,6 +170,8 @@ class ToolDefinition:
                 prop["items"] = param.items
             if param.properties:
                 prop["properties"] = param.properties
+            if param.schema_constraints:
+                prop.update(param.schema_constraints)
 
             properties[param.name] = prop
 
@@ -208,6 +211,8 @@ class ToolDefinition:
                 prop["items"] = param.items
             if param.properties:
                 prop["properties"] = param.properties
+            if param.schema_constraints:
+                prop.update(param.schema_constraints)
 
             properties[param.name] = prop
 
@@ -321,7 +326,9 @@ class ToolExecutor:
                 # Type checking
                 if param.type == "string" and not isinstance(value, str):
                     errors.append(f"Parameter {param.name} must be a string")
-                elif param.type == "number" and not isinstance(value, (int, float)):
+                elif param.type == "number" and (
+                    isinstance(value, bool) or not isinstance(value, (int, float))
+                ):
                     errors.append(f"Parameter {param.name} must be a number")
                 elif param.type == "boolean" and not isinstance(value, bool):
                     errors.append(f"Parameter {param.name} must be a boolean")
@@ -333,6 +340,28 @@ class ToolExecutor:
                 # Enum validation
                 if param.enum and value not in param.enum:
                     errors.append(f"Parameter {param.name} must be one of: {param.enum}")
+
+                constraints = param.schema_constraints or {}
+                if isinstance(value, str):
+                    if len(value) < int(constraints.get("minLength", 0)):
+                        errors.append(f"Parameter {param.name} is too short")
+                    max_length = constraints.get("maxLength")
+                    if max_length is not None and len(value) > int(max_length):
+                        errors.append(f"Parameter {param.name} is too long")
+                if isinstance(value, list):
+                    min_items = constraints.get("minItems")
+                    max_items = constraints.get("maxItems")
+                    if min_items is not None and len(value) < int(min_items):
+                        errors.append(f"Parameter {param.name} has too few items")
+                    if max_items is not None and len(value) > int(max_items):
+                        errors.append(f"Parameter {param.name} has too many items")
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    minimum = constraints.get("minimum")
+                    maximum = constraints.get("maximum")
+                    if minimum is not None and value < minimum:
+                        errors.append(f"Parameter {param.name} is below the minimum")
+                    if maximum is not None and value > maximum:
+                        errors.append(f"Parameter {param.name} is above the maximum")
 
         return errors
 

@@ -10,6 +10,8 @@ Test script to validate knowledge base improvements:
 import os
 import sys
 
+import pytest
+
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -51,11 +53,16 @@ def test_token_counting():
 
     counter = TokenCounter(use_tiktoken=True)
 
+    counts = {}
     for text, lang in test_cases:
         tokens = counter.count_tokens(text)
+        counts[text] = tokens
         print(f"  [{lang}] {text[:50]}...")
         print(f"    → {tokens} tokens, {len(text)} chars, ratio: {tokens / max(len(text), 1):.2f}")
 
+    assert counter.count_tokens("") == 0
+    assert all(isinstance(count, int) and count > 0 for count in counts.values())
+    assert counter.count_tokens(test_cases[-1][0]) == counts[test_cases[-1][0]]
     print("\n✓ Token counting test completed")
 
 
@@ -83,6 +90,12 @@ def test_arabic_tokenization():
         print(f"  Tokens: {tokens}")
         print()
 
+        assert normalized
+        assert not any("\u064b" <= char <= "\u0652" or char == "\u0670" for char in normalized)
+        assert tokens
+        assert all(token == normalize_arabic(token) for token in tokens)
+
+    assert "في" not in tokenize_arabic("في الصلاة", remove_stopwords=True)
     print("✓ Arabic tokenization test completed")
 
 
@@ -108,6 +121,9 @@ def test_multilingual_tokenization():
         print(f"  Tokens: {tokens}")
         print()
 
+        assert detected == expected_lang
+        assert tokens
+        assert text.lower() in tokens
     print("✓ Multilingual tokenization test completed")
 
 
@@ -118,13 +134,13 @@ def test_language_weights():
     print("=" * 60)
 
     test_cases = [
-        "What is prayer in Islam?",  # English
-        "ما هي الصلاة",  # Arabic
-        "人工智能问答",  # Chinese
-        "Prayer الصلاة 祈祷",  # Mixed
+        ("What is prayer in Islam?", (0.7, 0.3)),  # English
+        ("ما هي الصلاة", (0.55, 0.45)),  # Arabic
+        ("人工智能问答", (0.75, 0.25)),  # Chinese
+        ("Prayer الصلاة 祈祷", (0.65, 0.35)),  # Mixed
     ]
 
-    for query in test_cases:
+    for query, expected_weights in test_cases:
         lang = detect_language(query)
         dense_w, bm25_w = compute_language_weights(query)
 
@@ -133,6 +149,8 @@ def test_language_weights():
         print(f"  Weights: dense={dense_w:.2f}, bm25={bm25_w:.2f}")
         print()
 
+        assert (dense_w, bm25_w) == pytest.approx(expected_weights)
+        assert dense_w + bm25_w == pytest.approx(1.0)
     print("✓ Language weights test completed")
 
 
@@ -176,6 +194,12 @@ def test_score_normalization():
     bm25_percentile = ScoreNormalization.percentile_normalize(bm25_scores)
     print("  Percentile BM25:", {k: round(v, 3) for k, v in bm25_percentile.items()})
 
+    assert set(bm25_minmax) == set(bm25_scores)
+    assert bm25_minmax["doc3"] == 0.0
+    assert bm25_minmax["doc4"] == 1.0
+    assert all(0.0 <= score <= 1.0 for score in bm25_robust.values())
+    assert bm25_percentile["doc3"] == pytest.approx(0.2)
+    assert bm25_percentile["doc4"] == 1.0
     print()
     print("✓ Score normalization test completed")
 
@@ -220,6 +244,12 @@ latency, and queue depth against the baseline.
         for i, chunk in enumerate(chunks[:3]):  # Show first 3
             print(f"    Chunk {i + 1}: {chunk.token_count} tokens, {len(chunk.text)} chars")
             print(f"      Preview: {chunk.text[:80]}...")
+
+        assert chunks
+        assert [chunk.index for chunk in chunks] == list(range(len(chunks)))
+        assert all(chunk.text.strip() and chunk.token_count > 0 for chunk in chunks)
+        assert any("rollback" in chunk.text.lower() for chunk in chunks)
+        assert any("التحقق" in chunk.text for chunk in chunks)
 
     print("\n✓ Token-based chunking test completed")
 

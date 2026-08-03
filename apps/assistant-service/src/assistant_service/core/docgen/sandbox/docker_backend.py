@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import shutil
 import tempfile
 import time
@@ -45,7 +44,7 @@ class DockerSandbox(SandboxClient):
 
     async def _run_container(
         self,
-        shell_cmd: str,
+        container_argv: list[str],
         *,
         timeout: float,
         files_in: Iterable[Path] | None,
@@ -79,7 +78,8 @@ class DockerSandbox(SandboxClient):
         ]
         for k, v in (env or {}).items():
             argv.extend(["-e", f"{k}={v}"])
-        argv.extend([self._image, "bash", "-lc", shell_cmd])
+        argv.append(self._image)
+        argv.extend(container_argv)
 
         started = time.perf_counter()
         proc = await asyncio.create_subprocess_exec(
@@ -123,9 +123,13 @@ class DockerSandbox(SandboxClient):
         produce: Iterable[str] | None = None,
         env: dict[str, str] | None = None,
     ) -> SandboxResult:
-        payload = json.dumps(code)
-        shell = f"python3 -c {payload}"
-        return await self._run_container(shell, timeout=timeout, files_in=files_in, produce=produce, env=env)
+        return await self._run_container(
+            ["python3", "-c", code],
+            timeout=timeout,
+            files_in=files_in,
+            produce=produce,
+            env=env,
+        )
 
     async def exec_node(
         self,
@@ -136,9 +140,13 @@ class DockerSandbox(SandboxClient):
         produce: Iterable[str] | None = None,
         env: dict[str, str] | None = None,
     ) -> SandboxResult:
-        payload = json.dumps(code)
-        shell = f"node -e {payload}"
-        return await self._run_container(shell, timeout=timeout, files_in=files_in, produce=produce, env=env)
+        return await self._run_container(
+            ["node", "-e", code],
+            timeout=timeout,
+            files_in=files_in,
+            produce=produce,
+            env=env,
+        )
 
     async def exec_bash(
         self,
@@ -149,4 +157,10 @@ class DockerSandbox(SandboxClient):
         produce: Iterable[str] | None = None,
         env: dict[str, str] | None = None,
     ) -> SandboxResult:
-        return await self._run_container(cmd, timeout=timeout, files_in=files_in, produce=produce, env=env)
+        return await self._run_container(
+            ["bash", "-lc", cmd],
+            timeout=timeout,
+            files_in=files_in,
+            produce=produce,
+            env=env,
+        )

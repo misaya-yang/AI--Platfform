@@ -26,6 +26,9 @@ _RE_ARABIC_RUN = re.compile(r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\uf
 # Arabic diacritics (tashkeel) - remove for tokenization
 _RE_ARABIC_DIACRITICS = re.compile(r"[\u064b-\u0652\u0670]")
 
+LEGACY_RRF_SEMANTICS = "legacy_unweighted_rrf_v1"
+QDRANT_WEIGHTED_RRF_SEMANTICS = "qdrant_weighted_rrf_v1"
+
 # Arabic stopwords (common words to filter out for better BM25)
 ARABIC_STOPWORDS = frozenset(
     {
@@ -305,7 +308,13 @@ def tokenize_arabic(text: str, remove_stopwords: bool = True) -> list[str]:
     return arabic_tokens
 
 
-def tokenize(text: str, keep_original: bool = False, remove_stopwords: bool = False) -> list[str]:
+def tokenize(
+    text: str,
+    keep_original: bool = False,
+    remove_stopwords: bool = False,
+    *,
+    deduplicate: bool = True,
+) -> list[str]:
     """
     Tokenize text for multilingual lexical search (BM25).
 
@@ -319,6 +328,8 @@ def tokenize(text: str, keep_original: bool = False, remove_stopwords: bool = Fa
         text: Input text to tokenize
         keep_original: If True, include the original query as a token
         remove_stopwords: If True, filter out common stopwords
+        deduplicate: Preserve legacy unique-token behavior when True. Set False
+            only for an explicitly versioned term-frequency pipeline.
 
     Returns:
         List of tokens for BM25 scoring
@@ -364,7 +375,10 @@ def tokenize(text: str, keep_original: bool = False, remove_stopwords: bool = Fa
     arabic_tokens = tokenize_arabic(t_clean, remove_stopwords=remove_stopwords)
     tokens.extend(arabic_tokens)
 
-    # Deduplicate while preserving order
+    if not deduplicate:
+        return [token for token in tokens if token]
+
+    # Deduplicate while preserving order for query/exact-match compatibility.
     seen = set()
     result = []
     for tok in tokens:
@@ -445,7 +459,14 @@ def text_to_sparse_vector(
         (indices, values) — suitable for ``qdrant_client.models.SparseVector``.
         Indices are hashed token IDs; values are term frequencies.
     """
-    tokens = tokenize(text, remove_stopwords=remove_stopwords)
+    # Keep the existing term-presence sparse schema stable. True BM25 needs a
+    # versioned shadow field because changing stored weights in-place would mix
+    # incompatible vectors inside existing collections.
+    tokens = tokenize(
+        text,
+        remove_stopwords=remove_stopwords,
+        deduplicate=True,
+    )
     if not tokens:
         return [], []
 
@@ -558,6 +579,7 @@ def reciprocal_rank_fusion(
     *,
     k: int = 60,
     weights: dict[str, float] | None = None,
+    qdrant_weighted: bool = False,
 ) -> dict[str, float]:
     """
     Reciprocal Rank Fusion (RRF) for combining ranked lists.
@@ -567,24 +589,42 @@ def reciprocal_rank_fusion(
     - Immune to outliers that distort min-max normalization
     - Works well when score scales differ (BM25 vs cosine similarity)
 
-    Formula: RRF(d) = Σ (weight_i / (k + rank_i(d)))
+    The default preserves the original lexical_v1 contract:
+    ``RRF(d) = Σ weight_i / (k + rank_i(d))``.
+
+    When ``qdrant_weighted`` is explicitly enabled, the fallback matches
+    Qdrant's weighted RRF contract:
+    ``RRF(d) = Σ 1 / (rank_i(d) / weight_i + k - 1)`` for positive
+    weights and one-based ranks. A zero weight contributes zero.
 
     Args:
         ranked_lists: Dict mapping source name to list of document IDs (ranked)
         k: RRF constant (typically 60)
         weights: Optional weights per source
+        qdrant_weighted: Opt in to Qdrant's weighted denominator semantics.
 
     Returns:
         Dict mapping document ID to fused RRF score
     """
+    ranking_constant = int(k)
+    if ranking_constant < 1:
+        raise ValueError("RRF k must be positive")
     weights = weights or {}
     fused: dict[str, float] = defaultdict(float)
     for source, ids in (ranked_lists or {}).items():
         w = float(weights.get(source, 1.0))
+        if not math.isfinite(w) or w < 0.0:
+            raise ValueError("RRF weights must be finite and non-negative")
         for rank, item_id in enumerate(ids, start=1):
             if not item_id:
                 continue
-            fused[item_id] += w / float(int(k) + rank)
+            if qdrant_weighted:
+                contribution = (
+                    0.0 if w == 0.0 else 1.0 / (rank / w + ranking_constant - 1.0)
+                )
+            else:
+                contribution = w / float(ranking_constant + rank)
+            fused[item_id] += contribution
     return dict(fused)
 
 
@@ -799,18 +839,11 @@ def compute_language_weights(
     """
     lang = detect_language(query)
 
-    if lang == "ar":
-        # Arabic: boost BM25 for morphological matching
-        return 0.55, 0.45
-    elif lang == "zh":
-        # Chinese: boost dense for semantic understanding
-        return 0.75, 0.25
-    elif lang == "mixed":
-        # Mixed language: balanced
-        return 0.65, 0.35
-    else:
-        # English and others: default
-        return default_dense_weight, default_bm25_weight
+    return {
+        "ar": (0.55, 0.45),
+        "zh": (0.75, 0.25),
+        "mixed": (0.65, 0.35),
+    }.get(lang, (default_dense_weight, default_bm25_weight))
 
 
 def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
@@ -822,7 +855,7 @@ def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
         denom = np.linalg.norm(va) * np.linalg.norm(vb)
         return float(np.dot(va, vb) / denom) if denom > 0 else 0.0
     except ImportError:
-        dot = sum(float(x) * float(y) for x, y in zip(a, b))
+        dot = sum(float(x) * float(y) for x, y in zip(a, b, strict=True))
         na = sum(float(x) ** 2 for x in a)
         nb = sum(float(y) ** 2 for y in b)
         if na <= 0.0 or nb <= 0.0:

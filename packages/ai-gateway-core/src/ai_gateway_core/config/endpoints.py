@@ -67,6 +67,8 @@ DASHSCOPE_DEFAULT_CHAT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mod
 DASHSCOPE_DEFAULT_NATIVE_BASE_URL = "https://dashscope.aliyuncs.com/api/v1"
 
 _COMPAT_SUFFIX = "/compatible-mode"
+_COMPAT_V1_SUFFIX = f"{_COMPAT_SUFFIX}/v1"
+_CHAT_COMPLETIONS_SUFFIX = f"{_COMPAT_V1_SUFFIX}/chat/completions"
 _NATIVE_SUFFIX = "/api/v1"
 
 GOOGLE_AI_STUDIO_BASE_URL = "https://generativelanguage.googleapis.com"
@@ -87,18 +89,24 @@ def _normalize_dashscope_base(url: str, domain: Domain) -> str:
     chat domain → ``…/compatible-mode``  (OpenAI-compat client)
     image/embed → ``…/api/v1``           (dashscope native SDK)
 
-    Either suffix on input is accepted and converted; bare host (no
-    suffix) gets the right one appended. This is what makes a single
-    operator-set ``DASHSCOPE_BASE_URL`` work everywhere — incident
-    2026-04-28 traced an "Arrearage / 404" cascade to the embedding
+    Compatible-mode bases with or without ``/v1`` (including the full
+    chat-completions endpoint) and native SDK ``/api/v1`` bases are accepted
+    and converted. A bare host gets the right suffix appended. This is what
+    makes a single operator-set ``DASHSCOPE_BASE_URL`` work everywhere —
+    incident 2026-04-28 traced an "Arrearage / 404" cascade to the embedding
     path silently keeping ``/compatible-mode`` and the SDK 404'ing.
     """
     cleaned = url.rstrip("/")
     # Strip whichever suffix is present so we can re-add the right one.
-    if cleaned.endswith(_COMPAT_SUFFIX):
-        cleaned = cleaned[: -len(_COMPAT_SUFFIX)]
-    elif cleaned.endswith(_NATIVE_SUFFIX):
-        cleaned = cleaned[: -len(_NATIVE_SUFFIX)]
+    for suffix in (
+        _CHAT_COMPLETIONS_SUFFIX,
+        _COMPAT_V1_SUFFIX,
+        _COMPAT_SUFFIX,
+        _NATIVE_SUFFIX,
+    ):
+        if cleaned.endswith(suffix):
+            cleaned = cleaned[: -len(suffix)]
+            break
     if domain == "chat":
         return cleaned + _COMPAT_SUFFIX
     return cleaned + _NATIVE_SUFFIX

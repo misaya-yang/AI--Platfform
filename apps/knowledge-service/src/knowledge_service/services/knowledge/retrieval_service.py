@@ -7,6 +7,7 @@ Migrated from KnowledgeService as part of Phase 2 refactoring.
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -17,10 +18,17 @@ import httpx
 from ...config.settings import Settings
 from ...core.exceptions import ValidationFailedError
 from ...core.observability.logging import get_logger
-from ...persistence.database import DatabaseStorage
+from ...persistence.database import DatabaseStorage, dataset_index_deletion_fence
 from .common import ensure_dict as _ensure_dict
-from .embedding import BaseEmbedding, get_cached_embedder
+from .embedding import (
+    MULTIMODAL_EMBEDDING_MODELS,
+    BaseEmbedding,
+    get_cached_embedder,
+)
+from .lexical_config import LexicalConfig, LexicalConfigError
 from .retrieval import (
+    LEGACY_RRF_SEMANTICS,
+    QDRANT_WEIGHTED_RRF_SEMANTICS,
     ScoreNormalization,
     bm25_scores,
     compute_language_weights,
@@ -31,6 +39,7 @@ from .retrieval import (
     reciprocal_rank_fusion,
     tokenize,
 )
+from .vector_store import CollectionReadAuthorityError
 
 if TYPE_CHECKING:
     from ...core.auth.user_resolver import UserContext
@@ -39,6 +48,379 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 MULTI_QUERY_TOP_K = {1: 5, 2: 6, 3: 8, 4: 9, 5: 10}
+_SERVER_OWNED_RERANK_FIELD_ALIASES = frozenset(
+    {
+        "apikey",
+        "key",
+        "accesskey",
+        "secret",
+        "secretkey",
+        "token",
+        "bearertoken",
+        "authorization",
+        "auth",
+        "credentials",
+        "headers",
+        "baseurl",
+        "endpoint",
+        "endpointurl",
+        "apibase",
+        "apiurl",
+        "url",
+        "host",
+    }
+)
+
+
+def _contains_server_owned_rerank_field(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            normalized = "".join(character for character in str(key).lower() if character.isalnum())
+            if any(
+                normalized.endswith(alias)
+                for alias in _SERVER_OWNED_RERANK_FIELD_ALIASES
+            ):
+                return True
+            if _contains_server_owned_rerank_field(nested):
+                return True
+    elif isinstance(value, (list, tuple)):
+        return any(_contains_server_owned_rerank_field(item) for item in value)
+    return False
+
+
+def _require_server_owned_rerank_config(value: Any) -> None:
+    if _contains_server_owned_rerank_field(value):
+        raise ValidationFailedError(
+            "stored rerank config contains a legacy credential or endpoint; "
+            "remove it before retrieval"
+        )
+
+
+def _require_bounded_retrieval_config(value: Any, *, scope: str) -> None:
+    """Reject resource poison before any retrieval dependency is called."""
+
+    retrieval = _ensure_dict(value)
+    vector = _ensure_dict(retrieval.get("vector"))
+    keyword = _ensure_dict(retrieval.get("keyword"))
+    fusion = _ensure_dict(retrieval.get("fusion"))
+    rerank = _ensure_dict(retrieval.get("rerank"))
+    mmr = _ensure_dict(retrieval.get("mmr"))
+
+    def require_integer(path: str, raw: Any, upper_bound: int) -> None:
+        if raw is None:
+            return
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            raise ValidationFailedError(
+                f"{scope} {path} must be an integer between 1 and "
+                f"{upper_bound}"
+            )
+        if not 1 <= raw <= upper_bound:
+            raise ValidationFailedError(
+                f"{scope} {path} must be an integer between 1 and "
+                f"{upper_bound}"
+            )
+
+    integer_values = (
+        ("top_k", retrieval.get("top_k"), 100),
+        ("vector_top_k", retrieval.get("vector_top_k"), 1000),
+        ("keyword_top_k", retrieval.get("keyword_top_k"), 1000),
+        ("candidate_top_k", retrieval.get("candidate_top_k"), 2000),
+        ("keyword_candidate_k", retrieval.get("keyword_candidate_k"), 500),
+        ("rerank_top_n", retrieval.get("rerank_top_n"), 1000),
+        ("rrf_k", retrieval.get("rrf_k"), 10_000),
+        ("vector.top_k", vector.get("top_k"), 1000),
+        ("keyword.top_k", keyword.get("top_k"), 1000),
+        (
+            "keyword.candidate_pool_size",
+            keyword.get("candidate_pool_size"),
+            500,
+        ),
+        ("fusion.rrf_k", fusion.get("rrf_k"), 10_000),
+        ("rerank.top_n", rerank.get("top_n"), 1000),
+    )
+    for path, raw, upper_bound in integer_values:
+        require_integer(path, raw, upper_bound)
+
+    def require_unit_interval(path: str, raw: Any) -> float | None:
+        if raw is None:
+            return None
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise ValidationFailedError(
+                f"{scope} {path} must be finite and between 0 and 1"
+            )
+        numeric = float(raw)
+        if (
+            not math.isfinite(numeric)
+            or not 0.0 <= numeric <= 1.0
+        ):
+            raise ValidationFailedError(
+                f"{scope} {path} must be finite and between 0 and 1"
+            )
+        return numeric
+
+    unit_interval_values = (
+        ("dense_weight", retrieval.get("dense_weight")),
+        ("bm25_weight", retrieval.get("bm25_weight")),
+        ("alpha", retrieval.get("alpha")),
+        ("score_threshold", retrieval.get("score_threshold")),
+        ("mmr_lambda", retrieval.get("mmr_lambda")),
+        ("mmr_threshold", retrieval.get("mmr_threshold")),
+        ("vector.score_threshold", vector.get("score_threshold")),
+        ("fusion.dense_weight", fusion.get("dense_weight")),
+        ("fusion.bm25_weight", fusion.get("bm25_weight")),
+        ("fusion.alpha", fusion.get("alpha")),
+        ("rerank.score_threshold", rerank.get("score_threshold")),
+        ("mmr.lambda", mmr.get("lambda")),
+        ("mmr.lambda_mult", mmr.get("lambda_mult")),
+        ("mmr.threshold", mmr.get("threshold")),
+        ("mmr.similarity_threshold", mmr.get("similarity_threshold")),
+    )
+    validated_units = {
+        path: require_unit_interval(path, raw)
+        for path, raw in unit_interval_values
+    }
+    for prefix in ("", "fusion."):
+        dense = validated_units[f"{prefix}dense_weight"]
+        keyword_weight = validated_units[f"{prefix}bm25_weight"]
+        if dense is not None and keyword_weight is not None and not (
+            dense > 0.0 or keyword_weight > 0.0
+        ):
+            raise ValidationFailedError(
+                f"{scope} {prefix}weights must include a positive value"
+            )
+
+    def require_rrf_weights(path: str, raw: Any) -> None:
+        if raw is None:
+            return
+        if not isinstance(raw, dict) or len(raw) > 16:
+            raise ValidationFailedError(
+                f"{scope} {path} must contain at most 16 weights"
+            )
+        weights: list[float] = []
+        for name, weight in raw.items():
+            if not str(name).strip() or len(str(name)) > 64:
+                raise ValidationFailedError(
+                    f"{scope} {path} keys must contain 1-64 characters"
+                )
+            if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+                raise ValidationFailedError(
+                    f"{scope} {path} values must be finite and between 0 and 100"
+                )
+            numeric = float(weight)
+            if (
+                not math.isfinite(numeric)
+                or not 0.0 <= numeric <= 100.0
+            ):
+                raise ValidationFailedError(
+                    f"{scope} {path} values must be finite and between 0 and 100"
+                )
+            weights.append(numeric)
+        if weights and not any(weight > 0.0 for weight in weights):
+            raise ValidationFailedError(
+                f"{scope} {path} must include a positive weight"
+            )
+
+    require_rrf_weights("rrf_weights", retrieval.get("rrf_weights"))
+    require_rrf_weights("fusion.rrf_weights", fusion.get("rrf_weights"))
+
+
+def _require_bounded_persisted_retrieval_config(value: Any) -> None:
+    _require_bounded_retrieval_config(value, scope="stored retrieval config")
+
+
+def _require_bounded_retrieval_request(
+    *,
+    query: Any,
+    top_k: Any,
+    vector_top_k: Any = None,
+    keyword_top_k: Any = None,
+    candidate_top_k: Any = None,
+    keyword_candidate_k: Any = None,
+    rerank_top_n: Any = None,
+    rrf_k: Any = None,
+    dense_weight: Any = None,
+    bm25_weight: Any = None,
+    alpha: Any = None,
+    score_threshold: Any = None,
+    mmr_lambda: Any = None,
+    mmr_threshold: Any = None,
+    rrf_weights: Any = None,
+    scope: str = "retrieval request",
+) -> None:
+    if not isinstance(query, str) or not 1 <= len(query.strip()) <= 4096:
+        raise ValidationFailedError(f"{scope} query must contain 1-4096 characters")
+    _require_bounded_retrieval_config(
+        {
+            "top_k": top_k,
+            "vector_top_k": vector_top_k,
+            "keyword_top_k": keyword_top_k,
+            "candidate_top_k": candidate_top_k,
+            "keyword_candidate_k": keyword_candidate_k,
+            "rerank_top_n": rerank_top_n,
+            "rrf_k": rrf_k,
+            "dense_weight": dense_weight,
+            "bm25_weight": bm25_weight,
+            "alpha": alpha,
+            "score_threshold": score_threshold,
+            "mmr_lambda": mmr_lambda,
+            "mmr_threshold": mmr_threshold,
+            "rrf_weights": rrf_weights,
+        },
+        scope=scope,
+    )
+
+
+def _require_bounded_batch_request(
+    queries: Any,
+    *,
+    max_parallel: Any,
+) -> None:
+    if not isinstance(queries, list) or not 1 <= len(queries) <= 20:
+        raise ValidationFailedError(
+            "retrieval batch queries must be a list containing 1-20 entries"
+        )
+    if (
+        isinstance(max_parallel, bool)
+        or not isinstance(max_parallel, int)
+        or not 1 <= max_parallel <= 10
+    ):
+        raise ValidationFailedError(
+            "retrieval batch max_parallel must be an integer between 1 and 10"
+        )
+    for index, item in enumerate(queries):
+        if isinstance(item, str):
+            _require_bounded_retrieval_request(
+                query=item,
+                top_k=1,
+                scope=f"retrieval batch query[{index}]",
+            )
+            continue
+        if not isinstance(item, dict):
+            raise ValidationFailedError(
+                f"retrieval batch query[{index}] must be a string or object"
+            )
+        _require_bounded_retrieval_request(
+            query=item.get("query"),
+            top_k=item.get("top_k", 1),
+            vector_top_k=item.get("vector_top_k"),
+            keyword_top_k=item.get("keyword_top_k"),
+            candidate_top_k=item.get("candidate_top_k"),
+            keyword_candidate_k=item.get("keyword_candidate_k"),
+            rerank_top_n=item.get("rerank_top_n"),
+            rrf_k=item.get("rrf_k"),
+            dense_weight=item.get("dense_weight"),
+            bm25_weight=item.get("bm25_weight"),
+            alpha=item.get("alpha"),
+            score_threshold=item.get("score_threshold"),
+            mmr_lambda=item.get("mmr_lambda"),
+            mmr_threshold=item.get("mmr_threshold"),
+            rrf_weights=item.get("rrf_weights"),
+            scope=f"retrieval batch query[{index}]",
+        )
+
+
+def _candidate_is_image(candidate: dict[str, Any]) -> bool:
+    image_types = {"image", "page_image", "mixed", "multimodal"}
+
+    def _contains_image_type(value: Any) -> bool:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                normalized = "".join(
+                    character
+                    for character in str(key).lower()
+                    if character.isalnum()
+                )
+                if normalized == "contenttype" and str(nested).strip().lower() in image_types:
+                    return True
+                if _contains_image_type(nested):
+                    return True
+        elif isinstance(value, (list, tuple)):
+            return any(_contains_image_type(item) for item in value)
+        return False
+
+    return _contains_image_type(candidate)
+
+
+def _dataset_uses_multimodal_profile(dataset: dict[str, Any]) -> bool:
+    provider = str(dataset.get("embedding_provider") or "").strip().lower()
+    if provider in {
+        "unified_multimodal",
+        "unified",
+        "cross_modal",
+        "dashscope_multimodal",
+        "multimodal",
+    }:
+        return True
+    if str(dataset.get("embedding_model") or "") in MULTIMODAL_EMBEDDING_MODELS:
+        return True
+    index_config = _ensure_dict(dataset.get("index_config"))
+    return bool(
+        index_config.get("multimodal_enabled")
+        or index_config.get("enable_multimodal")
+    )
+
+
+def require_shadow_only_dataset(dataset: dict[str, Any]) -> LexicalConfig:
+    """Reject legacy or externally persisted active BM25 v2 before retrieval."""
+    try:
+        deletion_fence = dataset_index_deletion_fence(dataset)
+    except RuntimeError as exc:
+        raise ValidationFailedError(str(exc)) from exc
+    if deletion_fence is not None:
+        raise ValidationFailedError(
+            "dataset index deletion is pending; retrieval is unavailable"
+        )
+    try:
+        lexical_config = LexicalConfig.from_index_config(
+            _ensure_dict(dataset.get("index_config"))
+        )
+    except LexicalConfigError as exc:
+        raise ValidationFailedError(str(exc)) from exc
+    if lexical_config.reads_bm25_v2:
+        raise ValidationFailedError(
+            "bm25_v2 active retrieval is unavailable; this release is shadow-only"
+        )
+    return lexical_config
+
+
+def dataset_retrieval_generation(dataset: dict[str, Any]) -> tuple[str, Any]:
+    """Capture the authoritative generation that a retrieval may return."""
+
+    require_shadow_only_dataset(dataset)
+    return (
+        str(dataset.get("tenant_id") or "").strip(),
+        dataset.get("content_revision"),
+    )
+
+
+def _has_explicit_rrf_weighting(
+    *,
+    retrieval_defaults: dict[str, Any],
+    dense_weight: float | None,
+    bm25_weight: float | None,
+    alpha: float | None,
+    rrf_weights: dict[str, float] | None,
+) -> bool:
+    """Return whether weighted RRF was selected rather than merely defaulted."""
+    if any(value is not None for value in (dense_weight, bm25_weight, alpha)):
+        return True
+    if isinstance(rrf_weights, dict) and bool(rrf_weights):
+        return True
+
+    for key in ("dense_weight", "bm25_weight", "rrf_weights"):
+        value = retrieval_defaults.get(key)
+        if value is not None and value != {}:
+            return True
+
+    nested_fusion = _ensure_dict(retrieval_defaults.get("fusion"))
+    for key in ("alpha", "dense_weight", "bm25_weight", "rrf_weights"):
+        value = nested_fusion.get(key)
+        if value is not None and value != {}:
+            return True
+
+    # Adaptive weights historically defaulted on but did not alter RRF. Treat
+    # them as a weighted-RRF opt-in only when the dataset stores the flag.
+    return retrieval_defaults.get("adaptive_weights") is True
 
 
 @dataclass(frozen=True)
@@ -92,6 +474,114 @@ class RetrievalService:
         self.vector_store = None  # Set post-init by KnowledgeService
         self._ks = None  # Set post-init by KnowledgeService
 
+    async def _require_unchanged_retrieval_generation(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        expected: tuple[str, Any],
+    ) -> None:
+        """Discard any result that overlapped deletion set/clear or failure."""
+
+        authoritative = await self._ks.require_dataset_access(
+            user,
+            dataset_id,
+            required="viewer",
+        )
+        if dataset_retrieval_generation(authoritative) != expected:
+            raise ValidationFailedError(
+                "dataset index generation changed during retrieval; retry the request"
+            )
+
+    async def _require_collection_readable(
+        self,
+        dataset: dict[str, Any],
+        dataset_id: str,
+    ) -> None:
+        """Fail before cache, embedding, or PostgreSQL fallback on unsafe Qdrant state."""
+
+        index_config = _ensure_dict(dataset.get("index_config"))
+        retrieval_defaults = _ensure_dict(index_config.get("retrieval"))
+        _require_bounded_persisted_retrieval_config(retrieval_defaults)
+        _require_server_owned_rerank_config(retrieval_defaults.get("rerank"))
+        profile_detector = getattr(self._ks, "_is_multimodal_dataset", None)
+        is_multimodal = _dataset_uses_multimodal_profile(dataset) or (
+            callable(profile_detector) and bool(profile_detector(dataset))
+        )
+        if is_multimodal:
+            raise ValidationFailedError(
+                "multimodal dataset retrieval is unavailable in this release"
+            )
+        collection_name = str(dataset.get("collection_name") or "").strip()
+        tenant_id = str(dataset.get("tenant_id") or "").strip()
+        if not collection_name:
+            raise ValidationFailedError(
+                "dataset retrieval requires a persisted Qdrant collection"
+            )
+        guard = getattr(self.vector_store, "require_collection_readable", None)
+        if not callable(guard):
+            raise ValidationFailedError(
+                "vector store collection-read authority is unavailable"
+            )
+        try:
+            await guard(
+                collection_name,
+                tenant_id=tenant_id,
+                dataset_id=dataset_id,
+            )
+        except Exception as exc:
+            raise ValidationFailedError(
+                f"dataset collection is not readable: {exc}"
+            ) from exc
+
+    async def _active_segment_ids(
+        self,
+        *,
+        dataset_id: str,
+        tenant_id: str,
+        segment_ids: list[str],
+    ) -> set[str]:
+        """Resolve the authoritative active subset in one PostgreSQL query."""
+
+        normalized_ids = list(
+            dict.fromkeys(
+                str(segment_id or "").strip()
+                for segment_id in segment_ids
+                if str(segment_id or "").strip()
+            )
+        )
+        if not normalized_ids:
+            return set()
+        normalized_tenant = str(tenant_id or "").strip()
+        if not normalized_tenant:
+            raise ValidationFailedError(
+                "active-segment authority requires a non-empty dataset tenant scope"
+            )
+        filter_active = getattr(self.db, "filter_active_segment_ids", None)
+        if not callable(filter_active):
+            raise ValidationFailedError(
+                "active-segment database authority is unavailable"
+            )
+        try:
+            active = await filter_active(
+                dataset_id=dataset_id,
+                tenant_id=normalized_tenant,
+                segment_ids=normalized_ids,
+            )
+        except Exception as exc:
+            raise ValidationFailedError(
+                f"active-segment database authority failed: {exc}"
+            ) from exc
+        active_ids = {
+            str(segment_id or "").strip()
+            for segment_id in (active or set())
+            if str(segment_id or "").strip()
+        }
+        if not active_ids.issubset(set(normalized_ids)):
+            raise ValidationFailedError(
+                "active-segment database authority returned an unexpected segment"
+            )
+        return active_ids
+
     # ========================================================================
     # Core Retrieval — the main hybrid retrieval pipeline
     # ========================================================================
@@ -127,6 +617,23 @@ class RetrievalService:
         metadata_filter: dict[str, Any] | None = None,
     ) -> tuple[list[RetrieveResult], dict[str, Any]]:
         """Run the existing single-query retrieval contract."""
+        _require_bounded_retrieval_request(
+            query=query,
+            top_k=top_k,
+            vector_top_k=vector_top_k,
+            keyword_top_k=keyword_top_k,
+            candidate_top_k=candidate_top_k,
+            keyword_candidate_k=keyword_candidate_k,
+            rerank_top_n=rerank_top_n,
+            rrf_k=rrf_k,
+            dense_weight=dense_weight,
+            bm25_weight=bm25_weight,
+            alpha=alpha,
+            score_threshold=score_threshold,
+            mmr_lambda=mmr_lambda,
+            mmr_threshold=mmr_threshold,
+            rrf_weights=rrf_weights,
+        )
         return await self._retrieve_queries(
             user=user,
             dataset_id=dataset_id,
@@ -231,6 +738,23 @@ class RetrievalService:
         # default retrieval behavior per dataset.
         index_config = _ensure_dict(dataset.get("index_config"))
         retrieval_defaults = _ensure_dict(index_config.get("retrieval"))
+        lexical_config = require_shadow_only_dataset(dataset)
+        retrieval_generation = dataset_retrieval_generation(dataset)
+        dataset_tenant_id = str(dataset.get("tenant_id") or "").strip()
+        dataset_content_revision = dataset.get("content_revision")
+        await self._require_collection_readable(dataset, dataset_id)
+        if lexical_config.reads_bm25_v2 and not dataset_tenant_id:
+            raise ValidationFailedError(
+                "bm25_v2 retrieval requires a non-empty dataset tenant scope"
+            )
+        if lexical_config.reads_bm25_v2 and (
+            isinstance(dataset_content_revision, bool)
+            or not isinstance(dataset_content_revision, int)
+            or dataset_content_revision < 0
+        ):
+            raise ValidationFailedError(
+                "bm25_v2 retrieval requires the current dataset content_revision"
+            )
 
         # Enforce dataset-level retrieval config (ignore request overrides) if enabled.
         retrieval_enforce = bool(
@@ -281,6 +805,15 @@ class RetrievalService:
         effective_fusion_method = fusion_config["method"]
         effective_dense_weight = fusion_config["dense_weight"]
         effective_bm25_weight = fusion_config["bm25_weight"]
+        weighted_rrf_enabled = effective_fusion_method == "rrf" and (
+            _has_explicit_rrf_weighting(
+                retrieval_defaults=retrieval_defaults,
+                dense_weight=dense_weight,
+                bm25_weight=bm25_weight,
+                alpha=alpha,
+                rrf_weights=rrf_weights,
+            )
+        )
 
         top_k = max(int(top_k), 1)
         vector_k = int(
@@ -318,7 +851,6 @@ class RetrievalService:
 
         # Rerank params (bool or dict in index_config)
         rerank_cfg = retrieval_defaults.get("rerank")
-        rerank_api_key = None
         rerank_provider = None
         if isinstance(rerank_cfg, dict):
             rerank_enabled = (
@@ -326,18 +858,17 @@ class RetrievalService:
             )
             rerank_provider = str(rerank_cfg.get("provider") or "").strip() or None
             effective_rerank_model = str(
-                rerank_model or rerank_cfg.get("model") or "gte-rerank-v2"
+                rerank_model or rerank_cfg.get("model") or "qwen3-rerank"
             )
             effective_rerank_top_n = (
                 int(rerank_top_n)
                 if rerank_top_n is not None
                 else (int(rerank_cfg["top_n"]) if rerank_cfg.get("top_n") is not None else None)
             )
-            rerank_api_key = rerank_cfg.get("api_key") or None
         else:
             # Rerank defaults to OFF unless explicitly configured
             rerank_enabled = bool(rerank_cfg) if rerank is None else bool(rerank)
-            effective_rerank_model = str(rerank_model or "gte-rerank-v2")
+            effective_rerank_model = str(rerank_model or "qwen3-rerank")
             effective_rerank_top_n = int(rerank_top_n) if rerank_top_n is not None else None
 
         from .text_reranker import (
@@ -383,9 +914,7 @@ class RetrievalService:
         embedding_config = _ensure_dict(dataset.get("embedding_config"))
         dim = int(dataset.get("embedding_dimension") or 0) or None
         collection = str(dataset.get("collection_name") or "")
-
-        # Check if this is a multimodal dataset - use unified embedding for cross-modal retrieval
-        is_multimodal = self._ks._is_multimodal_dataset(dataset)
+        is_multimodal = False  # Rejected by the release profile preflight above.
 
         queries_to_run = [str(item["query"]) for item in query_specs]
 
@@ -458,6 +987,17 @@ class RetrievalService:
         else:
             effective_mode = "bm25"
 
+        # Resolve the final language-adaptive weights before either fusion
+        # implementation runs. Native Qdrant RRF and the Python fallback must
+        # consume and report the same weights for an identical request.
+        adaptive_weights = bool(retrieval_defaults.get("adaptive_weights", True))
+        if effective_mode == "hybrid" and adaptive_weights:
+            effective_dense_weight, effective_bm25_weight = compute_language_weights(
+                q,
+                default_dense_weight=effective_dense_weight,
+                default_bm25_weight=effective_bm25_weight,
+            )
+
         if dataset.get("needs_reindex") and dense_queries:
             raise ValidationFailedError(
                 "Dataset embeddings were migrated and require re-indexing before vector retrieval. "
@@ -484,6 +1024,8 @@ class RetrievalService:
                     collection_name=collection,
                     query_vector=qvec_local,
                     top_k=max(int(_query_option(query_text, "vector_top_k", vector_k)), 1),
+                    dataset_id=dataset_id,
+                    tenant_id=dataset_tenant_id,
                     document_id=_query_option(query_text, "document_id", document_id),
                     source_type=_query_option(
                         query_text, "source_type_filter", source_type_filter
@@ -510,6 +1052,10 @@ class RetrievalService:
                         }
                     )
                 return filtered, raw_count
+            except CollectionReadAuthorityError as vec_err:
+                raise ValidationFailedError(
+                    f"dataset collection is not readable: {vec_err}"
+                ) from vec_err
             except Exception as vec_err:
                 logger.warning(f"Dense search failed: {vec_err}")
                 recall_errors.setdefault(query_text, {})["dense"] = str(vec_err)
@@ -527,14 +1073,68 @@ class RetrievalService:
             if effective_mode not in {"bm25", "hybrid"}:
                 return [], 0
 
+            query_keyword_k = max(
+                int(_query_option(query_text, "keyword_top_k", keyword_k)), 1
+            )
+            if lexical_config.reads_bm25_v2:
+                if not collection:
+                    raise ValidationFailedError(
+                        "bm25_v2 retrieval requires a persisted Qdrant collection"
+                    )
+                try:
+                    sparse_hits = await self.vector_store.sparse_search(
+                        collection_name=collection,
+                        sparse_indices=[],
+                        sparse_values=[],
+                        top_k=query_keyword_k,
+                        dataset_id=dataset_id,
+                        tenant_id=dataset_tenant_id,
+                        document_id=_query_option(query_text, "document_id", document_id),
+                        source_type=_query_option(
+                            query_text, "source_type_filter", source_type_filter
+                        ),
+                        language=_query_option(
+                            query_text, "language_filter", language_filter
+                        ),
+                        metadata_filter=_query_option(
+                            query_text, "metadata_filter", metadata_filter
+                        ),
+                        with_payload=True,
+                        query_text=query_text,
+                        lexical_config=lexical_config,
+                        authority_content_revision=dataset_content_revision,
+                    )
+                except Exception as exc:
+                    recall_errors.setdefault(query_text, {})["bm25_v2"] = str(exc)
+                    raise ValidationFailedError(
+                        f"bm25_v2 sparse search failed: {exc}"
+                    ) from exc
+
+                hits = []
+                for hit in sparse_hits:
+                    payload = dict(hit.payload or {})
+                    text = str(payload.get("text") or "").strip()
+                    segment_id = str(payload.get("segment_id") or hit.point_id or "")
+                    if not text or not segment_id or not _matches_query_filters(
+                        query_text, payload
+                    ):
+                        continue
+                    hits.append(
+                        {
+                            "segment_id": segment_id,
+                            "document_id": str(payload.get("document_id") or ""),
+                            "text": text,
+                            "metadata": payload,
+                            "bm25_score": float(hit.score),
+                        }
+                    )
+                return hits, len(sparse_hits)
+
             query_tokens = tokenize(query_text, keep_original=True, remove_stopwords=True)
             if not query_tokens:
                 return [], 0
 
             # Step 1: PostgreSQL GIN FTS retrieval for candidates
-            query_keyword_k = max(
-                int(_query_option(query_text, "keyword_top_k", keyword_k)), 1
-            )
             query_keyword_pool_k = max(
                 int(
                     _query_option(
@@ -547,6 +1147,7 @@ class RetrievalService:
             try:
                 raw_hits = await self.db.search_segments_text(
                     dataset_id=dataset_id,
+                    tenant_id=dataset_tenant_id,
                     terms=query_tokens,
                     document_id=_query_option(query_text, "document_id", document_id),
                     source_type=_query_option(
@@ -588,6 +1189,9 @@ class RetrievalService:
                     if _matches_query_filters(query_text, payload):
                         valid.append((row, payload, text))
 
+            # lexical_v1 is a term-presence index. Repeated terms were
+            # historically deduplicated before BM25 scoring; changing that
+            # silently reorders existing datasets.
             doc_tokens = [tokenize(text) for _, _, text in valid]
             scores = bm25_scores(query_tokens, doc_tokens)
 
@@ -701,6 +1305,8 @@ class RetrievalService:
                 if isinstance(result, BaseException):
                     if isinstance(result, asyncio.CancelledError):
                         raise result
+                    if isinstance(result, ValidationFailedError):
+                        raise result
                     recall_errors.setdefault(query_text, {})["dense"] = str(result)
                     results.append(([], 0))
                 else:
@@ -729,6 +1335,8 @@ class RetrievalService:
             for query_text, result in zip(bm25_queries, gathered, strict=False):
                 if isinstance(result, BaseException):
                     if isinstance(result, asyncio.CancelledError):
+                        raise result
+                    if lexical_config.reads_bm25_v2:
                         raise result
                     recall_errors.setdefault(query_text, {})["bm25"] = str(result)
                     results.append(([], 0))
@@ -809,6 +1417,12 @@ class RetrievalService:
                     collection = await self.vector_store.ensure_collection(
                         dataset_id=dataset_id,
                         dimension=embedder.dimension,
+                        tenant_id=dataset_tenant_id,
+                        **(
+                            {"lexical_config": lexical_config}
+                            if lexical_config.configured
+                            else {}
+                        ),
                     )
                 # Note: Don't close cached embedder - it's reused across requests
 
@@ -857,7 +1471,9 @@ class RetrievalService:
             for query_text in queries_to_run:
                 query_vector = query_vectors.get(query_text)
                 sparse_indices, sparse_values = query_to_sparse_vector(query_text)
-                if not query_vector or not sparse_indices:
+                if not query_vector or (
+                    not lexical_config.reads_bm25_v2 and not sparse_indices
+                ):
                     native_routes = []
                     break
                 native_routes.append(
@@ -865,6 +1481,7 @@ class RetrievalService:
                         "query_vector": query_vector,
                         "sparse_indices": sparse_indices,
                         "sparse_values": sparse_values,
+                        "query_text": query_text,
                         "dense_limit": max(
                             int(_query_option(query_text, "vector_top_k", vector_k)), 1
                         ),
@@ -886,12 +1503,27 @@ class RetrievalService:
             if native_routes:
                 native_started = time.perf_counter()
                 try:
+                    native_kwargs: dict[str, Any] = {
+                        "collection_name": collection,
+                        "routes": native_routes,
+                        "top_k": candidate_k,
+                        "with_payload": True,
+                        "rrf_k": rrf_k_value,
+                        "dataset_id": dataset_id,
+                        "tenant_id": dataset_tenant_id,
+                    }
+                    if weighted_rrf_enabled:
+                        native_kwargs.update(
+                            dense_weight=effective_dense_weight,
+                            sparse_weight=effective_bm25_weight,
+                        )
+                    if lexical_config.reads_bm25_v2:
+                        native_kwargs["lexical_config"] = lexical_config
+                        native_kwargs["authority_content_revision"] = (
+                            dataset_content_revision
+                        )
                     native_result_sets = await self.vector_store.hybrid_search_multi_native(
-                        collection_name=collection,
-                        routes=native_routes,
-                        top_k=candidate_k,
-                        with_payload=True,
-                        rrf_k=rrf_k_value,
+                        **native_kwargs,
                     )
                     if len(native_result_sets) != len(native_routes):
                         raise RuntimeError(
@@ -900,8 +1532,16 @@ class RetrievalService:
                     native_hybrid_used = True
                     native_prefetch_count = len(native_routes) * 2
                     native_rrf_count = len(native_routes)
+                except CollectionReadAuthorityError as exc:
+                    raise ValidationFailedError(
+                        f"dataset collection is not readable: {exc}"
+                    ) from exc
                 except Exception as exc:
                     native_hybrid_error = str(exc)
+                    if lexical_config.reads_bm25_v2:
+                        raise ValidationFailedError(
+                            f"bm25_v2 native hybrid search failed: {exc}"
+                        ) from exc
                     logger.warning("Native hybrid search failed, falling back: %s", exc)
                 finally:
                     native_rrf_ms = (time.perf_counter() - native_started) * 1000
@@ -916,7 +1556,10 @@ class RetrievalService:
 
             if isinstance(dense_result, BaseException):
                 if (
-                    isinstance(dense_result, asyncio.CancelledError)
+                    isinstance(
+                        dense_result,
+                        (asyncio.CancelledError, ValidationFailedError),
+                    )
                     or effective_mode == "dense"
                 ):
                     raise dense_result
@@ -929,6 +1572,7 @@ class RetrievalService:
                 if (
                     isinstance(bm25_result, asyncio.CancelledError)
                     or effective_mode == "bm25"
+                    or lexical_config.reads_bm25_v2
                 ):
                     raise bm25_result
                 logger.warning("BM25 multi-retrieval failed: %s", bm25_result)
@@ -1064,6 +1708,30 @@ class RetrievalService:
                 candidate["_fusion_score"] = normalized_score
                 candidate["_final_score"] = normalized_score
 
+        candidate_ids = list(candidates)
+        active_candidate_ids = await self._active_segment_ids(
+            dataset_id=dataset_id,
+            tenant_id=dataset_tenant_id,
+            segment_ids=candidate_ids,
+        )
+        inactive_candidate_count = len(candidate_ids) - len(active_candidate_ids)
+        if inactive_candidate_count:
+            candidates = {
+                segment_id: candidate
+                for segment_id, candidate in candidates.items()
+                if segment_id in active_candidate_ids
+            }
+
+        legacy_image_candidate_count = sum(
+            1 for candidate in candidates.values() if _candidate_is_image(candidate)
+        )
+        if legacy_image_candidate_count:
+            candidates = {
+                segment_id: candidate
+                for segment_id, candidate in candidates.items()
+                if not _candidate_is_image(candidate)
+            }
+
         # --- Stage 2: Normalize scores to [0, 1] using robust normalization ---
         # Build score dicts for normalization
         dense_scores_dict = {
@@ -1082,20 +1750,7 @@ class RetrievalService:
         dense_norm_dict = ScoreNormalization.robust_normalize(dense_scores_dict)
         bm25_norm_dict = ScoreNormalization.robust_normalize(bm25_scores_dict)
 
-        # Detect query language for weight adjustment
-        lang_dense_weight, lang_bm25_weight = compute_language_weights(
-            q,
-            default_dense_weight=effective_dense_weight,
-            default_bm25_weight=effective_bm25_weight,
-        )
-
-        # Apply normalized scores to candidates
-        # Apply adaptive weights for multilingual queries (if enabled)
-        adaptive_weights = bool(retrieval_defaults.get("adaptive_weights", True))
-        if effective_mode == "hybrid" and adaptive_weights:
-            effective_dense_weight = lang_dense_weight
-            effective_bm25_weight = lang_bm25_weight
-
+        # Apply normalized scores to candidates.
         for cid, cand in candidates.items():
             if cid in dense_norm_dict:
                 cand["_dense_score_norm"] = dense_norm_dict[cid]
@@ -1142,10 +1797,22 @@ class RetrievalService:
                 }
                 if not query_ranked_lists:
                     continue
+                rrf_kwargs: dict[str, Any] = {"k": rrf_k_value}
+                if weighted_rrf_enabled:
+                    rrf_kwargs.update(
+                        weights={
+                            source: (
+                                effective_dense_weight
+                                if source == "dense"
+                                else effective_bm25_weight
+                            )
+                            for source in query_ranked_lists
+                        },
+                        qdrant_weighted=True,
+                    )
                 query_scores = reciprocal_rank_fusion(
                     query_ranked_lists,
-                    k=rrf_k_value,
-                    weights=dict.fromkeys(query_ranked_lists, 1.0),
+                    **rrf_kwargs,
                 )
                 rrf_query_count += 1
                 for cid, score in query_scores.items():
@@ -1225,6 +1892,19 @@ class RetrievalService:
             for global_rank, candidate in enumerate(ranked, 1):
                 candidate["_global_rank"] = global_rank
 
+        bm25_v2_readiness_receipt = None
+        if lexical_config.reads_bm25_v2 and bm25_queries and collection:
+            receipt_getter = getattr(
+                self.vector_store,
+                "latest_bm25_v2_readiness_receipt",
+                None,
+            )
+            if callable(receipt_getter):
+                bm25_v2_readiness_receipt = receipt_getter(
+                    collection,
+                    lexical_config,
+                )
+
         meta: dict[str, Any] = {
             "dataset_id": dataset_id,
             "mode": effective_mode,
@@ -1235,6 +1915,34 @@ class RetrievalService:
             "recall_max_parallel": retrieval_query_concurrency,
             "document_id": document_id,
             "enforce_config": retrieval_enforce,
+            "lexical_version": lexical_config.active_version,
+            "lexical_field": lexical_config.active_field,
+            "bm25_v2_schema_fingerprint": (
+                lexical_config.bm25_v2.fingerprint
+                if lexical_config.reads_bm25_v2
+                else None
+            ),
+            "bm25_v2_filtering_profile_fingerprint": (
+                lexical_config.filtering.fingerprint
+                if lexical_config.reads_bm25_v2
+                else None
+            ),
+            "bm25_v2_readiness_verified": bm25_v2_readiness_receipt is not None,
+            "bm25_v2_readiness_receipt": (
+                {
+                    "runtime_revision": bm25_v2_readiness_receipt.runtime_revision,
+                    "point_count": bm25_v2_readiness_receipt.point_count,
+                    "point_ids_sha256": bm25_v2_readiness_receipt.point_ids_sha256,
+                    "source_text_sha256": (
+                        bm25_v2_readiness_receipt.source_text_sha256
+                    ),
+                    "backfill_receipt_sha256": (
+                        bm25_v2_readiness_receipt.backfill_receipt_sha256
+                    ),
+                }
+                if bm25_v2_readiness_receipt is not None
+                else None
+            ),
             # Retrieval counts (for backward compatibility with frontend)
             "vector_hits_count": None
             if native_hybrid_used
@@ -1279,6 +1987,13 @@ class RetrievalService:
             "native_batch_request_count": 1 if native_hybrid_used else 0,
             "native_rrf_ms": round(native_rrf_ms, 2),
             "fusion_applied_by": "qdrant" if native_hybrid_used else "python",
+            "fusion_semantics": (
+                QDRANT_WEIGHTED_RRF_SEMANTICS
+                if weighted_rrf_enabled
+                else LEGACY_RRF_SEMANTICS
+            )
+            if effective_fusion_method == "rrf" and (effective_mode == "hybrid" or use_rrf)
+            else None,
             # Post-processing config
             "rerank": bool(rerank_enabled),
             "rerank_provider": effective_rerank_provider if rerank_enabled else None,
@@ -1297,6 +2012,8 @@ class RetrievalService:
             "embedding_model": embedding_model,
             # Total candidates after merge
             "total_candidates": len(candidates),
+            "inactive_candidates_filtered": inactive_candidate_count,
+            "legacy_image_candidates_filtered": legacy_image_candidate_count,
             # Pipeline stages
             "pipeline_stages": [],
         }
@@ -1327,14 +2044,30 @@ class RetrievalService:
             )
         meta["pipeline_stages"].append(f"Merged candidates: {len(candidates)}")
         if native_hybrid_used:
+            rrf_semantics = (
+                QDRANT_WEIGHTED_RRF_SEMANTICS
+                if weighted_rrf_enabled
+                else LEGACY_RRF_SEMANTICS
+            )
             meta["pipeline_stages"].append(
-                f"Fusion (qdrant rrf): queries={native_rrf_count}, "
-                f"cross_query=max, k={rrf_k_value}"
+                f"Fusion ({rrf_semantics}, qdrant): "
+                f"queries={native_rrf_count}, "
+                f"cross_query=max, k={rrf_k_value}, "
+                f"dense_w={effective_dense_weight:.2f}, "
+                f"bm25_w={effective_bm25_weight:.2f}"
             )
         elif use_rrf:
+            rrf_semantics = (
+                QDRANT_WEIGHTED_RRF_SEMANTICS
+                if weighted_rrf_enabled
+                else LEGACY_RRF_SEMANTICS
+            )
             meta["pipeline_stages"].append(
-                f"Fusion (rrf): queries={rrf_query_count}, "
-                f"ranked_lists={len(rrf_ranked_lists)}, cross_query=max"
+                f"Fusion ({rrf_semantics}, python): "
+                f"queries={rrf_query_count}, "
+                f"ranked_lists={len(rrf_ranked_lists)}, cross_query=max, "
+                f"dense_w={effective_dense_weight:.2f}, "
+                f"bm25_w={effective_bm25_weight:.2f}"
             )
         elif effective_mode == "hybrid":
             meta["pipeline_stages"].append(
@@ -1367,14 +2100,17 @@ class RetrievalService:
 
         # Prefetch vectors for MMR in parallel with rerank to reduce latency
         mmr_vectors_task = None
-        if mmr_enabled and ranked and collection:
+        if mmr_enabled and ranked and len(ranked) > top_k and collection:
             ids_for_mmr = [
                 str(c.get("segment_id") or "") for c in ranked if str(c.get("segment_id") or "")
             ]
             if ids_for_mmr:
                 mmr_vectors_task = asyncio.create_task(
                     self.vector_store.retrieve_vectors(
-                        collection_name=collection, point_ids=ids_for_mmr
+                        collection_name=collection,
+                        point_ids=ids_for_mmr,
+                        tenant_id=dataset_tenant_id,
+                        dataset_id=dataset_id,
                     )
                 )
 
@@ -1382,26 +2118,23 @@ class RetrievalService:
         if rerank_enabled and ranked:
             rerank_started = time.perf_counter()
             try:
-                def _resolve_dashscope_rerank_api_key(
-                    include_override: bool = True,
-                ) -> str | None:
+                def _resolve_dashscope_rerank_api_key() -> str | None:
                     return (
-                        (rerank_api_key if include_override else None)
-                        or getattr(self.settings.knowledge.dashscope, "api_key", None)
+                        getattr(self.settings.knowledge.dashscope, "api_key", None)
                         or os.getenv("DASHSCOPE_API_KEY")
                         or os.getenv("Aliyun_KEY")  # noqa: SIM112 - legacy env name
                         or os.getenv("ALIYUN_KEY")
                     )
 
                 def _resolve_cohere_rerank_api_key() -> str | None:
-                    return rerank_api_key or os.getenv("COHERE_API_KEY")
+                    return os.getenv("COHERE_API_KEY")
 
                 if effective_rerank_top_n is None:
                     effective_rerank_top_n = min(len(ranked), max(top_k * 3, 20))
 
                 api_key = None
                 if effective_rerank_provider == "dashscope":
-                    api_key = _resolve_dashscope_rerank_api_key(include_override=True)
+                    api_key = _resolve_dashscope_rerank_api_key()
                     if not api_key:
                         raise ValidationFailedError("dashscope api_key is required for rerank")
                 elif effective_rerank_provider == "cohere":
@@ -1430,9 +2163,7 @@ class RetrievalService:
                         effective_rerank_provider == "bge"
                         and "FlagEmbedding" in str(fallback_exc)
                     ):
-                        fallback_api_key = _resolve_dashscope_rerank_api_key(
-                            include_override=False
-                        )
+                        fallback_api_key = _resolve_dashscope_rerank_api_key()
                         if not fallback_api_key:
                             raise
                         fallback_model = normalize_rerank_model("dashscope", None)
@@ -1510,6 +2241,8 @@ class RetrievalService:
                         vectors = await self.vector_store.retrieve_vectors(
                             collection_name=collection,
                             point_ids=ids,
+                            tenant_id=dataset_tenant_id,
+                            dataset_id=dataset_id,
                         )
 
                     relevance: dict[str, float] = {}
@@ -1571,6 +2304,10 @@ class RetrievalService:
                     meta["pipeline_stages"].append(
                         f"MMR diversification: {len(out)} results (lambda={effective_mmr_lambda})"
                     )
+                except CollectionReadAuthorityError as exc:
+                    raise ValidationFailedError(
+                        f"dataset collection is not readable: {exc}"
+                    ) from exc
                 except Exception as exc:
                     meta["mmr_error"] = str(exc)
             stage_timings["mmr_ms"] = (time.perf_counter() - mmr_started) * 1000
@@ -1764,6 +2501,11 @@ class RetrievalService:
         meta["timings_ms"] = {
             key: round(value, 2) for key, value in stage_timings.items()
         }
+        await self._require_unchanged_retrieval_generation(
+            user,
+            dataset_id,
+            retrieval_generation,
+        )
         return results, meta
 
     # ========================================================================
@@ -1797,6 +2539,27 @@ class RetrievalService:
         4. Attaches associated images to text segments
         5. Optionally performs multimodal reranking via VLM
         """
+        _require_bounded_retrieval_request(
+            query=query,
+            top_k=top_k,
+            vector_top_k=kwargs.get("vector_top_k"),
+            keyword_top_k=kwargs.get("keyword_top_k"),
+            candidate_top_k=kwargs.get("candidate_top_k"),
+            keyword_candidate_k=kwargs.get("keyword_candidate_k"),
+            rerank_top_n=kwargs.get("rerank_top_n"),
+            rrf_k=kwargs.get("rrf_k"),
+            dense_weight=kwargs.get("dense_weight"),
+            bm25_weight=kwargs.get("bm25_weight"),
+            alpha=kwargs.get("alpha"),
+            score_threshold=kwargs.get("score_threshold"),
+            mmr_lambda=kwargs.get("mmr_lambda"),
+            mmr_threshold=kwargs.get("mmr_threshold"),
+            rrf_weights=kwargs.get("rrf_weights"),
+        )
+        raise ValidationFailedError(
+            "multimodal retrieval is unavailable in this release"
+        )
+
         _ = image_search_enabled
 
         # Fetch more results if filtering to ensure we get enough after filter
@@ -1817,11 +2580,18 @@ class RetrievalService:
         filtered_kwargs = {k: v for k, v in kwargs.items() if k not in unsupported_kwargs}
 
         # Perform standard retrieval (now with unified multimodal embedding)
-        results, meta = await self.retrieve(
+        dataset = await self._ks.require_dataset_access(
+            user,
+            dataset_id,
+            required="viewer",
+        )
+        retrieval_generation = dataset_retrieval_generation(dataset)
+        results, meta = await self._retrieve_queries(
             user=user,
             dataset_id=dataset_id,
             query=query,
             top_k=effective_top_k,
+            _dataset=dataset,
             **filtered_kwargs,
         )
 
@@ -1888,13 +2658,22 @@ class RetrievalService:
             meta["filtered_count"] = len(filtered_results)
 
         if not include_images or not results:
+            await self._require_unchanged_retrieval_generation(
+                user,
+                dataset_id,
+                retrieval_generation,
+            )
             return results, meta
 
         # Get segment IDs that might have associated images
         segment_ids = [r.segment_id for r in results]
 
         # Batch fetch associated images
-        associations = await self.db.get_segment_associations_batch(segment_ids)
+        associations = await self.db.get_segment_associations_batch(
+            segment_ids,
+            dataset_id=dataset_id,
+            tenant_id=str(dataset.get("tenant_id") or ""),
+        )
 
         # Enhance results with associated images
         enhanced_results: list[RetrieveResult] = []
@@ -2060,6 +2839,11 @@ class RetrievalService:
 
         # Truncate to original top_k (effective_top_k was expanded for filtering headroom)
         enhanced_results = enhanced_results[:top_k]
+        await self._require_unchanged_retrieval_generation(
+            user,
+            dataset_id,
+            retrieval_generation,
+        )
         return enhanced_results, meta
 
     # ========================================================================
@@ -2084,6 +2868,28 @@ class RetrievalService:
         1. Expanded recall phase: Retrieve `top_k * 2.5` candidates using hybrid search
         2. VLM reranking phase: Apply VLM-based reranking for image results (conditional)
         """
+        _require_bounded_retrieval_request(
+            query=query,
+            top_k=top_k,
+            vector_top_k=kwargs.get("vector_top_k"),
+            keyword_top_k=kwargs.get("keyword_top_k"),
+            candidate_top_k=kwargs.get("candidate_top_k"),
+            keyword_candidate_k=kwargs.get("keyword_candidate_k"),
+            rerank_top_n=kwargs.get("rerank_top_n"),
+            rrf_k=kwargs.get("rrf_k"),
+            dense_weight=kwargs.get("dense_weight"),
+            bm25_weight=kwargs.get("bm25_weight"),
+            alpha=kwargs.get("alpha"),
+            score_threshold=kwargs.get("score_threshold"),
+            mmr_lambda=kwargs.get("mmr_lambda"),
+            mmr_threshold=kwargs.get("mmr_threshold"),
+            rrf_weights=kwargs.get("rrf_weights"),
+        )
+        if bool(include_images) or bool(vlm_rerank) or str(intent).lower() == "find_image":
+            raise ValidationFailedError(
+                "multimodal retrieval is unavailable in this release"
+            )
+
         # Validate intent parameter
         valid_intents = {"general", "find_image", "find_document"}
         if intent not in valid_intents:
@@ -2101,10 +2907,22 @@ class RetrievalService:
             "fusion_method": kwargs.get("fusion_method", "rrf"),
             **{k: v for k, v in kwargs.items() if k not in ("mode", "fusion_method")},
         }
+        dataset = await self._ks.require_dataset_access(user, dataset_id, required="viewer")
+        require_shadow_only_dataset(dataset)
+        retrieval_generation = dataset_retrieval_generation(dataset)
+        await self._require_collection_readable(dataset, dataset_id)
+        # The cache is safe only when it is bound to the authoritative content
+        # revision and retrieval-effective Dataset configuration. This existing
+        # fingerprint also includes the versioned lexical profile, so a
+        # lexical_v1 -> bm25_v2 cutover cannot reuse legacy results.
+        from .dataset_service import _dataset_revision_fingerprint
+
+        dataset_revision_fingerprint = _dataset_revision_fingerprint(dataset)
         normalized_query = " ".join((query or "").strip().split())
         cache_fingerprint_payload = {
             "user_id": user.user_id,
             "dataset_id": dataset_id,
+            "dataset_revision_fingerprint": dataset_revision_fingerprint,
             "query": normalized_query,
             "intent": intent,
             "top_k": int(top_k),
@@ -2124,15 +2942,32 @@ class RetrievalService:
         retrieval_cache_key = (
             f"{user.user_id}:{dataset_id}:{retrieval_query_fingerprint}:intent={intent}"
         )
-        dataset = await self._ks.require_dataset_access(
-            user, dataset_id, required="viewer"
-        )
-        cached_response = await self._ks._get_cached_retrieval(retrieval_cache_key)
-        if cached_response is not None:
-            cached_results, cached_meta = cached_response
-            cached_meta["retrieval_cache_hit"] = True
-            cached_meta["retrieval_query_fingerprint"] = retrieval_query_fingerprint
-            return cached_results, cached_meta
+        if dataset_revision_fingerprint is not None:
+            cached_response = await self._ks._get_cached_retrieval(retrieval_cache_key)
+            if cached_response is not None:
+                cached_results, cached_meta = cached_response
+                cached_ids = [
+                    str(getattr(result, "segment_id", "") or "").strip()
+                    for result in cached_results
+                    if str(getattr(result, "segment_id", "") or "").strip()
+                ]
+                active_cached_ids = await self._active_segment_ids(
+                    dataset_id=dataset_id,
+                    tenant_id=str(dataset.get("tenant_id") or ""),
+                    segment_ids=cached_ids,
+                )
+                if active_cached_ids != set(cached_ids):
+                    cached_response = None
+                else:
+                    cached_meta["retrieval_cache_hit"] = True
+                    cached_meta["retrieval_query_fingerprint"] = retrieval_query_fingerprint
+                    cached_meta["dataset_revision_fingerprint"] = dataset_revision_fingerprint
+                    await self._require_unchanged_retrieval_generation(
+                        user,
+                        dataset_id,
+                        retrieval_generation,
+                    )
+                    return cached_results, cached_meta
 
         # Perform base retrieval with expanded top_k
         results, meta = await self._retrieve_queries(
@@ -2151,6 +2986,7 @@ class RetrievalService:
         meta["original_top_k"] = top_k
         meta["retrieval_cache_hit"] = False
         meta["retrieval_query_fingerprint"] = retrieval_query_fingerprint
+        meta["dataset_revision_fingerprint"] = dataset_revision_fingerprint
 
         # Log retrieval statistics
         content_type_counts: dict[str, int] = {}
@@ -2161,7 +2997,13 @@ class RetrievalService:
         meta["stage1_content_types"] = content_type_counts
 
         if not results:
-            await self._ks._set_cached_retrieval(retrieval_cache_key, results, meta)
+            if dataset_revision_fingerprint is not None:
+                await self._ks._set_cached_retrieval(retrieval_cache_key, results, meta)
+            await self._require_unchanged_retrieval_generation(
+                user,
+                dataset_id,
+                retrieval_generation,
+            )
             return results, meta
 
         # Stage 2: VLM reranking (conditional)
@@ -2304,7 +3146,11 @@ class RetrievalService:
         # Stage 3: Attach associated images (same as retrieve_with_images)
         if include_images and results:
             segment_ids = [r.segment_id for r in results]
-            associations = await self.db.get_segment_associations_batch(segment_ids)
+            associations = await self.db.get_segment_associations_batch(
+                segment_ids,
+                dataset_id=dataset_id,
+                tenant_id=str(dataset.get("tenant_id") or ""),
+            )
 
             enhanced_results: list[RetrieveResult] = []
             for r in results:
@@ -2376,7 +3222,13 @@ class RetrievalService:
             f"[retrieve_v2] Final: {len(results)} results, content_types={final_content_types}"
         )
 
-        await self._ks._set_cached_retrieval(retrieval_cache_key, results, meta)
+        if dataset_revision_fingerprint is not None:
+            await self._ks._set_cached_retrieval(retrieval_cache_key, results, meta)
+        await self._require_unchanged_retrieval_generation(
+            user,
+            dataset_id,
+            retrieval_generation,
+        )
         return results, meta
 
     # ========================================================================
@@ -2428,6 +3280,25 @@ class RetrievalService:
             Tuple of (batch_results, meta). ``batch_results`` contains one
             globally fused {query, results, meta} result group.
         """
+        _require_bounded_batch_request(queries, max_parallel=max_parallel)
+        _require_bounded_retrieval_request(
+            query="batch",
+            top_k=top_k,
+            vector_top_k=vector_top_k,
+            keyword_top_k=keyword_top_k,
+            candidate_top_k=candidate_top_k,
+            keyword_candidate_k=keyword_candidate_k,
+            rerank_top_n=rerank_top_n,
+            rrf_k=rrf_k,
+            dense_weight=dense_weight,
+            bm25_weight=bm25_weight,
+            alpha=alpha,
+            score_threshold=score_threshold,
+            mmr_lambda=mmr_lambda,
+            mmr_threshold=mmr_threshold,
+            rrf_weights=rrf_weights,
+            scope="retrieval batch request",
+        )
         _ = include_images, include_associated_images
         start_time = time.time()
 
@@ -2497,6 +3368,9 @@ class RetrievalService:
             return default if value is None else value
 
         dataset = await self._ks.require_dataset_access(user, dataset_id, required="viewer")
+        require_shadow_only_dataset(dataset)
+        retrieval_generation = dataset_retrieval_generation(dataset)
+        await self._require_collection_readable(dataset, dataset_id)
         retrieve_started = time.perf_counter()
         try:
             results, pipeline_meta = await self._retrieve_queries(
@@ -2530,6 +3404,12 @@ class RetrievalService:
                 _recall_max_parallel=max(int(max_parallel), 1),
                 _dataset=dataset,
             )
+        except ValidationFailedError:
+            raise
+        except CollectionReadAuthorityError as exc:
+            raise ValidationFailedError(
+                f"dataset collection is not readable: {exc}"
+            ) from exc
         except Exception as exc:
             logger.warning("[retrieve_batch] Global retrieval failed: %s", exc)
             results = []
@@ -2587,4 +3467,9 @@ class RetrievalService:
             "max_queue_wait_ms": 0.0,
         }
 
+        await self._require_unchanged_retrieval_generation(
+            user,
+            dataset_id,
+            retrieval_generation,
+        )
         return batch_results, meta

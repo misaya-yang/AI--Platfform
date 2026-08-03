@@ -1015,8 +1015,8 @@
       "embeddingModel": "Embedding 模型",
       "dimension": "{{dim}}维",
       "uploadFiles": "点击或拖拽上传文件",
-      "supportedFormats": "支持 .pdf, .doc, .docx, .txt, .md, .pptx, .ppt, .png, .jpg, .jpeg, .bmp, .gif, .xls, .xlsx 等格式",
-      "fileSizeLimit": "单文档最大限制 100MB 或 1000 页，单图片最大限制 20MB",
+      "supportedFormats": "支持 .pdf, .docx, .txt, .md, .html 文本与办公文档格式",
+      "fileSizeLimit": "单文档最大限制 100MB 或 1000 页；多模态图片索引暂未开放",
       "addUrl": "或添加网页URL",
       "urlPlaceholder": "输入网页URL，如 https://example.com/doc.html",
       "urlTitle": "文档标题 (可选)",
@@ -1096,7 +1096,8 @@
         "invalidUrl": "请输入有效的URL地址，需以 http:// 或 https:// 开头",
         "duplicateUrl": "该URL已添加",
         "fileTooLarge": "文件 \"{{name}}\" 超过大小限制 ({{limit}})",
-        "duplicateFile": "文件 \"{{name}}\" 已添加"
+        "duplicateFile": "文件 \"{{name}}\" 已添加",
+        "unsupportedFile": "文件 \"{{name}}\" 的格式暂不支持"
       },
       "embeddingGemini001": "Google Gemini Embedding 001",
       "embeddingDashscopeV4": "DashScope Text Embedding v4",
@@ -2650,6 +2651,7 @@
     "taskList": "任务列表",
     "taskRunning": "任务进行中...",
     "taskCompleted": "已完成 {{completed}}/{{total}} 项任务",
+    "streamInterrupted": "回复流意外中断，已保留上方生成内容；请重试。",
     "processSummary": {
       "running": "正在执行 {{tools}} 个工具",
       "preparing": "正在生成回复",

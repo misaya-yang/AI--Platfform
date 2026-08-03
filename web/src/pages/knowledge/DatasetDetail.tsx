@@ -57,7 +57,6 @@ import {
   reindexDocument,
   updateSegment,
   uploadDocument,
-  uploadImages,
   batchUploadDocuments,
   createDocumentFromText,
   createDocumentFromUrl,
@@ -161,12 +160,7 @@ type QAChatMessage = {
 };
 
 const QA_MODEL_OPTIONS = [
-  { value: "gemini-2.0-flash", label: "Gemini 2.0 Flash", provider: "gemini" },
-  { value: "gemini-2.5-flash-preview-05-20", label: "Gemini 2.5 Flash", provider: "gemini" },
-  { value: "qwen-plus", label: "Qwen Plus", provider: "dashscope" },
-  { value: "qwen-turbo", label: "Qwen Turbo", provider: "dashscope" },
-  { value: "deepseek-chat", label: "DeepSeek Chat", provider: "deepseek" },
-  { value: "deepseek-reasoner", label: "DeepSeek Reasoner", provider: "deepseek" },
+  { value: "qwen3.7-plus", label: "Qwen 3.7 Plus", provider: "dashscope" },
 ];
 
 const QA_SYSTEM_PROMPT_KEYS = {
@@ -177,9 +171,9 @@ const QA_SYSTEM_PROMPT_KEYS = {
 import { copyToClipboard } from "@/lib/clipboard";
 
 const EMBEDDING_MODELS = [
-  { provider: "gemini", model: "gemini-embedding-2-preview", label: "Gemini Embedding 2 Preview", dimension: 1024, badge: "推荐" },
+  { provider: "gemini", model: "gemini-embedding-2-preview", label: "Gemini Embedding 2 Preview", dimension: 1024 },
   { provider: "gemini", model: "gemini-embedding-001", label: "Gemini Embedding 001", dimension: 1024 },
-  { provider: "dashscope", model: "text-embedding-v4", label: "DashScope text-embedding-v4", dimension: 1024 },
+  { provider: "dashscope", model: "text-embedding-v4", label: "DashScope text-embedding-v4", dimension: 1024, badge: "推荐" },
   { provider: "dashscope", model: "text-embedding-v3", label: "DashScope text-embedding-v3", dimension: 1024 },
   { provider: "siliconflow", model: "BAAI/bge-m3", label: "SiliconFlow BGE-M3", dimension: 1024 },
   { provider: "siliconflow", model: "BAAI/bge-large-zh-v1.5", label: "SiliconFlow BGE-Large-ZH", dimension: 1024 },
@@ -246,8 +240,8 @@ export function KnowledgeDatasetDetailPage() {
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   
-  // Processing mode for upload: auto | text_only | scanned | multimodal
-  const [uploadProcessingMode, setUploadProcessingMode] = useState<ProcessingMode>("auto");
+  // Multimodal ingestion stays fail-closed until its full lifecycle is released.
+  const uploadProcessingMode: ProcessingMode = "text_only";
   
   // Chunking config for upload
   const [uploadChunkMode, setUploadChunkMode] = useState("automatic");
@@ -293,7 +287,7 @@ export function KnowledgeDatasetDetailPage() {
   const [uploadTableMode, setUploadTableMode] = useState<"markdown" | "row_based" | "structured">("markdown");
   const [uploadTableIncludeHeaders, setUploadTableIncludeHeaders] = useState(true);
   const [uploadTableGenerateSummary, setUploadTableGenerateSummary] = useState(false);
-  const [uploadEmbeddingModel, setUploadEmbeddingModel] = useState("gemini:gemini-embedding-2-preview");
+  const [uploadEmbeddingModel, setUploadEmbeddingModel] = useState("dashscope:text-embedding-v4");
 
   // Rerank model selection
   const [rerankEnabled, setRerankEnabled] = useState(true);
@@ -544,7 +538,18 @@ export function KnowledgeDatasetDetailPage() {
     // Filter by status
     if (statusFilter !== "all") {
       if (statusFilter === "processing") {
-        result = result.filter((d) => ["parsing", "segmenting", "embedding"].includes(d.status));
+        result = result.filter((d) =>
+          [
+            "uploaded",
+            "queued",
+            "detecting",
+            "processing",
+            "parsing",
+            "segmenting",
+            "embedding",
+            "embedding_images",
+          ].includes(d.status)
+        );
       } else {
         result = result.filter((d) => d.status === statusFilter);
       }
@@ -776,45 +781,6 @@ export function KnowledgeDatasetDetailPage() {
       setUploadDialogOpen(true);
     }
     if (fileRef.current) fileRef.current.value = "";
-  }
-
-  // When images are selected via image input
-  async function handleImagesSelected(files?: FileList | null) {
-    if (!files || files.length === 0 || !datasetId) return;
-
-    const imageFiles = Array.from(files);
-    setUploading(true);
-
-    try {
-      const result = await uploadImages(datasetId, imageFiles);
-
-      // Refresh document list
-      await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
-
-      // Show result
-      if (result.failed_count > 0) {
-        toast.warning(
-          t("knowledge.detail.imageUploadDone", { success: result.success_count, failed: result.failed_count }),
-          result.errors.map((e) => `${e.filename}: ${e.error}`).join("; ")
-        );
-      }
-      if (result.success_count > 0) {
-        // Switch to image filter to show uploaded images
-        setContentTypeFilter("image");
-        // Show success message if no failures
-        if (result.failed_count === 0) {
-          toast.success(t("knowledge.detail.imageUploadSuccess", { count: result.success_count }), t("knowledge.detail.imageProcessing"));
-        }
-      }
-    } catch (e) {
-      console.error("Failed to upload images:", e);
-      toast.error(t("knowledge.detail.imageUploadFailed"), e instanceof Error ? e.message : String(e));
-    } finally {
-      setUploading(false);
-      // Reset the input
-      const input = document.getElementById("image-upload-input") as HTMLInputElement;
-      if (input) input.value = "";
-    }
   }
 
   // Build chunking config based on mode
@@ -1077,7 +1043,16 @@ export function KnowledgeDatasetDetailPage() {
   function selectByStatus(status: string) {
     const docsWithStatus = docs.filter((d) => {
       if (status === "processing") {
-        return ["parsing", "segmenting", "embedding"].includes(d.status);
+        return [
+          "uploaded",
+          "queued",
+          "detecting",
+          "processing",
+          "parsing",
+          "segmenting",
+          "embedding",
+          "embedding_images",
+        ].includes(d.status);
       }
       return d.status === status;
     });
@@ -1315,7 +1290,7 @@ export function KnowledgeDatasetDetailPage() {
       rerank,
       mmr,
       llm_config: {
-        provider: QA_MODEL_OPTIONS.find((o) => o.value === qaModel)?.provider ?? "gemini",
+        provider: QA_MODEL_OPTIONS.find((o) => o.value === qaModel)?.provider ?? "dashscope",
         model: qaModel,
         temperature: qaTemperature,
         max_tokens: qaMaxTokens,
@@ -1744,17 +1719,9 @@ export function KnowledgeDatasetDetailPage() {
                   ref={fileRef}
                   type="file"
                   className="hidden"
-                  accept=".txt,.md,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
+                  accept=".txt,.md,.pdf,.docx,.html"
                   multiple
                   onChange={(e) => handleFilesSelected(e.target.files)}
-                />
-                <input
-                  id="image-upload-input"
-                  type="file"
-                  className="hidden"
-                  accept="image/jpeg,image/png,image/gif,image/webp,image/bmp"
-                  multiple
-                  onChange={(e) => handleImagesSelected(e.target.files)}
                 />
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
@@ -1771,10 +1738,6 @@ export function KnowledgeDatasetDetailPage() {
                     <DropdownMenuItem onClick={() => fileRef.current?.click()}>
                       <Upload className="h-4 w-4 mr-2" />
                       {t("knowledge.detail.uploadFile")}
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => document.getElementById("image-upload-input")?.click()}>
-                      <ImageIcon className="h-4 w-4 mr-2" />
-                      {t("knowledge.detail.uploadImage")}
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
                     <DropdownMenuItem onClick={() => setUrlDialogOpen(true)}>
@@ -2366,7 +2329,7 @@ export function KnowledgeDatasetDetailPage() {
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
                       <Label className="text-sm font-medium text-foreground/80">{t("knowledge.detail.qaModel")}</Label>
-                      <Badge variant="outline" className="text-xs">{(QA_MODEL_OPTIONS.find((o) => o.value === qaModel)?.provider ?? "gemini").toUpperCase()}</Badge>
+                      <Badge variant="outline" className="text-xs">{(QA_MODEL_OPTIONS.find((o) => o.value === qaModel)?.provider ?? "dashscope").toUpperCase()}</Badge>
                     </div>
                     <Select value={qaModel} onValueChange={setQaModel}>
                       <SelectTrigger className="border-border">
@@ -3974,77 +3937,28 @@ for chunk in results.get("chunks", []):
                 </div>
               </div>
 
-              {/* Processing Mode Selection - First Step */}
+              {/* Public ingestion is text-only until multimodal lifecycle support ships. */}
               <div className="border rounded-lg p-4 bg-primary/5">
                 <Label className="text-sm font-medium text-foreground mb-3 block">
                   {t("knowledge.detail.processingMode")}
                 </Label>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                  {[
-                    { 
-                      id: "auto" as const, 
-                      name: t("knowledge.detail.processingModes.auto"),
-                      desc: t("knowledge.detail.processingModes.autoDesc"),
-                      icon: "🔍",
-                      recommended: true,
-                    },
-                    { 
-                      id: "text_only" as const, 
-                      name: t("knowledge.detail.processingModes.text_only"),
-                      desc: t("knowledge.detail.processingModes.text_onlyDesc"),
-                      icon: "📝"
-                    },
-                    { 
-                      id: "scanned" as const, 
-                      name: t("knowledge.detail.processingModes.scanned"),
-                      desc: t("knowledge.detail.processingModes.scannedDesc"),
-                      icon: "📷"
-                    },
-                    { 
-                      id: "multimodal" as const, 
-                      name: t("knowledge.detail.processingModes.multimodal"),
-                      desc: t("knowledge.detail.processingModes.multimodalDesc"),
-                      icon: "🔀"
-                    },
-                  ].map((mode) => (
-                    <div
-                      key={mode.id}
-                      className={`p-3 rounded-lg border cursor-pointer transition-all ${
-                        uploadProcessingMode === mode.id
-                          ? "border-primary bg-primary/10 ring-2 ring-primary/50"
-                          : "border-border hover:border-primary/30 bg-card"
-                      }`}
-                      onClick={() => setUploadProcessingMode(mode.id)}
-                    >
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="text-lg">{mode.icon}</span>
-                        <h4 className="text-sm font-medium">
-                          {mode.name}
-                          {mode.recommended && (
-                            <span className="ml-1 text-[10px] px-1.5 py-0.5 bg-green-500/20 text-green-700 dark:text-green-400 rounded">
-                              {t("knowledge.detail.recommended")}
-                            </span>
-                          )}
-                        </h4>
-                      </div>
-                      <p className="text-xs text-muted-foreground">{mode.desc}</p>
-                    </div>
-                  ))}
+                <div className="rounded-lg border border-primary bg-primary/10 p-3 ring-2 ring-primary/50">
+                  <div className="mb-1 flex items-center gap-2">
+                    <span className="text-lg">📝</span>
+                    <h4 className="text-sm font-medium">
+                      {t("knowledge.detail.processingModes.text_only")}
+                      <span className="ml-1 rounded bg-green-500/20 px-1.5 py-0.5 text-[10px] text-green-700 dark:text-green-400">
+                        {t("knowledge.detail.recommended")}
+                      </span>
+                    </h4>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {t("knowledge.detail.processingModes.text_onlyDesc")}
+                  </p>
                 </div>
-                {uploadProcessingMode === "scanned" && (
-                  <div className="mt-3 p-2 bg-amber-500/10 rounded text-xs text-amber-700 dark:text-amber-400">
-                    {t("knowledge.detail.scannedModeNote")}
-                  </div>
-                )}
-                {uploadProcessingMode === "auto" && (
-                  <div className="mt-3 p-2 bg-blue-500/10 rounded text-xs text-blue-700 dark:text-blue-400">
-                    {t("knowledge.detail.autoModeNote")}
-                  </div>
-                )}
               </div>
 
-              {/* Chunking Mode Selection - Card Grid (hidden for scanned and auto mode) */}
-              {uploadProcessingMode !== "scanned" && uploadProcessingMode !== "auto" && (
+              {/* Chunking Mode Selection - Card Grid */}
               <div className="border rounded-lg p-4">
                 <Label className="text-sm font-medium text-foreground mb-3 block">{t("knowledge.detail.chunkingMethod")}</Label>
                 <div className="grid grid-cols-3 gap-2 mb-4">
@@ -4408,7 +4322,6 @@ for chunk in results.get("chunks", []):
                   )}
                 </div>
               </div>
-              )}
 
               {/* Advanced Settings - Collapsible */}
               <div className="border rounded-lg">

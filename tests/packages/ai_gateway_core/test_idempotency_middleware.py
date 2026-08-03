@@ -38,6 +38,90 @@ async def test_idempotency_middleware_replays_cached_response() -> None:
 
 
 @pytest.mark.asyncio
+async def test_idempotency_middleware_replays_only_an_identical_request_body() -> None:
+    calls = 0
+
+    async def endpoint(request):
+        nonlocal calls
+        calls += 1
+        return JSONResponse({"calls": calls, "body": (await request.body()).decode()})
+
+    app = Starlette(routes=[Route("/work", endpoint, methods=["POST"])])
+    app.add_middleware(
+        IdempotencyMiddleware,
+        store=InMemoryIdempotencyStore(),
+        ttl_seconds=60,
+    )
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        first = await client.post(
+            "/work",
+            content=b'{"operation":"first"}',
+            headers={"Idempotency-Key": "idem-body"},
+        )
+        replay = await client.post(
+            "/work",
+            content=b'{"operation":"first"}',
+            headers={"Idempotency-Key": "idem-body"},
+        )
+        conflict = await client.post(
+            "/work",
+            content=b'{"operation":"different"}',
+            headers={"Idempotency-Key": "idem-body"},
+        )
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert replay.json() == first.json()
+    assert replay.headers["x-idempotency-replayed"] == "true"
+    assert conflict.status_code == 409
+    assert "different request body" in conflict.text
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_idempotency_middleware_rejects_oversized_body_without_calling_app() -> None:
+    calls = 0
+
+    async def endpoint(_request):
+        nonlocal calls
+        calls += 1
+        return JSONResponse({"calls": calls})
+
+    app = Starlette(routes=[Route("/work", endpoint, methods=["POST"])])
+    app.add_middleware(
+        IdempotencyMiddleware,
+        store=InMemoryIdempotencyStore(),
+        ttl_seconds=60,
+        max_body_bytes=4,
+    )
+    transport = httpx.ASGITransport(app=app)
+
+    async def oversized_chunks():
+        yield b"12"
+        yield b"345"
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        oversized = await client.post(
+            "/work",
+            content=oversized_chunks(),
+            headers={"Idempotency-Key": "idem-too-large"},
+        )
+        retry = await client.post(
+            "/work",
+            content=b"1234",
+            headers={"Idempotency-Key": "idem-too-large"},
+        )
+
+    assert oversized.status_code == 413
+    assert "too large" in oversized.text
+    assert retry.status_code == 200
+    assert retry.json() == {"calls": 1}
+    assert calls == 1
+
+
+@pytest.mark.asyncio
 async def test_idempotency_middleware_waits_for_concurrent_owner() -> None:
     calls = 0
     gate = asyncio.Event()

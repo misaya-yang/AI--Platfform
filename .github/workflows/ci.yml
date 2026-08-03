@@ -97,7 +97,7 @@ jobs:
         run: pnpm -C web e2e:opensource
 
   eval-regression-gate:
-    name: Eval Regression Gate
+    name: Eval Contract Gates
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -109,14 +109,27 @@ jobs:
       - name: Install uv
         run: python -m pip install uv
 
-      - name: Run golden regression gate
-        run: make eval-regression-gate
+      - name: Run deterministic Agent and RAG Eval E1 fixture contracts
+        run: make eval-e1-gate
 
-      - name: Run eval P2 unit tests
+      - name: Upload Eval E1 contract reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-e1-contract-reports
+          path: |
+            tmp/eval-regression/latest.json
+            tmp/eval-regression/latest.md
+            tmp/eval-e1/rag-latest.json
+          if-no-files-found: warn
+
+      - name: Run Agent Eval core gate
+        run: make agent-eval-core-gate
+
+      - name: Run eval supporting unit tests
         run: |
-          uv run pytest -q --no-cov \
+          uv run --all-packages --extra test pytest -q --no-cov \
             tests/services/eval/test_online_sampling.py \
-            tests/services/eval/test_evaluator_executor.py \
             tests/services/eval/test_outbox_worker.py
 
   release-ready:

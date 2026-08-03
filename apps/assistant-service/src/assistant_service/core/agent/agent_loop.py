@@ -98,6 +98,11 @@ from ..rag.rag_metrics import (
 )
 from ..rag.scenario_analyzer import ScenarioAnalyzer, ScenarioDetectionResult
 from ..rag.scenario_aware_retriever import ScenarioAwareRetriever, ScenarioRetrievalContext
+from ..run_budget import (
+    RunBudget,
+    RunBudgetExceeded,
+    RunBudgetLimits,
+)
 from ..runtime.compat.runtime_adapter import AssistantRuntimeAdapter
 from ..runtime.context import (
     ContextAssemblerV2,
@@ -518,9 +523,14 @@ class AgentLoopConfig:
     max_tokens: int = 4096
 
     # Feature flags
-    # Task planning disabled by default - only needed for complex multi-step tasks
-    # Enabling this adds ~3-5s latency due to extra LLM call
+    # Task planning disabled by default - only needed for complex multi-step tasks.
+    # The canonical path uses the deterministic planner as model guidance; it
+    # does not dispatch a second, pre-model tool-execution pipeline.
     enable_task_planning: bool = False
+    # Legacy plan confirmation cannot be resumed durably by the unified runtime.
+    # When requested, execution fails closed after emitting the plan and an
+    # explicit compatibility status instead of silently running it.
+    confirm_plan: bool = False
     enable_scenario_retrieval: bool = True
     enable_context_compression: bool = True  # Enabled for context optimization
     enable_rag_metrics: bool = True
@@ -555,6 +565,10 @@ class AgentLoopConfig:
     # Execution limits
     max_tool_iterations: int = 10
     max_concurrent_tools: int = 5
+    # Optional hard limits for tests and internal callers.  ``None`` maps the
+    # two legacy knobs above into a finite compatibility budget.
+    run_budget_limits: RunBudgetLimits | None = field(default=None, repr=False)
+    persist_messages: bool = True
 
     # Context compression parameters
     compress_threshold: int = 10  # Compress when messages exceed this count
@@ -620,6 +634,7 @@ class AgentLoopConfig:
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
             "enable_task_planning": self.enable_task_planning,
+            "confirm_plan": self.confirm_plan,
             "enable_scenario_retrieval": self.enable_scenario_retrieval,
             "enable_memory_loading": self.enable_memory_loading,
             "enable_react_loop": self.enable_react_loop,
@@ -630,6 +645,8 @@ class AgentLoopConfig:
             "kb_min_relevance": self.kb_min_relevance,
             "kb_include_images": self.kb_include_images,
             "file_paths": self.file_paths,
+            "max_tool_iterations": self.max_tool_iterations,
+            "max_concurrent_tools": self.max_concurrent_tools,
             "execution_profile": self.execution_profile,
             "memory_mode": self.memory_mode,
             "os_agent_enabled": self.os_agent_enabled,
@@ -657,6 +674,10 @@ class AgentLoopConfig:
             ),
             "resume_run_id": self.resume_run_id,
             "resume_approval_id": self.resume_approval_id,
+            "run_budget_limits": (
+                self.run_budget_limits.to_dict() if self.run_budget_limits is not None else None
+            ),
+            "persist_messages": self.persist_messages,
         }
 
 
@@ -744,6 +765,11 @@ class AgentLoopContext:
     attempt_id: str = ""
     resumed_from_attempt_id: str | None = None
     turn_kernel: TurnKernel | None = field(default=None, repr=False)
+    run_budget: RunBudget | None = field(default=None, repr=False)
+    budget_restored_from_checkpoint: bool = False
+    started_tool_call_ids: set[str] = field(default_factory=set, repr=False)
+    result_tool_call_ids: set[str] = field(default_factory=set, repr=False)
+    ended_tool_call_ids: set[str] = field(default_factory=set, repr=False)
     terminal_event_type: str | None = None
     last_checkpoint_id: str | None = None
     last_checkpoint_phase: str | None = None
@@ -807,6 +833,7 @@ class AgentLoop:
         session_manager: Any | None = None,
         artifact_storage: Any | None = None,
         file_processor: Any | None = None,
+        runtime_adapter_unavailable: bool = False,
     ):
         """
         Initialize the AgentLoop.
@@ -838,7 +865,7 @@ class AgentLoop:
         self.scenario_retriever = scenario_retriever  # Created lazily when kb_service available
         self.query_intent_analyzer = query_intent_analyzer or self._create_query_intent_analyzer()
         self.task_planner = task_planner  # Created lazily
-        self.tool_invoker = tool_invoker or create_tool_invoker()
+        self.tool_invoker = tool_invoker if tool_invoker is not None else create_tool_invoker()
         self.context_engine = context_engine or ContextEngine(provider="openai")
         self.task_manager = task_manager or get_task_manager()
         self.metrics_collector = metrics_collector or get_rag_metrics_collector()
@@ -848,7 +875,11 @@ class AgentLoop:
         self.database = database
         self.trace_writer = trace_writer
         self.assistant_runtime = runtime_adapter
-        if self.assistant_runtime is None and self.database is not None:
+        if (
+            self.assistant_runtime is None
+            and self.database is not None
+            and not runtime_adapter_unavailable
+        ):
             with contextlib.suppress(Exception):
                 self.assistant_runtime = AssistantRuntimeAdapter.from_env(database=self.database)
 
@@ -908,6 +939,104 @@ class AgentLoop:
         ctx.resumed_from_attempt_id = resumed_from_attempt_id
         return kernel
 
+    @staticmethod
+    def _configured_run_budget(config: AgentLoopConfig) -> RunBudget:
+        limits = config.run_budget_limits or RunBudgetLimits.from_legacy(
+            max_tool_iterations=config.max_tool_iterations,
+            max_concurrent_tools=config.max_concurrent_tools,
+        )
+        return RunBudget(limits)
+
+    @staticmethod
+    def _unpaired_tool_terminal_events(
+        ctx: AgentLoopContext,
+        *,
+        status: str,
+        reason: str,
+    ) -> list[AgentLoopEvent]:
+        """Close public tool lifecycles before a non-paused terminal event."""
+
+        events: list[AgentLoopEvent] = []
+        phase = AgentLoopPhase.EXECUTION
+        for tool_call_id in sorted(ctx.started_tool_call_ids):
+            if tool_call_id not in ctx.result_tool_call_ids:
+                events.append(
+                    AgentLoopEvent(
+                        phase=phase,
+                        event_type=StreamEventType.TOOL_CALL_RESULT.value,
+                        data={
+                            "run_id": ctx.run_id,
+                            "thread_id": ctx.session_id,
+                            "session_id": ctx.session_id,
+                            "tool_call_id": tool_call_id,
+                            "status": status,
+                            "result_preview": None,
+                            "error": reason,
+                            "synthetic": True,
+                        },
+                    )
+                )
+            if tool_call_id not in ctx.ended_tool_call_ids:
+                events.append(
+                    AgentLoopEvent(
+                        phase=phase,
+                        event_type=StreamEventType.TOOL_CALL_END.value,
+                        data={
+                            "run_id": ctx.run_id,
+                            "thread_id": ctx.session_id,
+                            "session_id": ctx.session_id,
+                            "tool_call_id": tool_call_id,
+                            "status": status,
+                            "error": reason,
+                            "synthetic": True,
+                        },
+                    )
+                )
+        return events
+
+    @staticmethod
+    def _synthetic_tool_lifecycle_events(
+        ctx: AgentLoopContext,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        arguments: Any,
+        status: str,
+        reason: str,
+        phase: AgentLoopPhase = AgentLoopPhase.EXECUTION,
+    ) -> list[AgentLoopEvent]:
+        """Finalize a normalized proposal that will not be dispatched."""
+
+        common = {
+            "run_id": ctx.run_id,
+            "thread_id": ctx.session_id,
+            "session_id": ctx.session_id,
+            "tool_call_id": tool_call_id,
+            "name": tool_name,
+            "tool_name": tool_name,
+            "status": status,
+            "success": False,
+            "error": reason,
+            "synthetic": True,
+        }
+        return [
+            AgentLoopEvent(
+                phase=phase,
+                event_type=StreamEventType.TOOL_CALL_START.value,
+                data={**common, "arguments": arguments},
+            ),
+            AgentLoopEvent(
+                phase=phase,
+                event_type=StreamEventType.TOOL_CALL_RESULT.value,
+                data={**common, "result_preview": None},
+            ),
+            AgentLoopEvent(
+                phase=phase,
+                event_type=StreamEventType.TOOL_CALL_END.value,
+                data=common,
+            ),
+        ]
+
     def _move_turn_state(
         self,
         ctx: AgentLoopContext,
@@ -933,6 +1062,14 @@ class AgentLoop:
     def _observe_turn_event(self, ctx: AgentLoopContext, event: AgentLoopEvent) -> None:
         event_type = str(event.event_type or "")
         kernel = ctx.turn_kernel or self._initialize_turn_kernel(ctx)
+        event_data = event.data if isinstance(event.data, dict) else {}
+        tool_call_id = str(event_data.get("tool_call_id") or "")
+        if event_type == StreamEventType.TOOL_CALL_START.value and tool_call_id:
+            ctx.started_tool_call_ids.add(tool_call_id)
+        elif event_type == StreamEventType.TOOL_CALL_RESULT.value and tool_call_id:
+            ctx.result_tool_call_ids.add(tool_call_id)
+        elif event_type == StreamEventType.TOOL_CALL_END.value and tool_call_id:
+            ctx.ended_tool_call_ids.add(tool_call_id)
         if event_type in {
             StreamEventType.RUN_FINISHED.value,
             StreamEventType.RUN_ERROR.value,
@@ -942,7 +1079,6 @@ class AgentLoop:
                     f"attempt {kernel.attempt_id} already emitted terminal event "
                     f"{ctx.terminal_event_type}"
                 )
-            event_data = event.data if isinstance(event.data, dict) else {}
             terminal_envelope = event_data.get("terminal_envelope")
             envelope_status = (
                 str(terminal_envelope.get("status") or "")
@@ -1096,6 +1232,54 @@ class AgentLoop:
             timestamp=event.timestamp,
         )
 
+    def _project_prepared_stream_event(
+        self,
+        ctx: AgentLoopContext,
+        prepared: AgentLoopEvent,
+    ) -> AgentLoopEvent:
+        """Apply the canonical turn projection without optional trace I/O."""
+
+        self._observe_turn_event(ctx, prepared)
+        return self._event_with_turn_contract(ctx, prepared)
+
+    def _canonical_terminal_error_event(
+        self,
+        ctx: AgentLoopContext,
+        *,
+        error: Any,
+        exit_reason: str | None = None,
+        phase: AgentLoopPhase = AgentLoopPhase.EXECUTION,
+        run_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> AgentLoopEvent:
+        """Project one fail-closed terminal when the full run pipeline is unavailable."""
+
+        if run_id:
+            ctx.run_id = run_id
+        kernel = ctx.turn_kernel
+        if kernel is None or kernel.run_id != ctx.run_id or kernel.request_id != ctx.request_id:
+            self._initialize_turn_kernel(
+                ctx,
+                attempt_number=max(1, int(ctx.attempt_number or 1)),
+                resumed_from_attempt_id=ctx.resumed_from_attempt_id,
+            )
+            ctx.context_snapshot = {}
+            ctx.terminal_envelope = {}
+        safe_error = _redact_trace_text(error) or "assistant_run_failed"
+        ctx.terminal_exit_reason = exit_reason or safe_error
+        candidate = AgentLoopEvent(
+            phase=phase,
+            event_type=StreamEventType.RUN_ERROR.value,
+            data={
+                **(details or {}),
+                "run_id": ctx.run_id,
+                "thread_id": ctx.session_id,
+                "session_id": ctx.session_id,
+                "error": safe_error,
+            },
+        )
+        return self._project_prepared_stream_event(ctx, candidate)
+
     def _next_trace_sequence(self, ctx: AgentLoopContext) -> int:
         ctx.trace_sequence_no += 1
         return ctx.trace_sequence_no
@@ -1127,6 +1311,8 @@ class AgentLoop:
         snapshot_bootstrap = dict(bootstrap or {})
         if ctx.history_compaction_receipt:
             snapshot_bootstrap["history_compaction"] = copy.deepcopy(ctx.history_compaction_receipt)
+        if ctx.run_budget is not None:
+            snapshot_bootstrap["run_budget"] = ctx.run_budget.snapshot()
         ctx.context_snapshot = build_context_snapshot(
             run_id=ctx.run_id,
             request_id=ctx.request_id,
@@ -1267,7 +1453,10 @@ class AgentLoop:
             otel_trace_id=ctx.otel_trace_id,
             checkpoint_id=checkpoint_id,
             context_snapshot=snapshot,
-            usage=ctx.usage,
+            usage={
+                **ctx.usage,
+                **({"run_budget": ctx.run_budget.snapshot()} if ctx.run_budget is not None else {}),
+            },
             error=_redact_trace_text(error) if error else None,
             resume_ready=approval_checkpoint_ready,
             approval_id=ctx.last_approval_id,
@@ -1313,9 +1502,15 @@ class AgentLoop:
     ) -> AgentLoopEvent:
         """Capture an event whose middleware pass has already completed."""
 
-        self._observe_turn_event(ctx, prepared)
-        prepared = self._event_with_turn_contract(ctx, prepared)
-        self._capture_trace_event(ctx, prepared)
+        prepared = self._project_prepared_stream_event(ctx, prepared)
+        try:
+            self._capture_trace_event(ctx, prepared)
+        except Exception as exc:
+            logger.error(
+                "Assistant trace event capture failed without changing the public turn "
+                "(exception_type=%s)",
+                type(exc).__name__,
+            )
         return prepared
 
     def _capture_rag_retrieval_trace(
@@ -1455,6 +1650,7 @@ class AgentLoop:
             "attempt_number": ctx.attempt_number,
             "resumed_from_attempt_id": ctx.resumed_from_attempt_id,
             "turn_state": (ctx.turn_kernel.state.value if ctx.turn_kernel is not None else None),
+            "run_budget": ctx.run_budget.snapshot() if ctx.run_budget is not None else None,
         }
         try:
             checkpoint = await self.execution_gateway.save_run_checkpoint(
@@ -1863,6 +2059,14 @@ class AgentLoop:
             )
             return
 
+        if ctx.run_budget is None:
+            raise RuntimeError("run_budget_not_initialized")
+        # The original attempt reserves the proposed tool before persisting an
+        # approval checkpoint. Legacy checkpoints did not carry a budget
+        # snapshot, so reserve exactly once when upgrading those runs.
+        if not ctx.budget_restored_from_checkpoint:
+            ctx.run_budget.reserve_tool_batch(1)
+
         raw_arguments = (approval or {}).get("arguments") or {}
         tool_args = dict(raw_arguments) if isinstance(raw_arguments, dict) else {}
         tool_args["_approval_id"] = approval_id
@@ -1975,6 +2179,8 @@ class AgentLoop:
             data={
                 "tool_call_id": tool_id,
                 "name": tool_name,
+                "tool_name": tool_name,
+                "arguments": persisted_tool_args,
                 "run_id": ctx.run_id,
                 "thread_id": ctx.session_id,
                 "session_id": ctx.session_id,
@@ -2002,6 +2208,7 @@ class AgentLoop:
             else str(tool_error or "Tool execution failed")
         )
         tool_result_preview = _redact_trace_text(tool_result_text[:2000])
+        ctx.run_budget.observe_tool_result(tool_result_text)
         ctx.generated_content = ""
 
         yield AgentLoopEvent(
@@ -2010,7 +2217,9 @@ class AgentLoop:
             data={
                 "tool_call_id": tool_id,
                 "name": tool_name,
+                "tool_name": tool_name,
                 "status": tool_status,
+                "success": tool_success,
                 "result": tool_result_preview,
                 "result_preview": tool_result_preview,
                 "error": tool_error_for_event,
@@ -2025,7 +2234,10 @@ class AgentLoop:
             data={
                 "tool_call_id": tool_id,
                 "name": tool_name,
+                "tool_name": tool_name,
                 "status": tool_status,
+                "success": tool_success,
+                "duration_ms": tool_duration_ms,
                 "run_id": ctx.run_id,
                 "thread_id": ctx.session_id,
                 "session_id": ctx.session_id,
@@ -2144,6 +2356,7 @@ class AgentLoop:
         synthesis_usage: dict[str, int] = {}
         synthesis_finish_reason: str | None = None
         try:
+            ctx.run_budget.consume_model_turn()
             model_messages, packet_receipt = self._compile_auxiliary_context_packet(
                 ctx,
                 messages=synthesis_messages,
@@ -2208,6 +2421,8 @@ class AgentLoop:
                 )
             for key, value in synthesis_usage.items():
                 ctx.usage[key] = max(ctx.usage.get(key, 0), int(value))
+        except RunBudgetExceeded:
+            raise
         except ContextPacketOverflowError as exc:
             logger.warning(
                 "Approval resume synthesis context overflow for run %s: %s tokens",
@@ -2241,7 +2456,7 @@ class AgentLoop:
                 },
             )
 
-        if self.session_manager and ctx.generated_content:
+        if ctx.config.persist_messages and self.session_manager and ctx.generated_content:
             try:
                 from datetime import datetime
 
@@ -2470,6 +2685,85 @@ class AgentLoop:
         history: list[dict[str, Any]] | None = None,
         traceparent: str | None = None,
     ) -> AsyncGenerator[AgentLoopEvent, None]:
+        """Project exactly one public turn boundary for every execution attempt."""
+
+        public_boundary: str | None = None
+        try:
+            async for event in self._execute_impl(
+                session_id=session_id,
+                user=user,
+                message=message,
+                config=config,
+                history=history,
+                traceparent=traceparent,
+            ):
+                if public_boundary is not None:
+                    logger.error(
+                        "Dropping event %s emitted after public turn boundary %s",
+                        event.event_type,
+                        public_boundary,
+                    )
+                    return
+                if event.event_type in {
+                    StreamEventType.RUN_FINISHED.value,
+                    StreamEventType.RUN_ERROR.value,
+                    "approval_required",
+                    "side_effect_unknown",
+                }:
+                    public_boundary = str(event.event_type)
+                yield event
+        except (Exception, asyncio.CancelledError) as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    raise
+                exc = RuntimeError("assistant_operation_cancelled")
+            if public_boundary is not None:
+                logger.error(
+                    "Assistant execution failed after public turn boundary %s; preserving it "
+                    "(exception_type=%s)",
+                    public_boundary,
+                    type(exc).__name__,
+                )
+                return
+            resolved_traceparent = str(traceparent or "") or None
+            resolved_otel_trace_id: str | None = None
+            if resolved_traceparent and resolved_traceparent.startswith("00-"):
+                parts = resolved_traceparent.split("-")
+                if len(parts) >= 2 and parts[1]:
+                    resolved_otel_trace_id = parts[1]
+            fallback_ctx = AgentLoopContext(
+                session_id=session_id,
+                user_id=user.user_id,
+                tenant_id=user.tenant_id,
+                message=message,
+                config=config,
+                user=user,
+                run_id=str(config.resume_run_id or "") or str(uuid.uuid4()),
+                traceparent=resolved_traceparent,
+                otel_trace_id=resolved_otel_trace_id,
+            )
+            self._initialize_turn_kernel(fallback_ctx)
+            with contextlib.suppress(TypeError, ValueError):
+                fallback_ctx.run_budget = self._configured_run_budget(config)
+            safe_error = _redact_trace_text(exc) or "assistant_run_failed"
+            yield self._canonical_terminal_error_event(
+                fallback_ctx,
+                error=safe_error,
+                exit_reason="failed",
+                phase=AgentLoopPhase.GENERATION_STORAGE,
+                details={"exception_type": type(exc).__name__},
+            )
+
+    async def _execute_impl(
+        self,
+        session_id: str,
+        user: UserContextLike,
+        message: str,
+        config: AgentLoopConfig,
+        history: list[dict[str, Any]] | None = None,
+        traceparent: str | None = None,
+    ) -> AsyncGenerator[AgentLoopEvent, None]:
         """
         Execute the complete 8-step agent loop.
 
@@ -2502,18 +2796,24 @@ class AgentLoop:
             otel_trace_id=resolved_otel_trace_id,
         )
         self._initialize_turn_kernel(ctx)
+        try:
+            ctx.run_budget = self._configured_run_budget(config)
+        except (TypeError, ValueError) as exc:
+            yield self._canonical_terminal_error_event(
+                ctx,
+                error="run_budget_configuration_invalid",
+                exit_reason="run_budget_configuration_invalid",
+                details={"reason": _redact_trace_text(exc)},
+            )
+            return
         resume_requested = bool(config.resume_run_id or config.resume_approval_id)
         resume_mode = bool(config.resume_run_id and config.resume_approval_id)
         if resume_requested and not resume_mode:
-            yield AgentLoopEvent(
-                phase=AgentLoopPhase.EXECUTION,
-                event_type=StreamEventType.RUN_ERROR.value,
-                data={
-                    "run_id": ctx.run_id,
-                    "thread_id": ctx.session_id,
-                    "session_id": ctx.session_id,
-                    "error": "resume_run_id_and_approval_id_required",
-                },
+            yield self._canonical_terminal_error_event(
+                ctx,
+                error="resume_run_id_and_approval_id_required",
+                exit_reason="resume_run_id_and_approval_id_required",
+                run_id=str(config.resume_run_id or "") or None,
             )
             return
         if resume_mode:
@@ -2521,55 +2821,96 @@ class AgentLoop:
             requested_run_id = str(config.resume_run_id)
             approval_id = str(config.resume_approval_id)
             if not gateway or not gateway.enabled:
-                yield AgentLoopEvent(
-                    phase=AgentLoopPhase.EXECUTION,
-                    event_type=StreamEventType.RUN_ERROR.value,
-                    data={
-                        "run_id": requested_run_id,
-                        "thread_id": ctx.session_id,
-                        "session_id": ctx.session_id,
-                        "error": "approval_resume_unavailable",
-                    },
+                yield self._canonical_terminal_error_event(
+                    ctx,
+                    error="approval_resume_unavailable",
+                    exit_reason="approval_resume_unavailable",
+                    run_id=requested_run_id,
                 )
                 return
-            resume_plan = await gateway.prepare_run_resume(
-                run_id=requested_run_id,
-                tenant_id=ctx.tenant_id,
-                user_id=ctx.user_id,
-                session_id=ctx.session_id,
-                approval_id=approval_id,
-                agent_runtime=(
-                    None
-                    if config.agent_runtime is None
-                    else config.agent_runtime.trace_dimensions()
-                ),
-            )
-            if not resume_plan or resume_plan.get("status") != "ready":
-                yield AgentLoopEvent(
-                    phase=AgentLoopPhase.EXECUTION,
-                    event_type=StreamEventType.RUN_ERROR.value,
-                    data={
-                        "run_id": requested_run_id,
-                        "thread_id": ctx.session_id,
-                        "session_id": ctx.session_id,
-                        "error": str((resume_plan or {}).get("reason") or "resume_not_ready"),
-                    },
+            try:
+                resume_plan = await gateway.prepare_run_resume(
+                    run_id=requested_run_id,
+                    tenant_id=ctx.tenant_id,
+                    user_id=ctx.user_id,
+                    session_id=ctx.session_id,
+                    approval_id=approval_id,
+                    agent_runtime=(
+                        None
+                        if config.agent_runtime is None
+                        else config.agent_runtime.trace_dimensions()
+                    ),
+                )
+            except Exception as exc:
+                yield self._canonical_terminal_error_event(
+                    ctx,
+                    error="approval_resume_preflight_failed",
+                    exit_reason="approval_resume_preflight_failed",
+                    run_id=requested_run_id,
+                    details={"reason": _redact_trace_text(exc)},
+                )
+                return
+            if not isinstance(resume_plan, dict) or resume_plan.get("status") != "ready":
+                resume_reason = (
+                    resume_plan.get("reason")
+                    if isinstance(resume_plan, dict)
+                    else "resume_not_ready"
+                )
+                safe_resume_reason = _redact_trace_text(resume_reason or "resume_not_ready")
+                yield self._canonical_terminal_error_event(
+                    ctx,
+                    error=safe_resume_reason,
+                    exit_reason=safe_resume_reason,
+                    run_id=requested_run_id,
                 )
                 return
             ctx.run_id = requested_run_id
             ctx.resume_plan = resume_plan
             resume_checkpoint = resume_plan.get("checkpoint") or {}
-            previous_resume_payload = resume_checkpoint.get("resume_payload") or {}
-            previous_attempt_number = max(
-                1,
-                int(previous_resume_payload.get("attempt_number") or 1),
+            previous_resume_payload = (
+                resume_checkpoint.get("resume_payload") or {}
+                if isinstance(resume_checkpoint, dict)
+                else None
             )
-            previous_attempt_id = str(previous_resume_payload.get("attempt_id") or "") or None
+            try:
+                if not isinstance(previous_resume_payload, dict):
+                    raise ValueError("approval resume payload must be an object")
+                previous_attempt_number = max(
+                    1,
+                    int(previous_resume_payload.get("attempt_number") or 1),
+                )
+                previous_attempt_id = str(previous_resume_payload.get("attempt_id") or "") or None
+            except (TypeError, ValueError) as exc:
+                yield self._canonical_terminal_error_event(
+                    ctx,
+                    error="approval_resume_checkpoint_invalid",
+                    exit_reason="approval_resume_checkpoint_invalid",
+                    run_id=requested_run_id,
+                    details={"reason": _redact_trace_text(exc)},
+                )
+                return
             self._initialize_turn_kernel(
                 ctx,
                 attempt_number=previous_attempt_number + 1,
                 resumed_from_attempt_id=previous_attempt_id,
             )
+            persisted_budget = previous_resume_payload.get("run_budget")
+            try:
+                # Approval resume must never turn a missing or tampered
+                # checkpoint into a fresh budget.
+                ctx.run_budget = RunBudget.restore(
+                    configured_limits=ctx.run_budget.limits,
+                    snapshot=(persisted_budget if isinstance(persisted_budget, dict) else None),
+                )
+                ctx.budget_restored_from_checkpoint = isinstance(persisted_budget, dict)
+            except (KeyError, TypeError, ValueError):
+                yield self._canonical_terminal_error_event(
+                    ctx,
+                    error="run_budget_restore_failed",
+                    exit_reason="run_budget_restore_failed",
+                    run_id=requested_run_id,
+                )
+                return
             try:
                 if self.trace_writer is not None:
                     if not hasattr(self.trace_writer, "resume_sequence"):
@@ -2578,16 +2919,12 @@ class AgentLoop:
                         self._trace_context(ctx)
                     )
             except Exception as exc:
-                yield AgentLoopEvent(
-                    phase=AgentLoopPhase.EXECUTION,
-                    event_type=StreamEventType.RUN_ERROR.value,
-                    data={
-                        "run_id": requested_run_id,
-                        "thread_id": ctx.session_id,
-                        "session_id": ctx.session_id,
-                        "error": "trace_resume_sequence_failed",
-                        "reason": _redact_trace_text(exc),
-                    },
+                yield self._canonical_terminal_error_event(
+                    ctx,
+                    error="trace_resume_sequence_failed",
+                    exit_reason="trace_resume_sequence_failed",
+                    run_id=requested_run_id,
+                    details={"reason": _redact_trace_text(exc)},
                 )
                 return
 
@@ -2633,26 +2970,14 @@ class AgentLoop:
             ctx.cancel_event = task_ctx.cancel_event
             try:
                 await self._bind_session_working_memory(ctx=ctx, session=session)
-                # Proactive legacy-history compaction must run only after the
-                # owner-bound WorkingMemory has been hydrated. That lets the
-                # shared prepare/validate/commit primitive protect unresolved
-                # plans and run the provider flush gate before replacing any
-                # parent history.
-                if config.enable_history_trimming and history and not config.use_context_engine:
-                    history = await self._preprocess_history(
-                        history=history,
-                        max_tokens=config.max_history_tokens,
-                        min_recent=config.min_recent_messages,
-                        model_id=config.model_id,
-                        ctx=ctx,
-                    )
-            except Exception:
-                await self.task_manager.complete_task(session_id, task_id)
+            except (Exception, asyncio.CancelledError):
+                await asyncio.shield(self.task_manager.complete_task(session_id, task_id))
                 raise
 
             run_status = "running"
             run_error: str | None = None
             terminal_event_recorded = False
+            blocked_event_recorded = False
             execution_run_started = False
             terminal_persistence_attempted = False
             ctx.context_snapshot = self._context_snapshot(
@@ -2958,26 +3283,6 @@ class AgentLoop:
                             },
                         )
 
-                if ctx.routed_request:
-                    gateway_event = AgentLoopEvent(
-                        phase=AgentLoopPhase.MEMORY_LOADING,
-                        event_type="gateway_decision",
-                        data={
-                            "run_id": ctx.run_id,
-                            "thread_id": ctx.session_id,
-                            "session_id": ctx.session_id,
-                            "execution_profile": ctx.routed_request.execution_profile,
-                            "memory_mode": ctx.routed_request.memory_mode,
-                            "os_agent_enabled": ctx.routed_request.os_agent_enabled,
-                            "policy_profile": ctx.routed_request.policy_profile,
-                            "runtime_mode": ctx.routed_request.runtime_mode,
-                            "queue_mode": ctx.routed_request.queue_mode,
-                            "context_detail": ctx.routed_request.context_detail,
-                        },
-                    )
-                    gateway_event = await self._capture_and_prepare_stream_event(ctx, gateway_event)
-                    yield gateway_event
-
                 # Emit run_started with task_id for cancellation
                 run_started_event = AgentLoopEvent(
                     phase=AgentLoopPhase.MEMORY_LOADING,
@@ -2997,6 +3302,25 @@ class AgentLoop:
                     ctx, run_started_event
                 )
                 yield run_started_event
+                if ctx.routed_request:
+                    gateway_event = AgentLoopEvent(
+                        phase=AgentLoopPhase.MEMORY_LOADING,
+                        event_type="gateway_decision",
+                        data={
+                            "run_id": ctx.run_id,
+                            "thread_id": ctx.session_id,
+                            "session_id": ctx.session_id,
+                            "execution_profile": ctx.routed_request.execution_profile,
+                            "memory_mode": ctx.routed_request.memory_mode,
+                            "os_agent_enabled": ctx.routed_request.os_agent_enabled,
+                            "policy_profile": ctx.routed_request.policy_profile,
+                            "runtime_mode": ctx.routed_request.runtime_mode,
+                            "queue_mode": ctx.routed_request.queue_mode,
+                            "context_detail": ctx.routed_request.context_detail,
+                        },
+                    )
+                    gateway_event = await self._capture_and_prepare_stream_event(ctx, gateway_event)
+                    yield gateway_event
                 if config.queue_mode != "collect":
                     queue_event = AgentLoopEvent(
                         phase=AgentLoopPhase.MEMORY_LOADING,
@@ -3026,45 +3350,165 @@ class AgentLoop:
                         TurnState.TOOL_PENDING,
                         reason="approval_resume_ready",
                     )
-                    stream_factory = self._execute_approval_resume(
-                        ctx=ctx,
-                        user=user,
-                        history=history,
-                        task_ctx=task_ctx,
-                    )
                 else:
                     self._move_turn_state(
                         ctx,
                         TurnState.MODEL_RUNNING,
                         reason="model_invocation_started",
                     )
-                    stream_factory = self._execute_streaming_first(
-                        ctx=ctx,
-                        user=user,
-                        history=history,
-                        task_ctx=task_ctx,
-                    )
-                async for event in stream_factory:
-                    # If streaming-first hits an unexpected internal exception, it emits an "error" event.
-                    # Track it so we can emit a matching run_error event for AG-UI lifecycle completeness.
-                    if event.event_type == "error" and not had_fatal_error:
-                        had_fatal_error = True
-                        fatal_error_message = _terminal_error_message(event)
-                        event = await self._capture_and_prepare_stream_event(ctx, event)
-                    elif event.event_type == StreamEventType.RUN_ERROR.value:
-                        had_fatal_error = True
-                        fatal_error_message = _terminal_error_message(event)
-                        event, run_status, run_error = await _finalize_terminal_event(
-                            event,
-                            "failed",
-                            _redact_trace_text(
-                                fatal_error_message or "AgentLoop streaming-first failed"
-                            ),
+                budget_error: RunBudgetExceeded | None = None
+                try:
+                    if ctx.run_budget is None:
+                        raise RuntimeError("run_budget_not_initialized")
+                    async with asyncio.timeout(ctx.run_budget.remaining_wall_time_seconds):
+                        # Legacy history compaction can itself consume a model
+                        # turn. Keep it inside the same wall/model budget catch
+                        # as primary generation so exhaustion always produces
+                        # the structured run_budget_exceeded terminal contract.
+                        # The owner-bound WorkingMemory was hydrated above.
+                        if (
+                            config.enable_history_trimming
+                            and history
+                            and not config.use_context_engine
+                        ):
+                            history = await self._preprocess_history(
+                                history=history,
+                                max_tokens=config.max_history_tokens,
+                                min_recent=config.min_recent_messages,
+                                model_id=config.model_id,
+                                ctx=ctx,
+                            )
+                        stream_factory = (
+                            self._execute_approval_resume(
+                                ctx=ctx,
+                                user=user,
+                                history=history,
+                                task_ctx=task_ctx,
+                            )
+                            if resume_mode
+                            else self._execute_streaming_first(
+                                ctx=ctx,
+                                user=user,
+                                history=history,
+                                task_ctx=task_ctx,
+                            )
                         )
-                        terminal_event_recorded = True
+                        async for event in stream_factory:
+                            # A rejecting producer may first emit canonical
+                            # budget_rejected tool finals, then re-raise the
+                            # sticky exception. Do not suppress those repair
+                            # events by re-raising before they are captured.
+                            if not ctx.run_budget.exhausted:
+                                ctx.run_budget.check_wall_time()
+                            # If streaming-first hits an unexpected internal exception, it
+                            # emits an "error" event. Track it so the AG-UI lifecycle still
+                            # receives one matching terminal event.
+                            if event.event_type == "error" and not had_fatal_error:
+                                had_fatal_error = True
+                                fatal_error_message = _terminal_error_message(event)
+                                event = await self._capture_and_prepare_stream_event(ctx, event)
+                            elif event.event_type == StreamEventType.RUN_ERROR.value:
+                                had_fatal_error = True
+                                fatal_error_message = _terminal_error_message(event)
+                                event, run_status, run_error = await _finalize_terminal_event(
+                                    event,
+                                    "failed",
+                                    _redact_trace_text(
+                                        fatal_error_message or "AgentLoop streaming-first failed"
+                                    ),
+                                )
+                                terminal_event_recorded = True
+                            else:
+                                event = await self._capture_and_prepare_stream_event(ctx, event)
+                            if event.event_type in {"approval_required", "side_effect_unknown"}:
+                                blocked_event_recorded = True
+                            yield event
+                except asyncio.CancelledError:
+                    if task_ctx and task_ctx.cancelled:
+                        ctx.cancelled = True
+                        ctx.terminal_exit_reason = "cancelled"
                     else:
-                        event = await self._capture_and_prepare_stream_event(ctx, event)
-                    yield event
+                        current_task = asyncio.current_task()
+                        if current_task is not None and current_task.cancelling():
+                            ctx.cancelled = True
+                            ctx.terminal_exit_reason = "client_disconnected"
+                            run_status = "cancelled"
+                            run_error = "client_disconnected"
+                            raise
+                        ctx.model_error_seen = True
+                        ctx.terminal_exit_reason = "model_error"
+                        raise RuntimeError("provider_stream_cancelled") from None
+                except TimeoutError:
+                    try:
+                        ctx.run_budget.exhaust_wall_time()
+                    except RunBudgetExceeded as exc:
+                        budget_error = exc
+                except RunBudgetExceeded as exc:
+                    budget_error = exc
+
+                if budget_error is not None:
+                    had_fatal_error = True
+                    fatal_error_message = budget_error.reason
+                    ctx.terminal_exit_reason = "run_budget_exceeded"
+                    for repair_event in self._unpaired_tool_terminal_events(
+                        ctx,
+                        status="budget_exceeded",
+                        reason=budget_error.reason,
+                    ):
+                        repair_event = await self._capture_and_prepare_stream_event(
+                            ctx,
+                            repair_event,
+                        )
+                        yield repair_event
+                    budget_event = AgentLoopEvent(
+                        phase=AgentLoopPhase.EXECUTION,
+                        event_type="run_budget_exceeded",
+                        data={
+                            "run_id": ctx.run_id,
+                            "thread_id": ctx.session_id,
+                            "session_id": ctx.session_id,
+                            **budget_error.to_event_data(),
+                        },
+                    )
+                    budget_event = await self._capture_and_prepare_stream_event(ctx, budget_event)
+                    yield budget_event
+                    candidate = AgentLoopEvent(
+                        phase=AgentLoopPhase.GENERATION_STORAGE,
+                        event_type=StreamEventType.RUN_ERROR.value,
+                        data={
+                            "run_id": ctx.run_id,
+                            "thread_id": session_id,
+                            "session_id": session_id,
+                            "error": "run_budget_exceeded",
+                            "reason": budget_error.reason,
+                            "run_budget": budget_error.snapshot,
+                        },
+                    )
+                    run_error_event, run_status, run_error = await _finalize_terminal_event(
+                        candidate,
+                        "failed",
+                        budget_error.reason,
+                    )
+                    terminal_event_recorded = True
+                    yield run_error_event
+
+                if not ctx.execution_paused and budget_error is None:
+                    unpaired_events = self._unpaired_tool_terminal_events(
+                        ctx,
+                        status="cancelled" if ctx.cancelled else "error",
+                        reason="cancelled" if ctx.cancelled else "tool_result_missing",
+                    )
+                    if unpaired_events and not ctx.cancelled:
+                        had_fatal_error = True
+                        fatal_error_message = "tool_result_missing"
+                        ctx.tool_error_seen = True
+                        ctx.terminal_exit_reason = "tool_error"
+                    for repair_event in unpaired_events:
+                        repair_event = await self._capture_and_prepare_stream_event(
+                            ctx,
+                            repair_event,
+                        )
+                        yield repair_event
 
                 # Ensure lifecycle is complete: always end with run_finished or run_error.
                 if ctx.cancelled:
@@ -3137,15 +3581,90 @@ class AgentLoop:
                     terminal_event_recorded = True
                     yield run_finished_event
 
+            except (asyncio.CancelledError, GeneratorExit):
+                if not blocked_event_recorded and not terminal_event_recorded:
+                    ctx.cancelled = True
+                    ctx.terminal_exit_reason = "client_disconnected"
+                    run_status = "cancelled"
+                    run_error = run_error or "client_disconnected"
+                raise
             except Exception as loop_error:
                 run_status = "failed"
                 run_error = _redact_trace_text(loop_error)
-                async for error_event in self.middleware_chain.run_on_error(
-                    ctx, loop_error, AgentLoopPhase.GENERATION_STORAGE
-                ):
-                    error_event = await self._capture_and_prepare_stream_event(ctx, error_event)
-                    yield error_event
-                raise  # re-raise after recording status
+                if blocked_event_recorded or terminal_event_recorded:
+                    logger.error(
+                        "Assistant cleanup failed after the public turn boundary; preserving "
+                        "the existing terminal (exception_type=%s)",
+                        type(loop_error).__name__,
+                    )
+                else:
+                    # A pause flag is authoritative only after its blocked event
+                    # crossed the public boundary. Before that, an exception is
+                    # one failed attempt and must project a run_error.
+                    ctx.approval_paused = False
+                    ctx.recovery_paused = False
+                    try:
+                        async for error_event in self.middleware_chain.run_on_error(
+                            ctx,
+                            loop_error,
+                            AgentLoopPhase.GENERATION_STORAGE,
+                        ):
+                            if error_event.event_type in {
+                                StreamEventType.RUN_FINISHED.value,
+                                StreamEventType.RUN_ERROR.value,
+                                "approval_required",
+                                "side_effect_unknown",
+                            }:
+                                logger.error(
+                                    "Error middleware attempted to emit a second turn boundary; "
+                                    "the canonical terminal projector owns that boundary"
+                                )
+                                continue
+                            error_event = await self._capture_and_prepare_stream_event(
+                                ctx,
+                                error_event,
+                            )
+                            yield error_event
+                    except Exception as middleware_error:
+                        logger.error(
+                            "Assistant error middleware failed; continuing to canonical terminal "
+                            "projection (exception_type=%s)",
+                            type(middleware_error).__name__,
+                        )
+                    candidate = AgentLoopEvent(
+                        phase=AgentLoopPhase.GENERATION_STORAGE,
+                        event_type=StreamEventType.RUN_ERROR.value,
+                        data={
+                            "run_id": ctx.run_id,
+                            "thread_id": session_id,
+                            "session_id": session_id,
+                            "error": run_error,
+                        },
+                    )
+                    try:
+                        terminal_event, run_status, run_error = await _finalize_terminal_event(
+                            candidate,
+                            "failed",
+                            run_error,
+                        )
+                    except Exception as terminal_error:
+                        logger.error(
+                            "Full terminal finalization failed; using the side-effect-free "
+                            "canonical projector (exception_type=%s)",
+                            type(terminal_error).__name__,
+                        )
+                        terminal_event = self._canonical_terminal_error_event(
+                            ctx,
+                            error=run_error or "assistant_run_failed",
+                            exit_reason=self._terminal_exit_reason(
+                                ctx,
+                                status="failed",
+                                error=run_error,
+                            ),
+                            phase=AgentLoopPhase.GENERATION_STORAGE,
+                        )
+                    terminal_event_recorded = True
+                    yield terminal_event
             finally:
                 final_status = run_status
                 if ctx.execution_paused:
@@ -3156,7 +3675,9 @@ class AgentLoop:
                         ctx.cancelled = True
                         run_error = run_error or "Cancelled by user"
                     else:
-                        final_status = "succeeded"
+                        final_status = "failed"
+                        run_error = run_error or "assistant_run_ended_without_terminal"
+                        ctx.terminal_exit_reason = "assistant_run_ended_without_terminal"
                 if ctx.execution_paused:
                     self._move_turn_state(
                         ctx,
@@ -3222,17 +3743,24 @@ class AgentLoop:
                                 "Failed to persist paused run state (exception_type=%s)",
                                 type(exc).__name__,
                             )
-                            await self._save_checkpoint(
-                                ctx,
-                                phase="terminal_persistence_unknown",
-                                status="blocked",
-                                resume_payload={
-                                    "mode": "streaming_first",
-                                    "intended_status": "blocked",
-                                    "blind_replay_allowed": False,
-                                },
-                                error="terminal_persistence_unknown",
-                            )
+                            try:
+                                await self._save_checkpoint(
+                                    ctx,
+                                    phase="terminal_persistence_unknown",
+                                    status="blocked",
+                                    resume_payload={
+                                        "mode": "streaming_first",
+                                        "intended_status": "blocked",
+                                        "blind_replay_allowed": False,
+                                    },
+                                    error="terminal_persistence_unknown",
+                                )
+                            except Exception as checkpoint_error:
+                                logger.error(
+                                    "Blocked-run persistence fallback failed after the public "
+                                    "boundary (exception_type=%s)",
+                                    type(checkpoint_error).__name__,
+                                )
                     else:
                         (
                             final_status,
@@ -3244,11 +3772,18 @@ class AgentLoop:
                         )
                 if ctx.execution_paused:
                     if self.trace_writer:
-                        await self.trace_writer.drain(
-                            timeout_s=self.trace_writer.write_timeout_s,
-                            strict=True,
-                            trace_id=self._trace_context(ctx).trace_id,
-                        )
+                        try:
+                            await self.trace_writer.drain(
+                                timeout_s=self.trace_writer.write_timeout_s,
+                                strict=True,
+                                trace_id=self._trace_context(ctx).trace_id,
+                            )
+                        except Exception as exc:
+                            logger.error(
+                                "Assistant trace barrier failed after a durable blocked event; "
+                                "preserving the public blocked boundary (exception_type=%s)",
+                                type(exc).__name__,
+                            )
                 else:
                     terminal_event_type = None
                     if not terminal_event_recorded:
@@ -3257,24 +3792,45 @@ class AgentLoop:
                             if final_status == "succeeded"
                             else StreamEventType.RUN_ERROR.value
                         )
-                    self._finish_trace(
-                        ctx=ctx,
-                        status=final_status,
-                        error=run_error,
-                        terminal_event_type=terminal_event_type,
-                    )
+                    try:
+                        self._finish_trace(
+                            ctx=ctx,
+                            status=final_status,
+                            error=run_error,
+                            terminal_event_type=terminal_event_type,
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "Assistant trace finalization failed after the public terminal; "
+                            "preserving that terminal (exception_type=%s)",
+                            type(exc).__name__,
+                        )
 
                 # Persist the shared owner-bound object while holding the same
                 # lock used by cold restore and session deletion.
                 if ctx.working_memory:
-                    await self._persist_session_working_memory(
-                        ctx=ctx,
-                        session=session,
-                    )
+                    try:
+                        await self._persist_session_working_memory(
+                            ctx=ctx,
+                            session=session,
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "Working-memory finalization failed after the public turn boundary "
+                            "(exception_type=%s)",
+                            type(exc).__name__,
+                        )
 
                 # Complete task registration
                 if task_id:
-                    await self.task_manager.complete_task(session_id, task_id)
+                    try:
+                        await self.task_manager.complete_task(session_id, task_id)
+                    except Exception as exc:
+                        logger.error(
+                            "Task cleanup failed after the public turn boundary "
+                            "(exception_type=%s)",
+                            type(exc).__name__,
+                        )
 
     # =========================================================================
     # History Management
@@ -3582,6 +4138,7 @@ class AgentLoop:
         use_llm_summary: bool = True,
         protected_plan: dict[str, Any] | None = None,
         reason: str = "context_compact",
+        run_budget: RunBudget | None = None,
     ) -> dict[str, Any]:
         """Prepare, validate, then atomically commit a turn-based compaction.
 
@@ -3646,6 +4203,8 @@ class AgentLoop:
             )
 
         try:
+            if run_budget is not None:
+                run_budget.consume_model_turn()
             compressor = ContextCompressor(
                 llm_service=ModelRegistryLLMService(
                     self.model_registry,
@@ -3666,6 +4225,8 @@ class AgentLoop:
                 target_tokens=800,
                 preserve_recent=1,
             )
+        except RunBudgetExceeded:
+            raise
         except Exception as exc:
             logger.error(
                 "context_compact: summary preparation failed (exception_type=%s)",
@@ -3871,6 +4432,12 @@ class AgentLoop:
             memory_mode=getattr(ctx.config, "memory_mode", None),
             memory_profile=getattr(ctx.config, "memory_profile", None),
         )
+        run_budget = getattr(ctx, "run_budget", None)
+        if isinstance(ctx, AgentLoopContext) and run_budget is None:
+            # Real runs always carry the canonical budget. Structural legacy
+            # callers may omit it, but production compaction must not silently
+            # escape model-turn accounting.
+            raise RuntimeError("run_budget_not_initialized")
         if (
             self.assistant_runtime is not None
             and user_memory_enabled
@@ -4017,7 +4584,10 @@ class AgentLoop:
                 use_llm_summary=True,
                 protected_plan=protected_plan or None,
                 reason=reason,
+                run_budget=run_budget,
             )
+        except RunBudgetExceeded:
+            raise
         except Exception as exc:
             logger.error(
                 "context_compact: child preparation failed (exception_type=%s)",
@@ -4183,7 +4753,7 @@ class AgentLoop:
             )
 
     def _schedule_streaming_user_message_persistence(self, ctx: AgentLoopContext) -> None:
-        if not self.session_manager:
+        if not ctx.config.persist_messages or not self.session_manager:
             return
         try:
             from datetime import datetime
@@ -4701,6 +5271,9 @@ class AgentLoop:
         dataset_name_map: dict[str, str] | None,
         result: StreamingModelTurn,
     ) -> AsyncGenerator[AgentLoopEvent, None]:
+        if ctx.run_budget is None:
+            raise RuntimeError("run_budget_not_initialized")
+        ctx.run_budget.consume_model_turn()
         llm_started_at = time.time()
         logger.info(
             "[STREAMING-FIRST] Starting LLM call (iter=%s), total prep: %.0fms",
@@ -4938,6 +5511,9 @@ class AgentLoop:
         first_token_emitted = bool(ctx.generated_content)
         forced_usage: dict[str, int] = {}
         try:
+            if ctx.run_budget is None:
+                raise RuntimeError("run_budget_not_initialized")
+            ctx.run_budget.consume_model_turn()
             synthesis_messages = copy.deepcopy(messages)
             if synthesis_messages:
                 no_tools_system_prompt, _ = self._build_streaming_system_prompt(
@@ -5025,6 +5601,8 @@ class AgentLoop:
                     event_type="text_delta",
                     data=text_chunk,
                 )
+        except RunBudgetExceeded:
+            raise
         except ContextPacketOverflowError as exc:
             logger.warning(
                 "[STREAMING-FIRST] Forced synthesis context overflow: overflow_tokens=%s",
@@ -5071,7 +5649,7 @@ class AgentLoop:
         turn_tool_calls: list[dict[str, Any]],
         turn_tool_results: list[dict[str, Any]],
     ) -> None:
-        if not self.session_manager or not ctx.generated_content:
+        if not ctx.config.persist_messages or not self.session_manager or not ctx.generated_content:
             return
         try:
             from datetime import datetime
@@ -5467,6 +6045,110 @@ class AgentLoop:
                 available_tool_names,
                 available_tool_schema_hash,
             ) = await self._get_streaming_tools(ctx, user)
+
+            # Opt-in planning is a context-engine concern, not a second tool
+            # executor.  The plan is generated from the already-authorized tool
+            # catalog and supplied to the same model-driven AgentLoop that owns
+            # budgets, approvals, lifecycle events, and tool invocation.
+            planning_context = ""
+            if ctx.config.enable_task_planning:
+                if ctx.working_memory is not None:
+                    ctx.working_memory.set_goal(ctx.message)
+                yield AgentLoopEvent(
+                    phase=AgentLoopPhase.TASK_PLANNING,
+                    event_type="working_memory_update",
+                    data={
+                        "run_id": ctx.run_id,
+                        "thread_id": ctx.session_id,
+                        "session_id": ctx.session_id,
+                        "goal": ctx.message,
+                    },
+                )
+                try:
+                    if self.task_planner is None:
+                        self.task_planner = TaskPlanner()
+                    plan = await self.task_planner.create_plan(
+                        user_request=ctx.message,
+                        available_tools=available_tool_names,
+                        context={
+                            "session_id": ctx.session_id,
+                            "user_id": ctx.user_id,
+                            "tenant_id": ctx.tenant_id,
+                            "run_id": ctx.run_id,
+                        },
+                        use_llm=False,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Canonical task planning failed (exception_type=%s)",
+                        type(exc).__name__,
+                    )
+                    yield AgentLoopEvent(
+                        phase=AgentLoopPhase.TASK_PLANNING,
+                        event_type=StreamEventType.STATUS.value,
+                        data={
+                            "run_id": ctx.run_id,
+                            "thread_id": ctx.session_id,
+                            "session_id": ctx.session_id,
+                            "status": "task_planning_degraded",
+                            "message": (
+                                "Task planning was unavailable; continuing through the "
+                                "canonical model-driven loop."
+                            ),
+                            "error": _redact_trace_text(exc),
+                        },
+                    )
+                else:
+                    ctx.execution_plan = plan
+                    plan_payload = plan.to_dict()
+                    yield AgentLoopEvent(
+                        phase=AgentLoopPhase.TASK_PLANNING,
+                        event_type="task_planning",
+                        data={
+                            **plan_payload,
+                            "run_id": ctx.run_id,
+                            "thread_id": ctx.session_id,
+                            "session_id": ctx.session_id,
+                            "execution_mode": "model_guidance",
+                        },
+                    )
+                    planning_context = json.dumps(
+                        plan_payload,
+                        ensure_ascii=False,
+                        default=str,
+                    )[:8000]
+                    if ctx.config.confirm_plan:
+                        # The removed legacy orchestrator had no durable resume
+                        # contract for plan confirmation.  Fail closed and make
+                        # the retirement observable instead of executing tools
+                        # without the requested confirmation.
+                        yield AgentLoopEvent(
+                            phase=AgentLoopPhase.TASK_PLANNING,
+                            event_type=StreamEventType.STATUS.value,
+                            data={
+                                "run_id": ctx.run_id,
+                                "thread_id": ctx.session_id,
+                                "session_id": ctx.session_id,
+                                "status": "plan_confirmation_unsupported",
+                                "message": (
+                                    "Plan confirmation cannot be resumed by the unified "
+                                    "runtime; execution stopped before any model or tool call."
+                                ),
+                                "requires_confirmation": False,
+                            },
+                        )
+                        yield AgentLoopEvent(
+                            phase=AgentLoopPhase.TASK_PLANNING,
+                            event_type=StreamEventType.RUN_ERROR.value,
+                            data={
+                                "run_id": ctx.run_id,
+                                "thread_id": ctx.session_id,
+                                "session_id": ctx.session_id,
+                                "error": "plan_confirmation_resume_not_supported",
+                                "recoverable": False,
+                            },
+                        )
+                        return
             dataset_name_map, rag_revision_hash = await self._get_streaming_dataset_context(
                 ctx, user
             )
@@ -5506,6 +6188,9 @@ class AgentLoop:
                 from ..tools.builtin_tools import KBSearchExecutor
                 from ..tools.tool_registry import ToolCallRequest
 
+                if ctx.run_budget is None:
+                    raise RuntimeError("run_budget_not_initialized")
+                ctx.run_budget.reserve_tool_batch(1)
                 auto_dataset_ids = sorted(auto_retrieval_configs)
                 auto_top_k = max(
                     int(dataset_config["top_k"])
@@ -5520,6 +6205,25 @@ class AgentLoop:
                     for dataset_config in auto_retrieval_configs.values()
                 )
                 auto_started_at = time.time()
+                auto_tool_id = f"auto_kb_{ctx.run_id}"
+                yield AgentLoopEvent(
+                    phase=phase,
+                    event_type=StreamEventType.TOOL_CALL_START.value,
+                    data={
+                        "run_id": ctx.run_id,
+                        "thread_id": ctx.session_id,
+                        "session_id": ctx.session_id,
+                        "tool_call_id": auto_tool_id,
+                        "name": "search_knowledge_base",
+                        "tool_name": "search_knowledge_base",
+                        "arguments": {
+                            "query": ctx.message,
+                            "dataset_ids": auto_dataset_ids,
+                            "top_k": auto_top_k,
+                            "score_threshold": auto_threshold,
+                        },
+                    },
+                )
                 auto_trace = build_rag_trace_payload(
                     query=ctx.message,
                     dataset_ids=auto_dataset_ids,
@@ -5527,7 +6231,7 @@ class AgentLoop:
                     score_threshold=auto_threshold,
                     include_images=auto_include_images,
                     started_at=auto_started_at,
-                    tool_id=f"auto_kb_{ctx.run_id}",
+                    tool_id=auto_tool_id,
                     retrieval_configs=auto_retrieval_configs,
                 )
                 self._capture_rag_retrieval_trace(
@@ -5537,7 +6241,7 @@ class AgentLoop:
                 )
                 auto_result = await KBSearchExecutor(self.kb_service).execute(
                     ToolCallRequest(
-                        call_id=f"auto_kb_{ctx.run_id}",
+                        call_id=auto_tool_id,
                         tool_name="search_knowledge_base",
                         arguments={
                             "query": ctx.message,
@@ -5568,6 +6272,8 @@ class AgentLoop:
                 auto_contexts = auto_metadata.get("contexts")
                 auto_contexts = auto_contexts if isinstance(auto_contexts, list) else []
                 if not auto_result.success:
+                    auto_error = str(auto_result.error or "AGENT_KNOWLEDGE_UNAVAILABLE")
+                    ctx.run_budget.observe_tool_result(auto_error)
                     self._capture_rag_retrieval_trace(
                         ctx,
                         event_type="rag_retrieval_failed",
@@ -5580,9 +6286,41 @@ class AgentLoop:
                             started_at=auto_started_at,
                             ended_at=time.time(),
                             error="AGENT_KNOWLEDGE_UNAVAILABLE",
-                            tool_id=f"auto_kb_{ctx.run_id}",
+                            tool_id=auto_tool_id,
                             retrieval_configs=auto_retrieval_configs,
                         ),
+                    )
+                    yield AgentLoopEvent(
+                        phase=phase,
+                        event_type=StreamEventType.TOOL_CALL_RESULT.value,
+                        data={
+                            "run_id": ctx.run_id,
+                            "thread_id": ctx.session_id,
+                            "session_id": ctx.session_id,
+                            "tool_call_id": auto_tool_id,
+                            "name": "search_knowledge_base",
+                            "tool_name": "search_knowledge_base",
+                            "status": "error",
+                            "success": False,
+                            "result_preview": None,
+                            "error": _redact_trace_text(auto_error),
+                        },
+                    )
+                    yield AgentLoopEvent(
+                        phase=phase,
+                        event_type=StreamEventType.TOOL_CALL_END.value,
+                        data={
+                            "run_id": ctx.run_id,
+                            "thread_id": ctx.session_id,
+                            "session_id": ctx.session_id,
+                            "tool_call_id": auto_tool_id,
+                            "name": "search_knowledge_base",
+                            "tool_name": "search_knowledge_base",
+                            "status": "error",
+                            "success": False,
+                            "duration_ms": round((time.time() - auto_started_at) * 1000, 2),
+                            "error": _redact_trace_text(auto_error),
+                        },
                     )
                     yield AgentLoopEvent(
                         phase=phase,
@@ -5608,7 +6346,7 @@ class AgentLoop:
                         started_at=auto_started_at,
                         ended_at=time.time(),
                         contexts=auto_contexts,
-                        tool_id=f"auto_kb_{ctx.run_id}",
+                        tool_id=auto_tool_id,
                         retrieval_configs=auto_retrieval_configs,
                     ),
                 )
@@ -5623,6 +6361,39 @@ class AgentLoop:
                         data=compact_context,
                     )
                 auto_knowledge_context = str(auto_result.result or "").strip()
+                ctx.run_budget.observe_tool_result(auto_knowledge_context)
+                auto_duration_ms = round((time.time() - auto_started_at) * 1000, 2)
+                yield AgentLoopEvent(
+                    phase=phase,
+                    event_type=StreamEventType.TOOL_CALL_RESULT.value,
+                    data={
+                        "run_id": ctx.run_id,
+                        "thread_id": ctx.session_id,
+                        "session_id": ctx.session_id,
+                        "tool_call_id": auto_tool_id,
+                        "name": "search_knowledge_base",
+                        "tool_name": "search_knowledge_base",
+                        "status": "completed",
+                        "success": True,
+                        "result_preview": _redact_trace_text(auto_knowledge_context[:2000]),
+                        "duration_ms": auto_duration_ms,
+                    },
+                )
+                yield AgentLoopEvent(
+                    phase=phase,
+                    event_type=StreamEventType.TOOL_CALL_END.value,
+                    data={
+                        "run_id": ctx.run_id,
+                        "thread_id": ctx.session_id,
+                        "session_id": ctx.session_id,
+                        "tool_call_id": auto_tool_id,
+                        "name": "search_knowledge_base",
+                        "tool_name": "search_knowledge_base",
+                        "status": "completed",
+                        "success": True,
+                        "duration_ms": auto_duration_ms,
+                    },
+                )
 
             agent_runtime = ctx.config.agent_runtime
             agent_user_memory_enabled = agent_runtime is None or agent_runtime.user_memory_enabled
@@ -5695,6 +6466,12 @@ class AgentLoop:
             # user memory -> retrieved memory snippets. Query-dependent context
             # intentionally stays out of system.
             dynamic_sections: list[str] = []
+
+            if planning_context:
+                dynamic_sections.append(
+                    "## Execution Plan (internal guidance; not authorization to call tools)\n"
+                    + planning_context
+                )
 
             if auto_knowledge_context:
                 dynamic_sections.append(
@@ -6151,6 +6928,48 @@ class AgentLoop:
                     normalized_call_ids.add(proposed_id)
                     tool_call["id"] = proposed_id
 
+                if ctx.run_budget is None:
+                    raise RuntimeError("run_budget_not_initialized")
+                try:
+                    ctx.run_budget.reserve_tool_batch(len(tool_calls_batch))
+                except RunBudgetExceeded as budget_error:
+                    # A normalized provider proposal still receives one public
+                    # final result even when the run budget rejects dispatch.
+                    for tool_call in tool_calls_batch:
+                        tool_id = str(tool_call["id"])
+                        function = tool_call.get("function") or {}
+                        tool_name = str(function.get("name") or "unknown")
+                        lifecycle_data = {
+                            "run_id": ctx.run_id,
+                            "thread_id": ctx.session_id,
+                            "session_id": ctx.session_id,
+                            "tool_call_id": tool_id,
+                            "name": tool_name,
+                            "tool_name": tool_name,
+                            "status": "budget_rejected",
+                            "success": False,
+                            "error": budget_error.reason,
+                        }
+                        yield AgentLoopEvent(
+                            phase=phase,
+                            event_type=StreamEventType.TOOL_CALL_START.value,
+                            data={
+                                **lifecycle_data,
+                                "arguments": function.get("arguments") or "{}",
+                            },
+                        )
+                        yield AgentLoopEvent(
+                            phase=phase,
+                            event_type=StreamEventType.TOOL_CALL_RESULT.value,
+                            data={**lifecycle_data, "result_preview": None},
+                        )
+                        yield AgentLoopEvent(
+                            phase=phase,
+                            event_type=StreamEventType.TOOL_CALL_END.value,
+                            data=lifecycle_data,
+                        )
+                    raise
+
                 # Step 4: Execute tool calls
                 logger.info(f"[STREAMING-FIRST] Executing {len(tool_calls_batch)} tool calls")
 
@@ -6231,6 +7050,16 @@ class AgentLoop:
                                 ),
                             }
                         )
+                        for synthetic_event in self._synthetic_tool_lifecycle_events(
+                            ctx,
+                            tool_call_id=tool_id,
+                            tool_name=tool_name,
+                            arguments=tool_args_payload,
+                            status="invalid_arguments",
+                            reason="invalid_tool_arguments",
+                            phase=phase,
+                        ):
+                            yield synthetic_event
                         continue
                     kb_query_fp = (
                         _kb_query_fingerprint(tool_args)
@@ -6252,6 +7081,16 @@ class AgentLoop:
                                 "content": KB_REUSE_MESSAGE,
                             }
                         )
+                        for synthetic_event in self._synthetic_tool_lifecycle_events(
+                            ctx,
+                            tool_call_id=tool_id,
+                            tool_name=tool_name,
+                            arguments=tool_args,
+                            status="deduplicated",
+                            reason=str(_dedup_reason or "duplicate_tool_call"),
+                            phase=phase,
+                        ):
+                            yield synthetic_event
                         continue
                     # Permission middleware: gate the tool call before any
                     # lifecycle event is emitted. Deny/confirm short-circuits
@@ -6337,6 +7176,16 @@ class AgentLoop:
                                     }
                                 )
                                 denied_tools.add(tool_name)
+                                for synthetic_event in self._synthetic_tool_lifecycle_events(
+                                    ctx,
+                                    tool_call_id=tool_id,
+                                    tool_name=tool_name,
+                                    arguments=tool_args,
+                                    status="error",
+                                    reason="approval_persistence_failed",
+                                    phase=phase,
+                                ):
+                                    yield synthetic_event
                                 continue
                             approval_idempotency, approval_resume_payload = (
                                 self._tool_operation_fence(
@@ -6364,6 +7213,24 @@ class AgentLoop:
                             )
                             if approval_checkpoint is None:
                                 ctx.terminal_exit_reason = "checkpoint_persistence_failed"
+                                for rejected_index, rejected_call in enumerate(
+                                    tool_calls_batch[tool_index - 1 :]
+                                ):
+                                    rejected_function = rejected_call.get("function") or {}
+                                    for synthetic_event in self._synthetic_tool_lifecycle_events(
+                                        ctx,
+                                        tool_call_id=str(rejected_call["id"]),
+                                        tool_name=str(rejected_function.get("name") or "unknown"),
+                                        arguments=(
+                                            tool_args
+                                            if rejected_index == 0
+                                            else rejected_function.get("arguments") or "{}"
+                                        ),
+                                        status=("error" if rejected_index == 0 else "not_executed"),
+                                        reason="checkpoint_persistence_failed",
+                                        phase=phase,
+                                    ):
+                                        yield synthetic_event
                                 yield AgentLoopEvent(
                                     phase=phase,
                                     event_type=StreamEventType.RUN_ERROR.value,
@@ -6378,6 +7245,18 @@ class AgentLoop:
                                 )
                                 return
                             ctx.approval_paused = True
+                            for later_call in tool_calls_batch[tool_index:]:
+                                later_function = later_call.get("function") or {}
+                                for synthetic_event in self._synthetic_tool_lifecycle_events(
+                                    ctx,
+                                    tool_call_id=str(later_call["id"]),
+                                    tool_name=str(later_function.get("name") or "unknown"),
+                                    arguments=later_function.get("arguments") or "{}",
+                                    status="not_executed",
+                                    reason="approval_pending",
+                                    phase=phase,
+                                ):
+                                    yield synthetic_event
                             envelope = self._terminal_envelope(
                                 ctx,
                                 status="blocked",
@@ -6435,6 +7314,16 @@ class AgentLoop:
                             }
                         )
                         denied_tools.add(tool_name)
+                        for synthetic_event in self._synthetic_tool_lifecycle_events(
+                            ctx,
+                            tool_call_id=tool_id,
+                            tool_name=tool_name,
+                            arguments=tool_args,
+                            status="denied",
+                            reason=str(_verdict.reason or "blocked_by_policy"),
+                            phase=phase,
+                        ):
+                            yield synthetic_event
                         continue
 
                     dispatch_idempotency, dispatch_resume_payload = self._tool_operation_fence(
@@ -6466,6 +7355,24 @@ class AgentLoop:
                         )
                         if dispatch_checkpoint is None:
                             ctx.terminal_exit_reason = "checkpoint_persistence_failed"
+                            for rejected_index, rejected_call in enumerate(
+                                tool_calls_batch[tool_index - 1 :]
+                            ):
+                                rejected_function = rejected_call.get("function") or {}
+                                for synthetic_event in self._synthetic_tool_lifecycle_events(
+                                    ctx,
+                                    tool_call_id=str(rejected_call["id"]),
+                                    tool_name=str(rejected_function.get("name") or "unknown"),
+                                    arguments=(
+                                        tool_args
+                                        if rejected_index == 0
+                                        else rejected_function.get("arguments") or "{}"
+                                    ),
+                                    status=("error" if rejected_index == 0 else "not_executed"),
+                                    reason="checkpoint_persistence_failed",
+                                    phase=phase,
+                                ):
+                                    yield synthetic_event
                             yield AgentLoopEvent(
                                 phase=phase,
                                 event_type=StreamEventType.RUN_ERROR.value,
@@ -6527,6 +7434,8 @@ class AgentLoop:
                         data={
                             "tool_call_id": tool_id,
                             "name": tool_name,
+                            "tool_name": tool_name,
+                            "arguments": tool_args,
                             "step_id": step_id,
                             "run_id": ctx.run_id,
                             "thread_id": ctx.session_id,
@@ -6784,6 +7693,7 @@ class AgentLoop:
                                             * ctx.config.max_concurrent_tools
                                         ),
                                         parent_max_tokens=ctx.config.max_tokens,
+                                        run_budget=ctx.run_budget,
                                     ):
                                         yield AgentLoopEvent(
                                             phase=phase,
@@ -6940,6 +7850,26 @@ class AgentLoop:
                                 approval_id = tool_metadata.get("approval_id")
                                 if not approval_id:
                                     ctx.terminal_exit_reason = "approval_persistence_failed"
+                                    for repair_event in self._unpaired_tool_terminal_events(
+                                        ctx,
+                                        status="error",
+                                        reason="approval_persistence_failed",
+                                    ):
+                                        yield repair_event
+                                    for later_call in tool_calls_batch[tool_index:]:
+                                        later_function = later_call.get("function") or {}
+                                        for (
+                                            synthetic_event
+                                        ) in self._synthetic_tool_lifecycle_events(
+                                            ctx,
+                                            tool_call_id=str(later_call["id"]),
+                                            tool_name=str(later_function.get("name") or "unknown"),
+                                            arguments=(later_function.get("arguments") or "{}"),
+                                            status="not_executed",
+                                            reason="approval_persistence_failed",
+                                            phase=phase,
+                                        ):
+                                            yield synthetic_event
                                     yield AgentLoopEvent(
                                         phase=phase,
                                         event_type=StreamEventType.RUN_ERROR.value,
@@ -6976,6 +7906,12 @@ class AgentLoop:
                                 )
                                 if approval_checkpoint is None:
                                     ctx.terminal_exit_reason = "checkpoint_persistence_failed"
+                                    for repair_event in self._unpaired_tool_terminal_events(
+                                        ctx,
+                                        status="error",
+                                        reason="checkpoint_persistence_failed",
+                                    ):
+                                        yield repair_event
                                     yield AgentLoopEvent(
                                         phase=phase,
                                         event_type=StreamEventType.RUN_ERROR.value,
@@ -6990,6 +7926,24 @@ class AgentLoop:
                                     )
                                     return
                                 ctx.approval_paused = True
+                                for later_call in tool_calls_batch[tool_index:]:
+                                    later_function = later_call.get("function") or {}
+                                    for synthetic_event in self._synthetic_tool_lifecycle_events(
+                                        ctx,
+                                        tool_call_id=str(later_call["id"]),
+                                        tool_name=str(later_function.get("name") or "unknown"),
+                                        arguments=later_function.get("arguments") or "{}",
+                                        status="not_executed",
+                                        reason="approval_pending",
+                                        phase=phase,
+                                    ):
+                                        yield synthetic_event
+                                for repair_event in self._unpaired_tool_terminal_events(
+                                    ctx,
+                                    status="blocked",
+                                    reason="approval_pending",
+                                ):
+                                    yield repair_event
                                 envelope = self._terminal_envelope(
                                     ctx,
                                     status="blocked",
@@ -7030,6 +7984,18 @@ class AgentLoop:
                                 step_error = tool_error or "cancelled"
                                 ctx.cancelled = True
                                 ctx.terminal_exit_reason = "cancelled"
+                                for later_call in tool_calls_batch[tool_index:]:
+                                    later_function = later_call.get("function") or {}
+                                    for synthetic_event in self._synthetic_tool_lifecycle_events(
+                                        ctx,
+                                        tool_call_id=str(later_call["id"]),
+                                        tool_name=str(later_function.get("name") or "unknown"),
+                                        arguments=later_function.get("arguments") or "{}",
+                                        status="not_executed",
+                                        reason="cancelled",
+                                        phase=phase,
+                                    ):
+                                        yield synthetic_event
                                 envelope = self._terminal_envelope(
                                     ctx,
                                     status="cancelled",
@@ -7349,9 +8315,13 @@ class AgentLoop:
                                 "thread_id": ctx.session_id,
                                 "session_id": ctx.session_id,
                                 "tool_call_id": tool_id,
+                                "name": tool_name,
+                                "tool_name": tool_name,
                                 "status": tool_status,
+                                "success": tool_success,
                                 "result_preview": tool_result_preview,
                                 "error": tool_error_for_event,
+                                "duration_ms": tool_duration_ms,
                             },
                         )
                         yield AgentLoopEvent(
@@ -7446,6 +8416,8 @@ class AgentLoop:
                                 **recovery,
                             }
 
+                    except RunBudgetExceeded:
+                        raise
                     except Exception as e:
                         safe_error = _redact_trace_text(e)
                         if tool_name == "search_knowledge_base" and kb_rag_started_at is not None:
@@ -7578,14 +8550,30 @@ class AgentLoop:
                         if step_error:
                             step_finished_payload["error"] = step_error
 
-                        yield AgentLoopEvent(
-                            phase=phase,
-                            event_type=StreamEventType.STEP_FINISHED.value,
-                            data=step_finished_payload,
-                            timestamp=step_finished_at,
-                        )
+                        # Gateway approval may already have emitted the public
+                        # blocked boundary from inside the try block. No later
+                        # business event may cross that immutable boundary.
+                        if not ctx.approval_paused:
+                            yield AgentLoopEvent(
+                                phase=phase,
+                                event_type=StreamEventType.STEP_FINISHED.value,
+                                data=step_finished_payload,
+                                timestamp=step_finished_at,
+                            )
 
                     if pending_recovery_event is not None:
+                        for later_call in tool_calls_batch[tool_index:]:
+                            later_function = later_call.get("function") or {}
+                            for synthetic_event in self._synthetic_tool_lifecycle_events(
+                                ctx,
+                                tool_call_id=str(later_call["id"]),
+                                tool_name=str(later_function.get("name") or "unknown"),
+                                arguments=later_function.get("arguments") or "{}",
+                                status="not_executed",
+                                reason="side_effect_unknown",
+                                phase=phase,
+                            ):
+                                yield synthetic_event
                         yield AgentLoopEvent(
                             phase=phase,
                             event_type="side_effect_unknown",
@@ -7638,6 +8626,10 @@ class AgentLoop:
                             "call the underlying tool with a narrower query or "
                             "read_* for a specific item]"
                         )
+
+                    if ctx.run_budget is None:
+                        raise RuntimeError("run_budget_not_initialized")
+                    ctx.run_budget.observe_tool_result(_tool_content)
 
                     messages.append(
                         {
@@ -7850,6 +8842,8 @@ class AgentLoop:
                 f"{iteration} iterations, {len(ctx.generated_content)} chars"
             )
 
+        except RunBudgetExceeded:
+            raise
         except Exception as e:
             safe_error = _redact_trace_text(e)
             ctx.model_error_seen = True

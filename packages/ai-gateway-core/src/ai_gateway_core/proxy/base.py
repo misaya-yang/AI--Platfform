@@ -547,7 +547,10 @@ class ServiceProxy:
         budget.record_original()
         method = request.method.upper()
         body_replayable = body is not None
-        idempotency_key = any(k.lower() == "idempotency-key" for k in headers)
+        idempotency_key = any(
+            key.lower() == "idempotency-key" and bool(value.strip())
+            for key, value in headers.items()
+        )
         attempt = 1
 
         while True:
@@ -697,11 +700,14 @@ class ServiceProxy:
         breaker: CircuitBreaker,
     ) -> Response:
         client = await self._get_client()
+        request_content = body
+        if body is None and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+            request_content = request.stream()
         req = client.build_request(
             method=request.method,
             url=url,
             headers=headers,
-            content=body if body is not None else request.stream(),
+            content=request_content,
         )
         resp = await client.send(req, stream=True)
 

@@ -211,7 +211,7 @@ public class ChatClient {
                 .uri(URI.create(baseUrl + path))
                 .timeout(timeout)
                 .header("Content-Type", "application/json")
-                .header("Authorization", "Bearer " + apiKey)
+                .header("X-API-Key", apiKey)
                 .POST(HttpRequest.BodyPublishers.ofString(jsonBody));
 
         if (tenantId != null && !tenantId.isEmpty()) {

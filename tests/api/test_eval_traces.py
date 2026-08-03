@@ -167,6 +167,33 @@ def _score_row(**overrides: Any) -> dict[str, Any]:
     return row
 
 
+def _gate_summary(
+    *,
+    overall_score: float,
+    failed_case_count: int,
+    trajectory_failed_count: int,
+) -> dict[str, Any]:
+    case_count = 25
+    return {
+        "schema_version": "eval-gate-metrics/v2",
+        "case_count": case_count,
+        "score_sum": overall_score * case_count,
+        "failed_case_count": failed_case_count,
+        "overall_score": overall_score,
+        "average_score": overall_score,
+        "pass_rate": (case_count - failed_case_count) / case_count,
+        "trajectory_case_count": case_count,
+        "trajectory_failed_count": trajectory_failed_count,
+        "trajectory_pass_rate": (case_count - trajectory_failed_count) / case_count,
+        "critical_case_count": 5,
+        "critical_failed_count": 0,
+        "critical_pass_rate": 1.0,
+        "stateful_case_count": 1,
+        "stateful_failed_count": 0,
+        "stateful_pass_rate": 1.0,
+    }
+
+
 class FakeTraceRepository:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -238,11 +265,11 @@ class FakeTraceRepository:
             "dataset_id": self.dataset["dataset_id"],
             "status": "succeeded",
             "target_snapshot": {"candidate_label": "baseline"},
-            "score_summary": {
-                "overall_score": 0.9,
-                "trajectory_pass_rate": 1.0,
-                "critical_pass_rate": 1.0,
-            },
+            "score_summary": _gate_summary(
+                overall_score=0.9,
+                failed_case_count=2,
+                trajectory_failed_count=0,
+            ),
             "metrics": {"targets": 10},
             "error_message": None,
             "created_by": "user-a",
@@ -255,11 +282,11 @@ class FakeTraceRepository:
             **self.baseline_run,
             "run_id": "34343434-3434-4434-8434-343434343434",
             "target_snapshot": {"candidate_label": "candidate"},
-            "score_summary": {
-                "overall_score": 0.88,
-                "trajectory_pass_rate": 0.96,
-                "critical_pass_rate": 1.0,
-            },
+            "score_summary": _gate_summary(
+                overall_score=0.88,
+                failed_case_count=3,
+                trajectory_failed_count=1,
+            ),
         }
 
     async def list_traces(self, **kwargs: Any) -> tuple[list[dict[str, Any]], int]:
@@ -580,6 +607,8 @@ class FakeTraceRepository:
             "candidate_summary": self.candidate_run["score_summary"],
             "deltas": {"overall_score": -0.02, "trajectory_pass_rate": -0.04},
             "regression_summary": {"regressed_metrics": ["overall_score", "trajectory_pass_rate"]},
+            "compatibility": {"status": "compatible", "compatible": True, "reasons": []},
+            "gate": {"status": "pass", "failures": [], "warnings": []},
             "case_diffs": [],
         }
 
@@ -1529,17 +1558,108 @@ async def test_eval_experiment_batch_compare_and_gate(monkeypatch) -> None:
     gate = await dry_run_eval_gate(
         body=EvalGateDryRunRequest(
             result_payload={
-                "metrics": {
-                    "overall_score": 0.88,
-                    "trajectory_pass_rate": 0.96,
-                    "critical_pass_rate": 1.0,
-                }
+                "metrics": _gate_summary(
+                    overall_score=0.88,
+                    failed_case_count=3,
+                    trajectory_failed_count=1,
+                )
             }
         ),
         request=_request(),
         auth=auth,
     )
     assert gate.status == "pass"
+
+
+@pytest.mark.asyncio
+async def test_eval_gate_run_ids_preserve_authoritative_compatibility_and_gate(
+    monkeypatch,
+) -> None:
+    repo = FakeTraceRepository()
+    original_compare = repo.compare_experiment_runs
+
+    async def incompatible_compare(**kwargs: Any) -> dict[str, Any] | None:
+        comparison = await original_compare(**kwargs)
+        assert comparison is not None
+        return {
+            **comparison,
+            "compatibility": {
+                "status": "incompatible",
+                "compatible": False,
+                "reasons": ["dataset_manifest_mismatch"],
+            },
+            "gate": {
+                "status": "fail",
+                "failures": ["critical_case_regression"],
+                "warnings": [],
+            },
+        }
+
+    repo.compare_experiment_runs = incompatible_compare  # type: ignore[method-assign]
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+
+    gate = await dry_run_eval_gate(
+        body=EvalGateDryRunRequest(
+            baseline_run_id=repo.baseline_run["run_id"],
+            candidate_run_id=repo.candidate_run["run_id"],
+        ),
+        request=_request(),
+        auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+    )
+
+    assert gate.status == "fail"
+    assert gate.compatibility["compatible"] is False
+    assert gate.authoritative_gate["status"] == "fail"
+    assert "dataset_manifest_mismatch" in " ".join(gate.failures)
+    assert "critical_case_regression" in " ".join(gate.failures)
+
+
+@pytest.mark.asyncio
+async def test_eval_gate_rejects_unversioned_metrics_as_incompatible_schema(
+    monkeypatch,
+) -> None:
+    repo = FakeTraceRepository()
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+
+    with pytest.raises(HTTPException) as error:
+        await dry_run_eval_gate(
+            body=EvalGateDryRunRequest(
+                result_payload={
+                    "metrics": {
+                        "overall_score": 1.0,
+                        "trajectory_pass_rate": 1.0,
+                        "critical_pass_rate": 1.0,
+                    }
+                }
+            ),
+            request=_request(),
+            auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+        )
+
+    assert error.value.status_code == 422
+    assert error.value.detail["error"] == "incompatible_gate_metrics_schema"
+
+
+@pytest.mark.asyncio
+async def test_eval_gate_rejects_coercible_boolean_counts(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+    forged = _gate_summary(
+        overall_score=1.0,
+        failed_case_count=0,
+        trajectory_failed_count=0,
+    )
+    forged["case_count"] = True
+
+    with pytest.raises(HTTPException) as error:
+        await dry_run_eval_gate(
+            body=EvalGateDryRunRequest(result_payload={"metrics": forged}),
+            request=_request(),
+            auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+        )
+
+    assert error.value.status_code == 422
+    assert error.value.detail["error"] == "incompatible_gate_metrics_schema"
 
 
 @pytest.mark.asyncio
@@ -1619,13 +1739,18 @@ async def test_eval_baseline_promotion_requires_complete_verified_live_run(monke
         "status": "succeeded",
         "dataset_manifest_hash": "a" * 64,
         "evaluator_suite_hash": "b" * 64,
-        "score_summary": {"overall_score": 0.9, "critical_pass_rate": 1.0},
+        "score_summary": _gate_summary(
+            overall_score=0.9,
+            failed_case_count=0,
+            trajectory_failed_count=0,
+        ),
         "metrics": {
             "gate": {"status": "pass"},
-            "critical_case_count": 2,
+            "critical_case_count": 5,
             "required_hard_blockers": list(REQUIRED_ASSISTANT_HARD_BLOCKERS),
             "hard_blocker_results": dict.fromkeys(REQUIRED_ASSISTANT_HARD_BLOCKERS, True),
             "hard_blockers_passed": True,
+            "attempted_trials": 3,
             "failed_trials": 0,
             "completed_trials": 3,
             "total_trials": 3,
@@ -1653,6 +1778,31 @@ async def test_eval_baseline_promotion_requires_complete_verified_live_run(monke
     promotion_call = next(call for call in repo.calls if call[0] == "promote_baseline")
     assert promotion_call[1]["expected_previous_baseline_run_id"] is None
 
+    for field in (
+        "attempted_trials",
+        "completed_trials",
+        "failed_trials",
+        "total_trials",
+    ):
+        saved = repo.candidate_run["metrics"].pop(field)
+        with pytest.raises(HTTPException, match="complete, error-free live run"):
+            await promote_eval_experiment_baseline(
+                experiment_id=repo.experiment["experiment_id"],
+                body=EvalBaselinePromotionRequest(run_id=repo.candidate_run["run_id"]),
+                request=_request(),
+                auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+            )
+        repo.candidate_run["metrics"][field] = saved
+
+    repo.candidate_run["metrics"].pop("mixed_runtime")
+    with pytest.raises(HTTPException, match="explicit single-runtime"):
+        await promote_eval_experiment_baseline(
+            experiment_id=repo.experiment["experiment_id"],
+            body=EvalBaselinePromotionRequest(run_id=repo.candidate_run["run_id"]),
+            request=_request(),
+            auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+        )
+
 
 @pytest.mark.asyncio
 async def test_eval_baseline_promotion_rejects_partial_runtime_fingerprint(monkeypatch) -> None:
@@ -1664,12 +1814,18 @@ async def test_eval_baseline_promotion_rejects_partial_runtime_fingerprint(monke
         "status": "succeeded",
         "dataset_manifest_hash": "a" * 64,
         "evaluator_suite_hash": "b" * 64,
-        "score_summary": {"critical_pass_rate": 1.0},
+        "score_summary": _gate_summary(
+            overall_score=0.9,
+            failed_case_count=0,
+            trajectory_failed_count=0,
+        ),
         "metrics": {
             "gate": {"status": "pass"},
-            "critical_case_count": 2,
+            "critical_case_count": 5,
+            "required_hard_blockers": list(REQUIRED_ASSISTANT_HARD_BLOCKERS),
             "hard_blocker_results": dict.fromkeys(REQUIRED_ASSISTANT_HARD_BLOCKERS, True),
             "hard_blockers_passed": True,
+            "attempted_trials": 3,
             "failed_trials": 0,
             "completed_trials": 3,
             "total_trials": 3,
@@ -1699,7 +1855,11 @@ async def test_eval_baseline_promotion_rejects_missing_safety_or_provenance(monk
         **repo.candidate_run,
         "run_mode": "live_candidate",
         "status": "succeeded",
-        "score_summary": {"critical_pass_rate": 1.0},
+        "score_summary": _gate_summary(
+            overall_score=0.9,
+            failed_case_count=0,
+            trajectory_failed_count=0,
+        ),
         "metrics": {
             "gate": {"status": "pass"},
             "critical_case_count": 0,
@@ -1719,7 +1879,8 @@ async def test_eval_baseline_promotion_rejects_missing_safety_or_provenance(monk
 
     repo.candidate_run["metrics"].update(
         {
-            "critical_case_count": 2,
+            "critical_case_count": 5,
+            "required_hard_blockers": list(REQUIRED_ASSISTANT_HARD_BLOCKERS),
             "hard_blocker_results": dict.fromkeys(REQUIRED_ASSISTANT_HARD_BLOCKERS, True),
             "hard_blockers_passed": True,
         }
@@ -1731,6 +1892,47 @@ async def test_eval_baseline_promotion_rejects_missing_safety_or_provenance(monk
             request=_request(),
             auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
         )
+
+
+@pytest.mark.asyncio
+async def test_eval_baseline_promotion_rejects_legacy_coercible_and_forged_receipts(
+    monkeypatch,
+) -> None:
+    repo = FakeTraceRepository()
+    repo.experiment["baseline_run_id"] = None
+    repo.candidate_run = {
+        **repo.candidate_run,
+        "run_mode": "live_candidate",
+        "status": "succeeded",
+    }
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+
+    valid = _gate_summary(
+        overall_score=1.0,
+        failed_case_count=0,
+        trajectory_failed_count=0,
+    )
+    receipts = [
+        ({"overall_score": 1.0, "critical_pass_rate": 1.0}, "incompatible_gate_metrics_schema"),
+        ({**valid, "case_count": True}, "incompatible_gate_metrics_schema"),
+        (
+            {**valid, "critical_case_count": 999, "stateful_case_count": 999},
+            "incompatible_gate_metrics_schema",
+        ),
+        ({**valid, "failed_case_count": 1}, "baseline_quality_gate_failed"),
+    ]
+
+    for score_summary, expected_error in receipts:
+        repo.candidate_run["score_summary"] = score_summary
+        with pytest.raises(HTTPException) as error:
+            await promote_eval_experiment_baseline(
+                experiment_id=repo.experiment["experiment_id"],
+                body=EvalBaselinePromotionRequest(run_id=repo.candidate_run["run_id"]),
+                request=_request(),
+                auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+            )
+        assert error.value.status_code == 409
+        assert error.value.detail["error"] == expected_error
 
 
 def test_eval_openapi_paths_are_registered() -> None:

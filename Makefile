@@ -162,16 +162,30 @@ dev-compose-logs:           ## 查看源码挂载开发服务日志
 
 # -- Agent Trace / Eval Development Gates ------------------------------------
 
-.PHONY: verify-agent-studio verify-eval-dev eval-regression-gate verify-assistant-runtime-dev test-isolation snapshot-assistant-openapi
+.PHONY: verify-agent-studio verify-eval-dev agent-eval-core-gate eval-e1-gate eval-e1-unit-gate eval-regression-gate rag-eval-regression-gate verify-assistant-runtime-dev test-isolation snapshot-assistant-openapi
+
+EVAL_REGRESSION_REPORT_DIR ?= tmp/eval-regression
+EVAL_E1_ARTIFACT_DIR ?= tmp/eval-e1
+EVAL_UV_RUN ?= uv run --all-packages --extra test
+EVAL_RUFF_RUN ?= uv run --all-packages --extra dev
 
 verify-agent-studio:        ## 运行 AS-00~AS-08 版本化 Agent Studio 整体回归门禁
 	@uv run python scripts/agent_studio_regression.py $(ARGS)
 
 verify-assistant-runtime-dev: ## 运行 Assistant Runtime 离线回归门禁 (AHR-01~AHR-04)
-	@uv run python scripts/assistant_runtime_regression.py gate --no-write
+	@$(EVAL_UV_RUN) python scripts/assistant_runtime_regression.py gate --no-write
+
+agent-eval-core-gate:       ## 运行 Agent Eval 候选执行、统计、评估器与多代理核心门禁
+	@$(EVAL_UV_RUN) pytest -q --no-cov \
+		tests/services/eval/test_candidate_runner.py \
+		tests/services/eval/test_experiment_statistics.py \
+		tests/services/eval/test_eval_candidate_client.py \
+		tests/services/eval/test_evaluator_executor.py
+	@$(EVAL_UV_RUN) pytest -q --no-cov \
+		tests/services/assistant/test_subagent_manager.py
 
 verify-eval-dev:            ## 运行 Agent Trace/Eval dev 分支验证门禁
-	@uv run ruff check \
+	@$(EVAL_RUFF_RUN) ruff check \
 		src/api/v1/eval.py \
 		src/api/schemas/eval.py \
 		src/api/eval_export.py \
@@ -184,11 +198,11 @@ verify-eval-dev:            ## 运行 Agent Trace/Eval dev 分支验证门禁
 		tests/api/test_eval_api_trace_tree.py \
 		tests/services/eval \
 		tests/services/assistant/test_agent_trace_capture.py
-	@uv run pytest -q --no-cov \
+	@$(EVAL_UV_RUN) pytest -q --no-cov \
 		tests/api/test_eval_traces.py \
 		tests/api/test_eval_api_trace_tree.py \
 		tests/services/eval/test_eval_permissions.py
-	@uv run pytest -q --no-cov \
+	@$(EVAL_UV_RUN) pytest -q --no-cov \
 		tests/services/eval/test_evaluator_executor.py \
 		tests/services/eval/test_outbox_worker.py \
 		tests/services/eval/test_online_sampling.py \
@@ -197,21 +211,41 @@ verify-eval-dev:            ## 运行 Agent Trace/Eval dev 分支验证门禁
 		tests/services/eval/test_trace_retention_scheduler.py \
 		tests/services/eval/test_search_indexes.py \
 		tests/services/eval/test_drive_shipped_entrypoints.py
-	@$(MAKE) eval-regression-gate
-	@uv run --package assistant-service pytest -q --no-cov \
+	@$(MAKE) eval-e1-gate
+	@$(EVAL_UV_RUN) pytest -q --no-cov \
 		tests/services/assistant/test_agent_trace_capture.py
-	@uv run --package assistant-service pytest -q --no-cov \
+	@$(EVAL_UV_RUN) pytest -q --no-cov \
 		tests/services/eval/test_ingest_roundtrip.py \
 		tests/services/eval/test_trace_capture_helpers.py
 	@corepack pnpm@10.33.0 -C web lint
 	@corepack pnpm@10.33.0 -C web type-check
 
 eval-regression-gate:       ## 运行离线 Assistant Eval golden regression gate
-	@uv run python scripts/eval_golden.py validate tests/fixtures/eval/golden/assistant_regression_v1.jsonl
-	@uv run python scripts/eval_golden.py gate tests/fixtures/eval/golden/assistant_regression_v1.jsonl \
+	@$(EVAL_UV_RUN) python scripts/eval_golden.py validate tests/fixtures/eval/golden/assistant_regression_v1.jsonl
+	@$(EVAL_UV_RUN) python scripts/eval_golden.py gate tests/fixtures/eval/golden/assistant_regression_v1.jsonl \
 		--observations tests/fixtures/eval/observations/assistant_regression_v1.jsonl \
-		--output reports/eval-regression/latest.json \
-		--markdown reports/eval-regression/latest.md
+		--output $(EVAL_REGRESSION_REPORT_DIR)/latest.json \
+		--markdown $(EVAL_REGRESSION_REPORT_DIR)/latest.md
+
+rag-eval-regression-gate:   ## 验证离线双轨 RAG Eval fixture contract（不调用 provider）
+	@$(EVAL_UV_RUN) python scripts/eval_rag.py validate tests/fixtures/eval/rag/golden/rag_regression_v1.jsonl \
+		--observations tests/fixtures/eval/rag/observations/rag_regression_v1.jsonl
+	@$(EVAL_UV_RUN) python scripts/eval_rag.py gate tests/fixtures/eval/rag/golden/rag_regression_v1.jsonl \
+		--observations tests/fixtures/eval/rag/observations/rag_regression_v1.jsonl \
+		--output $(EVAL_E1_ARTIFACT_DIR)/rag-latest.json
+
+eval-e1-unit-gate:          ## 运行 Agent stateful 与 RAG Eval E1 单元门禁
+	@$(EVAL_UV_RUN) pytest -q --no-cov \
+		tests/services/eval/test_agent_observation_adapter.py \
+		tests/services/eval/test_golden_regression_gate.py \
+		tests/services/eval/test_stateful_agent_eval.py \
+		tests/services/eval/test_rag_regression_gate.py \
+		tests/services/eval/test_retrieval_metrics.py
+
+eval-e1-gate:               ## 运行 Eval E1 离线 fixture-contract 门禁（Agent + RAG）
+	@$(MAKE) eval-e1-unit-gate
+	@$(MAKE) eval-regression-gate
+	@$(MAKE) rag-eval-regression-gate
 
 # -- Assistant Service Isolation Gate (Phase 0 safety net) -------------------
 

@@ -23,6 +23,7 @@ async def test_kb_ragas_client_parses_metric_results() -> None:
         assert payload["query"] == "refund policy"
         assert payload["contexts"] == ["chunk one"]
         assert payload["answer"] == "Refunds are available for 30 days."
+        assert payload["llm_config"] is None
         return httpx.Response(
             200,
             json={
@@ -60,6 +61,47 @@ async def test_kb_ragas_client_parses_metric_results() -> None:
     assert results[0].judge_model == "qwen-test"
     assert results[0].failure_kind == "infrastructure"
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_kb_ragas_client_forwards_only_safe_judge_selector() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        assert payload["llm_config"] == {
+            "provider": "dashscope",
+            "model": "qwen-test",
+        }
+        return httpx.Response(
+            200,
+            json={"judge_model": "qwen-test", "results": [_VALID_METRIC_RESULT]},
+        )
+
+    from ai_gateway_core.comm.client import InternalServiceClient, InternalServiceClientConfig
+
+    client = KbRagasClient(base_url="http://kb.test", timeout_s=5.0)
+    client._service_client = InternalServiceClient(  # noqa: SLF001 - test setup
+        InternalServiceClientConfig(name="knowledge-service", base_url="http://kb.test"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    await client.evaluate_retrieval(
+        query="q",
+        contexts=["c"],
+        llm_config={"provider": "dashscope", "model": "qwen-test"},
+    )
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_kb_ragas_client_rejects_sensitive_judge_overrides_before_transport() -> None:
+    client = KbRagasClient(base_url="http://kb.test", timeout_s=5.0)
+
+    with pytest.raises(ValueError, match="only accepts provider and model"):
+        await client.evaluate_retrieval(
+            query="q",
+            contexts=["c"],
+            llm_config={"api_key": "caller-controlled"},
+        )
 
 
 @pytest.mark.asyncio

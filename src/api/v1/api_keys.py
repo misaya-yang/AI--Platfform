@@ -16,6 +16,14 @@ from ..deps import get_user_context
 
 router = APIRouter(prefix="/api-keys", tags=["API Keys"])
 
+# This is a self-service endpoint. Its scopes are stored as API-key
+# permissions and later participate in RBAC resolution, so keep the public
+# issuance surface deliberately limited to non-management knowledge access.
+# Privileged, console, and administrative API keys must be issued through an
+# administrator-controlled path instead.
+SELF_SERVICE_API_KEY_SCOPES = frozenset({"knowledge:read", "knowledge:write"})
+DEFAULT_SELF_SERVICE_API_KEY_SCOPES = ("knowledge:read", "knowledge:write")
+
 
 def get_database(request: Request) -> DatabaseStorage:
     """获取数据库连接"""
@@ -47,9 +55,13 @@ class CreateAPIKeyRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100, description="API Key 名称")
     description: str | None = Field(None, max_length=500, description="描述")
     scopes: list[str] | None = Field(
-        default=["knowledge:read", "knowledge:write"], description="权限范围"
+        default=list(DEFAULT_SELF_SERVICE_API_KEY_SCOPES),
+        description="自助 Key 仅允许 knowledge:read 和 knowledge:write",
     )
-    tier: str | None = Field(default="normal", description="层级")
+    tier: str | None = Field(
+        default="normal",
+        description="已弃用且会被忽略；Key 层级始终继承已认证调用方",
+    )
     expires_at: datetime | None = Field(None, description="过期时间，不填则永不过期")
 
 
@@ -93,6 +105,20 @@ async def create_api_key(
 
     返回的 api_key 只会显示一次，请妥善保存。
     """
+    scopes = (
+        list(req.scopes) if req.scopes is not None else list(DEFAULT_SELF_SERVICE_API_KEY_SCOPES)
+    )
+    disallowed_scopes = sorted(set(scopes) - SELF_SERVICE_API_KEY_SCOPES)
+    if disallowed_scopes:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": "Requested API key scopes are not available for self-service issuance",
+                "disallowed_scopes": disallowed_scopes,
+                "allowed_scopes": sorted(SELF_SERVICE_API_KEY_SCOPES),
+            },
+        )
+
     service = APIKeyService(db)
 
     result = await service.create_api_key(
@@ -100,8 +126,11 @@ async def create_api_key(
         user_id=current_user["user_id"],
         tenant_id=current_user.get("tenant_id", ""),
         description=req.description or "",
-        scopes=req.scopes,
-        tier=req.tier or "normal",
+        scopes=scopes,
+        # The request body is untrusted: self-service keys inherit their
+        # authenticated caller's tier rather than accepting a client-supplied
+        # value such as "admin".
+        tier=str(current_user.get("tier") or "normal"),
         expires_at=req.expires_at,
     )
 

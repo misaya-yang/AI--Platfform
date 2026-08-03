@@ -65,10 +65,10 @@ class ChatRequest(BaseModel):
     system_prompt: str | None = None
     eval_run: bool = False
     eval_system_prompt_override: str | None = None
-    kb_dataset_ids: list[str] | None = None
+    kb_dataset_ids: list[str] | None = Field(default=None, max_length=8)
     kb_mode: str | None = "auto"
-    kb_top_k: int | None = None
-    kb_score_threshold: float | None = None
+    kb_top_k: int | None = Field(default=None, ge=1, le=20)
+    kb_score_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
     kb_include_images: bool | None = None
     web_search_enabled: bool = False
     web_search_max_results: int | None = None
@@ -96,6 +96,21 @@ class ChatRequest(BaseModel):
                 raise ValueError(
                     "Client-supplied Agent runtime fields are forbidden: " + ", ".join(forbidden)
                 )
+            dataset_ids = value.get("kb_dataset_ids")
+            if dataset_ids is not None and (
+                not isinstance(dataset_ids, list)
+                or len(dataset_ids) > 8
+                or any(
+                    not isinstance(dataset_id, str)
+                    or not dataset_id.strip()
+                    or len(dataset_id) > 128
+                    for dataset_id in dataset_ids
+                )
+                or len(set(dataset_ids)) != len(dataset_ids)
+            ):
+                raise ValueError("Invalid knowledge dataset scope")
+            if value.get("kb_include_images") is True:
+                raise ValueError("Multimodal knowledge retrieval is not enabled")
         return value
 
 
@@ -387,7 +402,14 @@ def _build_agent_runtime_config(
     if retrieval_mode not in {"auto", "tool", "off"}:
         raise AgentRuntimeEnvelopeError("AGENT_RUNTIME_KNOWLEDGE_INVALID")
 
-    snapshot_dataset_ids = {str(value) for value in snapshot["knowledge"]["datasets"]}
+    raw_snapshot_dataset_ids = snapshot["knowledge"]["datasets"]
+    if not isinstance(raw_snapshot_dataset_ids, list) or len(raw_snapshot_dataset_ids) > 8:
+        raise AgentRuntimeEnvelopeError("AGENT_RUNTIME_KNOWLEDGE_INVALID")
+    snapshot_dataset_ids = {str(value) for value in raw_snapshot_dataset_ids}
+    if len(snapshot_dataset_ids) != len(raw_snapshot_dataset_ids) or any(
+        not dataset_id or len(dataset_id) > 128 for dataset_id in snapshot_dataset_ids
+    ):
+        raise AgentRuntimeEnvelopeError("AGENT_RUNTIME_KNOWLEDGE_INVALID")
 
     def _normalized_dataset_config(raw: Any) -> dict[str, Any]:
         if not isinstance(raw, dict) or set(raw) - {
@@ -410,6 +432,7 @@ def _build_agent_runtime_config(
             or not isinstance(threshold, (int, float))
             or not 0 <= float(threshold) <= 1
             or not isinstance(include_images, bool)
+            or include_images
         ):
             raise AgentRuntimeEnvelopeError("AGENT_RUNTIME_KNOWLEDGE_INVALID")
         return {
@@ -757,6 +780,11 @@ async def chat(
             "model_id": result.get("model_id"),
             "session_id": session_id,
             "run_id": result.get("run_id"),
+            "status": result.get("status"),
+            "approval_required": result.get("approval_required"),
+            "terminal_envelope": result.get("terminal_envelope"),
+            "context_snapshot": result.get("context_snapshot"),
+            "run_budget": result.get("run_budget"),
         }
     except Exception as e:
         import logging

@@ -104,6 +104,7 @@ class FailureClass(str, Enum):
     MODEL_ERROR = "model_error"
     TOOL_ERROR = "tool_error"
     MAX_ITERATIONS = "max_iterations"
+    RUN_BUDGET_EXCEEDED = "run_budget_exceeded"
     APPROVAL_PENDING = "approval_pending"
     RESUME_REQUIRED = "resume_required"
     COMPENSATION_REQUIRED = "compensation_required"
@@ -250,7 +251,12 @@ def decide_failure(
         else RetrySafety.UNSAFE,
         RecoveryAction.ABORT,
         UserVisibility.WARNING
-        if normalized in {FailureClass.TOOL_ERROR, FailureClass.MAX_ITERATIONS}
+        if normalized
+        in {
+            FailureClass.TOOL_ERROR,
+            FailureClass.MAX_ITERATIONS,
+            FailureClass.RUN_BUDGET_EXCEEDED,
+        }
         else UserVisibility.BLOCKING,
         side_effect,
         False,
@@ -262,6 +268,7 @@ def failure_class_for_exit_reason(exit_reason: str) -> FailureClass:
         "approval_pending": FailureClass.APPROVAL_PENDING,
         "cancelled": FailureClass.CANCELLED,
         "max_iterations": FailureClass.MAX_ITERATIONS,
+        "run_budget_exceeded": FailureClass.RUN_BUDGET_EXCEEDED,
         "model_error": FailureClass.MODEL_ERROR,
         "tool_error": FailureClass.TOOL_ERROR,
         "resume_required": FailureClass.RESUME_REQUIRED,

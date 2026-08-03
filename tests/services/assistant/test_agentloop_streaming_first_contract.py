@@ -323,6 +323,414 @@ def test_streaming_error_redaction_keeps_exception_type_and_redacts_provider_key
     assert "AIza[redacted]" in redacted
 
 
+@pytest.mark.asyncio
+async def test_run_budget_hard_stops_hidden_second_model_turn() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.run_budget import RunBudgetLimits
+
+    model = FakeModelRegistry(
+        scripted=[
+            [
+                {
+                    "tool_calls": [
+                        {
+                            "id": "call-budget-model",
+                            "function": {"name": "lookup", "arguments": "{}"},
+                        }
+                    ],
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            [{"content": "must not execute", "finish_reason": "stop"}],
+        ]
+    )
+    invoker = FakeToolInvoker({"lookup": {"result": "ok"}})
+    loop = AgentLoop(model_registry=model, tool_invoker=invoker)
+    limits = RunBudgetLimits(
+        max_model_turns=1,
+        max_tool_calls=3,
+        max_parallel_tool_calls=2,
+        max_wall_time_seconds=10,
+        max_tool_result_bytes=100,
+    )
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="budget-model-turn",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="lookup",
+            config=AgentLoopConfig(
+                model_id="test",
+                max_tool_iterations=3,
+                run_budget_limits=limits,
+                persist_messages=False,
+            ),
+            history=[],
+        )
+    ]
+    event_types = [str(getattr(event.event_type, "value", event.event_type)) for event in events]
+    budget_event = next(event for event in events if event.event_type == "run_budget_exceeded")
+
+    assert model._call_index == 1
+    assert invoker.invocation_count == 1
+    assert budget_event.data["dimension"] == "model_turns"
+    assert budget_event.data["reason"] == "model_turns_exhausted"
+    assert event_types.count("tool_call_start") == 1
+    assert event_types.count("tool_call_result") == 1
+    assert event_types.count("tool_call_end") == 1
+    assert event_types.count("run_error") == 1
+    assert "run_finished" not in event_types
+
+
+@pytest.mark.asyncio
+async def test_run_budget_rejects_oversized_parallel_batch_with_final_results() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.run_budget import RunBudgetLimits
+
+    tool_calls = [
+        {"id": "call-a", "function": {"name": "lookup", "arguments": '{"q":"a"}'}},
+        {"id": "call-b", "function": {"name": "lookup", "arguments": '{"q":"b"}'}},
+    ]
+    model = FakeModelRegistry(
+        scripted=[[{"tool_calls": tool_calls, "finish_reason": "tool_calls"}]]
+    )
+    invoker = FakeToolInvoker({"lookup": {"result": "ok"}})
+    loop = AgentLoop(model_registry=model, tool_invoker=invoker)
+    limits = RunBudgetLimits(
+        max_model_turns=2,
+        max_tool_calls=3,
+        max_parallel_tool_calls=1,
+        max_wall_time_seconds=10,
+        max_tool_result_bytes=100,
+    )
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="budget-parallel",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="lookup twice",
+            config=AgentLoopConfig(
+                model_id="test",
+                max_tool_iterations=2,
+                run_budget_limits=limits,
+                persist_messages=False,
+            ),
+            history=[],
+        )
+    ]
+    budget_event = next(event for event in events if event.event_type == "run_budget_exceeded")
+
+    assert invoker.invocation_count == 0
+    assert budget_event.data["dimension"] == "parallel_tool_calls"
+    for tool_call_id in ("call-a", "call-b"):
+        assert (
+            sum(
+                event.event_type == "tool_call_result"
+                and event.data.get("tool_call_id") == tool_call_id
+                for event in events
+            )
+            == 1
+        )
+        assert (
+            sum(
+                event.event_type == "tool_call_end"
+                and event.data.get("tool_call_id") == tool_call_id
+                for event in events
+            )
+            == 1
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_budget_counts_model_facing_utf8_tool_result_bytes() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.run_budget import RunBudgetLimits
+
+    model = FakeModelRegistry(
+        scripted=[
+            [
+                {
+                    "tool_calls": [
+                        {
+                            "id": "call-budget-result",
+                            "function": {"name": "lookup", "arguments": "{}"},
+                        }
+                    ],
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        ]
+    )
+    invoker = FakeToolInvoker({"lookup": {"result": "你好"}})
+    loop = AgentLoop(model_registry=model, tool_invoker=invoker)
+    limits = RunBudgetLimits(
+        max_model_turns=2,
+        max_tool_calls=2,
+        max_parallel_tool_calls=1,
+        max_wall_time_seconds=10,
+        max_tool_result_bytes=3,
+    )
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="budget-result-bytes",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="lookup",
+            config=AgentLoopConfig(
+                model_id="test",
+                max_tool_iterations=2,
+                run_budget_limits=limits,
+                persist_messages=False,
+            ),
+            history=[],
+        )
+    ]
+    budget_event = next(event for event in events if event.event_type == "run_budget_exceeded")
+
+    assert invoker.invocation_count == 1
+    assert budget_event.data["dimension"] == "tool_result_bytes"
+    assert sum(event.event_type == "tool_call_result" for event in events) == 1
+    assert sum(event.event_type == "tool_call_end" for event in events) == 1
+    assert sum(event.event_type == "run_error" for event in events) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_budget_wall_time_cancels_a_hung_model_stream() -> None:
+    import asyncio
+
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.run_budget import RunBudgetLimits
+
+    class SlowModel(FakeModelRegistry):
+        async def chat_stream(self, *_args: Any, **_kwargs: Any) -> AsyncIterator[Any]:
+            await asyncio.sleep(0.1)
+            if False:
+                yield None
+
+    model = SlowModel(scripted=[])
+    loop = AgentLoop(model_registry=model, tool_invoker=FakeToolInvoker({}))
+    limits = RunBudgetLimits(
+        max_model_turns=2,
+        max_tool_calls=2,
+        max_parallel_tool_calls=1,
+        max_wall_time_seconds=0.01,
+        max_tool_result_bytes=100,
+    )
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="budget-wall-time",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="wait",
+            config=AgentLoopConfig(
+                model_id="test",
+                max_tool_iterations=2,
+                run_budget_limits=limits,
+                persist_messages=False,
+            ),
+            history=[],
+        )
+    ]
+    budget_event = next(event for event in events if event.event_type == "run_budget_exceeded")
+
+    assert budget_event.data["dimension"] == "wall_time"
+    assert sum(event.event_type == "run_error" for event in events) == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_cancelled_error_projects_failed_terminal() -> None:
+    import asyncio
+
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+
+    class ProviderCancelledModel(FakeModelRegistry):
+        async def chat_stream(self, *_args: Any, **_kwargs: Any) -> AsyncIterator[Any]:
+            if False:
+                yield None
+            raise asyncio.CancelledError
+
+    invoker = FakeToolInvoker({})
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
+    loop = AgentLoop(
+        model_registry=ProviderCancelledModel(scripted=[]),
+        tool_invoker=invoker,  # type: ignore[arg-type]
+        execution_gateway=gateway,
+    )
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="provider-cancelled",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="hello",
+            config=AgentLoopConfig(model_id="test", persist_messages=False),
+            history=[],
+        )
+    ]
+
+    event_types = [event.event_type for event in events]
+    run_id = next(event.data["run_id"] for event in events if event.event_type == "run_started")
+    terminal = next(event.data for event in events if event.event_type == "run_error")
+    assert event_types.count("run_error") == 1
+    assert "run_finished" not in event_types
+    assert terminal["error"].endswith("provider_stream_cancelled")
+    assert terminal["terminal_envelope"]["status"] == "failed"
+    assert terminal["terminal_envelope"]["failure_decision"]["failure_class"] == "model_error"
+    assert gateway._runs[run_id].status == "failed"  # AUDIT-OK: DB-less test fallback only
+
+
+@pytest.mark.asyncio
+async def test_requested_task_cancellation_projects_cancelled_terminal() -> None:
+    import asyncio
+
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+
+    class ControlledCancelledModel(FakeModelRegistry):
+        def __init__(self) -> None:
+            super().__init__(scripted=[])
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def chat_stream(self, *_args: Any, **_kwargs: Any) -> AsyncIterator[Any]:
+            self.entered.set()
+            await self.release.wait()
+            if False:
+                yield None
+            raise asyncio.CancelledError
+
+    model = ControlledCancelledModel()
+    invoker = FakeToolInvoker({})
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
+    loop = AgentLoop(
+        model_registry=model,
+        tool_invoker=invoker,  # type: ignore[arg-type]
+        execution_gateway=gateway,
+    )
+    events: list[Any] = []
+
+    async def consume() -> None:
+        async for event in loop.execute(
+            session_id="requested-cancel",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="hello",
+            config=AgentLoopConfig(model_id="test", persist_messages=False),
+            history=[],
+        ):
+            events.append(event)
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.wait_for(model.entered.wait(), timeout=1)
+    started = next(event.data for event in events if event.event_type == "run_started")
+    assert await loop.task_manager.cancel_task("requested-cancel", started["task_id"])
+    model.release.set()
+    await asyncio.wait_for(consumer, timeout=1)
+
+    terminals = [event for event in events if event.event_type in {"run_finished", "run_error"}]
+    assert len(terminals) == 1
+    assert terminals[0].event_type == "run_error"
+    assert terminals[0].data["terminal_envelope"]["status"] == "cancelled"
+    assert gateway._runs[started["run_id"]].status == "cancelled"  # AUDIT-OK: DB-less test only
+
+
+@pytest.mark.asyncio
+async def test_client_disconnect_persists_cancelled_never_succeeded() -> None:
+    import asyncio
+
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+
+    class BlockingModel(FakeModelRegistry):
+        def __init__(self) -> None:
+            super().__init__(scripted=[])
+            self.entered = asyncio.Event()
+
+        async def chat_stream(self, *_args: Any, **_kwargs: Any) -> AsyncIterator[Any]:
+            self.entered.set()
+            await asyncio.Event().wait()
+            if False:
+                yield None
+
+    model = BlockingModel()
+    invoker = FakeToolInvoker({})
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
+    loop = AgentLoop(
+        model_registry=model,
+        tool_invoker=invoker,  # type: ignore[arg-type]
+        execution_gateway=gateway,
+    )
+    events: list[Any] = []
+
+    async def consume() -> None:
+        async for event in loop.execute(
+            session_id="client-disconnect",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="hello",
+            config=AgentLoopConfig(model_id="test", persist_messages=False),
+            history=[],
+        ):
+            events.append(event)
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.wait_for(model.entered.wait(), timeout=1)
+    run_id = next(event.data["run_id"] for event in events if event.event_type == "run_started")
+    consumer.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+
+    assert all(event.event_type not in {"run_finished", "run_error"} for event in events)
+    assert gateway._runs[run_id].status == "cancelled"  # AUDIT-OK: DB-less test fallback only
+    assert gateway._runs[run_id].error == "client_disconnected"
+    session = await loop.task_manager.get_session("client-disconnect")
+    assert session is not None
+    assert session.active_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_client_disconnect_during_working_memory_bind_releases_task() -> None:
+    import asyncio
+
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    class BindBlockingLoop(AgentLoop):
+        def __init__(self) -> None:
+            super().__init__(model_registry=FakeModelRegistry(scripted=[]))
+            self.bind_entered = asyncio.Event()
+
+        async def _bind_session_working_memory(self, **_kwargs: Any) -> None:
+            self.bind_entered.set()
+            await asyncio.Event().wait()
+
+    loop = BindBlockingLoop()
+
+    async def consume() -> None:
+        async for _ in loop.execute(
+            session_id="bind-client-disconnect",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="hello",
+            config=AgentLoopConfig(model_id="test", persist_messages=False),
+            history=[],
+        ):
+            pass
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.wait_for(loop.bind_entered.wait(), timeout=1)
+    consumer.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+
+    session = await loop.task_manager.get_session("bind-client-disconnect")
+    assert session is not None
+    assert session.active_tasks == set()
+
+
 class FakeArtifact:
     def __init__(self, artifact_id: str):
         self.artifact_id = artifact_id
@@ -1334,6 +1742,10 @@ async def test_streaming_first_persists_checkpoints_without_prompt_text() -> Non
     assert "run_succeeded" in phases
     assert "raw-token" not in serialized
     assert all(checkpoint.message_state_hash for checkpoint in checkpoints)
+    assert all(
+        checkpoint.resume_payload["run_budget"]["schema_version"] == "assistant-run-budget/v1"
+        for checkpoint in checkpoints
+    )
 
 
 @pytest.mark.asyncio
@@ -1445,6 +1857,60 @@ async def test_legacy_history_compaction_receipt_reaches_runtime_snapshot() -> N
     assert receipt["compaction_lineage"]["reason"] == "history_preprocess"
     assert receipt["compaction_lineage"]["summary_provenance"]["untrusted"] is True
     assert all(event.event_type != "run_error" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_history_compaction_model_turn_uses_structured_run_budget_terminal() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.run_budget import RunBudgetLimits
+
+    class CompactingModelRegistry(FakeModelRegistry):
+        async def chat(self, *_args: Any, **_kwargs: Any) -> tuple[str, dict[str, int]]:
+            return "validated historical summary", {}
+
+    model = CompactingModelRegistry(scripted=[[{"content": "must not execute"}]])
+    loop = AgentLoop(model_registry=model)
+    history = [
+        {"role": "user", "content": "old request"},
+        {"role": "assistant", "content": "old evidence " + "x" * 20_000},
+        {"role": "user", "content": "recent request"},
+        {"role": "assistant", "content": "recent response"},
+    ]
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="history-compaction-budget",
+            user=MockUserContext(user_id="u1"),  # type: ignore[arg-type]
+            message="current request",
+            config=AgentLoopConfig(
+                model_id="test",
+                max_tool_iterations=1,
+                use_context_engine=False,
+                max_history_tokens=100,
+                min_recent_messages=2,
+                enable_history_trimming=True,
+                run_budget_limits=RunBudgetLimits(
+                    max_model_turns=1,
+                    max_tool_calls=2,
+                    max_parallel_tool_calls=1,
+                    max_wall_time_seconds=10,
+                    max_tool_result_bytes=100,
+                ),
+            ),
+            history=history,
+        )
+    ]
+
+    event_types = [event.event_type for event in events]
+    assert event_types.count("run_budget_exceeded") == 1
+    assert event_types.count("run_error") == 1
+    assert event_types.index("run_started") < event_types.index("run_budget_exceeded")
+    budget_event = next(event.data for event in events if event.event_type == "run_budget_exceeded")
+    assert budget_event["dimension"] == "model_turns"
+    assert budget_event["used"] == 1
+    assert budget_event["requested"] == 2
+    assert model._call_index == 0
 
 
 @pytest.mark.asyncio
@@ -2162,6 +2628,120 @@ async def test_streaming_first_approval_required_event_is_traceable() -> None:
     assert approval_payload["terminal_envelope"]["failure_decision"]["recovery_action"] == ("pause")
     assert approval_payload["context_snapshot"]["snapshot_id"].startswith("ctx_")
     assert "super-secret-value" not in json.dumps(approval_payload, default=str)
+    approval_checkpoint = next(
+        checkpoint
+        for checkpoint in gateway._checkpoints[run_id]
+        if checkpoint.phase == "approval_pending"
+    )
+    checkpoint_budget = approval_checkpoint.resume_payload["run_budget"]
+    assert checkpoint_budget["usage"]["model_turns"] == 1
+    assert checkpoint_budget["usage"]["tool_calls"] == 1
+
+
+@pytest.mark.parametrize(
+    "tamper_case",
+    [
+        "missing",
+        "malformed",
+        "unknown_schema",
+        "boolean_counter",
+        "counter_over_limit",
+        "elapsed_over_wall",
+        "remaining_mismatch",
+        "non_finite_limit",
+        "limit_escalation",
+    ],
+)
+@pytest.mark.asyncio
+async def test_approval_resume_rejects_invalid_run_budget_checkpoint(
+    tamper_case: str,
+) -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoopConfig
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+
+    invoker = FakeToolInvoker(results_by_name={"generate_image": {"success": True}})
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
+    writer = RecordingTraceWriter()
+    user = MockUserContext(user_id="u1")
+    run_id, approval_id = await _create_pending_approval(
+        invoker=invoker,
+        gateway=gateway,
+        trace_writer=writer,
+        user=user,
+    )
+    approval_checkpoint = next(
+        checkpoint
+        for checkpoint in gateway._checkpoints[run_id]
+        if checkpoint.phase == "approval_pending"
+    )
+    snapshot = approval_checkpoint.resume_payload["run_budget"]
+    assert isinstance(snapshot, dict)
+
+    if tamper_case == "missing":
+        approval_checkpoint.resume_payload.pop("run_budget")
+    elif tamper_case == "malformed":
+        approval_checkpoint.resume_payload["run_budget"] = []
+    elif tamper_case == "unknown_schema":
+        snapshot["schema_version"] = "assistant-run-budget/v999"
+    elif tamper_case == "boolean_counter":
+        snapshot["usage"]["tool_calls"] = True
+    elif tamper_case == "counter_over_limit":
+        snapshot["usage"]["model_turns"] = snapshot["limits"]["max_model_turns"] + 1
+    elif tamper_case == "elapsed_over_wall":
+        snapshot["usage"]["elapsed_ms"] = (
+            int(snapshot["limits"]["max_wall_time_seconds"] * 1000) + 1
+        )
+    elif tamper_case == "remaining_mismatch":
+        snapshot["remaining"]["tool_calls"] += 1
+    elif tamper_case == "non_finite_limit":
+        snapshot["limits"]["max_wall_time_seconds"] = float("inf")
+    elif tamper_case == "limit_escalation":
+        snapshot["limits"]["max_model_turns"] += 1
+    else:  # pragma: no cover - keeps the case table exhaustive
+        raise AssertionError(tamper_case)
+
+    approved = await gateway.approve(
+        approval_id=approval_id,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        approved=True,
+        approver_user_id=user.user_id,
+    )
+    assert approved is not None
+
+    model = FakeModelRegistry(scripted=[[{"content": "must not run"}]])
+    loop = _confirmation_loop(
+        model=model,
+        invoker=invoker,
+        gateway=gateway,
+        trace_writer=None,
+    )
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="s1",
+            user=user,  # type: ignore[arg-type]
+            message="Continue",
+            config=AgentLoopConfig(
+                model_id="test",
+                max_tool_iterations=2,
+                resume_run_id=run_id,
+                resume_approval_id=approval_id,
+            ),
+            history=[],
+        )
+    ]
+
+    assert [event.event_type for event in events] == ["run_error"]
+    assert events[0].data["error"] == "run_budget_restore_failed"
+    assert events[0].data["run_id"] == run_id
+    assert events[0].data["attempt_id"].startswith("att_")
+    assert events[0].data["attempt_number"] == 2
+    assert events[0].data["context_snapshot"]["snapshot_id"].startswith("ctx_")
+    assert events[0].data["terminal_envelope"]["status"] == "failed"
+    assert events[0].data["terminal_envelope"]["turn_state"]["terminal"] is True
+    assert model._call_index == 0
+    assert invoker.invocation_count == 0
 
 
 @pytest.mark.asyncio
@@ -2248,7 +2828,7 @@ async def test_approval_pause_keeps_trace_non_terminal_and_drains_pending_writes
 
 
 @pytest.mark.asyncio
-async def test_approval_pause_strict_barrier_failure_is_fail_closed() -> None:
+async def test_approval_pause_trace_barrier_failure_preserves_public_blocked_terminal() -> None:
     from assistant_service.core.agent.agent_loop import AgentLoopConfig
     from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
 
@@ -2271,17 +2851,25 @@ async def test_approval_pause_strict_barrier_failure_is_fail_closed() -> None:
     )
     events = []
 
-    with pytest.raises(RuntimeError, match="trace persistence barrier failed"):
-        async for event in loop.execute(
-            session_id="s1",
-            user=MockUserContext(user_id="u1"),  # type: ignore[arg-type]
-            message="Generate",
-            config=AgentLoopConfig(model_id="test", max_tool_iterations=2),
-            history=[],
-        ):
-            events.append(event)
+    async for event in loop.execute(
+        session_id="s1",
+        user=MockUserContext(user_id="u1"),  # type: ignore[arg-type]
+        message="Generate",
+        config=AgentLoopConfig(model_id="test", max_tool_iterations=2),
+        history=[],
+    ):
+        events.append(event)
 
-    assert "approval_required" in [event.event_type for event in events]
+    from assistant_service.core.turn_event_collector import TurnEventCollector
+
+    collector = TurnEventCollector()
+    for event in events:
+        collector.accept(event)
+    turn = collector.finalize()
+
+    assert turn.status == "blocked"
+    assert [event.event_type for event in events].count("approval_required") == 1
+    assert all(event.event_type not in {"run_finished", "run_error"} for event in events)
     assert writer.drain_strict == [True]
     assert writer.drain_trace_ids == [writer.started[0].trace_id]
     assert writer.finished == []
@@ -2624,6 +3212,156 @@ async def test_approval_resume_cursor_failure_stops_before_trace_and_tool() -> N
     assert writer.operations == ["resume_sequence"]
     assert writer.started == []
     assert invoker.invocation_count == 0
+
+
+@pytest.mark.asyncio
+async def test_partial_resume_identity_projects_one_canonical_terminal() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.turn_contract import build_attempt_id
+
+    model = FakeModelRegistry(scripted=[[{"content": "must not run"}]])
+    loop = AgentLoop(model_registry=model)
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="s-partial-resume",
+            user=MockUserContext(user_id="u1"),  # type: ignore[arg-type]
+            message="Continue",
+            config=AgentLoopConfig(
+                model_id="test",
+                resume_run_id="run-partial-resume",
+            ),
+            history=[],
+        )
+    ]
+
+    assert [event.event_type for event in events] == ["run_error"]
+    terminal = events[0].data
+    assert terminal["run_id"] == "run-partial-resume"
+    assert terminal["error"] == "resume_run_id_and_approval_id_required"
+    assert terminal["attempt_id"].startswith("att_")
+    turn_state = terminal["turn_state"]
+    envelope = terminal["terminal_envelope"]
+    assert turn_state["run_id"] == "run-partial-resume"
+    assert envelope["run_id"] == "run-partial-resume"
+    assert envelope["turn_state"]["run_id"] == "run-partial-resume"
+    assert terminal["attempt_id"] == turn_state["attempt_id"]
+    assert terminal["attempt_id"] == envelope["attempt_id"]
+    assert terminal["attempt_id"] == envelope["turn_state"]["attempt_id"]
+    assert terminal["attempt_id"] == build_attempt_id(
+        "run-partial-resume",
+        turn_state["request_id"],
+        1,
+    )
+    assert terminal["context_snapshot"]["snapshot_id"].startswith("ctx_")
+    assert envelope["turn_state"]["state"] == "failed"
+    assert model._call_index == 0
+
+
+@pytest.mark.asyncio
+async def test_pre_session_exception_projects_one_canonical_terminal() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    model = FakeModelRegistry(scripted=[[{"content": "must not run"}]])
+    loop = AgentLoop(model_registry=model)
+
+    def fail_route(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("route failed Authorization: Bearer route-super-secret-value")
+
+    loop.request_router.route = fail_route  # type: ignore[method-assign]
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="s-pre-session-failure",
+            user=MockUserContext(user_id="u1"),  # type: ignore[arg-type]
+            message="Continue",
+            config=AgentLoopConfig(model_id="test"),
+            history=[],
+        )
+    ]
+
+    assert [event.event_type for event in events] == ["run_error"]
+    terminal = events[0].data
+    assert terminal["terminal_envelope"]["status"] == "failed"
+    assert terminal["terminal_envelope"]["turn_state"]["terminal"] is True
+    assert terminal["context_snapshot"]["snapshot_id"].startswith("ctx_")
+    assert "route-super-secret-value" not in json.dumps(terminal, default=str)
+    assert model._call_index == 0
+
+
+@pytest.mark.asyncio
+async def test_approval_resume_cas_exception_projects_exactly_one_terminal() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoopConfig
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+    from assistant_service.core.turn_event_collector import TurnEventCollector
+
+    invoker = FakeToolInvoker(results_by_name={"generate_image": {"success": True}})
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
+    writer = RecordingTraceWriter()
+    user = MockUserContext(user_id="u1")
+    run_id, approval_id = await _create_pending_approval(
+        invoker=invoker,
+        gateway=gateway,
+        trace_writer=writer,
+        user=user,
+    )
+    approved = await gateway.approve(
+        approval_id=approval_id,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        approved=True,
+        approver_user_id=user.user_id,
+    )
+    assert approved is not None
+    gateway.start_approval_resume = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError(
+            "resume CAS failed Authorization: Bearer resume-super-secret-value"
+        )
+    )
+    model = FakeModelRegistry(scripted=[[{"content": "must not run"}]])
+    loop = _confirmation_loop(
+        model=model,
+        invoker=invoker,
+        gateway=gateway,
+        trace_writer=None,
+    )
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="s1",
+            user=user,  # type: ignore[arg-type]
+            message="Continue",
+            config=AgentLoopConfig(
+                model_id="test",
+                max_tool_iterations=2,
+                resume_run_id=run_id,
+                resume_approval_id=approval_id,
+            ),
+            history=[],
+        )
+    ]
+    terminals = [event for event in events if event.event_type in {"run_finished", "run_error"}]
+
+    assert len(terminals) == 1
+    assert terminals[0].event_type == "run_error"
+    assert terminals[0].data["run_id"] == run_id
+    assert terminals[0].data["terminal_envelope"]["status"] == "failed"
+    assert terminals[0].data["terminal_envelope"]["turn_state"]["terminal"] is True
+    assert terminals[0].data["context_snapshot"]["snapshot_id"].startswith("ctx_")
+    assert "resume-super-secret-value" not in json.dumps(
+        [event.to_dict() for event in events],
+        default=str,
+    )
+    assert all(event.event_type != "run_started" for event in events)
+    assert model._call_index == 0
+    assert invoker.invocation_count == 0
+
+    collector = TurnEventCollector()
+    for event in events:
+        collector.accept(event)
+    assert collector.finalize().status == "failed"
 
 
 @pytest.mark.asyncio
@@ -3319,7 +4057,7 @@ async def test_streaming_first_rejects_malformed_tool_arguments_without_executio
         tool_invoker=tool_invoker,  # type: ignore[arg-type]
     )
 
-    events = []
+    emitted = []
     async for event in loop.execute(
         session_id="s1",
         user=MockUserContext(user_id="u1"),  # type: ignore[arg-type]
@@ -3327,7 +4065,8 @@ async def test_streaming_first_rejects_malformed_tool_arguments_without_executio
         config=AgentLoopConfig(model_id="test", max_tool_iterations=3),
         history=[],
     ):
-        events.append(event.event_type)
+        emitted.append(event)
+    events = [event.event_type for event in emitted]
 
     assert tool_invoker.invocation_count == 0
     assert tool_invoker.invocations == []
@@ -3351,11 +4090,17 @@ async def test_streaming_first_rejects_malformed_tool_arguments_without_executio
     assert not {
         "tool_call_started",
         "tool_call_completed",
-        "tool_call_start",
-        "tool_call_result",
-        "tool_call_end",
         "step_started",
     }.intersection(events)
+    assert events.count("tool_call_start") == 1
+    assert events.count("tool_call_result") == 1
+    assert events.count("tool_call_end") == 1
+    synthetic_result = next(
+        event.data for event in emitted if event.event_type == "tool_call_result"
+    )
+    assert synthetic_result["tool_call_id"] == "bad_args_1"
+    assert synthetic_result["status"] == "invalid_arguments"
+    assert synthetic_result["synthetic"] is True
     assert "run_finished" in events
     assert untrusted_tool_name not in caplog.text
     assert "unrecognized_tool_sha256:" in caplog.text
@@ -3748,7 +4493,11 @@ async def test_approval_checkpoint_failure_never_claims_resume_ready() -> None:
         {
             "id": "tc_checkpoint_failure",
             "function": {"name": "external_write", "arguments": '{"value":"x"}'},
-        }
+        },
+        {
+            "id": "tc_checkpoint_sibling",
+            "function": {"name": "external_write", "arguments": '{"value":"y"}'},
+        },
     ]
     invoker = FakeToolInvoker(results_by_name={"external_write": {"success": True}})
     gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
@@ -3781,6 +4530,31 @@ async def test_approval_checkpoint_failure_never_claims_resume_ready() -> None:
     assert failure["terminal_envelope"].get("checkpoint_id") is None
     assert all(event.event_type != "approval_required" for event in events)
     assert invoker.invocation_count == 0
+    for tool_call_id in {"tc_checkpoint_failure", "tc_checkpoint_sibling"}:
+        assert (
+            sum(
+                event.event_type == "tool_call_start"
+                and event.data.get("tool_call_id") == tool_call_id
+                for event in events
+            )
+            == 1
+        )
+        assert (
+            sum(
+                event.event_type == "tool_call_result"
+                and event.data.get("tool_call_id") == tool_call_id
+                for event in events
+            )
+            == 1
+        )
+        assert (
+            sum(
+                event.event_type == "tool_call_end"
+                and event.data.get("tool_call_id") == tool_call_id
+                for event in events
+            )
+            == 1
+        )
 
 
 @pytest.mark.asyncio
@@ -3792,7 +4566,11 @@ async def test_tool_dispatch_checkpoint_failure_blocks_write_before_invocation()
         {
             "id": "tc_write_fence_failure",
             "function": {"name": "external_write", "arguments": '{"value":"x"}'},
-        }
+        },
+        {
+            "id": "tc_write_fence_sibling",
+            "function": {"name": "external_write", "arguments": '{"value":"y"}'},
+        },
     ]
     invoker = FakeToolInvoker(results_by_name={"external_write": {"success": True}})
     gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
@@ -3824,6 +4602,186 @@ async def test_tool_dispatch_checkpoint_failure_blocks_write_before_invocation()
     assert failure["recoverable"] is False
     assert failure["terminal_envelope"]["resume_ready"] is False
     assert invoker.invocation_count == 0
+    for tool_call_id in {"tc_write_fence_failure", "tc_write_fence_sibling"}:
+        assert (
+            sum(
+                event.event_type == "tool_call_start"
+                and event.data.get("tool_call_id") == tool_call_id
+                for event in events
+            )
+            == 1
+        )
+        assert (
+            sum(
+                event.event_type == "tool_call_result"
+                and event.data.get("tool_call_id") == tool_call_id
+                for event in events
+            )
+            == 1
+        )
+        assert (
+            sum(
+                event.event_type == "tool_call_end"
+                and event.data.get("tool_call_id") == tool_call_id
+                for event in events
+            )
+            == 1
+        )
+
+
+@pytest.mark.asyncio
+async def test_gateway_approval_checkpoint_failure_repairs_tool_before_terminal() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+    from assistant_service.core.tools.tool_registry import ToolCallResult
+
+    tool_calls = [
+        {
+            "id": "tc_gateway_approval_checkpoint",
+            "function": {"name": "external_write", "arguments": '{"value":"x"}'},
+        }
+    ]
+    invoker = FakeToolInvoker(results_by_name={"external_write": {"success": True}})
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
+    gateway.invoke_tool = AsyncMock(  # type: ignore[method-assign]
+        return_value=ToolCallResult(
+            call_id="gateway-approval",
+            tool_name="external_write",
+            success=False,
+            result=None,
+            error="APPROVAL_REQUIRED",
+            metadata={
+                "approval_id": "approval-gateway",
+                "gateway_decision": {"reason": "confirmation required"},
+            },
+        )
+    )
+    loop = AgentLoop(
+        model_registry=FakeModelRegistry(scripted=[[{"tool_calls": tool_calls}]]),
+        tool_invoker=invoker,  # type: ignore[arg-type]
+        execution_gateway=gateway,
+    )
+
+    async def selective_checkpoint(*_args: Any, **kwargs: Any) -> dict[str, Any] | None:
+        if kwargs.get("phase") == "approval_pending":
+            return None
+        return {"checkpoint_id": f"checkpoint-{kwargs.get('phase', 'unknown')}"}
+
+    loop._save_checkpoint = AsyncMock(side_effect=selective_checkpoint)  # type: ignore[method-assign]
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="s-gateway-approval-checkpoint",
+            user=MockUserContext(user_id="u1"),  # type: ignore[arg-type]
+            message="write",
+            config=AgentLoopConfig(model_id="test", max_tool_iterations=1),
+            history=[],
+        )
+    ]
+
+    tool_call_id = "tc_gateway_approval_checkpoint"
+    assert (
+        sum(
+            event.event_type == "tool_call_start" and event.data.get("tool_call_id") == tool_call_id
+            for event in events
+        )
+        == 1
+    )
+    assert (
+        sum(
+            event.event_type == "tool_call_result"
+            and event.data.get("tool_call_id") == tool_call_id
+            for event in events
+        )
+        == 1
+    )
+    assert (
+        sum(
+            event.event_type == "tool_call_end" and event.data.get("tool_call_id") == tool_call_id
+            for event in events
+        )
+        == 1
+    )
+    terminal_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.event_type == "run_error"
+        and event.data.get("error") == "checkpoint_persistence_failed"
+    )
+    lifecycle_indices = [
+        index
+        for index, event in enumerate(events)
+        if event.event_type in {"tool_call_start", "tool_call_result", "tool_call_end"}
+        and event.data.get("tool_call_id") == tool_call_id
+    ]
+    assert lifecycle_indices
+    assert max(lifecycle_indices) < terminal_index
+    assert all(event.event_type != "approval_required" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_gateway_approval_completes_tool_lifecycle_before_blocked_boundary() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+    from assistant_service.core.tools.tool_registry import ToolCallResult
+    from assistant_service.core.turn_event_collector import TurnEventCollector
+
+    tool_call_id = "tc_gateway_approval_blocked"
+    tool_calls = [
+        {
+            "id": tool_call_id,
+            "function": {"name": "external_write", "arguments": '{"value":"x"}'},
+        }
+    ]
+    invoker = FakeToolInvoker(results_by_name={"external_write": {"success": True}})
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
+    gateway.invoke_tool = AsyncMock(  # type: ignore[method-assign]
+        return_value=ToolCallResult(
+            call_id="gateway-approval",
+            tool_name="external_write",
+            success=False,
+            result=None,
+            error="APPROVAL_REQUIRED",
+            metadata={
+                "approval_id": "approval-gateway",
+                "gateway_decision": {"reason": "confirmation required"},
+            },
+        )
+    )
+    loop = AgentLoop(
+        model_registry=FakeModelRegistry(scripted=[[{"tool_calls": tool_calls}]]),
+        tool_invoker=invoker,  # type: ignore[arg-type]
+        execution_gateway=gateway,
+    )
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="s-gateway-approval-blocked",
+            user=MockUserContext(user_id="u1"),  # type: ignore[arg-type]
+            message="write",
+            config=AgentLoopConfig(model_id="test", max_tool_iterations=1),
+            history=[],
+        )
+    ]
+    lifecycle = [
+        event.event_type
+        for event in events
+        if isinstance(event.data, dict)
+        and event.data.get("tool_call_id") == tool_call_id
+        and event.event_type in {"tool_call_start", "tool_call_result", "tool_call_end"}
+    ]
+
+    assert lifecycle == ["tool_call_start", "tool_call_result", "tool_call_end"]
+    assert events[-1].event_type == "approval_required"
+    assert all(event.event_type not in {"run_finished", "run_error"} for event in events)
+    collector = TurnEventCollector()
+    for event in events:
+        collector.accept(event)
+    turn = collector.finalize()
+    assert turn.status == "blocked"
+    assert len(turn.tool_history) == 1
 
 
 @pytest.mark.asyncio

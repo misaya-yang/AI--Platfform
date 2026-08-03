@@ -2767,9 +2767,9 @@ class ConfluenceSyncService:
                         # 获取 binding 信息以获取 dataset_id
                         binding = await self.db.get_confluence_binding(page["binding_id"])
                         if binding and binding.get("dataset_id"):
-                            await self.kb.delete_document(
-                                binding["dataset_id"],
-                                page["document_id"],
+                            await self.knowledge_service.delete_document(
+                                dataset_id=binding["dataset_id"],
+                                document_id=page["document_id"],
                             )
                             documents_deleted += 1
                     except Exception as e:

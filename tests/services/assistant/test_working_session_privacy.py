@@ -159,29 +159,11 @@ def test_context_receipt_scope_is_collision_safe_and_public_clear_is_scoped() ->
     assert set(service._working_memories) == {delimiter_collision_working_scope}
 
 
-@pytest.mark.asyncio
-async def test_planning_working_memory_is_owner_scoped_for_same_session_id() -> None:
+def test_working_memory_is_owner_scoped_for_same_session_id() -> None:
     service = AssistantService.__new__(AssistantService)
     service._working_memories = {}
     first_owner = UserContext(user_id="shared-user", tenant_id="tenant-a")
     second_owner = UserContext(user_id="shared-user", tenant_id="tenant-b")
-
-    first_stream = service._execute_with_planning(
-        user=first_owner,
-        session_id="shared-session",
-        message="tenant-a-private-goal",
-        config=AssistantConfig(),
-    )
-    second_stream = service._execute_with_planning(
-        user=second_owner,
-        session_id="shared-session",
-        message="tenant-b-private-goal",
-        config=AssistantConfig(),
-    )
-    await anext(first_stream)
-    await first_stream.aclose()
-    await anext(second_stream)
-    await second_stream.aclose()
 
     first_memory = service.get_working_memory(
         "shared-session",
@@ -193,6 +175,9 @@ async def test_planning_working_memory_is_owner_scoped_for_same_session_id() -> 
         tenant_id=second_owner.tenant_id,
         user_id=second_owner.user_id,
     )
+    first_memory.set_goal("tenant-a-private-goal")
+    second_memory.set_goal("tenant-b-private-goal")
+
     assert first_memory is not second_memory
     assert first_memory.goal == "tenant-a-private-goal"
     assert second_memory.goal == "tenant-b-private-goal"
@@ -577,8 +562,12 @@ async def test_agent_loop_fails_closed_when_delete_fence_wins_admission() -> Non
     )
     first_event = asyncio.create_task(anext(stream))
     await asyncio.sleep(0)
-    with pytest.raises(SessionDeletionBusyError, match="pending"):
-        await first_event
+    terminal = await first_event
+    assert terminal.event_type == "run_error"
+    assert "pending" in terminal.data["error"]
+    assert terminal.data["terminal_envelope"]["status"] == "failed"
+    assert terminal.data["terminal_envelope"]["turn_state"]["terminal"] is True
+    await stream.aclose()
     finish_deletion.set()
     await delete_task
 

@@ -586,8 +586,9 @@ async def test_agent_loop_conflicting_session_cannot_finalize_existing_run(
         execution_gateway=gateway,
     )
 
-    with pytest.raises(PermissionError, match="different session"):
-        async for _event in loop.execute(
+    events = [
+        event
+        async for event in loop.execute(
             session_id="session-b",
             user=MockUserContext(),  # type: ignore[arg-type]
             message="conflicting caller",
@@ -597,8 +598,15 @@ async def test_agent_loop_conflicting_session_cannot_finalize_existing_run(
                 agent_runtime=runtime,
             ),
             history=[],
-        ):
-            pass
+        )
+    ]
+    terminals = [
+        event for event in events if event.event_type in {"run_finished", "run_error"}
+    ]
+    assert len(terminals) == 1
+    assert terminals[0].event_type == "run_error"
+    assert "different session" in terminals[0].data["error"]
+    assert terminals[0].data["terminal_envelope"]["status"] == "failed"
 
     with pytest.raises(PermissionError, match="different session"):
         await gateway.finish_run(
@@ -990,7 +998,7 @@ async def test_non_stream_chat_returns_turn_contract_and_trace_metadata() -> Non
     assert result["terminal_envelope"]["turn_state"]["state"] == "succeeded"
     assert result["terminal_envelope"]["turn_state"]["terminal"] is True
     assert result["context_snapshot"]["attempt_id"] == result["terminal_envelope"]["attempt_id"]
-    assert result["context_snapshot"]["mode"] == "non_stream"
+    assert result["context_snapshot"]["mode"] == "streaming_first"
     assert "super-secret-value" not in json.dumps(result, default=str)
     assert "terminal_envelope" in db.serialized_calls()
 
@@ -1197,7 +1205,7 @@ async def test_concurrent_non_stream_users_get_distinct_trace_contexts() -> None
     result_a, result_b = await asyncio.gather(
         service.chat(
             user=MockUserContext(user_id="user-a", tenant_id="tenant-a"),  # type: ignore[arg-type]
-            session_id="session-a",
+            session_id="trace-concurrent-a",
             message="hello from a",
             config=AssistantConfig(model_id="test", kb_mode=RAGMode.DISABLED),
             history=[],
@@ -1205,7 +1213,7 @@ async def test_concurrent_non_stream_users_get_distinct_trace_contexts() -> None
         ),
         service.chat(
             user=MockUserContext(user_id="user-b", tenant_id="tenant-b"),  # type: ignore[arg-type]
-            session_id="session-b",
+            session_id="trace-concurrent-b",
             message="hello from b",
             config=AssistantConfig(model_id="test", kb_mode=RAGMode.DISABLED),
             history=[],
@@ -1220,8 +1228,8 @@ async def test_concurrent_non_stream_users_get_distinct_trace_contexts() -> None
     assert "tenant-b" in serialized
     assert "user-a" in serialized
     assert "user-b" in serialized
-    assert "session-a" in serialized
-    assert "session-b" in serialized
+    assert "trace-concurrent-a" in serialized
+    assert "trace-concurrent-b" in serialized
 
 
 @pytest.mark.asyncio

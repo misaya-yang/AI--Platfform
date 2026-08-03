@@ -142,6 +142,35 @@ def test_duplicate_retrieval_ids_receive_relevance_credit_once():
         assert all(0.0 <= value <= 1.0 for value in by_k.values())
 
 
+def test_duplicate_slots_do_not_promote_later_relevant_results():
+    retrieved = ["duplicate", "duplicate", "relevant-1", "relevant-1", "relevant-2"]
+    relevant = {"relevant-1", "relevant-2"}
+
+    assert hit_rate_at_k(retrieved, relevant, 2) == 0.0
+    assert precision_at_k(retrieved, relevant, 2) == 0.0
+    assert precision_at_k(retrieved, relevant, 3) == pytest.approx(1 / 3)
+    assert precision_at_k(retrieved, relevant, 5) == pytest.approx(2 / 5)
+    assert recall_at_k(retrieved, relevant, 2) == 0.0
+    assert recall_at_k(retrieved, relevant, 3) == pytest.approx(1 / 2)
+    assert recall_at_k(retrieved, relevant, 5) == 1.0
+    assert reciprocal_rank(retrieved, relevant, k=2) == 0.0
+    assert reciprocal_rank(retrieved, relevant) == pytest.approx(1 / 3)
+
+    dcg = 1.0 / math.log2(4) + 1.0 / math.log2(6)
+    idcg = 1.0 / math.log2(2) + 1.0 / math.log2(3)
+    assert ndcg_at_k(retrieved, relevant, 2) == 0.0
+    assert ndcg_at_k(retrieved, relevant, 5) == pytest.approx(dcg / idcg)
+    assert average_precision(retrieved, relevant, k=2) == 0.0
+    assert average_precision(retrieved, relevant) == pytest.approx(((1 / 3) + (2 / 5)) / 2)
+
+    detail = score_single_query(retrieved, relevant, [2, 5])
+    assert detail["retrieved_count"] == 5
+    assert detail["unique_retrieved_count"] == 3
+    assert detail["by_k"]["2"]["mrr"] == 0.0
+    assert detail["by_k"]["5"]["mrr"] == pytest.approx(1 / 3)
+    assert detail["by_k"]["5"]["map"] == pytest.approx(((1 / 3) + (2 / 5)) / 2)
+
+
 def test_mrr_and_map_are_truncated_at_each_k():
     report = evaluate_retrieval(
         [QueryRetrievalJudgement("q", ["miss", "hit"], {"hit"})],

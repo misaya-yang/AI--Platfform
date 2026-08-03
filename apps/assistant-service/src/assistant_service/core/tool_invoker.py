@@ -658,9 +658,9 @@ class RegistryToolInvoker(ToolInvoker):
         self.mcp_runtime = mcp_runtime
         self.tool_audit = tool_audit
 
-        # ADR-003 Phase 3: Per-session tool result cache
-        # Key: (session_id, cache_key) → (ToolCallResult, expires_at)
-        self._result_cache: dict[tuple[str, str], tuple[Any, float]] = {}
+        # ADR-003 Phase 3: Principal-and-scope isolated tool result cache.
+        # Key: (tenant_id, user_id, agent_scope/session_id, cache_key).
+        self._result_cache: dict[tuple[str, str, str, str], tuple[Any, float]] = {}
         self._cache_ttl = 300  # 5 minutes
         self._cache_max_size = 200
         # Only idempotent tools are cacheable
@@ -674,19 +674,28 @@ class RegistryToolInvoker(ToolInvoker):
     def _is_cacheable(self, tool_name: str) -> bool:
         return any(tool_name.startswith(p) for p in self._cacheable_prefixes)
 
-    def _cache_get(self, session_id: str, key: str) -> Any | None:
-        entry = self._result_cache.get((session_id, key))
+    @staticmethod
+    def _cache_scope(context: ToolInvocationContext) -> tuple[str, str, str]:
+        return (
+            str(context.tenant_id or ""),
+            str(context.user_id or ""),
+            str(context.scope_id or context.session_id or ""),
+        )
+
+    def _cache_get(self, scope: tuple[str, str, str], key: str) -> Any | None:
+        scoped_key = (*scope, key)
+        entry = self._result_cache.get(scoped_key)
         if entry and entry[1] > time.monotonic():
             return entry[0]
         if entry:
-            del self._result_cache[(session_id, key)]
+            del self._result_cache[scoped_key]
         return None
 
-    def _cache_put(self, session_id: str, key: str, result: Any) -> None:
+    def _cache_put(self, scope: tuple[str, str, str], key: str, result: Any) -> None:
         if len(self._result_cache) >= self._cache_max_size:
             oldest = min(self._result_cache, key=lambda k: self._result_cache[k][1])
             del self._result_cache[oldest]
-        self._result_cache[(session_id, key)] = (result, time.monotonic() + self._cache_ttl)
+        self._result_cache[(*scope, key)] = (result, time.monotonic() + self._cache_ttl)
 
     async def _load_policy_snapshot(
         self,
@@ -1151,7 +1160,7 @@ class RegistryToolInvoker(ToolInvoker):
         # ADR-003 Phase 3: Check result cache for idempotent tools
         cache_key = None
         cached = None
-        cache_scope = context.scope_id or context.session_id
+        cache_scope = self._cache_scope(context)
         if self._is_cacheable(tool_name):
             cache_args = effective_arguments
             if tool_name == "search_knowledge_base":

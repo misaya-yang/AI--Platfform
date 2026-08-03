@@ -27,9 +27,7 @@ import {
   Lock,
   Users,
   Globe,
-  Image,
   Database,
-  PlayCircle,
   MessageSquare,
   FileImage,
 } from "lucide-react";
@@ -141,7 +139,7 @@ const VISIBILITY_OPTIONS: Array<{
 ];
 
 // Knowledge base type options
-type KBType = "document" | "data" | "image" | "audio_video";
+type KBType = "document" | "data";
 const KB_TYPE_OPTIONS: Array<{
   id: KBType;
   nameKey: string;
@@ -162,20 +160,6 @@ const KB_TYPE_OPTIONS: Array<{
     descKey: "knowledge.create.kbTypeDataDesc",
     icon: Database,
     color: "text-green-500",
-  },
-  {
-    id: "image",
-    nameKey: "knowledge.create.kbTypeImage",
-    descKey: "knowledge.create.kbTypeImageDesc",
-    icon: Image,
-    color: "text-purple-500",
-  },
-  {
-    id: "audio_video",
-    nameKey: "knowledge.create.kbTypeAudioVideo",
-    descKey: "knowledge.create.kbTypeAudioVideoDesc",
-    icon: PlayCircle,
-    color: "text-orange-500",
   },
 ];
 
@@ -204,9 +188,8 @@ const USE_CASE_OPTIONS: Array<{
 // Validation constants
 const MAX_NAME_LENGTH = 100;
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
-const MAX_IMAGE_SIZE = 20 * 1024 * 1024; // 20MB
+const SUPPORTED_FILE_EXTENSIONS = /\.(pdf|docx|txt|md|html)$/i;
 const URL_PATTERN = /^https?:\/\/([\w-]+\.)+[\w-]+(\/[\w\-./?%&=#]*)?$/i;
-const IMAGE_EXTENSIONS = /\.(png|jpg|jpeg|gif|bmp)$/i;
 
 // ============================================================
 // Sub-Components
@@ -338,7 +321,7 @@ export default function DatasetCreatePage() {
   const [visibility, setVisibility] = useState<VisibilityType>("private");
   const [kbType, setKbType] = useState<KBType>("document");
   const [useCase, setUseCase] = useState<UseCase>("basic_qa");
-  const [embeddingModel, setEmbeddingModel] = useState("gemini:gemini-embedding-001");
+  const [embeddingModel, setEmbeddingModel] = useState("dashscope:text-embedding-v4");
 
   // Step 2: Data Source
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
@@ -369,9 +352,12 @@ export default function DatasetCreatePage() {
     const errors: string[] = [];
 
     Array.from(files).forEach((file) => {
-      const isImage = IMAGE_EXTENSIONS.test(file.name);
-      const maxSize = isImage ? MAX_IMAGE_SIZE : MAX_FILE_SIZE;
-      const maxSizeLabel = isImage ? "20MB" : "100MB";
+      if (!SUPPORTED_FILE_EXTENSIONS.test(file.name)) {
+        errors.push(t("knowledge.create.validation.unsupportedFile", { name: file.name }));
+        return;
+      }
+      const maxSize = MAX_FILE_SIZE;
+      const maxSizeLabel = "100MB";
 
       if (file.size > maxSize) {
         errors.push(t("knowledge.create.validation.fileTooLarge", { name: file.name, limit: maxSizeLabel }));
@@ -929,7 +915,7 @@ export default function DatasetCreatePage() {
                 type="file"
                 multiple
                 className="hidden"
-                accept=".pdf,.doc,.docx,.txt,.md,.pptx,.ppt,.png,.jpg,.jpeg,.bmp,.gif,.xls,.xlsx"
+                accept=".pdf,.docx,.txt,.md,.html"
                 onChange={(e) => {
                   handleFilesSelect(e.target.files);
                   e.currentTarget.value = "";

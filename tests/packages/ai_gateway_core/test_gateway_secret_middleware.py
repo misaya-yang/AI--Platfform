@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import pytest
 from ai_gateway_core.auth.gateway_secret import GatewaySecret
-from ai_gateway_core.auth.gateway_secret_middleware import GatewaySecretAuthMiddleware
+from ai_gateway_core.auth.gateway_secret_middleware import (
+    GatewaySecretAuthMiddleware,
+    validate_gateway_auth_configuration,
+)
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
@@ -29,6 +33,30 @@ def _app(*, allow_anonymous: bool = False) -> tuple[FastAPI, GatewaySecret]:
         return {"status": "accepted"}
 
     return app, secret
+
+
+def test_gateway_secret_and_anonymous_mode_are_mutually_exclusive() -> None:
+    with pytest.raises(RuntimeError, match="cannot be combined"):
+        validate_gateway_auth_configuration(
+            secret="configured-shared-secret",
+            allow_anonymous=True,
+            allow_anonymous_setting="SERVICE_APP__ALLOW_ANONYMOUS",
+        )
+
+
+@pytest.mark.parametrize(
+    ("secret", "allow_anonymous"),
+    [("configured-shared-secret", False), ("", True), ("", False)],
+)
+def test_gateway_auth_configuration_accepts_unambiguous_modes(
+    secret: str,
+    allow_anonymous: bool,
+) -> None:
+    validate_gateway_auth_configuration(
+        secret=secret,
+        allow_anonymous=allow_anonymous,
+        allow_anonymous_setting="SERVICE_APP__ALLOW_ANONYMOUS",
+    )
 
 
 def test_gateway_secret_middleware_allows_health_without_signature() -> None:

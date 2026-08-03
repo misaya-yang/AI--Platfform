@@ -516,12 +516,21 @@ class UsageRecorder:
         if model in self._pricing_cache:
             return self._pricing_cache[model]
 
-        # Try partial match (for model variants like gpt-4-0613)
-        for cached_model, pricing in self._pricing_cache.items():
-            if model.startswith(cached_model) or cached_model.startswith(model):
-                matched = dict(pricing)
-                matched["pricing_status"] = "provider_model"
-                return matched
+        # Try the most-specific partial match (for model variants such as
+        # ``gpt-4o-mini-2024-07-18``). Cache iteration order must not let a
+        # broad prefix such as ``gpt-4o`` win over ``gpt-4o-mini``.
+        normalized_model = model.lower()
+        candidates = [
+            (len(cached_model), cached_model, pricing)
+            for cached_model, pricing in self._pricing_cache.items()
+            if normalized_model.startswith(cached_model.lower())
+            or cached_model.lower().startswith(normalized_model)
+        ]
+        if candidates:
+            _length, _cached_model, pricing = max(candidates, key=lambda item: item[0])
+            matched = dict(pricing)
+            matched["pricing_status"] = "provider_model"
+            return matched
 
         # Return resolved default pricing when model is unknown.
         pricing, pricing_status = resolve_pricing_with_status(model)

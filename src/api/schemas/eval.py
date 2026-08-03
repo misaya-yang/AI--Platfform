@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 TraceFamily = Literal["assistant", "langgraph_proxy", "rag"]
 TraceStatus = Literal["running", "succeeded", "failed", "cancelled", "timeout"]
@@ -17,6 +17,7 @@ EvalRunMode = Literal["rescore_trace", "live_candidate"]
 ScoreTargetType = Literal["trace", "span", "thread", "dataset_run", "example"]
 EvalReviewStatus = Literal["pending", "approved", "rejected", "needs_fix"]
 EvalGateStatus = Literal["pass", "fail", "warning"]
+EvalGateMetricsSchemaVersion = Literal["eval-gate-metrics/v2"]
 
 
 class AgentTraceSummary(BaseModel):
@@ -450,6 +451,45 @@ class EvalBaselinePromotionResponse(BaseModel):
     promoted_at: datetime | None = None
 
 
+class EvalGateMetricsV2(BaseModel):
+    """Versioned exact-count receipt consumed by release gates."""
+
+    model_config = ConfigDict(extra="allow", strict=True)
+
+    schema_version: EvalGateMetricsSchemaVersion
+    case_count: int = Field(..., ge=0)
+    score_sum: float = Field(..., ge=0, allow_inf_nan=False)
+    failed_case_count: int = Field(..., ge=0)
+    overall_score: float = Field(..., ge=0, le=1, allow_inf_nan=False)
+    pass_rate: float = Field(..., ge=0, le=1, allow_inf_nan=False)
+    trajectory_case_count: int = Field(..., ge=0)
+    trajectory_failed_count: int = Field(..., ge=0)
+    trajectory_pass_rate: float = Field(..., ge=0, le=1, allow_inf_nan=False)
+    critical_case_count: int = Field(..., ge=0)
+    critical_failed_count: int = Field(..., ge=0)
+    critical_pass_rate: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    stateful_case_count: int = Field(..., ge=0)
+    stateful_failed_count: int = Field(..., ge=0)
+    stateful_pass_rate: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_exact_count_subsets(self) -> EvalGateMetricsV2:
+        if self.trajectory_case_count != self.case_count:
+            raise ValueError("trajectory_case_count must equal case_count")
+        if self.critical_case_count > self.case_count:
+            raise ValueError("critical_case_count must not exceed case_count")
+        if self.stateful_case_count > self.case_count:
+            raise ValueError("stateful_case_count must not exceed case_count")
+        for label, value in (
+            ("trajectory_failed_count", self.trajectory_failed_count),
+            ("critical_failed_count", self.critical_failed_count),
+            ("stateful_failed_count", self.stateful_failed_count),
+        ):
+            if value > self.failed_case_count:
+                raise ValueError(f"{label} must not exceed failed_case_count")
+        return self
+
+
 class EvalGateDryRunRequest(BaseModel):
     baseline_run_id: str | None = None
     candidate_run_id: str | None = None
@@ -462,6 +502,10 @@ class EvalGateDryRunResponse(BaseModel):
     thresholds: dict[str, float] = Field(default_factory=dict)
     metrics: dict[str, Any] = Field(default_factory=dict)
     failures: list[str] = Field(default_factory=list)
+    skipped_thresholds: list[str] = Field(default_factory=list)
+    coverage: dict[str, Any] = Field(default_factory=dict)
+    compatibility: dict[str, Any] = Field(default_factory=dict)
+    authoritative_gate: dict[str, Any] = Field(default_factory=dict)
     report: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -575,6 +619,15 @@ class KbRagasBatchScoreResponse(BaseModel):
     jobs: list[EvalAsyncJobResponse] = Field(default_factory=list)
 
 
+class KbRagasJudgeSelector(BaseModel):
+    """Safe caller selector; endpoints and credentials are server-owned."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str | None = Field(default=None, min_length=1, max_length=32)
+    model: str | None = Field(default=None, min_length=1, max_length=128)
+
+
 class KbRagasScoreRetrievalRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=4000)
     contexts: list[str] = Field(..., min_length=1, max_length=32)
@@ -582,7 +635,7 @@ class KbRagasScoreRetrievalRequest(BaseModel):
     metrics: list[str] | None = None
     ground_truth: str | None = Field(default=None, max_length=8000)
     dataset_id: str | None = None
-    llm_config: dict[str, Any] | None = None
+    llm_config: KbRagasJudgeSelector | None = None
 
 
 class KbRagasScoreRetrievalResult(BaseModel):

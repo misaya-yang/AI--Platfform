@@ -1,150 +1,120 @@
-#!/usr/bin/env python3
-"""测试Embedding连接"""
+"""Network-free embedding provider payload contract tests.
+
+Live provider probes require user-supplied credentials and belong in an
+explicitly invoked operational check, not the regular pytest suite.  These
+tests retain the provider request/response coverage without logging keys,
+making network calls, or changing process-wide TLS configuration.
+"""
+
+from __future__ import annotations
 
 import asyncio
-import os
-import sys
+import json
+import ssl
+from types import SimpleNamespace
+from typing import Any
 
-# 添加项目路径（当前在tests目录，需要引用上级目录）
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+import httpx
+import pytest
+from dashscope import TextEmbedding
 
 
-async def test_dashscope():
-    """测试DashScope连接"""
-    print("=" * 60)
-    print("测试DashScope Embedding连接")
-    print("=" * 60)
+def _dashscope_embedding_dimension(response: Any) -> int:
+    assert response.status_code == 200, f"DashScope returned {response.status_code}"
 
-    try:
-        from dashscope import TextEmbedding
+    output = getattr(response, "output", None)
+    if isinstance(output, dict):
+        embeddings = output.get("embeddings", [])
+        vector = embeddings[0].get("embedding", []) if embeddings else []
+    else:
+        embeddings = getattr(output, "embeddings", [])
+        vector = embeddings[0].embedding if embeddings else []
 
-        # 从环境变量获取API key
-        api_key = os.getenv("DASHSCOPE_API_KEY", "")
-        if not api_key:
-            print("DASHSCOPE_API_KEY not set")
-            return False
+    assert vector, "DashScope response did not contain an embedding vector"
+    return len(vector)
 
-        print(f"API Key: {api_key[:20]}...")
 
-        # 禁用SSL验证（测试用）
-        import ssl
+def _gemini_embedding_dimension(response: httpx.Response) -> int:
+    assert response.status_code == 200, f"Gemini returned {response.status_code}"
+    vector = response.json().get("embedding", {}).get("values", [])
+    assert vector, "Gemini response did not contain an embedding vector"
+    return len(vector)
 
-        ssl._create_default_https_context = ssl._create_unverified_context
 
-        print("\n尝试调用embedding API...")
+@pytest.mark.asyncio
+async def test_dashscope_embedding_payload_is_valid_without_tls_side_effect(monkeypatch) -> None:
+    observed: dict[str, object] = {}
+    original_ssl_context = ssl._create_default_https_context
 
-        resp = await asyncio.to_thread(
-            TextEmbedding.call,
-            model="text-embedding-v3",
-            input=["测试文本 test text"],
-            api_key=api_key,
+    def fake_call(**kwargs: object) -> SimpleNamespace:
+        observed.update(kwargs)
+        return SimpleNamespace(
+            status_code=200,
+            output={"embeddings": [{"embedding": [0.1, 0.2, 0.3]}]},
         )
 
-        print(f"响应状态: {resp.status_code}")
+    monkeypatch.setattr(TextEmbedding, "call", fake_call)
 
-        if resp.status_code == 200:
-            output = getattr(resp, "output", None)
-            if output:
-                # 检查是否是字典格式
-                if isinstance(output, dict) and "embeddings" in output:
-                    embeddings = output["embeddings"]
-                    if embeddings and len(embeddings) > 0:
-                        embedding = embeddings[0].get("embedding", [])
-                        print(f"✅ 成功! 向量维度: {len(embedding)}")
-                        return True
-                # 检查是否有embeddings属性
-                elif hasattr(output, "embeddings"):
-                    vectors = [emb.embedding for emb in output.embeddings]
-                    print(f"✅ 成功! 向量维度: {len(vectors[0]) if vectors else 0}")
-                    return True
+    response = await asyncio.to_thread(
+        TextEmbedding.call,
+        model="text-embedding-v3",
+        input=["测试文本 test text"],
+        api_key="test-key",
+    )
 
-            print(f"❌ 响应格式错误: {output}")
-            return False
-        else:
-            print(f"❌ API错误: {resp.code} - {resp.message}")
-            return False
-
-    except Exception as e:
-        print(f"❌ 异常: {type(e).__name__}: {e}")
-        import traceback
-
-        traceback.print_exc()
-        return False
+    assert _dashscope_embedding_dimension(response) == 3
+    assert observed == {
+        "model": "text-embedding-v3",
+        "input": ["测试文本 test text"],
+        "api_key": "test-key",
+    }
+    object_response = SimpleNamespace(
+        status_code=200,
+        output=SimpleNamespace(embeddings=[SimpleNamespace(embedding=[0.4, 0.5])]),
+    )
+    assert _dashscope_embedding_dimension(object_response) == 2
+    assert ssl._create_default_https_context is original_ssl_context
 
 
-async def test_gemini():
-    """测试Gemini连接"""
-    print("\n" + "=" * 60)
-    print("测试Gemini Embedding连接")
-    print("=" * 60)
+@pytest.mark.asyncio
+async def test_gemini_embedding_request_and_payload_are_local() -> None:
+    observed: dict[str, object] = {}
 
-    try:
-        import httpx
+    async def handler(request: httpx.Request) -> httpx.Response:
+        observed["host"] = request.url.host
+        observed["path"] = request.url.path
+        observed["api_key"] = request.url.params.get("key")
+        observed["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"embedding": {"values": [0.1, 0.2, 0.3]}})
 
-        api_key = os.getenv("GOOGLE_API_KEY", "")
-        if not api_key:
-            print("⚠️ 未配置GOOGLE_API_KEY，跳过Gemini测试")
-            return None
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, timeout=5.0) as client:
+        response = await client.post(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent",
+            params={"key": "test-key"},
+            json={
+                "model": "models/gemini-embedding-001",
+                "content": {"parts": [{"text": "测试文本 test text"}]},
+                "task_type": "RETRIEVAL_DOCUMENT",
+            },
+        )
 
-        print(f"API Key: {api_key[:20]}...")
-
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                url,
-                params={"key": api_key},
-                json={
-                    "model": "models/gemini-embedding-001",
-                    "content": {"parts": [{"text": "测试文本 test text"}]},
-                    "task_type": "RETRIEVAL_DOCUMENT",
-                },
-            )
-
-            print(f"响应状态: {resp.status_code}")
-
-            if resp.status_code == 200:
-                data = resp.json()
-                if "embedding" in data:
-                    vector = data["embedding"]["values"]
-                    print(f"✅ 成功! 向量维度: {len(vector)}")
-                    return True
-                else:
-                    print(f"❌ 响应格式错误: {data}")
-                    return False
-            else:
-                print(f"❌ API错误: {resp.text}")
-                return False
-
-    except Exception as e:
-        print(f"❌ 异常: {type(e).__name__}: {e}")
-        import traceback
-
-        traceback.print_exc()
-        return False
+    assert _gemini_embedding_dimension(response) == 3
+    assert observed == {
+        "host": "generativelanguage.googleapis.com",
+        "path": "/v1beta/models/gemini-embedding-001:embedContent",
+        "api_key": "test-key",
+        "body": {
+            "model": "models/gemini-embedding-001",
+            "content": {"parts": [{"text": "测试文本 test text"}]},
+            "task_type": "RETRIEVAL_DOCUMENT",
+        },
+    }
 
 
-async def main():
-    # 测试DashScope
-    dashscope_ok = await test_dashscope()
+def test_embedding_payload_validation_rejects_error_responses() -> None:
+    with pytest.raises(AssertionError, match="DashScope returned 401"):
+        _dashscope_embedding_dimension(SimpleNamespace(status_code=401, output={}))
 
-    # 测试Gemini
-    gemini_ok = await test_gemini()
-
-    print("\n" + "=" * 60)
-    print("测试结果")
-    print("=" * 60)
-    print(f"DashScope: {'✅ 可用' if dashscope_ok else '❌ 不可用'}")
-    if gemini_ok is not None:
-        print(f"Gemini: {'✅ 可用' if gemini_ok else '❌ 不可用'}")
-    print("=" * 60)
-
-    # 建议
-    if not dashscope_ok and gemini_ok:
-        print("\n💡 建议：切换到Gemini embedding")
-    elif not dashscope_ok and not gemini_ok:
-        print("\n⚠️ 警告：两个embedding服务都不可用")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    with pytest.raises(AssertionError, match="Gemini returned 429"):
+        _gemini_embedding_dimension(httpx.Response(429, json={"error": "quota"}))

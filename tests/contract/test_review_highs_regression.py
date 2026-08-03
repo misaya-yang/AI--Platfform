@@ -95,7 +95,11 @@ async def test_post_body_preserved_across_connect_error_retry():
         )
 
     with TestClient(gw) as c:
-        r = c.post("/gw/test", json={"hello": "world"})
+        r = c.post(
+            "/gw/test",
+            json={"hello": "world"},
+            headers={"Idempotency-Key": "body-replay-regression"},
+        )
 
     assert r.status_code == 200, r.text
     assert r.json() == {"ok": True}
@@ -131,6 +135,8 @@ def test_assistant_service_main_fails_hard_on_missing_secret_no_anonymous():
     assert "raise RuntimeError(" in source
     assert "GATEWAY_ASSISTANT_SHARED_SECRET" in source
     assert "security hole" in source
+    assert "validate_gateway_auth_configuration(" in source
+    assert 'allow_anonymous_setting="ASSISTANT_APP__ALLOW_ANONYMOUS"' in source
 
 
 def test_knowledge_service_main_fails_hard_on_missing_secret_no_anonymous():
@@ -148,6 +154,8 @@ def test_knowledge_service_main_fails_hard_on_missing_secret_no_anonymous():
     assert "gateway_secret_unset_but_anonymous_disabled" not in source
     assert "raise RuntimeError(" in source
     assert "security hole" in source
+    assert "validate_gateway_auth_configuration(" in source
+    assert 'allow_anonymous_setting="KNOWLEDGE_APP__ALLOW_ANONYMOUS"' in source
 
 
 # ---------------------------------------------------------------------------

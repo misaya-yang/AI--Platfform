@@ -19,6 +19,26 @@ EXAMPLE_METADATA_PATCH_KEYS = (
     "owner",
     "review_status",
 )
+EVAL_GATE_METRICS_SCHEMA_VERSION = "eval-gate-metrics/v2"
+EVAL_GATE_METRICS_REQUIRED_FIELDS = frozenset(
+    {
+        "case_count",
+        "critical_case_count",
+        "critical_failed_count",
+        "critical_pass_rate",
+        "failed_case_count",
+        "overall_score",
+        "pass_rate",
+        "score_sum",
+        "stateful_case_count",
+        "stateful_failed_count",
+        "stateful_pass_rate",
+        "trajectory_case_count",
+        "trajectory_failed_count",
+        "trajectory_pass_rate",
+    }
+)
+EVAL_GATE_RATE_ABS_TOLERANCE = 0.00005
 
 
 def _canonical_hash(value: Any) -> str:
@@ -58,6 +78,98 @@ def _known_number(value: Any) -> float | None:
         return None
     number = float(value)
     return number if math.isfinite(number) else None
+
+
+def _has_versioned_gate_metrics(value: Any) -> bool:
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != EVAL_GATE_METRICS_SCHEMA_VERSION
+        or not EVAL_GATE_METRICS_REQUIRED_FIELDS.issubset(value)
+    ):
+        return False
+    count_fields = (
+        "case_count",
+        "failed_case_count",
+        "trajectory_case_count",
+        "trajectory_failed_count",
+        "critical_case_count",
+        "critical_failed_count",
+        "stateful_case_count",
+        "stateful_failed_count",
+    )
+    counts: dict[str, int] = {}
+    for field in count_fields:
+        raw = value.get(field)
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+            return False
+        counts[field] = raw
+    case_count = counts["case_count"]
+    if (
+        case_count <= 0
+        or counts["failed_case_count"] > case_count
+        or counts["trajectory_case_count"] != case_count
+        or counts["trajectory_failed_count"] > counts["trajectory_case_count"]
+        or counts["critical_case_count"] > case_count
+        or counts["critical_failed_count"] > counts["critical_case_count"]
+        or counts["stateful_case_count"] > case_count
+        or counts["stateful_failed_count"] > counts["stateful_case_count"]
+    ):
+        return False
+
+    score_sum = _known_number(value.get("score_sum"))
+    overall_score = _known_number(value.get("overall_score"))
+    if (
+        score_sum is None
+        or overall_score is None
+        or not 0.0 <= score_sum <= float(case_count)
+        or not 0.0 <= overall_score <= 1.0
+        or not math.isclose(
+            overall_score,
+            score_sum / case_count,
+            rel_tol=0.0,
+            abs_tol=EVAL_GATE_RATE_ABS_TOLERANCE,
+        )
+    ):
+        return False
+
+    def rate_matches(rate_field: str, count_field: str, failed_field: str) -> bool:
+        count = counts[count_field]
+        failed = counts[failed_field]
+        raw_rate = value.get(rate_field)
+        if count == 0:
+            return raw_rate is None
+        rate = _known_number(raw_rate)
+        return (
+            rate is not None
+            and 0.0 <= rate <= 1.0
+            and math.isclose(
+                rate,
+                (count - failed) / count,
+                rel_tol=0.0,
+                abs_tol=EVAL_GATE_RATE_ABS_TOLERANCE,
+            )
+        )
+
+    return all(
+        (
+            rate_matches("pass_rate", "case_count", "failed_case_count"),
+            rate_matches(
+                "trajectory_pass_rate",
+                "trajectory_case_count",
+                "trajectory_failed_count",
+            ),
+            rate_matches(
+                "critical_pass_rate",
+                "critical_case_count",
+                "critical_failed_count",
+            ),
+            rate_matches(
+                "stateful_pass_rate",
+                "stateful_case_count",
+                "stateful_failed_count",
+            ),
+        )
+    )
 
 
 def _average(values: list[float]) -> float | None:
@@ -2155,6 +2267,10 @@ class AgentTraceRepository(BaseRepository):
         baseline_metrics = baseline.get("metrics") or {}
         candidate_metrics = candidate.get("metrics") or {}
         reasons: list[str] = []
+        if not _has_versioned_gate_metrics(baseline_summary):
+            reasons.append("baseline_gate_metrics_unverifiable")
+        if not _has_versioned_gate_metrics(candidate_summary):
+            reasons.append("candidate_gate_metrics_unverifiable")
         if (
             baseline.get("run_mode") != "live_candidate"
             or candidate.get("run_mode") != "live_candidate"

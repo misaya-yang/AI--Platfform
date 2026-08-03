@@ -8,12 +8,16 @@
 - MMR 多样化
 """
 
+import pytest
 from knowledge_service.services.knowledge.retrieval import (
     bm25_scores,
     mmr_select,
     reciprocal_rank_fusion,
+    text_to_sparse_vector,
     tokenize,
 )
+from qdrant_client import models as qdrant_models
+from qdrant_client.hybrid.fusion import reciprocal_rank_fusion as qdrant_rrf
 
 
 class TestTokenize:
@@ -33,6 +37,31 @@ class TestTokenize:
         """测试混合文本分词"""
         toks = tokenize("AI网关Gateway")
         assert len(toks) > 0
+
+    def test_lexical_v1_tokenization_golden_keeps_term_presence_schema(self):
+        text = 'Alpha alpha "Beta Gamma" 智能智能'
+
+        assert tokenize(text) == [
+            "beta gamma",
+            "alpha",
+            "智能智能",
+            "智能",
+            "能智",
+            "智",
+            "能",
+        ]
+        assert text_to_sparse_vector(text) == (
+            [
+                787234666,
+                1569418667,
+                1732189608,
+                2175947854,
+                2278473498,
+                2577206709,
+                3279047699,
+            ],
+            [1.0] * 7,
+        )
 
 
 class TestBM25:
@@ -62,6 +91,29 @@ class TestBM25:
         scores = bm25_scores(q, docs)
         assert len(scores) == 1
 
+    def test_document_term_frequency_is_preserved_for_bm25(self):
+        query = tokenize("vector")
+        docs = [
+            tokenize("vector", deduplicate=False),
+            tokenize("vector vector vector", deduplicate=False),
+        ]
+
+        scores = bm25_scores(query, docs)
+
+        assert scores[1] > scores[0]
+
+    def test_lexical_v1_default_bm25_keeps_duplicate_terms_neutral(self):
+        query = tokenize("vector")
+        documents = [
+            tokenize("vector"),
+            tokenize("vector vector vector"),
+        ]
+
+        assert documents == [["vector"], ["vector"]]
+        assert bm25_scores(query, documents) == pytest.approx(
+            [0.1823215567939546, 0.1823215567939546]
+        )
+
 
 class TestRRF:
     """RRF 融合测试"""
@@ -82,16 +134,85 @@ class TestRRF:
         # b 在两个列表中排名都高，应该得分更高
         assert fused["b"] > fused["d"]
 
+        # Golden lexical_v1 formula: rank is one-based and the denominator is
+        # k + rank (not Qdrant weighted RRF's k - 1 + rank / weight).
+        assert fused == pytest.approx(
+            {
+                "a": 1 / 61 + 1 / 63,
+                "b": 1 / 62 + 1 / 61,
+                "c": 1 / 63,
+                "d": 1 / 62,
+            }
+        )
+
     def test_rrf_with_weights(self):
-        """测试带权重的 RRF"""
+        """带权 RRF 使用 Qdrant 的 rank/weight 分母语义。"""
         fused = reciprocal_rank_fusion(
             {"vector": ["a", "b"], "keyword": ["b", "a"]},
             k=60,
             weights={"vector": 2.0, "keyword": 1.0},  # vector 权重更高
+            qdrant_weighted=True,
         )
 
-        # a 在 vector 中排第一，应该得分更高
-        assert fused["a"] > fused["b"]
+        assert fused["a"] == pytest.approx(1 / (1 / 2 + 59) + 1 / (2 / 1 + 59))
+        assert fused["b"] == pytest.approx(1 / (2 / 2 + 59) + 1 / (1 / 1 + 59))
+
+    def test_weighted_rrf_matches_qdrant_formula_and_ordering(self):
+        """Fallback must preserve Qdrant's non-equal-weight rank semantics."""
+        dense_ids = [3, 4, 5, 2]
+        sparse_ids = [1]
+        fallback = reciprocal_rank_fusion(
+            {"dense": dense_ids, "bm25": sparse_ids},
+            k=60,
+            weights={"dense": 0.75, "bm25": 0.25},
+            qdrant_weighted=True,
+        )
+        native = qdrant_rrf(
+            [
+                [
+                    qdrant_models.ScoredPoint(id=item_id, version=0, score=1.0)
+                    for item_id in dense_ids
+                ],
+                [
+                    qdrant_models.ScoredPoint(id=item_id, version=0, score=1.0)
+                    for item_id in sparse_ids
+                ],
+            ],
+            limit=10,
+            ranking_constant_k=60,
+            weights=[0.75, 0.25],
+        )
+
+        native_scores = {int(point.id): point.score for point in native}
+        assert fallback.keys() == native_scores.keys()
+        for item_id, score in fallback.items():
+            assert score == pytest.approx(native_scores[item_id])
+        assert sorted(fallback, key=fallback.get, reverse=True) == [
+            int(point.id) for point in native
+        ]
+        assert fallback[1] > fallback[2]
+
+    def test_zero_weight_source_keeps_qdrant_zero_score_candidates(self):
+        fallback = reciprocal_rank_fusion(
+            {"dense": [2], "bm25": [1]},
+            k=60,
+            weights={"dense": 1.0, "bm25": 0.0},
+            qdrant_weighted=True,
+        )
+        native = qdrant_rrf(
+            [
+                [qdrant_models.ScoredPoint(id=2, version=0, score=1.0)],
+                [qdrant_models.ScoredPoint(id=1, version=0, score=1.0)],
+            ],
+            limit=10,
+            ranking_constant_k=60,
+            weights=[1.0, 0.0],
+        )
+
+        assert list(fallback) == [2, 1]
+        assert fallback[2] == pytest.approx(native[0].score)
+        assert fallback[1] == 0.0
+        assert [int(point.id) for point in native] == [2, 1]
 
 
 class TestMMR:

@@ -183,7 +183,12 @@ def _candidate_result(run_case: dict[str, Any]) -> dict[str, Any]:
             "provider": "dashscope",
             "runtime_revision": "runtime-a",
         },
-        "contract_result": {"passed": True, "failures": []},
+        "contract_result": {
+            "passed": True,
+            "trajectory_pass": True,
+            "stateful_pass": None,
+            "failures": [],
+        },
     }
 
 
@@ -223,6 +228,11 @@ async def test_live_executor_runs_each_trial_once_and_reuses_trace_for_evaluator
     assert final["metrics"]["latency_p50_ms"] == 150
     assert final["metrics"]["total_tokens_per_task"] == 100
     assert final["score_summary"]["behavior_pass_rate"] == 1.0
+    assert final["score_summary"]["schema_version"] == "eval-gate-metrics/v2"
+    assert final["score_summary"]["score_sum"] == 2.0
+    assert final["score_summary"]["trajectory_case_count"] == 2
+    assert final["score_summary"]["trajectory_failed_count"] == 0
+    assert final["score_summary"]["trajectory_pass_rate"] == 1.0
     assert final["metrics"]["mixed_runtime"] is False
     assert all(case["status"] == "succeeded" for case in repository.cases)
 

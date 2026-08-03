@@ -104,6 +104,7 @@ EXPECTED_STREAM_EVENT_TYPES: frozenset[str] = frozenset(
         "run_started",
         "run_finished",
         "run_error",
+        "run_budget_exceeded",
     }
 )
 
@@ -224,6 +225,7 @@ EXPECTED_AGENT_LOOP_CONFIG_FIELDS: frozenset[str] = frozenset(
         "temperature",
         "max_tokens",
         "enable_task_planning",
+        "confirm_plan",
         "enable_scenario_retrieval",
         "enable_context_compression",
         "enable_rag_metrics",
@@ -241,6 +243,8 @@ EXPECTED_AGENT_LOOP_CONFIG_FIELDS: frozenset[str] = frozenset(
         "file_paths",
         "max_tool_iterations",
         "max_concurrent_tools",
+        "run_budget_limits",
+        "persist_messages",
         "compress_threshold",
         "min_recent_messages",
         "compressed_context_tokens",

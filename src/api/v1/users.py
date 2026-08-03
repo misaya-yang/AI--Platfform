@@ -12,7 +12,6 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, validator
 
-from ...core.auth.service_access_resolver import clear_service_access_constraint_cache
 from ...core.auth.password import (
     ALLOWED_EMAIL_DOMAIN,
     DEFAULT_PASSWORD,
@@ -20,6 +19,7 @@ from ...core.auth.password import (
     hash_password,
     validate_email,
 )
+from ...core.auth.service_access_resolver import clear_service_access_constraint_cache
 from ...core.auth.user_resolver import UserContext
 from ..deps import AuthContext, get_auth_context, get_dispatcher, get_user_context
 
@@ -182,6 +182,11 @@ def _build_user_response_payload(
     return payload
 
 
+def _tenant_scope(identity: AuthContext | UserContext) -> str:
+    """Return the caller's tenant, preserving the legacy default tenant."""
+    return str(identity.tenant_id or "default")
+
+
 # ============================================================
 # API Endpoints
 # ============================================================
@@ -210,7 +215,11 @@ async def list_users(
 
     offset = (page - 1) * page_size
     users, total = await db.list_users_paginated(
-        status=status, search=search, limit=page_size, offset=offset
+        status=status,
+        search=search,
+        tenant_id=_tenant_scope(auth),
+        limit=page_size,
+        offset=offset,
     )
 
     return UserListResponse(
@@ -272,7 +281,7 @@ async def create_user(
         "force_password_change": True,
         "status": "active",
         "tier": "normal",
-        "tenant_id": "default",
+        "tenant_id": _tenant_scope(auth),
         "created_by": auth.user_id,
     }
 
@@ -318,7 +327,7 @@ async def get_user(
     if not db or not getattr(db, "enabled", False):
         raise HTTPException(status_code=503, detail="Database not available")
 
-    user = await db.get_user(user_id)
+    user = await db.get_user_for_tenant(user_id, _tenant_scope(auth))
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -349,7 +358,8 @@ async def update_user(
     if not db or not getattr(db, "enabled", False):
         raise HTTPException(status_code=503, detail="Database not available")
 
-    user = await db.get_user(user_id)
+    tenant_id = _tenant_scope(auth)
+    user = await db.get_user_for_tenant(user_id, tenant_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -362,8 +372,11 @@ async def update_user(
     # === Mass-Assignment Protection ===
     # roles, tier, status are privileged fields — only admin can change them.
     # Without this gate, any user with user:edit could self-promote to admin.
-    ADMIN_ONLY_FIELDS = {"roles", "tier", "status"}
-    admin_field_changes = ADMIN_ONLY_FIELDS & update_data.keys()
+    admin_field_changes = {
+        field
+        for field in ("roles", "tier", "status")
+        if getattr(body, field) is not None
+    }
     if admin_field_changes and "admin" not in auth.roles:
         raise HTTPException(
             status_code=403,
@@ -408,20 +421,23 @@ async def update_user(
         metadata["service_access"] = service_access
         update_data["metadata"] = metadata
 
-    if update_data:
-        await db.update_user(user_id, update_data)
+    if update_data or body.roles is not None or body.extra_permissions is not None:
+        updated = await db.update_user_for_tenant(
+            user_id,
+            tenant_id,
+            update_data,
+            roles=body.roles,
+            extra_permissions=body.extra_permissions,
+            granted_by=auth.user_id,
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="User not found")
         if service_policy_updated:
             clear_service_access_constraint_cache()
 
-        # Update roles if changed
-        if body.roles is not None:
-            await db.update_user_roles(user_id, body.roles, auth.user_id)
-
-    # Update extra permissions if provided
-    if body.extra_permissions is not None:
-        await db.update_user_extra_permissions(user_id, body.extra_permissions, auth.user_id)
-
-    updated_user = await db.get_user(user_id)
+    updated_user = await db.get_user_for_tenant(user_id, tenant_id)
+    if not updated_user:
+        raise HTTPException(status_code=404, detail="User not found")
 
     # Get extra permissions
     extra_perms = await db.get_user_extra_permissions(user_id)
@@ -454,19 +470,22 @@ async def delete_user(
     if user_id == auth.user_id:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
 
-    # Cannot delete system admin
-    if user_id == "admin":
-        raise HTTPException(status_code=400, detail="Cannot delete system admin")
-
     db = getattr(request.app.state, "database", None)
     if not db or not getattr(db, "enabled", False):
         raise HTTPException(status_code=503, detail="Database not available")
 
-    user = await db.get_user(user_id)
+    tenant_id = _tenant_scope(auth)
+    user = await db.get_user_for_tenant(user_id, tenant_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    await db.delete_user(user_id)
+    # Only the system administrator in its own tenant is protected specially.
+    if user_id == "admin":
+        raise HTTPException(status_code=400, detail="Cannot delete system admin")
+
+    deleted = await db.delete_user_for_tenant(user_id, tenant_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="User not found")
     clear_service_access_constraint_cache()
     return {"status": "success", "message": f"User {user_id} deleted"}
 
@@ -491,12 +510,15 @@ async def reset_user_password(
     if not db or not getattr(db, "enabled", False):
         raise HTTPException(status_code=503, detail="Database not available")
 
-    user = await db.get_user(user_id)
+    tenant_id = _tenant_scope(auth)
+    user = await db.get_user_for_tenant(user_id, tenant_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     password_hash = hash_password(DEFAULT_PASSWORD)
-    await db.reset_user_password(user_id, password_hash)
+    reset = await db.reset_user_password_for_tenant(user_id, tenant_id, password_hash)
+    if not reset:
+        raise HTTPException(status_code=404, detail="User not found")
 
     return {"status": "success", "message": f"Password reset to default for user {user_id}"}
 
@@ -519,11 +541,14 @@ async def enable_user(
     if not db or not getattr(db, "enabled", False):
         raise HTTPException(status_code=503, detail="Database not available")
 
-    user = await db.get_user(user_id)
+    tenant_id = _tenant_scope(auth)
+    user = await db.get_user_for_tenant(user_id, tenant_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    await db.update_user(user_id, {"status": "active"})
+    updated = await db.update_user_for_tenant(user_id, tenant_id, {"status": "active"})
+    if not updated:
+        raise HTTPException(status_code=404, detail="User not found")
     return {"status": "success", "message": f"User {user_id} enabled"}
 
 
@@ -547,19 +572,22 @@ async def disable_user(
     if user_id == auth.user_id:
         raise HTTPException(status_code=400, detail="Cannot disable your own account")
 
-    # Cannot disable system admin
-    if user_id == "admin":
-        raise HTTPException(status_code=400, detail="Cannot disable system admin")
-
     db = getattr(request.app.state, "database", None)
     if not db or not getattr(db, "enabled", False):
         raise HTTPException(status_code=503, detail="Database not available")
 
-    user = await db.get_user(user_id)
+    tenant_id = _tenant_scope(auth)
+    user = await db.get_user_for_tenant(user_id, tenant_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    await db.update_user(user_id, {"status": "disabled"})
+    # Only the system administrator in its own tenant is protected specially.
+    if user_id == "admin":
+        raise HTTPException(status_code=400, detail="Cannot disable system admin")
+
+    updated = await db.update_user_for_tenant(user_id, tenant_id, {"status": "disabled"})
+    if not updated:
+        raise HTTPException(status_code=404, detail="User not found")
     return {"status": "success", "message": f"User {user_id} disabled"}
 
 
@@ -584,16 +612,21 @@ async def update_user_profile(
     if not db or not getattr(db, "enabled", False):
         raise HTTPException(status_code=503, detail="Database not available")
 
-    user = await db.get_user(user_id)
+    tenant_id = _tenant_scope(current_user)
+    user = await db.get_user_for_tenant(user_id, tenant_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     # Only update allowed fields
     update_data = body.dict(exclude_unset=True)
     if update_data:
-        await db.update_user(user_id, update_data)
+        updated = await db.update_user_for_tenant(user_id, tenant_id, update_data)
+        if not updated:
+            raise HTTPException(status_code=404, detail="User not found")
 
-    updated_user = await db.get_user(user_id)
+    updated_user = await db.get_user_for_tenant(user_id, tenant_id)
+    if not updated_user:
+        raise HTTPException(status_code=404, detail="User not found")
 
     # Get extra permissions
     extra_perms = await db.get_user_extra_permissions(user_id)

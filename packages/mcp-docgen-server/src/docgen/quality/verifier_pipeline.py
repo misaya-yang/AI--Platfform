@@ -13,15 +13,15 @@ the warnings or retry.
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
-from typing import Optional
 
-from ..ir import DocxIR, PptxIR, XlsxIR, PdfIR
+from openpyxl.utils.cell import coordinate_to_tuple
+
+from ..ir import DocxIR, PdfIR, PptxIR, XlsxIR
 from ..renderers import RendererDispatcher
 from ..renderers.base import RenderResult
 from .docx_verifier import DocxXmlVerifier
-from .types import CriticReport, Issue, IssueCategory, IssueSeverity
+from .types import CriticReport, Issue, IssueCategory
 from .visual_verifier import PptxPdfVisualVerifier, StructuralVisionCritic, VisionCritic
 from .xlsx_verifier import XlsxFormulaVerifier
 
@@ -50,8 +50,8 @@ class VerifierPipeline:
     def __init__(
         self,
         *,
-        critic: Optional[VisionCritic] = None,
-        dispatcher: Optional[RendererDispatcher] = None,
+        critic: VisionCritic | None = None,
+        dispatcher: RendererDispatcher | None = None,
     ) -> None:
         self._dispatcher = dispatcher or RendererDispatcher()
         self._critic = critic or StructuralVisionCritic()
@@ -90,9 +90,9 @@ class VerifierPipeline:
         # --- Round 0: verify what we already have.
         reports = [self.verify(artifact_path, doc_type=doc_type)]
         current_ir = ir
-        current_result: Optional[RenderResult] = None
+        current_result: RenderResult | None = None
 
-        for attempt in range(max_fix_rounds):
+        for _attempt in range(max_fix_rounds):
             last = reports[-1]
             if last.passed:
                 break
@@ -131,7 +131,7 @@ class VerifierPipeline:
         return any(p in lowered for p in self._PLACEHOLDER_PATTERNS)
 
     def _patch_pptx(self, ir: PptxIR, report: CriticReport) -> PptxIR:
-        from ..ir import ParagraphBlock
+        del report
         patched = ir.model_copy(deep=True)
         for slide in patched.content.slides:
             # Slide-level string fields: title / subtitle / stat_value /
@@ -156,6 +156,7 @@ class VerifierPipeline:
         return patched
 
     def _patch_docx(self, ir: DocxIR, report: CriticReport) -> DocxIR:
+        del report
         patched = ir.model_copy(deep=True)
         for block in patched.content.blocks:
             if hasattr(block, "text") and self._looks_like_placeholder(block.text):
@@ -168,18 +169,35 @@ class VerifierPipeline:
 
     def _patch_xlsx(self, ir: XlsxIR, report: CriticReport) -> XlsxIR:
         patched = ir.model_copy(deep=True)
-        error_targets = {i.message for i in report.issues if i.category == IssueCategory.FORMULA_ERROR}
+        error_targets: set[tuple[str, int, int]] = set()
+        for issue in report.issues:
+            if issue.category != IssueCategory.FORMULA_ERROR:
+                continue
+            prefix = "formula error at "
+            if not issue.message.startswith(prefix):
+                continue
+            try:
+                location, marker = issue.message.removeprefix(prefix).rsplit("=", 1)
+                sheet_name, coordinate = location.rsplit("!", 1)
+                row_index, column_index = coordinate_to_tuple(coordinate)
+            except ValueError:
+                continue
+            if marker == "#DIV/0!":
+                error_targets.add((sheet_name, row_index, column_index))
+
         # Very conservative: null out formulas flagged as #DIV/0.
         # A real fix loop would feed the error back to an LLM.
         for sheet in patched.content.sheets:
-            for row in sheet.rows:
-                for cell in row.cells:
-                    if cell.formula and any("DIV" in m for m in error_targets):
+            for row_index, row in enumerate(sheet.rows, start=1):
+                for column_index, cell in enumerate(row.cells, start=1):
+                    target = (sheet.name, row_index, column_index)
+                    if cell.formula and target in error_targets:
                         cell.formula = None
                         cell.value = 0
         return patched
 
     def _patch_pdf(self, ir: PdfIR, report: CriticReport) -> PdfIR:
+        del report
         patched = ir.model_copy(deep=True)
         for page in patched.content.pages:
             for block in page.blocks:

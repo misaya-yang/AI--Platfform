@@ -134,18 +134,24 @@ def _user_can_access_model(user: UserContext, access_level: str) -> bool:
     """
     from ai_gateway_core.enums import ModelAccessLevel
 
-    # Admin users can access everything
+    try:
+        required_access_level = ModelAccessLevel(access_level)
+    except (TypeError, ValueError):
+        # Dirty metadata must not turn a restricted model into a public one.
+        return False
+
+    # Admin users can access every *known* access level.
     if user.tier == "admin" or "admin" in user.roles:
         return True
 
-    if access_level == ModelAccessLevel.PUBLIC.value:
+    if required_access_level is ModelAccessLevel.PUBLIC:
         return True
-    elif access_level == ModelAccessLevel.PREMIUM.value:
+    elif required_access_level is ModelAccessLevel.PREMIUM:
         return user.tier in ("premium", "enterprise", "admin")
-    elif access_level == ModelAccessLevel.ADMIN.value:
+    elif required_access_level is ModelAccessLevel.ADMIN:
         return False  # Only admins, checked above
 
-    return True  # Default allow for unknown levels
+    return False
 
 
 def _is_missing_artifact_schema_error(exc: Exception) -> bool:

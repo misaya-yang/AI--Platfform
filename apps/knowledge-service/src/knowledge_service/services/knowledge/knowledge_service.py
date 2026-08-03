@@ -1,57 +1,39 @@
 from __future__ import annotations
 
 import asyncio
-import copy
-import hashlib
-import json
-import mimetypes
-import os
+import math
 import re
-import tempfile
-import time
-import uuid
-from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ...config.settings import Settings
-from ...core.auth.password import verify_password
 from ...core.auth.user_resolver import UserContext
-from ...core.exceptions import PermissionDeniedError, ValidationFailedError
+from ...core.exceptions import ValidationFailedError
 from ...core.observability.logging import get_logger
 
 logger = get_logger(__name__)
-# Type hint imports
-import contextlib
-from typing import TYPE_CHECKING
 
-from ...persistence.database import DatabaseStorage
+from ...persistence.database import (
+    DOCUMENT_UPLOAD_FAILED_KEY,
+    DatabaseStorage,
+    IndexLeaseUnavailableError,
+)
 from .chunking import (
     AssociatedImage,
     Chunk,
     ChunkingConfig,
-    ChunkingMode,
     ContentType,
-    enforce_token_limits,
-    flatten_chunks,
     merge_small_chunks,
-    process_document,
 )
 from .embedding import (
     BaseEmbedding,
     DashScopeMultimodalEmbedding,
     EmbeddingConfig,
-    create_embedding,
-    get_cached_embedder,
 )
 from .ingestion import DocumentImageExtractor
 from .ingestion import ExtractedImage as IngestionExtractedImage
 from .pdf_image_processor import ExtractedImage, PDFImageProcessor
 from .retrieval_service import RetrieveResult
-from .structured_document_parser import (
-    ChunkType,
-    StructuredDocumentParser,
-)
-from .utils import normalize_text
+from .structured_document_parser import StructuredDocumentParser
 from .vector_store import VectorStore
 
 if TYPE_CHECKING:
@@ -66,7 +48,6 @@ _global_vlm_max_concurrent: int = 10  # Default, updated from settings on first 
 
 
 from .common import ensure_dict as _ensure_dict  # noqa: E402
-from .common import permission_rank as _permission_rank  # noqa: E402
 
 
 class KnowledgeService:
@@ -140,6 +121,15 @@ class KnowledgeService:
             prefer_grpc=settings.knowledge.qdrant.prefer_grpc,
             max_retries=getattr(settings.knowledge.qdrant, "max_retries", 3),
             retry_base_delay=getattr(settings.knowledge.qdrant, "retry_base_delay", 0.5),
+            bm25_v2_enabled=getattr(
+                settings.knowledge.qdrant, "bm25_v2_enabled", False
+            ),
+            bm25_v2_capability_ttl_seconds=getattr(
+                settings.knowledge.qdrant,
+                "bm25_v2_capability_ttl_seconds",
+                300.0,
+            ),
+            dataset_write_lease=database.dataset_index_write_lease,
         )
 
         # Update sub-services with shared resources (post-init injection)
@@ -235,7 +225,12 @@ class KnowledgeService:
         This preserves the document structure (headings, images, tables)
         for better multimodal retrieval.
         """
-        from .chunking import Chunk, ContentType
+        from .chunking import MAX_CHUNK_OUTPUTS, Chunk, ContentType
+
+        if len(structured_chunks) > MAX_CHUNK_OUTPUTS:
+            raise ValidationFailedError(
+                f"structured parsing exceeds the {MAX_CHUNK_OUTPUTS} chunk limit"
+            )
 
         flat_chunks = []
 
@@ -275,6 +270,10 @@ class KnowledgeService:
                 # Store image metadata for later retrieval
                 chunk.metadata["associated_images"] = sc.get("images", [])
 
+            if len(flat_chunks) >= MAX_CHUNK_OUTPUTS:
+                raise ValidationFailedError(
+                    f"structured parsing exceeds the {MAX_CHUNK_OUTPUTS} chunk limit"
+                )
             flat_chunks.append(chunk)
 
         return flat_chunks
@@ -459,10 +458,16 @@ class KnowledgeService:
         fusion_strategy = None
         fusion_alpha = None
         fusion_rrf_k = None
+        fusion_rrf_weights = None
+        fusion_dense_weight = None
+        fusion_bm25_weight = None
         if isinstance(fusion_cfg, dict):
-            fusion_strategy = fusion_cfg.get("strategy")
+            fusion_strategy = fusion_cfg.get("strategy") or fusion_cfg.get("method")
             fusion_alpha = fusion_cfg.get("alpha")
             fusion_rrf_k = fusion_cfg.get("rrf_k")
+            fusion_rrf_weights = fusion_cfg.get("rrf_weights")
+            fusion_dense_weight = fusion_cfg.get("dense_weight")
+            fusion_bm25_weight = fusion_cfg.get("bm25_weight")
 
         effective_fusion_method = str(
             (
@@ -481,32 +486,89 @@ class KnowledgeService:
         if effective_fusion_method not in {"weighted", "rrf"}:
             effective_fusion_method = "rrf"
 
-        if alpha is not None:
-            effective_dense_weight = float(alpha)
-            effective_bm25_weight = 1.0 - float(alpha)
-        elif fusion_alpha is not None:
-            effective_dense_weight = float(fusion_alpha)
-            effective_bm25_weight = 1.0 - float(fusion_alpha)
-        else:
-            effective_dense_weight = float(
-                dense_weight
-                if dense_weight is not None
-                else retrieval_defaults.get("dense_weight", 0.5)
-            )
-            effective_bm25_weight = float(
-                bm25_weight
-                if bm25_weight is not None
-                else retrieval_defaults.get("bm25_weight", 0.5)
-            )
+        def coerce_weight(raw_value: Any) -> float:
+            try:
+                return float(raw_value)
+            except (TypeError, ValueError) as exc:
+                raise ValidationFailedError(
+                    "fusion weights must be finite and non-negative"
+                ) from exc
 
-        # Legacy rrf_weights support
-        if rrf_weights and isinstance(rrf_weights, dict):
-            effective_dense_weight = float(rrf_weights.get("vector", effective_dense_weight))
-            effective_bm25_weight = float(rrf_weights.get("keyword", effective_bm25_weight))
-
-        rrf_k_value = int(
-            rrf_k if rrf_k is not None else fusion_rrf_k or retrieval_defaults.get("rrf_k") or 60
+        default_dense_weight = retrieval_defaults.get("dense_weight")
+        default_bm25_weight = retrieval_defaults.get("bm25_weight")
+        effective_dense_weight = coerce_weight(
+            0.5 if default_dense_weight is None else default_dense_weight
         )
+        effective_bm25_weight = coerce_weight(
+            0.5 if default_bm25_weight is None else default_bm25_weight
+        )
+
+        # Resolve dataset defaults first. Canonical nested ``fusion`` values
+        # override legacy root values, then explicit request values override the
+        # dataset. This keeps native Qdrant and Python fallback on one contract.
+        if fusion_alpha is not None:
+            effective_dense_weight = coerce_weight(fusion_alpha)
+            effective_bm25_weight = 1.0 - coerce_weight(fusion_alpha)
+        else:
+            if fusion_dense_weight is not None:
+                effective_dense_weight = coerce_weight(fusion_dense_weight)
+            if fusion_bm25_weight is not None:
+                effective_bm25_weight = coerce_weight(fusion_bm25_weight)
+
+        def apply_rrf_weights(weights: Any) -> None:
+            nonlocal effective_dense_weight, effective_bm25_weight
+            if not isinstance(weights, dict):
+                return
+            for alias in ("vector", "dense"):
+                if weights.get(alias) is not None:
+                    effective_dense_weight = coerce_weight(weights[alias])
+                    break
+            for alias in ("keyword", "bm25"):
+                if weights.get(alias) is not None:
+                    effective_bm25_weight = coerce_weight(weights[alias])
+                    break
+
+        if effective_fusion_method == "rrf":
+            apply_rrf_weights(retrieval_defaults.get("rrf_weights"))
+            apply_rrf_weights(fusion_rrf_weights)
+
+        if alpha is not None:
+            effective_dense_weight = coerce_weight(alpha)
+            effective_bm25_weight = 1.0 - coerce_weight(alpha)
+        else:
+            if dense_weight is not None:
+                effective_dense_weight = coerce_weight(dense_weight)
+            if bm25_weight is not None:
+                effective_bm25_weight = coerce_weight(bm25_weight)
+        if effective_fusion_method == "rrf":
+            apply_rrf_weights(rrf_weights)
+
+        effective_weights = (effective_dense_weight, effective_bm25_weight)
+        if not all(math.isfinite(weight) and weight >= 0.0 for weight in effective_weights):
+            raise ValidationFailedError("fusion weights must be finite and non-negative")
+        if not any(weight > 0.0 for weight in effective_weights):
+            raise ValidationFailedError("at least one fusion weight must be positive")
+
+        raw_rrf_k = (
+            rrf_k
+            if rrf_k is not None
+            else fusion_rrf_k
+            if fusion_rrf_k is not None
+            else retrieval_defaults.get("rrf_k")
+        )
+        raw_rrf_k = 60 if raw_rrf_k is None else raw_rrf_k
+        try:
+            numeric_rrf_k = float(raw_rrf_k)
+        except (TypeError, ValueError) as exc:
+            raise ValidationFailedError("rrf_k must be an integer between 1 and 10000") from exc
+        if (
+            isinstance(raw_rrf_k, bool)
+            or not math.isfinite(numeric_rrf_k)
+            or not numeric_rrf_k.is_integer()
+            or not 1 <= numeric_rrf_k <= 10_000
+        ):
+            raise ValidationFailedError("rrf_k must be an integer between 1 and 10000")
+        rrf_k_value = int(numeric_rrf_k)
 
         return {
             "method": effective_fusion_method,
@@ -703,6 +765,7 @@ class KnowledgeService:
         document_id: str,
         images: list[IngestionExtractedImage],
         collection: str,
+        tenant_id: str,
         base_position: int = 0,
     ) -> tuple[int, list[dict[str, Any]]]:
         return await self.ingestion_service._embed_images_in_memory(
@@ -711,6 +774,7 @@ class KnowledgeService:
             document_id=document_id,
             images=images,
             collection=collection,
+            tenant_id=tenant_id,
             base_position=base_position,
         )
 
@@ -966,6 +1030,20 @@ class KnowledgeService:
     ) -> dict[str, Any]:
         return await self.document_service.set_segment_enabled(user, dataset_id, segment_id, enabled)
 
+    async def set_segments_enabled_batch(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        segment_ids: Any,
+        enabled: Any,
+    ) -> dict[str, Any]:
+        return await self.document_service.set_segments_enabled_batch(
+            user,
+            dataset_id,
+            segment_ids,
+            enabled,
+        )
+
     async def create_segment(
         self, user: UserContext, dataset_id: str, document_id: str, content: str,
         answer: str | None = None, keywords: list[str] | None = None,
@@ -978,7 +1056,13 @@ class KnowledgeService:
 
     async def get_dataset_statistics(self, user: UserContext, dataset_id: str) -> dict[str, Any]:
         """Get dataset statistics."""
-        await self.require_dataset_access(user, dataset_id, required="viewer")
+        from .document_service import (
+            _dataset_content_generation,
+            _require_unchanged_dataset_content,
+        )
+
+        dataset = await self.require_dataset_access(user, dataset_id, required="viewer")
+        generation = _dataset_content_generation(dataset)
 
         docs = await self.db.list_documents(dataset_id=dataset_id, limit=10000, offset=0)
         segs = await self.db.list_segments(dataset_id=dataset_id, limit=50000, offset=0)
@@ -1001,7 +1085,7 @@ class KnowledgeService:
         word_count = sum(d.get("word_count", 0) or 0 for d in docs)
         hit_count = sum(s.get("hit_count", 0) or 0 for s in segs)
 
-        return {
+        result = {
             "dataset_id": dataset_id,
             "document_count": total_docs,
             "available_document_count": available_docs,
@@ -1010,12 +1094,25 @@ class KnowledgeService:
             "word_count": word_count,
             "hit_count": hit_count,
         }
+        await _require_unchanged_dataset_content(
+            self,
+            user,
+            dataset_id,
+            generation,
+        )
+        return result
 
     async def get_document_statistics(
         self, user: UserContext, dataset_id: str, document_id: str
     ) -> dict[str, Any]:
         """Get document statistics."""
-        await self.require_dataset_access(user, dataset_id, required="viewer")
+        from .document_service import (
+            _dataset_content_generation,
+            _require_unchanged_dataset_content,
+        )
+
+        dataset = await self.require_dataset_access(user, dataset_id, required="viewer")
+        generation = _dataset_content_generation(dataset)
         doc = await self.db.get_document(document_id)
         if not doc or str(doc.get("dataset_id")) != dataset_id:
             raise ValidationFailedError("document not found")
@@ -1024,7 +1121,7 @@ class KnowledgeService:
             dataset_id=dataset_id, document_id=document_id, limit=10000, offset=0
         )
 
-        return {
+        result = {
             "document_id": document_id,
             "segment_count": len(segs),
             "word_count": doc.get("word_count", 0) or 0,
@@ -1033,6 +1130,13 @@ class KnowledgeService:
             "enabled": doc.get("enabled", True),
             "archived": doc.get("archived", False),
         }
+        await _require_unchanged_dataset_content(
+            self,
+            user,
+            dataset_id,
+            generation,
+        )
+        return result
 
     def _normalize_local_image_url(
         self,
@@ -1127,6 +1231,10 @@ class KnowledgeService:
             raise ValidationFailedError("document not found")
 
         dataset_id = str(doc.get("dataset_id"))
+        dataset = await self.db.get_dataset(dataset_id)
+        tenant_id = str((dataset or {}).get("tenant_id") or "").strip()
+        if not tenant_id:
+            raise ValidationFailedError("document dataset tenant scope is unavailable")
 
         # Get text and image segments separately
         all_segments = await self.db.list_segments(
@@ -1273,7 +1381,11 @@ class KnowledgeService:
 
         # Batch insert associations
         if associations:
-            count = await self.db.add_segment_image_associations_batch(associations)
+            count = await self.db.add_segment_image_associations_batch(
+                associations,
+                dataset_id=dataset_id,
+                tenant_id=tenant_id,
+            )
             logger.info(f"Created {count} image associations for document {document_id}")
 
             # Update segment flags in batch
@@ -1382,7 +1494,10 @@ class KnowledgeService:
         Returns:
             List of segments with associated_images field populated
         """
-        await self.require_dataset_access(user, dataset_id, required="viewer")
+        dataset = await self.require_dataset_access(user, dataset_id, required="viewer")
+        tenant_id = str(dataset.get("tenant_id") or "").strip()
+        if not tenant_id:
+            raise ValidationFailedError("dataset tenant scope is unavailable")
 
         segments = await self.db.list_segments(
             dataset_id=dataset_id, document_id=document_id, limit=5000, offset=0
@@ -1402,7 +1517,11 @@ class KnowledgeService:
             return segments
 
         # Batch fetch associated images
-        associations = await self.db.get_segment_associations_batch(text_segment_ids)
+        associations = await self.db.get_segment_associations_batch(
+            text_segment_ids,
+            dataset_id=dataset_id,
+            tenant_id=tenant_id,
+        )
 
         # Attach images to segments
         result = []
@@ -1483,11 +1602,112 @@ class KnowledgeService:
             "recovered_count": 0,
             "recovered_documents": [],
             "requeued_count": 0,
+            "abandoned_upload_count": 0,
+            "upload_cleanup_count": 0,
         }
 
         try:
-            # Query for stuck documents
-            stuck_documents = await self.db.find_stuck_documents(stuck_threshold_minutes)
+            # Upload owners are never ordinary ingest candidates. Crash-stale
+            # owners first become a durable cleanup receipt; storage cleanup is
+            # retried under the same document owner lease until it commits.
+            fail_stale_uploads = getattr(self.db, "fail_stale_document_uploads", None)
+            list_upload_cleanups = getattr(
+                self.db,
+                "list_pending_document_upload_cleanups",
+                None,
+            )
+            complete_upload_cleanup = getattr(
+                self.db,
+                "complete_document_upload_cleanup",
+                None,
+            )
+            document_lease = getattr(self.db, "document_index_update_lease", None)
+            delete_assets = getattr(
+                getattr(self, "image_storage_service", None),
+                "delete_document_assets",
+                None,
+            )
+            if callable(fail_stale_uploads):
+                abandoned = await fail_stale_uploads(
+                    max(int(stuck_threshold_minutes) * 4, 60)
+                )
+                result["abandoned_upload_count"] = len(abandoned)
+            if all(
+                callable(value)
+                for value in (
+                    list_upload_cleanups,
+                    complete_upload_cleanup,
+                    document_lease,
+                    delete_assets,
+                )
+            ):
+                pending_cleanups = await list_upload_cleanups(limit=100)
+                for receipt in pending_cleanups:
+                    document_id = str(receipt.get("document_id") or "").strip()
+                    dataset_id = str(receipt.get("dataset_id") or "").strip()
+                    if not document_id or not dataset_id:
+                        continue
+                    try:
+                        async with document_lease(
+                            dataset_id,
+                            document_id,
+                        ) as lease_connection:
+                            document = await self.db.get_document(
+                                document_id,
+                                connection=lease_connection,
+                            )
+                            upload_failure = _ensure_dict(
+                                _ensure_dict((document or {}).get("metadata")).get(
+                                    DOCUMENT_UPLOAD_FAILED_KEY
+                                )
+                            )
+                            if upload_failure.get("status") != "cleanup_pending":
+                                continue
+                            dataset = await self.db.get_dataset(
+                                dataset_id,
+                                connection=lease_connection,
+                            )
+                            tenant_id = str((dataset or {}).get("tenant_id") or "").strip()
+                            if not tenant_id:
+                                continue
+                            await delete_assets(
+                                tenant_id=tenant_id,
+                                document_id=document_id,
+                            )
+                            if await complete_upload_cleanup(
+                                document_id,
+                                dataset_id,
+                                connection=lease_connection,
+                            ):
+                                result["upload_cleanup_count"] += 1
+                    except IndexLeaseUnavailableError:
+                        logger.info(
+                            "Deferred stale upload cleanup during dataset lifecycle work",
+                            extra={
+                                "dataset_id": dataset_id,
+                                "document_id": document_id,
+                            },
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Stale upload storage cleanup failed and remains retryable",
+                            extra={
+                                "dataset_id": dataset_id,
+                                "document_id": document_id,
+                            },
+                        )
+
+            # Claim before enqueue so concurrent replicas cannot recover the
+            # same durable generation. The claim refreshes updated_at; if this
+            # process dies before enqueue, the pending lifecycle marker becomes
+            # claimable again after the same TTL.
+            claim_stuck = getattr(self.db, "claim_stuck_documents", None)
+            claimed_atomically = callable(claim_stuck)
+            stuck_documents = (
+                await claim_stuck(stuck_threshold_minutes)
+                if claimed_atomically
+                else await self.db.find_stuck_documents(stuck_threshold_minutes)
+            )
 
             if not stuck_documents:
                 logger.info("No stuck documents found")
@@ -1499,16 +1719,17 @@ class KnowledgeService:
                 doc_id = doc.get("document_id")
                 dataset_id = doc.get("dataset_id")
                 title = doc.get("title", "Unknown")
-                old_status = doc.get("status")
+                old_status = doc.get("old_status") or doc.get("status")
 
                 try:
-                    # Reset document status
-                    await self.db.update_document_status(
-                        doc_id,
-                        status="uploaded",
-                        progress=0,
-                        error=None,
-                    )
+                    if not claimed_atomically:
+                        # Compatibility fallback for non-PostgreSQL test stores.
+                        await self.db.update_document_status(
+                            doc_id,
+                            status="uploaded",
+                            progress=0,
+                            error=None,
+                        )
 
                     result["recovered_count"] += 1
                     result["recovered_documents"].append(
@@ -1523,7 +1744,11 @@ class KnowledgeService:
 
                     # Re-enqueue for processing if worker is available
                     if worker and dataset_id:
-                        await worker.enqueue(dataset_id, doc_id)
+                        enqueue_claimed = getattr(worker, "enqueue_claimed", None)
+                        if claimed_atomically and callable(enqueue_claimed):
+                            await enqueue_claimed(dataset_id, doc_id)
+                        else:
+                            await worker.enqueue(dataset_id, doc_id)
                         result["requeued_count"] += 1
 
                 except Exception as e:

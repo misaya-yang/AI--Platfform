@@ -53,14 +53,22 @@ class FakeDB:
         return "OK"
 
 
-def _make_request(db, cookies=None):
+def _make_request(
+    db,
+    *,
+    anonymous_id: str | None = None,
+    cookies: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+    client_host: str = "127.0.0.1",
+):
     """Fake FastAPI Request exposing only what the endpoint reads."""
     app = SimpleNamespace(state=SimpleNamespace(database=db, multi_rate_limiter=None))
     return SimpleNamespace(
         app=app,
         cookies=cookies or {},
-        headers={},
-        client=SimpleNamespace(host="127.0.0.1"),
+        headers=headers or {},
+        state=SimpleNamespace(anonymous_id=anonymous_id) if anonymous_id else SimpleNamespace(),
+        client=SimpleNamespace(host=client_host),
     )
 
 
@@ -118,7 +126,8 @@ def test_anon_submit_grades_and_persists():
     question_id = str(uuid.uuid4())
     snapshot = _build_snapshot(quiz_id, question_id)
     db = FakeDB(_share_row(snapshot))
-    request = _make_request(db, cookies={"ag_anon_id": "anon-visitor-1"})
+    anon_id = str(uuid.uuid4())
+    request = _make_request(db, anonymous_id=anon_id)
     body = cs.SharedQuizSubmitRequest(answers={question_id: "A"})
 
     result = asyncio.run(
@@ -134,7 +143,7 @@ def test_anon_submit_grades_and_persists():
     assert result["total_count"] == 1
     assert result["total_score"] == 1.0
     # Should have been persisted
-    assert ("abc12345", "anon-visitor-1", quiz_id) in db._attempts
+    assert ("abc12345", anon_id, quiz_id) in db._attempts
 
 
 def test_resubmit_returns_cached_result_without_regrading():
@@ -142,7 +151,7 @@ def test_resubmit_returns_cached_result_without_regrading():
     question_id = str(uuid.uuid4())
     snapshot = _build_snapshot(quiz_id, question_id)
     db = FakeDB(_share_row(snapshot))
-    request = _make_request(db, cookies={"ag_anon_id": "anon-visitor-2"})
+    request = _make_request(db, anonymous_id=str(uuid.uuid4()))
 
     first = asyncio.run(
         cs.submit_shared_quiz(
@@ -197,7 +206,7 @@ def test_share_without_matching_quiz_returns_404():
     question_id = str(uuid.uuid4())
     snapshot = _build_snapshot(quiz_id, question_id)
     db = FakeDB(_share_row(snapshot))
-    request = _make_request(db, cookies={"ag_anon_id": "visitor"})
+    request = _make_request(db, anonymous_id=str(uuid.uuid4()))
     body = cs.SharedQuizSubmitRequest(answers={})
 
     with pytest.raises(HTTPException) as exc_info:
@@ -210,6 +219,63 @@ def test_share_without_matching_quiz_returns_404():
             )
         )
     assert exc_info.value.status_code == 404
+
+
+def test_shared_quiz_attempt_key_uses_trusted_state_and_isolates_viewers():
+    """Raw cookie/header values cannot select another viewer's attempt key."""
+    quiz_id = str(uuid.uuid4())
+    question_id = str(uuid.uuid4())
+    snapshot = _build_snapshot(quiz_id, question_id)
+    db = FakeDB(_share_row(snapshot))
+    viewer_a = str(uuid.uuid4())
+    viewer_b = str(uuid.uuid4())
+    forged_cookies = {"ag_anon_id": "attacker-controlled-cookie"}
+    forged_headers = {"x-anon-id": "attacker-controlled-header"}
+
+    first = asyncio.run(
+        cs.submit_shared_quiz(
+            share_code="abc12345",
+            quiz_id=quiz_id,
+            body=cs.SharedQuizSubmitRequest(answers={question_id: "A"}),
+            request=_make_request(
+                db,
+                anonymous_id=viewer_a,
+                cookies=forged_cookies,
+                headers=forged_headers,
+            ),
+        )
+    )
+    second = asyncio.run(
+        cs.submit_shared_quiz(
+            share_code="abc12345",
+            quiz_id=quiz_id,
+            body=cs.SharedQuizSubmitRequest(answers={question_id: "A"}),
+            request=_make_request(
+                db,
+                anonymous_id=viewer_b,
+                cookies=forged_cookies,
+                headers=forged_headers,
+            ),
+        )
+    )
+
+    assert "cached" not in first
+    assert "cached" not in second
+    assert set(db._attempts) == {
+        ("abc12345", viewer_a, quiz_id),
+        ("abc12345", viewer_b, quiz_id),
+    }
+
+
+def test_anon_id_without_middleware_state_uses_client_ip_not_raw_client_ids():
+    request = _make_request(
+        None,
+        cookies={"ag_anon_id": "attacker-controlled-cookie"},
+        headers={"x-anon-id": "attacker-controlled-header"},
+        client_host="198.51.100.10",
+    )
+
+    assert cs._resolve_anon_id(request) == "198.51.100.10"
 
 
 def test_public_get_strips_answer_keys():

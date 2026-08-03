@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
+from ai_gateway_core.comm.retry import RetryBudget, RetryPolicy
 from ai_gateway_core.proxy.base import (
     CircuitBreaker,
     CircuitBreakerState,
@@ -19,6 +20,8 @@ from ai_gateway_core.proxy.base import (
     ServiceProxy,
     ServiceProxyConfig,
 )
+from fastapi import HTTPException
+from starlette.requests import Request
 
 
 def test_breaker_closed_by_default() -> None:
@@ -164,6 +167,115 @@ async def test_service_proxy_disables_httpx_transport_retries(monkeypatch) -> No
         await proxy.aclose()
 
     assert captured_retries == [0]
+
+
+def _retry_request(*, method: str, idempotency_key: str | None) -> Request:
+    headers = (
+        []
+        if idempotency_key is None
+        else [(b"idempotency-key", idempotency_key.encode("utf-8"))]
+    )
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    return Request(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": method,
+            "scheme": "http",
+            "path": "/gateway",
+            "raw_path": b"/gateway",
+            "query_string": b"",
+            "headers": headers,
+            "client": ("127.0.0.1", 1234),
+            "server": ("testserver", 80),
+        },
+        receive,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "idempotency_key", "expected_attempts", "expect_success"),
+    [
+        pytest.param("POST", None, 1, False, id="post-missing-key"),
+        pytest.param("POST", "", 1, False, id="post-empty-key"),
+        pytest.param("POST", "   ", 1, False, id="post-whitespace-key"),
+        pytest.param("POST", "mutation-1", 2, True, id="post-valid-key"),
+        pytest.param("GET", None, 2, True, id="get-no-key"),
+    ],
+)
+async def test_service_proxy_retries_only_safe_or_idempotency_keyed_requests(
+    method: str,
+    idempotency_key: str | None,
+    expected_attempts: int,
+    expect_success: bool,
+) -> None:
+    seen: list[tuple[bytes, str | None]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((await request.aread(), request.headers.get("idempotency-key")))
+        if len(seen) == 1:
+            raise httpx.RemoteProtocolError("temporary disconnect", request=request)
+        return httpx.Response(200, json={"ok": True})
+
+    upstream_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://upstream",
+    )
+    proxy = ServiceProxy(
+        ServiceProxyConfig(
+            name="test",
+            base_url="http://upstream",
+            retry_policy=RetryPolicy(
+                max_attempts=2,
+                base_delay_ms=0,
+                max_delay_ms=0,
+                jitter=False,
+            ),
+            retry_budget=RetryBudget(budget_ratio=1.0),
+        )
+    )
+
+    async def get_client() -> httpx.AsyncClient:
+        return upstream_client
+
+    async def reset_client() -> None:
+        return None
+
+    proxy._get_client = get_client  # type: ignore[method-assign]
+    proxy._reset_client = reset_client  # type: ignore[method-assign]
+    body = b"mutation-body" if method == "POST" else None
+
+    try:
+        if expect_success:
+            response = await proxy.forward(
+                _retry_request(method=method, idempotency_key=idempotency_key),
+                user_headers={"X-User-Id": "u", "X-Tenant-Id": "t"},
+                upstream_path="/upstream",
+                body=body,
+            )
+            assert response.status_code == 200
+        else:
+            with pytest.raises(HTTPException) as exc_info:
+                await proxy.forward(
+                    _retry_request(method=method, idempotency_key=idempotency_key),
+                    user_headers={"X-User-Id": "u", "X-Tenant-Id": "t"},
+                    upstream_path="/upstream",
+                    body=body,
+                )
+            assert exc_info.value.status_code == 502
+    finally:
+        await upstream_client.aclose()
+
+    assert len(seen) == expected_attempts
+    if method == "POST" and expect_success:
+        assert seen == [(b"mutation-body", idempotency_key)] * 2
+    if method == "GET":
+        assert seen == [(b"", None), (b"", None)]
 
 
 # --- strip / inject header contract ---

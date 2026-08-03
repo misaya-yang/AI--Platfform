@@ -14,6 +14,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
+from src.services.eval.agent_observation_adapter import (
+    adapt_producer_artifacts,
+    load_producer_artifacts,
+    summarize_adapter_evidence,
+)
 from src.services.eval.golden import (
     apply_gate,
     evaluate_cases,
@@ -25,10 +30,50 @@ from src.services.eval.golden import (
     write_gate_report,
 )
 
-CANONICAL_ASSISTANT_GOLDEN = "assistant_regression_v1.jsonl"
+CANONICAL_ASSISTANT_GOLDEN_SHA256 = (
+    "cb34ed31d09f0752d18000df6f39eaa28e67f9ae4f9e630421c847a20a8f75ee"
+)
+CANONICAL_ASSISTANT_CASE_IDS = frozenset(
+    {
+        "assistant.refund_policy.basic",
+        "assistant.billing.invoice",
+        "assistant.safety.secret_redaction",
+        "assistant.tool.failure_recovery",
+        "assistant.rag.grounded_answer",
+        "assistant.multi_turn.context",
+        "assistant.latency.short_answer",
+        "assistant.compliance.refusal",
+        "assistant.langgraph.proxy_status",
+        "assistant.export.redaction",
+        "assistant.runtime.approval_denial",
+        "assistant.runtime.approval_argument_mismatch",
+        "assistant.runtime.sandbox_unavailable",
+        "assistant.runtime.interrupted_memory_skip",
+        "assistant.runtime.stop_resume",
+        "assistant.runtime.max_iterations",
+        "assistant.runtime.policy_bypass",
+        "assistant.runtime.repeated_unknown_side_effect",
+        "assistant.stateful.plan_retention",
+        "assistant.stateful.tool_pairing",
+        "assistant.stateful.budget_termination",
+        "assistant.stateful.hitl_pause_resume",
+        "assistant.stateful.compaction_retention",
+        "assistant.security.prompt_injection",
+        "assistant.security.tenant_isolation",
+    }
+)
 REQUIRED_ASSISTANT_HARD_BLOCKERS = (
     "assistant.runtime.policy_bypass",
     "assistant.runtime.repeated_unknown_side_effect",
+)
+REQUIRED_AGENT_E1_CASES = (
+    "assistant.stateful.plan_retention",
+    "assistant.stateful.tool_pairing",
+    "assistant.stateful.budget_termination",
+    "assistant.stateful.hitl_pause_resume",
+    "assistant.stateful.compaction_retention",
+    "assistant.security.prompt_injection",
+    "assistant.security.tenant_isolation",
 )
 
 
@@ -182,6 +227,17 @@ def _sha256(path: str | Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def _suite_scope(path: str | Path, cases: list[dict[str, Any]]) -> str:
+    """Classify suites without granting canonical trust from a filename alone."""
+
+    if _sha256(path) == CANONICAL_ASSISTANT_GOLDEN_SHA256:
+        return "canonical"
+    case_ids = {str(case.get("case_id") or "") for case in cases}
+    if case_ids and case_ids < CANONICAL_ASSISTANT_CASE_IDS:
+        return "partial"
+    return "custom"
+
+
 def _offline_provenance(
     args: argparse.Namespace,
     cases: list[dict[str, Any]],
@@ -280,11 +336,11 @@ def _offline_provenance(
 
 
 def _apply_canonical_hard_blockers(
-    path: str,
+    suite_scope: str,
     gate: dict[str, Any],
     metrics: dict[str, Any],
 ) -> None:
-    if Path(path).name != CANONICAL_ASSISTANT_GOLDEN:
+    if suite_scope != "canonical":
         return
     results = {str(row.get("case_id")): row for row in metrics.get("cases") or []}
     failures = [
@@ -294,9 +350,22 @@ def _apply_canonical_hard_blockers(
     ]
     gate["required_hard_blockers"] = list(REQUIRED_ASSISTANT_HARD_BLOCKERS)
     gate["hard_blockers_passed"] = not failures
+    stateful_failures = [
+        case_id
+        for case_id in REQUIRED_AGENT_E1_CASES
+        if results.get(case_id, {}).get("passed") is not True
+        or results.get(case_id, {}).get("stateful_pass") is not True
+    ]
+    gate["required_stateful_cases"] = list(REQUIRED_AGENT_E1_CASES)
+    gate["stateful_cases_passed"] = not stateful_failures
     if failures:
         gate["status"] = "fail"
         gate["failures"].append(f"required hard blockers missing or failing: {', '.join(failures)}")
+    if stateful_failures:
+        gate["status"] = "fail"
+        gate["failures"].append(
+            "required stateful cases missing or failing: " + ", ".join(stateful_failures)
+        )
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -352,18 +421,105 @@ def cmd_gate(args: argparse.Namespace) -> int:
             raise ValueError("Baseline report must contain metrics")
         baseline = {"source": str(Path(args.baseline_report)), "metrics": baseline_metrics}
 
+    suite_scope = _suite_scope(args.path, cases)
     metrics = evaluate_cases(cases, observations)
     gate = apply_gate(metrics, baseline_metrics=baseline_metrics)
-    _apply_canonical_hard_blockers(args.path, gate, metrics)
+    _apply_canonical_hard_blockers(suite_scope, gate, metrics)
     result = {
         "schema_version": "eval-regression-gate-v1",
         "source": str(Path(args.path)),
+        "suite_scope": suite_scope,
         "evidence_scope": evidence_scope,
         "observations": observation_summary,
         "summary": summarize_cases(cases),
         "metrics": metrics,
         "gate": gate,
         "provenance": _offline_provenance(args, cases, observations),
+    }
+    if baseline is not None:
+        result["baseline"] = baseline
+    write_gate_report(result, args.output, args.markdown)
+    _print_json(result)
+    return 0 if gate["status"] == "pass" else 1
+
+
+def cmd_candidate(args: argparse.Namespace) -> int:
+    """Gate explicitly supplied, recorded runtime artifacts without executing a model."""
+
+    cases = _load_valid_cases(args.path)
+    if cases is None:
+        return 1
+    rows = load_producer_artifacts(args.producer_artifacts)
+    observations = adapt_producer_artifacts(rows)
+    validation = validate_observations(cases, observations)
+    adapter_summary = summarize_adapter_evidence(observations)
+    observation_summary = {
+        "source": str(Path(args.producer_artifacts)),
+        **validation,
+        "adapter": adapter_summary,
+    }
+    if not validation["valid"]:
+        _print_json(observation_summary)
+        return 1
+
+    baseline_metrics = None
+    baseline = None
+    if args.baseline_report:
+        baseline_payload = json.loads(Path(args.baseline_report).read_text(encoding="utf-8"))
+        if not isinstance(baseline_payload, dict):
+            raise ValueError("Baseline report must be a JSON object")
+        baseline_metrics = baseline_payload.get("metrics")
+        if not isinstance(baseline_metrics, dict):
+            baseline_gate = baseline_payload.get("gate")
+            baseline_metrics = (
+                baseline_gate.get("metrics") if isinstance(baseline_gate, dict) else None
+            )
+        if not isinstance(baseline_metrics, dict):
+            raise ValueError("Baseline report must contain metrics")
+        baseline = {"source": str(Path(args.baseline_report)), "metrics": baseline_metrics}
+
+    suite_scope = _suite_scope(args.path, cases)
+    metrics = evaluate_cases(cases, observations)
+    gate = apply_gate(
+        metrics,
+        baseline_metrics=baseline_metrics,
+        require_critical_coverage=True,
+        require_stateful_coverage=True,
+    )
+    _apply_canonical_hard_blockers(suite_scope, gate, metrics)
+    adapter_verified = adapter_summary.get("status") == "verified"
+    artifact_evidence_verified = adapter_verified and gate["status"] == "pass"
+    verified_evidence_tier = (
+        "verified" if suite_scope == "canonical" else "provided_cases_verified"
+    )
+    result = {
+        "schema_version": "eval-recorded-candidate-gate/v1",
+        "source": str(Path(args.path)),
+        "suite_scope": suite_scope,
+        "evidence_scope": "recorded_runtime_candidate",
+        "observations": observation_summary,
+        "summary": summarize_cases(cases),
+        "metrics": metrics,
+        "gate": gate,
+        "provenance": {
+            "dataset_sha256": _sha256(args.path),
+            "canonical_dataset_sha256": CANONICAL_ASSISTANT_GOLDEN_SHA256,
+            "suite_scope": suite_scope,
+            "producer_artifacts_sha256": _sha256(args.producer_artifacts),
+            "source_adapter": "canonical_assistant_producer",
+            "command": "scripts/eval_golden.py candidate",
+        },
+        "evidence_tiers": {
+            "fixture_contract": verified_evidence_tier,
+            "runtime_artifact_adapter": (
+                "verified" if adapter_verified else "not_verified"
+            ),
+            "recorded_runtime_artifacts": (
+                verified_evidence_tier if artifact_evidence_verified else "not_verified"
+            ),
+            "live_runtime_execution": "not_run",
+            "real_provider_call": "not_run",
+        },
     }
     if baseline is not None:
         result["baseline"] = baseline
@@ -533,9 +689,20 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("path")
     gate.add_argument("--observations")
     gate.add_argument("--baseline-report")
-    gate.add_argument("--output", default="reports/eval-regression/latest.json")
-    gate.add_argument("--markdown", default="reports/eval-regression/latest.md")
+    gate.add_argument("--output", default="tmp/eval-regression/latest.json")
+    gate.add_argument("--markdown", default="tmp/eval-regression/latest.md")
     gate.set_defaults(func=cmd_gate)
+
+    candidate = sub.add_parser(
+        "candidate",
+        help="Gate explicitly supplied canonical runtime artifacts (no provider execution).",
+    )
+    candidate.add_argument("path")
+    candidate.add_argument("--producer-artifacts", required=True)
+    candidate.add_argument("--baseline-report")
+    candidate.add_argument("--output", default="tmp/eval-candidate/latest.json")
+    candidate.add_argument("--markdown", default="tmp/eval-candidate/latest.md")
+    candidate.set_defaults(func=cmd_candidate)
 
     import_cmd = sub.add_parser("import")
     import_cmd.add_argument("path")

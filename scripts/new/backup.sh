@@ -80,11 +80,11 @@ mkdir -p "$BACKUP_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BACKUP_FILE="${BACKUP_DIR}/gateway_${TIMESTAMP}.sql.gz"
 
-docker exec "$(pg_container)" pg_dump -U "$(pg_user)" -d "$(pg_database)" | gzip > "$BACKUP_FILE"
-
-if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+# Keep the pipeline in a conditional so errexit cannot bypass cleanup. With
+# pipefail enabled by common.sh, a pg_dump or gzip failure enters this branch.
+if ! docker exec "$(pg_container)" pg_dump -U "$(pg_user)" -d "$(pg_database)" | gzip > "$BACKUP_FILE"; then
     rm -f "$BACKUP_FILE"
-    log_error "pg_dump failed — backup aborted"
+    log_error "Database backup failed — backup aborted"
     exit 1
 fi
 

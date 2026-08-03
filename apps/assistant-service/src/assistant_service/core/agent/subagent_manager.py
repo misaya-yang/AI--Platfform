@@ -33,6 +33,8 @@ if TYPE_CHECKING:
     from ..tool_invoker import ToolInvocationContext, ToolInvoker
     from ..tools.tool_registry import ToolRegistry
 
+from ..run_budget import RunBudget, RunBudgetExceeded
+
 logger = get_logger(__name__)
 
 
@@ -84,6 +86,7 @@ class SubAgentManager:
         parent_max_tool_calls: int | None = None,
         parent_max_tokens: int | None = None,
         parent_timeout_seconds: float | None = None,
+        run_budget: RunBudget | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Spawn a single sub-agent. Yields SSE-compatible event dicts."""
         agent_id = f"sub_{uuid.uuid4().hex[:12]}"
@@ -159,6 +162,7 @@ class SubAgentManager:
                 cancel_event=parent_cancel_event,
                 deadline=deadline,
                 attempt_id=attempt_id,
+                run_budget=run_budget,
             ):
                 yield event
                 if event["event_type"] == "subagent_text_delta":
@@ -194,6 +198,8 @@ class SubAgentManager:
                 attempt_id=attempt_id,
             )
 
+        except RunBudgetExceeded:
+            raise
         except asyncio.TimeoutError:
             yield self._terminal_event(
                 state,
@@ -241,6 +247,7 @@ class SubAgentManager:
         parent_max_tokens: int | None = None,
         parent_timeout_seconds: float | None = None,
         max_concurrency: int = 5,
+        run_budget: RunBudget | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Spawn multiple sub-agents in parallel. Merges event streams."""
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -274,6 +281,7 @@ class SubAgentManager:
                     parent_max_tool_calls=parent_max_tool_calls,
                     parent_max_tokens=parent_max_tokens,
                     parent_timeout_seconds=parent_timeout_seconds,
+                    run_budget=run_budget,
                 ):
                     await queue.put(event)
 
@@ -630,6 +638,7 @@ Rules:
         cancel_event: asyncio.Event | None = None,
         deadline: float | None = None,
         attempt_id: str = "",
+        run_budget: RunBudget | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Simplified agent loop for sub-agents."""
         del defaults
@@ -663,6 +672,8 @@ Rules:
             finish_reason: str | None = None
 
             try:
+                if run_budget is not None:
+                    run_budget.consume_model_turn()
                 stream = self.model_registry.chat_stream(
                     model_id=model_id,
                     messages=[{"role": "system", "content": system_prompt}] + messages,
@@ -700,7 +711,7 @@ Rules:
                     delta_finish_reason = getattr(delta, "finish_reason", None)
                     if delta_finish_reason is not None:
                         finish_reason = str(delta_finish_reason).strip().lower()
-            except (_ParentCancelled, asyncio.TimeoutError):
+            except (RunBudgetExceeded, _ParentCancelled, asyncio.TimeoutError):
                 raise
             except Exception as e:
                 logger.error(
@@ -733,6 +744,8 @@ Rules:
                     return
 
                 state.tool_calls_made += 1
+                if run_budget is not None:
+                    run_budget.reserve_tool_batch(1)
                 fn = tc.get("function", {})
                 tool_name = fn.get("name", "unknown")
                 call_id = tc.get("id", f"call_{turn}")
@@ -799,7 +812,7 @@ Rules:
                             cancel_event=cancel_event,
                             deadline=deadline,
                         )
-                except (_ParentCancelled, asyncio.TimeoutError):
+                except (RunBudgetExceeded, _ParentCancelled, asyncio.TimeoutError):
                     raise
                 except Exception as e:
                     result = ToolCallResult(
@@ -813,6 +826,8 @@ Rules:
                 result_str = (
                     str(result.result or "")[:2000] if result.success else (result.error or "Error")
                 )
+                if run_budget is not None:
+                    run_budget.observe_tool_result(result_str)
 
                 yield {
                     "event_type": "subagent_tool_result",

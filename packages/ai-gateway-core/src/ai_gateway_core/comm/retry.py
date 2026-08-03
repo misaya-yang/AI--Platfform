@@ -49,10 +49,6 @@ class RetryPolicy:
             return False
         if not isinstance(exc, _RETRIABLE_EXCEPTIONS):
             return False
-        if method.upper() in self.idempotent_methods:
-            return True
-        if body_replayable:
-            return True
         return self._method_can_retry(
             method,
             body_replayable=body_replayable,

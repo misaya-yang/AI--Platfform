@@ -8,6 +8,7 @@ from ai_gateway_core.persistence.repositories.agent_trace_repository import (
     AgentTraceRepository,
 )
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import ValidationError
 
 from ...api.deps import AuthContext, get_auth_context, require_gateway_capability
 from ...core.auth.permissions import Capability, build_permission_denied_detail
@@ -61,6 +62,7 @@ from ..schemas.eval import (
     EvalExperimentRunResultsResponse,
     EvalGateDryRunRequest,
     EvalGateDryRunResponse,
+    EvalGateMetricsV2,
     EvalTraceExportResponse,
     EvalTraceFailurePattern,
     EvalTraceFeedbackRequest,
@@ -1020,8 +1022,34 @@ async def promote_eval_experiment_baseline(
             status_code=409, detail="Baseline requires a succeeded live_candidate run"
         )
     metrics = run.get("metrics") if isinstance(run.get("metrics"), dict) else {}
-    summary = run.get("score_summary") if isinstance(run.get("score_summary"), dict) else {}
-    critical_pass_rate = summary.get("critical_pass_rate", metrics.get("critical_pass_rate"))
+    raw_summary = (
+        run.get("score_summary") if isinstance(run.get("score_summary"), dict) else {}
+    )
+    try:
+        summary = EvalGateMetricsV2.model_validate(raw_summary).model_dump()
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "incompatible_gate_metrics_schema",
+                "required_schema_version": "eval-gate-metrics/v2",
+                "validation_errors": exc.errors(include_url=False),
+            },
+        ) from exc
+    release_gate = apply_gate(
+        summary,
+        require_critical_coverage=True,
+        require_stateful_coverage=True,
+    )
+    if release_gate.get("status") != "pass":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "baseline_quality_gate_failed",
+                "failures": release_gate.get("failures") or [],
+            },
+        )
+    critical_pass_rate = summary["critical_pass_rate"]
     if critical_pass_rate is None or float(critical_pass_rate) < 1.0:
         raise HTTPException(status_code=409, detail="All critical behavior cases must pass")
     hard_blocker_results = (
@@ -1029,8 +1057,17 @@ async def promote_eval_experiment_baseline(
         if isinstance(metrics.get("hard_blocker_results"), dict)
         else {}
     )
+    required_hard_blockers = metrics.get("required_hard_blockers")
+    metrics_critical_case_count = metrics.get("critical_case_count")
     if (
-        int(metrics.get("critical_case_count") or 0) < 1
+        isinstance(metrics_critical_case_count, bool)
+        or not isinstance(metrics_critical_case_count, int)
+        or metrics_critical_case_count != summary["critical_case_count"]
+        or metrics_critical_case_count < 1
+        or not isinstance(required_hard_blockers, list)
+        or len(required_hard_blockers) != len(REQUIRED_ASSISTANT_HARD_BLOCKERS)
+        or set(required_hard_blockers) != set(REQUIRED_ASSISTANT_HARD_BLOCKERS)
+        or set(hard_blocker_results) != set(REQUIRED_ASSISTANT_HARD_BLOCKERS)
         or metrics.get("hard_blockers_passed") is not True
         or any(
             hard_blocker_results.get(case_id) is not True
@@ -1051,15 +1088,37 @@ async def promote_eval_experiment_baseline(
             status_code=409,
             detail="Baseline requires verified dataset and evaluator provenance",
         )
-    if metrics.get("mixed_runtime") is True:
+    if metrics.get("mixed_runtime") is not False:
         raise HTTPException(
-            status_code=409, detail="Mixed runtime fingerprints cannot become baseline"
+            status_code=409,
+            detail="Baseline requires an explicit single-runtime fingerprint cohort",
         )
     run_gate = metrics.get("gate") if isinstance(metrics.get("gate"), dict) else {}
+    trial_fields = {
+        field: metrics.get(field)
+        for field in (
+            "attempted_trials",
+            "completed_trials",
+            "failed_trials",
+            "total_trials",
+        )
+    }
+    valid_trial_receipt = all(
+        not isinstance(value, bool) and isinstance(value, int) and value >= 0
+        for value in trial_fields.values()
+    )
+    attempted_trials = trial_fields["attempted_trials"]
+    completed_trials = trial_fields["completed_trials"]
+    failed_trials = trial_fields["failed_trials"]
+    total_trials = trial_fields["total_trials"]
     if (
         run_gate.get("status") != "pass"
-        or int(metrics.get("failed_trials") or 0) > 0
-        or int(metrics.get("completed_trials") or 0) != int(metrics.get("total_trials") or 0)
+        or not valid_trial_receipt
+        or total_trials == 0
+        or attempted_trials != total_trials
+        or completed_trials != total_trials
+        or failed_trials != 0
+        or completed_trials + failed_trials != attempted_trials
     ):
         raise HTTPException(
             status_code=409, detail="Baseline requires a complete, error-free live run"
@@ -1194,7 +1253,11 @@ async def score_kb_ragas_retrieval(
             answer=body.answer,
             metrics=body.metrics,
             ground_truth=body.ground_truth,
-            llm_config=body.llm_config,
+            llm_config=(
+                body.llm_config.model_dump(exclude_none=True)
+                if body.llm_config is not None
+                else None
+            ),
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -1215,8 +1278,15 @@ async def dry_run_eval_gate(
     auth: AuthContext = Depends(get_auth_context),
 ) -> EvalGateDryRunResponse:
     _require_eval_run_access(request, auth)
-    metrics = dict(body.result_payload.get("metrics") or body.result_payload)
+    if bool(body.baseline_run_id) != bool(body.candidate_run_id):
+        raise HTTPException(
+            status_code=422,
+            detail="baseline_run_id and candidate_run_id must be supplied together",
+        )
+    raw_metrics = body.result_payload.get("metrics") or body.result_payload
     baseline_metrics = None
+    compatibility: dict[str, Any] = {}
+    authoritative_gate: dict[str, Any] = {}
     if body.baseline_run_id and body.candidate_run_id:
         comparison = await _get_trace_repository(request).compare_experiment_runs(
             tenant_id=auth.tenant_id,
@@ -1225,13 +1295,74 @@ async def dry_run_eval_gate(
         )
         if not comparison:
             raise HTTPException(status_code=404, detail="Experiment run not found")
-        metrics = comparison.get("candidate_summary") or metrics
+        raw_metrics = comparison.get("candidate_summary") or {}
         baseline_metrics = comparison.get("baseline_summary")
-    gate = apply_gate(metrics, thresholds=body.thresholds, baseline_metrics=baseline_metrics)
+        compatibility = (
+            comparison.get("compatibility")
+            if isinstance(comparison.get("compatibility"), dict)
+            else {}
+        )
+        authoritative_gate = (
+            comparison.get("gate") if isinstance(comparison.get("gate"), dict) else {}
+        )
+    try:
+        metrics = EvalGateMetricsV2.model_validate(raw_metrics).model_dump()
+        validated_baseline = (
+            EvalGateMetricsV2.model_validate(baseline_metrics).model_dump()
+            if baseline_metrics is not None
+            else None
+        )
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "incompatible_gate_metrics_schema",
+                "required_schema_version": "eval-gate-metrics/v2",
+                "validation_errors": exc.errors(include_url=False),
+            },
+        ) from exc
+    gate = apply_gate(
+        metrics,
+        thresholds=body.thresholds,
+        baseline_metrics=validated_baseline,
+        require_critical_coverage=True,
+        require_stateful_coverage=True,
+    )
+    authoritative_failures: list[str] = []
+    if body.baseline_run_id and body.candidate_run_id:
+        compatible = compatibility.get("compatible") is True and compatibility.get(
+            "status"
+        ) == "compatible"
+        if not compatible:
+            reasons = ", ".join(str(item) for item in compatibility.get("reasons") or [])
+            authoritative_failures.append(
+                f"authoritative run comparison is incompatible: {reasons or 'unknown'}"
+            )
+        if authoritative_gate.get("status") != "pass":
+            reasons = ", ".join(
+                str(item) for item in authoritative_gate.get("failures") or []
+            )
+            authoritative_failures.append(
+                f"authoritative run comparison gate failed: {reasons or 'unknown'}"
+            )
+    if authoritative_failures:
+        gate["status"] = "fail"
+        gate["failures"] = list(dict.fromkeys([*gate["failures"], *authoritative_failures]))
     return EvalGateDryRunResponse(
         status=gate["status"],
         thresholds=gate["thresholds"],
         metrics=gate["metrics"],
         failures=gate["failures"],
-        report={"source": "api-dry-run", "baseline_run_id": body.baseline_run_id},
+        skipped_thresholds=gate["skipped_thresholds"],
+        coverage=gate["coverage"],
+        compatibility=compatibility,
+        authoritative_gate=authoritative_gate,
+        report={
+            "source": "api-dry-run",
+            "gate_profile": "release",
+            "baseline_run_id": body.baseline_run_id,
+            "candidate_run_id": body.candidate_run_id,
+            "compatibility": compatibility,
+            "authoritative_gate": authoritative_gate,
+        },
     )

@@ -15,7 +15,6 @@ Tests for the StreamingWriter class and StreamChunk dataclass:
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from assistant_service.core.streaming_writer import (
     DEFAULT_VERIFICATION_TRIGGERS,
     StreamChunk,
@@ -850,6 +849,7 @@ class TestWriteWithVerification:
         async for chunk in writer.write_with_verification(
             writing_prompt="Explain the refund policy",
             dataset_ids=["policies"],
+            verification_triggers=["according to"],
             user=create_mock_user(),
         ):
             chunks.append(chunk)
@@ -862,6 +862,49 @@ class TestWriteWithVerification:
         assert len(search_starts) > 0
         assert len(search_results) > 0
         assert len(search_ends) > 0
+
+    @pytest.mark.asyncio
+    async def test_trigger_is_consumed_once_and_tail_keeps_streaming(self):
+        mock_kb_service = MagicMock()
+        mock_kb_service.retrieve = AsyncMock(return_value=([], {}))
+        mock_assistant_service = MagicMock()
+
+        async def mock_stream(*args, **kwargs):
+            for text in (
+                "Background. According to ",
+                "the policy ",
+                "refunds are allowed.",
+            ):
+                yield MagicMock(content=text)
+
+        mock_assistant_service.model_registry.chat_stream = mock_stream
+        writer = StreamingWriter(
+            mock_kb_service,
+            mock_assistant_service,
+            buffer_threshold=5,
+        )
+
+        chunks = []
+        async for chunk in writer.write_with_verification(
+            writing_prompt="Explain the refund policy",
+            dataset_ids=["policies"],
+            verification_triggers=["according to"],
+            user=create_mock_user(),
+        ):
+            chunks.append(chunk)
+
+        assert sum(chunk.type == "search_start" for chunk in chunks) == 1
+        assert mock_kb_service.retrieve.await_count == 1
+        search_end_index = next(
+            index for index, chunk in enumerate(chunks) if chunk.type == "search_end"
+        )
+        trailing_text = [
+            chunk.content
+            for chunk in chunks[search_end_index + 1 :]
+            if chunk.type == "text"
+        ]
+        assert len(trailing_text) >= 2
+        assert "".join(trailing_text) == " the policy refunds are allowed."
 
     @pytest.mark.asyncio
     async def test_custom_triggers(self):

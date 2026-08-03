@@ -804,7 +804,7 @@ class LangGraphAdapter(ProtocolAdapter):
                             )
                             yield StreamEvent(event_type=StreamEventType.THINKING)
 
-                        result = self._extract_remote_stream_event(
+                        result = self._extract_remote_stream_events(
                             event,
                             last_content_length,
                             last_tool_args,
@@ -813,13 +813,13 @@ class LangGraphAdapter(ProtocolAdapter):
                             sent_tool_call_starts,
                         )
                         (
-                            stream_event,
+                            stream_events,
                             last_content_length,
                             last_tool_args,
                             current_tool_call_id,
                             current_tool_name,
                         ) = result
-                        if stream_event:
+                        for stream_event in stream_events:
                             logger.debug(
                                 f"[TIMING] LangGraph yield: event_type={stream_event.event_type}, text_len={len(stream_event.text) if stream_event.text else 0}"
                             )
@@ -830,6 +830,86 @@ class LangGraphAdapter(ProtocolAdapter):
             ) from exc
 
         logger.debug("LangGraph stream completed")
+
+    @staticmethod
+    def _extract_ai_message_text_delta(
+        msg: Any,
+        last_content_length: int,
+    ) -> tuple[StreamEvent | None, int]:
+        if not isinstance(msg, dict) or msg.get("type", "") not in (
+            "ai",
+            "AIMessage",
+            "AIMessageChunk",
+        ):
+            return None, last_content_length
+
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            text_parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    text_parts.append(item)
+                elif isinstance(item, dict) and item.get("type") == "text":
+                    text_parts.append(str(item.get("text", "")))
+            content = "".join(text_parts)
+
+        if not isinstance(content, str) or len(content) <= last_content_length:
+            return None, last_content_length
+
+        return (
+            StreamEvent(
+                event_type=StreamEventType.TEXT_DELTA,
+                text=content[last_content_length:],
+            ),
+            len(content),
+        )
+
+    def _extract_remote_stream_events(
+        self,
+        event: Any,
+        last_content_length: int,
+        last_tool_args: dict[str, str],
+        current_tool_call_id: str,
+        current_tool_name: str,
+        sent_tool_call_starts: set,
+    ) -> tuple[list[StreamEvent], int, dict[str, str], str, str]:
+        """Project one upstream event into every observable downstream event."""
+
+        (
+            primary_event,
+            last_content_length,
+            last_tool_args,
+            current_tool_call_id,
+            current_tool_name,
+        ) = self._extract_remote_stream_event(
+            event,
+            last_content_length,
+            last_tool_args,
+            current_tool_call_id,
+            current_tool_name,
+            sent_tool_call_starts,
+        )
+        events = [primary_event] if primary_event is not None else []
+
+        if not any(item.event_type == StreamEventType.TEXT_DELTA for item in events):
+            event_type = event.get("event", "") if isinstance(event, dict) else ""
+            data = event.get("data") if isinstance(event, dict) and "event" in event else event
+            if event_type in ("messages", "messages/partial"):
+                msg = data[0] if isinstance(data, list) and data else data
+                text_event, last_content_length = self._extract_ai_message_text_delta(
+                    msg,
+                    last_content_length,
+                )
+                if text_event is not None:
+                    events.append(text_event)
+
+        return (
+            events,
+            last_content_length,
+            last_tool_args,
+            current_tool_call_id,
+            current_tool_name,
+        )
 
     def _extract_remote_stream_event(
         self,
@@ -1233,31 +1313,16 @@ class LangGraphAdapter(ProtocolAdapter):
 
                 # 处理 AI 消息类型的文本（累积内容，需要计算增量）
                 if msg_type in ("ai", "AIMessage", "AIMessageChunk"):
-                    content = msg.get("content", "")
-
-                    # 处理 content 为 list 的情况（多模态内容）
-                    if isinstance(content, list):
-                        # 提取文本部分
-                        text_parts = []
-                        for item in content:
-                            if isinstance(item, str):
-                                text_parts.append(item)
-                            elif isinstance(item, dict) and item.get("type") == "text":
-                                text_parts.append(item.get("text", ""))
-                        content = "".join(text_parts)
-
-                    if isinstance(content, str) and len(content) > last_content_length:
-                        # 只返回新增的部分
-                        delta = content[last_content_length:]
-                        new_length = len(content)
+                    text_event, new_length = self._extract_ai_message_text_delta(
+                        msg,
+                        last_content_length,
+                    )
+                    if text_event is not None:
                         logger.debug(
-                            f"[STREAM] TEXT_DELTA: delta_len={len(delta)}, total_len={new_length}"
+                            f"[STREAM] TEXT_DELTA: delta_len={len(text_event.text)}, total_len={new_length}"
                         )
                         return (
-                            StreamEvent(
-                                event_type=StreamEventType.TEXT_DELTA,
-                                text=delta,
-                            ),
+                            text_event,
                             new_length,
                             last_tool_args,
                             current_tool_call_id,

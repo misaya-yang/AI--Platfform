@@ -16,9 +16,10 @@ import copy
 import hashlib
 import json
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from ai_gateway_core.enums import ModelAccessLevel, ModelProvider
@@ -27,6 +28,15 @@ from ai_gateway_core.models import ChatMessage
 from ai_gateway_core.models import normalize_chat_message as _normalize_message
 
 from ..quality.cache_optimizer import normalize_provider_cache_usage
+from .responses_api import (
+    CHAT_COMPLETIONS_WIRE_PROTOCOL,
+    RESPONSES_V1_WIRE_PROTOCOL,
+    SUPPORTED_WIRE_PROTOCOLS,
+    ResponsesAPIError,
+    build_responses_request,
+    iter_responses_stream,
+    parse_responses_response,
+)
 
 # Re-export so existing ``from ...model_registry import ModelProvider`` sites
 # keep working. Phase 5d moved the enum definitions to ``ai_gateway_core``
@@ -260,22 +270,50 @@ def _parse_sse_event(data: str, *, provider: str) -> dict[str, Any]:
     return event
 
 
-def _validate_openai_tool_call_deltas(raw_calls: Any) -> list[dict[str, Any]] | None:
-    """Validate every partial tool call before it can reach the executor."""
+def _validate_openai_tool_call_deltas(
+    raw_calls: Any,
+    *,
+    established_calls: dict[int, tuple[str, str]] | None = None,
+) -> list[dict[str, Any]] | None:
+    """Validate and normalize partial tool calls before executor exposure.
+
+    Some OpenAI-compatible providers repeat ``id: \"\"`` (and occasionally an
+    empty function name) on argument-only continuation frames.  Those empty
+    identity fields are safe to discard only after a prior frame established
+    the same tool-call index with a non-empty ID.
+    """
 
     if raw_calls is None:
         return None
     if not isinstance(raw_calls, list):
         raise ProviderStreamError("openai-compatible", "invalid_event")
     validated: list[dict[str, Any]] = []
-    for call in raw_calls:
-        if not isinstance(call, dict) or not call:
+    for raw_call in raw_calls:
+        if not isinstance(raw_call, dict) or not raw_call:
             raise ProviderStreamError("openai-compatible", "invalid_event")
+        call = dict(raw_call)
+        index: int | None = None
         if "index" in call:
-            index = call["index"]
-            if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+            raw_index = call["index"]
+            if isinstance(raw_index, bool) or not isinstance(raw_index, int) or raw_index < 0:
                 raise ProviderStreamError("openai-compatible", "invalid_event")
-        if "id" in call and (not isinstance(call["id"], str) or not call["id"]):
+            index = raw_index
+        established_identity = (
+            established_calls.get(index)
+            if index is not None and established_calls is not None
+            else None
+        )
+        is_continuation = established_identity is not None
+        if "id" in call:
+            if not isinstance(call["id"], str):
+                raise ProviderStreamError("openai-compatible", "invalid_event")
+            if not call["id"]:
+                if not is_continuation:
+                    raise ProviderStreamError("openai-compatible", "invalid_event")
+                call.pop("id")
+            elif is_continuation and call["id"] != established_identity[0]:
+                raise ProviderStreamError("openai-compatible", "invalid_event")
+        elif index is not None and not is_continuation:
             raise ProviderStreamError("openai-compatible", "invalid_event")
         if "type" in call and call["type"] != "function":
             raise ProviderStreamError("openai-compatible", "invalid_event")
@@ -287,14 +325,31 @@ def _validate_openai_tool_call_deltas(raw_calls: Any) -> list[dict[str, Any]] | 
                 or not ({"name", "arguments"} & set(function))
             ):
                 raise ProviderStreamError("openai-compatible", "invalid_event")
-            if "name" in function and (
-                not isinstance(function["name"], str) or not function["name"]
-            ):
-                raise ProviderStreamError("openai-compatible", "invalid_event")
+            function = dict(function)
+            if "name" in function:
+                if not isinstance(function["name"], str):
+                    raise ProviderStreamError("openai-compatible", "invalid_event")
+                if not function["name"]:
+                    if not is_continuation:
+                        raise ProviderStreamError("openai-compatible", "invalid_event")
+                    function.pop("name")
+                elif is_continuation and function["name"] != established_identity[1]:
+                    raise ProviderStreamError("openai-compatible", "invalid_event")
             if "arguments" in function and not isinstance(function["arguments"], str):
                 raise ProviderStreamError("openai-compatible", "invalid_event")
+            if not function:
+                raise ProviderStreamError("openai-compatible", "invalid_event")
+            call["function"] = function
         elif "id" not in call:
             raise ProviderStreamError("openai-compatible", "invalid_event")
+        if index is not None and not is_continuation:
+            function_name = function.get("name") if isinstance(function, dict) else None
+            if not isinstance(function_name, str) or not function_name:
+                raise ProviderStreamError("openai-compatible", "invalid_event")
+            if established_calls is not None:
+                if any(identity[0] == call["id"] for identity in established_calls.values()):
+                    raise ProviderStreamError("openai-compatible", "invalid_event")
+                established_calls[index] = (call["id"], function_name)
         validated.append(call)
     return validated
 
@@ -450,6 +505,9 @@ class ModelConfig:
     #: drop-in replacements — no OAuth / project / location required,
     #: which is why we only support Express Mode for now.
     backend: str = "ai_studio"
+    #: Versioned upstream wire protocol. Responses v1 is opt-in per provider;
+    #: OpenAI-compatible chat completions remains the compatibility default.
+    wire_protocol: str = CHAT_COMPLETIONS_WIRE_PROTOCOL
 
 
 # Env-driven routing for the Google provider:
@@ -839,48 +897,7 @@ class ModelRegistry:
                 logger.info("No models in database, keeping default catalog")
                 return 0
 
-            # Clear existing models and load from database
-            self._models.clear()
-            loaded_count = 0
-            for row in db_models:
-                try:
-                    # Map provider_id to ModelProvider enum
-                    provider_id = row.get("provider_id", "")
-                    try:
-                        provider = ModelProvider(provider_id)
-                    except ValueError:
-                        # Unknown provider, skip
-                        logger.warning(
-                            f"Unknown provider {provider_id} for model {row.get('model_id')}"
-                        )
-                        continue
-
-                    # Map access_level string to enum
-                    access_str = row.get("access_level", "public")
-                    try:
-                        access_level = ModelAccessLevel(access_str)
-                    except ValueError:
-                        access_level = ModelAccessLevel.PUBLIC
-
-                    model = ModelInfo(
-                        id=row["model_id"],
-                        name=row["display_name"],
-                        provider=provider,
-                        context_window=row.get("context_window", 128000),
-                        max_output_tokens=row.get("max_output_tokens", 4096),
-                        supports_vision=row.get("supports_vision", False),
-                        supports_tools=row.get("supports_tools", True),
-                        input_price_per_1k=float(row.get("input_price_per_1k", 0)),
-                        output_price_per_1k=float(row.get("output_price_per_1k", 0)),
-                        access_level=access_level,
-                    )
-                    self._models[model.id] = model
-                    loaded_count += 1
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to load model row (exception_type=%s)",
-                        type(exc).__name__,
-                    )
+            loaded_count = self.replace_models_from_database_rows(db_models)
 
             self._db_models_loaded = True
             logger.info(f"Loaded {loaded_count} models from database")
@@ -892,6 +909,50 @@ class ModelRegistry:
                 type(exc).__name__,
             )
             return 0
+
+    def replace_models_from_database_rows(
+        self,
+        rows: Iterable[Mapping[str, Any]],
+        *,
+        default_context_window: int = 128000,
+        default_max_output_tokens: int = 4096,
+    ) -> int:
+        """Replace the catalog with valid, explicitly classified DB rows only.
+
+        A malformed or missing access level is a configuration error, not a
+        public model. Skipping the row fails closed for both the regular
+        database loader and the assistant-service startup loader.
+        """
+        self._models.clear()
+        loaded_count = 0
+        for row in rows:
+            try:
+                provider = ModelProvider(row.get("provider_id", ""))
+                access_level = ModelAccessLevel(row.get("access_level"))
+                model_id = row["model_id"]
+                model = ModelInfo(
+                    id=model_id,
+                    name=row.get("display_name") or model_id,
+                    provider=provider,
+                    context_window=row.get("context_window") or default_context_window,
+                    max_output_tokens=row.get("max_output_tokens") or default_max_output_tokens,
+                    supports_vision=row.get("supports_vision", False),
+                    supports_tools=row.get("supports_tools", True),
+                    input_price_per_1k=float(row.get("input_price_per_1k", 0)),
+                    output_price_per_1k=float(row.get("output_price_per_1k", 0)),
+                    access_level=access_level,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Skipping invalid database model row (exception_type=%s)",
+                    type(exc).__name__,
+                )
+                continue
+
+            self._models[model.id] = model
+            loaded_count += 1
+
+        return loaded_count
 
     def clear_models(self) -> None:
         """Clear all models from registry."""
@@ -905,6 +966,7 @@ class ModelRegistry:
         base_url: str | None = None,
         timeout: float = 120.0,
         backend: str = "ai_studio",
+        wire_protocol: str = CHAT_COMPLETIONS_WIRE_PROTOCOL,
     ) -> None:
         """Configure a provider with API credentials.
 
@@ -914,6 +976,17 @@ class ModelRegistry:
         no explicit ``base_url`` is passed, the Vertex base URL is selected
         automatically so callers don't have to know the host format.
         """
+        normalized_wire_protocol = str(wire_protocol or "").strip().lower()
+        if normalized_wire_protocol not in SUPPORTED_WIRE_PROTOCOLS:
+            raise ValueError(f"Unsupported provider wire protocol: {normalized_wire_protocol}")
+        if normalized_wire_protocol == RESPONSES_V1_WIRE_PROTOCOL and provider not in {
+            ModelProvider.OPENAI,
+            ModelProvider.DASHSCOPE,
+        }:
+            raise ValueError(
+                f"Provider {provider.value} does not support the Responses v1 wire protocol"
+            )
+
         resolved_base = base_url
         if resolved_base is None:
             if provider == ModelProvider.GOOGLE and backend == "vertex":
@@ -926,6 +999,7 @@ class ModelRegistry:
             base_url=resolved_base,
             timeout=timeout,
             backend=backend if provider == ModelProvider.GOOGLE else "ai_studio",
+            wire_protocol=normalized_wire_protocol,
         )
         # Reset client if exists
         if provider in self._clients:
@@ -935,6 +1009,21 @@ class ModelRegistry:
     def is_provider_configured(self, provider: ModelProvider) -> bool:
         """Check if a provider is configured."""
         return provider in self._configs and bool(self._configs[provider].api_key)
+
+    def _uses_responses_v1(self, provider: ModelProvider) -> bool:
+        config = self._configs.get(provider)
+        return bool(config and config.wire_protocol == RESPONSES_V1_WIRE_PROTOCOL)
+
+    def _responses_endpoint(self, provider: ModelProvider) -> str:
+        """Return a relative Responses path without duplicating a configured ``/v1``."""
+
+        config = self._configs.get(provider)
+        base_path = urlsplit(str(config.base_url or "") if config else "").path.rstrip("/")
+        if base_path.endswith("/responses"):
+            return "."
+        if base_path.endswith("/v1"):
+            return "responses"
+        return "/v1/responses"
 
     def _google_backend_for_model(self, model_id: str) -> str:
         """Resolve the effective Google backend for one model.
@@ -1137,6 +1226,31 @@ class ModelRegistry:
         native_search_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build request body for the provider's API."""
+        if self._uses_responses_v1(provider):
+            reasoning_effort = (
+                thinking_level
+                if provider == ModelProvider.OPENAI
+                and thinking_level in {"minimal", "low", "medium", "high"}
+                else None
+            )
+            body = build_responses_request(
+                model_id=model_id,
+                messages=messages,
+                temperature=temperature,
+                max_output_tokens=max_tokens,
+                tools=tools,
+                stream=stream,
+                reasoning_effort=reasoning_effort,
+            )
+            if provider == ModelProvider.DASHSCOPE:
+                if thinking_level and "qwen3" in model_id.lower():
+                    body["enable_thinking"] = True
+                    if "max_output_tokens" not in body:
+                        body["max_output_tokens"] = 16384
+                if native_search_config and native_search_config.get("enable_search"):
+                    response_tools = body.setdefault("tools", [])
+                    response_tools.append({"type": "web_search"})
+            return body
         if provider == ModelProvider.ANTHROPIC:
             return self._build_anthropic_body(
                 model_id,
@@ -1777,6 +1891,8 @@ class ModelRegistry:
             endpoint = self._vertex_endpoint(model_id, stream=False)
         elif model.provider == ModelProvider.ANTHROPIC:
             endpoint = "/v1/messages"
+        elif self._uses_responses_v1(model.provider):
+            endpoint = self._responses_endpoint(model.provider)
         else:
             endpoint = "/v1/chat/completions"
 
@@ -1826,6 +1942,12 @@ class ModelRegistry:
                 if block.get("type") == "text":
                     content += block.get("text", "")
             usage = _sanitize_usage(data.get("usage", {}))
+        elif self._uses_responses_v1(model.provider):
+            result = parse_responses_response(data)
+            if result.tool_calls:
+                raise ResponsesAPIError("nonstream_tool_calls_unsupported")
+            content = result.content
+            usage = result.usage
         else:
             content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
             usage = _sanitize_usage(data.get("usage", {}))
@@ -1885,6 +2007,17 @@ class ModelRegistry:
                 endpoint = "/v1/messages"
                 async for delta in self._stream_anthropic(client, endpoint, body):
                     yield delta
+            elif self._uses_responses_v1(model.provider):
+                endpoint = self._responses_endpoint(model.provider)
+                async with _safe_provider_stream(client, endpoint, body) as response:
+                    async for response_delta in iter_responses_stream(response.aiter_lines()):
+                        yield StreamDelta(
+                            content=response_delta.content,
+                            tool_calls=response_delta.tool_calls,
+                            finish_reason=response_delta.finish_reason,
+                            usage=response_delta.usage,
+                            thinking_content=response_delta.thinking_content,
+                        )
             else:
                 endpoint = "/v1/chat/completions"
                 async for delta in self._stream_openai(client, endpoint, body):
@@ -1906,6 +2039,7 @@ class ModelRegistry:
         saw_tool_call = False
         saw_terminal_event = False
         terminal_reason: str | None = None
+        established_tool_calls: dict[int, tuple[str, str]] = {}
 
         async with _safe_provider_stream(client, endpoint, body) as response:
             async for line in response.aiter_lines():
@@ -1966,7 +2100,10 @@ class ModelRegistry:
                     reasoning is not None and not isinstance(reasoning, str)
                 ):
                     raise ProviderStreamError("openai-compatible", "invalid_event")
-                tool_calls = _validate_openai_tool_call_deltas(delta.get("tool_calls"))
+                tool_calls = _validate_openai_tool_call_deltas(
+                    delta.get("tool_calls"),
+                    established_calls=established_tool_calls,
+                )
                 if tool_calls:
                     saw_tool_call = True
                 if finish_reason:

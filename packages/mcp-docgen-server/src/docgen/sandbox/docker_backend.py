@@ -12,14 +12,14 @@ care which backend is wired up.
 from __future__ import annotations
 
 import asyncio
-import json
+import contextlib
 import shutil
 import tempfile
 import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, Optional
 
-from .client import SandboxClient, SandboxResult, SandboxTimeout, SandboxError
+from .client import SandboxClient, SandboxError, SandboxResult, SandboxTimeout
 
 DEFAULT_SANDBOX_IMAGE = "ghcr.io/misaya-yang/ai-gateway-docgen-sandbox:2.0.0"
 
@@ -33,7 +33,7 @@ class DockerSandbox(SandboxClient):
         network: str = "none",
         memory_mb: int = 1024,
         cpus: float = 1.0,
-        workdir_root: Optional[Path] = None,
+        workdir_root: Path | None = None,
     ) -> None:
         self._image = image
         self._docker = docker_bin
@@ -44,12 +44,12 @@ class DockerSandbox(SandboxClient):
 
     async def _run_container(
         self,
-        shell_cmd: str,
+        container_argv: list[str],
         *,
         timeout: float,
-        files_in: Optional[Iterable[Path]],
-        produce: Optional[Iterable[str]],
-        env: Optional[dict[str, str]],
+        files_in: Iterable[Path] | None,
+        produce: Iterable[str] | None,
+        env: dict[str, str] | None,
     ) -> SandboxResult:
         workdir = Path(tempfile.mkdtemp(prefix="docgen_dk_", dir=self._workdir_root or None))
         if files_in:
@@ -78,7 +78,8 @@ class DockerSandbox(SandboxClient):
         ]
         for k, v in (env or {}).items():
             argv.extend(["-e", f"{k}={v}"])
-        argv.extend([self._image, "bash", "-lc", shell_cmd])
+        argv.append(self._image)
+        argv.extend(container_argv)
 
         started = time.perf_counter()
         proc = await asyncio.create_subprocess_exec(
@@ -90,10 +91,8 @@ class DockerSandbox(SandboxClient):
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
-            try:
+            with contextlib.suppress(Exception):
                 await proc.wait()
-            except Exception:
-                pass
             raise SandboxTimeout(f"docker job exceeded {timeout}s (workdir={workdir})") from None
         duration_ms = int((time.perf_counter() - started) * 1000)
 
@@ -120,34 +119,48 @@ class DockerSandbox(SandboxClient):
         code: str,
         *,
         timeout: float = 120.0,
-        files_in: Optional[Iterable[Path]] = None,
-        produce: Optional[Iterable[str]] = None,
-        env: Optional[dict[str, str]] = None,
+        files_in: Iterable[Path] | None = None,
+        produce: Iterable[str] | None = None,
+        env: dict[str, str] | None = None,
     ) -> SandboxResult:
-        payload = json.dumps(code)
-        shell = f"python3 -c {payload}"
-        return await self._run_container(shell, timeout=timeout, files_in=files_in, produce=produce, env=env)
+        return await self._run_container(
+            ["python3", "-c", code],
+            timeout=timeout,
+            files_in=files_in,
+            produce=produce,
+            env=env,
+        )
 
     async def exec_node(
         self,
         code: str,
         *,
         timeout: float = 120.0,
-        files_in: Optional[Iterable[Path]] = None,
-        produce: Optional[Iterable[str]] = None,
-        env: Optional[dict[str, str]] = None,
+        files_in: Iterable[Path] | None = None,
+        produce: Iterable[str] | None = None,
+        env: dict[str, str] | None = None,
     ) -> SandboxResult:
-        payload = json.dumps(code)
-        shell = f"node -e {payload}"
-        return await self._run_container(shell, timeout=timeout, files_in=files_in, produce=produce, env=env)
+        return await self._run_container(
+            ["node", "-e", code],
+            timeout=timeout,
+            files_in=files_in,
+            produce=produce,
+            env=env,
+        )
 
     async def exec_bash(
         self,
         cmd: str,
         *,
         timeout: float = 120.0,
-        files_in: Optional[Iterable[Path]] = None,
-        produce: Optional[Iterable[str]] = None,
-        env: Optional[dict[str, str]] = None,
+        files_in: Iterable[Path] | None = None,
+        produce: Iterable[str] | None = None,
+        env: dict[str, str] | None = None,
     ) -> SandboxResult:
-        return await self._run_container(cmd, timeout=timeout, files_in=files_in, produce=produce, env=env)
+        return await self._run_container(
+            ["bash", "-lc", cmd],
+            timeout=timeout,
+            files_in=files_in,
+            produce=produce,
+            env=env,
+        )

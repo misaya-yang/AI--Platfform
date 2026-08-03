@@ -110,6 +110,7 @@ def test_build_rag_trace_payload_parses_query_and_document_count() -> None:
 
     assert payload["trace_family"] == "rag"
     assert payload["metadata"]["dataset_id"] == "dataset-9"
+    assert payload["metadata"]["answer_source"] == "retrieval_only"
     assert payload["spans"][1]["span_kind"] == "retriever"
     assert payload["spans"][1]["parent_span_id"] == payload["spans"][0]["span_id"]
     assert payload["events"][1]["event_type"] == "rag_retrieval_completed"

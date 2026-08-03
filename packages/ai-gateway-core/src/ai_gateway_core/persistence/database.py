@@ -3503,6 +3503,20 @@ class DatabaseStorage:
             row = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
             return self._row_to_dict(row) if row else None
 
+    async def get_user_for_tenant(
+        self, user_id: str, tenant_id: str
+    ) -> dict[str, Any] | None:
+        """Return a user only when it belongs to the caller's tenant."""
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM users WHERE user_id = $1 AND tenant_id = $2",
+                user_id,
+                tenant_id,
+            )
+            return self._row_to_dict(row) if row else None
+
     async def list_users(
         self, tenant_id: str | None = None, status: str = "active", limit: int = 100
     ) -> list[dict[str, Any]]:
@@ -5748,6 +5762,30 @@ class DatabaseStorage:
                 user_id,
             )
 
+    async def reset_user_password_for_tenant(
+        self, user_id: str, tenant_id: str, password_hash: str
+    ) -> bool:
+        """Reset a password only for a user in the specified tenant."""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE users SET
+                    password_hash = $1,
+                    force_password_change = TRUE,
+                    password_changed_at = NULL,
+                    login_attempts = 0,
+                    locked_until = NULL,
+                    updated_at = NOW()
+                WHERE user_id = $2 AND tenant_id = $3
+                """,
+                password_hash,
+                user_id,
+                tenant_id,
+            )
+        return result == "UPDATE 1"
+
     async def increment_login_attempts(self, user_id: str) -> None:
         """增加登录失败计数"""
         if not self._pool:
@@ -5998,6 +6036,107 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
 
+    async def update_user_for_tenant(
+        self,
+        user_id: str,
+        tenant_id: str,
+        updates: dict[str, Any],
+        *,
+        roles: list[str] | None = None,
+        extra_permissions: list[str] | None = None,
+        granted_by: str | None = None,
+    ) -> bool:
+        """Atomically update a user and optional access grants within one tenant.
+
+        The user-management API must not authorize a target in Python and then
+        issue unscoped writes.  Locking the tenant-qualified row before each
+        dependent-table mutation keeps role and direct-permission changes tied
+        to the same tenant identity.
+        """
+        if not self._pool:
+            return False
+
+        allowed_fields = {
+            "display_name",
+            "username",
+            "department",
+            "tier",
+            "roles",
+            "permissions",
+            "quota_config",
+            "status",
+            "metadata",
+            "email_verified",
+        }
+        filtered = {key: value for key, value in updates.items() if key in allowed_fields}
+
+        async with self._pool.acquire() as conn, conn.transaction():
+            exists = await conn.fetchval(
+                "SELECT 1 FROM users WHERE user_id = $1 AND tenant_id = $2 FOR UPDATE",
+                user_id,
+                tenant_id,
+            )
+            if not exists:
+                return False
+
+            if filtered:
+                set_clauses = ["updated_at = NOW()"]
+                params: list[Any] = []
+                param_idx = 1
+
+                for key, value in filtered.items():
+                    if key in ("quota_config", "metadata") and isinstance(value, dict):
+                        set_clauses.append(f"{key} = ${param_idx}")
+                        params.append(json.dumps(value))
+                    else:
+                        set_clauses.append(f"{key} = ${param_idx}")
+                        params.append(value)
+                    param_idx += 1
+
+                params.extend([user_id, tenant_id])
+                await conn.execute(
+                    f"UPDATE users SET {', '.join(set_clauses)} "
+                    f"WHERE user_id = ${param_idx} AND tenant_id = ${param_idx + 1}",
+                    *params,
+                )
+
+            if roles is not None:
+                await conn.execute("DELETE FROM user_roles WHERE user_id = $1", user_id)
+                for role in roles:
+                    await conn.execute(
+                        """
+                        INSERT INTO user_roles (user_id, role_name, granted_by)
+                        VALUES ($1, $2, $3)
+                        """,
+                        user_id,
+                        role,
+                        granted_by,
+                    )
+                await conn.execute(
+                    "UPDATE users SET roles = $1, updated_at = NOW() "
+                    "WHERE user_id = $2 AND tenant_id = $3",
+                    roles,
+                    user_id,
+                    tenant_id,
+                )
+
+            if extra_permissions is not None:
+                await conn.execute("DELETE FROM user_permissions WHERE user_id = $1", user_id)
+                for permission in extra_permissions:
+                    await conn.execute(
+                        """
+                        INSERT INTO user_permissions (user_id, permission_code, granted_by)
+                        VALUES ($1, $2, $3)
+                        """,
+                        user_id,
+                        permission,
+                        granted_by,
+                    )
+
+        if roles is not None or extra_permissions is not None:
+            await self._invalidate_permission_cache(user_id)
+        return True
+
     async def delete_user(self, user_id: str) -> bool:
         """删除用户"""
         if not self._pool:
@@ -6008,6 +6147,31 @@ class DatabaseStorage:
             # 再删除用户
             result = await conn.execute("DELETE FROM users WHERE user_id = $1", user_id)
             return result == "DELETE 1"
+
+    async def delete_user_for_tenant(self, user_id: str, tenant_id: str) -> bool:
+        """Delete a user and dependent grants only when it belongs to a tenant."""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn, conn.transaction():
+            exists = await conn.fetchval(
+                "SELECT 1 FROM users WHERE user_id = $1 AND tenant_id = $2 FOR UPDATE",
+                user_id,
+                tenant_id,
+            )
+            if not exists:
+                return False
+            await conn.execute("DELETE FROM user_roles WHERE user_id = $1", user_id)
+            await conn.execute("DELETE FROM user_permissions WHERE user_id = $1", user_id)
+            result = await conn.execute(
+                "DELETE FROM users WHERE user_id = $1 AND tenant_id = $2",
+                user_id,
+                tenant_id,
+            )
+
+        deleted = result == "DELETE 1"
+        if deleted:
+            await self._invalidate_permission_cache(user_id)
+        return deleted
 
     async def assign_user_role(self, user_id: str, role_name: str, granted_by: str) -> None:
         """为用户分配角色"""

@@ -23,6 +23,13 @@ REQUIRED_ASSISTANT_HARD_BLOCKERS = (
     "assistant.runtime.policy_bypass",
     "assistant.runtime.repeated_unknown_side_effect",
 )
+EVAL_GATE_METRICS_SCHEMA_VERSION = "eval-gate-metrics/v2"
+
+
+def _critical_cases_gate_passes(*, case_count: int, passed_count: int) -> bool:
+    """Gate on exact counts so display rounding can never hide one failure."""
+
+    return case_count > 0 and passed_count == case_count
 
 
 @dataclass(frozen=True)
@@ -81,6 +88,7 @@ def _trace_target(detail: dict[str, Any] | None) -> dict[str, Any] | None:
         "trace_id": trace_id,
         "trace_family": trace.get("trace_family"),
         "workflow_kind": trace.get("workflow_kind"),
+        "source_adapter": trace.get("source_adapter"),
         "input_preview": trace.get("input_preview") or "",
         "output_preview": trace.get("output_preview") or "",
         "status": trace.get("status"),
@@ -896,6 +904,10 @@ class EvaluatorExecutor:
                     else {}
                 )
                 contract_pass = contract.get("passed") is True
+                expected_trajectory = run_case.get("expected_trajectory")
+                stateful_expected = isinstance(expected_trajectory, dict) and isinstance(
+                    expected_trajectory.get("stateful"), dict
+                )
                 behavior_score = {
                     "score_name": "behavior_contract",
                     "score_type": "numeric",
@@ -1018,9 +1030,14 @@ class EvaluatorExecutor:
                     "trace_id": trace_id,
                     "execution_succeeded": target.get("status") == "succeeded",
                     "deterministic_pass": contract_pass,
+                    "trajectory_pass": contract.get("trajectory_pass") is True,
+                    "stateful_expected": stateful_expected,
+                    "stateful_pass": (
+                        contract.get("stateful_pass") is True if stateful_expected else None
+                    ),
                     "behavior_pass": contract_pass
                     and all(label == "pass" for label in score_labels),
-                    "aggregate_score": round(sum(numeric_scores) / len(numeric_scores), 4),
+                    "aggregate_score": sum(numeric_scores) / len(numeric_scores),
                     "score_labels": score_labels,
                     "latency_ms": target.get("total_latency_ms"),
                     "input_tokens": target.get("input_tokens"),
@@ -1057,6 +1074,11 @@ class EvaluatorExecutor:
                     "trial_index": int(run_case.get("trial_index") or 1),
                     "critical": bool((run_case.get("metadata") or {}).get("critical")),
                     "execution_succeeded": False,
+                    "trajectory_pass": False,
+                    "stateful_expected": isinstance(
+                        (run_case.get("expected_trajectory") or {}).get("stateful"), dict
+                    ),
+                    "stateful_pass": False,
                     "behavior_pass": False,
                     "error": message,
                 }
@@ -1081,17 +1103,16 @@ class EvaluatorExecutor:
         grouped: dict[str, list[dict[str, Any]]] = {}
         for item in trial_results:
             grouped.setdefault(str(item.get("case_id") or ""), []).append(item)
-        case_scores = [
-            sum(values) / len(values)
-            for items in grouped.values()
-            if (
-                values := [
-                    float(item["aggregate_score"])
-                    for item in items
-                    if isinstance(item.get("aggregate_score"), int | float)
-                ]
-            )
-        ]
+        case_scores: list[float] = []
+        for items in grouped.values():
+            values = [
+                float(item["aggregate_score"])
+                for item in items
+                if isinstance(item.get("aggregate_score"), int | float)
+                and not isinstance(item.get("aggregate_score"), bool)
+                and math.isfinite(float(item["aggregate_score"]))
+            ]
+            case_scores.append(sum(values) / len(values) if values else 0.0)
         behavior_passed_cases = sum(
             1
             for items in grouped.values()
@@ -1109,6 +1130,19 @@ class EvaluatorExecutor:
             1
             for items in critical_cases
             if all(item.get("behavior_pass") is True for item in items)
+        )
+        trajectory_failed = sum(
+            1
+            for items in grouped.values()
+            if not items or not all(item.get("trajectory_pass") is True for item in items)
+        )
+        stateful_cases = [
+            items for items in grouped.values() if any(item.get("stateful_expected") for item in items)
+        ]
+        stateful_failed = sum(
+            1
+            for items in stateful_cases
+            if not items or not all(item.get("stateful_pass") is True for item in items)
         )
         hard_blocker_results = {
             case_id: bool(grouped.get(case_id))
@@ -1148,18 +1182,36 @@ class EvaluatorExecutor:
                 if len(sorted_latencies) % 2
                 else (sorted_latencies[midpoint - 1] + sorted_latencies[midpoint]) / 2
             )
+        score_sum = sum(case_scores)
+        overall_score = score_sum / len(grouped) if grouped else 0.0
+        behavior_pass_rate = behavior_passed_cases / len(grouped) if grouped else 0.0
         summary = {
-            "overall_score": round(sum(case_scores) / len(case_scores), 4) if case_scores else 0.0,
-            "average_score": round(sum(case_scores) / len(case_scores), 4) if case_scores else 0.0,
-            "behavior_pass_rate": (
-                round(behavior_passed_cases / len(grouped), 4) if grouped else 0.0
+            "schema_version": EVAL_GATE_METRICS_SCHEMA_VERSION,
+            "score_sum": score_sum,
+            "overall_score": overall_score,
+            "average_score": overall_score,
+            "behavior_pass_rate": behavior_pass_rate,
+            "pass_rate": behavior_pass_rate,
+            "trajectory_case_count": len(grouped),
+            "trajectory_failed_count": trajectory_failed,
+            "trajectory_pass_rate": (
+                (len(grouped) - trajectory_failed) / len(grouped) if grouped else 0.0
             ),
-            "critical_pass_rate": round(critical_passed / len(critical_cases), 4)
+            "critical_pass_rate": critical_passed / len(critical_cases)
             if critical_cases
-            else 0.0,
+            else None,
             "critical_case_count": len(critical_cases),
+            "critical_failed_count": len(critical_cases) - critical_passed,
             "flaky_rate": round(flaky_cases / len(grouped), 4) if grouped else 0.0,
             "case_count": len(grouped),
+            "failed_case_count": len(grouped) - behavior_passed_cases,
+            "stateful_case_count": len(stateful_cases),
+            "stateful_failed_count": stateful_failed,
+            "stateful_pass_rate": (
+                (len(stateful_cases) - stateful_failed) / len(stateful_cases)
+                if stateful_cases
+                else None
+            ),
             "trial_count": attempted,
         }
         summary["quality_score"] = summary["overall_score"]
@@ -1182,6 +1234,7 @@ class EvaluatorExecutor:
             "cost_per_task_cents": _average_known("cost_cents"),
             "critical_pass_rate": summary["critical_pass_rate"],
             "critical_case_count": summary["critical_case_count"],
+            "critical_failed_count": summary["critical_failed_count"],
             "required_hard_blockers": list(REQUIRED_ASSISTANT_HARD_BLOCKERS),
             "hard_blocker_results": hard_blocker_results,
             "hard_blockers_passed": hard_blockers_passed,
@@ -1193,7 +1246,10 @@ class EvaluatorExecutor:
             "scores_written": scores_written,
             "gate": {
                 "status": "pass"
-                if summary["critical_pass_rate"] == 1.0
+                if _critical_cases_gate_passes(
+                    case_count=len(critical_cases),
+                    passed_count=critical_passed,
+                )
                 and hard_blockers_passed
                 and attempted == completed
                 and all(
@@ -1584,23 +1640,24 @@ class EvaluatorExecutor:
         )
         metadata = evaluator.get("metadata") if isinstance(evaluator.get("metadata"), dict) else {}
         configured_metrics = filter_config.get("metrics") or metadata.get("metrics")
-        metrics = (
-            list(
-                dict.fromkeys(
-                    item.strip()
-                    for item in configured_metrics
-                    if isinstance(configured_metrics, list)
-                    and isinstance(item, str)
-                    and item.strip()
-                )
-            )
-            if isinstance(configured_metrics, list)
-            else []
-        )
+        metrics: list[str] = []
+        if isinstance(configured_metrics, list):
+            metric_aliases = {"answer_relevancy": "response_relevancy"}
+            for item in configured_metrics:
+                normalized = item.strip() if isinstance(item, str) else ""
+                if normalized:
+                    metrics.append(metric_aliases.get(normalized, normalized))
+            metrics = list(dict.fromkeys(metrics))
         if not metrics:
             metrics = ["context_relevancy"]
 
-        def review_scores(explanation: str, failure_kind: str) -> list[dict[str, Any]]:
+        def review_scores(
+            explanation: str,
+            failure_kind: str,
+            *,
+            selected_metrics: list[str] | None = None,
+        ) -> list[dict[str, Any]]:
+            review_metrics = metrics if selected_metrics is None else selected_metrics
             return [
                 self._heuristic_kb_ragas_score(
                     evaluator,
@@ -1609,8 +1666,14 @@ class EvaluatorExecutor:
                     failure_kind=failure_kind,
                     metric=metric,
                 )
-                for metric in metrics
+                for metric in review_metrics
             ]
+
+        def merge_metric_scores(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            by_metric = {
+                str(score.get("score_name") or ""): score for group in groups for score in group
+            }
+            return [by_metric[metric] for metric in metrics if metric in by_metric]
 
         ground_truth = self._resolve_ground_truth(evaluator, target)
         sample = kb_ragas_sample_from_target(target, ground_truth=ground_truth)
@@ -1630,14 +1693,38 @@ class EvaluatorExecutor:
                     "semantic_review",
                 )
 
+        answer_required_metrics = {"faithfulness", "response_relevancy"}
+        blocked_answer_metrics = [
+            metric for metric in metrics if metric in answer_required_metrics and not sample.answer
+        ]
+        scorable_metrics = [metric for metric in metrics if metric not in blocked_answer_metrics]
+        missing_answer_explanation = (
+            "Retrieval-only RAG trace has no generated answer; answer-dependent metric skipped."
+            if sample.answer_source == "retrieval_only"
+            else "RAG trace has no generated answer; answer-dependent metric skipped."
+        )
+        answer_review_scores = review_scores(
+            missing_answer_explanation,
+            "semantic_review",
+            selected_metrics=blocked_answer_metrics,
+        )
+        for score in answer_review_scores:
+            score["metadata"]["answer_source"] = sample.answer_source
+        if not scorable_metrics:
+            return answer_review_scores
+
         llm_config = filter_config.get("llm_config") or metadata.get("llm_config")
         if llm_config is not None and not isinstance(llm_config, dict):
             llm_config = None
 
         if self.kb_ragas_evaluate is None:
-            return review_scores(
-                "KB RAGAS client is not configured; manual review is required.",
-                "infrastructure",
+            return merge_metric_scores(
+                answer_review_scores,
+                review_scores(
+                    "KB RAGAS client is not configured; manual review is required.",
+                    "infrastructure",
+                    selected_metrics=scorable_metrics,
+                ),
             )
 
         try:
@@ -1645,21 +1732,29 @@ class EvaluatorExecutor:
                 query=sample.question,
                 contexts=sample.contexts,
                 answer=sample.answer,
-                metrics=metrics,
+                metrics=scorable_metrics,
                 ground_truth=sample.ground_truth,
                 llm_config=llm_config,
             )
         except Exception as exc:  # noqa: BLE001 - evaluator must degrade gracefully
             logger.warning("KB RAGAS evaluation failed: %s", exc)
-            return review_scores(
-                f"KB RAGAS evaluation failed: {exc}",
-                "infrastructure",
+            return merge_metric_scores(
+                answer_review_scores,
+                review_scores(
+                    f"KB RAGAS evaluation failed: {exc}",
+                    "infrastructure",
+                    selected_metrics=scorable_metrics,
+                ),
             )
 
         if not isinstance(raw_results, list) or not raw_results:
-            return review_scores(
-                "KB RAGAS evaluation returned no metric results.",
-                "infrastructure",
+            return merge_metric_scores(
+                answer_review_scores,
+                review_scores(
+                    "KB RAGAS evaluation returned no metric results.",
+                    "infrastructure",
+                    selected_metrics=scorable_metrics,
+                ),
             )
 
         normalized_results: list[tuple[dict[str, Any], str, float, str, str | None]] = []
@@ -1700,10 +1795,14 @@ class EvaluatorExecutor:
                 break
             seen_metrics.add(metric)
             normalized_results.append((item, metric, score, service_label, failure_kind))
-        if len(normalized_results) != len(raw_results) or seen_metrics != set(metrics):
-            return review_scores(
-                "KB RAGAS evaluation returned invalid metric results.",
-                "infrastructure",
+        if len(normalized_results) != len(raw_results) or seen_metrics != set(scorable_metrics):
+            return merge_metric_scores(
+                answer_review_scores,
+                review_scores(
+                    "KB RAGAS evaluation returned invalid metric results.",
+                    "infrastructure",
+                    selected_metrics=scorable_metrics,
+                ),
             )
 
         pass_threshold = float(filter_config.get("pass_threshold", 0.7))
@@ -1736,11 +1835,12 @@ class EvaluatorExecutor:
                         "component": "kb_ragas",
                         "judge_model": item.get("judge_model"),
                         "dataset_id": sample.dataset_id,
+                        "answer_source": sample.answer_source,
                         "failure_kind": failure_kind,
                     },
                 }
             )
-        return payloads
+        return merge_metric_scores(answer_review_scores, payloads)
 
     async def _score_with_llm(
         self,

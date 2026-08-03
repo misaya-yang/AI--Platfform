@@ -287,3 +287,77 @@ class TestLangGraphRunMetadataInjection:
 
         assert isinstance(merged, dict)
         assert merged["gateway"]["domain_policy"] == "custom"
+
+
+class TestRemoteStreamProjection:
+    """One upstream chunk may carry both a tool call and assistant text."""
+
+    def test_tool_chunk_with_text_projects_both_events(self):
+        from ai_gateway_core.enums import StreamEventType
+
+        from src.adapters.langgraph import LangGraphAdapter
+
+        adapter = object.__new__(LangGraphAdapter)
+        event = {
+            "event": "messages/partial",
+            "data": [
+                {
+                    "type": "AIMessageChunk",
+                    "content": "I am checking that now.",
+                    "tool_call_chunks": [
+                        {
+                            "id": "call-1",
+                            "name": "search_knowledge_base",
+                            "args": '{"query":"contract"}',
+                        }
+                    ],
+                }
+            ],
+        }
+
+        events, content_length, args, call_id, tool_name = (
+            adapter._extract_remote_stream_events(
+                event,
+                0,
+                {},
+                "",
+                "",
+                set(),
+            )
+        )
+
+        assert [item.event_type for item in events] == [
+            StreamEventType.TOOL_CALL_START,
+            StreamEventType.TEXT_DELTA,
+        ]
+        assert events[0].tool_call.tool_call_id == "call-1"
+        assert events[1].text == "I am checking that now."
+        assert content_length == len("I am checking that now.")
+        assert args["call-1"] == '{"query":"contract"}'
+        assert call_id == "call-1"
+        assert tool_name == "search_knowledge_base"
+
+    def test_plain_text_chunk_is_not_duplicated(self):
+        from ai_gateway_core.enums import StreamEventType
+
+        from src.adapters.langgraph import LangGraphAdapter
+
+        adapter = object.__new__(LangGraphAdapter)
+        event = {
+            "event": "messages/partial",
+            "data": [{"type": "AIMessageChunk", "content": "Hello"}],
+        }
+
+        events, content_length, *_ = adapter._extract_remote_stream_events(
+            event,
+            0,
+            {},
+            "",
+            "",
+            set(),
+        )
+
+        assert len(events) == 1
+        assert events[0].event_type == StreamEventType.TEXT_DELTA
+        assert events[0].text == "Hello"
+        assert content_length == 5

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,6 +12,7 @@ class KbRagasSample:
     question: str
     contexts: list[str]
     answer: str | None = None
+    answer_source: str | None = None
     ground_truth: str | None = None
     dataset_id: str | None = None
     trace_id: str | None = None
@@ -51,6 +53,28 @@ def _document_contexts(span: dict[str, Any]) -> list[str]:
     return contexts
 
 
+_RETRIEVAL_COUNT_OUTPUT = re.compile(r"^[0-9]+\s+retrieved documents$", re.IGNORECASE)
+
+
+def _resolve_answer_source(trace: dict[str, Any], metadata: dict[str, Any]) -> str | None:
+    explicit = str(metadata.get("answer_source") or "").strip().lower()
+    if explicit:
+        return explicit
+
+    workflow_kind = str(trace.get("workflow_kind") or "").strip()
+    source_adapter = str(
+        trace.get("source_adapter") or metadata.get("source_adapter") or ""
+    ).strip()
+    output_preview = str(trace.get("output_preview") or "").strip()
+    is_known_retrieval_trace = (
+        workflow_kind == "rag_retrieval_chain"
+        or source_adapter == "gateway.knowledge_proxy"
+    )
+    if is_known_retrieval_trace and _RETRIEVAL_COUNT_OUTPUT.fullmatch(output_preview):
+        return "retrieval_only"
+    return None
+
+
 def build_kb_ragas_sample(
     detail: dict[str, Any] | None,
     *,
@@ -74,9 +98,7 @@ def build_kb_ragas_sample(
 
     contexts: list[str] = []
     for span in _retriever_spans(detail):
-        for context in _document_contexts(span):
-            if context not in contexts:
-                contexts.append(context)
+        contexts.extend(_document_contexts(span))
 
     if not contexts:
         return None
@@ -84,11 +106,18 @@ def build_kb_ragas_sample(
     dataset_id = metadata.get("dataset_id")
     if dataset_id is not None:
         dataset_id = str(dataset_id)
+    answer_source = _resolve_answer_source(trace, metadata)
+    answer = (
+        None
+        if answer_source == "retrieval_only"
+        else _preview_text(trace.get("output_preview"), limit=4_000) or None
+    )
 
     return KbRagasSample(
         question=question,
         contexts=contexts,
-        answer=_preview_text(trace.get("output_preview"), limit=4_000) or None,
+        answer=answer,
+        answer_source=answer_source,
         ground_truth=str(ground_truth).strip() if ground_truth else None,
         dataset_id=dataset_id,
         trace_id=str(trace.get("trace_id") or "") or None,
@@ -104,6 +133,8 @@ def kb_ragas_sample_from_target(
         "trace": {
             "trace_id": target.get("trace_id"),
             "trace_family": target.get("trace_family") or "rag",
+            "workflow_kind": target.get("workflow_kind"),
+            "source_adapter": target.get("source_adapter"),
             "input_preview": target.get("input_preview"),
             "output_preview": target.get("output_preview"),
             "metadata": target.get("metadata") if isinstance(target.get("metadata"), dict) else {},

@@ -8,9 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
 
 # ---------------------------------------------------------------------------
 # Sub-models
@@ -62,14 +61,18 @@ class QdrantSettings(BaseModel):
     timeout_seconds: float = 120.0
     max_retries: int = 5
     retry_base_delay: float = 2.0
+    # Global emergency gate. Dataset config alone cannot enable native BM25.
+    bm25_v2_enabled: bool = False
+    bm25_v2_capability_ttl_seconds: float = Field(default=300.0, ge=0.0)
+    bm25_v2_readiness_ttl_seconds: float = Field(default=0.0, ge=0.0)
 
 
 class EmbeddingSettings(BaseModel):
     """Text embedding provider settings."""
 
-    provider: str = "gemini"  # gemini | dashscope | siliconflow
+    provider: str = "dashscope"  # dashscope | gemini | siliconflow
     api_key: str = ""
-    model: str = "gemini-embedding-001"
+    model: str = "text-embedding-v4"
     dimension: int = 1024
     batch_size: int = 50
     max_concurrent: int = 5
@@ -222,7 +225,63 @@ class StorageSettings(BaseModel):
     local_base_path: str = "./data/files"
     url_expiry_seconds: int = 3600
     key_prefix: str = "dev"
+    signing_key: SecretStr = Field(default_factory=lambda: SecretStr(""))
     s3: StorageS3Settings = Field(default_factory=StorageS3Settings)
+
+
+class RagasEvalSettings(BaseModel):
+    """Server-owned judge selection and request budgets for KB RAGAS evals."""
+
+    enabled: bool = False
+    provider: str = Field(default="dashscope", min_length=1, max_length=32)
+    model: str = Field(default="qwen3.7-plus", min_length=1, max_length=128)
+    base_url: str | None = Field(default=None, max_length=2048)
+    timeout_seconds: float = Field(default=60.0, ge=1.0, le=180.0)
+    request_timeout_seconds: float = Field(default=180.0, ge=1.0, le=600.0)
+    allowed_providers: list[str] = Field(default_factory=lambda: ["dashscope"])
+    allowed_models: list[str] = Field(default_factory=lambda: ["qwen3.7-plus"])
+    max_contexts: int = Field(default=32, ge=1, le=128)
+    max_context_chars: int = Field(default=8_000, ge=256, le=100_000)
+    max_total_context_chars: int = Field(default=64_000, ge=1_000, le=500_000)
+    max_metrics: int = Field(default=5, ge=1, le=5)
+
+    @field_validator("provider")
+    @classmethod
+    def normalize_provider(cls, value: str) -> str:
+        return value.strip().lower()
+
+    @field_validator("model")
+    @classmethod
+    def normalize_model(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("allowed_providers")
+    @classmethod
+    def normalize_allowed_providers(cls, values: list[str]) -> list[str]:
+        normalized = list(
+            dict.fromkeys(str(value).strip().lower() for value in values if str(value).strip())
+        )
+        if not normalized:
+            raise ValueError("allowed_providers must not be empty")
+        return normalized
+
+    @field_validator("allowed_models")
+    @classmethod
+    def normalize_allowed_models(cls, values: list[str]) -> list[str]:
+        normalized = list(
+            dict.fromkeys(str(value).strip() for value in values if str(value).strip())
+        )
+        if not normalized:
+            raise ValueError("allowed_models must not be empty")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_default_judge_is_allowlisted(self) -> RagasEvalSettings:
+        if self.provider not in self.allowed_providers:
+            raise ValueError("ragas eval provider must be allowlisted")
+        if self.model not in self.allowed_models:
+            raise ValueError("ragas eval model must be allowlisted")
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -252,5 +311,6 @@ class Settings(BaseSettings):
     )
     ocr: OCRSettings = Field(default_factory=OCRSettings)
     metadata_llm: MetadataLLMSettings = Field(default_factory=MetadataLLMSettings)
+    ragas_eval: RagasEvalSettings = Field(default_factory=RagasEvalSettings)
     processing: ProcessingSettings = Field(default_factory=ProcessingSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)

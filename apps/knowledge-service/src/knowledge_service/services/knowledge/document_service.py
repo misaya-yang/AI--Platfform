@@ -7,20 +7,29 @@ Migrated from KnowledgeService as part of Phase 2 refactoring (Step 3).
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from ...config.settings import Settings
 from ...core.auth.user_resolver import UserContext
 from ...core.exceptions import ValidationFailedError
 from ...core.observability.logging import get_logger
-from ...persistence.database import DatabaseStorage
+from ...persistence.database import (
+    CONFLUENCE_SYNC_GENERATION_KEY,
+    DOCUMENT_LIFECYCLE_REINDEX_KEY,
+    DOCUMENT_UPLOAD_FAILED_KEY,
+    DOCUMENT_UPLOAD_GENERATION_KEY,
+    SOURCE_OWNED_DOCUMENT_METADATA_KEYS,
+    DatabaseStorage,
+    dataset_index_deletion_fence,
+    dataset_ingestion_identity,
+    make_dataset_index_deletion_fence,
+)
+from .chunking import validate_persisted_chunking_config
 from .common import ensure_dict as _ensure_dict
 from .embedding import BaseEmbedding, create_embedding
-from .ingestion import ExtractedImage as IngestionExtractedImage
-from .structured_document_parser import ChunkType
+from .lexical_config import LexicalConfig
 
 if TYPE_CHECKING:
     from .knowledge_service import KnowledgeService
@@ -28,24 +37,168 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _resolve_mime_type(filename: str, mime_type: str | None, document_type: str | None) -> str:
-    """Resolve a safe MIME type without overwriting with non-MIME document type labels."""
-    import mimetypes as _mimetypes
+def _lexical_ensure_kwargs(index_config: Any) -> dict[str, Any]:
+    lexical = LexicalConfig.from_index_config(index_config)
+    return {"lexical_config": lexical} if lexical.configured else {}
 
-    if mime_type:
-        return mime_type
 
-    doc_type = (document_type or "").lower()
-    mapping = {
-        "pdf": "application/pdf",
-        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "html": "text/html",
+def _require_dataset_index_writable(
+    dataset: dict[str, Any],
+    *,
+    allowed_deletion: tuple[str, str] | None = None,
+) -> None:
+    try:
+        deletion_fence = dataset_index_deletion_fence(dataset)
+    except RuntimeError as exc:
+        raise ValidationFailedError(str(exc)) from exc
+    if deletion_fence is not None:
+        allowed_marker = (
+            make_dataset_index_deletion_fence(*allowed_deletion)
+            if allowed_deletion is not None
+            else None
+        )
+        if deletion_fence != allowed_marker:
+            raise ValidationFailedError(
+                "dataset index deletion is pending; indexed content is unavailable"
+            )
+    index_config = dataset.get("index_config") or {}
+    if not isinstance(index_config, dict):
+        raise ValidationFailedError("dataset index_config is invalid")
+    validate_persisted_chunking_config(index_config.get("chunking", {}))
+    lexical = LexicalConfig.from_index_config(index_config)
+    if lexical.reads_bm25_v2:
+        raise ValidationFailedError(
+            "bm25_v2 active mode is read-only; roll back to lexical_v1 shadow "
+            "before changing indexed content"
+        )
+
+
+def _validate_segment_batch_enable_request(
+    segment_ids: Any,
+    enabled: Any,
+) -> tuple[list[str], bool]:
+    """Defend direct service callers that bypass the public Pydantic schema."""
+
+    if not isinstance(segment_ids, list) or not 1 <= len(segment_ids) <= 500:
+        raise ValidationFailedError("segment_ids must contain between 1 and 500 IDs")
+    normalized: list[str] = []
+    for raw_segment_id in segment_ids:
+        if not isinstance(raw_segment_id, str):
+            raise ValidationFailedError("segment IDs must contain 1-256 characters")
+        segment_id = raw_segment_id.strip()
+        if not segment_id or len(segment_id) > 256:
+            raise ValidationFailedError("segment IDs must contain 1-256 characters")
+        normalized.append(segment_id)
+    if not isinstance(enabled, bool):
+        raise ValidationFailedError("enabled must be a boolean")
+    return normalized, enabled
+
+
+def _require_dataset_index_readable(dataset: dict[str, Any]) -> None:
+    """Hide content while a multi-store deletion is incomplete."""
+
+    try:
+        deletion_fence = dataset_index_deletion_fence(dataset)
+    except RuntimeError as exc:
+        raise ValidationFailedError(str(exc)) from exc
+    if deletion_fence is not None:
+        raise ValidationFailedError(
+            "dataset index deletion is pending; indexed content is unavailable"
+        )
+
+
+def _dataset_content_generation(dataset: dict[str, Any]) -> tuple[str, Any]:
+    _require_dataset_index_readable(dataset)
+    return (
+        str(dataset.get("tenant_id") or "").strip(),
+        dataset.get("content_revision"),
+    )
+
+
+def _require_document_active_for_manual_index_write(document: dict[str, Any]) -> None:
+    """Reject manual segment writes while their owning document is hidden."""
+
+    metadata = _ensure_dict(document.get("metadata"))
+    if (
+        not bool(document.get("enabled", True))
+        or bool(document.get("archived", False))
+        or str(document.get("status") or "") != "completed"
+        or DOCUMENT_LIFECYCLE_REINDEX_KEY in metadata
+        or DOCUMENT_UPLOAD_GENERATION_KEY in metadata
+        or DOCUMENT_UPLOAD_FAILED_KEY in metadata
+        or CONFLUENCE_SYNC_GENERATION_KEY in metadata
+    ):
+        raise ValidationFailedError(
+            "manual segment indexing requires an active completed document"
+        )
+
+
+def _require_no_reserved_document_metadata(metadata: Any) -> None:
+    supplied = _ensure_dict(metadata)
+    for key in SOURCE_OWNED_DOCUMENT_METADATA_KEYS:
+        if key in supplied:
+            raise ValidationFailedError(f"metadata key '{key}' is reserved")
+
+
+def _segment_vector_payload(
+    *,
+    dataset: dict[str, Any],
+    segment: dict[str, Any],
+    text: str,
+) -> dict[str, Any]:
+    """Rebuild the serving payload without dropping authoritative fields."""
+
+    metadata = _ensure_dict(segment.get("metadata"))
+    source_type = str(
+        segment.get("source_type") or metadata.get("source_type") or "unknown"
+    )
+    language = str(segment.get("language") or metadata.get("language") or "en")
+    content_type = str(
+        segment.get("content_type") or metadata.get("content_type") or "text"
+    )
+    return {
+        "tenant_id": str(dataset.get("tenant_id") or ""),
+        "dataset_id": str(segment.get("dataset_id") or ""),
+        "document_id": str(segment.get("document_id") or ""),
+        "segment_id": str(segment.get("segment_id") or ""),
+        "position": int(segment.get("position") or 0),
+        "text": text,
+        "enabled": bool(segment.get("enabled", True)),
+        "status": "completed",
+        "level": int(segment.get("level") or 3),
+        "content_type": content_type,
+        "source_type": source_type,
+        "language": language,
+        "metadata": metadata,
+        "parent_segment_id": segment.get("parent_segment_id"),
+        "token_count": int(segment.get("token_count") or 0),
+        "source_reference": segment.get("source_reference")
+        or metadata.get("source_reference"),
+        "citation_text": segment.get("citation_text")
+        or metadata.get("citation_text"),
+        "page_number": segment.get("page_number") or metadata.get("page_number"),
+        "section_header": segment.get("section_header")
+        or metadata.get("section_header"),
     }
-    if doc_type in mapping:
-        return mapping[doc_type]
 
-    guessed, _ = _mimetypes.guess_type(filename or "")
-    return guessed or "application/octet-stream"
+
+async def _require_unchanged_dataset_content(
+    knowledge_service: Any,
+    user: UserContext,
+    dataset_id: str,
+    expected: tuple[str, Any],
+    *,
+    required: str = "viewer",
+) -> None:
+    authoritative = await knowledge_service.require_dataset_access(
+        user,
+        dataset_id,
+        required=required,
+    )
+    if _dataset_content_generation(authoritative) != expected:
+        raise ValidationFailedError(
+            "dataset content generation changed during read; retry the request"
+        )
 
 
 class DocumentService:
@@ -69,6 +222,73 @@ class DocumentService:
         self.dataset_service = dataset_service
         self._ks = None  # Set post-init by KnowledgeService
 
+    async def _save_document_for_dataset(
+        self,
+        document: dict[str, Any],
+        dataset: dict[str, Any],
+    ) -> None:
+        await self.db.insert_document(
+            document,
+            expected_ingestion_identity=dataset_ingestion_identity(dataset),
+        )
+
+    async def _finalize_upload_for_dataset(
+        self,
+        document: dict[str, Any],
+        dataset: dict[str, Any],
+        *,
+        upload_generation: str,
+        connection: Any | None = None,
+    ) -> None:
+        try:
+            finalized = await self.db.finalize_document_upload(
+                document,
+                upload_generation=upload_generation,
+                expected_ingestion_identity=dataset_ingestion_identity(dataset),
+                connection=connection,
+            )
+        except RuntimeError as exc:
+            raise ValidationFailedError(
+                "document upload lost ownership while processing"
+            ) from exc
+        if not finalized:
+            raise ValidationFailedError(
+                "document upload was deleted or superseded while processing"
+            )
+
+    async def _upsert_for_dataset_identity(
+        self,
+        *,
+        dataset: dict[str, Any],
+        collection: str,
+        points: list[Any],
+        lifecycle_lease_held: bool = False,
+    ) -> None:
+        dataset_id = str(dataset.get("dataset_id") or "").strip()
+        document_ids = sorted(
+            {
+                str((getattr(point, "payload", None) or {}).get("document_id") or "").strip()
+                for point in points
+                if str(
+                    (getattr(point, "payload", None) or {}).get("document_id") or ""
+                ).strip()
+            }
+        )
+        lease_factory = getattr(self.db, "dataset_index_write_lease", None)
+        if not dataset_id or not document_ids or not callable(lease_factory):
+            raise ValidationFailedError(
+                "vector writes are unavailable without the dataset identity fence"
+            )
+        upsert_kwargs: dict[str, Any] = {}
+        if lifecycle_lease_held:
+            upsert_kwargs["lifecycle_lease_held"] = True
+        await self._ks.vector_store.upsert(
+            collection_name=collection,
+            points=points,
+            expected_ingestion_identity=dataset_ingestion_identity(dataset),
+            **upsert_kwargs,
+        )
+
     # ========================================================================
     # Document CRUD Operations
     # ========================================================================
@@ -81,7 +301,9 @@ class DocumentService:
         content: str,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        await self._ks.require_dataset_access(user, dataset_id, required="editor")
+        _require_no_reserved_document_metadata(metadata)
+        dataset = await self._ks.require_dataset_access(user, dataset_id, required="editor")
+        _require_dataset_index_writable(dataset)
         doc_id = str(uuid.uuid4())
         # Sanitize content for PostgreSQL
         clean_content = self._ks._sanitize_text_for_db(content or "")
@@ -97,7 +319,7 @@ class DocumentService:
             "content": clean_content,
             "metadata": metadata or {},
         }
-        await self.db.save_document(doc)
+        await self._save_document_for_dataset(doc, dataset)
         return await self.db.get_document(doc_id) or doc
 
     async def create_document_from_upload(
@@ -122,21 +344,33 @@ class DocumentService:
             metadata: Optional metadata
             processing_mode: Processing mode - auto, text_only, scanned, or multimodal
         """
-        from .processing_mode import ProcessingMode, parse_processing_mode
+        from .processing_mode import parse_processing_mode
 
-        await self._ks.require_dataset_access(user, dataset_id, required="editor")
+        _require_no_reserved_document_metadata(metadata)
+        dataset = await self._ks.require_dataset_access(user, dataset_id, required="editor")
+        _require_dataset_index_writable(dataset)
+        storage = getattr(self._ks, "image_storage_service", None)
+        upload_original = getattr(storage, "upload_original_file", None)
+        delete_assets = getattr(storage, "delete_document_assets", None)
+        lease_factory = getattr(self.db, "document_index_update_lease", None)
+        if not all(callable(value) for value in (upload_original, delete_assets, lease_factory)):
+            raise ValidationFailedError(
+                "document upload requires durable storage and the document owner fence"
+            )
+        tenant_id = str(dataset.get("tenant_id") or user.tenant_id or "").strip()
+        if not tenant_id:
+            raise ValidationFailedError("dataset tenant identity is required for document upload")
         doc_id = str(uuid.uuid4())
-
-        name = (filename or "").strip().lower()
-        mime = (mime_type or "").strip().lower()
 
         # Parse and validate processing mode
         mode = parse_processing_mode(processing_mode)
         logger.info(f"Creating document with processing_mode={mode.value}")
 
         # Prepare initial metadata with processing mode
-        doc_metadata = metadata or {}
+        doc_metadata = dict(metadata or {})
         doc_metadata["processing_mode"] = mode.value
+        upload_generation = str(uuid.uuid4())
+        doc_metadata[DOCUMENT_UPLOAD_GENERATION_KEY] = upload_generation
 
         # Save document record immediately so frontend can show it while processing
         initial_doc = {
@@ -146,386 +380,91 @@ class DocumentService:
             "source_type": "upload",
             "mime_type": mime_type or "application/octet-stream",
             "size_bytes": len(content_bytes),
-            "status": "queued",  # Changed from "parsing" - will be processed by worker
+            "status": "uploading",
             "progress": 0,
             "content": "",
             "metadata": doc_metadata,
         }
-        await self.db.save_document(initial_doc)
+        await self._save_document_for_dataset(initial_doc, dataset)
 
-        # ============================================================
-        # FAST PATH: For 'scanned' or 'auto' mode, skip extraction and upload directly
-        # Processing will be done by VisionPDFProcessor in the worker
-        # ============================================================
-        if mode in {ProcessingMode.SCANNED, ProcessingMode.AUTO}:
-            logger.info(
-                f"[Upload] {mode.value} mode: saving file directly, processing deferred to worker"
-            )
-
-            # Save original file to storage
-            if self._ks.image_storage_service:
-                dataset = await self._ks._get_dataset_or_404(dataset_id)
-                tenant_id = str(dataset.get("tenant_id") or user.tenant_id or "default")
-
-                try:
-                    original_key = await self._ks.image_storage_service.upload_original_file(
-                        tenant_id=tenant_id,
-                        document_id=doc_id,
-                        filename=filename,
-                        content=content_bytes,
-                        content_type=mime_type or "application/octet-stream",
-                    )
-                    doc_metadata["original_file_key"] = original_key
-                    doc_metadata["original_filename"] = filename
-                    doc_metadata["original_mime_type"] = mime_type or "application/octet-stream"
-                except Exception as e:
-                    logger.warning(f"Failed to save original file to storage: {e}")
-
-            # Update document with metadata
-            doc = {
-                "document_id": doc_id,
-                "dataset_id": dataset_id,
-                "title": filename or doc_id,
-                "source_type": "upload",
-                "mime_type": mime_type or "application/octet-stream",
-                "size_bytes": len(content_bytes),
-                "status": "queued",
-                "progress": 0,
-                "content": "",  # No text for scanned mode
-                "metadata": doc_metadata,
-            }
-            await self.db.save_document(doc)
-
-            logger.info(f"[Upload] Scanned document {doc_id} saved, ready for worker processing")
-            return await self.db.get_document(doc_id) or doc
-
-        # ============================================================
-        # STANDARD PATH: text_only and multimodal modes
-        # ============================================================
-        extracted_images: list[IngestionExtractedImage] = []
-        text: str = ""
-        detected_mime: str = ""
-
-        # Use unified DocumentImageExtractor for all file types when multimodal is available
-        if (
-            mode == ProcessingMode.MULTIMODAL
-            and self._ks.multimodal_embedding
-            and self._ks.image_storage_service
-        ):
-            try:
-                logger.info(f"Processing document with unified image extraction: {filename}")
-                extraction_result = await self._ks.document_image_extractor.extract(
-                    filename=filename,
-                    content=content_bytes,
-                    document_type=None,  # Auto-detect
+        finalized = False
+        try:
+            async with lease_factory(dataset_id, doc_id) as lease_connection:
+                current = await self.db.get_document(
+                    doc_id,
+                    connection=lease_connection,
                 )
-                text = extraction_result.text
-                extracted_images = extraction_result.embeddable_images
-                detected_mime = _resolve_mime_type(
-                    filename,
-                    mime_type,
-                    extraction_result.document_type,
-                )
-                logger.info(
-                    f"Extraction complete: {len(text)} chars, "
-                    f"{extraction_result.total_images} images ({len(extracted_images)} embeddable)"
-                )
-
-                # Scanned PDF: use image-only (no OCR). Log when we have enough page images.
-                if name.endswith(".pdf") or "application/pdf" in mime:
-                    min_images = getattr(
-                        self.settings.knowledge, "scanned_min_images_for_image_only", 5
-                    )
-                    embeddable_count = len(extracted_images) if extracted_images else 0
-                    if embeddable_count >= min_images:
-                        logger.info(
-                            f"Scanned PDF with {embeddable_count} embeddable images, "
-                            f"using multimodal image embeddings only"
-                        )
-
-            except Exception as extract_err:
-                logger.warning(f"Image extraction failed, falling back to text-only: {extract_err}")
-                # Fallback to text-only extraction
-                text, detected_mime = await asyncio.to_thread(
-                    self._ks._extract_text_from_bytes, content_bytes, filename, mime_type
-                )
-        else:
-            # Standard text extraction when multimodal is not available
-            text, detected_mime = await asyncio.to_thread(
-                self._ks._extract_text_from_bytes, content_bytes, filename, mime_type
-            )
-
-        # Prepare document metadata
-        doc_metadata = metadata or {}
-        stored_image_metadata = []
-
-        # Resolve tenant for storage operations
-        dataset = None
-        tenant_id = None
-        if self._ks.image_storage_service:
-            dataset = await self._ks._get_dataset_or_404(dataset_id)
-            tenant_id = str(dataset.get("tenant_id") or user.tenant_id or "default")
-
-        # ============================================================
-        # IN-MEMORY DIRECT EMBEDDING: Embed images before S3 upload
-        # This avoids the slow S3 download during ingestion
-        # ============================================================
-        if extracted_images and self._ks.multimodal_embedding:
-            try:
-                # Get collection name for vector storage
-                dataset_config = dataset or await self._ks._get_dataset_or_404(dataset_id)
-                index_config = _ensure_dict(dataset_config.get("index_config"))
-                index_config.get(
-                    "embedding_model"
-                ) or self.settings.knowledge.default_embedding_model
-
-                # Determine vector dimension
-                # Default 1024 for unified dimension
-                vector_dim = 1024
-                if hasattr(self._ks.multimodal_embedding, "dimension"):
-                    vector_dim = self._ks.multimodal_embedding.dimension
-
-                image_position_offset = int(
-                    getattr(self.settings.knowledge, "image_position_offset", 1_000_000)
-                )
-
-                collection = f"kb_{dataset_id}_{vector_dim}"
-
-                # Ensure collection exists
-                await self._ks.vector_store.ensure_collection(
-                    dataset_id=dataset_id,
-                    dimension=vector_dim,
-                    collection_name=collection,
-                )
-
-                logger.info(
-                    f"[Upload] Starting in-memory embedding for {len(extracted_images)} images..."
-                )
-                await self.db.update_document_status(doc_id, status="embedding_images", progress=10)
-
-                # Embed images directly from memory
-                embed_count, embedded_meta = await self._ks._embed_images_in_memory(
-                    embedder=self._ks.multimodal_embedding,
-                    dataset_id=dataset_id,
-                    document_id=doc_id,
-                    images=extracted_images,
-                    collection=collection,
-                    base_position=image_position_offset,
-                )
-
-                if embed_count > 0:
-                    doc_metadata["images_embedded"] = True
-                    doc_metadata["embedded_image_count"] = embed_count
-                    logger.info(
-                        f"[Upload] In-memory embedding complete: {embed_count} images embedded"
+                current_metadata = _ensure_dict((current or {}).get("metadata"))
+                if (
+                    not current
+                    or str(current.get("dataset_id") or "") != dataset_id
+                    or str(current.get("status") or "") != "uploading"
+                    or current_metadata.get(DOCUMENT_UPLOAD_GENERATION_KEY)
+                    != upload_generation
+                ):
+                    raise ValidationFailedError(
+                        "document upload lost ownership before storage publication"
                     )
 
-            except Exception as embed_err:
-                logger.warning(
-                    f"[Upload] In-memory embedding failed, will retry during ingestion: {embed_err}"
-                )
-                # Continue with upload, images will be embedded during ingestion
-
-        # ============================================================
-        # S3 UPLOAD: Now upload images to storage (after embedding)
-        # ============================================================
-        if extracted_images and self._ks.image_storage_service:
-            logger.info(f"[Upload] Uploading {len(extracted_images)} images to S3...")
-            await self.db.update_document_status(doc_id, status="uploading_images", progress=65)
-
-            async def upload_single_image(idx: int, img: IngestionExtractedImage) -> dict[str, Any]:
-                """Upload a single image and return metadata."""
-                try:
-                    page_number = (
-                        getattr(img, "page_number", None) or img.metadata.get("page_number")
-                        if hasattr(img, "metadata")
-                        else None
-                    )
-                    attachment_id = f"upload_{img.image_id}"
-                    storage_filename = img.filename or f"image_{idx}.{img.mime_type.split('/')[-1]}"
-
-                    storage_url = await self._ks.image_storage_service.upload_image(
-                        tenant_id=tenant_id,
-                        document_id=doc_id,
-                        attachment_id=attachment_id,
-                        filename=storage_filename,
-                        content=img.content,
-                        content_type=img.mime_type,
-                        metadata={
-                            "width": str(img.width),
-                            "height": str(img.height),
-                            "source_location": img.source_location,
-                            "page_number": str(page_number) if page_number else str(idx),
-                        },
-                    )
-
-                    actual_storage_key = self._ks.image_storage_service._generate_key(
-                        tenant_id, doc_id, attachment_id, storage_filename
-                    )
-                    return {
-                        "image_id": img.image_id,
-                        "storage_url": storage_url,
-                        "storage_key": actual_storage_key,
-                        "mime_type": img.mime_type,
-                        "width": img.width,
-                        "height": img.height,
-                        "page_number": page_number,
-                        "size_bytes": img.size_bytes,
-                        "context_text": img.context_text[:200] if img.context_text else "",
-                        "source_location": img.source_location,
-                    }
-                except Exception as store_err:
-                    logger.warning(f"Failed to persist image {img.image_id}: {store_err}")
-                    return {
-                        "image_id": img.image_id,
-                        "storage_url": None,
-                        "mime_type": img.mime_type,
-                        "width": img.width,
-                        "height": img.height,
-                        "page_number": None,
-                        "size_bytes": img.size_bytes,
-                        "context_text": img.context_text[:200] if img.context_text else "",
-                        "error": str(store_err),
-                    }
-
-            # Parallel upload with concurrency limit (reduced for stability)
-            upload_semaphore = asyncio.Semaphore(10)
-
-            async def upload_with_semaphore(
-                idx: int, img: IngestionExtractedImage
-            ) -> dict[str, Any]:
-                async with upload_semaphore:
-                    return await upload_single_image(idx, img)
-
-            upload_tasks = [upload_with_semaphore(i, img) for i, img in enumerate(extracted_images)]
-            upload_results = await asyncio.gather(*upload_tasks, return_exceptions=True)
-
-            for result in upload_results:
-                if isinstance(result, Exception):
-                    logger.warning(f"Image upload failed: {result}")
-                    continue
-                stored_image_metadata.append(result)
-
-            logger.info(
-                f"[Upload] S3 upload complete: {len(stored_image_metadata)}/{len(extracted_images)} images"
-            )
-
-        if stored_image_metadata:
-            doc_metadata["extracted_images"] = stored_image_metadata
-            doc_metadata["image_count"] = len(stored_image_metadata)
-            logger.info(
-                f"Document {doc_id} has {len(stored_image_metadata)} images persisted to storage"
-            )
-
-        # Persist original file to storage for future re-extraction (reindex)
-        if self._ks.image_storage_service and tenant_id:
-            try:
-                original_key = await self._ks.image_storage_service.upload_original_file(
+                original_key = await upload_original(
                     tenant_id=tenant_id,
                     document_id=doc_id,
                     filename=filename,
                     content=content_bytes,
                     content_type=mime_type or "application/octet-stream",
                 )
-                doc_metadata["original_file_key"] = original_key
-                doc_metadata["original_filename"] = filename
-                doc_metadata["original_mime_type"] = mime_type or "application/octet-stream"
-                logger.info(f"Original file persisted to storage: {original_key}")
-            except Exception as e:
-                logger.warning(f"Failed to persist original file to storage: {e}")
-
-        # Structured document parsing for PDFs (enhanced multimodal support)
-        # Check if enabled via dataset config or global settings
-        dataset_config = await self.db.get_dataset(dataset_id) if self.db else None
-        dataset_index_config = (
-            _ensure_dict(dataset_config.get("index_config")) if dataset_config else {}
-        )
-        parsing_config = dataset_index_config.get("parsing", {})
-
-        # Enable structured parsing by default for PDFs, can be disabled per-dataset
-        use_structured_parsing = parsing_config.get("structured", True)
-
-        structured_chunks = None
-        if name.endswith(".pdf") and self._ks.structured_parser and use_structured_parsing:
-            try:
-                logger.info(f"Running structured document parsing for {filename}")
-                parse_result = await self._ks.structured_parser.parse_pdf(
-                    content_bytes, filename=filename
-                )
-
-                # Convert structured chunks to serializable format
-                structured_chunks = []
-                for chunk in parse_result.chunks:
-                    chunk_data = {
-                        "type": chunk.type.value,
-                        "content": chunk.content,
-                        "page_number": chunk.page_number,
-                        "text": chunk.text,
-                        "has_images": chunk.has_images,
-                        "metadata": chunk.metadata,
-                        "section_title": chunk.section_title,
-                        "section_level": chunk.section_level,
+                doc_metadata.update(
+                    {
+                        "original_file_key": original_key,
+                        "original_filename": filename,
+                        "original_mime_type": mime_type or "application/octet-stream",
+                        "mime_type": mime_type or "application/octet-stream",
                     }
-                    # Include image metadata (but not bytes for storage)
-                    if chunk.images:
-                        chunk_data["images"] = [
-                            {
-                                "image_id": img.get("image_id"),
-                                "mime_type": img.get("mime_type"),
-                                "width": img.get("width"),
-                                "height": img.get("height"),
-                            }
-                            for img in chunk.images
-                        ]
-                    structured_chunks.append(chunk_data)
-
-                doc_metadata["structured_parsing"] = {
-                    "enabled": True,
-                    "total_chunks": len(parse_result.chunks),
-                    "text_chunks": len(
-                        [c for c in parse_result.chunks if c.type == ChunkType.TEXT]
-                    ),
-                    "heading_chunks": len(
-                        [c for c in parse_result.chunks if c.type == ChunkType.HEADING]
-                    ),
-                    "image_chunks": len(
-                        [c for c in parse_result.chunks if c.type == ChunkType.IMAGE]
-                    ),
-                    "table_chunks": len(
-                        [c for c in parse_result.chunks if c.type == ChunkType.TABLE]
-                    ),
-                    "chunks": structured_chunks,
+                )
+                doc = {
+                    "document_id": doc_id,
+                    "dataset_id": dataset_id,
+                    "title": filename or doc_id,
+                    "source_type": "upload",
+                    "mime_type": mime_type or "application/octet-stream",
+                    "size_bytes": len(content_bytes),
+                    "status": "uploaded",
+                    "progress": 0,
+                    "content": "",
+                    "metadata": doc_metadata,
                 }
-                logger.info(
-                    f"Structured parsing complete: {len(parse_result.chunks)} chunks "
-                    f"({len([c for c in parse_result.chunks if c.type == ChunkType.IMAGE])} images, "
-                    f"{len([c for c in parse_result.chunks if c.type == ChunkType.TABLE])} tables)"
+                await self._finalize_upload_for_dataset(
+                    doc,
+                    dataset,
+                    upload_generation=upload_generation,
+                    connection=lease_connection,
                 )
-            except Exception as e:
-                logger.warning(
-                    f"Structured parsing failed, falling back to standard extraction: {e}"
+                finalized = True
+                persisted = await self.db.get_document(
+                    doc_id,
+                    connection=lease_connection,
                 )
-                doc_metadata["structured_parsing"] = {"enabled": False, "error": str(e)}
-
-        # Mark that full extraction ran at upload -- ingest_document will skip re-extraction
-        # to avoid duplicate processing.
-        doc_metadata["ocr_processed"] = True
-
-        doc = {
-            "document_id": doc_id,
-            "dataset_id": dataset_id,
-            "title": filename or doc_id,
-            "source_type": "upload",
-            "mime_type": detected_mime or mime_type or "application/octet-stream",
-            "size_bytes": len(content_bytes),
-            "status": "uploaded",
-            "progress": 0,
-            "content": text,
-            "metadata": doc_metadata,
-        }
-
-        await self.db.save_document(doc)
-        return await self.db.get_document(doc_id) or doc
+                if not persisted:
+                    raise RuntimeError("finalized document upload is not readable")
+                return persisted
+        except BaseException:
+            if not finalized:
+                cleanup = asyncio.create_task(
+                    delete_assets(
+                        tenant_id=tenant_id,
+                        document_id=doc_id,
+                    )
+                )
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    await cleanup
+                except Exception:
+                    logger.exception(
+                        "Failed to compensate document upload storage",
+                        extra={"dataset_id": dataset_id, "document_id": doc_id},
+                    )
+            raise
 
     async def create_document_from_url(
         self,
@@ -535,7 +474,9 @@ class DocumentService:
         title: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        await self._ks.require_dataset_access(user, dataset_id, required="editor")
+        _require_no_reserved_document_metadata(metadata)
+        dataset = await self._ks.require_dataset_access(user, dataset_id, required="editor")
+        _require_dataset_index_writable(dataset)
 
         raw_url = (url or "").strip()
         if not raw_url:
@@ -583,42 +524,157 @@ class DocumentService:
             "content": text,
             "metadata": metadata or {},
         }
-        await self.db.save_document(doc)
+        await self._save_document_for_dataset(doc, dataset)
         return await self.db.get_document(doc_id) or doc
 
     async def list_documents(self, user: UserContext, dataset_id: str) -> list[dict[str, Any]]:
-        await self._ks.require_dataset_access(user, dataset_id, required="viewer")
-        return await self.db.list_documents(dataset_id=dataset_id, limit=200, offset=0)
+        dataset = await self._ks.require_dataset_access(user, dataset_id, required="viewer")
+        generation = _dataset_content_generation(dataset)
+        documents = await self.db.list_documents(dataset_id=dataset_id, limit=200, offset=0)
+        await _require_unchanged_dataset_content(
+            self._ks,
+            user,
+            dataset_id,
+            generation,
+        )
+        return documents
 
     async def get_document(
         self, user: UserContext, dataset_id: str, document_id: str
     ) -> dict[str, Any]:
-        await self._ks.require_dataset_access(user, dataset_id, required="viewer")
+        dataset = await self._ks.require_dataset_access(user, dataset_id, required="viewer")
+        generation = _dataset_content_generation(dataset)
         doc = await self.db.get_document(document_id)
         if not doc or str(doc.get("dataset_id")) != dataset_id:
             raise ValidationFailedError("document not found")
+        await _require_unchanged_dataset_content(
+            self._ks,
+            user,
+            dataset_id,
+            generation,
+        )
         return doc
 
     async def enqueue_ingest(self, dataset_id: str, document_id: str) -> None:
         # Worker will be injected from app.state; this is a convenience for API.
+        dataset = await self._ks._get_dataset_or_404(dataset_id)
+        _require_dataset_index_writable(dataset)
         worker = getattr(self._ks, "_worker", None) if self._ks else None
         if worker is None:
             return
         await worker.enqueue(dataset_id, document_id)
 
     async def delete_document(self, user: UserContext, dataset_id: str, document_id: str) -> bool:
-        await self._ks.require_dataset_access(user, dataset_id, required="editor")
-        # Clean vectors first
-        dataset = await self._ks._get_dataset_or_404(dataset_id)
-        collection = str(dataset.get("collection_name") or "")
-        if collection:
-            segs = await self.db.list_segments(
-                dataset_id=dataset_id, document_id=document_id, limit=5000, offset=0
+        dataset = await self._ks.require_dataset_access(user, dataset_id, required="editor")
+        deletion_target = ("document_delete", document_id)
+        _require_dataset_index_writable(
+            dataset,
+            allowed_deletion=deletion_target,
+        )
+        lease_factory = getattr(self.db, "dataset_index_delete_lease", None)
+        set_fence = getattr(self.db, "set_dataset_index_deletion_fence", None)
+        clear_fence = getattr(self.db, "clear_dataset_index_deletion_fence", None)
+        delete_vectors = getattr(
+            self._ks.vector_store,
+            "delete_document_points",
+            None,
+        )
+        storage = getattr(self._ks, "image_storage_service", None)
+        delete_assets = getattr(storage, "delete_document_assets", None)
+        if not all(
+            callable(value)
+            for value in (lease_factory, set_fence, clear_fence, delete_vectors)
+        ) or (storage is not None and not callable(delete_assets)):
+            raise ValidationFailedError(
+                "document deletion is unavailable without the index lifecycle fence"
             )
-            ids = [str(s.get("vector_id") or s.get("segment_id") or "") for s in segs]
-            with contextlib.suppress(Exception):
-                await self._ks.vector_store.delete_points(collection, ids)
-        return await self.db.delete_document(document_id)
+
+        async with lease_factory(dataset_id) as lease_connection:
+            authoritative = await self.db.get_dataset(
+                dataset_id,
+                connection=lease_connection,
+            )
+            if not authoritative:
+                raise ValidationFailedError("dataset not found")
+            _require_dataset_index_writable(
+                authoritative,
+                allowed_deletion=deletion_target,
+            )
+            tenant_id = str(authoritative.get("tenant_id") or "").strip()
+            if not tenant_id or tenant_id != str(dataset.get("tenant_id") or "").strip():
+                raise ValidationFailedError(
+                    "dataset tenant identity changed during document deletion"
+                )
+            document = await self.db.get_document(
+                document_id,
+                connection=lease_connection,
+            )
+            if document is not None and str(document.get("dataset_id") or "") != dataset_id:
+                raise ValidationFailedError("document not found")
+            if document is None:
+                existing_fence = dataset_index_deletion_fence(authoritative)
+                if existing_fence != make_dataset_index_deletion_fence(
+                    "document_delete",
+                    document_id,
+                ):
+                    raise ValidationFailedError("document not found")
+                cleared = await clear_fence(
+                    dataset_id,
+                    operation="document_delete",
+                    target_id=document_id,
+                    connection=lease_connection,
+                )
+                if not cleared:
+                    raise ValidationFailedError(
+                        "document deletion fence recovery could not be committed"
+                    )
+                # The row was committed before a prior attempt failed to clear
+                # this exact marker. Clearing it completes that retry.
+                return True
+
+            try:
+                authoritative, _marker_created = await set_fence(
+                    dataset_id,
+                    operation="document_delete",
+                    target_id=document_id,
+                    connection=lease_connection,
+                )
+            except RuntimeError as exc:
+                raise ValidationFailedError(str(exc)) from exc
+            if str(authoritative.get("tenant_id") or "").strip() != tenant_id:
+                raise ValidationFailedError(
+                    "dataset tenant identity changed during document deletion"
+                )
+            await delete_vectors(
+                tenant_id=tenant_id,
+                dataset_id=dataset_id,
+                document_id=document_id,
+                lifecycle_lease_held=True,
+            )
+            if callable(delete_assets):
+                await delete_assets(
+                    tenant_id=tenant_id,
+                    document_id=document_id,
+                )
+            deleted = await self.db.delete_document(
+                document_id,
+                connection=lease_connection,
+            )
+            if not deleted:
+                raise ValidationFailedError(
+                    "document database deletion failed; index deletion fence remains"
+                )
+            cleared = await clear_fence(
+                dataset_id,
+                operation="document_delete",
+                target_id=document_id,
+                connection=lease_connection,
+            )
+            if not cleared:
+                raise ValidationFailedError(
+                    "document deletion committed but its index fence remains pending"
+                )
+            return True
 
     # ========================================================================
     # Segment Operations
@@ -631,10 +687,18 @@ class DocumentService:
         document_id: str | None = None,
         q: str | None = None,
     ) -> list[dict[str, Any]]:
-        await self._ks.require_dataset_access(user, dataset_id, required="viewer")
-        return await self.db.list_segments(
+        dataset = await self._ks.require_dataset_access(user, dataset_id, required="viewer")
+        generation = _dataset_content_generation(dataset)
+        segments = await self.db.list_segments(
             dataset_id=dataset_id, document_id=document_id, query_text=q, limit=500, offset=0
         )
+        await _require_unchanged_dataset_content(
+            self._ks,
+            user,
+            dataset_id,
+            generation,
+        )
+        return segments
 
     async def update_segment(
         self,
@@ -644,6 +708,7 @@ class DocumentService:
         new_text: str,
     ) -> dict[str, Any]:
         dataset = await self._ks.require_dataset_access(user, dataset_id, required="editor")
+        _require_dataset_index_writable(dataset)
         seg = await self.db.get_segment(segment_id)
         if not seg or str(seg.get("dataset_id")) != dataset_id:
             raise ValidationFailedError("segment not found")
@@ -651,7 +716,7 @@ class DocumentService:
         # Sanitize text for PostgreSQL
         clean_text = self._ks._sanitize_text_for_db(new_text)
 
-        # Re-embed and upsert (best-effort; keep DB updated even if vector update fails)
+        # Re-embed and upsert under one cross-replica segment generation.
         embedding_provider = str(dataset.get("embedding_provider") or "local")
         embedding_model = str(dataset.get("embedding_model") or "hash-384")
         embedding_config = _ensure_dict(dataset.get("embedding_config"))
@@ -662,80 +727,566 @@ class DocumentService:
             embedding_config=embedding_config,
         )
 
-        # Always persist the new text first.
-        await self.db.update_segment(segment_id, text=clean_text)
+        set_index_state = getattr(self.db, "set_segment_index_state", None)
+        lease_factory = getattr(self.db, "segment_index_update_lease", None)
+        if not callable(set_index_state) or not callable(lease_factory):
+            raise ValidationFailedError(
+                "segment editing requires the fail-closed index state contract"
+            )
 
-        vector_error: str | None = None
-        try:
-            embedder: BaseEmbedding | None = None
+        initial_document_id = str(seg.get("document_id") or "").strip()
+        if not initial_document_id:
+            raise ValidationFailedError("segment document identity is unavailable")
+        async with lease_factory(
+            dataset_id,
+            initial_document_id,
+            segment_id,
+        ) as lease_connection:
+            authoritative_dataset = await self.db.get_dataset(
+                dataset_id,
+                connection=lease_connection,
+            )
+            if not authoritative_dataset:
+                raise ValidationFailedError("dataset not found")
+            _require_dataset_index_writable(authoritative_dataset)
+            if dataset_ingestion_identity(authoritative_dataset) != dataset_ingestion_identity(
+                dataset
+            ):
+                raise ValidationFailedError(
+                    "dataset ingestion identity changed during segment update; retry"
+                )
+            current = await self.db.get_segment(
+                segment_id,
+                connection=lease_connection,
+            )
+            if not current or str(current.get("dataset_id") or "") != dataset_id:
+                raise ValidationFailedError("segment not found")
+            seg = current
+            document_id = str(seg.get("document_id") or "").strip()
+            document = await self.db.get_document(
+                document_id,
+                connection=lease_connection,
+            )
+            if not document or str(document.get("dataset_id") or "") != dataset_id:
+                raise ValidationFailedError("segment document not found")
+            _require_document_active_for_manual_index_write(document)
+
+            # Autocommit the hidden state before either authoritative text or
+            # Qdrant changes. A crash or stale payload remains non-retrievable.
+            await set_index_state(
+                segment_id,
+                "pending",
+                connection=lease_connection,
+            )
             try:
-                embedder = create_embedding(econf, dimension=dim)
-                vec = (
-                    await asyncio.wait_for(
-                        embedder.embed_documents([clean_text]),
-                        timeout=float(econf.timeout_seconds) + 10.0,
+                await self.db.update_segment(
+                    segment_id,
+                    text=clean_text,
+                    connection=lease_connection,
+                )
+                embedder: BaseEmbedding | None = None
+                try:
+                    embedder = create_embedding(econf, dimension=dim)
+                    vec = (
+                        await asyncio.wait_for(
+                            embedder.embed_documents([clean_text]),
+                            timeout=float(econf.timeout_seconds) + 10.0,
+                        )
+                    )[0]
+                    collection = await self._ks.vector_store.ensure_collection(
+                        dataset_id=dataset_id,
+                        dimension=embedder.dimension,
+                        collection_name=str(dataset.get("collection_name") or "") or None,
+                        tenant_id=str(dataset.get("tenant_id") or ""),
+                        lifecycle_lease_held=True,
+                        **_lexical_ensure_kwargs(dataset.get("index_config")),
                     )
-                )[0]
-                collection = await self._ks.vector_store.ensure_collection(
-                    dataset_id=dataset_id,
-                    dimension=embedder.dimension,
-                    collection_name=str(dataset.get("collection_name") or "") or None,
+                finally:
+                    if embedder:
+                        await embedder.close()
+
+                from qdrant_client.http import models as qmodels  # type: ignore
+
+                pid = str(seg.get("vector_id") or seg.get("segment_id") or "")
+                payload = _segment_vector_payload(
+                    dataset=authoritative_dataset,
+                    segment=seg,
+                    text=clean_text,
                 )
-            finally:
-                if embedder:
-                    await embedder.close()
-
-            from qdrant_client.http import models as qmodels  # type: ignore
-
-            pid = str(seg.get("vector_id") or seg.get("segment_id") or "")
-            payload = {
-                "dataset_id": dataset_id,
-                "document_id": str(seg.get("document_id")),
-                "segment_id": str(seg.get("segment_id")),
-                "position": int(seg.get("position") or 0),
-                "text": clean_text,
-            }
-            if pid and collection:
-                await self._ks.vector_store.upsert(
-                    collection_name=collection,
+                if not pid or not collection:
+                    raise RuntimeError("segment vector identity is unavailable")
+                await self._upsert_for_dataset_identity(
+                    dataset=dataset,
+                    collection=collection,
                     points=[qmodels.PointStruct(id=pid, vector=vec, payload=payload)],
+                    lifecycle_lease_held=True,
                 )
-        except Exception as exc:
-            vector_error = str(exc)
+                await set_index_state(
+                    segment_id,
+                    "completed",
+                    connection=lease_connection,
+                )
+            except Exception as exc:
+                try:
+                    await set_index_state(
+                        segment_id,
+                        "error",
+                        error="vector update failed",
+                        connection=lease_connection,
+                    )
+                except Exception as state_exc:
+                    raise ValidationFailedError(
+                        "segment vector update failed and its hidden error state "
+                        "could not be confirmed"
+                    ) from state_exc
+                raise ValidationFailedError(
+                    "segment vector update failed; the segment remains hidden until retry"
+                ) from exc
 
-        out = await self.db.get_segment(segment_id) or seg
-        if vector_error:
-            out = dict(out)
-            out["_vector_error"] = vector_error
-        return out
+        return await self.db.get_segment(segment_id) or {
+            **seg,
+            "text": clean_text,
+            "status": "completed",
+        }
 
     async def delete_segment(self, user: UserContext, dataset_id: str, segment_id: str) -> bool:
         dataset = await self._ks.require_dataset_access(user, dataset_id, required="editor")
-        seg = await self.db.get_segment(segment_id)
-        if not seg or str(seg.get("dataset_id")) != dataset_id:
-            raise ValidationFailedError("segment not found")
+        deletion_target = ("segment_delete", segment_id)
+        _require_dataset_index_writable(
+            dataset,
+            allowed_deletion=deletion_target,
+        )
+        lease_factory = getattr(self.db, "dataset_index_delete_lease", None)
+        set_fence = getattr(self.db, "set_dataset_index_deletion_fence", None)
+        clear_fence = getattr(self.db, "clear_dataset_index_deletion_fence", None)
+        delete_segment_points = getattr(
+            self._ks.vector_store,
+            "delete_segment_points",
+            None,
+        )
+        if not all(
+            callable(value)
+            for value in (
+                lease_factory,
+                set_fence,
+                clear_fence,
+                delete_segment_points,
+            )
+        ):
+            raise ValidationFailedError(
+                "segment deletion is unavailable without the index lifecycle fence"
+            )
 
-        collection = str(dataset.get("collection_name") or "")
-        if collection:
-            pid = str(seg.get("vector_id") or seg.get("segment_id") or "")
-            with contextlib.suppress(Exception):
-                await self._ks.vector_store.delete_points(collection, [pid])
-        document_id = str(seg.get("document_id") or "")
-        result = await self.db.delete_segment(segment_id)
+        document_id = ""
+        async with lease_factory(dataset_id) as lease_connection:
+            authoritative = await self.db.get_dataset(
+                dataset_id,
+                connection=lease_connection,
+            )
+            if not authoritative:
+                raise ValidationFailedError("dataset not found")
+            _require_dataset_index_writable(
+                authoritative,
+                allowed_deletion=deletion_target,
+            )
+            tenant_id = str(authoritative.get("tenant_id") or "").strip()
+            if not tenant_id or tenant_id != str(dataset.get("tenant_id") or "").strip():
+                raise ValidationFailedError(
+                    "dataset tenant identity changed during segment deletion"
+                )
+            seg = await self.db.get_segment(
+                segment_id,
+                connection=lease_connection,
+            )
+            if seg is not None and str(seg.get("dataset_id") or "") != dataset_id:
+                raise ValidationFailedError(
+                    "segment dataset identity changed; index deletion fence remains"
+                )
+            if seg is None:
+                existing_fence = dataset_index_deletion_fence(authoritative)
+                if existing_fence == make_dataset_index_deletion_fence(
+                    "segment_delete",
+                    segment_id,
+                ):
+                    cleared = await clear_fence(
+                        dataset_id,
+                        operation="segment_delete",
+                        target_id=segment_id,
+                        connection=lease_connection,
+                    )
+                    if not cleared:
+                        raise ValidationFailedError(
+                            "segment deletion fence recovery could not be committed"
+                        )
+                    return True
+                raise ValidationFailedError("segment not found")
+
+            document_id = str(seg.get("document_id") or "").strip()
+            point_id = str(seg.get("vector_id") or seg.get("segment_id") or "").strip()
+            if not point_id or not document_id:
+                raise ValidationFailedError(
+                    "segment ownership identity is incomplete"
+                )
+            document = await self.db.get_document(
+                document_id,
+                connection=lease_connection,
+            )
+            if not document or str(document.get("dataset_id") or "") != dataset_id:
+                raise ValidationFailedError("segment document not found")
+            _require_document_active_for_manual_index_write(document)
+
+            content_type = str(seg.get("content_type") or "text").strip().lower()
+            if content_type == "image":
+                raise ValidationFailedError(
+                    "image segment deletion is disabled until the durable image "
+                    "receipt and object can be retired atomically"
+                )
+
+            try:
+                authoritative, _marker_created = await set_fence(
+                    dataset_id,
+                    operation="segment_delete",
+                    target_id=segment_id,
+                    connection=lease_connection,
+                )
+            except RuntimeError as exc:
+                raise ValidationFailedError(str(exc)) from exc
+            if str(authoritative.get("tenant_id") or "").strip() != tenant_id:
+                raise ValidationFailedError(
+                    "dataset tenant identity changed during segment deletion"
+                )
+
+            await delete_segment_points(
+                tenant_id=tenant_id,
+                dataset_id=dataset_id,
+                document_id=document_id,
+                segment_id=point_id,
+                lifecycle_lease_held=True,
+            )
+            deleted = await self.db.delete_segment(
+                segment_id,
+                connection=lease_connection,
+            )
+            if not deleted:
+                raise ValidationFailedError(
+                    "segment database deletion failed; index deletion fence remains"
+                )
+            cleared = await clear_fence(
+                dataset_id,
+                operation="segment_delete",
+                target_id=segment_id,
+                connection=lease_connection,
+            )
+            if not cleared:
+                raise ValidationFailedError(
+                    "segment deletion committed but its index fence remains pending"
+                )
+
         # Update document segment_count after deletion
-        if result and document_id:
-            await self.db.refresh_document_segment_count(document_id)
-        return result
+        if document_id:
+            try:
+                await self.db.refresh_document_segment_count(document_id)
+            except Exception:
+                logger.warning(
+                    "Failed to refresh segment count after deleting %s",
+                    segment_id,
+                    exc_info=True,
+                )
+        return True
 
     # ========================================================================
     # Document Enable/Disable/Archive (Dify-style)
     # ========================================================================
 
+    def _lifecycle_reindex_is_stale(self, document: dict[str, Any]) -> bool:
+        updated_at = document.get("updated_at")
+        if isinstance(updated_at, str):
+            try:
+                updated_at = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+            except ValueError:
+                return False
+        if not isinstance(updated_at, datetime):
+            return False
+        knowledge_settings = getattr(self.settings, "knowledge", None)
+        threshold_minutes = max(
+            int(
+                getattr(
+                    knowledge_settings,
+                    "lifecycle_reindex_stale_minutes",
+                    15,
+                )
+            ),
+            1,
+        )
+        now = datetime.now(updated_at.tzinfo or timezone.utc)
+        comparable = updated_at
+        if comparable.tzinfo is None:
+            comparable = comparable.replace(tzinfo=timezone.utc)
+        return now - comparable >= timedelta(minutes=threshold_minutes)
+
+    async def _transition_document_lifecycle(
+        self,
+        *,
+        user: UserContext,
+        dataset: dict[str, Any],
+        dataset_id: str,
+        document_id: str,
+        desired_enabled: bool,
+        desired_archived: bool,
+        state_updates: dict[str, Any],
+        requested_action: str,
+    ) -> dict[str, Any]:
+        """Apply a durable, replayable document lifecycle transition."""
+
+        lease_factory = getattr(self.db, "dataset_index_delete_lease", None)
+        delete_vectors = getattr(
+            self._ks.vector_store,
+            "delete_document_points",
+            None,
+        )
+        clear_marker = getattr(self.db, "clear_document_lifecycle_marker", None)
+        if not all(callable(value) for value in (lease_factory, delete_vectors, clear_marker)):
+            raise ValidationFailedError(
+                "document lifecycle changes require the index lifecycle fence"
+            )
+
+        async with lease_factory(dataset_id) as lease_connection:
+            authoritative_dataset = await self.db.get_dataset(
+                dataset_id,
+                connection=lease_connection,
+            )
+            if not authoritative_dataset:
+                raise ValidationFailedError("dataset not found")
+            _require_dataset_index_writable(authoritative_dataset)
+            tenant_id = str(authoritative_dataset.get("tenant_id") or "").strip()
+            if not tenant_id or tenant_id != str(dataset.get("tenant_id") or "").strip():
+                raise ValidationFailedError(
+                    "dataset tenant identity changed during document lifecycle update"
+                )
+
+            document = await self.db.get_document(
+                document_id,
+                connection=lease_connection,
+            )
+            if not document or str(document.get("dataset_id") or "") != dataset_id:
+                raise ValidationFailedError("document not found")
+
+            metadata = _ensure_dict(document.get("metadata"))
+            pending = _ensure_dict(metadata.get(DOCUMENT_LIFECYCLE_REINDEX_KEY))
+            current_enabled = bool(document.get("enabled", True))
+            current_archived = bool(document.get("archived", False))
+            desired_active = desired_enabled and not desired_archived
+            current_active = current_enabled and not current_archived
+
+            marker_status = str(pending.get("status") or "").strip()
+            if pending:
+                if marker_status not in {"deactivating", "pending"}:
+                    raise ValidationFailedError(
+                        "document lifecycle marker is malformed; refusing an unsafe transition"
+                    )
+                if "desired_enabled" in pending and "desired_archived" in pending:
+                    marker_target = (
+                        bool(pending.get("desired_enabled")),
+                        bool(pending.get("desired_archived")),
+                    )
+                    if marker_target != (desired_enabled, desired_archived):
+                        raise ValidationFailedError(
+                            "a different document lifecycle transition is pending; retry "
+                            "the original target first"
+                        )
+                elif (marker_status == "pending") != desired_active:
+                    # Legacy markers did not persist the target fields. Their
+                    # status still unambiguously distinguishes restore from
+                    # inactive cleanup.
+                    raise ValidationFailedError(
+                        "a different document lifecycle transition is pending"
+                    )
+
+            if desired_active and current_active and not pending:
+                # Idempotent active request: no vectors were removed, so a
+                # synthetic reindex would only create churn.
+                await self.db.update_document_fields(
+                    document_id,
+                    state_updates,
+                    connection=lease_connection,
+                )
+                return (
+                    await self.db.get_document(
+                        document_id,
+                        connection=lease_connection,
+                    )
+                    or document
+                )
+
+            if not desired_active:
+                # Persist the inactive state and durable marker first. Every DB
+                # authority path rejects any document carrying this marker, so
+                # a crash before/during the multi-collection sweep stays hidden
+                # and a same-target request can safely replay the cleanup.
+                if not pending:
+                    pending = {
+                        "status": "deactivating",
+                        "desired_enabled": desired_enabled,
+                        "desired_archived": desired_archived,
+                        "requested_action": requested_action,
+                        "requested_at": datetime.now(timezone.utc).isoformat(),
+                        "requested_by": user.user_id,
+                    }
+                metadata[DOCUMENT_LIFECYCLE_REINDEX_KEY] = pending
+                inactive_updates = dict(state_updates)
+                inactive_updates["metadata"] = metadata
+                await self.db.update_document_fields(
+                    document_id,
+                    inactive_updates,
+                    connection=lease_connection,
+                    allow_lifecycle_marker_update=True,
+                )
+                try:
+                    await delete_vectors(
+                        tenant_id=tenant_id,
+                        dataset_id=dataset_id,
+                        document_id=document_id,
+                        lifecycle_lease_held=True,
+                    )
+                except Exception as exc:
+                    raise ValidationFailedError(
+                        "document vectors could not be fully deactivated; the document "
+                        "remains hidden and the same transition is retryable"
+                    ) from exc
+                cleared = await clear_marker(
+                    document_id,
+                    expected_status="deactivating",
+                    connection=lease_connection,
+                )
+                if not cleared:
+                    raise ValidationFailedError(
+                        "document vectors were deactivated but lifecycle finalization failed"
+                    )
+                metadata.pop(DOCUMENT_LIFECYCLE_REINDEX_KEY, None)
+                return (
+                    await self.db.get_document(
+                        document_id,
+                        connection=lease_connection,
+                    )
+                    or {**document, **inactive_updates}
+                )
+
+            worker = getattr(self._ks, "_worker", None)
+            enqueue_claimed = getattr(worker, "enqueue_claimed", None)
+            if not callable(enqueue_claimed):
+                raise ValidationFailedError(
+                    "document restore requires an available ingestion worker"
+                )
+
+            document_status = str(document.get("status") or "")
+            stale_processing = bool(pending) and document_status not in {
+                "failed",
+                "completed",
+            } and self._lifecycle_reindex_is_stale(document)
+            if pending and document_status not in {"failed", "completed"}:
+                if not stale_processing:
+                    # A fresh worker owns this durable generation. Do not
+                    # duplicate its work or destroy partial progress.
+                    return document
+            else:
+                if not pending:
+                    pending = {
+                        "status": "pending",
+                        "desired_enabled": True,
+                        "desired_archived": False,
+                        "requested_action": requested_action,
+                        "requested_at": datetime.now(timezone.utc).isoformat(),
+                        "requested_by": user.user_id,
+                    }
+                    metadata[DOCUMENT_LIFECYCLE_REINDEX_KEY] = pending
+                    await self.db.update_document_fields(
+                        document_id,
+                        {"metadata": metadata},
+                        connection=lease_connection,
+                        allow_lifecycle_marker_update=True,
+                    )
+
+                # Initial restore and explicit failed retry rebuild from a
+                # clean generation. A stale-processing replay deliberately
+                # skips this branch so useful partial progress is retained.
+                receipt_changed = False
+                for receipt_key in ("images_embedded", "embedded_image_count"):
+                    if receipt_key in metadata:
+                        metadata.pop(receipt_key, None)
+                        receipt_changed = True
+                if receipt_changed:
+                    # The old receipt only proves persistence in the generation
+                    # that is about to be swept. Keeping it would make retry
+                    # skip image embedding and falsely complete without images.
+                    cleared_receipts = await self.db.clear_document_legacy_image_receipts(
+                        document_id,
+                        dataset_id,
+                        connection=lease_connection,
+                    )
+                    if not cleared_receipts:
+                        raise ValidationFailedError(
+                            "document restore lost image-receipt generation authority"
+                        )
+                try:
+                    await delete_vectors(
+                        tenant_id=tenant_id,
+                        dataset_id=dataset_id,
+                        document_id=document_id,
+                        lifecycle_lease_held=True,
+                    )
+                except Exception as exc:
+                    raise ValidationFailedError(
+                        "document restore cleanup failed; the document remains hidden"
+                    ) from exc
+                await self.db.delete_segments_by_document(
+                    document_id,
+                    connection=lease_connection,
+                )
+                await self.db.update_document_fields(
+                    document_id,
+                    {"segment_count": 0},
+                    connection=lease_connection,
+                )
+
+            # The dataset-exclusive lifecycle lease is stronger than the
+            # normal dataset/document enqueue claim. Persist the outbox state
+            # on this connection, then publish to memory only after release.
+            await self.db.update_document_status(
+                document_id,
+                status="queued",
+                progress=0,
+                error="",
+                connection=lease_connection,
+            )
+
+        # Publish only after releasing the dataset-exclusive cleanup lease.
+        # A process crash or queue failure leaves ``queued`` durable and the
+        # periodic SKIP LOCKED recovery pass will replay it after the TTL.
+        try:
+            await enqueue_claimed(dataset_id, document_id)
+        except Exception as exc:
+            raise ValidationFailedError(
+                "document restore reindex could not be queued; durable recovery "
+                "will retry the pending lifecycle generation"
+            ) from exc
+
+        result = await self.db.get_document(document_id)
+        return result or {
+            **document,
+            "metadata": metadata,
+            "segment_count": document.get("segment_count", 0)
+            if stale_processing
+            else 0,
+            "status": "queued",
+            "progress": 0,
+        }
+
     async def set_document_enabled(
         self, user: UserContext, dataset_id: str, document_id: str, enabled: bool
     ) -> dict[str, Any]:
         """Enable or disable a document."""
-        await self._ks.require_dataset_access(user, dataset_id, required="editor")
+        dataset = await self._ks.require_dataset_access(user, dataset_id, required="editor")
+        _require_dataset_index_writable(dataset)
         doc = await self.db.get_document(document_id)
         if not doc or str(doc.get("dataset_id")) != dataset_id:
             raise ValidationFailedError("document not found")
@@ -748,8 +1299,16 @@ class DocumentService:
             update_data["disabled_at"] = None
             update_data["disabled_by"] = None
 
-        await self.db.update_document_fields(document_id, update_data)
-        return await self.db.get_document(document_id) or doc
+        return await self._transition_document_lifecycle(
+            user=user,
+            dataset=dataset,
+            dataset_id=dataset_id,
+            document_id=document_id,
+            desired_enabled=enabled,
+            desired_archived=bool(doc.get("archived", False)),
+            state_updates=update_data,
+            requested_action="enable" if enabled else "disable",
+        )
 
     async def set_document_archived(
         self,
@@ -760,7 +1319,8 @@ class DocumentService:
         reason: str | None = None,
     ) -> dict[str, Any]:
         """Archive or unarchive a document."""
-        await self._ks.require_dataset_access(user, dataset_id, required="editor")
+        dataset = await self._ks.require_dataset_access(user, dataset_id, required="editor")
+        _require_dataset_index_writable(dataset)
         doc = await self.db.get_document(document_id)
         if not doc or str(doc.get("dataset_id")) != dataset_id:
             raise ValidationFailedError("document not found")
@@ -775,8 +1335,16 @@ class DocumentService:
             update_data["archived_by"] = None
             update_data["archived_reason"] = None
 
-        await self.db.update_document_fields(document_id, update_data)
-        return await self.db.get_document(document_id) or doc
+        return await self._transition_document_lifecycle(
+            user=user,
+            dataset=dataset,
+            dataset_id=dataset_id,
+            document_id=document_id,
+            desired_enabled=bool(doc.get("enabled", True)),
+            desired_archived=archived,
+            state_updates=update_data,
+            requested_action="archive" if archived else "unarchive",
+        )
 
     async def update_document(
         self,
@@ -786,13 +1354,16 @@ class DocumentService:
         update_data: dict[str, Any],
     ) -> dict[str, Any]:
         """Update document metadata."""
-        await self._ks.require_dataset_access(user, dataset_id, required="editor")
+        dataset = await self._ks.require_dataset_access(user, dataset_id, required="editor")
+        _require_dataset_index_writable(dataset)
         doc = await self.db.get_document(document_id)
         if not doc or str(doc.get("dataset_id")) != dataset_id:
             raise ValidationFailedError("document not found")
 
         allowed_fields = {"title", "metadata", "doc_type", "doc_language"}
         filtered = {k: v for k, v in update_data.items() if k in allowed_fields}
+        if "metadata" in filtered:
+            _require_no_reserved_document_metadata(filtered["metadata"])
         if filtered:
             await self.db.update_document_fields(document_id, filtered)
         return await self.db.get_document(document_id) or doc
@@ -885,33 +1456,166 @@ class DocumentService:
     # ========================================================================
 
     async def set_segment_enabled(
-        self, user: UserContext, dataset_id: str, segment_id: str, enabled: bool
+        self,
+        user: UserContext,
+        dataset_id: str,
+        segment_id: str,
+        enabled: bool,
+        *,
+        _authorized_dataset: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Enable or disable a segment."""
-        dataset = await self._ks.require_dataset_access(user, dataset_id, required="editor")
+        """Synchronize reversible segment visibility across DB and Qdrant."""
+        dataset = _authorized_dataset
+        if dataset is None:
+            dataset = await self._ks.require_dataset_access(
+                user,
+                dataset_id,
+                required="editor",
+            )
+            _require_dataset_index_writable(dataset)
         seg = await self.db.get_segment(segment_id)
         if not seg or str(seg.get("dataset_id")) != dataset_id:
             raise ValidationFailedError("segment not found")
+        lease_factory = getattr(self.db, "segment_index_update_lease", None)
+        set_payload_enabled = getattr(
+            self._ks.vector_store,
+            "set_segment_payload_enabled",
+            None,
+        )
+        if not callable(lease_factory) or not callable(set_payload_enabled):
+            raise ValidationFailedError(
+                "segment visibility changes require the serialized index contract"
+            )
 
-        update_data: dict[str, Any] = {"enabled": enabled}
-        if not enabled:
-            update_data["disabled_at"] = datetime.utcnow()
-            update_data["disabled_by"] = user.user_id
-        else:
-            update_data["disabled_at"] = None
-            update_data["disabled_by"] = None
+        initial_document_id = str(seg.get("document_id") or "").strip()
+        if not initial_document_id:
+            raise ValidationFailedError("segment document identity is unavailable")
+        async with lease_factory(
+            dataset_id,
+            initial_document_id,
+            segment_id,
+        ) as lease_connection:
+            authoritative_dataset = await self.db.get_dataset(
+                dataset_id,
+                connection=lease_connection,
+            )
+            current = await self.db.get_segment(
+                segment_id,
+                connection=lease_connection,
+            )
+            if (
+                not authoritative_dataset
+                or dataset_ingestion_identity(authoritative_dataset)
+                != dataset_ingestion_identity(dataset)
+                or not current
+                or str(current.get("dataset_id") or "") != dataset_id
+            ):
+                raise ValidationFailedError(
+                    "segment visibility identity changed; retry the request"
+                )
+            _require_dataset_index_writable(authoritative_dataset)
+            document_id = str(current.get("document_id") or "").strip()
+            document = await self.db.get_document(
+                document_id,
+                connection=lease_connection,
+            )
+            if not document or str(document.get("dataset_id") or "") != dataset_id:
+                raise ValidationFailedError("segment document not found")
+            _require_document_active_for_manual_index_write(document)
 
-        await self.db.update_segment_fields(segment_id, update_data)
+            update_data: dict[str, Any] = {"enabled": enabled}
+            if not enabled:
+                update_data["disabled_at"] = datetime.utcnow()
+                update_data["disabled_by"] = user.user_id
+                # DB authority hides the point before any multi-collection
+                # remote mutation. A partial Qdrant failure remains safe and a
+                # same-value retry repairs all payloads.
+                await self.db.update_segment_fields(
+                    segment_id,
+                    update_data,
+                    connection=lease_connection,
+                )
+                try:
+                    await set_payload_enabled(
+                        tenant_id=str(authoritative_dataset.get("tenant_id") or ""),
+                        dataset_id=dataset_id,
+                        document_id=document_id,
+                        segment_id=segment_id,
+                        enabled=False,
+                        lifecycle_lease_held=True,
+                    )
+                except Exception as exc:
+                    raise ValidationFailedError(
+                        "segment remains disabled but Qdrant visibility sync failed; "
+                        "retry the same request"
+                    ) from exc
+            else:
+                update_data["disabled_at"] = None
+                update_data["disabled_by"] = None
+                # Qdrant first, DB authority last: a failed re-enable leaves the
+                # segment disabled and retryable. Same-value calls intentionally
+                # resynchronize a prior partial update.
+                try:
+                    await set_payload_enabled(
+                        tenant_id=str(authoritative_dataset.get("tenant_id") or ""),
+                        dataset_id=dataset_id,
+                        document_id=document_id,
+                        segment_id=segment_id,
+                        enabled=True,
+                        lifecycle_lease_held=True,
+                    )
+                except Exception as exc:
+                    raise ValidationFailedError(
+                        "segment Qdrant visibility could not be enabled; retry the request"
+                    ) from exc
+                await self.db.update_segment_fields(
+                    segment_id,
+                    update_data,
+                    connection=lease_connection,
+                )
 
-        # If disabling, optionally remove from vector store
-        if not enabled:
-            collection = str(dataset.get("collection_name") or "")
-            if collection:
-                pid = str(seg.get("vector_id") or seg.get("segment_id") or "")
-                with contextlib.suppress(Exception):
-                    await self._ks.vector_store.delete_points(collection, [pid])
+        return await self.db.get_segment(segment_id) or {**seg, **update_data}
 
-        return await self.db.get_segment(segment_id) or seg
+    async def set_segments_enabled_batch(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        segment_ids: Any,
+        enabled: Any,
+    ) -> dict[str, Any]:
+        """Bound and authorize one batch before any per-segment mutation."""
+
+        normalized_ids, normalized_enabled = _validate_segment_batch_enable_request(
+            segment_ids,
+            enabled,
+        )
+        dataset = await self._ks.require_dataset_access(
+            user,
+            dataset_id,
+            required="editor",
+        )
+        _require_dataset_index_writable(dataset)
+
+        updated = 0
+        for segment_id in normalized_ids:
+            try:
+                await self.set_segment_enabled(
+                    user,
+                    dataset_id,
+                    segment_id,
+                    normalized_enabled,
+                    _authorized_dataset=dataset,
+                )
+                updated += 1
+            except Exception:
+                # Preserve the compatibility endpoint's partial-success
+                # contract while keeping authorization outside the loop.
+                continue
+        return {
+            "success": True,
+            "updated": updated,
+            "total": len(normalized_ids),
+        }
 
     async def create_segment(
         self,
@@ -924,87 +1628,157 @@ class DocumentService:
     ) -> dict[str, Any]:
         """Create a new segment manually."""
         dataset = await self._ks.require_dataset_access(user, dataset_id, required="editor")
+        _require_dataset_index_writable(dataset)
         doc = await self.db.get_document(document_id)
         if not doc or str(doc.get("dataset_id")) != dataset_id:
             raise ValidationFailedError("document not found")
-
-        # Get next position
-        existing_segs = await self.db.list_segments(
-            dataset_id=dataset_id, document_id=document_id, limit=1000, offset=0
-        )
-        position = max((s.get("position", 0) for s in existing_segs), default=-1) + 1
+        _require_document_active_for_manual_index_write(doc)
+        set_index_state = getattr(self.db, "set_segment_index_state", None)
+        lease_factory = getattr(self.db, "document_segment_create_lease", None)
+        next_position = getattr(self.db, "next_segment_position", None)
+        if not all(callable(value) for value in (set_index_state, lease_factory, next_position)):
+            raise ValidationFailedError(
+                "segment creation requires the fail-closed index state contract"
+            )
 
         seg_id = str(uuid.uuid4())
         clean_content = self._ks._sanitize_text_for_db(content)
+        seg: dict[str, Any] = {}
 
-        seg = {
-            "segment_id": seg_id,
-            "dataset_id": dataset_id,
-            "document_id": document_id,
-            "position": position,
-            "text": clean_content,
-            "token_count": len(clean_content) // 4,
-            "word_count": len(clean_content.split()),
-            "answer": answer,
-            "keywords": keywords or [],
-            "created_by": user.user_id,
-            "enabled": True,
-            "status": "waiting",
-            "metadata": {},
-        }
-
-        await self.db.insert_segments([seg])
-
-        # Embed and index the segment
-        try:
-            embedding_provider = str(dataset.get("embedding_provider") or "local")
-            embedding_model = str(dataset.get("embedding_model") or "hash-384")
-            embedding_config = _ensure_dict(dataset.get("embedding_config"))
-            dim = int(dataset.get("embedding_dimension") or 0) or None
-
-            econf = self._ks._resolve_embedding_config(
-                provider=embedding_provider,
-                model=embedding_model,
-                embedding_config=embedding_config,
+        # Embed and index the new row under the same cross-replica generation
+        # contract as edits. Validate the owning document under the dataset
+        # barrier before the first DB mutation, then insert through the held
+        # connection so a one-connection pool cannot deadlock.
+        async with lease_factory(dataset_id, document_id) as lease_connection:
+            authoritative_dataset = await self.db.get_dataset(
+                dataset_id,
+                connection=lease_connection,
             )
-
-            embedder: BaseEmbedding | None = None
-            try:
-                embedder = create_embedding(econf, dimension=dim)
-                vec = (
-                    await asyncio.wait_for(
-                        embedder.embed_documents([clean_content]),
-                        timeout=float(econf.timeout_seconds) + 10.0,
-                    )
-                )[0]
-
-                collection = await self._ks.vector_store.ensure_collection(
-                    dataset_id=dataset_id,
-                    dimension=embedder.dimension,
-                    collection_name=str(dataset.get("collection_name") or "") or None,
+            stored_document = await self.db.get_document(
+                document_id,
+                connection=lease_connection,
+            )
+            if authoritative_dataset:
+                _require_dataset_index_writable(authoritative_dataset)
+            if (
+                not authoritative_dataset
+                or dataset_ingestion_identity(authoritative_dataset)
+                != dataset_ingestion_identity(dataset)
+                or not stored_document
+                or str(stored_document.get("dataset_id") or "") != dataset_id
+            ):
+                raise ValidationFailedError(
+                    "segment creation identity changed before vector indexing"
                 )
-            finally:
-                if embedder:
-                    await embedder.close()
-
-            from qdrant_client.http import models as qmodels
-
-            payload = {
+            _require_document_active_for_manual_index_write(stored_document)
+            position = await next_position(
+                dataset_id,
+                document_id,
+                connection=lease_connection,
+            )
+            seg = {
+                "segment_id": seg_id,
                 "dataset_id": dataset_id,
                 "document_id": document_id,
-                "segment_id": seg_id,
                 "position": position,
+                "level": 3,
                 "text": clean_content,
+                "token_count": len(clean_content) // 4,
+                "word_count": len(clean_content.split()),
+                "answer": answer,
+                "keywords": keywords or [],
+                "created_by": user.user_id,
+                "enabled": True,
+                "status": "waiting",
+                "source_type": "manual",
+                "language": "en",
+                "metadata": {"content_type": "text"},
             }
-            await self._ks.vector_store.upsert(
-                collection_name=collection,
-                points=[qmodels.PointStruct(id=seg_id, vector=vec, payload=payload)],
+            await self.db.insert_segments([seg], connection=lease_connection)
+            stored_segment = await self.db.get_segment(
+                seg_id,
+                connection=lease_connection,
             )
-            await self.db.update_segment_fields(
-                seg_id, {"vector_id": seg_id, "status": "completed"}
+            if not stored_segment or str(stored_segment.get("dataset_id") or "") != dataset_id:
+                raise ValidationFailedError("segment creation did not persist its identity")
+            await set_index_state(
+                seg_id,
+                "pending",
+                connection=lease_connection,
             )
-        except Exception as exc:
-            await self.db.update_segment_fields(seg_id, {"status": "error", "error": str(exc)})
+            try:
+                embedding_provider = str(dataset.get("embedding_provider") or "local")
+                embedding_model = str(dataset.get("embedding_model") or "hash-384")
+                embedding_config = _ensure_dict(dataset.get("embedding_config"))
+                dim = int(dataset.get("embedding_dimension") or 0) or None
+
+                econf = self._ks._resolve_embedding_config(
+                    provider=embedding_provider,
+                    model=embedding_model,
+                    embedding_config=embedding_config,
+                )
+
+                embedder: BaseEmbedding | None = None
+                try:
+                    embedder = create_embedding(econf, dimension=dim)
+                    vec = (
+                        await asyncio.wait_for(
+                            embedder.embed_documents([clean_content]),
+                            timeout=float(econf.timeout_seconds) + 10.0,
+                        )
+                    )[0]
+
+                    collection = await self._ks.vector_store.ensure_collection(
+                        dataset_id=dataset_id,
+                        dimension=embedder.dimension,
+                        collection_name=str(dataset.get("collection_name") or "") or None,
+                        tenant_id=str(dataset.get("tenant_id") or ""),
+                        lifecycle_lease_held=True,
+                        **_lexical_ensure_kwargs(dataset.get("index_config")),
+                    )
+                finally:
+                    if embedder:
+                        await embedder.close()
+
+                from qdrant_client.http import models as qmodels
+
+                payload = _segment_vector_payload(
+                    dataset=authoritative_dataset,
+                    segment=stored_segment,
+                    text=clean_content,
+                )
+                await self._upsert_for_dataset_identity(
+                    dataset=authoritative_dataset,
+                    collection=collection,
+                    points=[qmodels.PointStruct(id=seg_id, vector=vec, payload=payload)],
+                    lifecycle_lease_held=True,
+                )
+                await self.db.update_segment_fields(
+                    seg_id,
+                    {"vector_id": seg_id},
+                    connection=lease_connection,
+                )
+                await set_index_state(
+                    seg_id,
+                    "completed",
+                    connection=lease_connection,
+                )
+            except Exception as exc:
+                try:
+                    await set_index_state(
+                        seg_id,
+                        "error",
+                        error="vector creation failed",
+                        connection=lease_connection,
+                    )
+                except Exception as state_exc:
+                    raise ValidationFailedError(
+                        "segment vector creation failed and its hidden error state "
+                        "could not be confirmed"
+                    ) from state_exc
+                raise ValidationFailedError(
+                    "segment vector creation failed; the segment remains hidden until retry"
+                ) from exc
 
         # Update document segment_count after creating a new segment
         await self.db.refresh_document_segment_count(document_id)

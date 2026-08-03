@@ -17,6 +17,23 @@ UNAUTHORIZED_BODY = {
 }
 
 
+def validate_gateway_auth_configuration(
+    *,
+    secret: str,
+    allow_anonymous: bool,
+    allow_anonymous_setting: str,
+) -> None:
+    """Reject a configured trust boundary that can silently bypass itself."""
+
+    if secret.strip() and allow_anonymous:
+        raise RuntimeError(
+            f"{allow_anonymous_setting}=true cannot be combined with "
+            "GATEWAY_ASSISTANT_SHARED_SECRET. Anonymous mode bypasses the "
+            "gateway signature and must only be used when the shared secret "
+            "is intentionally unset for local development."
+        )
+
+
 class GatewaySecretAuthMiddleware:
     """Verify ``X-Gateway-Secret`` on every non-probe request.
 
@@ -121,4 +138,8 @@ def _query_string(scope) -> str:
     return str(raw)
 
 
-__all__ = ["GatewaySecretAuthMiddleware", "UNAUTHORIZED_BODY"]
+__all__ = [
+    "GatewaySecretAuthMiddleware",
+    "UNAUTHORIZED_BODY",
+    "validate_gateway_auth_configuration",
+]

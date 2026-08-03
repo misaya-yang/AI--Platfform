@@ -29,7 +29,7 @@ import os
 import time
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -45,6 +45,7 @@ from ai_gateway_core.metrics import (
     RealtimeMetricsLike,
     UsageRecorderLike,
 )
+from ai_gateway_core.security import redact_trace_text as _redact_trace_text
 from ai_gateway_core.storage import (
     ArtifactStorageLike,
     FileStorageLike,
@@ -53,7 +54,7 @@ from ai_gateway_core.storage import (
 )
 from cachetools import TTLCache
 
-from .agent.agent_loop import PRIOR_TOOL_RESULTS_MARKER, AgentLoopEvent, AgentLoopPhase
+from .agent.agent_loop import PRIOR_TOOL_RESULTS_MARKER, AgentLoopEvent
 from .agent.runtime_context import (
     AgentRuntimeExecutionContext,
     assert_session_runtime_pin,
@@ -96,21 +97,18 @@ from .rag.scenario_analyzer import (
 )
 from .runtime.context.assembler import ContextAssemblerV2
 from .tasks.task_planner import TaskPlanner
-from .tool_invoker import CapabilityAllowlist
-from .tool_orchestrator import ToolExecutionResult, ToolOrchestrator
+from .tool_invoker import CapabilityAllowlist, ToolInvoker
 from .tools.code_executor_tool import CODE_EXECUTOR_TOOL, CodeExecutorToolExecutor
-from .trace_payloads import build_rag_trace_payload as _rag_trace_payload
 from .trace_writer import AssistantTraceContext, AssistantTraceWriter, build_transcript_locator
 from .turn_contract import (
-    SideEffectState,
     TurnKernel,
     TurnState,
-    TurnTransitionError,
     build_context_snapshot,
     build_terminal_envelope,
     decide_failure,
     failure_class_for_exit_reason,
 )
+from .turn_event_collector import CollectedTurn, TurnEventCollector
 from .working_memory import WorkingMemory
 
 if TYPE_CHECKING:
@@ -118,6 +116,7 @@ if TYPE_CHECKING:
     from ai_gateway_core.session import SessionManagerLike
 
     from .memory_service import MemoryService
+    from .runtime.compat.runtime_adapter import AssistantRuntimeAdapter
 
 logger = get_logger(__name__)
 
@@ -275,6 +274,7 @@ class StreamEventType(str, Enum):
     RUN_STARTED = "run_started"
     RUN_FINISHED = "run_finished"
     RUN_ERROR = "run_error"
+    RUN_BUDGET_EXCEEDED = "run_budget_exceeded"
 
 
 @dataclass
@@ -699,7 +699,6 @@ Please use this web search context to inform your response when relevant."""
         enable_rag_evaluation: bool = True,
         code_executor: CodeExecutorService | None = None,
         task_planner: TaskPlanner | None = None,
-        tool_orchestrator: ToolOrchestrator | None = None,
         db: Any | None = None,  # DatabaseStorage for MemoryManager
         trace_writer: AssistantTraceWriter | None = None,
         vlm_service: Any | None = None,  # DashScopeVLMService for image descriptions
@@ -722,8 +721,18 @@ Please use this web search context to inform your response when relevant."""
         realtime_metrics: RealtimeMetricsLike = _DEFAULT_NOOP_REALTIME_METRICS,
         artifact_storage: ArtifactStorageLike = _DEFAULT_NOOP_ARTIFACT_STORAGE,
         file_storage: FileStorageLike = _DEFAULT_NOOP_FILE_STORAGE,
+        runtime_adapter: AssistantRuntimeAdapter | None = None,
+        tool_invoker: ToolInvoker | None = None,
+        runtime_adapter_unavailable: bool = False,
     ):
         self.model_registry = model_registry
+        if execution_gateway is not None:
+            gateway_tool_invoker = getattr(execution_gateway, "tool_invoker", None)
+            if gateway_tool_invoker is None:
+                raise ValueError("execution_gateway must expose its canonical tool_invoker")
+            if tool_invoker is not None and tool_invoker is not gateway_tool_invoker:
+                raise ValueError("execution_gateway and tool_invoker must share one identity")
+            tool_invoker = gateway_tool_invoker
         self.kb_service = kb_service or kb_proxy  # Use proxy when local KB unavailable
         # ADR-002: Tenant isolation
         self.tenant_tool_policy = tenant_tool_policy
@@ -738,16 +747,30 @@ Please use this web search context to inform your response when relevant."""
         self.memory_service = memory_service
         self.trace_writer = trace_writer or AssistantTraceWriter(database=db)
 
+        # Process-scoped runtime dependencies. ``AgentLoop`` remains a cheap
+        # per-turn coordinator, but its memory/index/skill adapter and tool
+        # invoker must not be rebuilt for every request.
+        self.runtime_adapter = runtime_adapter
+        self.runtime_adapter_unavailable = bool(
+            runtime_adapter_unavailable and self.runtime_adapter is None
+        )
+        if self.runtime_adapter is None and db is not None and not self.runtime_adapter_unavailable:
+            try:
+                from .runtime.compat.runtime_adapter import AssistantRuntimeAdapter
+
+                self.runtime_adapter = AssistantRuntimeAdapter.from_env(database=db)
+            except Exception:
+                self.runtime_adapter_unavailable = True
+
         # Background task registry — keeps fire-and-forget tasks alive.
         # Python 3.11+ will GC tasks that have no strong reference, so any
         # task we launch via asyncio.create_task without awaiting MUST be
         # stored here. Tasks remove themselves via done_callback.
         self._background_tasks: set[asyncio.Task] = set()
 
-        # Task planning and orchestration (Phase 2.4)
-        # These are created on demand if not provided
+        # Planning is guidance inside the canonical AgentLoop, never a second
+        # tool-execution path.
         self._task_planner = task_planner
-        self._tool_orchestrator = tool_orchestrator
 
         # Phase 3: RAG evaluation
         self.enable_rag_evaluation = enable_rag_evaluation
@@ -843,14 +866,17 @@ Please use this web search context to inform your response when relevant."""
         with contextlib.suppress(Exception):
             gateway_enabled = os.getenv("ASSISTANT_GATEWAY_ENABLED", "false").lower() == "true"
 
-        self.request_router = request_router or AssistantRequestRouter()
-        self.execution_gateway = execution_gateway or AssistantExecutionGateway(
-            tool_invoker=create_tool_invoker(
+        self.tool_invoker = tool_invoker
+        if self.tool_invoker is None:
+            self.tool_invoker = create_tool_invoker(
                 tenant_tool_policy=self.tenant_tool_policy,
                 tenant_mcp_config=self.tenant_mcp_config,
                 mcp_runtime=self.mcp_runtime,
                 tool_audit=self.tool_audit,
-            ),
+            )
+        self.request_router = request_router or AssistantRequestRouter()
+        self.execution_gateway = execution_gateway or AssistantExecutionGateway(
+            tool_invoker=self.tool_invoker,
             database=db,
             enabled=gateway_enabled,
         )
@@ -860,125 +886,6 @@ Please use this web search context to inform your response when relevant."""
         if self._task_planner is None:
             self._task_planner = TaskPlanner()
         return self._task_planner
-
-    def get_tool_orchestrator(self, max_parallel: int = 5) -> ToolOrchestrator:
-        if self._tool_orchestrator is None:
-            from .tools import get_tool_registry
-
-            self._tool_orchestrator = ToolOrchestrator(
-                tool_registry=get_tool_registry(),
-                max_parallel=max_parallel,
-            )
-        return self._tool_orchestrator
-
-    async def _execute_with_planning(
-        self,
-        user: UserContext,
-        session_id: str,
-        message: str,
-        config: AssistantConfig,
-        history: list[dict[str, str]] | None = None,
-        retrieved_contexts: list[RetrievedContext] | None = None,
-    ) -> AsyncIterator[AssistantStreamEvent]:
-        """Opt-in multi-step task-planning mode (``config.enable_task_planning=True``).
-
-        Not the default execution path: ``AssistantConfig.enable_task_planning``
-        defaults to ``False``, in which case streaming requests go through
-        ``AgentLoop._execute_streaming_first`` instead. This mode builds an
-        explicit task plan up front and executes it via ``ToolOrchestrator``
-        rather than letting the model drive tool calls turn-by-turn; use it for
-        complex multi-step requests where an inspectable plan is wanted before
-        execution starts.
-        """
-        del history, retrieved_contexts
-        working_memory = self.get_working_memory(
-            session_id,
-            tenant_id=user.tenant_id,
-            user_id=user.user_id,
-        )
-        working_memory.set_goal(message)
-        yield AssistantStreamEvent(
-            event_type=StreamEventType.WORKING_MEMORY_UPDATE.value,
-            data={"session_id": session_id, "goal": message},
-        )
-
-        try:
-            from .tools import get_tool_registry
-
-            registry = get_tool_registry()
-            list_tools = getattr(registry, "list_tools", None)
-            available_tools = list_tools() if callable(list_tools) else []
-            plan = await self.task_planner.create_plan(
-                user_request=message,
-                available_tools=available_tools,
-                context={"session_id": session_id, "user_id": user.user_id},
-                use_llm=False,
-            )
-        except Exception as exc:
-            yield AssistantStreamEvent(
-                event_type=StreamEventType.ERROR.value,
-                data={"message": str(exc)},
-            )
-            return
-
-        yield AssistantStreamEvent(
-            event_type=StreamEventType.TASK_PLANNING.value,
-            data=plan.to_dict(),
-        )
-
-        if config.confirm_plan:
-            yield AssistantStreamEvent(
-                event_type=StreamEventType.STATUS.value,
-                data={
-                    "message": "Please confirm this plan before execution",
-                    "requires_confirmation": True,
-                },
-            )
-            return
-
-        results: list[ToolExecutionResult] = []
-        if plan.tasks:
-            orchestrator = self.get_tool_orchestrator(max_parallel=config.max_parallel_tools)
-            async for result in orchestrator.execute_plan(plan, working_memory):
-                results.append(result)
-                yield AssistantStreamEvent(
-                    event_type=StreamEventType.WORKING_MEMORY_UPDATE.value,
-                    data={
-                        "session_id": session_id,
-                        "task_id": result.task_id,
-                        "success": result.success,
-                    },
-                )
-
-        formatted = self._format_execution_results(results)
-        if formatted:
-            yield AssistantStreamEvent(
-                event_type=StreamEventType.TEXT_DELTA.value,
-                data=formatted,
-            )
-        yield AssistantStreamEvent(
-            event_type=StreamEventType.DONE.value,
-            data={"session_id": session_id, "planned_tasks": len(plan.tasks)},
-        )
-
-    @staticmethod
-    def _format_execution_results(results: list[ToolExecutionResult]) -> str:
-        if not results:
-            return ""
-        lines = ["## Task Execution Results"]
-        for result in results:
-            status = "SUCCESS" if result.success else "FAILED"
-            lines.append(f"\n### {result.task_id} ({status})")
-            lines.append(f"- Tool: {result.tool}")
-            lines.append(f"- Duration: {result.duration_ms:.1f}ms")
-            if result.success:
-                value = str(result.result)
-                if len(value) > 500:
-                    value = value[:500].rstrip() + "..."
-                lines.append(f"- Result: {value}")
-            elif result.error:
-                lines.append(f"- Error: {result.error}")
-        return "\n".join(lines)
 
     def validate_generated_content(
         self,
@@ -1158,6 +1065,192 @@ Please use this web search context to inform your response when relevant."""
             if existing.service_id and existing.service_id != "__builtin_assistant__":
                 raise PermissionDeniedError("Session is bound to a different service")
 
+    def _preflight_failure_event(
+        self,
+        *,
+        user: UserContext,
+        session_id: str,
+        message: str,
+        config: AssistantConfig,
+        history: list[dict[str, str]] | None,
+        error: Exception,
+        started_at: float,
+    ) -> AssistantStreamEvent:
+        """Close and trace a turn that fails before AgentLoop admission."""
+
+        run_id = str(uuid.uuid4())
+        request_id = str(uuid.uuid4())
+        provider = getattr(config.model_provider, "value", str(config.model_provider))
+        kernel = TurnKernel(run_id=run_id, request_id=request_id)
+        kernel.transition(TurnState.PREPARING, reason="request_accepted")
+        kernel.finish(TurnState.FAILED, reason="preflight_failed")
+        trace_context = AssistantTraceContext.from_chat_request(
+            run_id=run_id,
+            request_id=request_id,
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            session_id=session_id,
+            message=message,
+            model_id=config.model_id,
+            provider=provider,
+            started_at=started_at,
+            transcript_locator=build_transcript_locator(
+                session_id=session_id,
+                run_id=run_id,
+                request_id=request_id,
+                message=message,
+                history=history or [],
+            ),
+            traceparent=config.traceparent,
+            otel_trace_id=config.otel_trace_id,
+            agent_runtime=config.agent_runtime,
+        )
+        safe_error = _redact_trace_text(error)
+        snapshot = build_context_snapshot(
+            run_id=run_id,
+            request_id=request_id,
+            session_id=session_id,
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            mode="streaming_first",
+            model_id=config.model_id,
+            provider=provider,
+            trace_id=trace_context.trace_id,
+            otel_trace_id=config.otel_trace_id,
+            policy={"preflight": "failed"},
+            surface={"stream": True},
+            attempt_id=kernel.attempt_id,
+            attempt_number=kernel.attempt_number,
+            turn_state=kernel.snapshot(),
+        )
+        decision = decide_failure(failure_class_for_exit_reason("internal_error"))
+        envelope = build_terminal_envelope(
+            run_id=run_id,
+            request_id=request_id,
+            session_id=session_id,
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            mode="streaming_first",
+            status="failed",
+            exit_reason="preflight_failed",
+            started_at=started_at,
+            model_id=config.model_id,
+            provider=provider,
+            trace_id=trace_context.trace_id,
+            otel_trace_id=config.otel_trace_id,
+            context_snapshot=snapshot,
+            error=safe_error,
+            attempt_id=kernel.attempt_id,
+            attempt_number=kernel.attempt_number,
+            turn_state=kernel.snapshot(),
+            failure_decision=decision,
+        )
+        self.trace_writer.start_trace(trace_context)
+        self.trace_writer.finish_trace(
+            ctx=trace_context,
+            status="failed",
+            error=safe_error,
+            total_latency_ms=int((time.time() - started_at) * 1000),
+            terminal_event_type=StreamEventType.RUN_ERROR.value,
+            terminal_sequence_no=1,
+            terminal_envelope=envelope,
+        )
+        return AssistantStreamEvent(
+            event_type=StreamEventType.RUN_ERROR.value,
+            data={
+                "run_id": run_id,
+                "thread_id": session_id,
+                "session_id": session_id,
+                "error": safe_error,
+                "terminal_envelope": envelope,
+                "context_snapshot": snapshot,
+            },
+        )
+
+    async def _iter_turn_events(
+        self,
+        user: UserContext,
+        session_id: str,
+        message: str,
+        config: AssistantConfig,
+        history: list[dict[str, str]] | None = None,
+        persist_messages: bool = True,
+    ) -> AsyncIterator[AssistantStreamEvent]:
+        """Produce the one canonical turn event stream for every transport."""
+
+        started_at = time.time()
+        try:
+            await self._ensure_session_exists(
+                user=user,
+                session_id=session_id,
+                agent_runtime=config.agent_runtime,
+            )
+            effective_config = replace(config)
+            domain_policy, _ = await self._resolve_domain_policy(user, config.kb_dataset_ids)
+        except Exception as exc:
+            yield self._preflight_failure_event(
+                user=user,
+                session_id=session_id,
+                message=message,
+                config=config,
+                history=history,
+                error=exc,
+                started_at=started_at,
+            )
+            return
+        if domain_policy:
+            domain_rules = domain_policy.scenario_rules()
+            if domain_rules:
+                existing_prompt = (effective_config.system_prompt or "").strip()
+                effective_config.system_prompt = (
+                    f"{existing_prompt}\n\n{domain_rules}" if existing_prompt else domain_rules
+                )
+
+        if self._detect_user_correction(message):
+            correction_context = (
+                "The user has corrected your previous response. "
+                "Acknowledge the correction briefly, re-execute any necessary tool calls "
+                "with corrected parameters, and provide an updated answer. "
+                "Do NOT just apologize — actually fix the issue."
+            )
+            existing_prompt = (effective_config.system_prompt or "").strip()
+            effective_config.system_prompt = (
+                f"{existing_prompt}\n\n{correction_context}"
+                if existing_prompt
+                else correction_context
+            )
+
+        async for event in self._execute_agent_loop(
+            user=user,
+            session_id=session_id,
+            message=message,
+            config=effective_config,
+            history=history,
+            persist_messages=persist_messages,
+        ):
+            yield event
+
+    async def _collect_turn(
+        self,
+        user: UserContext,
+        session_id: str,
+        message: str,
+        config: AssistantConfig,
+        history: list[dict[str, str]] | None = None,
+        persist_messages: bool = True,
+    ) -> CollectedTurn:
+        collector = TurnEventCollector()
+        async for event in self._iter_turn_events(
+            user=user,
+            session_id=session_id,
+            message=message,
+            config=config,
+            history=history,
+            persist_messages=persist_messages,
+        ):
+            collector.accept(event)
+        return collector.finalize()
+
     async def chat_stream(
         self,
         user: UserContext,
@@ -1167,195 +1260,17 @@ Please use this web search context to inform your response when relevant."""
         history: list[dict[str, str]] | None = None,
         persist_messages: bool = True,
     ) -> AsyncIterator[AssistantStreamEvent]:
-        """
-        Stream a chat response with session persistence and context management.
+        """Stream the canonical turn projector used by non-stream collection."""
 
-        Args:
-            user: User context for authentication/authorization
-            session_id: Session ID for conversation tracking
-            message: User's message
-            config: Assistant configuration
-            history: Previous conversation history (if None, loaded from session)
-            persist_messages: Whether to persist messages to database
-
-        Yields:
-            AssistantStreamEvent objects with different event types:
-            - context_retrieved: KB search results (if RAG enabled)
-            - text_delta: Incremental text content
-            - tool_call: Tool invocation (future)
-            - tool_result: Tool response (future)
-            - usage: Token usage statistics
-            - done: Stream completion
-
-        Context Management:
-            - Applies sliding window (last 30 messages)
-            - Token-aware truncation based on model context window
-            - Preserves at least 6 recent messages
-        """
-        start_time = time.time()
-
-        # ========== LATENCY DEBUG: Track timing for each step ==========
-        logger.info(f"[LATENCY] chat_stream started at {start_time}")
-
-        await self._ensure_session_exists(
+        async for event in self._iter_turn_events(
             user=user,
             session_id=session_id,
-            agent_runtime=config.agent_runtime,
-        )
-
-        domain_policy, _ = await self._resolve_domain_policy(user, config.kb_dataset_ids)
-
-        # IMPORTANT: Keep streaming for AgentLoop mode.
-        # Previously, any domain policy would force buffered `chat()` path, causing
-        # no real-time text deltas (TTFT ~= total duration).
-        # For agent_loop, inject domain rules into system prompt and continue streaming.
-        if domain_policy and config.use_agent_loop:
-            domain_rules = domain_policy.scenario_rules()
-            if domain_rules:
-                existing_prompt = (config.system_prompt or "").strip()
-                config.system_prompt = (
-                    f"{existing_prompt}\n\n{domain_rules}" if existing_prompt else domain_rules
-                )
-            logger.info(
-                "[DOMAIN POLICY] Applied domain rules in streaming mode (agent_loop), "
-                "keeping SSE incremental delivery."
-            )
-
-        if domain_policy and not config.use_agent_loop:
-            if persist_messages and self.session_manager:
-                try:
-                    await self.session_manager.add_message(
-                        session_id=session_id,
-                        role="user",
-                        content=message,
-                        metadata={"timestamp": datetime.utcnow().isoformat()},
-                    )
-                except Exception as exc:
-                    logger.warning(f"Failed to persist user message (policy branch): {exc}")
-
-            # For strict-domain assistants, use buffered generation to enforce policies.
-            result = await self.chat(
-                user=user,
-                session_id=session_id,
-                message=message,
-                config=config,
-                history=history,
-                persist_messages=False,
-            )
-            if persist_messages and self.session_manager:
-                try:
-                    await self.session_manager.add_message(
-                        session_id=session_id,
-                        role="assistant",
-                        content=result.get("content", ""),
-                        metadata={
-                            "timestamp": datetime.utcnow().isoformat(),
-                            "model_id": config.model_id,
-                            "contexts": result.get("contexts"),
-                        },
-                    )
-                except Exception as exc:
-                    logger.warning(f"Failed to persist assistant message (policy branch): {exc}")
-
-            for ctx in result.get("contexts", []):
-                yield AssistantStreamEvent(
-                    event_type="context_retrieved",
-                    data=ctx,
-                )
-            yield AssistantStreamEvent(
-                event_type=StreamEventType.TEXT_DELTA.value,
-                data=result.get("content", ""),
-            )
-            yield AssistantStreamEvent(
-                event_type="usage",
-                data=result.get("usage") or {"input_tokens": 0, "output_tokens": 0},
-            )
-            yield AssistantStreamEvent(
-                event_type="done",
-                data={
-                    "session_id": session_id,
-                    "duration_ms": result.get("duration_ms", 0),
-                    "total_length": len(result.get("content", "")),
-                    "run_id": result.get("run_id"),
-                    "terminal_envelope": result.get("terminal_envelope"),
-                    "context_snapshot": result.get("context_snapshot"),
-                },
-            )
-            return
-
-        # ========== P2.2: Auto error recovery on user correction ==========
-        if self._detect_user_correction(message):
-            correction_ctx = (
-                "The user has corrected your previous response. "
-                "Acknowledge the correction briefly, re-execute any necessary tool calls "
-                "with corrected parameters, and provide an updated answer. "
-                "Do NOT just apologize — actually fix the issue."
-            )
-            existing = (config.system_prompt or "").strip()
-            config.system_prompt = f"{existing}\n\n{correction_ctx}" if existing else correction_ctx
-
-        if not config.use_agent_loop:
-            if config.enable_task_planning:
-                async for event in self._execute_with_planning(
-                    user=user,
-                    session_id=session_id,
-                    message=message,
-                    config=config,
-                    history=history,
-                    retrieved_contexts=[],
-                ):
-                    yield event
-                return
-
-            result = await self.chat(
-                user=user,
-                session_id=session_id,
-                message=message,
-                config=config,
-                history=history,
-                persist_messages=persist_messages,
-            )
-            for ctx in result.get("contexts", []):
-                yield AssistantStreamEvent(
-                    event_type=StreamEventType.CONTEXT_RETRIEVED.value,
-                    data=ctx,
-                )
-            yield AssistantStreamEvent(
-                event_type=StreamEventType.TEXT_DELTA.value,
-                data=result.get("content", ""),
-            )
-            yield AssistantStreamEvent(
-                event_type=StreamEventType.USAGE.value,
-                data=result.get("usage") or {"input_tokens": 0, "output_tokens": 0},
-            )
-            yield AssistantStreamEvent(
-                event_type=StreamEventType.DONE.value,
-                data={
-                    "session_id": session_id,
-                    "duration_ms": result.get("duration_ms", 0),
-                    "total_length": len(result.get("content", "")),
-                    "run_id": result.get("run_id"),
-                    "terminal_envelope": result.get("terminal_envelope"),
-                    "context_snapshot": result.get("context_snapshot"),
-                },
-            )
-            return
-
-        # ========== Agent Loop (only execution path) ==========
-        # The legacy 8-step ReAct pipeline that lived below this point has
-        # been removed; ``_execute_agent_loop`` is now the sole path.
-        # ``config.use_agent_loop`` is retained on AssistantConfig for
-        # frontend-schema parity but no longer gates a separate code path.
-        if config.use_agent_loop:
-            async for event in self._execute_agent_loop(
-                user=user,
-                session_id=session_id,
-                message=message,
-                config=config,
-                history=history,
-            ):
-                yield event
-            return
+            message=message,
+            config=config,
+            history=history,
+            persist_messages=persist_messages,
+        ):
+            yield event
 
     async def chat(
         self,
@@ -1366,672 +1281,61 @@ Please use this web search context to inform your response when relevant."""
         history: list[dict[str, str]] | None = None,
         persist_messages: bool = True,
     ) -> dict[str, Any]:
-        """
-        Non-streaming chat completion.
+        """Collect the canonical event stream without invoking a second path."""
 
-        Returns a dict with:
-            - content: The assistant's response
-            - usage: Token usage
-            - contexts: Retrieved KB contexts
-            - duration_ms: Total time
-        """
-        start_time = time.time()
-        run_id = str(uuid.uuid4())
-        request_id = str(uuid.uuid4())
-        turn_kernel = TurnKernel(run_id=run_id, request_id=request_id)
-        turn_kernel.transition(TurnState.PREPARING, reason="request_accepted")
-        provider = getattr(config.model_provider, "value", str(config.model_provider))
-        initial_history = history or []
-        trace_ctx = AssistantTraceContext.from_chat_request(
-            run_id=run_id,
-            request_id=request_id,
-            tenant_id=user.tenant_id,
-            user_id=user.user_id,
+        started_at = time.time()
+        turn = await self._collect_turn(
+            user=user,
             session_id=session_id,
             message=message,
-            model_id=config.model_id,
-            provider=provider,
-            started_at=start_time,
-            transcript_locator=build_transcript_locator(
-                session_id=session_id,
-                run_id=run_id,
-                request_id=request_id,
-                message=message,
-                history=initial_history,
-            ),
-            traceparent=config.traceparent,
-            otel_trace_id=config.otel_trace_id,
-            agent_runtime=config.agent_runtime,
-        )
-        trace_sequence_no = 0
-        trace_finished = False
-        context_snapshot: dict[str, Any] = {}
-        context_packet_receipt: dict[str, Any] = {}
-
-        def _refresh_context_snapshot(
-            *,
-            history_count: int,
-            message_count: int,
-            retrieved_context_count: int = 0,
-            domain_policy_enabled: bool = False,
-        ) -> dict[str, Any]:
-            nonlocal context_snapshot
-            context_snapshot = build_context_snapshot(
-                run_id=run_id,
-                request_id=request_id,
-                session_id=session_id,
-                tenant_id=user.tenant_id,
-                user_id=user.user_id,
-                mode="non_stream",
-                model_id=config.model_id,
-                provider=provider,
-                trace_id=trace_ctx.trace_id,
-                otel_trace_id=config.otel_trace_id,
-                policy={
-                    "kb_mode": getattr(config.kb_mode, "value", str(config.kb_mode)),
-                    "web_search_enabled": config.web_search_enabled,
-                    "domain_policy_enabled": domain_policy_enabled,
-                },
-                memory={
-                    "history_message_count": history_count,
-                    "session_manager_enabled": bool(self.session_manager),
-                },
-                workspace={"file_count": len(config.file_paths or [])},
-                tools={"tool_count": len(config.tools_enabled or [])},
-                bootstrap={
-                    "message_count": message_count,
-                    "retrieved_context_count": retrieved_context_count,
-                    **(
-                        {"context_packet": context_packet_receipt} if context_packet_receipt else {}
-                    ),
-                },
-                surface={"stream": False},
-                attempt_id=turn_kernel.attempt_id,
-                attempt_number=turn_kernel.attempt_number,
-                turn_state=turn_kernel.snapshot(),
-            )
-            return context_snapshot
-
-        def _make_terminal_envelope(
-            *,
-            status: str,
-            exit_reason: str,
-            usage: dict[str, Any] | None = None,
-            error: Any = None,
-        ) -> dict[str, Any]:
-            target = (
-                TurnState.SUCCEEDED
-                if status == "succeeded"
-                else TurnState.CANCELLED
-                if status == "cancelled"
-                else TurnState.FAILED
-            )
-            if turn_kernel.is_terminal:
-                if turn_kernel.state is not target:
-                    raise TurnTransitionError(
-                        f"attempt {turn_kernel.attempt_id} already ended as "
-                        f"{turn_kernel.state.value}, not {target.value}"
-                    )
-            else:
-                turn_kernel.finish(target, reason=exit_reason or status)
-            failure_decision = None
-            if status != "succeeded":
-                failure_class = failure_class_for_exit_reason(exit_reason)
-                failure_decision = decide_failure(
-                    failure_class,
-                    side_effect_state=(
-                        SideEffectState.UNKNOWN
-                        if failure_class.value == "side_effect_unknown"
-                        else SideEffectState.NONE
-                    ),
-                )
-            return build_terminal_envelope(
-                run_id=run_id,
-                request_id=request_id,
-                session_id=session_id,
-                tenant_id=user.tenant_id,
-                user_id=user.user_id,
-                mode="non_stream",
-                status=status,
-                exit_reason=exit_reason,
-                started_at=start_time,
-                model_id=config.model_id,
-                provider=provider,
-                trace_id=trace_ctx.trace_id,
-                otel_trace_id=config.otel_trace_id,
-                context_snapshot=context_snapshot
-                or _refresh_context_snapshot(history_count=0, message_count=1),
-                usage=usage,
-                error=error,
-                attempt_id=turn_kernel.attempt_id,
-                attempt_number=turn_kernel.attempt_number,
-                turn_state=turn_kernel.snapshot(),
-                failure_decision=failure_decision,
-            )
-
-        def _next_trace_sequence() -> int:
-            nonlocal trace_sequence_no
-            trace_sequence_no += 1
-            return trace_sequence_no
-
-        def _record_trace_event(event_type: str, payload: Any) -> None:
-            self.trace_writer.record_event(
-                ctx=trace_ctx,
-                event_type=event_type,
-                sequence_no=_next_trace_sequence(),
-                payload=payload,
-                phase=AgentLoopPhase.GENERATION_STORAGE.value,
-            )
-
-        def _finish_trace(
-            *,
-            status: str,
-            output_preview: Any = "",
-            usage: dict[str, Any] | None = None,
-            error: Any = None,
-            terminal_event_type: str,
-            terminal_envelope: dict[str, Any] | None = None,
-        ) -> None:
-            nonlocal trace_finished
-            if trace_finished:
-                return
-            trace_finished = True
-            self.trace_writer.finish_trace(
-                ctx=trace_ctx,
-                status=status,
-                output_preview=output_preview,
-                usage=usage,
-                error=error,
-                total_latency_ms=int((time.time() - start_time) * 1000),
-                terminal_event_type=terminal_event_type,
-                terminal_sequence_no=_next_trace_sequence(),
-                terminal_envelope=terminal_envelope
-                or _make_terminal_envelope(
-                    status=status,
-                    exit_reason="succeeded" if status == "succeeded" else "failed",
-                    usage=usage,
-                    error=error,
-                ),
-            )
-
-        def _fail_trace(error: Exception) -> None:
-            _finish_trace(
-                status="failed",
-                error=error,
-                terminal_event_type=StreamEventType.RUN_ERROR.value,
-                terminal_envelope=_make_terminal_envelope(
-                    status="failed",
-                    exit_reason="model_error",
-                    error=error,
-                ),
-            )
-
-        async def _guard_trace_await(awaitable: Any) -> Any:
-            try:
-                return await awaitable
-            except Exception as exc:
-                _fail_trace(exc)
-                raise
-
-        def _guard_trace_call(callback: Any, *args: Any, **kwargs: Any) -> Any:
-            try:
-                return callback(*args, **kwargs)
-            except Exception as exc:
-                _fail_trace(exc)
-                raise
-
-        self.trace_writer.start_trace(trace_ctx)
-        _refresh_context_snapshot(history_count=len(initial_history), message_count=1)
-        _record_trace_event(
-            StreamEventType.RUN_STARTED.value,
-            {
-                "run_id": run_id,
-                "thread_id": session_id,
-                "session_id": session_id,
-                "request_id": request_id,
-                "mode": "non_stream",
-                "attempt_id": turn_kernel.attempt_id,
-                "attempt_number": turn_kernel.attempt_number,
-                "turn_state": turn_kernel.snapshot(),
-                "context_snapshot": context_snapshot,
-            },
-        )
-        await _guard_trace_await(
-            self._ensure_session_exists(
-                user=user,
-                session_id=session_id,
-                agent_runtime=config.agent_runtime,
-            )
-        )
-
-        if history is None and self.session_manager:
-            try:
-                session = await self.session_manager.get(session_id)
-                if session and session.history:
-                    history = _session_history_to_messages(session.history)
-                else:
-                    history = []
-            except Exception as exc:
-                logger.warning(f"Failed to load session history (chat): {exc}")
-                history = []
-        else:
-            history = history or []
-
-        trace_ctx = AssistantTraceContext.from_chat_request(
-            run_id=run_id,
-            request_id=request_id,
-            tenant_id=user.tenant_id,
-            user_id=user.user_id,
-            session_id=session_id,
-            message=message,
-            model_id=config.model_id,
-            provider=provider,
-            started_at=start_time,
-            transcript_locator=build_transcript_locator(
-                session_id=session_id,
-                run_id=run_id,
-                request_id=request_id,
-                message=message,
-                history=history,
-            ),
-            traceparent=config.traceparent,
-            otel_trace_id=config.otel_trace_id,
-            agent_runtime=config.agent_runtime,
-        )
-        # Later writes carry the history-aware transcript locator; avoid a second root upsert.
-        _refresh_context_snapshot(
-            history_count=len(history),
-            message_count=len(history) + 1,
-        )
-
-        if persist_messages and self.session_manager:
-            try:
-                await self.session_manager.add_message(
-                    session_id=session_id,
-                    role="user",
-                    content=message,
-                    metadata={"timestamp": datetime.utcnow().isoformat()},
-                )
-            except Exception as exc:
-                logger.warning(f"Failed to persist user message (chat): {exc}")
-
-        async def _persist_assistant_chat_message(
-            content_text: str,
-            contexts: list[dict[str, Any]] | None = None,
-        ) -> None:
-            if not (persist_messages and self.session_manager):
-                return
-            try:
-                await self.session_manager.add_message(
-                    session_id=session_id,
-                    role="assistant",
-                    content=content_text,
-                    metadata={
-                        "timestamp": datetime.utcnow().isoformat(),
-                        "model_id": config.model_id,
-                        "contexts": contexts or [],
-                    },
-                )
-            except Exception as exc:
-                logger.warning(f"Failed to persist assistant message (chat): {exc}")
-
-        domain_policy, _ = await _guard_trace_await(
-            self._resolve_domain_policy(user, config.kb_dataset_ids)
-        )
-        _refresh_context_snapshot(
-            history_count=len(history),
-            message_count=len(history) + 1,
-            domain_policy_enabled=bool(domain_policy),
-        )
-        if domain_policy:
-            decision = _guard_trace_call(domain_policy.precheck_query, message)
-            if decision and decision.action == "decline":
-                await _persist_assistant_chat_message(decision.response or "")
-                terminal_envelope = _make_terminal_envelope(
-                    status="succeeded",
-                    exit_reason="succeeded",
-                    usage={},
-                )
-                _finish_trace(
-                    status="succeeded",
-                    output_preview=decision.response or "",
-                    usage={},
-                    terminal_event_type=StreamEventType.RUN_FINISHED.value,
-                    terminal_envelope=terminal_envelope,
-                )
-                return {
-                    "content": decision.response or "",
-                    "usage": {},
-                    "contexts": [],
-                    "duration_ms": (time.time() - start_time) * 1000,
-                    "model_id": config.model_id,
-                    "run_id": run_id,
-                    "terminal_envelope": terminal_envelope,
-                    "context_snapshot": context_snapshot,
-                }
-
-        # Retrieve KB context
-        retrieved_contexts: list[RetrievedContext] = []
-        auto_dataset_ids = list(config.kb_dataset_ids or [])
-        auto_retrieval_configs: dict[str, dict[str, Any]] | None = None
-        auto_top_k = config.kb_top_k
-        auto_score_threshold = config.kb_score_threshold
-        auto_include_images = config.kb_include_images
-        if config.agent_runtime is not None:
-            auto_retrieval_configs = {
-                dataset_id: dict(dataset_config)
-                for dataset_id, dataset_config in config.kb_retrieval_configs.items()
-                if dataset_config.get("mode") == "auto"
-                and dataset_id in set(config.kb_dataset_ids or [])
-            }
-            auto_dataset_ids = sorted(auto_retrieval_configs)
-            auto_top_k = max(
-                (dataset_config["top_k"] for dataset_config in auto_retrieval_configs.values()),
-                default=config.kb_top_k,
-            )
-            auto_score_threshold = min(
-                (dataset_config["threshold"] for dataset_config in auto_retrieval_configs.values()),
-                default=config.kb_score_threshold,
-            )
-            auto_include_images = any(
-                dataset_config["include_images"]
-                for dataset_config in auto_retrieval_configs.values()
-            )
-        if config.kb_mode == RAGMode.AUTO and auto_dataset_ids and self.kb_service:
-            retrieval_started = time.time()
-            _record_trace_event(
-                StreamEventType.RAG_RETRIEVAL_STARTED.value,
-                _rag_trace_payload(
-                    query=message,
-                    dataset_ids=auto_dataset_ids,
-                    top_k=auto_top_k,
-                    score_threshold=auto_score_threshold,
-                    include_images=auto_include_images,
-                    started_at=retrieval_started,
-                    retrieval_configs=auto_retrieval_configs,
-                ),
-            )
-            try:
-                retrieved_contexts = await _guard_trace_await(
-                    self._retrieve_context(
-                        user=user,
-                        query=message,
-                        dataset_ids=auto_dataset_ids,
-                        top_k=auto_top_k,
-                        score_threshold=auto_score_threshold,
-                        include_images=auto_include_images,
-                        retrieval_configs=auto_retrieval_configs,
-                    )
-                )
-            except Exception as exc:
-                _record_trace_event(
-                    StreamEventType.RAG_RETRIEVAL_FAILED.value,
-                    _rag_trace_payload(
-                        query=message,
-                        dataset_ids=auto_dataset_ids,
-                        top_k=auto_top_k,
-                        score_threshold=auto_score_threshold,
-                        include_images=auto_include_images,
-                        started_at=retrieval_started,
-                        ended_at=time.time(),
-                        error=exc,
-                        retrieval_configs=auto_retrieval_configs,
-                    ),
-                )
-                raise
-            _record_trace_event(
-                StreamEventType.RAG_RETRIEVAL_COMPLETED.value,
-                _rag_trace_payload(
-                    query=message,
-                    dataset_ids=auto_dataset_ids,
-                    top_k=auto_top_k,
-                    score_threshold=auto_score_threshold,
-                    include_images=auto_include_images,
-                    started_at=retrieval_started,
-                    ended_at=time.time(),
-                    contexts=retrieved_contexts,
-                    retrieval_configs=auto_retrieval_configs,
-                ),
-            )
-            _refresh_context_snapshot(
-                history_count=len(history),
-                message_count=len(history) + 1,
-                retrieved_context_count=len(retrieved_contexts),
-                domain_policy_enabled=bool(domain_policy),
-            )
-
-        if domain_policy:
-            ctx_payload = [
-                {
-                    "dataset_id": ctx.dataset_id,
-                    "dataset_name": ctx.dataset_name,
-                    "chunks": ctx.chunks,
-                }
-                for ctx in retrieved_contexts
-            ]
-            decision = _guard_trace_call(domain_policy.precheck_context, message, ctx_payload)
-            if decision and decision.action == "decline":
-                await _persist_assistant_chat_message(decision.response or "", contexts=ctx_payload)
-                terminal_envelope = _make_terminal_envelope(
-                    status="succeeded",
-                    exit_reason="succeeded",
-                    usage={},
-                )
-                _finish_trace(
-                    status="succeeded",
-                    output_preview=decision.response or "",
-                    usage={},
-                    terminal_event_type=StreamEventType.RUN_FINISHED.value,
-                    terminal_envelope=terminal_envelope,
-                )
-                return {
-                    "content": decision.response or "",
-                    "usage": {},
-                    "contexts": ctx_payload,
-                    "duration_ms": (time.time() - start_time) * 1000,
-                    "model_id": config.model_id,
-                    "run_id": run_id,
-                    "terminal_envelope": terminal_envelope,
-                    "context_snapshot": context_snapshot,
-                }
-
-        # Build messages
-        messages = _guard_trace_call(
-            self._build_messages,
-            message=message,
-            history=history,
             config=config,
-            retrieved_contexts=retrieved_contexts,
-            session_id=session_id,
-            domain_rules=domain_policy.scenario_rules() if domain_policy else "",
-            include_citations=bool(domain_policy),
-            context_packet_receipt=context_packet_receipt,
-            context_cache_scope=_context_receipt_scope(
-                tenant_id=user.tenant_id,
-                user_id=user.user_id,
-                session_id=session_id,
-            ),
-            working_memory_scope=_working_memory_scope(
-                tenant_id=user.tenant_id,
-                user_id=user.user_id,
-                session_id=session_id,
-            ),
+            history=history,
+            persist_messages=persist_messages,
         )
-        _refresh_context_snapshot(
-            history_count=len(history),
-            message_count=len(messages),
-            retrieved_context_count=len(retrieved_contexts),
-            domain_policy_enabled=bool(domain_policy),
-        )
+        elapsed_ms = turn.duration_ms or (time.time() - started_at) * 1000
+        if turn.status in {"failed", "cancelled"}:
+            raise RuntimeError(turn.error or f"assistant_run_{turn.status}")
 
-        # Get response
-        model_started = time.time()
-        turn_kernel.transition(TurnState.MODEL_RUNNING, reason="model_invocation_started")
-        packet_output_reserve = int(
-            (context_packet_receipt.get("model_boundary") or {}).get("reserved_output_tokens", 0)
-            or 0
-        )
-        effective_max_tokens = config.max_tokens
-        if packet_output_reserve > 0:
-            effective_max_tokens = min(
-                int(config.max_tokens or packet_output_reserve),
-                packet_output_reserve,
-            )
-        try:
-            content, usage = await self.model_registry.chat(
-                model_id=config.model_id,
-                messages=messages,
-                temperature=config.temperature,
-                max_tokens=effective_max_tokens,
-            )
-        except Exception as exc:
-            terminal_envelope = _make_terminal_envelope(
-                status="failed",
-                exit_reason="model_error",
-                error=exc,
-            )
-            _finish_trace(
-                status="failed",
-                error=exc,
-                terminal_event_type=StreamEventType.RUN_ERROR.value,
-                terminal_envelope=terminal_envelope,
-            )
-            raise
-        self.trace_writer.record_span(
-            ctx=trace_ctx,
-            span_key="non_stream:model_invocation",
-            span_kind="model_invocation",
-            name="non_stream_model_invocation",
-            status="succeeded",
-            sequence_no=_next_trace_sequence(),
-            started_at=model_started,
-            ended_at=time.time(),
-            input_preview=message,
-            output_preview=content,
-            attributes={"model_id": config.model_id, "provider": provider},
-        )
-
-        if domain_policy:
-            content = domain_policy.sanitize_answer(content)
-            issues = domain_policy.validate_answer(content)
-            if issues:
-                context_text = self._format_context(
-                    retrieved_contexts,
-                    include_citations=True,
-                )
-                repaired = await _guard_trace_await(
-                    self._repair_with_policy(
-                        policy=domain_policy,
-                        user_message=message,
-                        context_text=context_text,
-                        answer=content,
-                        model_id=config.model_id,
-                        temperature=min(config.temperature, 0.3),
-                        max_tokens=config.max_tokens,
-                        issues=issues,
-                        context_packet_receipt=context_packet_receipt,
-                    )
-                )
-                _refresh_context_snapshot(
-                    history_count=len(history),
-                    message_count=len(messages),
-                    retrieved_context_count=len(retrieved_contexts),
-                    domain_policy_enabled=True,
-                )
-                repaired = domain_policy.sanitize_answer(repaired)
-                if not domain_policy.validate_answer(repaired):
-                    content = repaired
-
-        elapsed_ms = (time.time() - start_time) * 1000
-
-        # Record usage to database for billing/analytics
-        if usage:
-            input_tokens = usage.get("input_tokens", 0)
-            output_tokens = usage.get("output_tokens", 0)
+        input_tokens = int(turn.usage.get("input_tokens", 0) or 0)
+        output_tokens = int(turn.usage.get("output_tokens", 0) or 0)
+        if turn.usage:
             try:
-                usage_recorder = self.usage_recorder
-                await usage_recorder.record_usage(
+                await self.usage_recorder.record_usage(
                     tenant_id=user.tenant_id,
                     user_id=user.user_id,
                     model=config.model_id,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     service_id="__builtin_assistant__",
-                    provider=config.model_provider.value,
+                    provider=getattr(config.model_provider, "value", str(config.model_provider)),
                     latency_ms=int(elapsed_ms),
                     request_type="chat",
                     metadata={
                         "session_id": session_id,
-                        "kb_datasets": config.kb_dataset_ids if retrieved_contexts else [],
+                        "kb_datasets": config.kb_dataset_ids if turn.contexts else [],
                     },
                 )
-                logger.debug(f"Recorded usage: {usage} for user {user.user_id}")
-            except Exception as e:
-                logger.warning(f"Failed to record usage: {e}")
-
-            # Update real-time metrics in Redis for dashboard
+            except Exception as exc:
+                logger.warning("Failed to record collected turn usage: %s", exc)
             try:
-                realtime_metrics = self.realtime_metrics
-                if realtime_metrics and (input_tokens > 0 or output_tokens > 0):
-                    await realtime_metrics.record_token_usage(input_tokens, output_tokens)
-                    logger.debug(
-                        f"Updated realtime token metrics: input={input_tokens}, output={output_tokens}"
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to update realtime metrics: {e}")
-
-        finalization_started = time.time()
-        await _persist_assistant_chat_message(
-            content,
-            contexts=[
-                {
-                    "dataset_id": ctx.dataset_id,
-                    "dataset_name": ctx.dataset_name,
-                }
-                for ctx in retrieved_contexts
-            ],
-        )
-        self.trace_writer.record_span(
-            ctx=trace_ctx,
-            span_key="non_stream:response_finalization",
-            span_kind="response_finalization",
-            name="non_stream_response_finalization",
-            status="succeeded",
-            sequence_no=_next_trace_sequence(),
-            started_at=finalization_started,
-            ended_at=time.time(),
-            output_preview=content,
-            attributes={"persist_messages": persist_messages},
-        )
-        terminal_envelope = _make_terminal_envelope(
-            status="succeeded",
-            exit_reason="succeeded",
-            usage=usage,
-        )
-        _finish_trace(
-            status="succeeded",
-            output_preview=content,
-            usage=usage,
-            terminal_event_type=StreamEventType.RUN_FINISHED.value,
-            terminal_envelope=terminal_envelope,
-        )
+                if input_tokens > 0 or output_tokens > 0:
+                    await self.realtime_metrics.record_token_usage(input_tokens, output_tokens)
+            except Exception as exc:
+                logger.warning("Failed to update collected turn metrics: %s", exc)
 
         return {
-            "content": content,
-            "usage": usage,
-            "contexts": [
-                {
-                    "dataset_id": ctx.dataset_id,
-                    "dataset_name": ctx.dataset_name,
-                    "chunks": ctx.chunks,
-                }
-                for ctx in retrieved_contexts
-            ],
+            "content": turn.content,
+            "usage": turn.usage,
+            "contexts": turn.contexts,
             "duration_ms": elapsed_ms,
             "model_id": config.model_id,
-            "run_id": run_id,
-            "terminal_envelope": terminal_envelope,
-            "context_snapshot": context_snapshot,
+            "session_id": session_id,
+            "run_id": turn.run_id,
+            "status": turn.status,
+            "terminal_envelope": turn.terminal_envelope,
+            "context_snapshot": turn.context_snapshot,
+            "approval_required": turn.blocked_event,
+            "run_budget": turn.budget_termination,
         }
 
     async def _retrieve_context(
@@ -2045,12 +1349,57 @@ Please use this web search context to inform your response when relevant."""
         retrieval_configs: dict[str, dict[str, Any]] | None = None,
     ) -> list[RetrievedContext]:
         """Retrieve context from knowledge bases - PARALLEL retrieval for performance."""
+        if (
+            not isinstance(query, str)
+            or not query.strip()
+            or len(query) > 4096
+            or not isinstance(dataset_ids, list)
+            or len(dataset_ids) > 8
+            or any(
+                not isinstance(dataset_id, str)
+                or not dataset_id.strip()
+                or len(dataset_id) > 128
+                for dataset_id in dataset_ids
+            )
+            or len(set(dataset_ids)) != len(dataset_ids)
+            or isinstance(top_k, bool)
+            or not isinstance(top_k, int)
+            or not 1 <= top_k <= 20
+            or isinstance(score_threshold, bool)
+            or not isinstance(score_threshold, (int, float))
+            or not 0 <= float(score_threshold) <= 1
+            or not isinstance(include_images, bool)
+            or include_images
+        ):
+            raise ValueError("KNOWLEDGE_RETRIEVAL_CONFIG_INVALID")
         logger.info(
             f"_retrieve_context called with datasets={dataset_ids}, query='{query[:50]}...'"
         )
 
-        if retrieval_configs is not None and set(retrieval_configs) != set(dataset_ids):
+        if retrieval_configs is not None and (
+            not isinstance(retrieval_configs, dict)
+            or set(retrieval_configs) != set(dataset_ids)
+        ):
             raise ValueError("AGENT_KNOWLEDGE_CONFIG_INVALID")
+        if retrieval_configs is not None and any(
+            not isinstance(config, dict) or config.get("include_images")
+            for config in retrieval_configs.values()
+        ):
+            raise ValueError("AGENT_KNOWLEDGE_CONFIG_INVALID")
+        if retrieval_configs is not None:
+            for config in retrieval_configs.values():
+                sealed_top_k = config.get("top_k")
+                sealed_threshold = config.get("threshold")
+                if (
+                    config.get("mode") != "auto"
+                    or isinstance(sealed_top_k, bool)
+                    or not isinstance(sealed_top_k, int)
+                    or not 1 <= sealed_top_k <= 20
+                    or isinstance(sealed_threshold, bool)
+                    or not isinstance(sealed_threshold, (int, float))
+                    or not 0 <= float(sealed_threshold) <= 1
+                ):
+                    raise ValueError("AGENT_KNOWLEDGE_CONFIG_INVALID")
 
         async def retrieve_single_dataset(dataset_id: str) -> RetrievedContext | None:
             """Retrieve from a single dataset - designed for parallel execution."""
@@ -2060,8 +1409,6 @@ Please use this web search context to inform your response when relevant."""
                 sealed_config = (
                     retrieval_configs[dataset_id] if retrieval_configs is not None else None
                 )
-                if sealed_config is not None and sealed_config.get("mode") != "auto":
-                    raise ValueError("AGENT_KNOWLEDGE_CONFIG_INVALID")
                 effective_top_k = (
                     int(sealed_config["top_k"]) if sealed_config is not None else top_k
                 )
@@ -2070,32 +1417,14 @@ Please use this web search context to inform your response when relevant."""
                     if sealed_config is not None
                     else score_threshold
                 )
-                effective_include_images = (
-                    bool(sealed_config["include_images"])
-                    if sealed_config is not None
-                    else include_images
+                results, meta = await self.kb_service.retrieve(
+                    user=user,
+                    dataset_id=dataset_id,
+                    query=query,
+                    top_k=effective_top_k,
+                    score_threshold=effective_threshold,
+                    include_images=False,
                 )
-                # Use retrieve_with_images if available and requested
-                if effective_include_images and hasattr(self.kb_service, "retrieve_with_images"):
-                    results, meta = await self.kb_service.retrieve_with_images(
-                        user=user,
-                        dataset_id=dataset_id,
-                        query=query,
-                        top_k=effective_top_k,
-                        score_threshold=effective_threshold,
-                        include_images=True,
-                        image_boost=3.0,
-                        use_separate_thresholds=True,
-                        image_score_threshold=0.3,
-                    )
-                else:
-                    results, meta = await self.kb_service.retrieve(
-                        user=user,
-                        dataset_id=dataset_id,
-                        query=query,
-                        top_k=effective_top_k,
-                        score_threshold=effective_threshold,
-                    )
 
                 took_ms = (time.time() - start) * 1000
                 # Debug: Log content types and image_url presence
@@ -2131,8 +1460,6 @@ Please use this web search context to inform your response when relevant."""
                     )
                     if source_url:
                         chunk["source_url"] = source_url
-                    if r.image_url:
-                        chunk["image_url"] = r.image_url
                     chunks.append(chunk)
 
                 if chunks:
@@ -2173,6 +1500,7 @@ Please use this web search context to inform your response when relevant."""
         message: str,
         config: AssistantConfig,
         history: list[dict[str, str]] | None = None,
+        persist_messages: bool = True,
     ) -> AsyncIterator[AssistantStreamEvent]:
         """
         Execute using the unified 8-step AgentLoop.
@@ -2194,6 +1522,7 @@ Please use this web search context to inform your response when relevant."""
             AssistantStreamEvent objects
         """
         from .agent.agent_loop import AgentLoop, AgentLoopConfig
+        from .run_budget import RunBudgetLimits
 
         # Create AgentLoop configuration. Streaming-first is the only path
         # — the legacy 8-step pipeline was removed.
@@ -2206,6 +1535,25 @@ Please use this web search context to inform your response when relevant."""
             scope=context_cache_scope,
             model_id=config.model_id,
         )
+        legacy_budget = RunBudgetLimits.from_legacy(
+            max_tool_iterations=5,
+            max_concurrent_tools=config.max_parallel_tools,
+        )
+        kb_retrieval_configs = {
+            str(dataset_id): dict(dataset_config)
+            for dataset_id, dataset_config in config.kb_retrieval_configs.items()
+        }
+        if config.kb_mode is RAGMode.AUTO:
+            for dataset_id in config.kb_dataset_ids:
+                kb_retrieval_configs.setdefault(
+                    str(dataset_id),
+                    {
+                        "mode": "auto",
+                        "top_k": config.kb_top_k,
+                        "threshold": config.kb_score_threshold,
+                        "include_images": config.kb_include_images,
+                    },
+                )
         loop_config = AgentLoopConfig(
             model_id=config.model_id,
             temperature=config.temperature,
@@ -2226,18 +1574,21 @@ Please use this web search context to inform your response when relevant."""
             # Boundary fields retained for AssistantConfig parity with the frontend;
             # most are no-ops internally now that the legacy 8-step path is gone.
             enable_task_planning=config.enable_task_planning,
+            confirm_plan=config.confirm_plan,
             enable_scenario_retrieval=config.use_scenario_retrieval,
             enable_rag_metrics=config.enable_rag_metrics,
             enable_memory_loading=config.enable_memory_loading,
             enable_react_loop=config.enable_react_loop,
             kb_dataset_ids=config.kb_dataset_ids,
-            kb_retrieval_configs=config.kb_retrieval_configs,
+            kb_retrieval_configs=kb_retrieval_configs,
             kb_mode=getattr(config.kb_mode, "value", str(config.kb_mode)),
             kb_top_k=config.kb_top_k,
             kb_min_relevance=config.kb_score_threshold,
             kb_include_images=config.kb_include_images,
-            max_tool_iterations=5,  # Reasonable limit for tool iterations
+            max_tool_iterations=5,
             max_concurrent_tools=config.max_parallel_tools,
+            run_budget_limits=legacy_budget,
+            persist_messages=persist_messages,
             execution_profile=config.execution_profile,
             memory_mode=config.memory_mode,
             os_agent_enabled=config.os_agent_enabled,
@@ -2262,9 +1613,8 @@ Please use this web search context to inform your response when relevant."""
 
         logger.info(f"[AGENT LOOP] streaming-first model={loop_config.model_id}")
 
-        # Create AgentLoop instance (system_prompt passed via loop_config)
-        from .tool_invoker import create_tool_invoker
-
+        # Create AgentLoop instance (system_prompt passed via loop_config).
+        # Heavy runtime dependencies are process-scoped and injected here.
         agent_loop = AgentLoop(
             model_registry=self.model_registry,
             kb_service=self.kb_service,
@@ -2276,12 +1626,10 @@ Please use this web search context to inform your response when relevant."""
             request_router=self.request_router,
             database=self.db,
             trace_writer=self.trace_writer,
-            tool_invoker=create_tool_invoker(
-                tenant_tool_policy=self.tenant_tool_policy,
-                tenant_mcp_config=self.tenant_mcp_config,
-                mcp_runtime=self.mcp_runtime,
-                tool_audit=self.tool_audit,
-            ),
+            runtime_adapter=self.runtime_adapter,
+            tool_invoker=self.tool_invoker,
+            task_planner=self.task_planner,
+            runtime_adapter_unavailable=self.runtime_adapter_unavailable,
         )
 
         # Load history if not provided
@@ -2346,73 +1694,10 @@ Please use this web search context to inform your response when relevant."""
                 )
                 continue
 
-            # Handle tool_call_started -> tool_call_start (AG-UI compatible)
-            if event.event_type == "tool_call_started":
-                data = event.data if isinstance(event.data, dict) else {}
-                # Parse arguments string to dict for frontend display
-                args_str = data.get("arguments", "{}")
-                try:
-                    import json
-
-                    args_dict = json.loads(args_str) if args_str else {}
-                except (json.JSONDecodeError, TypeError):
-                    args_dict = {"raw": args_str} if args_str else {}
-                yield AssistantStreamEvent(
-                    event_type=StreamEventType.TOOL_CALL_START.value,
-                    data={
-                        "tool_call_id": data.get("tool_id", ""),
-                        "tool_name": data.get("tool_name", ""),
-                        "arguments": args_dict,  # Include parsed arguments for card display
-                        "step_id": data.get("step_id"),
-                        "timestamp": event.timestamp,
-                    },
-                )
-                continue
-
-            # Handle tool_call_completed -> tool_call_end + tool_call_result (AG-UI compatible)
-            if event.event_type == "tool_call_completed":
-                data = event.data if isinstance(event.data, dict) else {}
-                tool_call_id = data.get("tool_id", "")
-                tool_name = data.get("tool_name", "")
-                metadata = data.get("metadata", {})
-                total_results = (
-                    metadata.get("total_results") if isinstance(metadata, dict) else None
-                )
-                duration_ms = data.get("duration_ms")
-                if duration_ms is None and isinstance(metadata, dict):
-                    duration_ms = metadata.get("duration_ms")
-                meta_keys = list(metadata.keys()) if isinstance(metadata, dict) else None
-                # Avoid logging large/sensitive metadata payloads (e.g. KB chunks, web snippets).
-                logger.info(
-                    "[TOOL_CALL_COMPLETED] tool=%s total_results=%s duration_ms=%s metadata_keys=%s",
-                    tool_name,
-                    total_results,
-                    duration_ms,
-                    meta_keys,
-                )
-                # Send tool_call_end event
-                yield AssistantStreamEvent(
-                    event_type=StreamEventType.TOOL_CALL_END.value,
-                    data={
-                        "tool_call_id": tool_call_id,
-                        "timestamp": event.timestamp,
-                    },
-                )
-                # Send tool_call_result event with metadata for frontend display
-                yield AssistantStreamEvent(
-                    event_type=StreamEventType.TOOL_CALL_RESULT.value,
-                    data={
-                        "tool_call_id": tool_call_id,
-                        "tool_name": tool_name,
-                        "result": data.get("result_preview", ""),
-                        "success": data.get("success", True),
-                        "result_count": metadata.get(
-                            "total_results"
-                        ),  # For KB/Web search result count
-                        "duration_ms": duration_ms,
-                        "timestamp": event.timestamp,
-                    },
-                )
+            # Canonical lifecycle events are emitted directly by AgentLoop.
+            # Suppress rolling-upgrade aliases so public consumers see one
+            # start/result/end per tool call.
+            if event.event_type in {"tool_call_started", "tool_call_completed"}:
                 continue
 
             # Convert AgentLoopEvent to AssistantStreamEvent

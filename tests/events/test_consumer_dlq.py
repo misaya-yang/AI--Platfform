@@ -12,9 +12,9 @@ Scenario:
    - appear in ``{stream}:dlq`` with ``original_id`` + ``error`` +
      ``attempts`` fields.
 
-We patch ``RECLAIM_IDLE_MS`` to 0 so reclaiming is immediate, and use
-``IdempotencyStore`` with a fresh consumer_name per attempt so the
-dedupe table doesn't short-circuit retries (each fake worker is "new").
+We patch ``RECLAIM_IDLE_MS`` to 0 so reclaiming is immediate. Retries use
+the same consumer name: the consumer must release its failed idempotency
+claim, otherwise the second delivery would be skipped and ACKed.
 """
 
 from __future__ import annotations
@@ -61,15 +61,15 @@ async def test_handler_failures_route_to_dlq(
             raise _BoomError("nope")
 
         stream = STREAM_NAMES["usage.recorded.v1"]
-        # Share a single IdempotencyStore so retries to the same
-        # consumer_name don't cache-hit each other. We bypass the cache
-        # by using a fresh consumer_name per attempt below.
+        # Reuse the same consumer identity to reproduce a normal worker
+        # restart. The failed handler must release the idempotency claim so
+        # the reclaimed message is actually retried.
         for attempt in range(3):
             consumer = EventConsumer(
                 "redis://unused",
                 stream=stream,
                 group="dlq-group",
-                consumer_name=f"worker-{attempt}",
+                consumer_name="worker-0",
                 handler=boom,
                 client=fake_redis,
                 idempotency=IdempotencyStore(fake_redis, prefix="t-idem"),

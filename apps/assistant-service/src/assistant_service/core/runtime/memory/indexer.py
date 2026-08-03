@@ -176,7 +176,7 @@ class MemoryIndexer:
         lock_key = "assistant-memory-source:" + hashlib.sha256(scope).hexdigest()
         async with pool.acquire() as connection:
             await connection.execute(
-                "SELECT pg_advisory_lock(hashtextextended($1, 0))",
+                "SELECT pg_advisory_lock(hashtextextended($1::text, 0::bigint))",
                 lock_key,
             )
             try:
@@ -184,7 +184,7 @@ class MemoryIndexer:
             finally:
                 unlock_task = asyncio.create_task(
                     connection.execute(
-                        "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
+                        "SELECT pg_advisory_unlock(hashtextextended($1::text, 0::bigint))",
                         lock_key,
                     )
                 )
@@ -309,7 +309,10 @@ class MemoryIndexer:
             INSERT INTO assistant_memory_sources (
                 source_id, tenant_id, user_id, source_path, source_type,
                 content_hash, metadata, updated_at, created_at
-            ) VALUES ($1, $2, $3, $4, $5, md5($6), $7, $8, NOW())
+            ) VALUES (
+                $1::uuid, $2::varchar, $3::varchar, $4::text, $5::varchar,
+                md5($6::text), $7::jsonb, $8::timestamptz, NOW()
+            )
             ON CONFLICT (tenant_id, user_id, source_path)
             DO UPDATE SET
                 source_type = EXCLUDED.source_type,
@@ -354,8 +357,8 @@ class MemoryIndexer:
                         SELECT 1
                         FROM assistant_memory_chunks completed_chunk
                         WHERE completed_chunk.source_id = assistant_memory_sources.source_id
-                          AND completed_chunk.tenant_id = $2
-                          AND completed_chunk.user_id = $3
+                          AND completed_chunk.tenant_id = $2::varchar
+                          AND completed_chunk.user_id = $3::varchar
                     )
                     AND NULLIF(
                         assistant_memory_sources.metadata->>'deletion_completed_at',
@@ -399,11 +402,11 @@ class MemoryIndexer:
                 UPDATE assistant_memory_sources
                 SET metadata = metadata - 'indexing_token',
                     updated_at = NOW()
-                WHERE source_id = $1
-                  AND tenant_id = $2
-                  AND user_id = $3
-                  AND source_path = $4
-                  AND metadata->>'indexing_token' = $5
+                WHERE source_id = $1::uuid
+                  AND tenant_id = $2::varchar
+                  AND user_id = $3::varchar
+                  AND source_path = $4::text
+                  AND metadata->>'indexing_token' = $5::text
                 """,
                 source_id,
                 tenant_id,
@@ -430,9 +433,9 @@ class MemoryIndexer:
         await database.execute(
             """
             DELETE FROM assistant_memory_chunks
-            WHERE source_id = $1
-              AND tenant_id = $2
-              AND user_id = $3
+            WHERE source_id = $1::uuid
+              AND tenant_id = $2::varchar
+              AND user_id = $3::varchar
             """,
             source_id,
             tenant_id,
@@ -468,18 +471,21 @@ class MemoryIndexer:
                 start_line, end_line, content, token_estimate, metadata,
                 created_at, updated_at
             )
-            SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW()
+            SELECT
+                $1::uuid, $2::uuid, $3::varchar, $4::varchar,
+                $5::integer, $6::integer, $7::integer, $8::text,
+                $9::integer, $10::jsonb, NOW(), NOW()
             WHERE EXISTS (
                 SELECT 1
                 FROM assistant_memory_sources s
-                WHERE s.source_id = $2
-                  AND s.tenant_id = $3
-                  AND s.user_id = $4
+                WHERE s.source_id = $2::uuid
+                  AND s.tenant_id = $3::varchar
+                  AND s.user_id = $4::varchar
                   AND LOWER(COALESCE(
                       s.metadata->>'deletion_pending',
                       'false'
                   )) <> 'true'
-                  AND s.metadata->>'indexing_token' = $11
+                  AND s.metadata->>'indexing_token' = $11::text
             )
         """
         if hasattr(database, "executemany"):
@@ -530,10 +536,10 @@ class MemoryIndexer:
                                 true
                             ),
                             updated_at = NOW()
-                        WHERE source_id = $1
-                          AND tenant_id = $2
-                          AND user_id = $3
-                          AND metadata->>'indexing_token' = $4
+                        WHERE source_id = $1::uuid
+                          AND tenant_id = $2::varchar
+                          AND user_id = $3::varchar
+                          AND metadata->>'indexing_token' = $4::text
                         """,
                         source_id,
                         tenant_id,
@@ -583,10 +589,10 @@ class MemoryIndexer:
                                     true
                                 ),
                                 updated_at = NOW()
-                            WHERE source_id = $1
-                              AND tenant_id = $2
-                              AND user_id = $3
-                              AND metadata->>'indexing_token' = $4
+                            WHERE source_id = $1::uuid
+                              AND tenant_id = $2::varchar
+                              AND user_id = $3::varchar
+                              AND metadata->>'indexing_token' = $4::text
                             """,
                             source_id,
                             tenant_id,
@@ -618,9 +624,9 @@ class MemoryIndexer:
             await database.execute(
                 """
                 DELETE FROM assistant_memory_chunks
-                WHERE source_id = $1
-                  AND tenant_id = $2
-                  AND user_id = $3
+                WHERE source_id = $1::uuid
+                  AND tenant_id = $2::varchar
+                  AND user_id = $3::varchar
                 """,
                 source_id,
                 tenant_id,
@@ -648,11 +654,11 @@ class MemoryIndexer:
             """
             SELECT source_id
             FROM assistant_memory_sources
-            WHERE source_id = $1
-              AND tenant_id = $2
-              AND user_id = $3
+            WHERE source_id = $1::uuid
+              AND tenant_id = $2::varchar
+              AND user_id = $3::varchar
               AND LOWER(COALESCE(metadata->>'deletion_pending', 'false')) <> 'true'
-              AND metadata->>'indexing_token' = $4
+              AND metadata->>'indexing_token' = $4::text
             """,
             source_id,
             tenant_id,
@@ -799,7 +805,8 @@ class MemoryIndexer:
                     source_id, tenant_id, user_id, source_path, source_type,
                     content_hash, metadata, updated_at, created_at
                 ) VALUES (
-                    $1, $2, $3, $4, 'deletion_tombstone', md5(''),
+                    $1::uuid, $2::varchar, $3::varchar, $4::text,
+                    'deletion_tombstone', md5(''),
                     jsonb_build_object(
                         'deletion_pending', true,
                         'deletion_completed', false,
@@ -973,9 +980,9 @@ class MemoryIndexer:
                 await database.execute(
                     """
                     DELETE FROM assistant_memory_chunks
-                    WHERE source_id = $1
-                      AND tenant_id = $2
-                      AND user_id = $3
+                    WHERE source_id = $1::uuid
+                      AND tenant_id = $2::varchar
+                      AND user_id = $3::varchar
                     """,
                     source_id,
                     tenant_id,
@@ -1108,10 +1115,10 @@ class MemoryIndexer:
                             'vector_points_remaining', 0
                         ),
                         updated_at = NOW()
-                    WHERE source_id = $1
-                      AND tenant_id = $2
-                      AND user_id = $3
-                      AND source_path = $4
+                    WHERE source_id = $1::uuid
+                      AND tenant_id = $2::varchar
+                      AND user_id = $3::varchar
+                      AND source_path = $4::text
                       AND LOWER(COALESCE(
                           metadata->>'deletion_pending',
                           'false'
@@ -1121,8 +1128,8 @@ class MemoryIndexer:
                           SELECT 1
                           FROM assistant_memory_chunks chunk
                           WHERE chunk.source_id = assistant_memory_sources.source_id
-                            AND chunk.tenant_id = $2
-                            AND chunk.user_id = $3
+                            AND chunk.tenant_id = $2::varchar
+                            AND chunk.user_id = $3::varchar
                       )
                     RETURNING source_id, metadata
                     """,
@@ -1229,9 +1236,9 @@ class MemoryIndexer:
                          )
                    ) AS owner_proven
             FROM assistant_memory_sources source
-            WHERE source.tenant_id = $1
-              AND source.user_id = $2
-              AND source.metadata->>'deletion_source_handle' = $3
+            WHERE source.tenant_id = $1::varchar
+              AND source.user_id = $2::varchar
+              AND source.metadata->>'deletion_source_handle' = $3::text
               AND LOWER(COALESCE(
                   source.metadata->>'deletion_pending',
                   'false'
@@ -1291,11 +1298,11 @@ class MemoryIndexer:
                          )
                    ) AS owner_proven
             FROM assistant_memory_sources source
-            WHERE source.tenant_id = $1
-              AND source.user_id = $2
+            WHERE source.tenant_id = $1::varchar
+              AND source.user_id = $2::varchar
               AND COALESCE(source.metadata->>'deletion_pending', 'false') = 'true'
               AND COALESCE(source.metadata->>'deletion_completed', 'false') <> 'true'
-              AND source.metadata->>'deletion_source_handle' = $3
+              AND source.metadata->>'deletion_source_handle' = $3::text
             """,
             tenant_id,
             user_id,
@@ -1333,8 +1340,8 @@ class MemoryIndexer:
                          )
                    ) AS owner_proven
             FROM assistant_memory_sources source
-            WHERE source.tenant_id = $1
-              AND source.user_id = $2
+            WHERE source.tenant_id = $1::varchar
+              AND source.user_id = $2::varchar
               AND COALESCE(source.metadata->>'deletion_pending', 'false') = 'true'
               AND COALESCE(source.metadata->>'deletion_completed', 'false') <> 'true'
             ORDER BY source.updated_at DESC
@@ -1413,7 +1420,7 @@ class MemoryIndexer:
         user_id: str,
         source_path: str | None = None,
     ) -> list[dict[str, Any]]:
-        path_clause = "AND source.source_path = $3" if source_path is not None else ""
+        path_clause = "AND source.source_path = $3::text" if source_path is not None else ""
         args: tuple[object, ...] = (
             (tenant_id, user_id, source_path) if source_path is not None else (tenant_id, user_id)
         )
@@ -1444,8 +1451,8 @@ class MemoryIndexer:
                          )
                    ) AS owner_proven
             FROM assistant_memory_sources source
-            WHERE source.tenant_id = $1
-              AND source.user_id = $2
+            WHERE source.tenant_id = $1::varchar
+              AND source.user_id = $2::varchar
               {path_clause}
               AND COALESCE(
                   source.metadata->>'deletion_pending',
@@ -1573,11 +1580,11 @@ class MemoryIndexer:
             FROM assistant_memory_sources s
             LEFT JOIN assistant_memory_chunks c
               ON c.source_id = s.source_id
-             AND c.tenant_id = $1
-             AND c.user_id = $2
-            WHERE s.tenant_id = $1
-              AND s.user_id = $2
-              AND s.source_path = $3
+             AND c.tenant_id = $1::varchar
+             AND c.user_id = $2::varchar
+            WHERE s.tenant_id = $1::varchar
+              AND s.user_id = $2::varchar
+              AND s.source_path = $3::text
             """,
             tenant_id,
             user_id,

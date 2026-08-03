@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
+import re as _re
 import time
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -26,9 +28,140 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-import re as _re
-
 _SAFE_COLUMN_RE = _re.compile(r"^[a-z][a-z0-9_]*$")
+INDEX_DELETION_FENCE_KEY = "_index_deletion_fence"
+INDEX_DELETION_FENCE_VERSION = 1
+DOCUMENT_LIFECYCLE_REINDEX_KEY = "_document_lifecycle_reindex"
+DOCUMENT_UPLOAD_GENERATION_KEY = "_document_upload_generation"
+DOCUMENT_UPLOAD_FAILED_KEY = "_document_upload_failed"
+CONFLUENCE_SYNC_GENERATION_KEY = "_confluence_sync_generation"
+CONFLUENCE_SYNC_STALE_SECONDS = 3600
+SOURCE_OWNED_DOCUMENT_METADATA_KEYS = frozenset(
+    {
+        DOCUMENT_LIFECYCLE_REINDEX_KEY,
+        DOCUMENT_UPLOAD_GENERATION_KEY,
+        DOCUMENT_UPLOAD_FAILED_KEY,
+        CONFLUENCE_SYNC_GENERATION_KEY,
+        "_confluence_image_source_generation",
+        "_confluence_attachment_manifest",
+        "skipped_confluence_attachments",
+        "original_file_key",
+        "original_filename",
+        "original_mime_type",
+        "processing_mode",
+        "extracted_images",
+        "image_count",
+        "images_embedded",
+        "embedded_image_count",
+        "ocr_processed",
+        "structured_parsing",
+    }
+)
+_INDEX_DELETION_OPERATIONS = frozenset(
+    {"dataset_delete", "document_delete", "segment_delete"}
+)
+
+
+class IndexLeaseUnavailableError(RuntimeError):
+    """A short-lived index lease is busy; callers must defer, not fail work."""
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+    return {}
+
+
+def make_dataset_index_deletion_fence(
+    operation: str,
+    target_id: str,
+) -> dict[str, Any]:
+    """Build one deterministic, target-bound deletion fence marker."""
+
+    normalized_operation = str(operation or "").strip()
+    normalized_target = str(target_id or "").strip()
+    if normalized_operation not in _INDEX_DELETION_OPERATIONS:
+        raise ValueError("unsupported dataset index deletion operation")
+    if not normalized_target:
+        raise ValueError("dataset index deletion target_id is required")
+    return {
+        "operation": normalized_operation,
+        "target_id": normalized_target,
+        "status": "pending",
+        "version": INDEX_DELETION_FENCE_VERSION,
+    }
+
+
+def dataset_index_deletion_fence(dataset: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the validated durable deletion fence, failing closed if malformed."""
+
+    index_config = _json_object(dataset.get("index_config"))
+    retrieval = _json_object(index_config.get("retrieval"))
+    if INDEX_DELETION_FENCE_KEY not in retrieval:
+        return None
+    marker = retrieval.get(INDEX_DELETION_FENCE_KEY)
+    if not isinstance(marker, dict):
+        raise RuntimeError("dataset index deletion fence is malformed")
+    operation = marker.get("operation")
+    target_id = marker.get("target_id")
+    if (
+        operation not in _INDEX_DELETION_OPERATIONS
+        or not isinstance(target_id, str)
+        or not target_id.strip()
+        or marker.get("status") != "pending"
+        or marker.get("version") != INDEX_DELETION_FENCE_VERSION
+    ):
+        raise RuntimeError("dataset index deletion fence is malformed")
+    return make_dataset_index_deletion_fence(operation, target_id)
+
+
+def index_config_has_reserved_deletion_fence(index_config: Any) -> bool:
+    """Return whether caller-controlled config contains the internal marker key."""
+
+    retrieval = _json_object(_json_object(index_config).get("retrieval"))
+    return INDEX_DELETION_FENCE_KEY in retrieval
+
+
+def dataset_ingestion_identity(dataset: dict[str, Any]) -> str:
+    """Hash the dataset choices that determine persisted index generations.
+
+    Retrieval-only tuning is intentionally excluded: it can be changed without
+    rebuilding chunks or dense vectors. The hash keeps credential-bearing
+    embedding configuration out of logs and exception messages.
+    """
+
+    index_config = _json_object(dataset.get("index_config"))
+    payload = {
+        "tenant_id": str(dataset.get("tenant_id") or ""),
+        "collection_name": str(dataset.get("collection_name") or ""),
+        "embedding_provider": str(dataset.get("embedding_provider") or ""),
+        "embedding_model": str(dataset.get("embedding_model") or ""),
+        "embedding_dimension": int(dataset.get("embedding_dimension") or 0),
+        "embedding_config": _json_object(dataset.get("embedding_config")),
+        "ingestion_index_config": {
+            key: value for key, value in index_config.items() if key != "retrieval"
+        },
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _dataset_lexical_active_version(dataset: dict[str, Any]) -> str:
+    index_config = _json_object(dataset.get("index_config"))
+    retrieval = _json_object(index_config.get("retrieval"))
+    lexical = _json_object(retrieval.get("lexical"))
+    return str(lexical.get("active_version") or "lexical_v1")
 
 
 def _validate_column_name(name: str) -> str:
@@ -1578,6 +1711,113 @@ class DatabaseStorage:
     # Knowledge Base (KBMS)
     # =========================================================================
 
+    async def dataset_exists(self, dataset_id: str) -> bool:
+        """Return whether an ID is reserved by any active or soft-deleted dataset."""
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        async with self._pool.acquire() as conn:
+            return bool(
+                await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM datasets WHERE dataset_id = $1)",
+                    dataset_id,
+                )
+            )
+
+    async def collection_name_in_use(self, collection_name: str) -> bool:
+        """Return whether a Qdrant collection name is already bound to a dataset."""
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        if not collection_name:
+            return False
+        async with self._pool.acquire() as conn:
+            return bool(
+                await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM datasets WHERE collection_name = $1)",
+                    collection_name,
+                )
+            )
+
+    async def _insert_dataset_row(self, conn: Any, dataset: dict[str, Any]) -> Any:
+        return await conn.fetchrow(
+            """
+            INSERT INTO datasets (
+                dataset_id, name, description, tenant_id, visibility,
+                embedding_provider, embedding_model, embedding_dimension,
+                embedding_config, index_config, collection_name,
+                is_deleted, deleted_at, deleted_by, delete_reason,
+                created_by
+            ) VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8,
+                $9, $10, $11,
+                $12, $13, $14, $15,
+                $16
+            )
+            RETURNING dataset_id
+            """,
+            dataset.get("dataset_id"),
+            dataset.get("name"),
+            dataset.get("description"),
+            dataset.get("tenant_id", ""),
+            dataset.get("visibility", "private"),
+            dataset.get("embedding_provider", "gemini"),
+            dataset.get("embedding_model", "gemini-embedding-001"),
+            int(dataset.get("embedding_dimension") or 0) or 1024,
+            json.dumps(dataset.get("embedding_config", {})),
+            json.dumps(dataset.get("index_config", {})),
+            dataset.get("collection_name"),
+            bool(dataset.get("is_deleted", False)),
+            dataset.get("deleted_at"),
+            dataset.get("deleted_by"),
+            dataset.get("delete_reason"),
+            dataset.get("created_by"),
+        )
+
+    async def create_dataset(self, dataset: dict[str, Any]) -> bool:
+        """Insert a new dataset without ever overwriting an existing identity."""
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+
+        try:
+            async with self._pool.acquire() as conn:
+                row = await self._insert_dataset_row(conn, dataset)
+                return row is not None
+        except Exception as exc:
+            if HAS_ASYNCPG and isinstance(exc, asyncpg.UniqueViolationError):
+                return False
+            raise
+
+    async def create_dataset_with_owner(
+        self,
+        dataset: dict[str, Any],
+        owner_user_id: str,
+    ) -> bool:
+        """Atomically insert a dataset and its explicit owner permission."""
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        if not owner_user_id:
+            raise ValueError("owner_user_id is required")
+
+        try:
+            async with self._pool.acquire() as conn, conn.transaction():
+                row = await self._insert_dataset_row(conn, dataset)
+                if row is None:
+                    raise RuntimeError("dataset insert returned no identity")
+                await conn.execute(
+                    """
+                    INSERT INTO dataset_permissions (
+                        dataset_id, subject_type, subject_id, permission
+                    ) VALUES ($1, 'user', $2, 'owner')
+                    """,
+                    dataset.get("dataset_id"),
+                    owner_user_id,
+                )
+                return True
+        except Exception as exc:
+            if HAS_ASYNCPG and isinstance(exc, asyncpg.UniqueViolationError):
+                return False
+            raise
+
     async def save_dataset(self, dataset: dict[str, Any]) -> None:
         """保存或更新知识库 Dataset"""
         if not self._pool:
@@ -1634,6 +1874,752 @@ class DatabaseStorage:
                 dataset.get("created_by"),
             )
 
+    async def patch_dataset_fields(
+        self,
+        dataset_id: str,
+        changes: dict[str, Any],
+        *,
+        expected_config: dict[str, Any] | None = None,
+        require_no_documents: bool = False,
+    ) -> dict[str, Any] | None:
+        """Patch only requested fields, with CAS for retrieval configuration.
+
+        Dataset callers commonly operate on snapshots. Updating the full row
+        from such a snapshot can overwrite a concurrent lexical transition,
+        so this method deliberately rejects unknown columns and never touches
+        fields omitted by the caller. Any embedding/index/collection change
+        must match the caller's complete prior configuration projection.
+        """
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        allowed = (
+            "name",
+            "description",
+            "visibility",
+            "embedding_provider",
+            "embedding_model",
+            "embedding_dimension",
+            "embedding_config",
+            "index_config",
+            "collection_name",
+        )
+        config_fields = {
+            "embedding_provider",
+            "embedding_model",
+            "embedding_dimension",
+            "embedding_config",
+            "index_config",
+            "collection_name",
+        }
+        unknown = sorted(set(changes) - set(allowed))
+        if unknown:
+            raise ValueError(
+                "unsupported dataset update fields: " + ", ".join(unknown)
+            )
+        selected = [field for field in allowed if field in changes]
+        if not selected:
+            return await self.get_dataset(dataset_id)
+
+        expected: dict[str, Any] | None = None
+        if config_fields.intersection(selected):
+            expected = dict(expected_config or {})
+            missing_expected = sorted(config_fields - set(expected))
+            if missing_expected:
+                raise ValueError(
+                    "dataset configuration CAS is missing fields: "
+                    + ", ".join(missing_expected)
+                )
+
+        values: list[Any] = [dataset_id]
+        assignments: list[str] = []
+        for field in selected:
+            value = changes[field]
+            if field in {"embedding_config", "index_config"}:
+                value = json.dumps(value or {})
+                cast = "::jsonb"
+            else:
+                cast = ""
+            values.append(value)
+            assignments.append(f"{field} = ${len(values)}{cast}")
+
+        predicates = ["dataset_id = $1", "is_deleted = FALSE"]
+        if expected is not None:
+            for field in (
+                "embedding_provider",
+                "embedding_model",
+                "embedding_dimension",
+                "embedding_config",
+                "index_config",
+                "collection_name",
+            ):
+                value = expected[field]
+                if field in {"embedding_config", "index_config"}:
+                    value = json.dumps(value or {})
+                    cast = "::jsonb"
+                else:
+                    cast = ""
+                values.append(value)
+                predicates.append(
+                    f"{field} IS NOT DISTINCT FROM ${len(values)}{cast}"
+                )
+        if require_no_documents:
+            predicates.append(
+                "NOT EXISTS (SELECT 1 FROM documents "
+                "WHERE documents.dataset_id = datasets.dataset_id)"
+            )
+
+        async def _patch(conn: Any) -> Any:
+            return await conn.fetchrow(
+                "UPDATE datasets SET "
+                + ", ".join(assignments)
+                + ", updated_at = NOW() WHERE "
+                + " AND ".join(predicates)
+                + " RETURNING *",
+                *values,
+            )
+
+        async with self._pool.acquire() as conn:
+            if require_no_documents:
+                async with conn.transaction():
+                    await conn.fetchval(
+                        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                        self._dataset_index_lock_name(dataset_id),
+                    )
+                    row = await _patch(conn)
+            else:
+                row = await _patch(conn)
+        return self._row_to_dict(row) if row else None
+
+    async def compare_and_swap_dataset_collection_identity(
+        self,
+        dataset_id: str,
+        *,
+        expected_dimension: int,
+        expected_collection_name: str,
+        replacement_dimension: int,
+        replacement_collection_name: str,
+    ) -> bool:
+        """Initialize dimension/collection without overwriting a newer value."""
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.fetchval(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                self._dataset_index_lock_name(dataset_id),
+            )
+            row = await conn.fetchrow(
+                """
+                UPDATE datasets
+                SET embedding_dimension = $4,
+                    collection_name = $5,
+                    updated_at = NOW()
+                WHERE dataset_id = $1
+                  AND is_deleted = FALSE
+                  AND COALESCE(embedding_dimension, 0) = $2
+                  AND COALESCE(collection_name, '') = $3
+                RETURNING dataset_id
+                """,
+                dataset_id,
+                int(expected_dimension or 0),
+                str(expected_collection_name or ""),
+                int(replacement_dimension),
+                replacement_collection_name,
+            )
+        return row is not None
+
+    @staticmethod
+    def _dataset_index_lock_name(dataset_id: str) -> str:
+        normalized = str(dataset_id or "").strip()
+        if not normalized:
+            raise ValueError("dataset_id is required for index locking")
+        return f"knowledge-dataset-index:{normalized}"
+
+    def connection_pool_max_size(self) -> int:
+        """Expose configured capacity for long-lived worker lease admission."""
+
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        getter = getattr(self._pool, "get_max_size", None)
+        if not callable(getter):
+            raise RuntimeError("database pool does not expose its maximum size")
+        return int(getter())
+
+    @staticmethod
+    def _segment_index_lock_name(dataset_id: str, segment_id: str) -> str:
+        normalized_dataset = str(dataset_id or "").strip()
+        normalized_segment = str(segment_id or "").strip()
+        if not normalized_dataset or not normalized_segment:
+            raise ValueError("dataset_id and segment_id are required for segment locking")
+        return f"knowledge-segment-index:{normalized_dataset}:{normalized_segment}"
+
+    @staticmethod
+    def _document_index_lock_name(dataset_id: str, document_id: str) -> str:
+        normalized_dataset = str(dataset_id or "").strip()
+        normalized_document = str(document_id or "").strip()
+        if not normalized_dataset or not normalized_document:
+            raise ValueError("dataset_id and document_id are required for document locking")
+        return f"knowledge-document-index:{normalized_dataset}:{normalized_document}"
+
+    @contextlib.asynccontextmanager
+    async def document_index_update_lease(
+        self,
+        dataset_id: str,
+        document_id: str,
+    ):
+        """Short dataset-shared/document-exclusive cross-replica barrier."""
+
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        dataset_lock_name = self._dataset_index_lock_name(dataset_id)
+        document_lock_name = self._document_index_lock_name(dataset_id, document_id)
+        async with self._pool.acquire() as conn:
+            dataset_acquired = await conn.fetchval(
+                "SELECT pg_try_advisory_lock_shared(hashtextextended($1, 0))",
+                dataset_lock_name,
+            )
+            if dataset_acquired is not True:
+                raise IndexLeaseUnavailableError(
+                    "dataset index deletion is in progress; refusing document index update"
+                )
+            document_acquired = False
+            try:
+                document_acquired = await conn.fetchval(
+                    "SELECT pg_try_advisory_lock(hashtextextended($1, 0))",
+                    document_lock_name,
+                )
+                if document_acquired is not True:
+                    raise IndexLeaseUnavailableError(
+                        "document index update is already in progress"
+                    )
+                yield conn
+            finally:
+                try:
+                    if document_acquired:
+                        document_unlock = asyncio.create_task(
+                            conn.fetchval(
+                                "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
+                                document_lock_name,
+                            )
+                        )
+                        try:
+                            document_released = await asyncio.shield(document_unlock)
+                        except asyncio.CancelledError:
+                            document_released = await document_unlock
+                            raise
+                        if document_released is not True:
+                            raise RuntimeError(
+                                "document index update lease was not released"
+                            )
+                finally:
+                    dataset_unlock = asyncio.create_task(
+                        conn.fetchval(
+                            "SELECT pg_advisory_unlock_shared(hashtextextended($1, 0))",
+                            dataset_lock_name,
+                        )
+                    )
+                    try:
+                        dataset_released = await asyncio.shield(dataset_unlock)
+                    except asyncio.CancelledError:
+                        dataset_released = await dataset_unlock
+                        raise
+                    if dataset_released is not True:
+                        raise RuntimeError(
+                            "dataset shared index lease was not released"
+                        )
+
+    @contextlib.asynccontextmanager
+    async def segment_index_update_lease(
+        self,
+        dataset_id: str,
+        document_id: str,
+        segment_id: str,
+    ):
+        """Lock dataset, document generation, then one segment generation."""
+
+        segment_lock_name = self._segment_index_lock_name(dataset_id, segment_id)
+        async with self.document_index_update_lease(dataset_id, document_id) as conn:
+            segment_acquired = False
+            try:
+                segment_acquired = await conn.fetchval(
+                    "SELECT pg_try_advisory_lock(hashtextextended($1, 0))",
+                    segment_lock_name,
+                )
+                if segment_acquired is not True:
+                    raise IndexLeaseUnavailableError(
+                        "segment index update is already in progress"
+                    )
+                yield conn
+            finally:
+                if segment_acquired:
+                    segment_unlock = asyncio.create_task(
+                        conn.fetchval(
+                            "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
+                            segment_lock_name,
+                        )
+                    )
+                    try:
+                        segment_released = await asyncio.shield(segment_unlock)
+                    except asyncio.CancelledError:
+                        segment_released = await segment_unlock
+                        raise
+                    if segment_released is not True:
+                        raise RuntimeError(
+                            "segment index update lease was not released"
+                        )
+
+    @contextlib.asynccontextmanager
+    async def document_segment_create_lease(
+        self,
+        dataset_id: str,
+        document_id: str,
+    ):
+        """Fence deletion and serialize position allocation for one document."""
+
+        async with self.document_index_update_lease(dataset_id, document_id) as conn:
+            yield conn
+
+    async def claim_document_for_enqueue(
+        self,
+        dataset_id: str,
+        document_id: str,
+    ) -> bool:
+        """Durably move one eligible document into the queued generation."""
+
+        async with self.document_index_update_lease(dataset_id, document_id) as conn:
+            dataset = await self._require_dataset_ingestion_identity(
+                conn,
+                dataset_id,
+                None,
+            )
+            if _dataset_lexical_active_version(dataset) != "lexical_v1":
+                raise RuntimeError(
+                    "bm25_v2 active mode is read-only; refusing document enqueue"
+                )
+            row = await conn.fetchrow(
+                f"""
+                UPDATE documents
+                SET status = 'queued',
+                    progress = 0,
+                    error = NULL,
+                    updated_at = NOW()
+                WHERE document_id = $1
+                  AND dataset_id = $2
+                  AND status IN ('uploaded', 'completed', 'failed')
+                  AND NOT (
+                        COALESCE(metadata, '{{}}'::jsonb)
+                        ? '{DOCUMENT_UPLOAD_GENERATION_KEY}'
+                  )
+                  AND NOT (
+                        COALESCE(metadata, '{{}}'::jsonb)
+                        ? '{DOCUMENT_UPLOAD_FAILED_KEY}'
+                  )
+                  AND NOT (
+                        COALESCE(metadata, '{{}}'::jsonb)
+                        ? '{CONFLUENCE_SYNC_GENERATION_KEY}'
+                  )
+                  AND (
+                        (
+                            COALESCE(enabled, TRUE) = TRUE
+                            AND COALESCE(archived, FALSE) = FALSE
+                            AND NOT (
+                                COALESCE(metadata, '{{}}'::jsonb)
+                                ? '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                            )
+                        )
+                        OR metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                            ->> 'status' = 'pending'
+                            AND metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                                ->> 'desired_enabled' = 'true'
+                            AND metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                                ->> 'desired_archived' = 'false'
+                  )
+                RETURNING document_id
+                """,
+                document_id,
+                dataset_id,
+            )
+            return row is not None
+
+    async def claim_queued_document_for_processing(
+        self,
+        dataset_id: str,
+        document_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> bool:
+        """CAS one durable queued row to processing before consuming it."""
+
+        async def _claim(conn: Any) -> bool:
+            dataset = await self._require_dataset_ingestion_identity(
+                conn,
+                dataset_id,
+                None,
+            )
+            if _dataset_lexical_active_version(dataset) != "lexical_v1":
+                raise RuntimeError(
+                    "bm25_v2 active mode is read-only; refusing document consumer claim"
+                )
+            row = await conn.fetchrow(
+                f"""
+                UPDATE documents
+                SET status = 'processing',
+                    progress = 0,
+                    error = NULL,
+                    updated_at = NOW(),
+                    started_at = COALESCE(started_at, NOW())
+                WHERE document_id = $1
+                  AND dataset_id = $2
+                  AND status = 'queued'
+                  AND NOT (
+                        COALESCE(metadata, '{{}}'::jsonb)
+                        ? '{DOCUMENT_UPLOAD_GENERATION_KEY}'
+                  )
+                  AND NOT (
+                        COALESCE(metadata, '{{}}'::jsonb)
+                        ? '{DOCUMENT_UPLOAD_FAILED_KEY}'
+                  )
+                  AND NOT (
+                        COALESCE(metadata, '{{}}'::jsonb)
+                        ? '{CONFLUENCE_SYNC_GENERATION_KEY}'
+                  )
+                  AND (
+                        (
+                            COALESCE(enabled, TRUE) = TRUE
+                            AND COALESCE(archived, FALSE) = FALSE
+                            AND NOT (
+                                COALESCE(metadata, '{{}}'::jsonb)
+                                ? '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                            )
+                        )
+                        OR (
+                            metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                                ->> 'status' = 'pending'
+                            AND metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                                ->> 'desired_enabled' = 'true'
+                            AND metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                                ->> 'desired_archived' = 'false'
+                        )
+                  )
+                RETURNING document_id
+                """,
+                document_id,
+                dataset_id,
+            )
+            return row is not None
+
+        if connection is not None:
+            return await _claim(connection)
+        async with self.document_index_update_lease(dataset_id, document_id) as conn:
+            return await _claim(conn)
+
+    async def next_segment_position(
+        self,
+        dataset_id: str,
+        document_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> int:
+        """Allocate the next position while the caller holds the document lease."""
+
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+
+        async def _read(conn: Any) -> int:
+            value = await conn.fetchval(
+                """
+                SELECT COALESCE(MAX(position), -1) + 1
+                FROM segments
+                WHERE dataset_id = $1 AND document_id = $2
+                """,
+                dataset_id,
+                document_id,
+            )
+            return int(value or 0)
+
+        if connection is not None:
+            return await _read(connection)
+        async with self._pool.acquire() as conn:
+            return await _read(conn)
+
+    async def _require_dataset_ingestion_identity(
+        self,
+        conn: Any,
+        dataset_id: str,
+        expected_ingestion_identity: str | None,
+    ) -> dict[str, Any]:
+        row = await conn.fetchrow(
+            """
+            SELECT tenant_id, collection_name,
+                   embedding_provider, embedding_model, embedding_dimension,
+                   embedding_config, index_config
+            FROM datasets
+            WHERE dataset_id = $1 AND is_deleted = FALSE
+            """,
+            dataset_id,
+        )
+        if not row:
+            raise RuntimeError(
+                "dataset was deleted before index write; refusing orphan content"
+            )
+        if dataset_index_deletion_fence(dict(row)) is not None:
+            raise RuntimeError(
+                "dataset index deletion is pending; refusing indexed-content access"
+            )
+        if (
+            expected_ingestion_identity is not None
+            and dataset_ingestion_identity(dict(row)) != expected_ingestion_identity
+        ):
+            raise RuntimeError(
+                "dataset ingestion identity changed; refusing a mixed index generation"
+            )
+        return dict(row)
+
+    @contextlib.asynccontextmanager
+    async def dataset_index_write_lease(
+        self,
+        dataset_id: str,
+        document_ids: list[str],
+        *,
+        expected_ingestion_identity: str | None = None,
+    ):
+        """Fence one Qdrant upsert against dataset/document deletion.
+
+        The transaction-scoped shared advisory lock is held across the remote
+        upsert. A writer that encounters an in-progress exclusive deletion
+        fails closed instead of waiting until the deletion has cleared its
+        marker and then recreating a point that was just removed.
+        """
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        lock_name = self._dataset_index_lock_name(dataset_id)
+        normalized_ids = sorted(
+            {
+                str(document_id).strip()
+                for document_id in document_ids
+                if str(document_id).strip()
+            }
+        )
+        async with self._pool.acquire() as conn, conn.transaction():
+            acquired = await conn.fetchval(
+                "SELECT pg_try_advisory_xact_lock_shared(hashtextextended($1, 0))",
+                lock_name,
+            )
+            if acquired is not True:
+                raise RuntimeError(
+                    "dataset index deletion is in progress; refusing a queued "
+                    "vector write"
+                )
+            await self._require_dataset_ingestion_identity(
+                conn,
+                dataset_id,
+                expected_ingestion_identity,
+            )
+            if normalized_ids:
+                count = await conn.fetchval(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM documents
+                    WHERE dataset_id = $1
+                      AND document_id = ANY($2::text[])
+                      AND NOT (
+                            COALESCE(metadata, '{{}}'::jsonb)
+                            ? '{DOCUMENT_UPLOAD_GENERATION_KEY}'
+                      )
+                      AND NOT (
+                            COALESCE(metadata, '{{}}'::jsonb)
+                            ? '{DOCUMENT_UPLOAD_FAILED_KEY}'
+                      )
+                      AND NOT (
+                            COALESCE(metadata, '{{}}'::jsonb)
+                            ? '{CONFLUENCE_SYNC_GENERATION_KEY}'
+                      )
+                      AND (
+                            (
+                                COALESCE(enabled, TRUE) = TRUE
+                                AND COALESCE(archived, FALSE) = FALSE
+                                AND NOT (
+                                    COALESCE(metadata, '{{}}'::jsonb)
+                                    ? '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                                )
+                            )
+                            OR metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                                ->> 'status' = 'pending'
+                                AND metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                                    ->> 'desired_enabled' = 'true'
+                                AND metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                                    ->> 'desired_archived' = 'false'
+                      )
+                    """,
+                    dataset_id,
+                    normalized_ids,
+                )
+                if int(count or 0) != len(normalized_ids):
+                    raise RuntimeError(
+                        "document is missing or inactive before vector write; "
+                        "refusing orphan or disabled points"
+                    )
+            yield
+
+    @contextlib.asynccontextmanager
+    async def dataset_index_delete_lease(self, dataset_id: str):
+        """Exclude centrally routed index writes/schema mutation during deletion.
+
+        This is deliberately a session advisory lock, rather than a
+        transaction-scoped lock. The yielded connection can commit the durable
+        deletion marker before the first remote mutation while retaining the
+        exclusive barrier until the caller finishes or fails.
+        """
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        lock_name = self._dataset_index_lock_name(dataset_id)
+        async with self._pool.acquire() as conn:
+            acquired = False
+            try:
+                acquired = await conn.fetchval(
+                    "SELECT pg_try_advisory_lock(hashtextextended($1, 0))",
+                    lock_name,
+                )
+                if acquired is not True:
+                    raise IndexLeaseUnavailableError(
+                        "dataset index lifecycle work is already in progress"
+                    )
+                yield conn
+            finally:
+                if acquired:
+                    unlock_task = asyncio.create_task(
+                        conn.fetchval(
+                            "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
+                            lock_name,
+                        )
+                    )
+                    try:
+                        unlocked = await asyncio.shield(unlock_task)
+                    except asyncio.CancelledError:
+                        unlocked = await unlock_task
+                        raise
+                    if unlocked is not True:
+                        raise RuntimeError(
+                            "dataset index deletion lease was not released"
+                        )
+
+    async def set_dataset_index_deletion_fence(
+        self,
+        dataset_id: str,
+        *,
+        operation: str,
+        target_id: str,
+        connection: Any,
+    ) -> tuple[dict[str, Any], bool]:
+        """CAS-set a durable deletion marker on the exclusive lease connection.
+
+        An exact same-target retry reuses the existing marker. A different or
+        malformed marker is never overwritten.
+        """
+
+        if connection is None:
+            raise RuntimeError("exclusive dataset deletion lease connection is required")
+        marker = make_dataset_index_deletion_fence(operation, target_id)
+        marker_json = json.dumps(marker, separators=(",", ":"), sort_keys=True)
+        row = await connection.fetchrow(
+            f"""
+            UPDATE datasets
+            SET index_config = jsonb_set(
+                    COALESCE(index_config, '{{}}'::jsonb),
+                    '{{retrieval}}',
+                    CASE
+                        WHEN jsonb_typeof(index_config->'retrieval') = 'object'
+                        THEN index_config->'retrieval'
+                        ELSE '{{}}'::jsonb
+                    END
+                        || jsonb_build_object(
+                            '{INDEX_DELETION_FENCE_KEY}', $2::jsonb
+                        ),
+                    TRUE
+                ),
+                content_revision = COALESCE(content_revision, 0) + 1,
+                updated_at = NOW()
+            WHERE dataset_id = $1
+              AND is_deleted = FALSE
+              AND jsonb_typeof(COALESCE(index_config, '{{}}'::jsonb)) = 'object'
+              AND NOT (
+                  CASE
+                      WHEN jsonb_typeof(index_config->'retrieval') = 'object'
+                      THEN index_config->'retrieval'
+                      ELSE '{{}}'::jsonb
+                  END
+                  ? '{INDEX_DELETION_FENCE_KEY}'
+              )
+            RETURNING *
+            """,
+            dataset_id,
+            marker_json,
+        )
+        if row:
+            created_dataset = self._row_to_dict(row)
+            if dataset_index_deletion_fence(created_dataset) != marker:
+                raise RuntimeError("dataset index deletion fence CAS verification failed")
+            return created_dataset, True
+
+        current = await connection.fetchrow(
+            "SELECT * FROM datasets WHERE dataset_id = $1 AND is_deleted = FALSE",
+            dataset_id,
+        )
+        if not current:
+            raise RuntimeError("dataset was deleted before index deletion")
+        current_dataset = self._row_to_dict(current)
+        existing = dataset_index_deletion_fence(current_dataset)
+        if existing != marker:
+            raise RuntimeError(
+                "another dataset index deletion target is already pending"
+            )
+        return current_dataset, False
+
+    async def clear_dataset_index_deletion_fence(
+        self,
+        dataset_id: str,
+        *,
+        operation: str,
+        target_id: str,
+        connection: Any,
+    ) -> bool:
+        """Clear only the exact marker owned by the successful delete target."""
+
+        if connection is None:
+            raise RuntimeError("exclusive dataset deletion lease connection is required")
+        marker = make_dataset_index_deletion_fence(operation, target_id)
+        marker_json = json.dumps(marker, separators=(",", ":"), sort_keys=True)
+        row = await connection.fetchrow(
+            f"""
+            UPDATE datasets
+            SET index_config = jsonb_set(
+                    COALESCE(index_config, '{{}}'::jsonb),
+                    '{{retrieval}}',
+                    CASE
+                        WHEN jsonb_typeof(index_config->'retrieval') = 'object'
+                        THEN index_config->'retrieval'
+                        ELSE '{{}}'::jsonb
+                    END
+                        - '{INDEX_DELETION_FENCE_KEY}',
+                    TRUE
+                ),
+                content_revision = COALESCE(content_revision, 0) + 1,
+                updated_at = NOW()
+            WHERE dataset_id = $1
+              AND is_deleted = FALSE
+              AND jsonb_typeof(COALESCE(index_config, '{{}}'::jsonb)) = 'object'
+              AND CASE
+                      WHEN jsonb_typeof(index_config->'retrieval') = 'object'
+                      THEN index_config->'retrieval'
+                      ELSE '{{}}'::jsonb
+                  END
+                    ->'{INDEX_DELETION_FENCE_KEY}' = $2::jsonb
+            RETURNING dataset_id
+            """,
+            dataset_id,
+            marker_json,
+        )
+        return row is not None
+
     async def clear_dataset_needs_reindex(self, dataset_id: str) -> None:
         """Clear the needs_reindex flag after successful document reindexing."""
         if not self._pool:
@@ -1651,10 +2637,21 @@ class DatabaseStorage:
             )
             logger.info(f"Cleared needs_reindex flag for dataset {dataset_id}")
 
-    async def get_dataset(self, dataset_id: str) -> dict[str, Any] | None:
+    async def get_dataset(
+        self,
+        dataset_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> dict[str, Any] | None:
         """获取 Dataset"""
         if not self._pool:
             return None
+        if connection is not None:
+            row = await connection.fetchrow(
+                "SELECT * FROM datasets WHERE dataset_id = $1 AND is_deleted = FALSE",
+                dataset_id,
+            )
+            return self._row_to_dict(row) if row else None
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM datasets WHERE dataset_id = $1 AND is_deleted = FALSE", dataset_id
@@ -1701,11 +2698,14 @@ class DatabaseStorage:
         dataset_id: str,
         deleted_by: str | None = None,
         delete_reason: str | None = None,
+        *,
+        connection: Any | None = None,
     ) -> bool:
         """软删除 Dataset，并清理关联数据。"""
         if not self._pool:
             return False
-        async with self._pool.acquire() as conn:
+
+        async def _delete(conn: Any) -> bool:
             async with conn.transaction():
                 target = await conn.fetchrow(
                     """
@@ -1756,6 +2756,11 @@ class DatabaseStorage:
                 await conn.execute("DELETE FROM documents WHERE dataset_id = $1", dataset_id)
 
             return True
+
+        if connection is not None:
+            return await _delete(connection)
+        async with self._pool.acquire() as conn:
+            return await _delete(conn)
 
     async def get_datasets_statistics_batch(
         self, dataset_ids: list[str]
@@ -1870,22 +2875,35 @@ class DatabaseStorage:
             )
             return self._row_to_dict(row) if row else None
 
-    async def save_document(self, document: dict[str, Any]) -> None:
-        """保存或更新文档 Document"""
-        if not self._pool:
-            return
-        async with self._pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO documents (
-                    document_id, dataset_id, title, source_type, source_uri,
-                    mime_type, size_bytes, status, progress, error, content,
-                    metadata, started_at, completed_at
-                ) VALUES (
-                    $1, $2, $3, $4, $5,
-                    $6, $7, $8, $9, $10, $11,
-                    $12, $13, $14
-                )
+    @staticmethod
+    def _document_write_values(document: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            document.get("document_id"),
+            document.get("dataset_id"),
+            document.get("title"),
+            document.get("source_type", "upload"),
+            document.get("source_uri"),
+            document.get("mime_type"),
+            document.get("size_bytes"),
+            document.get("status", "uploaded"),
+            float(document.get("progress", 0) or 0),
+            document.get("error"),
+            document.get("content"),
+            json.dumps(document.get("metadata", {})),
+            document.get("started_at"),
+            document.get("completed_at"),
+        )
+
+    @staticmethod
+    async def _insert_document_row(
+        conn: Any,
+        document: dict[str, Any],
+        *,
+        upsert: bool,
+    ) -> None:
+        conflict_clause = ""
+        if upsert:
+            conflict_clause = """
                 ON CONFLICT (document_id) DO UPDATE SET
                     dataset_id = EXCLUDED.dataset_id,
                     title = EXCLUDED.title,
@@ -1901,9 +2919,153 @@ class DatabaseStorage:
                     started_at = EXCLUDED.started_at,
                     completed_at = EXCLUDED.completed_at,
                     updated_at = NOW()
+            """
+        await conn.execute(
+            """
+                INSERT INTO documents (
+                    document_id, dataset_id, title, source_type, source_uri,
+                    mime_type, size_bytes, status, progress, error, content,
+                    metadata, started_at, completed_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5,
+                    $6, $7, $8, $9, $10, $11,
+                    $12, $13, $14
+                )
+            """
+            + conflict_clause,
+            *DatabaseStorage._document_write_values(document),
+        )
+
+    async def insert_document(
+        self,
+        document: dict[str, Any],
+        *,
+        expected_ingestion_identity: str | None = None,
+    ) -> None:
+        """Create one document generation without conflict resurrection."""
+
+        if not self._pool:
+            return
+        dataset_id = str(document.get("dataset_id") or "").strip()
+        if not dataset_id:
+            raise ValueError("dataset_id is required for fenced document insert")
+
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.fetchval(
+                "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))",
+                self._dataset_index_lock_name(dataset_id),
+            )
+            await self._require_dataset_ingestion_identity(
+                conn,
+                dataset_id,
+                expected_ingestion_identity,
+            )
+            await self._insert_document_row(conn, document, upsert=False)
+
+    async def save_document(
+        self,
+        document: dict[str, Any],
+        *,
+        expected_ingestion_identity: str | None = None,
+    ) -> None:
+        """保存或更新文档 Document。
+
+        New document creation may provide the dataset identity observed by the
+        caller. The shared lifecycle lock and identity check then execute in
+        the same transaction as the INSERT, serializing creation with an
+        identity-changing dataset patch on every replica.
+        """
+        if not self._pool:
+            return
+        dataset_id = str(document.get("dataset_id") or "").strip()
+        if not dataset_id:
+            raise ValueError("dataset_id is required for fenced document save")
+
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.fetchval(
+                "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))",
+                self._dataset_index_lock_name(dataset_id),
+            )
+            await self._require_dataset_ingestion_identity(
+                conn,
+                dataset_id,
+                expected_ingestion_identity,
+            )
+            await self._insert_document_row(conn, document, upsert=True)
+
+    async def finalize_document_upload(
+        self,
+        document: dict[str, Any],
+        *,
+        upload_generation: str,
+        expected_ingestion_identity: str | None = None,
+        connection: Any | None = None,
+    ) -> bool:
+        """CAS-complete the exact upload generation without inserting a row.
+
+        The document owner lease serializes this update with deletion and worker
+        ownership. A missing row, changed status, hidden document, or generation
+        mismatch returns ``False`` and must never be retried as an upsert.
+        """
+
+        if not self._pool:
+            return False
+        document_id = str(document.get("document_id") or "").strip()
+        dataset_id = str(document.get("dataset_id") or "").strip()
+        generation = str(upload_generation or "").strip()
+        if not document_id or not dataset_id or not generation:
+            raise ValueError(
+                "document_id, dataset_id, and upload_generation are required"
+            )
+        metadata = _json_object(document.get("metadata"))
+        metadata.pop(DOCUMENT_UPLOAD_GENERATION_KEY, None)
+
+        async def _finalize(conn: Any) -> bool:
+            await self._require_dataset_ingestion_identity(
+                conn,
+                dataset_id,
+                expected_ingestion_identity,
+            )
+            row = await conn.fetchrow(
+                f"""
+                UPDATE documents
+                SET title = $3,
+                    source_type = $4,
+                    source_uri = $5,
+                    mime_type = $6,
+                    size_bytes = $7,
+                    status = $8,
+                    progress = $9,
+                    error = $10,
+                    content = $11,
+                    metadata = $12::jsonb,
+                    started_at = $13,
+                    completed_at = $14,
+                    updated_at = NOW()
+                WHERE document_id = $1
+                  AND dataset_id = $2
+                  AND status IN (
+                        'uploading', 'uploaded', 'uploading_images', 'embedding_images'
+                  )
+                  AND COALESCE(enabled, TRUE) = TRUE
+                  AND COALESCE(archived, FALSE) = FALSE
+                  AND NOT (
+                        COALESCE(metadata, '{{}}'::jsonb)
+                        ? '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                  )
+                  AND NOT (
+                        COALESCE(metadata, '{{}}'::jsonb)
+                        ? '{DOCUMENT_UPLOAD_FAILED_KEY}'
+                  )
+                  AND NOT (
+                        COALESCE(metadata, '{{}}'::jsonb)
+                        ? '{CONFLUENCE_SYNC_GENERATION_KEY}'
+                  )
+                  AND metadata ->> $15 = $16
+                RETURNING document_id
                 """,
-                document.get("document_id"),
-                document.get("dataset_id"),
+                document_id,
+                dataset_id,
                 document.get("title"),
                 document.get("source_type", "upload"),
                 document.get("source_uri"),
@@ -1913,15 +3075,273 @@ class DatabaseStorage:
                 float(document.get("progress", 0) or 0),
                 document.get("error"),
                 document.get("content"),
-                json.dumps(document.get("metadata", {})),
+                json.dumps(metadata),
                 document.get("started_at"),
                 document.get("completed_at"),
+                DOCUMENT_UPLOAD_GENERATION_KEY,
+                generation,
             )
+            return row is not None
 
-    async def get_document(self, document_id: str) -> dict[str, Any] | None:
+        if connection is not None:
+            return await _finalize(connection)
+        async with self.document_index_update_lease(dataset_id, document_id) as conn:
+            return await _finalize(conn)
+
+    async def begin_confluence_document_sync(
+        self,
+        document_id: str,
+        dataset_id: str,
+        *,
+        generation: str,
+        source_metadata: dict[str, Any],
+        connection: Any,
+    ) -> bool:
+        """Claim an active Confluence document for one durable source generation."""
+
+        normalized_generation = str(generation or "").strip()
+        if not normalized_generation:
+            raise ValueError("Confluence sync generation is required")
+        source = _json_object(source_metadata)
+        reserved = {
+            DOCUMENT_LIFECYCLE_REINDEX_KEY,
+            DOCUMENT_UPLOAD_FAILED_KEY,
+            DOCUMENT_UPLOAD_GENERATION_KEY,
+            CONFLUENCE_SYNC_GENERATION_KEY,
+        }.intersection(source)
+        if reserved:
+            raise ValueError("Confluence source metadata contains a reserved key")
+        source_owner = _json_object(source.get("source_owner"))
+        owner_kind = str(source_owner.get("kind") or "").strip()
+        owner_id = str(source_owner.get("id") or "").strip()
+        if owner_kind not in {"binding", "direct"} or not owner_id:
+            raise ValueError("Confluence source metadata requires a valid source_owner")
+        source["source_owner"] = {"kind": owner_kind, "id": owner_id}
+        marker = {
+            "generation": normalized_generation,
+            "source": source,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "status": "syncing",
+            "version": 1,
+        }
+        row = await connection.fetchrow(
+            f"""
+            UPDATE documents
+            SET status = 'syncing',
+                progress = 0,
+                error = NULL,
+                metadata = COALESCE(metadata, '{{}}'::jsonb)
+                    || jsonb_build_object(
+                        '{CONFLUENCE_SYNC_GENERATION_KEY}',
+                        $4::jsonb
+                    ),
+                updated_at = NOW()
+            WHERE document_id = $1
+              AND dataset_id = $2
+              AND (
+                    (
+                        status IN ('completed', 'failed', 'uploaded')
+                        AND NOT (
+                            COALESCE(metadata, '{{}}'::jsonb)
+                            ? '{CONFLUENCE_SYNC_GENERATION_KEY}'
+                        )
+                    )
+                    OR (
+                        status = 'syncing'
+                        AND (
+                            metadata -> '{CONFLUENCE_SYNC_GENERATION_KEY}'
+                                ->> 'generation' = $3
+                            OR (
+                                metadata -> '{CONFLUENCE_SYNC_GENERATION_KEY}'
+                                    -> 'source' -> 'source_owner' = $5::jsonb
+                                AND metadata -> '{CONFLUENCE_SYNC_GENERATION_KEY}'
+                                    ->> 'generation' IS DISTINCT FROM $3
+                                AND COALESCE(
+                                    NULLIF(
+                                        metadata -> '{CONFLUENCE_SYNC_GENERATION_KEY}'
+                                            ->> 'started_at',
+                                        ''
+                                    )::timestamptz,
+                                    '-infinity'::timestamptz
+                                ) <= NOW() - make_interval(secs => $6)
+                            )
+                        )
+                    )
+              )
+              AND COALESCE(enabled, TRUE) = TRUE
+              AND COALESCE(archived, FALSE) = FALSE
+              AND NOT (
+                    COALESCE(metadata, '{{}}'::jsonb)
+                    ? '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+              )
+              AND NOT (
+                    COALESCE(metadata, '{{}}'::jsonb)
+                    ? '{DOCUMENT_UPLOAD_GENERATION_KEY}'
+              )
+              AND NOT (
+                    COALESCE(metadata, '{{}}'::jsonb)
+                    ? '{DOCUMENT_UPLOAD_FAILED_KEY}'
+              )
+            RETURNING document_id
+            """,
+            document_id,
+            dataset_id,
+            normalized_generation,
+            json.dumps(marker),
+            json.dumps(source["source_owner"]),
+            CONFLUENCE_SYNC_STALE_SECONDS,
+        )
+        return row is not None
+
+    async def abort_confluence_document_sync(
+        self,
+        document_id: str,
+        dataset_id: str,
+        *,
+        generation: str,
+        error: str,
+        connection: Any,
+    ) -> bool:
+        """Abort only the exact failed source generation under its owner lease."""
+
+        normalized_generation = str(generation or "").strip()
+        if not normalized_generation:
+            raise ValueError("Confluence sync generation is required")
+        row = await connection.fetchrow(
+            f"""
+            UPDATE documents
+            SET status = 'failed',
+                progress = 100,
+                error = $4,
+                metadata = COALESCE(metadata, '{{}}'::jsonb)
+                    - '{CONFLUENCE_SYNC_GENERATION_KEY}',
+                updated_at = NOW()
+            WHERE document_id = $1
+              AND dataset_id = $2
+              AND status = 'syncing'
+              AND metadata -> '{CONFLUENCE_SYNC_GENERATION_KEY}'
+                    ->> 'generation' = $3
+            RETURNING document_id
+            """,
+            document_id,
+            dataset_id,
+            normalized_generation,
+            str(error or "Confluence source generation failed")[:2000],
+        )
+        return row is not None
+
+    async def prepare_confluence_document_update(
+        self,
+        document_id: str,
+        dataset_id: str,
+        *,
+        generation: str,
+        title: str,
+        content: str,
+        confluence_version: int,
+        source_metadata: dict[str, Any],
+        page_record: dict[str, Any] | None = None,
+        connection: Any,
+    ) -> bool:
+        """Prepare one active Confluence document while its owner lease is held."""
+
+        metadata_patch = _json_object(source_metadata)
+        normalized_generation = str(generation or "").strip()
+        if not normalized_generation:
+            raise ValueError("Confluence sync generation is required")
+        reserved = {
+            DOCUMENT_LIFECYCLE_REINDEX_KEY,
+            DOCUMENT_UPLOAD_FAILED_KEY,
+            DOCUMENT_UPLOAD_GENERATION_KEY,
+            CONFLUENCE_SYNC_GENERATION_KEY,
+        }.intersection(metadata_patch)
+        if reserved:
+            raise ValueError("Confluence source metadata contains a reserved key")
+        row = await connection.fetchrow(
+            f"""
+            UPDATE documents
+            SET title = $3,
+                content = $4,
+                confluence_version = $5,
+                metadata = (
+                    COALESCE(metadata, '{{}}'::jsonb)
+                    - '{CONFLUENCE_SYNC_GENERATION_KEY}'
+                    - 'images_embedded'
+                    - 'embedded_image_count'
+                ) || $6::jsonb,
+                status = 'queued',
+                progress = 0,
+                error = NULL,
+                started_at = NULL,
+                completed_at = NULL,
+                updated_at = NOW()
+            WHERE document_id = $1
+              AND dataset_id = $2
+              AND status = 'syncing'
+              AND COALESCE(enabled, TRUE) = TRUE
+              AND COALESCE(archived, FALSE) = FALSE
+              AND NOT (
+                    COALESCE(metadata, '{{}}'::jsonb)
+                    ? '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+              )
+              AND NOT (
+                    COALESCE(metadata, '{{}}'::jsonb)
+                    ? '{DOCUMENT_UPLOAD_GENERATION_KEY}'
+              )
+              AND NOT (
+                    COALESCE(metadata, '{{}}'::jsonb)
+                    ? '{DOCUMENT_UPLOAD_FAILED_KEY}'
+              )
+              AND metadata -> '{CONFLUENCE_SYNC_GENERATION_KEY}'
+                    ->> 'generation' = $7
+            RETURNING document_id
+            """,
+            document_id,
+            dataset_id,
+            title,
+            content,
+            int(confluence_version),
+            json.dumps(metadata_patch),
+            normalized_generation,
+        )
+        if row is None:
+            return False
+        if page_record:
+            await self.upsert_confluence_page(
+                binding_id=str(page_record.get("binding_id") or ""),
+                page_id=str(page_record.get("page_id") or ""),
+                document_id=document_id,
+                space_key=str(page_record.get("space_key") or ""),
+                title=str(page_record.get("title") or title),
+                version=int(page_record.get("version") or confluence_version),
+                content_hash=page_record.get("content_hash"),
+                parent_page_id=page_record.get("parent_page_id"),
+                depth=int(page_record.get("depth") or 0),
+                status=str(page_record.get("status") or "synced"),
+                labels=list(page_record.get("labels") or []),
+                web_url=page_record.get("web_url"),
+                author=page_record.get("author"),
+                confluence_updated_at=page_record.get("confluence_updated_at"),
+                image_count=int(page_record.get("image_count") or 0),
+                connection=connection,
+            )
+        return True
+
+    async def get_document(
+        self,
+        document_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> dict[str, Any] | None:
         """获取 Document"""
         if not self._pool:
             return None
+        if connection is not None:
+            row = await connection.fetchrow(
+                "SELECT * FROM documents WHERE document_id = $1",
+                document_id,
+            )
+            return self._row_to_dict(row) if row else None
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow("SELECT * FROM documents WHERE document_id = $1", document_id)
             return self._row_to_dict(row) if row else None
@@ -1958,6 +3378,29 @@ class DatabaseStorage:
             rows = await conn.fetch(query, *params)
             return [self._row_to_dict(row) for row in rows]
 
+    async def list_document_ids_by_dataset(
+        self,
+        dataset_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> list[str]:
+        """List exact document IDs, optionally on an existing lifecycle lease."""
+
+        if not self._pool:
+            return []
+
+        async def _list(conn: Any) -> list[str]:
+            rows = await conn.fetch(
+                "SELECT document_id FROM documents WHERE dataset_id = $1",
+                dataset_id,
+            )
+            return [str(row["document_id"]) for row in rows]
+
+        if connection is not None:
+            return await _list(connection)
+        async with self._pool.acquire() as conn:
+            return await _list(conn)
+
     async def find_stuck_documents(
         self,
         stuck_threshold_minutes: int = 15,
@@ -1966,11 +3409,41 @@ class DatabaseStorage:
         if not self._pool:
             return []
 
-        query = """
+        query = f"""
             SELECT document_id, dataset_id, title, status, started_at, updated_at
             FROM documents
-            WHERE status IN ('parsing', 'segmenting', 'embedding', 'embedding_images')
-              AND COALESCE(started_at, updated_at, created_at)
+            WHERE (
+                    (
+                        metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                            ->> 'status' = 'pending'
+                        AND metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                            ->> 'desired_enabled' = 'true'
+                        AND metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                            ->> 'desired_archived' = 'false'
+                    )
+                    OR (
+                        status NOT IN ('completed', 'failed')
+                        AND COALESCE(enabled, TRUE) = TRUE
+                        AND COALESCE(archived, FALSE) = FALSE
+                        AND NOT (
+                            COALESCE(metadata, '{{}}'::jsonb)
+                            ? '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                        )
+                    )
+                  )
+              AND NOT (
+                    COALESCE(metadata, '{{}}'::jsonb)
+                    ? '{DOCUMENT_UPLOAD_GENERATION_KEY}'
+              )
+              AND NOT (
+                    COALESCE(metadata, '{{}}'::jsonb)
+                    ? '{DOCUMENT_UPLOAD_FAILED_KEY}'
+              )
+              AND NOT (
+                    COALESCE(metadata, '{{}}'::jsonb)
+                    ? '{CONFLUENCE_SYNC_GENERATION_KEY}'
+              )
+              AND COALESCE(updated_at, started_at, created_at)
                   < NOW() - make_interval(mins => $1)
             ORDER BY updated_at ASC
         """
@@ -1979,12 +3452,271 @@ class DatabaseStorage:
             rows = await conn.fetch(query, stuck_threshold_minutes)
             return [self._row_to_dict(row) for row in rows]
 
+    async def fail_stale_document_uploads(
+        self,
+        stuck_threshold_minutes: int = 60,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Fail abandoned upload owners without publishing incomplete content."""
+
+        if not self._pool:
+            return []
+        threshold = max(int(stuck_threshold_minutes), 1)
+        bounded_limit = min(max(int(limit), 1), 1000)
+        query = f"""
+            WITH candidates AS (
+                SELECT d.document_id
+                FROM documents AS d
+                JOIN datasets AS ds ON ds.dataset_id = d.dataset_id
+                CROSS JOIN LATERAL (
+                    SELECT pg_try_advisory_xact_lock_shared(
+                        hashtextextended(
+                            'knowledge-dataset-index:' || ds.dataset_id,
+                            0
+                        )
+                    ) AS dataset_locked
+                ) AS dataset_gate
+                CROSS JOIN LATERAL (
+                    SELECT CASE
+                        WHEN dataset_gate.dataset_locked THEN
+                            pg_try_advisory_xact_lock(
+                                hashtextextended(
+                                    'knowledge-document-index:' || ds.dataset_id
+                                        || ':' || d.document_id,
+                                    0
+                                )
+                            )
+                        ELSE FALSE
+                    END AS document_locked
+                ) AS document_gate
+                WHERE COALESCE(d.metadata, '{{}}'::jsonb)
+                        ? '{DOCUMENT_UPLOAD_GENERATION_KEY}'
+                  AND d.status IN (
+                        'uploading', 'uploaded', 'uploading_images', 'embedding_images'
+                  )
+                  AND NOT (
+                        COALESCE(d.metadata, '{{}}'::jsonb)
+                        ? '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                  )
+                  AND dataset_gate.dataset_locked
+                  AND document_gate.document_locked
+                  AND ds.is_deleted = FALSE
+                  AND NOT COALESCE(
+                        COALESCE(ds.index_config, '{{}}'::jsonb)
+                            -> 'retrieval' ? '{INDEX_DELETION_FENCE_KEY}',
+                        FALSE
+                  )
+                  AND COALESCE(d.updated_at, d.created_at)
+                        < NOW() - make_interval(mins => $1)
+                ORDER BY d.updated_at ASC
+                FOR UPDATE OF d SKIP LOCKED
+                LIMIT $2
+            )
+            UPDATE documents AS d
+            SET status = 'failed',
+                progress = 100,
+                error = 'document upload did not finalize; upload the source again',
+                metadata = (
+                    COALESCE(d.metadata, '{{}}'::jsonb)
+                    - '{DOCUMENT_UPLOAD_GENERATION_KEY}'
+                ) || jsonb_build_object(
+                    '{DOCUMENT_UPLOAD_FAILED_KEY}',
+                    jsonb_build_object(
+                        'status', 'cleanup_pending',
+                        'requires_reupload', TRUE
+                    )
+                ),
+                completed_at = NOW(),
+                updated_at = NOW()
+            FROM candidates AS c
+            WHERE d.document_id = c.document_id
+            RETURNING d.document_id, d.dataset_id, d.status, d.error, d.metadata
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            rows = await conn.fetch(query, threshold, bounded_limit)
+        return [self._row_to_dict(row) for row in rows]
+
+    async def list_pending_document_upload_cleanups(
+        self,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List failed upload receipts whose storage cleanup is still pending."""
+
+        if not self._pool:
+            return []
+        bounded_limit = min(max(int(limit), 1), 1000)
+        query = f"""
+            SELECT d.document_id, d.dataset_id, d.status, d.metadata
+            FROM documents AS d
+            JOIN datasets AS ds ON ds.dataset_id = d.dataset_id
+            WHERE d.metadata -> '{DOCUMENT_UPLOAD_FAILED_KEY}'
+                    ->> 'status' = 'cleanup_pending'
+              AND ds.is_deleted = FALSE
+              AND NOT COALESCE(
+                    COALESCE(ds.index_config, '{{}}'::jsonb)
+                        -> 'retrieval' ? '{INDEX_DELETION_FENCE_KEY}',
+                    FALSE
+              )
+            ORDER BY d.updated_at ASC
+            LIMIT $1
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, bounded_limit)
+        return [self._row_to_dict(row) for row in rows]
+
+    async def complete_document_upload_cleanup(
+        self,
+        document_id: str,
+        dataset_id: str,
+        *,
+        connection: Any,
+    ) -> bool:
+        """Commit the terminal requires-reupload receipt after storage cleanup."""
+
+        row = await connection.fetchrow(
+            f"""
+            UPDATE documents
+            SET metadata = jsonb_set(
+                    COALESCE(metadata, '{{}}'::jsonb),
+                    '{{{DOCUMENT_UPLOAD_FAILED_KEY}}}',
+                    jsonb_build_object(
+                        'status', 'requires_reupload',
+                        'requires_reupload', TRUE
+                    ),
+                    TRUE
+                ),
+                updated_at = NOW()
+            WHERE document_id = $1
+              AND dataset_id = $2
+              AND status = 'failed'
+              AND metadata -> '{DOCUMENT_UPLOAD_FAILED_KEY}'
+                    ->> 'status' = 'cleanup_pending'
+            RETURNING document_id
+            """,
+            document_id,
+            dataset_id,
+        )
+        return row is not None
+
+    async def claim_stuck_documents(
+        self,
+        stuck_threshold_minutes: int = 15,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Atomically claim stale ingestion/lifecycle rows for durable replay.
+
+        ``FOR UPDATE SKIP LOCKED`` makes concurrent service replicas divide the
+        work. Updating ``updated_at`` creates a fresh recovery generation; if a
+        claimant crashes before enqueue, the durable lifecycle marker makes the
+        row eligible again after the same TTL.
+        """
+
+        if not self._pool:
+            return []
+        threshold = max(int(stuck_threshold_minutes), 1)
+        bounded_limit = min(max(int(limit), 1), 1000)
+        query = f"""
+            WITH candidates AS (
+                SELECT d.document_id, d.status AS old_status
+                FROM documents AS d
+                JOIN datasets AS ds ON ds.dataset_id = d.dataset_id
+                CROSS JOIN LATERAL (
+                    SELECT pg_try_advisory_xact_lock_shared(
+                        hashtextextended(
+                            'knowledge-dataset-index:' || ds.dataset_id,
+                            0
+                        )
+                    ) AS dataset_locked
+                ) AS dataset_gate
+                CROSS JOIN LATERAL (
+                    SELECT CASE
+                        WHEN dataset_gate.dataset_locked THEN
+                            pg_try_advisory_xact_lock(
+                                hashtextextended(
+                                    'knowledge-document-index:' || ds.dataset_id
+                                        || ':' || d.document_id,
+                                    0
+                                )
+                            )
+                        ELSE FALSE
+                    END AS document_locked
+                ) AS document_gate
+                WHERE (
+                        (
+                            d.metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                                ->> 'status' = 'pending'
+                            AND d.metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                                ->> 'desired_enabled' = 'true'
+                            AND d.metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                                ->> 'desired_archived' = 'false'
+                        )
+                        OR (
+                            d.status NOT IN ('completed', 'failed')
+                            AND COALESCE(d.enabled, TRUE) = TRUE
+                            AND COALESCE(d.archived, FALSE) = FALSE
+                            AND NOT (
+                                COALESCE(d.metadata, '{{}}'::jsonb)
+                                ? '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                            )
+                        )
+                      )
+                  AND NOT (
+                        COALESCE(d.metadata, '{{}}'::jsonb)
+                        ? '{DOCUMENT_UPLOAD_GENERATION_KEY}'
+                  )
+                  AND NOT (
+                        COALESCE(d.metadata, '{{}}'::jsonb)
+                        ? '{DOCUMENT_UPLOAD_FAILED_KEY}'
+                  )
+                  AND NOT (
+                        COALESCE(d.metadata, '{{}}'::jsonb)
+                        ? '{CONFLUENCE_SYNC_GENERATION_KEY}'
+                  )
+                  AND dataset_gate.dataset_locked
+                  AND document_gate.document_locked
+                  AND ds.is_deleted = FALSE
+                  AND NOT COALESCE(
+                        COALESCE(ds.index_config, '{{}}'::jsonb)
+                            -> 'retrieval' ? '{INDEX_DELETION_FENCE_KEY}',
+                        FALSE
+                  )
+                  AND COALESCE(
+                        ds.index_config -> 'retrieval' -> 'lexical'
+                            ->> 'active_version',
+                        'lexical_v1'
+                  ) = 'lexical_v1'
+                  AND COALESCE(d.updated_at, d.started_at, d.created_at)
+                      < NOW() - make_interval(mins => $1)
+                ORDER BY d.updated_at ASC
+                FOR UPDATE OF d SKIP LOCKED
+                LIMIT $2
+            )
+            UPDATE documents AS d
+            SET status = 'queued',
+                progress = 0,
+                error = NULL,
+                updated_at = NOW()
+            FROM candidates AS c
+            WHERE d.document_id = c.document_id
+            RETURNING d.document_id, d.dataset_id, d.title, d.status,
+                      c.old_status,
+                      d.started_at, d.updated_at, d.metadata
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            rows = await conn.fetch(query, threshold, bounded_limit)
+        return [self._row_to_dict(row) for row in rows]
+
     async def update_document_status(
         self,
         document_id: str,
         status: str,
         progress: float | None = None,
         error: str | None = None,
+        *,
+        connection: Any | None = None,
     ) -> None:
         """更新 Document 状态"""
         if not self._pool:
@@ -2014,23 +3746,343 @@ class DatabaseStorage:
             params.append(datetime.utcnow())
             param_idx += 1
 
+        if status == "completed":
+            pending_reindex = (
+                f"metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}' "
+                "->> 'status' = 'pending'"
+            )
+            # A disabled/archived restore stays fail-closed while vectors are
+            # rebuilt. Only the ingestion completion write makes the document
+            # active, and the activation is committed in the same statement as
+            # the terminal status.
+            updates.extend(
+                [
+                    f"enabled = CASE WHEN {pending_reindex} THEN TRUE ELSE enabled END",
+                    f"disabled_at = CASE WHEN {pending_reindex} THEN NULL ELSE disabled_at END",
+                    f"disabled_by = CASE WHEN {pending_reindex} THEN NULL ELSE disabled_by END",
+                    f"archived = CASE WHEN {pending_reindex} THEN FALSE ELSE archived END",
+                    f"archived_at = CASE WHEN {pending_reindex} THEN NULL ELSE archived_at END",
+                    f"archived_by = CASE WHEN {pending_reindex} THEN NULL ELSE archived_by END",
+                    f"archived_reason = CASE WHEN {pending_reindex} THEN NULL ELSE archived_reason END",
+                    f"error = CASE WHEN {pending_reindex} THEN NULL ELSE error END",
+                    f"metadata = CASE WHEN {pending_reindex} "
+                    f"THEN metadata - '{DOCUMENT_LIFECYCLE_REINDEX_KEY}' ELSE metadata END",
+                ]
+            )
+
         params.append(document_id)
         query = f"UPDATE documents SET {_build_safe_set_clause(updates)} WHERE document_id = ${param_idx}"
 
+        if connection is not None:
+            await connection.execute(query, *params)
+            return
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
 
-    async def delete_document(self, document_id: str) -> bool:
+    async def delete_document(
+        self,
+        document_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> bool:
         """删除 Document（级联删除 Segment）"""
         if not self._pool:
             return False
-        async with self._pool.acquire() as conn:
-            result = await conn.execute("DELETE FROM documents WHERE document_id = $1", document_id)
+
+        async def _delete(conn: Any) -> bool:
+            result = await conn.execute(
+                "DELETE FROM documents WHERE document_id = $1",
+                document_id,
+            )
             if result.startswith("DELETE "):
                 return int(result.split()[-1]) > 0
             return False
 
-    async def update_document_fields(self, document_id: str, fields: dict[str, Any]) -> None:
+        if connection is not None:
+            return await _delete(connection)
+        async with self._pool.acquire() as conn:
+            return await _delete(conn)
+
+    async def compare_and_swap_document_processing_mode(
+        self,
+        document_id: str,
+        dataset_id: str,
+        *,
+        expected_mode: str,
+        replacement_mode: str,
+        detection_result: dict[str, Any],
+        connection: Any | None = None,
+    ) -> bool:
+        """Publish auto-detection output only for its active worker generation."""
+
+        normalized_document = str(document_id or "").strip()
+        normalized_dataset = str(dataset_id or "").strip()
+        normalized_expected = str(expected_mode or "").strip().lower()
+        normalized_replacement = str(replacement_mode or "").strip().lower()
+        if not all(
+            (
+                normalized_document,
+                normalized_dataset,
+                normalized_expected,
+                normalized_replacement,
+            )
+        ):
+            raise ValueError(
+                "document_id, dataset_id, expected_mode, and replacement_mode are required"
+            )
+        if not isinstance(detection_result, dict):
+            raise ValueError("detection_result must be a JSON object")
+        if not self._pool and connection is None:
+            raise RuntimeError("database is not connected")
+
+        async def _publish(conn: Any) -> Any:
+            return await conn.fetchrow(
+                f"""
+                UPDATE documents
+                SET detection_result = $5::jsonb,
+                    metadata = jsonb_set(
+                        COALESCE(metadata, '{{}}'::jsonb),
+                        '{{processing_mode}}',
+                        to_jsonb($4::text),
+                        TRUE
+                    ),
+                    updated_at = NOW()
+                WHERE document_id = $1
+                  AND dataset_id = $2
+                  AND status = 'processing'
+                  AND COALESCE(metadata ->> 'processing_mode', 'text_only') = $3
+                  AND (
+                        (
+                            COALESCE(enabled, TRUE) = TRUE
+                            AND COALESCE(archived, FALSE) = FALSE
+                            AND NOT (
+                                COALESCE(metadata, '{{}}'::jsonb)
+                                ? '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                            )
+                        )
+                        OR (
+                            metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                                ->> 'status' = 'pending'
+                            AND metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                                ->> 'desired_enabled' = 'true'
+                            AND metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                                ->> 'desired_archived' = 'false'
+                        )
+                  )
+                  AND NOT (
+                        COALESCE(metadata, '{{}}'::jsonb)
+                        ? '{DOCUMENT_UPLOAD_GENERATION_KEY}'
+                  )
+                  AND NOT (
+                        COALESCE(metadata, '{{}}'::jsonb)
+                        ? '{DOCUMENT_UPLOAD_FAILED_KEY}'
+                  )
+                  AND NOT (
+                        COALESCE(metadata, '{{}}'::jsonb)
+                        ? '{CONFLUENCE_SYNC_GENERATION_KEY}'
+                  )
+                RETURNING document_id
+                """,
+                normalized_document,
+                normalized_dataset,
+                normalized_expected,
+                normalized_replacement,
+                json.dumps(detection_result),
+            )
+
+        if connection is not None:
+            row = await _publish(connection)
+        else:
+            async with self._pool.acquire() as conn:
+                row = await _publish(conn)
+        return row is not None
+
+    async def publish_document_image_receipt(
+        self,
+        document_id: str,
+        dataset_id: str,
+        *,
+        expected_original_file_key: str,
+        expected_processing_mode: str,
+        extracted_images: list[dict[str, Any]],
+        connection: Any | None = None,
+    ) -> bool:
+        """Atomically publish a complete durable image-source receipt."""
+
+        normalized_document = str(document_id or "").strip()
+        normalized_dataset = str(dataset_id or "").strip()
+        normalized_original_key = str(expected_original_file_key or "").strip()
+        normalized_mode = str(expected_processing_mode or "").strip().lower()
+        if not all(
+            (
+                normalized_document,
+                normalized_dataset,
+                normalized_original_key,
+                normalized_mode,
+            )
+        ):
+            raise ValueError(
+                "document_id, dataset_id, original file key, and processing mode are required"
+            )
+        if not isinstance(extracted_images, list):
+            raise ValueError("extracted_images must be a list")
+        for image in extracted_images:
+            if not isinstance(image, dict) or not all(
+                str(image.get(key) or "").strip()
+                for key in ("image_id", "storage_url", "storage_key")
+            ):
+                raise ValueError(
+                    "each extracted image requires image_id, storage_url, and storage_key"
+                )
+        if not self._pool and connection is None:
+            raise RuntimeError("database is not connected")
+        serialized_images = json.dumps(extracted_images)
+
+        async def _publish(conn: Any) -> Any:
+            return await conn.fetchrow(
+                f"""
+                UPDATE documents
+                SET metadata = jsonb_set(
+                        jsonb_set(
+                            COALESCE(metadata, '{{}}'::jsonb),
+                            '{{extracted_images}}',
+                            $5::jsonb,
+                            TRUE
+                        ),
+                        '{{image_count}}',
+                        to_jsonb(jsonb_array_length($5::jsonb)),
+                        TRUE
+                    ),
+                    updated_at = NOW()
+                WHERE document_id = $1
+                  AND dataset_id = $2
+                  AND status IN ('processing', 'parsing')
+                  AND metadata ->> 'original_file_key' = $3
+                  AND LOWER(COALESCE(metadata ->> 'processing_mode', 'text_only')) = $4
+                  AND (
+                        (
+                            COALESCE(enabled, TRUE) = TRUE
+                            AND COALESCE(archived, FALSE) = FALSE
+                            AND NOT (
+                                COALESCE(metadata, '{{}}'::jsonb)
+                                ? '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                            )
+                        )
+                        OR (
+                            metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                                ->> 'status' = 'pending'
+                            AND metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                                ->> 'desired_enabled' = 'true'
+                            AND metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                                ->> 'desired_archived' = 'false'
+                        )
+                  )
+                  AND NOT (
+                        COALESCE(metadata, '{{}}'::jsonb)
+                        ? '{DOCUMENT_UPLOAD_GENERATION_KEY}'
+                  )
+                  AND NOT (
+                        COALESCE(metadata, '{{}}'::jsonb)
+                        ? '{DOCUMENT_UPLOAD_FAILED_KEY}'
+                  )
+                  AND NOT (
+                        COALESCE(metadata, '{{}}'::jsonb)
+                        ? '{CONFLUENCE_SYNC_GENERATION_KEY}'
+                  )
+                RETURNING document_id
+                """,
+                normalized_document,
+                normalized_dataset,
+                normalized_original_key,
+                normalized_mode,
+                serialized_images,
+            )
+
+        if connection is not None:
+            row = await _publish(connection)
+        else:
+            async with self._pool.acquire() as conn:
+                row = await _publish(conn)
+        return row is not None
+
+    async def clear_document_legacy_image_receipts(
+        self,
+        document_id: str,
+        dataset_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> bool:
+        """Invalidate legacy embedded-image receipts for an owned rebuild."""
+
+        normalized_document = str(document_id or "").strip()
+        normalized_dataset = str(dataset_id or "").strip()
+        if not normalized_document or not normalized_dataset:
+            raise ValueError("document_id and dataset_id are required")
+        if not self._pool and connection is None:
+            raise RuntimeError("database is not connected")
+
+        async def _clear(conn: Any) -> Any:
+            return await conn.fetchrow(
+                f"""
+                UPDATE documents
+                SET metadata = COALESCE(metadata, '{{}}'::jsonb)
+                        - 'images_embedded'
+                        - 'embedded_image_count',
+                    updated_at = NOW()
+                WHERE document_id = $1
+                  AND dataset_id = $2
+                  AND status NOT IN ('uploading', 'syncing')
+                  AND NOT (
+                        COALESCE(metadata, '{{}}'::jsonb)
+                        ? '{DOCUMENT_UPLOAD_GENERATION_KEY}'
+                  )
+                  AND NOT (
+                        COALESCE(metadata, '{{}}'::jsonb)
+                        ? '{DOCUMENT_UPLOAD_FAILED_KEY}'
+                  )
+                  AND NOT (
+                        COALESCE(metadata, '{{}}'::jsonb)
+                        ? '{CONFLUENCE_SYNC_GENERATION_KEY}'
+                  )
+                  AND (
+                        (
+                            COALESCE(enabled, TRUE) = TRUE
+                            AND COALESCE(archived, FALSE) = FALSE
+                            AND NOT (
+                                COALESCE(metadata, '{{}}'::jsonb)
+                                ? '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                            )
+                        )
+                        OR (
+                            metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                                ->> 'status' = 'pending'
+                            AND metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                                ->> 'desired_enabled' = 'true'
+                            AND metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                                ->> 'desired_archived' = 'false'
+                        )
+                  )
+                RETURNING document_id
+                """,
+                normalized_document,
+                normalized_dataset,
+            )
+
+        if connection is not None:
+            row = await _clear(connection)
+        else:
+            async with self._pool.acquire() as conn:
+                row = await _clear(conn)
+        return row is not None
+
+    async def update_document_fields(
+        self,
+        document_id: str,
+        fields: dict[str, Any],
+        *,
+        connection: Any | None = None,
+        allow_lifecycle_marker_update: bool = False,
+    ) -> None:
         """Update arbitrary document fields (Dify-style enable/disable/archive support)"""
         if not self._pool or not fields:
             return
@@ -2058,6 +4110,24 @@ class DatabaseStorage:
         filtered = {k: v for k, v in fields.items() if k in allowed}
         if not filtered:
             return
+        incoming_metadata = filtered.get("metadata")
+        if (
+            isinstance(incoming_metadata, dict)
+            and (
+                DOCUMENT_UPLOAD_GENERATION_KEY in incoming_metadata
+                or DOCUMENT_UPLOAD_FAILED_KEY in incoming_metadata
+                or CONFLUENCE_SYNC_GENERATION_KEY in incoming_metadata
+            )
+        ):
+            raise ValueError("document internal metadata keys are reserved")
+        if (
+            isinstance(incoming_metadata, dict)
+            and DOCUMENT_LIFECYCLE_REINDEX_KEY in incoming_metadata
+            and not allow_lifecycle_marker_update
+        ):
+            raise ValueError(
+                f"metadata key '{DOCUMENT_LIFECYCLE_REINDEX_KEY}' is reserved"
+            )
 
         updates = ["updated_at = NOW()"]
         params: list[Any] = []
@@ -2065,8 +4135,35 @@ class DatabaseStorage:
 
         for key, value in filtered.items():
             if key == "metadata" and isinstance(value, dict):
-                updates.append(f"{key} = ${param_idx}")
-                params.append(json.dumps(value))
+                mutable_source_keys = (
+                    {DOCUMENT_LIFECYCLE_REINDEX_KEY}
+                    if allow_lifecycle_marker_update
+                    else set()
+                )
+                preserved_keys = (
+                    SOURCE_OWNED_DOCUMENT_METADATA_KEYS - mutable_source_keys
+                )
+                sanitized_value = {
+                    metadata_key: metadata_value
+                    for metadata_key, metadata_value in value.items()
+                    if metadata_key not in preserved_keys
+                }
+                preservation_terms = [
+                    (
+                        "(CASE WHEN COALESCE(metadata, '{}'::jsonb) "
+                        f"? '{metadata_key}' THEN "
+                        f"jsonb_build_object('{metadata_key}', metadata -> '{metadata_key}') "
+                        "ELSE '{}'::jsonb END)"
+                    )
+                    for metadata_key in sorted(preserved_keys)
+                ]
+                # Generic callers can replace user metadata, but source receipts
+                # and lifecycle owners always win from the authoritative row.
+                updates.append(
+                    f"metadata = ${param_idx}::jsonb || "
+                    + " || ".join(preservation_terms)
+                )
+                params.append(json.dumps(sanitized_value))
             else:
                 updates.append(f"{key} = ${param_idx}")
                 params.append(value)
@@ -2075,21 +4172,79 @@ class DatabaseStorage:
         params.append(document_id)
         query = f"UPDATE documents SET {_build_safe_set_clause(updates)} WHERE document_id = ${param_idx}"
 
+        if connection is not None:
+            await connection.execute(query, *params)
+            return
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
 
-    async def update_document_content(self, document_id: str, content: str) -> None:
+    async def clear_document_lifecycle_marker(
+        self,
+        document_id: str,
+        *,
+        expected_status: str,
+        connection: Any | None = None,
+    ) -> bool:
+        """Remove a lifecycle marker only from the expected saga generation."""
+
+        normalized_document = str(document_id or "").strip()
+        normalized_status = str(expected_status or "").strip()
+        if not normalized_document or not normalized_status:
+            raise ValueError("document_id and expected_status are required")
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+
+        async def _clear(conn: Any) -> Any:
+            return await conn.fetchrow(
+                f"""
+                UPDATE documents
+                SET metadata = COALESCE(metadata, '{{}}'::jsonb)
+                        - '{DOCUMENT_LIFECYCLE_REINDEX_KEY}',
+                    updated_at = NOW()
+                WHERE document_id = $1
+                  AND metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
+                        ->> 'status' = $2
+                RETURNING document_id
+                """,
+                normalized_document,
+                normalized_status,
+            )
+
+        if connection is not None:
+            row = await _clear(connection)
+        else:
+            async with self._pool.acquire() as conn:
+                row = await _clear(conn)
+        return row is not None
+
+    async def update_document_content(
+        self,
+        document_id: str,
+        content: str,
+        *,
+        connection: Any | None = None,
+    ) -> None:
         """Internal: update document content (for re-extraction during reindex)"""
         if not self._pool:
             return
-        async with self._pool.acquire() as conn:
+        async def _update(conn: Any) -> None:
             await conn.execute(
                 "UPDATE documents SET content = $1, updated_at = NOW() WHERE document_id = $2",
                 content,
                 document_id,
             )
+        if connection is not None:
+            await _update(connection)
+            return
+        async with self._pool.acquire() as conn:
+            await _update(conn)
 
-    async def insert_segments(self, segments: list[dict[str, Any]]) -> None:
+    async def insert_segments(
+        self,
+        segments: list[dict[str, Any]],
+        *,
+        connection: Any | None = None,
+    ) -> None:
         """批量插入/更新 Segment (enhanced with Dify-style fields + content_hash)"""
         if not self._pool or not segments:
             return
@@ -2145,7 +4300,7 @@ class DatabaseStorage:
                 )
             )
 
-        async with self._pool.acquire() as conn:
+        async def _insert(conn: Any) -> None:
             await conn.executemany(
                 """
                 INSERT INTO segments (
@@ -2188,6 +4343,12 @@ class DatabaseStorage:
                 rows,
             )
 
+        if connection is not None:
+            await _insert(connection)
+            return
+        async with self._pool.acquire() as conn:
+            await _insert(conn)
+
     async def get_segment_hashes_by_document(
         self, document_id: str, content_type: str = "text"
     ) -> dict[int, dict[str, Any]]:
@@ -2228,6 +4389,8 @@ class DatabaseStorage:
         document_id: str,
         exclude_ids: list[str] | None = None,
         content_type: str | None = None,
+        *,
+        connection: Any | None = None,
     ) -> int:
         """
         删除指定文档下的 Segment
@@ -2242,7 +4405,8 @@ class DatabaseStorage:
         """
         if not self._pool:
             return 0
-        async with self._pool.acquire() as conn:
+
+        async def _delete(conn: Any) -> int:
             if exclude_ids and content_type:
                 result = await conn.execute(
                     "DELETE FROM segments WHERE document_id = $1 AND segment_id != ALL($2::text[]) AND content_type = $3",
@@ -2269,6 +4433,11 @@ class DatabaseStorage:
             if result.startswith("DELETE "):
                 return int(result.split()[-1])
             return 0
+
+        if connection is not None:
+            return await _delete(connection)
+        async with self._pool.acquire() as conn:
+            return await _delete(conn)
 
     async def list_segments(
         self,
@@ -2308,6 +4477,7 @@ class DatabaseStorage:
     async def search_segments_like_any(
         self,
         dataset_id: str,
+        tenant_id: str,
         terms: list[str],
         document_id: str | None = None,
         source_type: str | None = None,
@@ -2331,6 +4501,7 @@ class DatabaseStorage:
         try:
             result = await self._search_segments_fts(
                 dataset_id,
+                tenant_id,
                 cleaned,
                 document_id,
                 source_type,
@@ -2345,6 +4516,7 @@ class DatabaseStorage:
 
         return await self._search_segments_ilike(
             dataset_id,
+            tenant_id,
             cleaned,
             document_id,
             source_type,
@@ -2355,6 +4527,120 @@ class DatabaseStorage:
 
     # Alias for retrieval_service compatibility
     search_segments_text = search_segments_like_any
+
+    async def filter_active_segment_ids(
+        self,
+        dataset_id: str,
+        tenant_id: str,
+        segment_ids: list[str],
+    ) -> set[str]:
+        """Return exact-scope segment IDs whose document is retrieval-ready.
+
+        This is the authoritative candidate boundary for Qdrant dense,
+        hierarchy, native-hybrid, and cached results. Callers must fail closed
+        if this database check raises.
+        """
+
+        normalized_ids = sorted(
+            {
+                str(segment_id).strip()
+                for segment_id in segment_ids
+                if str(segment_id).strip()
+            }
+        )
+        if not normalized_ids:
+            return set()
+        normalized_dataset = str(dataset_id or "").strip()
+        normalized_tenant = str(tenant_id or "").strip()
+        if not normalized_dataset or not normalized_tenant:
+            raise ValueError("dataset_id and tenant_id are required for active segment filtering")
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT s.segment_id
+                FROM segments AS s
+                JOIN documents AS d
+                  ON d.document_id = s.document_id
+                 AND d.dataset_id = s.dataset_id
+                JOIN datasets AS ds ON ds.dataset_id = s.dataset_id
+                WHERE s.dataset_id = $1
+                  AND ds.tenant_id = $2
+                  AND ds.is_deleted = FALSE
+                  AND s.segment_id = ANY($3::text[])
+                  AND COALESCE(s.enabled, TRUE) = TRUE
+                  AND s.status = 'completed'
+                  AND COALESCE(d.enabled, TRUE) = TRUE
+                  AND COALESCE(d.archived, FALSE) = FALSE
+                  AND d.status = 'completed'
+                  AND NOT (
+                      COALESCE(d.metadata, '{}'::jsonb)
+                      ? '_document_lifecycle_reindex'
+                  )
+                """,
+                normalized_dataset,
+                normalized_tenant,
+                normalized_ids,
+            )
+        return {
+            str(row["segment_id"]).strip()
+            for row in rows
+            if str(row["segment_id"] or "").strip()
+        }
+
+    async def filter_active_document_ids(
+        self,
+        dataset_id: str,
+        tenant_id: str,
+        document_ids: list[str],
+    ) -> set[str]:
+        """Return exact-scope document IDs that are retrieval-ready."""
+
+        normalized_ids = sorted(
+            {
+                str(document_id).strip()
+                for document_id in document_ids
+                if str(document_id).strip()
+            }
+        )
+        if not normalized_ids:
+            return set()
+        normalized_dataset = str(dataset_id or "").strip()
+        normalized_tenant = str(tenant_id or "").strip()
+        if not normalized_dataset or not normalized_tenant:
+            raise ValueError("dataset_id and tenant_id are required for active document filtering")
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT d.document_id
+                FROM documents AS d
+                JOIN datasets AS ds ON ds.dataset_id = d.dataset_id
+                WHERE d.dataset_id = $1
+                  AND ds.tenant_id = $2
+                  AND ds.is_deleted = FALSE
+                  AND d.document_id = ANY($3::text[])
+                  AND COALESCE(d.enabled, TRUE) = TRUE
+                  AND COALESCE(d.archived, FALSE) = FALSE
+                  AND d.status = 'completed'
+                  AND NOT (
+                      COALESCE(d.metadata, '{}'::jsonb)
+                      ? '_document_lifecycle_reindex'
+                  )
+                """,
+                normalized_dataset,
+                normalized_tenant,
+                normalized_ids,
+            )
+        return {
+            str(row["document_id"]).strip()
+            for row in rows
+            if str(row["document_id"] or "").strip()
+        }
 
     async def dataset_has_embeddings(self, dataset_id: str) -> bool:
         """Check if dataset has any embedded segments with vectors."""
@@ -2388,6 +4674,7 @@ class DatabaseStorage:
     async def _search_segments_fts(
         self,
         dataset_id: str,
+        tenant_id: str,
         terms: list[str],
         document_id: str | None,
         source_type: str | None,
@@ -2403,24 +4690,47 @@ class DatabaseStorage:
         if not self._pool:
             return None
 
-        query = "SELECT * FROM segments WHERE dataset_id = $1"
-        params: list[Any] = [dataset_id]
-        param_idx = 2
+        normalized_tenant = str(tenant_id or "").strip()
+        if not normalized_tenant:
+            raise ValueError("tenant_id is required for segment search")
+
+        query = """
+            SELECT s.*
+            FROM segments AS s
+            JOIN documents AS d
+              ON d.document_id = s.document_id
+             AND d.dataset_id = s.dataset_id
+            JOIN datasets AS ds ON ds.dataset_id = s.dataset_id
+            WHERE s.dataset_id = $1
+              AND ds.tenant_id = $2
+              AND ds.is_deleted = FALSE
+              AND COALESCE(s.enabled, TRUE) = TRUE
+              AND s.status = 'completed'
+              AND COALESCE(d.enabled, TRUE) = TRUE
+              AND COALESCE(d.archived, FALSE) = FALSE
+              AND d.status = 'completed'
+              AND NOT (
+                  COALESCE(d.metadata, '{}'::jsonb)
+                  ? '_document_lifecycle_reindex'
+              )
+        """
+        params: list[Any] = [dataset_id, normalized_tenant]
+        param_idx = 3
 
         if document_id:
-            query += f" AND document_id = ${param_idx}"
+            query += f" AND s.document_id = ${param_idx}"
             params.append(document_id)
             param_idx += 1
         if source_type:
-            query += f" AND source_type = ${param_idx}"
+            query += f" AND s.source_type = ${param_idx}"
             params.append(source_type)
             param_idx += 1
         if language:
-            query += f" AND language = ${param_idx}"
+            query += f" AND s.language = ${param_idx}"
             params.append(language)
             param_idx += 1
         if metadata_filter:
-            query += f" AND metadata @> ${param_idx}::jsonb"
+            query += f" AND s.metadata @> ${param_idx}::jsonb"
             params.append(json.dumps(metadata_filter))
             param_idx += 1
 
@@ -2431,13 +4741,13 @@ class DatabaseStorage:
             tsquery_parts.append(f"plainto_tsquery('simple', ${param_idx + i})")
         tsquery_expr = " || ".join(tsquery_parts) if len(tsquery_parts) > 1 else tsquery_parts[0]
 
-        query += f" AND text_search @@ ({tsquery_expr})"
+        query += f" AND s.text_search @@ ({tsquery_expr})"
         params.extend(terms)
         param_idx = param_idx + len(terms)
 
         # Order by relevance using the same tsquery expression
         # Note: ts_rank_cd is faster and often sufficient for ranking
-        query += f" ORDER BY ts_rank_cd(text_search, ({tsquery_expr})) DESC"
+        query += f" ORDER BY ts_rank_cd(s.text_search, ({tsquery_expr})) DESC"
 
         query += f" LIMIT ${param_idx}"
         params.append(int(limit))
@@ -2458,6 +4768,7 @@ class DatabaseStorage:
     async def _search_segments_ilike(
         self,
         dataset_id: str,
+        tenant_id: str,
         terms: list[str],
         document_id: str | None,
         source_type: str | None,
@@ -2466,30 +4777,53 @@ class DatabaseStorage:
         metadata_filter: dict[str, Any] | None,
     ) -> list[dict[str, Any]]:
         """Legacy ILIKE fallback for pre-migration databases (O(N) sequential scan)."""
-        query = "SELECT * FROM segments WHERE dataset_id = $1"
-        params: list[Any] = [dataset_id]
-        param_idx = 2
+        normalized_tenant = str(tenant_id or "").strip()
+        if not normalized_tenant:
+            raise ValueError("tenant_id is required for segment search")
+
+        query = """
+            SELECT s.*
+            FROM segments AS s
+            JOIN documents AS d
+              ON d.document_id = s.document_id
+             AND d.dataset_id = s.dataset_id
+            JOIN datasets AS ds ON ds.dataset_id = s.dataset_id
+            WHERE s.dataset_id = $1
+              AND ds.tenant_id = $2
+              AND ds.is_deleted = FALSE
+              AND COALESCE(s.enabled, TRUE) = TRUE
+              AND s.status = 'completed'
+              AND COALESCE(d.enabled, TRUE) = TRUE
+              AND COALESCE(d.archived, FALSE) = FALSE
+              AND d.status = 'completed'
+              AND NOT (
+                  COALESCE(d.metadata, '{}'::jsonb)
+                  ? '_document_lifecycle_reindex'
+              )
+        """
+        params: list[Any] = [dataset_id, normalized_tenant]
+        param_idx = 3
 
         if document_id:
-            query += f" AND document_id = ${param_idx}"
+            query += f" AND s.document_id = ${param_idx}"
             params.append(document_id)
             param_idx += 1
         if source_type:
-            query += f" AND source_type = ${param_idx}"
+            query += f" AND s.source_type = ${param_idx}"
             params.append(source_type)
             param_idx += 1
         if language:
-            query += f" AND language = ${param_idx}"
+            query += f" AND s.language = ${param_idx}"
             params.append(language)
             param_idx += 1
         if metadata_filter:
-            query += f" AND metadata @> ${param_idx}::jsonb"
+            query += f" AND s.metadata @> ${param_idx}::jsonb"
             params.append(json.dumps(metadata_filter))
             param_idx += 1
 
         parts = []
         for t in terms:
-            parts.append(f"text ILIKE ${param_idx}")
+            parts.append(f"s.text ILIKE ${param_idx}")
             # Escape LIKE special characters to prevent wildcard injection
             escaped = t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             params.append(f"%{escaped}%")
@@ -2509,12 +4843,107 @@ class DatabaseStorage:
             logger.error(f"ILIKE search error: {e}, params: {params[:2]}...")
             return []
 
-    async def get_segment(self, segment_id: str) -> dict[str, Any] | None:
+    async def get_segment(
+        self,
+        segment_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> dict[str, Any] | None:
         """获取 Segment"""
         if not self._pool:
             return None
+        if connection is not None:
+            row = await connection.fetchrow(
+                "SELECT * FROM segments WHERE segment_id = $1",
+                segment_id,
+            )
+            return self._row_to_dict(row) if row else None
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow("SELECT * FROM segments WHERE segment_id = $1", segment_id)
+            return self._row_to_dict(row) if row else None
+
+    async def get_segment_scoped(
+        self,
+        segment_id: str,
+        dataset_id: str,
+        tenant_id: str,
+    ) -> dict[str, Any] | None:
+        """Read one active segment under an exact tenant/dataset authority."""
+
+        normalized_segment = str(segment_id or "").strip()
+        normalized_dataset = str(dataset_id or "").strip()
+        normalized_tenant = str(tenant_id or "").strip()
+        if not normalized_segment or not normalized_dataset or not normalized_tenant:
+            raise ValueError("segment_id, dataset_id, and tenant_id are required")
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT s.*
+                FROM segments AS s
+                JOIN documents AS d
+                  ON d.document_id = s.document_id
+                 AND d.dataset_id = s.dataset_id
+                JOIN datasets AS ds ON ds.dataset_id = s.dataset_id
+                WHERE s.segment_id = $1
+                  AND s.dataset_id = $2
+                  AND ds.tenant_id = $3
+                  AND ds.is_deleted = FALSE
+                  AND COALESCE(s.enabled, TRUE) = TRUE
+                  AND s.status = 'completed'
+                  AND COALESCE(d.enabled, TRUE) = TRUE
+                  AND COALESCE(d.archived, FALSE) = FALSE
+                  AND d.status = 'completed'
+                  AND NOT (
+                      COALESCE(d.metadata, '{}'::jsonb)
+                      ? '_document_lifecycle_reindex'
+                  )
+                """,
+                normalized_segment,
+                normalized_dataset,
+                normalized_tenant,
+            )
+            return self._row_to_dict(row) if row else None
+
+    async def get_active_segment_by_tenant(
+        self,
+        segment_id: str,
+        tenant_id: str,
+    ) -> dict[str, Any] | None:
+        """Resolve an active segment without exposing cross-tenant existence."""
+
+        normalized_segment = str(segment_id or "").strip()
+        normalized_tenant = str(tenant_id or "").strip()
+        if not normalized_segment or not normalized_tenant:
+            raise ValueError("segment_id and tenant_id are required")
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT s.*
+                FROM segments AS s
+                JOIN documents AS d
+                  ON d.document_id = s.document_id
+                 AND d.dataset_id = s.dataset_id
+                JOIN datasets AS ds ON ds.dataset_id = s.dataset_id
+                WHERE s.segment_id = $1
+                  AND ds.tenant_id = $2
+                  AND ds.is_deleted = FALSE
+                  AND COALESCE(s.enabled, TRUE) = TRUE
+                  AND s.status = 'completed'
+                  AND COALESCE(d.enabled, TRUE) = TRUE
+                  AND COALESCE(d.archived, FALSE) = FALSE
+                  AND d.status = 'completed'
+                  AND NOT (
+                      COALESCE(d.metadata, '{}'::jsonb)
+                      ? '_document_lifecycle_reindex'
+                  )
+                """,
+                normalized_segment,
+                normalized_tenant,
+            )
             return self._row_to_dict(row) if row else None
 
     async def get_segments_by_ids(self, segment_ids: list[str]) -> list[dict[str, Any]]:
@@ -2538,6 +4967,8 @@ class DatabaseStorage:
         token_count: int | None = None,
         metadata: dict[str, Any] | None = None,
         vector_id: str | None = None,
+        *,
+        connection: Any | None = None,
     ) -> None:
         """更新 Segment"""
         if not self._pool:
@@ -2565,10 +4996,19 @@ class DatabaseStorage:
         params.append(segment_id)
         query = f"UPDATE segments SET {_build_safe_set_clause(updates)} WHERE segment_id = ${param_idx}"
 
+        if connection is not None:
+            await connection.execute(query, *params)
+            return
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
 
-    async def update_segment_fields(self, segment_id: str, fields: dict[str, Any]) -> None:
+    async def update_segment_fields(
+        self,
+        segment_id: str,
+        fields: dict[str, Any],
+        *,
+        connection: Any | None = None,
+    ) -> None:
         """Update arbitrary segment fields (Dify-style enable/disable support)"""
         if not self._pool or not fields:
             return
@@ -2608,18 +5048,86 @@ class DatabaseStorage:
         params.append(segment_id)
         query = f"UPDATE segments SET {_build_safe_set_clause(updates)} WHERE segment_id = ${param_idx}"
 
+        if connection is not None:
+            await connection.execute(query, *params)
+            return
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
 
-    async def delete_segment(self, segment_id: str) -> bool:
+    async def set_segment_index_state(
+        self,
+        segment_id: str,
+        state: str,
+        *,
+        error: str | None = None,
+        connection: Any | None = None,
+    ) -> None:
+        """Commit the fail-closed vector synchronization state for a segment.
+
+        ``enabled`` is deliberately preserved: editing a manually disabled
+        segment must not re-enable it. Retrieval requires both enabled=true and
+        status=completed, so pending/error states hide any stale Qdrant payload.
+        """
+
+        normalized_segment = str(segment_id or "").strip()
+        if not normalized_segment:
+            raise ValueError("segment_id is required")
+        if state not in {"pending", "completed", "error"}:
+            raise ValueError("segment index state must be pending, completed, or error")
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+
+        status = {
+            "pending": "indexing",
+            "completed": "completed",
+            "error": "error",
+        }[state]
+        error_value = None if state != "error" else str(error or "vector update failed")[:1000]
+        async def _update(conn: Any) -> Any:
+            return await conn.fetchrow(
+                """
+                UPDATE segments
+                SET status = $2,
+                    error = $3,
+                    updated_at = NOW()
+                WHERE segment_id = $1
+                RETURNING segment_id
+                """,
+                normalized_segment,
+                status,
+                error_value,
+            )
+        if connection is not None:
+            row = await _update(connection)
+        else:
+            async with self._pool.acquire() as conn:
+                row = await _update(conn)
+        if not row:
+            raise RuntimeError("segment disappeared while updating vector synchronization state")
+
+    async def delete_segment(
+        self,
+        segment_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> bool:
         """删除 Segment"""
         if not self._pool:
             return False
-        async with self._pool.acquire() as conn:
-            result = await conn.execute("DELETE FROM segments WHERE segment_id = $1", segment_id)
+
+        async def _delete(conn: Any) -> bool:
+            result = await conn.execute(
+                "DELETE FROM segments WHERE segment_id = $1",
+                segment_id,
+            )
             if result.startswith("DELETE "):
                 return int(result.split()[-1]) > 0
             return False
+
+        if connection is not None:
+            return await _delete(connection)
+        async with self._pool.acquire() as conn:
+            return await _delete(conn)
 
     async def save_image_segment(self, segment_data: dict[str, Any]) -> None:
         """保存图片段到数据库
@@ -2694,7 +5202,12 @@ class DatabaseStorage:
                 "completed",  # status
             )
 
-    async def get_image_segments_by_document(self, document_id: str) -> list[dict[str, Any]]:
+    async def get_image_segments_by_document(
+        self,
+        document_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> list[dict[str, Any]]:
         """获取文档的所有图片段
 
         Args:
@@ -2705,7 +5218,7 @@ class DatabaseStorage:
         """
         if not self._pool:
             return []
-        async with self._pool.acquire() as conn:
+        async def _get(conn: Any) -> list[dict[str, Any]]:
             rows = await conn.fetch(
                 """
                 SELECT segment_id, document_id, dataset_id, position,
@@ -2720,6 +5233,11 @@ class DatabaseStorage:
                 document_id,
             )
             return [dict(row) for row in rows]
+
+        if connection is not None:
+            return await _get(connection)
+        async with self._pool.acquire() as conn:
+            return await _get(conn)
 
     async def delete_image_segments_by_document(self, document_id: str) -> int:
         """删除文档的所有图片段
@@ -2804,6 +5322,9 @@ class DatabaseStorage:
         proximity_score: float = 1.0,
         char_offset: int = 0,
         page_number: int | None = None,
+        *,
+        dataset_id: str,
+        tenant_id: str,
     ) -> bool:
         """Associate an image segment with a text segment.
 
@@ -2820,15 +5341,29 @@ class DatabaseStorage:
         """
         if not self._pool:
             return False
+        normalized_dataset = str(dataset_id or "").strip()
+        normalized_tenant = str(tenant_id or "").strip()
+        if not normalized_dataset or not normalized_tenant:
+            raise ValueError("dataset_id and tenant_id are required for segment association")
 
         async with self._pool.acquire() as conn:
             try:
-                await conn.execute(
+                result = await conn.execute(
                     """
                     INSERT INTO segment_images (
                         segment_id, image_segment_id, position,
                         proximity_score, char_offset, page_number
-                    ) VALUES ($1, $2, $3, $4, $5, $6)
+                    )
+                    SELECT $1, $2, $3, $4, $5, $6
+                    FROM segments AS source_s
+                    JOIN segments AS image_s
+                      ON image_s.segment_id = $2
+                     AND image_s.dataset_id = source_s.dataset_id
+                    JOIN datasets AS ds ON ds.dataset_id = source_s.dataset_id
+                    WHERE source_s.segment_id = $1
+                      AND source_s.dataset_id = $7
+                      AND ds.tenant_id = $8
+                      AND ds.is_deleted = FALSE
                     ON CONFLICT (segment_id, image_segment_id) DO UPDATE SET
                         position = EXCLUDED.position,
                         proximity_score = EXCLUDED.proximity_score,
@@ -2841,14 +5376,19 @@ class DatabaseStorage:
                     proximity_score,
                     char_offset,
                     page_number,
+                    normalized_dataset,
+                    normalized_tenant,
                 )
-                return True
+                return result.rsplit(" ", 1)[-1] == "1"
             except Exception:
                 return False
 
     async def add_segment_image_associations_batch(
         self,
         associations: list[dict[str, Any]],
+        *,
+        dataset_id: str,
+        tenant_id: str,
     ) -> int:
         """Add multiple image associations in batch.
 
@@ -2866,6 +5406,10 @@ class DatabaseStorage:
         """
         if not self._pool or not associations:
             return 0
+        normalized_dataset = str(dataset_id or "").strip()
+        normalized_tenant = str(tenant_id or "").strip()
+        if not normalized_dataset or not normalized_tenant:
+            raise ValueError("dataset_id and tenant_id are required for segment associations")
 
         async with self._pool.acquire() as conn:
             count = 0
@@ -2873,12 +5417,22 @@ class DatabaseStorage:
             async with conn.transaction():
                 for assoc in associations:
                     try:
-                        await conn.execute(
+                        result = await conn.execute(
                             """
                             INSERT INTO segment_images (
                                 segment_id, image_segment_id, position,
                                 proximity_score, char_offset, page_number
-                            ) VALUES ($1, $2, $3, $4, $5, $6)
+                            )
+                            SELECT $1, $2, $3, $4, $5, $6
+                            FROM segments AS source_s
+                            JOIN segments AS image_s
+                              ON image_s.segment_id = $2
+                             AND image_s.dataset_id = source_s.dataset_id
+                            JOIN datasets AS ds ON ds.dataset_id = source_s.dataset_id
+                            WHERE source_s.segment_id = $1
+                              AND source_s.dataset_id = $7
+                              AND ds.tenant_id = $8
+                              AND ds.is_deleted = FALSE
                             ON CONFLICT (segment_id, image_segment_id) DO UPDATE SET
                                 position = EXCLUDED.position,
                                 proximity_score = EXCLUDED.proximity_score,
@@ -2891,8 +5445,11 @@ class DatabaseStorage:
                             assoc.get("proximity_score", 1.0),
                             assoc.get("char_offset", 0),
                             assoc.get("page_number"),
+                            normalized_dataset,
+                            normalized_tenant,
                         )
-                        count += 1
+                        if result.rsplit(" ", 1)[-1] == "1":
+                            count += 1
                     except Exception:
                         continue
             return count
@@ -2932,7 +5489,11 @@ class DatabaseStorage:
             return [dict(row) for row in rows]
 
     async def get_segment_associations_batch(
-        self, segment_ids: list[str]
+        self,
+        segment_ids: list[str],
+        *,
+        dataset_id: str,
+        tenant_id: str,
     ) -> dict[str, list[dict[str, Any]]]:
         """Get associated images for multiple segments efficiently.
 
@@ -2944,6 +5505,10 @@ class DatabaseStorage:
         """
         if not self._pool or not segment_ids:
             return {}
+        normalized_dataset = str(dataset_id or "").strip()
+        normalized_tenant = str(tenant_id or "").strip()
+        if not normalized_dataset or not normalized_tenant:
+            raise ValueError("dataset_id and tenant_id are required for segment associations")
 
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
@@ -2955,16 +5520,49 @@ class DatabaseStorage:
                     si.proximity_score,
                     si.char_offset,
                     si.page_number,
-                    s.image_url AS storage_url,
-                    s.image_filename AS filename,
-                    s.image_media_type AS media_type,
-                    s.text AS vlm_description
+                    image_s.image_url AS storage_url,
+                    image_s.image_filename AS filename,
+                    image_s.image_media_type AS media_type,
+                    image_s.text AS vlm_description
                 FROM segment_images si
-                JOIN segments s ON s.segment_id = si.image_segment_id
-                WHERE si.segment_id = ANY($1)
+                JOIN segments AS source_s ON source_s.segment_id = si.segment_id
+                JOIN segments AS image_s
+                  ON image_s.segment_id = si.image_segment_id
+                 AND image_s.dataset_id = source_s.dataset_id
+                JOIN documents AS source_d
+                  ON source_d.document_id = source_s.document_id
+                 AND source_d.dataset_id = source_s.dataset_id
+                JOIN documents AS image_d
+                  ON image_d.document_id = image_s.document_id
+                 AND image_d.dataset_id = image_s.dataset_id
+                JOIN datasets AS ds ON ds.dataset_id = source_s.dataset_id
+                WHERE si.segment_id = ANY($1::text[])
+                  AND source_s.dataset_id = $2
+                  AND ds.tenant_id = $3
+                  AND ds.is_deleted = FALSE
+                  AND COALESCE(source_s.enabled, TRUE) = TRUE
+                  AND COALESCE(image_s.enabled, TRUE) = TRUE
+                  AND source_s.status = 'completed'
+                  AND image_s.status = 'completed'
+                  AND COALESCE(source_d.enabled, TRUE) = TRUE
+                  AND COALESCE(source_d.archived, FALSE) = FALSE
+                  AND source_d.status = 'completed'
+                  AND NOT (
+                      COALESCE(source_d.metadata, '{}'::jsonb)
+                      ? '_document_lifecycle_reindex'
+                  )
+                  AND COALESCE(image_d.enabled, TRUE) = TRUE
+                  AND COALESCE(image_d.archived, FALSE) = FALSE
+                  AND image_d.status = 'completed'
+                  AND NOT (
+                      COALESCE(image_d.metadata, '{}'::jsonb)
+                      ? '_document_lifecycle_reindex'
+                  )
                 ORDER BY si.segment_id, si.proximity_score DESC, si.position
                 """,
                 segment_ids,
+                normalized_dataset,
+                normalized_tenant,
             )
 
             result: dict[str, list[dict[str, Any]]] = {sid: [] for sid in segment_ids}
@@ -4996,6 +7594,9 @@ class DatabaseStorage:
         web_url: str | None = None,
         author: str | None = None,
         confluence_updated_at: str | None = None,
+        image_count: int = 0,
+        *,
+        connection: Any | None = None,
     ) -> None:
         """插入或更新 Confluence 页面记录"""
         if not self._pool:
@@ -5012,14 +7613,18 @@ class DatabaseStorage:
             else:
                 updated_at_dt = confluence_updated_at
 
-        async with self._pool.acquire() as conn:
+        async def _upsert(conn: Any) -> None:
             await conn.execute(
                 """
                 INSERT INTO confluence_pages (
                     id, binding_id, document_id, page_id, space_key, title,
                     version, content_hash, parent_page_id, depth, status,
-                    last_synced_at, confluence_updated_at, labels, web_url, author
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), $12, $13, $14, $15)
+                    last_synced_at, confluence_updated_at, labels, web_url, author,
+                    image_count
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                    NOW(), $12, $13, $14, $15, $16
+                )
                 ON CONFLICT (id) DO UPDATE SET
                     document_id = EXCLUDED.document_id,
                     title = EXCLUDED.title,
@@ -5030,6 +7635,8 @@ class DatabaseStorage:
                     confluence_updated_at = EXCLUDED.confluence_updated_at,
                     labels = EXCLUDED.labels,
                     web_url = EXCLUDED.web_url,
+                    author = EXCLUDED.author,
+                    image_count = EXCLUDED.image_count,
                     updated_at = NOW()
             """,
                 record_id,
@@ -5047,7 +7654,14 @@ class DatabaseStorage:
                 json.dumps(labels or []),  # JSONB 列需要 JSON 字符串
                 web_url,
                 author,
+                max(int(image_count or 0), 0),
             )
+
+        if connection is not None:
+            await _upsert(connection)
+            return
+        async with self._pool.acquire() as conn:
+            await _upsert(conn)
 
     async def delete_confluence_page_by_page_id(
         self,
@@ -6513,6 +9127,8 @@ class DatabaseStorage:
         changed_by: str | None = None,
         confluence_version: int | None = None,
         confluence_updated_at: datetime | None = None,
+        *,
+        connection: Any | None = None,
     ) -> dict[str, Any] | None:
         """
         Create a new document version snapshot.
@@ -6535,7 +9151,7 @@ class DatabaseStorage:
         if not self._pool:
             return None
 
-        async with self._pool.acquire() as conn:
+        async def _create(conn: Any) -> dict[str, Any]:
             # Get next version number for this document
             row = await conn.fetchrow(
                 "SELECT COALESCE(MAX(version_number), 0) + 1 as next_version FROM document_versions WHERE document_id = $1",
@@ -6589,6 +9205,11 @@ class DatabaseStorage:
                 "change_type": change_type,
                 "word_count": word_count,
             }
+
+        if connection is not None:
+            return await _create(connection)
+        async with self._pool.acquire() as conn, conn.transaction():
+            return await _create(conn)
 
     async def list_document_versions(
         self,
@@ -6831,7 +9452,55 @@ class DatabaseStorage:
             )
             return self._row_to_dict(row) if row else None
 
-    async def delete_document_summary(self, document_id: str) -> bool:
+    async def get_document_summary_scoped(
+        self,
+        document_id: str,
+        dataset_id: str,
+        tenant_id: str,
+    ) -> dict[str, Any] | None:
+        """Read an active document summary under exact tenant/dataset scope."""
+
+        normalized_document = str(document_id or "").strip()
+        normalized_dataset = str(dataset_id or "").strip()
+        normalized_tenant = str(tenant_id or "").strip()
+        if not normalized_document or not normalized_dataset or not normalized_tenant:
+            raise ValueError("document_id, dataset_id, and tenant_id are required")
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT dsumm.document_id, dsumm.summary, dsumm.keywords,
+                       dsumm.topics, dsumm.vector_id, dsumm.created_at,
+                       dsumm.updated_at
+                FROM document_summaries AS dsumm
+                JOIN documents AS d ON d.document_id = dsumm.document_id
+                JOIN datasets AS ds ON ds.dataset_id = d.dataset_id
+                WHERE dsumm.document_id = $1
+                  AND d.dataset_id = $2
+                  AND ds.tenant_id = $3
+                  AND ds.is_deleted = FALSE
+                  AND COALESCE(d.enabled, TRUE) = TRUE
+                  AND COALESCE(d.archived, FALSE) = FALSE
+                  AND d.status = 'completed'
+                  AND NOT (
+                      COALESCE(d.metadata, '{}'::jsonb)
+                      ? '_document_lifecycle_reindex'
+                  )
+                """,
+                normalized_document,
+                normalized_dataset,
+                normalized_tenant,
+            )
+            return self._row_to_dict(row) if row else None
+
+    async def delete_document_summary(
+        self,
+        document_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> bool:
         """
         Delete document summary.
 
@@ -6844,12 +9513,16 @@ class DatabaseStorage:
         if not self._pool:
             return False
 
-        async with self._pool.acquire() as conn:
+        async def _delete(conn: Any) -> bool:
             result = await conn.execute(
                 "DELETE FROM document_summaries WHERE document_id = $1",
                 document_id,
             )
             return "DELETE" in result
+        if connection is not None:
+            return await _delete(connection)
+        async with self._pool.acquire() as conn:
+            return await _delete(conn)
 
     async def get_dataset_summaries(
         self,

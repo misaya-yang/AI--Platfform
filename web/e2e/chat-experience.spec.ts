@@ -10,6 +10,8 @@ import {
   seedClientPrefs,
   toSseBody,
 } from "./support/helpers";
+import { buildTimeline } from "../src/pages/assistant/components/buildTimeline";
+import type { ChatMessage as AssistantChatMessage } from "../src/pages/assistant/types";
 
 const ASSISTANT_COMPOSER_ID = "assistant-chat-composer";
 const PLAYGROUND_COMPOSER_ID = "playground-chat-composer";
@@ -18,6 +20,48 @@ const MOCK_ASSISTANT_MODEL_ID = "gpt-4o";
 const MOCK_PLAYGROUND_SERVICE_ID = "e2e-mock-playground";
 const MOCK_PLAYGROUND_THREAD_ID = "e2e-mock-thread";
 const MOCK_PLAYGROUND_TOOL_ID = "pg-tool-1";
+
+const translateDefault = (
+  key: string,
+  options?: Record<string, unknown>
+): string => String(options?.defaultValue ?? key);
+
+test("assistant timeline tolerates transient tool entries without names", () => {
+  const message = {
+    id: "assistant-transient-tool-name",
+    role: "assistant",
+    content: "",
+    createdAt: new Date(0).toISOString(),
+    toolCalls: [
+      {
+        id: "todo-call-transient",
+        name: undefined,
+        arguments: { todos: [{ content: "Review tool stream", status: "pending" }] },
+        status: "running",
+      },
+    ],
+    processSummary: {
+      collapsed: true,
+      status: "running",
+      steps: [],
+      tools: [
+        {
+          id: "process-tool-transient",
+          name: undefined,
+          status: "running",
+        },
+      ],
+    },
+  } as unknown as AssistantChatMessage;
+
+  const timeline = buildTimeline(message, translateDefault);
+
+  expect(timeline.steps).toHaveLength(2);
+  expect(timeline.steps.map((step) => step.title)).toEqual([
+    "External tool",
+    "External tool",
+  ]);
+});
 
 type MockAssistantSession = {
   session_id: string;
@@ -767,6 +811,247 @@ test("assistant emits stream telemetry lifecycle on mocked stream", async ({ pag
 
   const finishedEvent = events.find((event) => event.event === "chat.stream.finished");
   expect(finishedEvent?.payload?.outcome).toBe("completed");
+});
+
+test("assistant restores todo_write after transient nameless tool events", async ({ page }) => {
+  await seedClientPrefs(page, { locale: "en-US" });
+  await installClientAuth(page, {
+    user_id: "e2e-assistant-tool-order-user",
+    email: "assistant-tool-order@example.com",
+    display_name: "Assistant Tool Order",
+  });
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+
+  await installAssistantHarness(page, async (route) => {
+    const common = {
+      run_id: "qwen-todo-run",
+      thread_id: "qwen-todo-thread",
+      session_id: "qwen-todo-session",
+    };
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body: toSseBody([
+        { event_type: "started", data: { request_id: "qwen-todo-request" } },
+        {
+          event_type: "tool_call_end",
+          data: {
+            ...common,
+            tool_call_id: "qwen-todo-call",
+            timestamp: 1000,
+          },
+        },
+        {
+          event_type: "tool_call_result",
+          data: {
+            ...common,
+            tool_call_id: "qwen-todo-call",
+            result: { updated: 1 },
+            success: true,
+            timestamp: 1001,
+          },
+        },
+        {
+          event_type: "tool_call_start",
+          data: {
+            ...common,
+            tool_call_id: "qwen-todo-call",
+            name: "todo_write",
+            tool_name: "todo_write",
+            arguments: {
+              todos: [{ content: "Review tool stream", status: "in_progress" }],
+            },
+            step_id: "qwen-todo-step",
+            timestamp: 1002,
+          },
+        },
+        {
+          event_type: "tool_call_result",
+          data: {
+            ...common,
+            tool_call_id: "qwen-todo-call",
+            name: "todo_write",
+            tool_name: "todo_write",
+            result: { updated: 1 },
+            success: true,
+            timestamp: 1003,
+          },
+        },
+        { event_type: "text_delta", data: "Todo list updated." },
+        { event_type: "done", data: { duration_ms: 120, total_tokens: 42 } },
+      ]),
+    });
+  });
+
+  await ensureAuthenticatedPage(page, "/assistant");
+  const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
+  await composer.fill(`qwen-todo-${Date.now()}`);
+  await composer.press("Enter");
+
+  await expect(page.getByText("Todo list updated.")).toBeVisible();
+  await expect(page.getByText("Failed to render message")).toHaveCount(0);
+  await page.getByRole("button", { name: /Activity/ }).last().click();
+  await expect(page.getByText("todo_write")).toBeVisible();
+  expect(pageErrors).not.toContainEqual(
+    expect.stringContaining("Cannot read properties of undefined")
+  );
+});
+
+test("assistant treats protocol-completed todo_read result without success as completed", async ({ page }) => {
+  await seedClientPrefs(page, { locale: "en-US" });
+  await installClientAuth(page, {
+    user_id: "e2e-assistant-tool-status-user",
+    email: "assistant-tool-status@example.com",
+    display_name: "Assistant Tool Status",
+  });
+
+  await installAssistantHarness(page, async (route) => {
+    const common = {
+      run_id: "qwen-todo-read-run",
+      thread_id: "qwen-todo-read-thread",
+      session_id: "qwen-todo-read-session",
+    };
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body: toSseBody([
+        { event_type: "run_started", data: { ...common, timestamp: 1000 } },
+        {
+          event_type: "step_started",
+          data: {
+            ...common,
+            step_id: "qwen-todo-read-step",
+            title: "Execute tool: todo_read",
+            timestamp: 1001,
+          },
+        },
+        {
+          event_type: "tool_call_start",
+          data: {
+            ...common,
+            tool_call_id: "qwen-todo-read-call",
+            name: "todo_read",
+            tool_name: "todo_read",
+            arguments: {},
+            step_id: "qwen-todo-read-step",
+            timestamp: 1002,
+          },
+        },
+        {
+          event_type: "tool_call_result",
+          data: {
+            ...common,
+            tool_call_id: "qwen-todo-read-call",
+            name: "todo_read",
+            tool_name: "todo_read",
+            status: "completed",
+            result_preview: '{"todos":[]}',
+            duration_ms: 8,
+            timestamp: 1003,
+          },
+        },
+        {
+          event_type: "tool_call_end",
+          data: {
+            ...common,
+            tool_call_id: "qwen-todo-read-call",
+            name: "todo_read",
+            status: "completed",
+            duration_ms: 8,
+            timestamp: 1004,
+          },
+        },
+        {
+          event_type: "step_finished",
+          data: {
+            ...common,
+            step_id: "qwen-todo-read-step",
+            status: "completed",
+            duration_ms: 9,
+            timestamp: 1005,
+          },
+        },
+        { event_type: "text_delta", data: "Todo list is empty." },
+        {
+          event_type: "run_finished",
+          data: { ...common, status: "succeeded", timestamp: 1006 },
+        },
+        { event_type: "done", data: { duration_ms: 10, total_tokens: 32 } },
+      ]),
+    });
+  });
+
+  await ensureAuthenticatedPage(page, "/assistant");
+  const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
+  await composer.fill(`qwen-todo-read-${Date.now()}`);
+  await composer.press("Enter");
+
+  await expect(page.getByText("Todo list is empty.")).toBeVisible();
+  await page.getByRole("button", { name: /Activity/ }).last().click();
+  await expect(page.getByText("Execute tool: todo_read")).toBeVisible();
+  await expect(page.getByText("Step failed", { exact: true })).toHaveCount(0);
+});
+
+test("assistant keeps explicit todo_read failure as an error", async ({ page }) => {
+  await seedClientPrefs(page, { locale: "en-US" });
+  await installClientAuth(page, {
+    user_id: "e2e-assistant-tool-error-user",
+    email: "assistant-tool-error@example.com",
+    display_name: "Assistant Tool Error",
+  });
+
+  await installAssistantHarness(page, async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body: toSseBody([
+        {
+          event_type: "tool_call_start",
+          data: {
+            tool_call_id: "qwen-todo-read-error-call",
+            name: "todo_read",
+            tool_name: "todo_read",
+            arguments: {},
+            timestamp: 1000,
+          },
+        },
+        {
+          event_type: "tool_call_result",
+          data: {
+            tool_call_id: "qwen-todo-read-error-call",
+            name: "todo_read",
+            tool_name: "todo_read",
+            status: "error",
+            success: false,
+            error: "todo_read denied",
+            timestamp: 1001,
+          },
+        },
+        {
+          event_type: "tool_call_end",
+          data: {
+            tool_call_id: "qwen-todo-read-error-call",
+            name: "todo_read",
+            status: "error",
+            error: "todo_read denied",
+            timestamp: 1002,
+          },
+        },
+        { event_type: "text_delta", data: "Tool request failed safely." },
+        { event_type: "done", data: { duration_ms: 10, total_tokens: 20 } },
+      ]),
+    });
+  });
+
+  await ensureAuthenticatedPage(page, "/assistant");
+  const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
+  await composer.fill(`qwen-todo-read-error-${Date.now()}`);
+  await composer.press("Enter");
+
+  await expect(page.getByText("Tool request failed safely.")).toBeVisible();
+  await page.getByRole("button", { name: /Activity/ }).last().click();
+  await expect(page.getByText("todo_read denied", { exact: true })).toBeVisible();
 });
 
 test("assistant activity surfaces agent run state approvals context and artifacts", async ({ page }) => {

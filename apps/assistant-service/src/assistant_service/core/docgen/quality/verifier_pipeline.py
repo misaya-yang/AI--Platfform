@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from openpyxl.utils.cell import coordinate_to_tuple
+
 from ..ir import DocxIR, PdfIR, PptxIR, XlsxIR
 from ..renderers import RendererDispatcher
 from ..renderers.base import RenderResult
@@ -167,13 +169,29 @@ class VerifierPipeline:
 
     def _patch_xlsx(self, ir: XlsxIR, report: CriticReport) -> XlsxIR:
         patched = ir.model_copy(deep=True)
-        error_targets = {i.message for i in report.issues if i.category == IssueCategory.FORMULA_ERROR}
+        error_targets: set[tuple[str, int, int]] = set()
+        for issue in report.issues:
+            if issue.category != IssueCategory.FORMULA_ERROR:
+                continue
+            prefix = "formula error at "
+            if not issue.message.startswith(prefix):
+                continue
+            try:
+                location, marker = issue.message.removeprefix(prefix).rsplit("=", 1)
+                sheet_name, coordinate = location.rsplit("!", 1)
+                row_index, column_index = coordinate_to_tuple(coordinate)
+            except ValueError:
+                continue
+            if marker == "#DIV/0!":
+                error_targets.add((sheet_name, row_index, column_index))
+
         # Very conservative: null out formulas flagged as #DIV/0.
         # A real fix loop would feed the error back to an LLM.
         for sheet in patched.content.sheets:
-            for row in sheet.rows:
-                for cell in row.cells:
-                    if cell.formula and any("DIV" in m for m in error_targets):
+            for row_index, row in enumerate(sheet.rows, start=1):
+                for column_index, cell in enumerate(row.cells, start=1):
+                    target = (sheet.name, row_index, column_index)
+                    if cell.formula and target in error_targets:
                         cell.formula = None
                         cell.value = 0
         return patched

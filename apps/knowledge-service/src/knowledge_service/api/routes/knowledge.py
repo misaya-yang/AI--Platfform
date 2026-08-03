@@ -2,22 +2,32 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import logging
 import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
 
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import RedirectResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field, model_validator
 
 from ...config.settings import Settings
 from ...core.auth.user_resolver import UserContext
-from ...core.crypto import get_unsigned_url, verify_signed_url
 from ...core.exceptions import PermissionDeniedError, ValidationFailedError
+from ...persistence.database import (
+    DOCUMENT_LIFECYCLE_REINDEX_KEY,
+    IndexLeaseUnavailableError,
+    dataset_index_deletion_fence,
+)
+from ...services.knowledge.document_service import (
+    _dataset_content_generation,
+    _require_dataset_index_readable,
+    _require_dataset_index_writable,
+    _require_unchanged_dataset_content,
+)
 from ...services.knowledge.knowledge_service import KnowledgeService
 from ...services.knowledge.worker import KnowledgeWorker
 from ..deps import get_knowledge_service, get_knowledge_worker, get_settings, get_user_context
@@ -41,6 +51,7 @@ from ..schemas.knowledge import (
     QAQuerySchema,
     RetrievalEvalRequestSchema,
     RetrieveRequestSchema,
+    SegmentBatchEnableDisableSchema,
     SegmentCreateSchema,
     SegmentEnableDisableSchema,
     SegmentUpdateSchema,
@@ -52,12 +63,284 @@ router = APIRouter()
 RETRIEVAL_EVAL_MAX_CASES = 20
 RETRIEVAL_EVAL_TIMEOUT_SECONDS = 30.0
 
+_UNRELEASED_MULTIMODAL_TYPES = frozenset(
+    {"image", "page_image", "mixed", "multimodal", "vision"}
+)
+_UNRELEASED_IMAGE_METADATA_KEYS = frozenset(
+    {
+        "associatedimages",
+        "imagebytes",
+        "imagecount",
+        "imagepresignedurl",
+        "images",
+        "imagesegmentid",
+        "imageurl",
+        "rawimageurl",
+        "storageurl",
+        "vlmdescription",
+    }
+)
+
+
+def _is_unreleased_multimodal_result(item: Any) -> bool:
+    metadata = getattr(item, "metadata", None)
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    modality_values = (
+        getattr(item, "content_type", None),
+        getattr(item, "media_type", None),
+        getattr(item, "modality", None),
+        metadata.get("content_type"),
+        metadata.get("media_type"),
+        metadata.get("modality"),
+    )
+    for raw_value in modality_values:
+        normalized = str(raw_value or "").strip().lower()
+        if normalized in _UNRELEASED_MULTIMODAL_TYPES or normalized.startswith("image/"):
+            return True
+    return False
+
+
+def _strip_unreleased_image_metadata(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        projected: dict[str, Any] = {}
+        for raw_key, nested in value.items():
+            normalized_key = "".join(
+                character
+                for character in str(raw_key).lower()
+                if character.isalnum()
+            )
+            if normalized_key in _UNRELEASED_IMAGE_METADATA_KEYS:
+                continue
+            projected[str(raw_key)] = _strip_unreleased_image_metadata(nested)
+        return projected
+    if isinstance(value, list):
+        return [_strip_unreleased_image_metadata(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_strip_unreleased_image_metadata(item) for item in value)
+    return copy.deepcopy(value)
+
+
+def _build_server_qa_llm_config(selector: Any, settings: Settings) -> Any:
+    """Build QA generation config from the server allowlist and credentials.
+
+    The request may tune bounded generation preferences, but it never selects
+    an endpoint or supplies/borrows credentials.  This keeps all three QA
+    routes on the same fail-closed provider contract as the RAGAS evaluator.
+    """
+
+    from ai_gateway_core.config import resolve_dashscope
+
+    from ...services.knowledge.qa_service import LLMConfig, LLMProvider
+
+    config = settings.ragas_eval
+    provider_name = str(
+        selector.provider if selector and selector.provider else config.provider
+    ).strip().lower()
+    model = str(selector.model if selector and selector.model else config.model).strip()
+    if provider_name not in config.allowed_providers:
+        raise ValidationFailedError(f"QA provider is not allowlisted: {provider_name}")
+    if model not in config.allowed_models:
+        raise ValidationFailedError(f"QA model is not allowlisted: {model}")
+    if provider_name != LLMProvider.DASHSCOPE.value:
+        raise ValidationFailedError("Only the server-owned DashScope QA provider is enabled")
+
+    api_key, resolved_base_url = resolve_dashscope("chat")
+    if not api_key:
+        raise ValidationFailedError("DashScope QA is not configured")
+    base_url = str(config.base_url or "").strip()
+    if not base_url:
+        base_url = f"{resolved_base_url.rstrip('/')}/v1"
+
+    return LLMConfig(
+        provider=LLMProvider.DASHSCOPE,
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+        temperature=(
+            float(selector.temperature)
+            if selector and selector.temperature is not None
+            else 0.1
+        ),
+        max_tokens=(
+            int(selector.max_tokens)
+            if selector and selector.max_tokens is not None
+            else 2048
+        ),
+        timeout_seconds=config.timeout_seconds,
+        system_prompt=(
+            str(selector.system_prompt)
+            if selector and selector.system_prompt is not None
+            else LLMConfig.system_prompt
+        ),
+    )
+
+
+def _require_authenticated_user(user: UserContext) -> None:
+    """Reject synthetic/guest identities before any paid or expensive work."""
+
+    if (
+        not bool(getattr(user, "is_authenticated", False))
+        or bool(getattr(user, "is_anonymous", False))
+        or str(getattr(user, "user_id", "") or "").strip().lower() == "anonymous"
+        or str(getattr(user, "user_type", "") or "").strip().lower()
+        in {"anonymous", "guest"}
+        or "guest" in {str(role).strip().lower() for role in (user.roles or [])}
+    ):
+        raise PermissionDeniedError("Authenticated user required")
+
+
+async def _require_authenticated_dataset_editor(
+    svc: KnowledgeService,
+    user: UserContext,
+    dataset_id: str,
+) -> dict[str, Any]:
+    _require_authenticated_user(user)
+    return await svc.require_dataset_access(user, dataset_id, required="editor")
+
+
+def _require_safe_chunk_preview_config(config: Any) -> None:
+    """Disable attacker-controlled regex execution in preview-only routes."""
+
+    if config is None:
+        return
+    if hasattr(config, "model_dump"):
+        config = config.model_dump(exclude_none=True)
+    if not isinstance(config, Mapping):
+        raise ValidationFailedError("chunk preview config must be an object")
+    mode = str(config.get("mode") or "automatic").strip().lower()
+    if (
+        mode == "regex"
+        or bool(config.get("regex_pattern"))
+        or bool(config.get("regex"))
+        or bool(config.get("heading_patterns"))
+        or bool(config.get("page_marker"))
+    ):
+        raise ValidationFailedError("custom regex chunk preview is disabled")
+
+
+async def _enqueue_document_or_conflict(
+    worker: KnowledgeWorker,
+    dataset_id: str,
+    document_id: str,
+) -> None:
+    """Publish only a generation durably claimed by the database."""
+
+    if not await _try_enqueue_document(worker, dataset_id, document_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Document could not enter a new ingestion generation",
+        )
+
+
+async def _try_enqueue_document(
+    worker: KnowledgeWorker,
+    dataset_id: str,
+    document_id: str,
+) -> bool:
+    try:
+        return await worker.enqueue(dataset_id, document_id) is True
+    except IndexLeaseUnavailableError:
+        return False
+
+
+async def _require_active_document(
+    svc: KnowledgeService,
+    *,
+    dataset: Mapping[str, Any],
+    dataset_id: str,
+    document_id: str,
+) -> dict[str, Any]:
+    """Resolve one document through the serving active-state authority."""
+
+    tenant_id = str(dataset.get("tenant_id") or "").strip()
+    normalized_dataset = str(dataset_id or "").strip()
+    normalized_document = str(document_id or "").strip()
+    if not tenant_id or not normalized_dataset or not normalized_document:
+        raise ValidationFailedError("Document not found")
+
+    filter_active = getattr(svc.db, "filter_active_document_ids", None)
+    if not callable(filter_active):
+        raise ValidationFailedError("Document active-state authority is unavailable")
+    active_ids = await filter_active(
+        normalized_dataset,
+        tenant_id,
+        [normalized_document],
+    )
+    if set(active_ids or ()) != {normalized_document}:
+        raise ValidationFailedError("Document not found")
+
+    document = await svc.db.get_document(normalized_document)
+    if not document or str(document.get("dataset_id") or "") != normalized_dataset:
+        raise ValidationFailedError("Document not found")
+    return document
+
+
+async def _filter_active_route_segments(
+    svc: KnowledgeService,
+    *,
+    dataset: Mapping[str, Any],
+    dataset_id: str,
+    segments: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Fail closed and retain only exact-scope active segment rows."""
+
+    tenant_id = str(dataset.get("tenant_id") or "").strip()
+    normalized_dataset = str(dataset_id or "").strip()
+    candidate_ids = {
+        str(segment.get("segment_id") or "").strip()
+        for segment in segments
+        if str(segment.get("segment_id") or "").strip()
+    }
+    if not candidate_ids:
+        return []
+    if not tenant_id or not normalized_dataset:
+        raise ValidationFailedError("Segment active-state authority is unavailable")
+
+    filter_active = getattr(svc.db, "filter_active_segment_ids", None)
+    if not callable(filter_active):
+        raise ValidationFailedError("Segment active-state authority is unavailable")
+    active_ids = set(
+        await filter_active(
+            normalized_dataset,
+            tenant_id,
+            sorted(candidate_ids),
+        )
+        or ()
+    )
+    if not active_ids.issubset(candidate_ids):
+        raise ValidationFailedError("Segment active-state authority returned unexpected IDs")
+    return [
+        segment
+        for segment in segments
+        if str(segment.get("segment_id") or "").strip() in active_ids
+    ]
+
+
+def _merge_config_patch(existing: Mapping[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
+    """Recursively merge explicitly supplied config fields into stored config."""
+
+    merged = dict(existing)
+    for key, value in patch.items():
+        current = merged.get(key)
+        if isinstance(current, Mapping) and isinstance(value, Mapping):
+            merged[key] = _merge_config_patch(current, value)
+        else:
+            merged[key] = value
+    return merged
+
 
 async def require_admin_user(
     user: UserContext = Depends(get_user_context),
 ) -> UserContext:
-    roles = set(user.roles or [])
-    if user.tier != "admin" and "admin" not in roles:
+    try:
+        _require_authenticated_user(user)
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail="Admin role required") from exc
+    roles = {str(role).strip().lower() for role in (user.roles or [])}
+    tier = str(
+        getattr(user, "tier", getattr(user, "user_tier", "normal")) or "normal"
+    ).strip().lower()
+    if tier != "admin" and "admin" not in roles:
         raise HTTPException(status_code=403, detail="Admin role required")
     return user
 
@@ -214,7 +497,7 @@ async def create_document_text(
             content=payload.content,
             metadata=payload.metadata,
         )
-        await worker.enqueue(dataset_id, doc["document_id"])
+        await _enqueue_document_or_conflict(worker, dataset_id, doc["document_id"])
         return doc
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
@@ -236,7 +519,8 @@ async def upload_document(
     Upload a document to the knowledge base.
 
     Streams the upload to a temporary file to avoid loading large files
-    entirely into memory. Supports files up to KB_MAX_FILE_SIZE_MB (default 200MB).
+    entirely into memory. The direct-service default is 16 MiB and configured
+    limits are clamped to 48 MiB.
 
     Args:
         dataset_id: Target dataset ID
@@ -251,12 +535,25 @@ async def upload_document(
     import tempfile
 
     ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".html"}
-    KB_MAX_FILE_SIZE_MB = max(1, min(int(os.getenv("KB_MAX_FILE_SIZE_MB", "200")), 500))
+    KB_MAX_FILE_SIZE_MB = max(1, min(int(os.getenv("KB_MAX_FILE_SIZE_MB", "16")), 48))
     KB_MAX_FILE_SIZE = KB_MAX_FILE_SIZE_MB * 1024 * 1024
     CHUNK_SIZE = 64 * 1024  # 64KB
 
     temp_path = None
     try:
+        dataset = await _require_authenticated_dataset_editor(svc, user, dataset_id)
+        _require_dataset_index_writable(dataset)
+
+        normalized_processing_mode = str(processing_mode or "auto").strip().lower()
+        if normalized_processing_mode == "auto":
+            normalized_processing_mode = "text_only"
+        if normalized_processing_mode != "text_only":
+            raise ValidationFailedError(
+                "scanned and multimodal uploads are disabled until the unified "
+                "multimodal index profile is released"
+            )
+        processing_mode = normalized_processing_mode
+
         filename = file.filename or "upload"
         ext = Path(filename).suffix.lower()
 
@@ -335,7 +632,11 @@ async def upload_document(
                     mime_type="application/pdf",
                     processing_mode=processing_mode,
                 )
-                await worker.enqueue(dataset_id, doc["document_id"])
+                await _enqueue_document_or_conflict(
+                    worker,
+                    dataset_id,
+                    doc["document_id"],
+                )
                 results.append(doc)
                 logger.info(
                     "Part %d/%d created: %s, pages %d-%d, doc=%s",
@@ -367,7 +668,7 @@ async def upload_document(
             processing_mode=processing_mode,
         )
         logger.info("Document created: id=%s, enqueueing for ingestion...", doc["document_id"])
-        await worker.enqueue(dataset_id, doc["document_id"])
+        await _enqueue_document_or_conflict(worker, dataset_id, doc["document_id"])
         logger.info(
             "Document enqueued: id=%s, worker queue size ~%d",
             doc["document_id"],
@@ -397,7 +698,7 @@ async def batch_upload_documents(
     批量上传文档到知识库（支持并行处理）
 
     支持格式: PDF, DOCX, TXT, MD, HTML
-    最大文件数: 50
+    最大文件数: 63
     最大单文件大小: 由系统配置决定
 
     使用流式写入临时文件，避免大文件占用过多内存。
@@ -419,11 +720,25 @@ async def batch_upload_documents(
     import aiofiles
 
     try:
-        await svc.require_dataset_access(user, dataset_id, required="editor")
+        dataset = await _require_authenticated_dataset_editor(svc, user, dataset_id)
+        _require_dataset_index_writable(dataset)
 
-        MAX_FILES = 50
+        MAX_FILES = 63
         CHUNK_SIZE = 64 * 1024  # 64KB chunks for streaming
         ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".html"}
+        max_file_size_mb = max(
+            1,
+            min(int(os.getenv("KB_MAX_FILE_SIZE_MB", "16")), 48),
+        )
+        max_file_size = max_file_size_mb * 1024 * 1024
+        max_batch_size_mb = max(
+            1,
+            min(
+                int(os.getenv("KB_MAX_BATCH_SIZE_MB", "32")),
+                48,
+            ),
+        )
+        max_batch_size = max_batch_size_mb * 1024 * 1024
 
         if len(files) > MAX_FILES:
             raise ValidationFailedError(f"Maximum {MAX_FILES} files allowed per batch")
@@ -434,6 +749,7 @@ async def batch_upload_documents(
         batch_id = str(uuid_lib.uuid4())
         documents = []
         errors = []
+        accepted_bytes = 0
 
         for file in files:
             filename = file.filename or "unknown"
@@ -462,12 +778,28 @@ async def batch_upload_documents(
                     temp_path = tmp.name
 
                 # Stream write using aiofiles
+                file_size = 0
                 async with aiofiles.open(temp_path, "wb") as out_file:
                     while True:
                         chunk = await file.read(CHUNK_SIZE)
                         if not chunk:
                             break
+                        file_size += len(chunk)
+                        if file_size > max_file_size:
+                            raise ValidationFailedError(
+                                f"File too large: {file_size / 1024 / 1024:.1f}MB "
+                                f"exceeds limit of {max_file_size_mb}MB"
+                            )
+                        if accepted_bytes + file_size > max_batch_size:
+                            raise ValidationFailedError(
+                                "Batch upload exceeds aggregate limit of "
+                                f"{max_batch_size_mb}MB"
+                            )
                         await out_file.write(chunk)
+
+                if file_size <= 0:
+                    raise ValidationFailedError("Empty files are not accepted")
+                accepted_bytes += file_size
 
                 # Read back for processing (file is now on disk, not all in memory at once)
                 async with aiofiles.open(temp_path, "rb") as in_file:
@@ -480,6 +812,7 @@ async def batch_upload_documents(
                     filename=filename,
                     content_bytes=content,
                     mime_type=file.content_type,
+                    processing_mode="text_only",
                 )
 
                 # Add batch metadata
@@ -496,15 +829,25 @@ async def batch_upload_documents(
 
         # Enqueue all documents for parallel processing
         # Worker will process them based on document_worker_concurrency setting
+        queued_documents = []
         for doc in documents:
-            await worker.enqueue(dataset_id, doc["document_id"])
+            if await _try_enqueue_document(worker, dataset_id, doc["document_id"]):
+                queued_documents.append(doc)
+            else:
+                errors.append(
+                    {
+                        "document_id": doc["document_id"],
+                        "filename": doc.get("title"),
+                        "error": "Document was not accepted by the durable ingestion queue",
+                    }
+                )
 
         return {
             "batch_id": batch_id,
             "total": len(files),
-            "accepted": len(documents),
+            "accepted": len(queued_documents),
             "rejected": len(errors),
-            "documents": documents,
+            "documents": queued_documents,
             "errors": errors,
         }
 
@@ -530,7 +873,7 @@ async def create_document_url(
             title=payload.title,
             metadata=payload.metadata,
         )
-        await worker.enqueue(dataset_id, doc["document_id"])
+        await _enqueue_document_or_conflict(worker, dataset_id, doc["document_id"])
         return doc
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
@@ -541,109 +884,18 @@ async def create_document_url(
 @router.post("/knowledge/{dataset_id}/documents/images")
 async def upload_images(
     dataset_id: str,
-    files: list[UploadFile] = File(...),
     svc: KnowledgeService = Depends(get_knowledge_service),
-    worker: KnowledgeWorker = Depends(get_knowledge_worker),
     user: UserContext = Depends(get_user_context),
 ):
-    """
-    批量上传图片到知识库
-
-    支持格式: JPEG, PNG, GIF, WebP, BMP
-    最大大小: 3MB per image
-    图片将通过VLM生成描述并进行多模态向量化
-    """
+    """Keep the incomplete multimodal write path unavailable."""
     try:
-        # Verify access
         await svc.require_dataset_access(user, dataset_id, required="editor")
-
-        ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp"}
-        MAX_IMAGE_SIZE = 3 * 1024 * 1024  # 3MB
-
-        # Magic bytes for image validation (prevents content-type spoofing)
-        IMAGE_MAGIC_BYTES = {
-            b"\xff\xd8\xff": "image/jpeg",  # JPEG
-            b"\x89PNG\r\n\x1a\n": "image/png",  # PNG
-            b"GIF87a": "image/gif",  # GIF87a
-            b"GIF89a": "image/gif",  # GIF89a
-            b"RIFF": "image/webp",  # WebP (starts with RIFF)
-            b"BM": "image/bmp",  # BMP
-        }
-
-        def validate_image_magic(data: bytes) -> bool:
-            """Validate image by checking magic bytes."""
-            for magic in IMAGE_MAGIC_BYTES:
-                if data.startswith(magic):
-                    return True
-            # Special case for WebP: RIFF....WEBP
-            return bool(data[:4] == b"RIFF" and len(data) >= 12 and data[8:12] == b"WEBP")
-
-        results = []
-        errors = []
-
-        for file in files:
-            # Validate content type
-            if file.content_type not in ALLOWED_IMAGE_TYPES:
-                errors.append(
-                    {
-                        "filename": file.filename,
-                        "error": f"Unsupported image type: {file.content_type}",
-                    }
-                )
-                continue
-
-            # Read and validate size
-            content = await file.read()
-            if len(content) > MAX_IMAGE_SIZE:
-                errors.append(
-                    {
-                        "filename": file.filename,
-                        "error": f"Image too large: {len(content)} bytes (max {MAX_IMAGE_SIZE})",
-                    }
-                )
-                continue
-
-            # Validate magic bytes to prevent content-type spoofing
-            if not validate_image_magic(content):
-                errors.append(
-                    {
-                        "filename": file.filename,
-                        "error": "Invalid image file: magic bytes validation failed",
-                    }
-                )
-                continue
-
-            # Create document
-            doc = await svc.create_document_from_upload(
-                user,
-                dataset_id,
-                filename=file.filename or "image",
-                content_bytes=content,
-                mime_type=file.content_type,
-            )
-
-            # Enqueue for processing (VLM description + multimodal embedding)
-            await worker.enqueue(dataset_id, doc["document_id"])
-
-            results.append(
-                {
-                    "document_id": doc["document_id"],
-                    "filename": file.filename,
-                    "size_bytes": len(content),
-                }
-            )
-
-        return {
-            "uploaded": results,
-            "success_count": len(results),
-            "failed_count": len(errors),
-            "errors": errors,
-        }
-
+        raise HTTPException(
+            status_code=503,
+            detail="Multimodal image ingestion is not enabled for this release.",
+        )
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
-    except ValidationFailedError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.get("/knowledge/images/{segment_id}")
@@ -651,7 +903,6 @@ async def get_image_segment(
     segment_id: str,
     svc: KnowledgeService = Depends(get_knowledge_service),
     user: UserContext = Depends(get_user_context),
-    settings: Settings = Depends(get_settings),
 ):
     """
     Serve image content for a segment.
@@ -662,55 +913,37 @@ async def get_image_segment(
     - Path traversal protection via base_path check
     """
     try:
-        segment = await svc.db.get_segment(segment_id)
-        if not segment or segment.get("content_type") != "image":
+        get_active_segment_by_tenant = getattr(
+            svc.db,
+            "get_active_segment_by_tenant",
+            None,
+        )
+        if not callable(get_active_segment_by_tenant):
+            raise ValidationFailedError("Image active-state authority is unavailable")
+        segment = await get_active_segment_by_tenant(segment_id, user.tenant_id)
+        if not segment:
             raise HTTPException(status_code=404, detail="Image not found")
 
         dataset_id = str(segment.get("dataset_id") or "")
         if not dataset_id:
             raise HTTPException(status_code=404, detail="Image not found")
 
-        await svc.require_dataset_access(user, dataset_id, required="viewer")
-
-        image_url = segment.get("image_url") or ""
-        if not image_url:
+        dataset = await svc.require_dataset_access(user, dataset_id, required="viewer")
+        get_segment_scoped = getattr(svc.db, "get_segment_scoped", None)
+        if not callable(get_segment_scoped):
+            raise ValidationFailedError("Image active-state authority is unavailable")
+        segment = await get_segment_scoped(
+            segment_id,
+            dataset_id,
+            str(dataset.get("tenant_id") or ""),
+        )
+        if not segment or segment.get("content_type") != "image":
             raise HTTPException(status_code=404, detail="Image not found")
+        raise HTTPException(
+            status_code=503,
+            detail="Multimodal image serving is not enabled for this release.",
+        )
 
-        if image_url.startswith("file://"):
-            if not svc.image_storage_service:
-                raise HTTPException(
-                    status_code=503, detail="Image storage service is not initialized."
-                )
-
-            # Verify URL signature for local files (security fix)
-            signing_key = getattr(settings.confluence, "encryption_key", "") or ""
-            if signing_key:
-                is_valid, error_msg = verify_signed_url(image_url, signing_key)
-                if not is_valid:
-                    logger.warning(
-                        f"Invalid image URL signature for segment {segment_id}: {error_msg}"
-                    )
-                    raise HTTPException(status_code=403, detail=f"Access denied: {error_msg}")
-
-            # Get the unsigned URL path for file access
-            unsigned_url = get_unsigned_url(image_url)
-            base_path = (
-                Path(svc.image_storage_service.config.local_base_path).expanduser().resolve()
-            )
-            parsed = urlparse(unsigned_url)
-            file_path = Path(unquote(parsed.path)).expanduser().resolve()
-
-            # Path traversal protection
-            if base_path not in file_path.parents and file_path != base_path:
-                logger.warning(f"Path traversal attempt for segment {segment_id}: {file_path}")
-                raise HTTPException(status_code=403, detail="Access denied")
-            if not file_path.exists():
-                raise HTTPException(status_code=404, detail="Image not found")
-
-            media_type = segment.get("image_media_type") or "application/octet-stream"
-            return StreamingResponse(file_path.open("rb"), media_type=media_type)
-
-        return RedirectResponse(image_url, status_code=307)
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
@@ -741,17 +974,20 @@ async def reindex_document(
     user: UserContext = Depends(get_user_context),
 ):
     try:
-        await svc.require_dataset_access(user, dataset_id, required="editor")
-        await worker.enqueue(dataset_id, document_id)
-        # Update status immediately so UI shows "解析中" after refetch instead of staying "已上传"
-        try:
-            await svc.db.update_document_status(document_id, status="parsing", progress=0)
-        except Exception as e:
-            logger.warning("Could not update document status after reindex enqueue: %s", e)
+        dataset = await svc.require_dataset_access(user, dataset_id, required="editor")
+        _require_dataset_index_writable(dataset)
+        queued = await _try_enqueue_document(worker, dataset_id, document_id)
+        if not queued:
+            raise HTTPException(
+                status_code=409,
+                detail="Document is already queued/processing or is not eligible for reindex",
+            )
         logger.info("Reindex queued for document %s (dataset=%s)", document_id, dataset_id)
         return {"status": "queued", "document_id": document_id}
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.delete("/knowledge/{dataset_id}/documents/{document_id}")
@@ -832,34 +1068,64 @@ async def _run_hierarchical_retrieval(
     """Run hierarchical retrieval with the dataset's authorized embedding setup."""
 
     dataset = await svc.require_dataset_access(user, dataset_id, required="viewer")
+    from ...services.knowledge.retrieval_service import (
+        dataset_retrieval_generation,
+        require_shadow_only_dataset,
+    )
+
+    require_shadow_only_dataset(dataset)
+    if svc._is_multimodal_dataset(dataset):
+        raise ValidationFailedError(
+            "multimodal dataset retrieval is not enabled for this release"
+        )
+    retrieval_generation = dataset_retrieval_generation(dataset)
+    collection_name = str(dataset.get("collection_name") or "").strip()
+    dataset_tenant_id = str(dataset.get("tenant_id") or "").strip()
+    if not collection_name:
+        raise ValidationFailedError(
+            "dataset retrieval requires a persisted Qdrant collection"
+        )
+    collection_guard = getattr(
+        svc.vector_store,
+        "require_hierarchical_collections_readable",
+        None,
+    )
+    if not callable(collection_guard):
+        raise ValidationFailedError(
+            "vector store collection-read authority is unavailable"
+        )
+    try:
+        await collection_guard(
+            collection_name,
+            tenant_id=dataset_tenant_id,
+            dataset_id=dataset_id,
+        )
+    except Exception as exc:
+        raise ValidationFailedError(
+            f"dataset collection is not readable: {exc}"
+        ) from exc
     embedding_config = dataset.get("embedding_config")
     if not isinstance(embedding_config, dict):
         embedding_config = {}
 
-    if svc._is_multimodal_dataset(dataset):
-        embedder: Any = svc._get_unified_multimodal_embedder(
-            dataset,
-            embedding_config,
-        )
-    else:
-        from ...services.knowledge.embedding import get_cached_embedder
+    from ...services.knowledge.embedding import get_cached_embedder
 
-        embedding_provider = str(dataset.get("embedding_provider") or "local")
-        embedding_model = str(dataset.get("embedding_model") or "hash-384")
-        embedding_dimension = int(dataset.get("embedding_dimension") or 0) or None
-        embedding_settings = svc._resolve_embedding_config(
-            provider=embedding_provider,
-            model=embedding_model,
-            embedding_config=embedding_config,
-        )
-        embedder = await get_cached_embedder(
-            embedding_settings,
-            dimension=embedding_dimension,
-        )
+    embedding_provider = str(dataset.get("embedding_provider") or "local")
+    embedding_model = str(dataset.get("embedding_model") or "hash-384")
+    embedding_dimension = int(dataset.get("embedding_dimension") or 0) or None
+    embedding_settings = svc._resolve_embedding_config(
+        provider=embedding_provider,
+        model=embedding_model,
+        embedding_config=embedding_config,
+    )
+    embedder: Any = await get_cached_embedder(
+        embedding_settings,
+        dimension=embedding_dimension,
+    )
 
     from ...services.knowledge.hierarchical_retriever import hierarchical_retrieve
 
-    return await hierarchical_retrieve(
+    hierarchical_results, hierarchical_meta = await hierarchical_retrieve(
         query=query,
         dataset_id=dataset_id,
         vector_store=svc.vector_store,
@@ -867,12 +1133,111 @@ async def _run_hierarchical_retrieval(
         database=svc.db,
         top_k=top_k,
         strategy=strategy,
-        base_collection=str(dataset.get("collection_name") or "") or None,
+        base_collection=collection_name,
+        tenant_id=dataset_tenant_id,
         l1_top_k=l1_top_k,
         l2_top_k=l2_top_k,
         include_context=include_context,
         score_threshold=score_threshold,
     )
+    text_only_results: list[Any] = []
+    for item in hierarchical_results:
+        if _is_unreleased_multimodal_result(item):
+            continue
+        projected_item = copy.copy(item)
+        projected_item.metadata = _strip_unreleased_image_metadata(
+            getattr(item, "metadata", {})
+        )
+        text_only_results.append(projected_item)
+    hierarchical_results = text_only_results
+    document_ids = [
+        str(getattr(item, "document_id", "") or "").strip()
+        for item in hierarchical_results
+        if str(getattr(item, "document_id", "") or "").strip()
+    ]
+    if hierarchical_results:
+        filter_documents = getattr(svc.db, "filter_active_document_ids", None)
+        if not callable(filter_documents):
+            raise ValidationFailedError(
+                "active-document database authority is unavailable"
+            )
+        try:
+            active_document_ids = await filter_documents(
+                dataset_id=dataset_id,
+                tenant_id=dataset_tenant_id,
+                document_ids=document_ids,
+            )
+        except Exception as exc:
+            raise ValidationFailedError(
+                f"active-document database authority failed: {exc}"
+            ) from exc
+        normalized_active_documents = {
+            str(document_id or "").strip()
+            for document_id in (active_document_ids or set())
+            if str(document_id or "").strip()
+        }
+        if not normalized_active_documents.issubset(set(document_ids)):
+            raise ValidationFailedError(
+                "active-document database authority returned an unexpected document"
+            )
+        hierarchical_results = [
+            item
+            for item in hierarchical_results
+            if str(getattr(item, "document_id", "") or "").strip()
+            in normalized_active_documents
+        ]
+    segment_results = [
+        item
+        for item in hierarchical_results
+        if int(getattr(item, "level", 3) or 3) != 1
+    ]
+    segment_ids = [
+        str(getattr(item, "segment_id", "") or "").strip()
+        for item in segment_results
+        if str(getattr(item, "segment_id", "") or "").strip()
+    ]
+    if segment_results:
+        filter_segments = getattr(svc.db, "filter_active_segment_ids", None)
+        if not callable(filter_segments):
+            raise ValidationFailedError(
+                "active-segment database authority is unavailable"
+            )
+        try:
+            active_segment_ids = await filter_segments(
+                dataset_id=dataset_id,
+                tenant_id=dataset_tenant_id,
+                segment_ids=segment_ids,
+            )
+        except Exception as exc:
+            raise ValidationFailedError(
+                f"active-segment database authority failed: {exc}"
+            ) from exc
+        normalized_active_segments = {
+            str(segment_id or "").strip()
+            for segment_id in (active_segment_ids or set())
+            if str(segment_id or "").strip()
+        }
+        if not normalized_active_segments.issubset(set(segment_ids)):
+            raise ValidationFailedError(
+                "active-segment database authority returned an unexpected segment"
+            )
+        hierarchical_results = [
+            item
+            for item in hierarchical_results
+            if int(getattr(item, "level", 3) or 3) == 1
+            or str(getattr(item, "segment_id", "") or "").strip()
+            in normalized_active_segments
+        ]
+    authoritative = await svc.require_dataset_access(
+        user,
+        dataset_id,
+        required="viewer",
+    )
+    if dataset_retrieval_generation(authoritative) != retrieval_generation:
+        raise ValidationFailedError(
+            "dataset index generation changed during retrieval; retry the request"
+        )
+    return hierarchical_results, hierarchical_meta
 
 
 @router.post("/knowledge/{dataset_id}/retrieve")
@@ -883,6 +1248,7 @@ async def retrieve(
     user: UserContext = Depends(get_user_context),
 ):
     try:
+        _require_authenticated_user(user)
         # Use hierarchical retrieval if enabled
         if payload.hierarchical:
             hierarchical_results, hierarchical_meta = await _run_hierarchical_retrieval(
@@ -1040,6 +1406,7 @@ async def retrieve_batch(
     the response contains one globally fused Top-K result group.
     """
     try:
+        _require_authenticated_user(user)
         # Parse queries from either format
         queries: list[Any] = []
         if payload.queries:
@@ -1110,6 +1477,7 @@ async def hit_test(
 ):
     """Retrieve preview endpoint for debugging (includes raw scores in metadata)."""
     try:
+        await _require_authenticated_dataset_editor(svc, user, dataset_id)
         payload.mode = payload.mode or "hybrid"
         results, meta = await svc.retrieve(
             user=user,
@@ -1363,7 +1731,10 @@ async def _retrieve_eval_case(
     return list(standard_results), metadata
 
 
-@router.post("/knowledge/{dataset_id}/retrieve_evaluate")
+@router.post(
+    "/knowledge/{dataset_id}/retrieve_evaluate",
+    dependencies=[Depends(require_admin_user)],
+)
 async def retrieve_evaluate(
     dataset_id: str,
     payload: RetrievalEvalRequestSchema = Body(...),
@@ -1380,6 +1751,8 @@ async def retrieve_evaluate(
     two configurations yields directly A/B-comparable metric sets — this is the
     backend primitive for the KB retrieval evaluation workbench.
     """
+    await require_admin_user(user)
+
     from ...services.eval.retrieval_metrics import (
         QueryRetrievalJudgement,
         evaluate_retrieval,
@@ -1405,7 +1778,7 @@ async def retrieve_evaluate(
             raise ValidationFailedError("k_values must contain at least one value in 1..100")
         k_values = sorted(set(payload.k_values))
         fetch_k = max(max(k_values), payload.top_k)
-        await svc.require_dataset_access(user, dataset_id, required="editor")
+        await _require_authenticated_dataset_editor(svc, user, dataset_id)
         deadline = asyncio.get_running_loop().time() + RETRIEVAL_EVAL_TIMEOUT_SECONDS
 
         judgements: list[QueryRetrievalJudgement] = []
@@ -1625,6 +1998,8 @@ async def preview_chunking_generic(
     Generic preview endpoint (no dataset context required).
     """
     try:
+        _require_authenticated_user(user)
+        _require_safe_chunk_preview_config(payload.config)
         # Use a dummy dataset ID since we don't have one yet
         chunks = await svc.preview_chunking(
             user,
@@ -1651,6 +2026,8 @@ async def preview_chunking(
     Does not save anything. useful for testing chunking strategies.
     """
     try:
+        await _require_authenticated_dataset_editor(svc, user, dataset_id)
+        _require_safe_chunk_preview_config(payload.config)
         chunks = await svc.preview_chunking(
             user,
             dataset_id,
@@ -1686,9 +2063,17 @@ async def batch_create_documents(
             process_rule=payload.process_rule.model_dump() if payload.process_rule else None,
             batch_name=payload.batch_name,
         )
-        # Enqueue all for processing
+        queued_documents = []
+        skipped_document_ids = []
         for doc in results.get("documents", []):
-            await worker.enqueue(dataset_id, doc["document_id"])
+            if await _try_enqueue_document(worker, dataset_id, doc["document_id"]):
+                queued_documents.append(doc)
+            else:
+                skipped_document_ids.append(doc["document_id"])
+        results["documents"] = queued_documents
+        results["queued_count"] = len(queued_documents)
+        results["skipped_document_ids"] = skipped_document_ids
+        results["status"] = "partial" if skipped_document_ids else "queued"
         return results
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
@@ -1706,7 +2091,8 @@ async def batch_reindex_documents(
 ):
     """Batch reindex documents."""
     try:
-        await svc.require_dataset_access(user, dataset_id, required="editor")
+        dataset = await svc.require_dataset_access(user, dataset_id, required="editor")
+        _require_dataset_index_writable(dataset)
 
         if payload.all_documents:
             docs = await svc.list_documents(user, dataset_id)
@@ -1714,10 +2100,28 @@ async def batch_reindex_documents(
         else:
             doc_ids = payload.document_ids
 
+        queued_ids = []
+        skipped_ids = []
         for doc_id in doc_ids:
-            await worker.enqueue(dataset_id, doc_id)
+            if await _try_enqueue_document(worker, dataset_id, doc_id):
+                queued_ids.append(doc_id)
+            else:
+                skipped_ids.append(doc_id)
 
-        return {"status": "queued", "document_count": len(doc_ids)}
+        if skipped_ids and not queued_ids:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "No document entered a new ingestion generation",
+                    "skipped_document_ids": skipped_ids,
+                },
+            )
+        return {
+            "status": "partial" if skipped_ids else "queued",
+            "document_count": len(queued_ids),
+            "queued_document_ids": queued_ids,
+            "skipped_document_ids": skipped_ids,
+        }
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
@@ -1796,21 +2200,23 @@ async def enable_segment_compat(
 @router.post("/knowledge/{dataset_id}/segments/batch/enable")
 async def batch_enable_segments(
     dataset_id: str,
-    payload: dict = Body(...),
+    payload: SegmentBatchEnableDisableSchema = Body(...),
     svc: KnowledgeService = Depends(get_knowledge_service),
     user: UserContext = Depends(get_user_context),
 ):
     """Batch enable/disable segments."""
-    segment_ids = payload.get("segment_ids", [])
-    enabled = payload.get("enabled", True)
-    updated = 0
-    for sid in segment_ids:
-        try:
-            await svc.set_segment_enabled(user, dataset_id, sid, enabled)
-            updated += 1
-        except Exception:
-            pass
-    return {"success": True, "updated": updated, "total": len(segment_ids)}
+    try:
+        _require_authenticated_user(user)
+        return await svc.set_segments_enabled_batch(
+            user,
+            dataset_id,
+            payload.segment_ids,
+            payload.enabled,
+        )
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/knowledge/{dataset_id}/documents/{document_id}/segments")
@@ -1868,12 +2274,27 @@ async def debug_dataset(
     """Debug endpoint to check dataset status."""
     try:
         dataset = await svc.require_dataset_access(user, dataset_id, required="viewer")
+        generation = _dataset_content_generation(dataset)
         stats = await svc.get_dataset_statistics(user, dataset_id)
 
-        # Sample a few segments to verify
-        sample_segments = await svc.db.list_segments(dataset_id=dataset_id, limit=3, offset=0)
+        # Debug output is still a content read. Fetch a bounded candidate pool,
+        # then apply the same PostgreSQL active-state authority as retrieval so
+        # disabled, archived, pending-lifecycle, and foreign rows never leak.
+        sample_candidates = await svc.db.list_segments(
+            dataset_id=dataset_id,
+            limit=100,
+            offset=0,
+        )
+        sample_segments = (
+            await _filter_active_route_segments(
+                svc,
+                dataset=dataset,
+                dataset_id=dataset_id,
+                segments=sample_candidates,
+            )
+        )[:3]
 
-        return {
+        result = {
             "dataset": {
                 "id": dataset_id,
                 "name": dataset.get("name"),
@@ -1896,6 +2317,13 @@ async def debug_dataset(
             "has_segments": len(sample_segments) > 0,
             "has_collection": bool(dataset.get("collection_name")),
         }
+        await _require_unchanged_dataset_content(
+            svc,
+            user,
+            dataset_id,
+            generation,
+        )
+        return result
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
@@ -1924,26 +2352,30 @@ async def get_document_statistics(
 # ============================================================
 
 
-@router.post("/knowledge/{dataset_id}/qa")
+@router.post(
+    "/knowledge/{dataset_id}/qa",
+    dependencies=[Depends(require_admin_user)],
+)
 async def qa_query(
     request: Request,
     dataset_id: str,
     payload: QAQuerySchema = Body(...),
     svc: KnowledgeService = Depends(get_knowledge_service),
     user: UserContext = Depends(get_user_context),
+    settings: Settings = Depends(get_settings),
 ):
     """
     Execute a QA query: retrieve → context → LLM answer.
 
     This endpoint provides a complete RAG flow for testing retrieval quality.
     """
-    try:
-        from ...services.knowledge.qa_service import LLMConfig, QAService
+    await require_admin_user(user)
 
-        # Build LLM config
-        llm_config = None
-        if payload.llm_config:
-            llm_config = LLMConfig.from_dict(payload.llm_config.model_dump())
+    try:
+        from ...services.knowledge.qa_service import QAService
+
+        await _require_authenticated_dataset_editor(svc, user, dataset_id)
+        llm_config = _build_server_qa_llm_config(payload.llm_config, settings)
 
         # Create QA service
         qa_service = QAService(svc, llm_config)
@@ -1991,22 +2423,32 @@ async def qa_query(
         raise HTTPException(status_code=500, detail=f"QA query failed: {str(exc)}")
 
 
-@router.post("/knowledge/{dataset_id}/qa/stream")
+@router.post(
+    "/knowledge/{dataset_id}/qa/stream",
+    dependencies=[Depends(require_admin_user)],
+)
 async def qa_query_stream(
     request: Request,
     dataset_id: str,
     payload: QAQuerySchema = Body(...),
     svc: KnowledgeService = Depends(get_knowledge_service),
     user: UserContext = Depends(get_user_context),
+    settings: Settings = Depends(get_settings),
 ):
     """
     Stream QA query: retrieve → stream LLM answer.
     """
-    from ...services.knowledge.qa_service import LLMConfig, QAService
+    await require_admin_user(user)
 
-    llm_config = None
-    if payload.llm_config:
-        llm_config = LLMConfig.from_dict(payload.llm_config.model_dump())
+    from ...services.knowledge.qa_service import QAService
+
+    try:
+        await _require_authenticated_dataset_editor(svc, user, dataset_id)
+        llm_config = _build_server_qa_llm_config(payload.llm_config, settings)
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     qa_service = QAService(svc, llm_config)
 
@@ -2060,30 +2502,33 @@ async def qa_query_stream(
     )
 
 
-@router.post("/knowledge/{dataset_id}/qa/batch")
+@router.post(
+    "/knowledge/{dataset_id}/qa/batch",
+    dependencies=[Depends(require_admin_user)],
+)
 async def qa_batch_test(
     request: Request,
     dataset_id: str,
     payload: QABatchTestSchema = Body(...),
     svc: KnowledgeService = Depends(get_knowledge_service),
     user: UserContext = Depends(get_user_context),
+    settings: Settings = Depends(get_settings),
 ):
     """
     Run batch QA tests for evaluation.
 
     Executes multiple test cases and returns aggregated results.
     """
+    await require_admin_user(user)
+
     try:
         from ...services.knowledge.qa_service import (
-            LLMConfig,
             QAService,
             QATestCase,
         )
 
-        # Build LLM config
-        llm_config = None
-        if payload.llm_config:
-            llm_config = LLMConfig.from_dict(payload.llm_config.model_dump())
+        await _require_authenticated_dataset_editor(svc, user, dataset_id)
+        llm_config = _build_server_qa_llm_config(payload.llm_config, settings)
 
         # Create QA service
         qa_service = QAService(svc, llm_config)
@@ -2100,14 +2545,17 @@ async def qa_batch_test(
             ]
 
             # Run batch test
-            results = await qa_service.run_test_batch(
-                user_context=user,
-                dataset_id=dataset_id,
-                test_cases=test_cases,
-                top_k=payload.top_k,
-                mode=payload.mode,
-                rerank=payload.rerank,
-                mmr=payload.mmr,
+            results = await asyncio.wait_for(
+                qa_service.run_test_batch(
+                    user_context=user,
+                    dataset_id=dataset_id,
+                    test_cases=test_cases,
+                    top_k=payload.top_k,
+                    mode=payload.mode,
+                    rerank=payload.rerank,
+                    mmr=payload.mmr,
+                ),
+                timeout=settings.ragas_eval.request_timeout_seconds,
             )
 
             # Aggregate results
@@ -2142,6 +2590,7 @@ async def get_dataset_config(
     """Get dataset chunking and retrieval configuration."""
     try:
         dataset = await svc.require_dataset_access(user, dataset_id, required="viewer")
+        dataset = svc.sanitize_dataset_for_response(dataset)
 
         # Extract configurations from index_config
         index_config = dataset.get("index_config", {}) or {}
@@ -2195,6 +2644,7 @@ async def update_dataset_config(
     """Update dataset chunking and retrieval configuration."""
     try:
         dataset = await svc.require_dataset_access(user, dataset_id, required="owner")
+        _require_dataset_index_writable(dataset)
 
         # Get current config
         index_config = dict(dataset.get("index_config", {}) or {})
@@ -2204,35 +2654,22 @@ async def update_dataset_config(
             index_config["chunking"] = payload.chunking_config.model_dump(exclude_none=True)
 
         # Update retrieval config
-        if payload.retrieval_config:
-            retrieval = payload.retrieval_config.model_dump(exclude_none=True)
-
-            # Extract nested objects sent by frontend
-            fusion_cfg = retrieval.get("fusion", {}) or {}
-            rerank_cfg = retrieval.get("rerank", {}) or {}
-            mmr_cfg = retrieval.get("mmr", {}) or {}
-
-            index_config["retrieval"] = {
-                "mode": retrieval.get("mode", "hybrid"),
-                "top_k": retrieval.get("top_k", 5),
-                "score_threshold": retrieval.get("score_threshold"),
-                "vector_top_k": retrieval.get("vector_top_k", 20),
-                "keyword_top_k": retrieval.get("keyword_top_k", 20),
-                "fusion": {
-                    "strategy": fusion_cfg.get("strategy", "rrf"),
-                    "alpha": fusion_cfg.get("alpha", 0.7),
-                    "rrf_k": fusion_cfg.get("rrf_k", 60),
-                },
-                "rerank": {
-                    "enabled": rerank_cfg.get("enabled", False),
-                    "model": rerank_cfg.get("model", "gte-rerank"),
-                    "top_n": rerank_cfg.get("top_n"),
-                },
-                "mmr": {
-                    "enabled": mmr_cfg.get("enabled", False),
-                    "lambda": mmr_cfg.get("lambda", 0.5),
-                },
-            }
+        if payload.retrieval_config is not None:
+            # This endpoint is a config patch even though it uses PUT. Pydantic
+            # model defaults must not become writes for fields the caller did
+            # not send, and nested lexical/fusion/rerank/MMR objects must retain
+            # their unspecified settings.
+            retrieval_patch = payload.retrieval_config.model_dump(
+                exclude_none=True,
+                exclude_unset=True,
+            )
+            existing_retrieval = index_config.get("retrieval", {}) or {}
+            if not isinstance(existing_retrieval, Mapping):
+                existing_retrieval = {}
+            index_config["retrieval"] = _merge_config_patch(
+                existing_retrieval,
+                retrieval_patch,
+            )
 
         # Build dataset updates
         dataset_updates: dict[str, Any] = {"index_config": index_config}
@@ -2293,10 +2730,18 @@ async def update_dataset_config(
 class ChunkPreviewRequest(BaseModel):
     """Request for chunk preview."""
 
-    text: str = Field(..., description="Text to chunk")
+    text: str = Field(..., min_length=1, max_length=200_000, description="Text to chunk")
     chunking_config: dict[str, Any] | None = Field(
         default=None, description="Chunking configuration. Uses dataset defaults if not provided."
     )
+
+    @model_validator(mode="after")
+    def _reject_unsafe_regex_preview(self) -> ChunkPreviewRequest:
+        try:
+            _require_safe_chunk_preview_config(self.chunking_config)
+        except ValidationFailedError as exc:
+            raise ValueError(str(exc)) from exc
+        return self
 
 
 class ChunkPreviewItem(BaseModel):
@@ -2330,7 +2775,7 @@ async def preview_chunks(
     This is useful for testing chunking settings before processing documents.
     """
     try:
-        dataset = await svc.require_dataset_access(user, dataset_id, required="viewer")
+        dataset = await _require_authenticated_dataset_editor(svc, user, dataset_id)
 
         # Import chunking module from KS's own services package — gateway src/
         # is NOT bundled into the KS image, so the legacy `from src.services...`
@@ -2348,6 +2793,7 @@ async def preview_chunks(
         else:
             index_config = dataset.get("index_config", {}) or {}
             config_dict = index_config.get("chunking", {})
+        _require_safe_chunk_preview_config(config_dict)
 
         # Parse config
         config = ChunkingConfig.from_dict(config_dict)
@@ -2402,7 +2848,8 @@ async def get_dataset_sources(
     """
     try:
         # Verify access
-        await svc.require_dataset_access(user, dataset_id, required="viewer")
+        dataset = await svc.require_dataset_access(user, dataset_id, required="viewer")
+        generation = _dataset_content_generation(dataset)
 
         # Get document statistics by source_type using database
         docs = await svc.list_documents(user, dataset_id)
@@ -2429,7 +2876,7 @@ async def get_dataset_sources(
             except Exception as e:
                 logger.warning(f"Failed to get Confluence bindings for dataset {dataset_id}: {e}")
 
-        return {
+        result = {
             "file_uploads": {
                 "count": source_counts.get("upload", 0),
             },
@@ -2439,6 +2886,13 @@ async def get_dataset_sources(
             "confluence_bindings": confluence_bindings,
             "total_documents": sum(source_counts.values()),
         }
+        await _require_unchanged_dataset_content(
+            svc,
+            user,
+            dataset_id,
+            generation,
+        )
+        return result
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
@@ -2477,8 +2931,27 @@ async def dedupe_segments(
         # Always require owner access for maintenance operations
         # Security: No bypass allowed - maintenance operations should be properly authenticated
         dataset = await svc.require_dataset_access(user, dataset_id, required="owner")
+        try:
+            pending_delete = dataset_index_deletion_fence(dataset)
+        except RuntimeError as exc:
+            raise ValidationFailedError(str(exc)) from exc
 
-        collection_name = dataset.get("collection_name")
+        recovered_count = 0
+        if pending_delete is not None:
+            if dry_run or pending_delete["operation"] != "segment_delete":
+                _require_dataset_index_readable(dataset)
+            recovered = await svc.delete_segment(
+                user,
+                dataset_id,
+                pending_delete["target_id"],
+            )
+            recovered_count = int(bool(recovered))
+            dataset = await svc.require_dataset_access(
+                user,
+                dataset_id,
+                required="owner",
+            )
+        generation = _dataset_content_generation(dataset)
 
         # Get all segments grouped by content_hash
         segments = await svc.db.list_segments(dataset_id, limit=10000)
@@ -2515,23 +2988,33 @@ async def dedupe_segments(
                 }
                 for seg in duplicates_to_delete[:10]
             ]
+            await _require_unchanged_dataset_content(
+                svc,
+                user,
+                dataset_id,
+                generation,
+                required="owner",
+            )
             return result
 
+        _require_dataset_index_writable(dataset)
+
         # Actually delete duplicates
-        deleted_count = 0
+        deleted_count = recovered_count
         errors = []
 
         for seg in duplicates_to_delete:
-            seg_id = seg.get("segment_id")
+            seg_id = str(seg.get("segment_id") or "").strip()
             try:
-                # Delete from vector store
-                if collection_name:
-                    vector_id = seg.get("vector_id") or seg_id
-                    with contextlib.suppress(Exception):
-                        await svc.vector_store.delete_points(collection_name, [vector_id])
-
-                # Delete from database
-                ok = await svc.db.delete_segment(seg_id)
+                if not seg_id:
+                    raise ValidationFailedError(
+                        "duplicate segment has no durable segment identity"
+                    )
+                # Keep maintenance deletion on the same durable lifecycle path
+                # as the public segment API.  That path holds the exclusive
+                # dataset fence, sweeps every owned Qdrant generation, commits
+                # PostgreSQL on the same lease, and only then clears the marker.
+                ok = await svc.delete_segment(user, dataset_id, seg_id)
                 if ok:
                     deleted_count += 1
             except Exception as e:
@@ -2541,6 +3024,12 @@ async def dedupe_segments(
         if errors:
             result["errors"] = errors[:10]
 
+        authoritative = await svc.require_dataset_access(
+            user,
+            dataset_id,
+            required="owner",
+        )
+        _require_dataset_index_readable(authoritative)
         return result
 
     except PermissionDeniedError as exc:
@@ -2594,22 +3083,34 @@ async def list_document_versions(
     """
     try:
         # Verify access
-        await svc.require_dataset_access(user, dataset_id, required="viewer")
+        dataset = await svc.require_dataset_access(user, dataset_id, required="viewer")
+        generation = _dataset_content_generation(dataset)
 
-        # Get document to verify it exists and get current version
-        doc = await svc.db.get_document(document_id)
-        if not doc or str(doc.get("dataset_id")) != dataset_id:
-            raise ValidationFailedError("Document not found")
+        # Version metadata is content-derived and must follow the same active
+        # document authority as retrieval and full-content version reads.
+        doc = await _require_active_document(
+            svc,
+            dataset=dataset,
+            dataset_id=dataset_id,
+            document_id=document_id,
+        )
 
         # Get versions
         versions = await svc.db.list_document_versions(document_id, limit, offset)
         total = await svc.db.get_document_version_count(document_id)
 
-        return VersionListResponse(
+        result = VersionListResponse(
             versions=versions,
             total=total,
             current_version=doc.get("current_version", 1),
         )
+        await _require_unchanged_dataset_content(
+            svc,
+            user,
+            dataset_id,
+            generation,
+        )
+        return result
 
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
@@ -2630,18 +3131,27 @@ async def get_document_version(
     """
     try:
         # Verify access
-        await svc.require_dataset_access(user, dataset_id, required="viewer")
+        dataset = await svc.require_dataset_access(user, dataset_id, required="viewer")
+        generation = _dataset_content_generation(dataset)
 
-        # Get document to verify it exists
-        doc = await svc.db.get_document(document_id)
-        if not doc or str(doc.get("dataset_id")) != dataset_id:
-            raise ValidationFailedError("Document not found")
+        await _require_active_document(
+            svc,
+            dataset=dataset,
+            dataset_id=dataset_id,
+            document_id=document_id,
+        )
 
         # Get specific version
         version = await svc.db.get_document_version(document_id, version_number)
         if not version:
             raise ValidationFailedError(f"Version {version_number} not found")
 
+        await _require_unchanged_dataset_content(
+            svc,
+            user,
+            dataset_id,
+            generation,
+        )
         return version
 
     except PermissionDeniedError as exc:
@@ -2668,12 +3178,15 @@ async def compare_document_versions(
 
     try:
         # Verify access
-        await svc.require_dataset_access(user, dataset_id, required="viewer")
+        dataset = await svc.require_dataset_access(user, dataset_id, required="viewer")
+        generation = _dataset_content_generation(dataset)
 
-        # Get document to verify it exists
-        doc = await svc.db.get_document(document_id)
-        if not doc or str(doc.get("dataset_id")) != dataset_id:
-            raise ValidationFailedError("Document not found")
+        await _require_active_document(
+            svc,
+            dataset=dataset,
+            dataset_id=dataset_id,
+            document_id=document_id,
+        )
 
         # Get both versions
         version_from = await svc.db.get_document_version(document_id, from_version)
@@ -2716,7 +3229,7 @@ async def compare_document_versions(
             else:
                 diff_items.append({"type": "equal", "content": line})
 
-        return VersionCompareResponse(
+        result = VersionCompareResponse(
             from_version=from_version,
             to_version=to_version,
             diff=diff_items[:500],  # Limit to 500 lines
@@ -2726,6 +3239,13 @@ async def compare_document_versions(
                 "changes": additions + deletions,
             },
         )
+        await _require_unchanged_dataset_content(
+            svc,
+            user,
+            dataset_id,
+            generation,
+        )
+        return result
 
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
@@ -2753,61 +3273,111 @@ async def restore_document_version(
 
     try:
         # Verify access (need editor permission to restore)
-        await svc.require_dataset_access(user, dataset_id, required="editor")
+        dataset = await svc.require_dataset_access(user, dataset_id, required="editor")
+        _require_dataset_index_writable(dataset)
 
-        # Get document to verify it exists
-        doc = await svc.db.get_document(document_id)
-        if not doc or str(doc.get("dataset_id")) != dataset_id:
-            raise ValidationFailedError("Document not found")
+        lease_factory = getattr(svc.db, "document_index_update_lease", None)
+        if not callable(lease_factory):
+            raise ValidationFailedError("Document restore serialization is unavailable")
 
-        # Get the version to restore
-        version_to_restore = await svc.db.get_document_version(document_id, version_number)
-        if not version_to_restore:
-            raise ValidationFailedError(f"Version {version_number} not found")
-
-        # Save current content as a new version before restoring
-        current_content = doc.get("content", "")
-        if current_content:
-            current_hash = hashlib.sha256(current_content.encode("utf-8")).hexdigest()
-            await svc.db.create_document_version(
-                document_id=document_id,
-                content=current_content,
-                content_hash=current_hash,
-                change_type="updated",
-                title=doc.get("title"),
-                metadata=doc.get("metadata"),
-                change_reason=f"Before restore to version {version_number}",
-                changed_by=user.user_id,
-                confluence_version=doc.get("confluence_version"),
+        # Serialize the complete version/content transition against ingestion and
+        # manual segment changes. The DB transaction makes the hidden status,
+        # restored content, and audit versions visible together; a crash after
+        # commit but before local enqueue remains recoverable from `uploaded`.
+        async with lease_factory(dataset_id, document_id) as lease_connection:
+            authoritative_dataset = await svc.db.get_dataset(
+                dataset_id,
+                connection=lease_connection,
             )
+            if (
+                not authoritative_dataset
+                or str(authoritative_dataset.get("tenant_id") or "")
+                != str(dataset.get("tenant_id") or "")
+            ):
+                raise ValidationFailedError("Dataset identity changed; retry the restore")
+            _require_dataset_index_writable(authoritative_dataset)
 
-        # Update document with restored content
-        restored_content = version_to_restore.get("content", "")
-        await svc.db.update_document_fields(
-            document_id,
-            {
-                "content": restored_content,
-                "status": "uploaded",
-                "progress": 0,
-            },
-        )
+            async with lease_connection.transaction():
+                doc = await svc.db.get_document(
+                    document_id,
+                    connection=lease_connection,
+                )
+                metadata = doc.get("metadata") if doc else None
+                if (
+                    not doc
+                    or str(doc.get("dataset_id") or "") != dataset_id
+                    or not bool(doc.get("enabled", True))
+                    or bool(doc.get("archived", False))
+                    or str(doc.get("status") or "") != "completed"
+                    or DOCUMENT_LIFECYCLE_REINDEX_KEY
+                    in (metadata if isinstance(metadata, dict) else {})
+                ):
+                    raise ValidationFailedError("Document is not active and restore-ready")
 
-        # Create a new version marking the restore
-        restored_hash = hashlib.sha256(restored_content.encode("utf-8")).hexdigest()
-        new_version = await svc.db.create_document_version(
-            document_id=document_id,
-            content=restored_content,
-            content_hash=restored_hash,
-            change_type="restored",
-            title=version_to_restore.get("title") or doc.get("title"),
-            metadata=version_to_restore.get("metadata"),
-            change_reason=payload.reason or f"Restored from version {version_number}",
-            changed_by=user.user_id,
-            confluence_version=version_to_restore.get("confluence_version"),
-        )
+                # Read version content only after exact dataset/tenant/lifecycle
+                # ownership has been revalidated under the document lease.
+                version_to_restore = await svc.db.get_document_version(
+                    document_id,
+                    version_number,
+                )
+                if not version_to_restore:
+                    raise ValidationFailedError(f"Version {version_number} not found")
 
-        # Re-index the document
-        await worker.enqueue(dataset_id, document_id)
+                current_content = str(doc.get("content") or "")
+                if current_content:
+                    current_hash = hashlib.sha256(current_content.encode("utf-8")).hexdigest()
+                    await svc.db.create_document_version(
+                        document_id=document_id,
+                        content=current_content,
+                        content_hash=current_hash,
+                        change_type="updated",
+                        title=doc.get("title"),
+                        metadata=metadata if isinstance(metadata, dict) else {},
+                        change_reason=f"Before restore to version {version_number}",
+                        changed_by=user.user_id,
+                        confluence_version=doc.get("confluence_version"),
+                        connection=lease_connection,
+                    )
+
+                restored_content = str(version_to_restore.get("content") or "")
+                await svc.db.update_document_status(
+                    document_id,
+                    status="queued",
+                    progress=0,
+                    error="",
+                    connection=lease_connection,
+                )
+                await svc.db.update_document_content(
+                    document_id,
+                    restored_content,
+                    connection=lease_connection,
+                )
+
+                restored_hash = hashlib.sha256(restored_content.encode("utf-8")).hexdigest()
+                new_version = await svc.db.create_document_version(
+                    document_id=document_id,
+                    content=restored_content,
+                    content_hash=restored_hash,
+                    change_type="restored",
+                    title=version_to_restore.get("title") or doc.get("title"),
+                    metadata=(
+                        version_to_restore.get("metadata")
+                        if isinstance(version_to_restore.get("metadata"), dict)
+                        else {}
+                    ),
+                    change_reason=payload.reason or f"Restored from version {version_number}",
+                    changed_by=user.user_id,
+                    confluence_version=version_to_restore.get("confluence_version"),
+                    connection=lease_connection,
+                )
+
+        enqueue_claimed = getattr(worker, "enqueue_claimed", None)
+        if not callable(enqueue_claimed):
+            raise HTTPException(
+                status_code=503,
+                detail="Durable claimed-queue publisher is unavailable",
+            )
+        await enqueue_claimed(dataset_id, document_id)
 
         return {
             "status": "success",
@@ -2846,9 +3416,24 @@ async def force_complete_document(
     user: UserContext = Depends(require_admin_user),
 ):
     """Force complete a stuck document (admin/debug only)."""
-    _ = dataset_id, user
     try:
-        await svc.db.update_document_status(document_id, status="completed", progress=100)
+        dataset = await svc.require_dataset_access(user, dataset_id, required="editor")
+        _require_dataset_index_writable(dataset)
+        # Completing an unfinished generation without proving its Qdrant/DB
+        # writes would expose partial content. Keep this debug endpoint as an
+        # idempotent acknowledgement for already-active documents only; queued,
+        # processing, failed, disabled, archived, or lifecycle-pending rows must
+        # be repaired through the durable worker path.
+        await _require_active_document(
+            svc,
+            dataset=dataset,
+            dataset_id=dataset_id,
+            document_id=document_id,
+        )
         return {"status": "completed", "document_id": document_id}
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -51,6 +51,54 @@ def test_pii_filter_redacts_sensitive_values_before_memory_persistence() -> None
     assert "[REDACTED:api_key]" in redacted
 
 
+def test_pii_filter_redacts_chinese_mobile_and_common_provider_tokens() -> None:
+    github_classic = "ghp_" + ("a" * 36)
+    github_fine_grained = "github_pat_" + ("A" * 82)
+    aws_access_key = "AKIA" + ("A" * 16)
+    slack_token = "xoxb-123456789012-123456789012-abcdefghijklmnopqrstuvwx"
+    sensitive_values = (
+        "+86 138 1234 5678",
+        "13812345678",
+        github_classic,
+        github_fine_grained,
+        aws_access_key,
+        slack_token,
+    )
+
+    redacted, findings = PIIFilter().redact(" ".join(sensitive_values))
+
+    for value in sensitive_values:
+        assert value not in redacted
+    assert [finding.pattern for finding in findings] == [
+        "phone",
+        "phone",
+        "api_key",
+        "api_key",
+        "api_key",
+        "api_key",
+    ]
+    assert redacted.count("[REDACTED:phone]") == 2
+    assert redacted.count("[REDACTED:api_key]") == 4
+
+
+def test_pii_filter_does_not_redact_obvious_non_sensitive_lookalikes() -> None:
+    text = " ".join(
+        (
+            "12345678901",
+            "order_13812345678",
+            "ghp_short",
+            "github_pat_documentation_reference_for_internal_tooling",
+            "AKIA_NOT_A_KEY",
+            "xoxylophone",
+        )
+    )
+
+    redacted, findings = PIIFilter().redact(text)
+
+    assert redacted == text
+    assert findings == []
+
+
 @pytest.mark.asyncio
 async def test_tool_result_cap_has_neutral_non_retry_hint() -> None:
     result = ToolCallResult(

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import re
 import uuid
 from datetime import datetime
@@ -11,23 +10,117 @@ from typing import Any
 from ...core.auth.user_resolver import UserContext
 from ...core.exceptions import ValidationFailedError
 from ...core.observability.logging import get_logger
-from ...persistence.database import DatabaseStorage
+from ...persistence.database import (
+    DOCUMENT_LIFECYCLE_REINDEX_KEY,
+    DatabaseStorage,
+    dataset_index_deletion_fence,
+    dataset_ingestion_identity,
+)
 from .chunking import (
     Chunk,
     ChunkingConfig,
-    ChunkingMode,
     ContentType,
-    enforce_token_limits,
     flatten_chunks,
     merge_small_chunks,
     process_document,
+    validate_persisted_chunking_config,
 )
 from .common import ensure_dict as _ensure_dict
 from .embedding import BaseEmbedding, EmbeddingConfig, create_embedding
-from .structured_document_parser import ChunkType
+from .lexical_config import LexicalConfig
 from .vector_store import VectorStore
 
 logger = get_logger(__name__)
+
+
+def _lexical_ensure_kwargs(index_config: Any) -> dict[str, Any]:
+    lexical = LexicalConfig.from_index_config(index_config)
+    return {"lexical_config": lexical} if lexical.configured else {}
+
+
+def _require_dataset_index_writable(dataset: dict[str, Any]) -> None:
+    try:
+        deletion_fence = dataset_index_deletion_fence(dataset)
+    except RuntimeError as exc:
+        raise ValidationFailedError(str(exc)) from exc
+    if deletion_fence is not None:
+        raise ValidationFailedError(
+            "dataset index deletion is pending; indexed content is unavailable"
+        )
+    lexical = LexicalConfig.from_index_config(dataset.get("index_config") or {})
+    if lexical.reads_bm25_v2:
+        raise ValidationFailedError(
+            "bm25_v2 active mode is read-only; roll back to lexical_v1 shadow "
+            "before changing indexed content"
+        )
+
+
+def _require_active_segment_document(
+    document: dict[str, Any] | None,
+    *,
+    dataset_id: str,
+) -> dict[str, Any]:
+    """Reject manual index writes unless their document is authoritatively active."""
+
+    if not document or str(document.get("dataset_id") or "") != dataset_id:
+        raise ValidationFailedError("segment document not found")
+    metadata = _ensure_dict(document.get("metadata"))
+    if (
+        not bool(document.get("enabled", True))
+        or bool(document.get("archived", False))
+        or str(document.get("status") or "") != "completed"
+        or DOCUMENT_LIFECYCLE_REINDEX_KEY in metadata
+    ):
+        raise ValidationFailedError(
+            "segment document is inactive or has a pending lifecycle transition"
+        )
+    return document
+
+
+def _segment_vector_payload(
+    *,
+    dataset: dict[str, Any],
+    segment: dict[str, Any],
+    text: str,
+) -> dict[str, Any]:
+    """Project authoritative segment fields into a lossless serving payload."""
+
+    metadata = _ensure_dict(segment.get("metadata"))
+    payload = {
+        "tenant_id": str(dataset.get("tenant_id") or ""),
+        "dataset_id": str(segment.get("dataset_id") or ""),
+        "document_id": str(segment.get("document_id") or ""),
+        "segment_id": str(segment.get("segment_id") or ""),
+        "position": int(segment.get("position") or 0),
+        "text": text,
+        "enabled": bool(segment.get("enabled", True)),
+        # The point is published immediately before the authoritative DB row
+        # becomes completed. PostgreSQL remains the visibility authority during
+        # that small interval.
+        "status": "completed",
+        "level": int(segment.get("level") or 3),
+        "content_type": str(segment.get("content_type") or "text"),
+        "source_type": str(
+            segment.get("source_type") or metadata.get("source_type") or "unknown"
+        ),
+        "language": str(segment.get("language") or metadata.get("language") or "en"),
+        "metadata": metadata,
+        "parent_segment_id": segment.get("parent_segment_id"),
+    }
+    for field in (
+        "summary",
+        "page_start",
+        "page_end",
+        "source_reference",
+        "citation_text",
+        "page_number",
+        "section_header",
+        "contextual_prefix",
+        "answer",
+        "keywords",
+    ):
+        payload[field] = segment.get(field)
+    return payload
 
 
 class ChunkingManager:
@@ -292,6 +385,8 @@ class ChunkingManager:
     async def preview_chunking(
         self, user: UserContext, dataset_id: str, text: str, config: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
+        if config is not None:
+            validate_persisted_chunking_config(config)
         # Verify dataset access (viewer is enough for preview, though ideally check if member)
         if dataset_id != "temp_preview":
             await self._ks.require_dataset_access(user, dataset_id, required="viewer")
@@ -351,14 +446,8 @@ class ChunkingManager:
         new_text: str,
     ) -> dict[str, Any]:
         dataset = await self._ks.require_dataset_access(user, dataset_id, required="editor")
-        seg = await self.db.get_segment(segment_id)
-        if not seg or str(seg.get("dataset_id")) != dataset_id:
-            raise ValidationFailedError("segment not found")
-
-        # Sanitize text for PostgreSQL
+        _require_dataset_index_writable(dataset)
         clean_text = self._sanitize_text_for_db(new_text)
-
-        # Re-embed and upsert (best-effort; keep DB updated even if vector update fails)
         embedding_provider = str(dataset.get("embedding_provider") or "local")
         embedding_model = str(dataset.get("embedding_model") or "hash-384")
         embedding_config = _ensure_dict(dataset.get("embedding_config"))
@@ -368,47 +457,125 @@ class ChunkingManager:
             model=embedding_model,
             embedding_config=embedding_config,
         )
-
-        # Always persist the new text first.
-        await self.db.update_segment(segment_id, text=clean_text)
+        lease_factory = getattr(self.db, "segment_index_update_lease", None)
+        set_index_state = getattr(self.db, "set_segment_index_state", None)
+        if not callable(lease_factory) or not callable(set_index_state):
+            raise ValidationFailedError(
+                "segment editing requires the serialized index state contract"
+            )
+        segment_hint = await self.db.get_segment(segment_id)
+        if not segment_hint or str(segment_hint.get("dataset_id") or "") != dataset_id:
+            raise ValidationFailedError("segment not found")
+        hinted_document_id = str(segment_hint.get("document_id") or "").strip()
+        if not hinted_document_id:
+            raise ValidationFailedError("segment document identity is incomplete")
 
         vector_error: str | None = None
-        try:
-            embedder: BaseEmbedding | None = None
-            try:
-                embedder = create_embedding(econf, dimension=dim)
-                vec = (
-                    await asyncio.wait_for(
-                        embedder.embed_documents([clean_text]),
-                        timeout=float(econf.timeout_seconds) + 10.0,
-                    )
-                )[0]
-                collection = await self.vector_store.ensure_collection(
-                    dataset_id=dataset_id,
-                    dimension=embedder.dimension,
-                    collection_name=str(dataset.get("collection_name") or "") or None,
+        async with lease_factory(
+            dataset_id,
+            hinted_document_id,
+            segment_id,
+        ) as lease_connection:
+            authoritative_dataset = await self.db.get_dataset(
+                dataset_id,
+                connection=lease_connection,
+            )
+            if not authoritative_dataset:
+                raise ValidationFailedError("dataset not found")
+            _require_dataset_index_writable(authoritative_dataset)
+            if dataset_ingestion_identity(
+                authoritative_dataset
+            ) != dataset_ingestion_identity(dataset):
+                raise ValidationFailedError(
+                    "dataset ingestion identity changed during segment update; retry"
                 )
-            finally:
-                if embedder:
-                    await embedder.close()
+            seg = await self.db.get_segment(
+                segment_id,
+                connection=lease_connection,
+            )
+            if not seg or str(seg.get("dataset_id")) != dataset_id:
+                raise ValidationFailedError("segment not found")
+            document_id = str(seg.get("document_id") or "").strip()
+            if document_id != hinted_document_id:
+                raise ValidationFailedError(
+                    "segment document identity changed during update; retry"
+                )
+            document = await self.db.get_document(
+                document_id,
+                connection=lease_connection,
+            )
+            _require_active_segment_document(document, dataset_id=dataset_id)
 
-            from qdrant_client.http import models as qmodels  # type: ignore
+            # Hide stale Qdrant payloads throughout the serialized replacement.
+            # The active-segment authority requires status=completed and also
+            # preserves the user's independent enabled toggle.
+            await set_index_state(
+                segment_id,
+                "pending",
+                connection=lease_connection,
+            )
+            try:
+                await self.db.update_segment(
+                    segment_id,
+                    text=clean_text,
+                    connection=lease_connection,
+                )
+                embedder: BaseEmbedding | None = None
+                try:
+                    embedder = create_embedding(econf, dimension=dim)
+                    vec = (
+                        await asyncio.wait_for(
+                            embedder.embed_documents([clean_text]),
+                            timeout=float(econf.timeout_seconds) + 10.0,
+                        )
+                    )[0]
+                    collection = await self.vector_store.ensure_collection(
+                        dataset_id=dataset_id,
+                        dimension=embedder.dimension,
+                        collection_name=str(
+                            authoritative_dataset.get("collection_name") or ""
+                        )
+                        or None,
+                        tenant_id=str(authoritative_dataset.get("tenant_id") or ""),
+                        lifecycle_lease_held=True,
+                        **_lexical_ensure_kwargs(
+                            authoritative_dataset.get("index_config")
+                        ),
+                    )
+                finally:
+                    if embedder:
+                        await embedder.close()
 
-            pid = str(seg.get("vector_id") or seg.get("segment_id") or "")
-            payload = {
-                "dataset_id": dataset_id,
-                "document_id": str(seg.get("document_id")),
-                "segment_id": str(seg.get("segment_id")),
-                "position": int(seg.get("position") or 0),
-                "text": clean_text,
-            }
-            if pid and collection:
+                from qdrant_client.http import models as qmodels  # type: ignore
+
+                pid = str(seg.get("vector_id") or seg.get("segment_id") or "")
+                payload = _segment_vector_payload(
+                    dataset=authoritative_dataset,
+                    segment=seg,
+                    text=clean_text,
+                )
+                if not pid or not collection:
+                    raise ValidationFailedError(
+                        "segment vector identity is incomplete"
+                    )
                 await self.vector_store.upsert(
                     collection_name=collection,
                     points=[qmodels.PointStruct(id=pid, vector=vec, payload=payload)],
+                    lifecycle_lease_held=True,
                 )
-        except Exception as exc:
-            vector_error = str(exc)
+                await set_index_state(
+                    segment_id,
+                    "completed",
+                    connection=lease_connection,
+                )
+            except Exception as exc:
+                vector_error = str(exc)
+                await set_index_state(
+                    segment_id,
+                    "error",
+                    error=vector_error,
+                    connection=lease_connection,
+                )
 
         out = await self.db.get_segment(segment_id) or seg
         if vector_error:
@@ -418,17 +585,89 @@ class ChunkingManager:
 
     async def delete_segment(self, user: UserContext, dataset_id: str, segment_id: str) -> bool:
         dataset = await self._ks.require_dataset_access(user, dataset_id, required="editor")
-        seg = await self.db.get_segment(segment_id)
-        if not seg or str(seg.get("dataset_id")) != dataset_id:
+        _require_dataset_index_writable(dataset)
+        segment_hint = await self.db.get_segment(segment_id)
+        if not segment_hint or str(segment_hint.get("dataset_id")) != dataset_id:
             raise ValidationFailedError("segment not found")
-
-        collection = str(dataset.get("collection_name") or "")
-        if collection:
-            pid = str(seg.get("vector_id") or seg.get("segment_id") or "")
-            with contextlib.suppress(Exception):
-                await self.vector_store.delete_points(collection, [pid])
-        document_id = str(seg.get("document_id") or "")
-        result = await self.db.delete_segment(segment_id)
+        document_id = str(segment_hint.get("document_id") or "").strip()
+        lease_factory = getattr(self.db, "segment_index_update_lease", None)
+        set_index_state = getattr(self.db, "set_segment_index_state", None)
+        delete_segment_points = getattr(
+            self.vector_store,
+            "delete_segment_points",
+            None,
+        )
+        if not document_id or not all(
+            callable(value)
+            for value in (lease_factory, set_index_state, delete_segment_points)
+        ):
+            raise ValidationFailedError(
+                "segment vector deletion is unavailable without owned-collection cleanup"
+            )
+        async with lease_factory(
+            dataset_id,
+            document_id,
+            segment_id,
+        ) as lease_connection:
+            authoritative_dataset = await self.db.get_dataset(
+                dataset_id,
+                connection=lease_connection,
+            )
+            if not authoritative_dataset:
+                raise ValidationFailedError("dataset not found")
+            _require_dataset_index_writable(authoritative_dataset)
+            if dataset_ingestion_identity(
+                authoritative_dataset
+            ) != dataset_ingestion_identity(dataset):
+                raise ValidationFailedError(
+                    "dataset ingestion identity changed during segment deletion; retry"
+                )
+            seg = await self.db.get_segment(
+                segment_id,
+                connection=lease_connection,
+            )
+            if (
+                not seg
+                or str(seg.get("dataset_id") or "") != dataset_id
+                or str(seg.get("document_id") or "") != document_id
+            ):
+                raise ValidationFailedError("segment not found")
+            document = await self.db.get_document(
+                document_id,
+                connection=lease_connection,
+            )
+            _require_active_segment_document(document, dataset_id=dataset_id)
+            await set_index_state(
+                segment_id,
+                "pending",
+                connection=lease_connection,
+            )
+            try:
+                await delete_segment_points(
+                    tenant_id=str(authoritative_dataset.get("tenant_id") or ""),
+                    dataset_id=dataset_id,
+                    document_id=document_id,
+                    segment_id=segment_id,
+                    lifecycle_lease_held=True,
+                )
+            except Exception as exc:
+                await set_index_state(
+                    segment_id,
+                    "error",
+                    error=str(exc),
+                    connection=lease_connection,
+                )
+                raise ValidationFailedError(
+                    f"segment vector deletion failed; database row was retained: {exc}"
+                ) from exc
+            result = await self.db.delete_segment(
+                segment_id,
+                connection=lease_connection,
+            )
+            if not result:
+                raise ValidationFailedError(
+                    "segment database deletion failed after vector cleanup"
+                )
         # Update document segment_count after deletion
         if result and document_id:
             await self.db.refresh_document_segment_count(document_id)
@@ -441,27 +680,88 @@ class ChunkingManager:
     ) -> dict[str, Any]:
         """Enable or disable a segment."""
         dataset = await self._ks.require_dataset_access(user, dataset_id, required="editor")
-        seg = await self.db.get_segment(segment_id)
-        if not seg or str(seg.get("dataset_id")) != dataset_id:
+        _require_dataset_index_writable(dataset)
+        lease_factory = getattr(self.db, "segment_index_update_lease", None)
+        set_payload_enabled = getattr(
+            self.vector_store,
+            "set_segment_payload_enabled",
+            None,
+        )
+        if not callable(lease_factory) or not callable(set_payload_enabled):
+            raise ValidationFailedError(
+                "segment enablement requires the serialized payload-state contract"
+            )
+        segment_hint = await self.db.get_segment(segment_id)
+        if not segment_hint or str(segment_hint.get("dataset_id") or "") != dataset_id:
             raise ValidationFailedError("segment not found")
+        hinted_document_id = str(segment_hint.get("document_id") or "").strip()
+        if not hinted_document_id:
+            raise ValidationFailedError("segment document identity is incomplete")
 
-        update_data: dict[str, Any] = {"enabled": enabled}
-        if not enabled:
-            update_data["disabled_at"] = datetime.utcnow()  # Pass datetime object, not string
-            update_data["disabled_by"] = user.user_id
-        else:
-            update_data["disabled_at"] = None
-            update_data["disabled_by"] = None
+        async with lease_factory(
+            dataset_id,
+            hinted_document_id,
+            segment_id,
+        ) as lease_connection:
+            seg = await self.db.get_segment(
+                segment_id,
+                connection=lease_connection,
+            )
+            if not seg or str(seg.get("dataset_id")) != dataset_id:
+                raise ValidationFailedError("segment not found")
+            document_id = str(seg.get("document_id") or "").strip()
+            if document_id != hinted_document_id:
+                raise ValidationFailedError(
+                    "segment document identity changed during enablement; retry"
+                )
+            document = await self.db.get_document(
+                document_id,
+                connection=lease_connection,
+            )
+            _require_active_segment_document(document, dataset_id=dataset_id)
+            tenant_id = str(dataset.get("tenant_id") or "").strip()
+            if not tenant_id or not document_id:
+                raise ValidationFailedError("segment ownership identity is incomplete")
 
-        await self.db.update_segment_fields(segment_id, update_data)
-
-        # If disabling, optionally remove from vector store
-        if not enabled:
-            collection = str(dataset.get("collection_name") or "")
-            if collection:
-                pid = str(seg.get("vector_id") or seg.get("segment_id") or "")
-                with contextlib.suppress(Exception):
-                    await self.vector_store.delete_points(collection, [pid])
+            update_data: dict[str, Any] = {"enabled": enabled}
+            if not enabled:
+                update_data["disabled_at"] = datetime.utcnow()
+                update_data["disabled_by"] = user.user_id
+                # Database authority hides the segment before a possibly
+                # partial cross-generation payload update. Same-value retries
+                # still run the idempotent Qdrant repair.
+                if bool(seg.get("enabled", True)):
+                    await self.db.update_segment_fields(
+                        segment_id,
+                        update_data,
+                        connection=lease_connection,
+                    )
+                await set_payload_enabled(
+                    tenant_id=tenant_id,
+                    dataset_id=dataset_id,
+                    document_id=document_id,
+                    segment_id=segment_id,
+                    enabled=False,
+                    lifecycle_lease_held=True,
+                )
+            else:
+                # Restore every owned payload first; PostgreSQL becomes active
+                # only after Qdrant acknowledges all generations.
+                await set_payload_enabled(
+                    tenant_id=tenant_id,
+                    dataset_id=dataset_id,
+                    document_id=document_id,
+                    segment_id=segment_id,
+                    enabled=True,
+                    lifecycle_lease_held=True,
+                )
+                update_data["disabled_at"] = None
+                update_data["disabled_by"] = None
+                await self.db.update_segment_fields(
+                    segment_id,
+                    update_data,
+                    connection=lease_connection,
+                )
 
         return await self.db.get_segment(segment_id) or seg
 
@@ -478,87 +778,169 @@ class ChunkingManager:
     ) -> dict[str, Any]:
         """Create a new segment manually."""
         dataset = await self._ks.require_dataset_access(user, dataset_id, required="editor")
+        _require_dataset_index_writable(dataset)
         doc = await self.db.get_document(document_id)
         if not doc or str(doc.get("dataset_id")) != dataset_id:
             raise ValidationFailedError("document not found")
-
-        # Get next position
-        existing_segs = await self.db.list_segments(
-            dataset_id=dataset_id, document_id=document_id, limit=1000, offset=0
-        )
-        position = max((s.get("position", 0) for s in existing_segs), default=-1) + 1
+        lease_factory = getattr(self.db, "document_segment_create_lease", None)
+        set_index_state = getattr(self.db, "set_segment_index_state", None)
+        next_position = getattr(self.db, "next_segment_position", None)
+        if not all(
+            callable(value)
+            for value in (lease_factory, set_index_state, next_position)
+        ):
+            raise ValidationFailedError(
+                "segment creation requires the serialized index state contract"
+            )
 
         seg_id = str(uuid.uuid4())
         clean_content = self._sanitize_text_for_db(content)
 
-        seg = {
-            "segment_id": seg_id,
-            "dataset_id": dataset_id,
-            "document_id": document_id,
-            "position": position,
-            "text": clean_content,
-            "token_count": len(clean_content) // 4,
-            "word_count": len(clean_content.split()),
-            "answer": answer,
-            "keywords": keywords or [],
-            "created_by": user.user_id,
-            "enabled": True,
-            "status": "waiting",
-            "metadata": {},
-        }
-
-        await self.db.insert_segments([seg])
-
-        # Embed and index the segment
-        try:
-            embedding_provider = str(dataset.get("embedding_provider") or "local")
-            embedding_model = str(dataset.get("embedding_model") or "hash-384")
-            embedding_config = _ensure_dict(dataset.get("embedding_config"))
-            dim = int(dataset.get("embedding_dimension") or 0) or None
-
-            econf = self._resolve_embedding_config(
-                provider=embedding_provider,
-                model=embedding_model,
-                embedding_config=embedding_config,
+        async with lease_factory(dataset_id, document_id) as lease_connection:
+            authoritative_dataset = await self.db.get_dataset(
+                dataset_id,
+                connection=lease_connection,
             )
-
-            embedder: BaseEmbedding | None = None
-            try:
-                embedder = create_embedding(econf, dimension=dim)
-                vec = (
-                    await asyncio.wait_for(
-                        embedder.embed_documents([clean_content]),
-                        timeout=float(econf.timeout_seconds) + 10.0,
-                    )
-                )[0]
-
-                collection = await self.vector_store.ensure_collection(
-                    dataset_id=dataset_id,
-                    dimension=embedder.dimension,
-                    collection_name=str(dataset.get("collection_name") or "") or None,
+            if not authoritative_dataset:
+                raise ValidationFailedError("dataset not found")
+            _require_dataset_index_writable(authoritative_dataset)
+            if dataset_ingestion_identity(
+                authoritative_dataset
+            ) != dataset_ingestion_identity(dataset):
+                raise ValidationFailedError(
+                    "dataset ingestion identity changed during segment creation; retry"
                 )
-            finally:
-                if embedder:
-                    await embedder.close()
-
-            from qdrant_client.http import models as qmodels
-
-            payload = {
+            authoritative_document = await self.db.get_document(
+                document_id,
+                connection=lease_connection,
+            )
+            _require_active_segment_document(
+                authoritative_document,
+                dataset_id=dataset_id,
+            )
+            position = await next_position(
+                dataset_id,
+                document_id,
+                connection=lease_connection,
+            )
+            seg = {
+                "segment_id": seg_id,
                 "dataset_id": dataset_id,
                 "document_id": document_id,
-                "segment_id": seg_id,
                 "position": position,
+                "level": 3,
+                "parent_segment_id": None,
                 "text": clean_content,
+                "token_count": len(clean_content) // 4,
+                "word_count": len(clean_content.split()),
+                "answer": answer,
+                "keywords": keywords or [],
+                "created_by": user.user_id,
+                "enabled": True,
+                "status": "indexing",
+                "content_type": "text",
+                "source_type": str(
+                    authoritative_document.get("source_type") or "manual"
+                ),
+                "language": str(
+                    authoritative_document.get("doc_language") or "en"
+                ),
+                "metadata": {},
             }
-            await self.vector_store.upsert(
-                collection_name=collection,
-                points=[qmodels.PointStruct(id=seg_id, vector=vec, payload=payload)],
+            await self.db.insert_segments(
+                [seg],
+                connection=lease_connection,
             )
-            await self.db.update_segment_fields(
-                seg_id, {"vector_id": seg_id, "status": "completed"}
+            stored_segment = await self.db.get_segment(
+                seg_id,
+                connection=lease_connection,
             )
-        except Exception as exc:
-            await self.db.update_segment_fields(seg_id, {"status": "error", "error": str(exc)})
+            if not stored_segment or str(stored_segment.get("dataset_id") or "") != dataset_id:
+                raise ValidationFailedError(
+                    "segment creation failed before vector indexing"
+                )
+            seg = stored_segment
+            await set_index_state(
+                seg_id,
+                "pending",
+                connection=lease_connection,
+            )
+
+            # Embed and index the segment
+            try:
+                embedding_provider = str(
+                    authoritative_dataset.get("embedding_provider") or "local"
+                )
+                embedding_model = str(
+                    authoritative_dataset.get("embedding_model") or "hash-384"
+                )
+                embedding_config = _ensure_dict(
+                    authoritative_dataset.get("embedding_config")
+                )
+                dim = int(authoritative_dataset.get("embedding_dimension") or 0) or None
+
+                econf = self._resolve_embedding_config(
+                    provider=embedding_provider,
+                    model=embedding_model,
+                    embedding_config=embedding_config,
+                )
+
+                embedder: BaseEmbedding | None = None
+                try:
+                    embedder = create_embedding(econf, dimension=dim)
+                    vec = (
+                        await asyncio.wait_for(
+                            embedder.embed_documents([clean_content]),
+                            timeout=float(econf.timeout_seconds) + 10.0,
+                        )
+                    )[0]
+
+                    collection = await self.vector_store.ensure_collection(
+                        dataset_id=dataset_id,
+                        dimension=embedder.dimension,
+                        collection_name=str(
+                            authoritative_dataset.get("collection_name") or ""
+                        )
+                        or None,
+                        tenant_id=str(authoritative_dataset.get("tenant_id") or ""),
+                        lifecycle_lease_held=True,
+                        **_lexical_ensure_kwargs(
+                            authoritative_dataset.get("index_config")
+                        ),
+                    )
+                finally:
+                    if embedder:
+                        await embedder.close()
+
+                from qdrant_client.http import models as qmodels
+
+                payload = _segment_vector_payload(
+                    dataset=authoritative_dataset,
+                    segment=seg,
+                    text=clean_content,
+                )
+                await self.vector_store.upsert(
+                    collection_name=collection,
+                    points=[qmodels.PointStruct(id=seg_id, vector=vec, payload=payload)],
+                    lifecycle_lease_held=True,
+                )
+                await self.db.update_segment_fields(
+                    seg_id,
+                    {"vector_id": seg_id},
+                    connection=lease_connection,
+                )
+                await set_index_state(
+                    seg_id,
+                    "completed",
+                    connection=lease_connection,
+                )
+            except Exception as exc:
+                await set_index_state(
+                    seg_id,
+                    "error",
+                    error=str(exc),
+                    connection=lease_connection,
+                )
 
         # Update document segment_count after creating a new segment
         await self.db.refresh_document_segment_count(document_id)

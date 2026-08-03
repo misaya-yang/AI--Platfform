@@ -152,7 +152,7 @@ class RerankConfig:
         False  # Off by default; preset configs (balanced/accurate/sota) enable it explicitly
     )
     provider: RerankProvider = RerankProvider.DASHSCOPE
-    model: str = "gte-rerank-v2"
+    model: str = "qwen3-rerank"
     top_n: int | None = None  # Number of results to keep after reranking
     score_threshold: float | None = None
 
@@ -189,7 +189,7 @@ class RerankConfig:
         return cls(
             enabled=bool(data.get("enabled", False)),
             provider=provider,
-            model=str(data.get("model", "gte-rerank-v2")),
+            model=str(data.get("model", "qwen3-rerank")),
             top_n=int(data["top_n"]) if data.get("top_n") is not None else None,
             score_threshold=float(data["score_threshold"])
             if data.get("score_threshold") is not None
@@ -235,13 +235,16 @@ class MMRConfig:
 class MultimodalConfig:
     """Multimodal retrieval configuration for image-text cross-modal search"""
 
-    enabled: bool = True  # Enable multimodal retrieval for datasets with images
+    # Public retrieval is text-only until the multimodal lifecycle is released
+    # end to end. Explicit experimental configs may still carry the dormant
+    # tuning fields below, but no built-in preset enables them.
+    enabled: bool = False
 
     # Image search settings
-    image_search_enabled: bool = True  # Directly search image segments (not just associated)
+    image_search_enabled: bool = False
     image_score_threshold: float = 0.2  # Lower threshold for images (typically score lower)
     text_score_threshold: float = 0.3  # Threshold for text segments
-    use_separate_thresholds: bool = True  # Use different thresholds for text/image
+    use_separate_thresholds: bool = False
 
     # Image boosting
     image_boost: float = 1.0  # Boost factor for image results (>1 = prefer images)
@@ -275,11 +278,11 @@ class MultimodalConfig:
             return cls(enabled=data)
 
         return cls(
-            enabled=bool(data.get("enabled", True)),
-            image_search_enabled=bool(data.get("image_search_enabled", True)),
+            enabled=bool(data.get("enabled", False)),
+            image_search_enabled=bool(data.get("image_search_enabled", False)),
             image_score_threshold=float(data.get("image_score_threshold", 0.2)),
             text_score_threshold=float(data.get("text_score_threshold", 0.3)),
-            use_separate_thresholds=bool(data.get("use_separate_thresholds", True)),
+            use_separate_thresholds=bool(data.get("use_separate_thresholds", False)),
             image_boost=float(data.get("image_boost", 1.0)),
             vlm_rerank_enabled=bool(data.get("vlm_rerank_enabled", False)),
             vlm_rerank_weight=float(data.get("vlm_rerank_weight", 0.4)),
@@ -383,7 +386,7 @@ class RetrievalConfig:
             ),
             rerank=RerankConfig(
                 enabled=bool(data.get("rerank", False)),
-                model=str(data.get("rerank_model", "gte-rerank-v2")),
+                model=str(data.get("rerank_model", "qwen3-rerank")),
                 top_n=int(data["rerank_top_n"]) if data.get("rerank_top_n") is not None else None,
             ),
             mmr=MMRConfig(
@@ -438,7 +441,7 @@ DEFAULT_CONFIGS = {
         top_k=5,
         score_threshold=0.3,
         fusion=FusionConfig(strategy=FusionStrategy.RRF, rrf_k=60, alpha=0.6),
-        rerank=RerankConfig(enabled=True, model="gte-rerank-v2"),  # CHANGED: enable rerank by default
+        rerank=RerankConfig(enabled=True, model="qwen3-rerank"),
         mmr=MMRConfig(enabled=False),
     ),
     "accurate": RetrievalConfig(
@@ -446,7 +449,7 @@ DEFAULT_CONFIGS = {
         top_k=5,
         score_threshold=0.35,
         fusion=FusionConfig(strategy=FusionStrategy.RRF, rrf_k=60, alpha=0.6),
-        rerank=RerankConfig(enabled=True, model="gte-rerank-v2"),
+        rerank=RerankConfig(enabled=True, model="qwen3-rerank"),
         mmr=MMRConfig(enabled=False),
     ),
     "diverse": RetrievalConfig(
@@ -454,7 +457,7 @@ DEFAULT_CONFIGS = {
         top_k=5,
         score_threshold=0.3,
         fusion=FusionConfig(strategy=FusionStrategy.RRF, rrf_k=60, alpha=0.6),
-        rerank=RerankConfig(enabled=True, model="gte-rerank-v2"),
+        rerank=RerankConfig(enabled=True, model="qwen3-rerank"),
         mmr=MMRConfig(enabled=True, lambda_mult=0.5),
     ),
     # SOTA: State-of-the-art configuration for best accuracy
@@ -463,7 +466,7 @@ DEFAULT_CONFIGS = {
         top_k=5,
         score_threshold=0.3,
         fusion=FusionConfig(strategy=FusionStrategy.RRF, rrf_k=60, alpha=0.6),
-        rerank=RerankConfig(enabled=True, model="gte-rerank-v2", top_n=10),
+        rerank=RerankConfig(enabled=True, model="qwen3-rerank", top_n=10),
         mmr=MMRConfig(enabled=True, lambda_mult=0.7),  # Slight diversity
     ),
 }

@@ -23,10 +23,6 @@ from ..deps import enforce_rate_limit, get_user_context
 logger = get_logger(__name__)
 router = APIRouter(prefix="/assistant", tags=["conversation-shares"])
 
-# Cookie used by the front-end to correlate anonymous viewers to their attempts.
-ANON_COOKIE_NAME = "ag_anon_id"
-
-
 # ── Models ───────────────────────────────────────────────────────────
 
 
@@ -344,16 +340,16 @@ class SharedQuizSubmitRequest(BaseModel):
 
 
 def _resolve_anon_id(request: Request) -> str:
-    """Best-effort stable identifier for an anonymous share viewer.
+    """Return the middleware-validated anonymous identity for a share viewer.
 
-    Priority: ``ag_anon_id`` cookie → ``X-Anon-Id`` header → client IP.
+    ``StreamingAnonymousMiddleware`` validates or generates the stable ID and
+    stores it on request state. Direct route invocations without that
+    middleware retain a server-derived client-IP fallback; raw client-provided
+    anonymous cookies and headers must not control quiz-attempt ownership.
     """
-    cookie = request.cookies.get(ANON_COOKIE_NAME)
-    if cookie:
-        return cookie[:128]
-    header = request.headers.get("x-anon-id")
-    if header:
-        return header[:128]
+    anon_id = getattr(getattr(request, "state", None), "anonymous_id", None)
+    if anon_id:
+        return str(anon_id)[:128]
     return get_client_ip_from_request(request)[:128] or "anonymous"
 
 
@@ -367,9 +363,9 @@ async def submit_shared_quiz(
     """Grade an anonymous viewer's answers against the frozen quiz snapshot.
 
     * No auth required. Rate-limited by IP via ``enforce_rate_limit``.
-    * Keyed by ``(share_code, anon_id, quiz_id)`` — one attempt per anon
-      viewer per quiz; resubmits return the cached result rather than
-      re-grading.
+    * Keyed by ``(share_code, anon_id, quiz_id)`` using the trusted anonymous
+      middleware identity — one attempt per viewer per quiz; resubmits return
+      the cached result rather than re-grading.
     * Grades against the **frozen** answer key embedded in the share's
       snapshot, so even if the original quiz row is deleted the share still
       functions.

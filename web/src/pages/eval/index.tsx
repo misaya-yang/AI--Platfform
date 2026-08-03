@@ -937,12 +937,26 @@ export function EvalPage() {
     && baselineRun?.status === "succeeded"
     && candidateRun?.status === "succeeded"
   );
-  const latestScoreSummary = latestRun?.score_summary || {};
+  const latestScoreSummary = candidateRun?.score_summary || latestRun?.score_summary || {};
   const canDryRunGate = Boolean(
-    latestRun?.status === "succeeded"
-    && typeof (latestScoreSummary.overall_score ?? latestScoreSummary.average_score) === "number"
+    canCompareRuns
+    && candidateRun?.status === "succeeded"
+    && latestScoreSummary.schema_version === "eval-gate-metrics/v2"
+    && typeof latestScoreSummary.case_count === "number"
+    && typeof latestScoreSummary.score_sum === "number"
+    && typeof latestScoreSummary.overall_score === "number"
+    && typeof latestScoreSummary.failed_case_count === "number"
+    && typeof latestScoreSummary.trajectory_case_count === "number"
+    && typeof latestScoreSummary.trajectory_failed_count === "number"
     && typeof latestScoreSummary.trajectory_pass_rate === "number"
+    && typeof latestScoreSummary.critical_case_count === "number"
+    && latestScoreSummary.critical_case_count > 0
+    && typeof latestScoreSummary.critical_failed_count === "number"
     && typeof latestScoreSummary.critical_pass_rate === "number"
+    && typeof latestScoreSummary.stateful_case_count === "number"
+    && latestScoreSummary.stateful_case_count > 0
+    && typeof latestScoreSummary.stateful_failed_count === "number"
+    && typeof latestScoreSummary.stateful_pass_rate === "number"
   );
   const effectiveRunDatasetId = activeDataset?.dataset_id || activeExperiment?.dataset_id || null;
   const canRunExperiment = Boolean(
@@ -1004,12 +1018,10 @@ export function EvalPage() {
   const gateMutation = useMutation({
     mutationFn: () =>
       dryRunEvalGate({
+        baseline_run_id: baselineRunId,
+        candidate_run_id: candidateRunId,
         result_payload: {
-          metrics: {
-            overall_score: asNumber(latestScoreSummary.overall_score ?? latestScoreSummary.average_score),
-            trajectory_pass_rate: asNumber(latestScoreSummary.trajectory_pass_rate),
-            critical_pass_rate: asNumber(latestScoreSummary.critical_pass_rate),
-          },
+          metrics: latestScoreSummary,
         },
       }),
     onSuccess: (result) => setGateResult(result),

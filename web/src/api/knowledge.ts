@@ -87,17 +87,11 @@ export async function createDocumentFromUrl(datasetId: string, payload: { url: s
 }
 
 /**
- * Processing modes for document upload
- * - auto: Automatic detection of document type (default, recommended)
- * - text_only: Traditional OCR + text embedding
- * - scanned: Page-as-Image vision embedding (for scanned PDFs)
- * - multimodal: Combined text + image embedding
+ * Public document upload is intentionally text-only until the multimodal
+ * create/ingest/retrieve/delete contract is released end to end.
  */
 export const ProcessingModes = {
-  AUTO: "auto",
   TEXT_ONLY: "text_only",
-  SCANNED: "scanned",
-  MULTIMODAL: "multimodal",
 } as const;
 
 export type ProcessingMode = typeof ProcessingModes[keyof typeof ProcessingModes];
@@ -105,7 +99,7 @@ export type ProcessingMode = typeof ProcessingModes[keyof typeof ProcessingModes
 export async function uploadDocument(
   datasetId: string,
   file: File,
-  processingMode: ProcessingMode = "auto"
+  processingMode: ProcessingMode = "text_only"
 ) {
   const form = new FormData();
   form.append("file", file);

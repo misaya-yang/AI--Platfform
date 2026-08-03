@@ -291,6 +291,11 @@ class EventConsumer:
             self._inflight = asyncio.create_task(self._handler(envelope))
             await self._inflight
         except Exception as exc:  # noqa: BLE001 — handler may raise anything
+            # The handler did not complete, so the idempotency reservation
+            # must not convert the later reclaimed delivery into a false
+            # success. A crash remains conservatively deduplicated; this
+            # release only covers a failure we observed directly.
+            await idem.release(self._consumer, str(envelope.event_id))
             await self._on_handler_failure(client, message_id, msg_id_str, exc, attempts)
             return
         finally:

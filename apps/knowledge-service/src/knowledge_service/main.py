@@ -7,20 +7,17 @@ pool, Qdrant client, and background worker.
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 
 import structlog
 import uvicorn
+from ai_gateway_core.logging import configure_structured_logging
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 
-from ai_gateway_core.logging import configure_structured_logging
-
-from .api.router import api_router
 from .config import Settings
 from .db.connection import DatabasePool
 
@@ -101,7 +98,12 @@ async def _init_qdrant(settings: Settings) -> Any:
             collections=len(collections.collections),
         )
     except Exception:
-        logger.warning("qdrant_probe_failed", url=settings.qdrant.url)
+        logger.exception("qdrant_probe_failed", url=settings.qdrant.url)
+        # Qdrant is a core retrieval dependency.  Returning a client object
+        # after a failed probe would let readiness report a false healthy
+        # instance, so close the partial client and abort startup.
+        await qdrant.close()
+        raise
     return qdrant
 
 
@@ -166,6 +168,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # --- Initialize KnowledgeService + Worker ---
         knowledge_service = None
         knowledge_worker = None
+        db_storage = None
         try:
             from .persistence.database import DatabaseStorage as FullDatabaseStorage
             from .services.knowledge.knowledge_service import KnowledgeService
@@ -197,6 +200,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "prefer_grpc": s.qdrant.prefer_grpc,
                             "max_retries": getattr(s.qdrant, "max_retries", 3),
                             "retry_base_delay": getattr(s.qdrant, "retry_base_delay", 1.0),
+                            "bm25_v2_enabled": getattr(s.qdrant, "bm25_v2_enabled", False),
+                            "bm25_v2_capability_ttl_seconds": getattr(
+                                s.qdrant, "bm25_v2_capability_ttl_seconds", 300.0
+                            ),
+                            "bm25_v2_readiness_ttl_seconds": getattr(
+                                s.qdrant, "bm25_v2_readiness_ttl_seconds", 0.0
+                            ),
                         })(),
                         "dashscope": type("D", (), {
                             "api_key": embed.dashscope_api_key or (embed.api_key if embed.provider == "dashscope" else ""),
@@ -266,7 +276,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         key_prefix=storage_cfg.key_prefix,
                         url_expiry_seconds=storage_cfg.url_expiry_seconds,
                     )
-                    image_storage = ImageStorageService(sc)
+                    image_storage = ImageStorageService(
+                        sc,
+                        signing_key=storage_cfg.signing_key.get_secret_value(),
+                    )
                     logger.info("s3_storage_initialized", bucket=storage_cfg.s3.bucket)
                 else:
                     sc = StorageConfig(
@@ -274,7 +287,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         local_base_path=storage_cfg.local_base_path,
                         key_prefix=storage_cfg.key_prefix,
                     )
-                    image_storage = ImageStorageService(sc)
+                    image_storage = ImageStorageService(
+                        sc,
+                        signing_key=storage_cfg.signing_key.get_secret_value(),
+                    )
                     logger.info("local_storage_initialized", path=storage_cfg.local_base_path)
             except Exception as e:
                 logger.warning("storage_init_failed", error=str(e))
@@ -338,8 +354,52 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             logger.info("knowledge_service_initialized",
                         worker_running=knowledge_worker.is_running if hasattr(knowledge_worker, 'is_running') else True)
         except Exception as e:
-            logger.warning("knowledge_service_init_partial", error=str(e))
-            # Service still boots — retrieve endpoint works, upload may not until init completes
+            app.state._ready = False
+            logger.exception("knowledge_service_init_failed", error=str(e))
+
+            # Lifespan cleanup after a pre-yield failure is not automatic.  Release
+            # every core resource that may already have started, but never mask the
+            # startup exception that must keep this instance out of rotation.
+            if knowledge_worker:
+                try:
+                    await knowledge_worker.stop()
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "knowledge_worker_startup_cleanup_failed",
+                        error=str(cleanup_error),
+                    )
+            if knowledge_service:
+                try:
+                    await knowledge_service.close()
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "knowledge_service_startup_cleanup_failed",
+                        error=str(cleanup_error),
+                    )
+            if db_storage:
+                try:
+                    await db_storage.close()
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "knowledge_database_startup_cleanup_failed",
+                        error=str(cleanup_error),
+                    )
+            if hasattr(qdrant, "close"):
+                try:
+                    await qdrant.close()
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "qdrant_startup_cleanup_failed",
+                        error=str(cleanup_error),
+                    )
+            try:
+                await db.close()
+            except Exception as cleanup_error:
+                logger.warning(
+                    "database_pool_startup_cleanup_failed",
+                    error=str(cleanup_error),
+                )
+            raise
 
         app.state._ready = True
         logger.info("knowledge_service_ready")
@@ -358,10 +418,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 hint="forcing shutdown with requests still in flight",
             )
         if knowledge_worker:
-            try:
+            with suppress(Exception):
                 await knowledge_worker.stop()
-            except Exception:
-                pass
         if hasattr(qdrant, "close"):
             await qdrant.close()
         await db.close()
@@ -423,7 +481,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.add_middleware(RequestIDMiddleware)
 
-    from ai_gateway_core.comm import IdempotencyMiddleware, InMemoryIdempotencyStore, RedisIdempotencyStore
+    from ai_gateway_core.comm import (
+        IdempotencyMiddleware,
+        InMemoryIdempotencyStore,
+        RedisIdempotencyStore,
+    )
 
     def _idempotency_store_from_env():
         backend = os.environ.get("INTERNAL_IDEMPOTENCY_BACKEND", "memory").strip().lower()
@@ -452,6 +514,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # single rotated secret covers both gateway→microservice hops (simpler
     # deployment; same trust boundary).
     _gateway_secret_env = os.environ.get("GATEWAY_ASSISTANT_SHARED_SECRET", "").strip()
+    from ai_gateway_core.auth.gateway_secret_middleware import (
+        validate_gateway_auth_configuration,
+    )
+
+    validate_gateway_auth_configuration(
+        secret=_gateway_secret_env,
+        allow_anonymous=resolved.app.allow_anonymous,
+        allow_anonymous_setting="KNOWLEDGE_APP__ALLOW_ANONYMOUS",
+    )
     if _gateway_secret_env:
         from ai_gateway_core.auth.gateway_secret import GatewaySecret
 
@@ -521,17 +592,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     # --- API routes ---
-    # Try full 51-endpoint router first; fall back to placeholder if imports fail
-    try:
-        from .api.routes.eval import router as kb_eval_router
-        from .api.routes.knowledge import router as full_knowledge_router
+    # These routers are part of the service's required API surface.  Import
+    # failures must abort application construction so the process cannot
+    # become ready while serving only a reduced placeholder API.
+    from .api.routes.eval import router as kb_eval_router
+    from .api.routes.knowledge import router as full_knowledge_router
 
-        app.include_router(full_knowledge_router, prefix="/api/v1")
-        app.include_router(kb_eval_router, prefix="/api/v1")
-        logger.info("knowledge_routes_loaded", mode="full", endpoints=51)
-    except Exception as e:
-        logger.warning("knowledge_routes_fallback", error=str(e), mode="placeholder")
-        app.include_router(api_router, prefix="/api/v1/knowledge")
+    app.include_router(full_knowledge_router, prefix="/api/v1")
+    app.include_router(kb_eval_router, prefix="/api/v1")
+    logger.info("knowledge_routes_loaded", mode="full", endpoints=51)
 
     app.state.settings = resolved
     return app

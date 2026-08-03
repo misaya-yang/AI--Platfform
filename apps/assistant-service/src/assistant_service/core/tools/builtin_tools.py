@@ -35,11 +35,16 @@ if TYPE_CHECKING:
     from ai_gateway_core.knowledge import KnowledgeClientLike
 
     from ..memory_service import MemoryService
+    from ..runtime.compat.runtime_adapter import AssistantRuntimeAdapter
 
 logger = get_logger(__name__)
 
 _MAX_KB_PUBLIC_ERROR_CHARS = 200
 _TRUNCATION_SUFFIX = "...[truncated]"
+_MAX_KB_QUERY_CHARS = 4096
+_MAX_KB_DATASETS = 8
+_MAX_KB_DATASET_ID_CHARS = 128
+_MAX_KB_TOP_K = 20
 
 
 def _safe_kb_public_error(value: Any) -> str:
@@ -60,36 +65,39 @@ def _safe_kb_public_error(value: Any) -> str:
 
 KB_SEARCH_DEFINITION = ToolDefinition(
     name="search_knowledge_base",
-    description="Search the knowledge base for relevant documents. Returns ranked text/image chunks from specified datasets.",
+    description="Search the knowledge base for relevant text documents from specified datasets.",
     parameters=[
         ToolParameter(
             name="query",
             type="string",
             description="The search query in natural language. Be specific and include relevant keywords.",
             required=True,
+            schema_constraints={"minLength": 1, "maxLength": _MAX_KB_QUERY_CHARS},
         ),
         ToolParameter(
             name="intent",
             type="string",
-            description="Retrieval intent: general=balanced text and image retrieval, "
-            "find_image=prioritize images, find_document=text only. Default is general.",
+            description="Retrieval intent: general=balanced text retrieval, "
+            "find_document=locate a specific text document. Default is general.",
             required=False,
             default="general",
-            enum=["general", "find_image", "find_document"],
+            enum=["general", "find_document"],
         ),
         ToolParameter(
             name="dataset_ids",
             type="array",
-            description="List of dataset IDs to search. If empty, searches all accessible datasets.",
+            description="Bound dataset IDs to search. At most 8 datasets are accepted.",
             required=False,
-            items={"type": "string"},
+            items={"type": "string", "minLength": 1, "maxLength": _MAX_KB_DATASET_ID_CHARS},
+            schema_constraints={"maxItems": _MAX_KB_DATASETS, "uniqueItems": True},
         ),
         ToolParameter(
             name="top_k",
-            type="number",
+            type="integer",
             description="Number of results to return (1-20). Default is 5.",
             required=False,
             default=5,
+            schema_constraints={"minimum": 1, "maximum": _MAX_KB_TOP_K},
         ),
         ToolParameter(
             name="score_threshold",
@@ -97,13 +105,13 @@ KB_SEARCH_DEFINITION = ToolDefinition(
             description="Minimum relevance score (0.0-1.0). Lower values return more results. Default is 0.0 (no filtering - AI judges relevance).",
             required=False,
             default=0.0,  # Let AI judge result relevance instead of hard filtering
+            schema_constraints={"minimum": 0.0, "maximum": 1.0},
         ),
     ],
     category=ToolCategory.RETRIEVAL,
     risk_level=ToolRiskLevel.LOW,
     when_to_use="Use this tool when the user asks questions that might be answered by "
     "internal documentation, policies, product information, or other company knowledge. "
-    "Use find_image intent when looking for diagrams, screenshots, or visual content. "
     "Use find_document intent when looking for specific text-based documents.",
     when_not_to_use="Do not use for questions about current events, external companies, "
     "or information that wouldn't be in internal documents.",
@@ -117,11 +125,6 @@ KB_SEARCH_DEFINITION = ToolDefinition(
             description="Search specific dataset",
             input={"query": "API authentication methods", "dataset_ids": ["api-docs"], "top_k": 3},
             expected_output="Returns API documentation about authentication",
-        ),
-        ToolExample(
-            description="Search for architecture diagrams",
-            input={"query": "system architecture diagram", "intent": "find_image", "top_k": 5},
-            expected_output="Returns images and diagrams related to system architecture",
         ),
     ],
     timeout_seconds=30,
@@ -145,19 +148,67 @@ class KBSearchExecutor(ToolExecutor):
         runtime_configs = (request.metadata or {}).get("kb_retrieval_configs")
         runtime_configs = runtime_configs if isinstance(runtime_configs, dict) else None
 
-        if not query:
+        if not isinstance(query, str) or not query.strip() or len(query) > _MAX_KB_QUERY_CHARS:
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=False,
-                error="Query is required",
+                error="Query must be a non-empty string of at most 4096 characters",
                 duration_ms=(time.time() - start_time) * 1000,
             )
 
-        # Validate intent parameter
-        valid_intents = {"general", "find_image", "find_document"}
+        # The current public release is intentionally text-only.
+        valid_intents = {"general", "find_document"}
         if intent not in valid_intents:
-            intent = "general"
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error="Unsupported knowledge retrieval intent",
+                duration_ms=(time.time() - start_time) * 1000,
+            )
+        if (
+            not isinstance(dataset_ids, list)
+            or len(dataset_ids) > _MAX_KB_DATASETS
+            or any(
+                not isinstance(dataset_id, str)
+                or not dataset_id.strip()
+                or len(dataset_id) > _MAX_KB_DATASET_ID_CHARS
+                for dataset_id in dataset_ids
+            )
+            or len(set(dataset_ids)) != len(dataset_ids)
+        ):
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error="dataset_ids must contain at most 8 unique, non-empty IDs",
+                duration_ms=(time.time() - start_time) * 1000,
+            )
+        if (
+            isinstance(top_k, bool)
+            or not isinstance(top_k, int)
+            or not 1 <= top_k <= _MAX_KB_TOP_K
+        ):
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error="top_k must be an integer between 1 and 20",
+                duration_ms=(time.time() - start_time) * 1000,
+            )
+        if (
+            isinstance(score_threshold, bool)
+            or not isinstance(score_threshold, (int, float))
+            or not 0 <= float(score_threshold) <= 1
+        ):
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error="score_threshold must be between 0 and 1",
+                duration_ms=(time.time() - start_time) * 1000,
+            )
 
         try:
             all_results = []
@@ -202,9 +253,36 @@ class KBSearchExecutor(ToolExecutor):
                         error="AGENT_KNOWLEDGE_CONFIG_INVALID",
                         duration_ms=(time.time() - start_time) * 1000,
                     )
-                top_k = max(
-                    int(runtime_configs[str(dataset_id)]["top_k"]) for dataset_id in dataset_ids
-                )
+                sealed_values: list[tuple[int, float]] = []
+                for dataset_id in dataset_ids:
+                    sealed_config = runtime_configs[str(dataset_id)]
+                    if not isinstance(sealed_config, dict) or sealed_config.get("include_images"):
+                        return ToolCallResult(
+                            call_id=request.call_id,
+                            tool_name=request.tool_name,
+                            success=False,
+                            error="AGENT_KNOWLEDGE_CONFIG_INVALID",
+                            duration_ms=(time.time() - start_time) * 1000,
+                        )
+                    sealed_top_k = sealed_config.get("top_k")
+                    sealed_threshold = sealed_config.get("threshold")
+                    if (
+                        isinstance(sealed_top_k, bool)
+                        or not isinstance(sealed_top_k, int)
+                        or not 1 <= sealed_top_k <= _MAX_KB_TOP_K
+                        or isinstance(sealed_threshold, bool)
+                        or not isinstance(sealed_threshold, (int, float))
+                        or not 0 <= float(sealed_threshold) <= 1
+                    ):
+                        return ToolCallResult(
+                            call_id=request.call_id,
+                            tool_name=request.tool_name,
+                            success=False,
+                            error="AGENT_KNOWLEDGE_CONFIG_INVALID",
+                            duration_ms=(time.time() - start_time) * 1000,
+                        )
+                    sealed_values.append((sealed_top_k, float(sealed_threshold)))
+                top_k = max(value[0] for value in sealed_values)
 
             knowledge_settings = (
                 getattr(getattr(self.kb_service, "settings", None), "knowledge", None)
@@ -230,36 +308,14 @@ class KBSearchExecutor(ToolExecutor):
                     effective_top_k = int(sealed_config.get("top_k", top_k))
                     effective_threshold = float(sealed_config.get("threshold", score_threshold))
                     async with fanout_semaphore:
-                        # Use retrieve_with_images_v2 for multimodal retrieval with intent support
-                        # Text-first by default; only explicit image intent pays multimodal cost.
-                        include_images = (
-                            bool(sealed_config.get("include_images"))
-                            if runtime_configs is not None
-                            else intent == "find_image"
-                        ) and intent != "find_document"
-                        # Enable VLM reranking for image-focused queries
-                        vlm_rerank = intent == "find_image" and include_images
-                        if hasattr(self.kb_service, "retrieve_with_images_v2"):
-                            results, meta = await self.kb_service.retrieve_with_images_v2(
-                                user=request.user,
-                                dataset_id=dataset_id,
-                                query=query,
-                                top_k=effective_top_k,
-                                intent=intent,
-                                vlm_rerank=vlm_rerank,
-                                include_images=include_images,
-                                score_threshold=effective_threshold,
-                            )
-                        else:
-                            # Fallback for proxy client (no multimodal support)
-                            results, meta = await self.kb_service.retrieve(
-                                user=request.user,
-                                dataset_id=dataset_id,
-                                query=query,
-                                top_k=effective_top_k,
-                                score_threshold=effective_threshold,
-                                include_images=include_images,
-                            )
+                        results, meta = await self.kb_service.retrieve(
+                            user=request.user,
+                            dataset_id=dataset_id,
+                            query=query,
+                            top_k=effective_top_k,
+                            score_threshold=effective_threshold,
+                            include_images=False,
+                        )
                     return {
                         "dataset_id": dataset_id,
                         "results": results,
@@ -333,7 +389,7 @@ class KBSearchExecutor(ToolExecutor):
                         "dataset_name": dataset_name,
                         "segment_id": getattr(r, "segment_id", None),
                         "document_id": getattr(r, "document_id", None),
-                        "image_url": getattr(r, "image_url", None) or r_meta.get("image_url"),
+                        "image_url": None,
                         "citation_text": citation_text,
                         "source_url": source_url,
                         "metadata": r_meta,
@@ -508,6 +564,7 @@ def register_builtin_tools(
     kb_service: KnowledgeClientLike | None = None,
     memory_service: MemoryService | None = None,
     database: Any | None = None,
+    runtime_adapter: AssistantRuntimeAdapter | None = None,
 ) -> None:
     """Register all built-in tools with the global registry."""
 
@@ -522,12 +579,12 @@ def register_builtin_tools(
     if memory_service:
         from .memory_tool import UPDATE_MEMORY_DEFINITION, UpdateMemoryExecutor
 
-        runtime_adapter = None
-        if database is not None:
+        resolved_runtime_adapter = runtime_adapter
+        if resolved_runtime_adapter is None and database is not None:
             try:
                 from ..runtime.compat.runtime_adapter import AssistantRuntimeAdapter
 
-                runtime_adapter = AssistantRuntimeAdapter.from_env(database=database)
+                resolved_runtime_adapter = AssistantRuntimeAdapter.from_env(database=database)
             except Exception as exc:
                 logger.error(
                     "assistant.runtime_memory_adapter_init_failed (exception_type=%s)",
@@ -535,7 +592,7 @@ def register_builtin_tools(
                 )
         register_tool(
             UPDATE_MEMORY_DEFINITION,
-            UpdateMemoryExecutor(memory_service, runtime_adapter=runtime_adapter),
+            UpdateMemoryExecutor(memory_service, runtime_adapter=resolved_runtime_adapter),
         )
         logger.info("Registered memory tool")
 

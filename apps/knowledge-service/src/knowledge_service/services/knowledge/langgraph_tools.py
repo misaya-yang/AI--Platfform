@@ -38,15 +38,67 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from ...core.auth.user_resolver import UserContext
-from ...core.exceptions import AuthenticationRequiredError
+from ...core.exceptions import AuthenticationRequiredError, ValidationFailedError
 from .knowledge_service import KnowledgeService
 
 logger = logging.getLogger(__name__)
+
+
+def _require_tool_query(query: Any) -> str:
+    if not isinstance(query, str) or not 1 <= len(query.strip()) <= 4096:
+        raise ValidationFailedError("knowledge tool query must contain 1-4096 characters")
+    return query.strip()
+
+
+def _require_tool_top_k(top_k: Any) -> int:
+    if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 20:
+        raise ValidationFailedError("knowledge tool top_k must be an integer between 1 and 20")
+    return top_k
+
+
+def _require_tool_score_threshold(score_threshold: Any) -> float | None:
+    if score_threshold is None:
+        return None
+    if isinstance(score_threshold, bool) or not isinstance(score_threshold, (int, float)):
+        raise ValidationFailedError(
+            "knowledge tool score_threshold must be finite and between 0 and 1"
+        )
+    numeric = float(score_threshold)
+    if not math.isfinite(numeric) or not 0.0 <= numeric <= 1.0:
+        raise ValidationFailedError(
+            "knowledge tool score_threshold must be finite and between 0 and 1"
+        )
+    return numeric
+
+
+def _require_text_only_intent(intent: Any) -> str:
+    normalized = str(intent or "general").strip().lower()
+    if normalized not in {"general", "find_document"}:
+        raise ValidationFailedError(
+            "knowledge tool intent must be general or find_document"
+        )
+    return normalized
+
+
+def _require_tool_dataset_ids(dataset_ids: Any) -> list[str]:
+    if not isinstance(dataset_ids, list) or not 1 <= len(dataset_ids) <= 8:
+        raise ValidationFailedError(
+            "knowledge tool dataset_ids must be a list containing 1-8 entries"
+        )
+    normalized = [str(dataset_id or "").strip() for dataset_id in dataset_ids]
+    if any(not dataset_id for dataset_id in normalized) or len(set(normalized)) != len(
+        normalized
+    ):
+        raise ValidationFailedError(
+            "knowledge tool dataset_ids must be non-empty and unique"
+        )
+    return normalized
 
 
 @dataclass
@@ -57,7 +109,7 @@ class KBRetrievalInput:
     dataset_id: str
     top_k: int = 5
     mode: str = "hybrid"  # hybrid | vector | keyword
-    intent: str = "general"  # general | find_image | find_document
+    intent: str = "general"  # general | find_document
     document_id: str | None = None
     rerank: bool = False
     mmr: bool = False
@@ -147,11 +199,12 @@ class KnowledgeRetriever:
             raise AuthenticationRequiredError(
                 "Authenticated user context is required for knowledge retrieval"
             )
+        resolved_top_k = _require_tool_top_k(default_top_k)
 
         self.kb = knowledge_service
         self.dataset_id = dataset_id
         self.user_context = user_context
-        self.default_top_k = default_top_k
+        self.default_top_k = resolved_top_k
         self.default_mode = default_mode
         self.default_rerank = default_rerank
         self.default_mmr = default_mmr
@@ -196,37 +249,36 @@ class KnowledgeRetriever:
             rerank: Whether to use reranking
             mmr: Whether to use MMR diversity
             dataset_id: Override the default dataset
-            intent: Retrieval intent (general/find_image/find_document)
+            intent: Retrieval intent (general/find_document)
             **kwargs: Additional parameters passed to KB retrieve
 
         Returns:
             List of KBSearchResult objects
         """
+        resolved_query = _require_tool_query(query)
+        resolved_top_k = _require_tool_top_k(
+            self.default_top_k if top_k is None else top_k
+        )
+        _require_text_only_intent(intent)
+        if "score_threshold" in kwargs:
+            kwargs["score_threshold"] = _require_tool_score_threshold(
+                kwargs.get("score_threshold")
+            )
+
         # Build retrieve kwargs
         retrieve_kwargs = {
             "user": self.user_context,
             "dataset_id": dataset_id or self.dataset_id,
-            "query": query,
-            "top_k": top_k or self.default_top_k,
+            "query": resolved_query,
+            "top_k": resolved_top_k,
             "mode": mode or self.default_mode,
             "document_id": document_id,
             "rerank": rerank if rerank is not None else self.default_rerank,
             "mmr": mmr if mmr is not None else self.default_mmr,
         }
 
-        # Add intent if provided
-        if intent is not None:
-            retrieve_kwargs["intent"] = intent
-
         retrieve_kwargs.update(kwargs)
-
-        # Use retrieve_with_images_v2 for multimodal retrieval with intent support
-        if hasattr(self.kb, "retrieve_with_images_v2"):
-            results, meta = await self.kb.retrieve_with_images_v2(**retrieve_kwargs)
-        else:
-            # Fallback to regular retrieve, remove intent param if present
-            retrieve_kwargs.pop("intent", None)
-            results, meta = await self.kb.retrieve(**retrieve_kwargs)
+        results, _meta = await self.kb.retrieve(**retrieve_kwargs)
 
         return [
             KBSearchResult(
@@ -262,11 +314,19 @@ class KnowledgeRetriever:
         """
         Retrieve with full metadata including retrieval statistics.
         """
+        resolved_query = _require_tool_query(query)
+        resolved_top_k = _require_tool_top_k(
+            self.default_top_k if top_k is None else top_k
+        )
+        if "score_threshold" in kwargs:
+            kwargs["score_threshold"] = _require_tool_score_threshold(
+                kwargs.get("score_threshold")
+            )
         results, meta = await self.kb.retrieve(
             user=self.user_context,
             dataset_id=self.dataset_id,
-            query=query,
-            top_k=top_k or self.default_top_k,
+            query=resolved_query,
+            top_k=resolved_top_k,
             mode=self.default_mode,
             rerank=self.default_rerank,
             mmr=self.default_mmr,
@@ -285,7 +345,7 @@ class KnowledgeRetriever:
                 for r in results
             ],
             metadata=meta,
-            query=query,
+            query=resolved_query,
             dataset_id=self.dataset_id,
         )
 
@@ -324,17 +384,21 @@ class KnowledgeRetriever:
                     "query": {
                         "type": "string",
                         "description": "The search query to find relevant information",
+                        "minLength": 1,
+                        "maxLength": 4096,
                     },
                     "intent": {
                         "type": "string",
-                        "enum": ["general", "find_image", "find_document"],
-                        "description": "Retrieval intent: general=balanced, find_image=prioritize images, find_document=text only",
+                        "enum": ["general", "find_document"],
+                        "description": "Text retrieval intent",
                         "default": "general",
                     },
                     "top_k": {
                         "type": "integer",
                         "description": "Number of results to return",
                         "default": 5,
+                        "minimum": 1,
+                        "maximum": 20,
                     },
                 },
                 "required": ["query"],
@@ -349,23 +413,27 @@ class KnowledgeRetriever:
             "type": "function",
             "function": {
                 "name": "search_knowledge_base",
-                "description": f"Search the knowledge base for relevant information to answer questions. Supports text and image retrieval. Dataset: {self.dataset_id}",
+                "description": f"Search the knowledge base for relevant text information. Dataset: {self.dataset_id}",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
                             "description": "The search query describing what information you're looking for",
+                            "minLength": 1,
+                            "maxLength": 4096,
                         },
                         "intent": {
                             "type": "string",
-                            "enum": ["general", "find_image", "find_document"],
-                            "description": "Retrieval intent: general=balanced, find_image=prioritize images, find_document=text only",
+                            "enum": ["general", "find_document"],
+                            "description": "Text retrieval intent",
                         },
                         "top_k": {
                             "type": "integer",
                             "description": "Number of results to return",
                             "default": 5,
+                            "minimum": 1,
+                            "maximum": 20,
                         },
                     },
                     "required": ["query"],
@@ -408,11 +476,13 @@ class MultiDatasetRetriever:
             raise AuthenticationRequiredError(
                 "Authenticated user context is required for knowledge retrieval"
             )
+        resolved_dataset_ids = _require_tool_dataset_ids(dataset_ids)
+        resolved_top_k = _require_tool_top_k(default_top_k)
 
         self.kb = knowledge_service
-        self.dataset_ids = dataset_ids
+        self.dataset_ids = resolved_dataset_ids
         self.user_context = user_context
-        self.default_top_k = default_top_k
+        self.default_top_k = resolved_top_k
         self.default_mode = default_mode
 
         # Create individual retrievers
@@ -424,7 +494,7 @@ class MultiDatasetRetriever:
                 default_top_k=default_top_k,
                 default_mode=default_mode,
             )
-            for ds_id in dataset_ids
+            for ds_id in resolved_dataset_ids
         }
 
     async def retrieve(
@@ -444,27 +514,38 @@ class MultiDatasetRetriever:
             top_k: Number of results to return
             dataset_id: Specific dataset to search (if None, search all)
             merge_results: If searching all, whether to merge and rank results
-            intent: Retrieval intent (general/find_image/find_document)
+            intent: Retrieval intent (general/find_document)
             **kwargs: Additional parameters
 
         Returns:
             List of search results
         """
-        top_k = top_k or self.default_top_k
+        resolved_query = _require_tool_query(query)
+        top_k = _require_tool_top_k(self.default_top_k if top_k is None else top_k)
+        resolved_intent = _require_text_only_intent(intent)
+        if "score_threshold" in kwargs:
+            kwargs["score_threshold"] = _require_tool_score_threshold(
+                kwargs.get("score_threshold")
+            )
 
         if dataset_id:
             # Search single dataset
             if dataset_id not in self.retrievers:
                 raise ValueError(f"Dataset {dataset_id} not configured")
             return await self.retrievers[dataset_id].retrieve(
-                query, top_k=top_k, intent=intent, **kwargs
+                resolved_query, top_k=top_k, intent=resolved_intent, **kwargs
             )
 
         # Search all datasets
         import asyncio
 
         tasks = [
-            retriever.retrieve(query, top_k=top_k, intent=intent, **kwargs)
+            retriever.retrieve(
+                resolved_query,
+                top_k=top_k,
+                intent=resolved_intent,
+                **kwargs,
+            )
             for retriever in self.retrievers.values()
         ]
 
@@ -491,18 +572,20 @@ class MultiDatasetRetriever:
             "type": "function",
             "function": {
                 "name": "search_knowledge_bases",
-                "description": f"Search knowledge bases for relevant information. Supports text and image retrieval. Available datasets: {dataset_desc}",
+                "description": f"Search knowledge bases for relevant text information. Available datasets: {dataset_desc}",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
                             "description": "The search query describing what information you're looking for",
+                            "minLength": 1,
+                            "maxLength": 4096,
                         },
                         "intent": {
                             "type": "string",
-                            "enum": ["general", "find_image", "find_document"],
-                            "description": "Retrieval intent: general=balanced, find_image=prioritize images, find_document=text only",
+                            "enum": ["general", "find_document"],
+                            "description": "Text retrieval intent",
                         },
                         "dataset_id": {
                             "type": "string",
@@ -513,6 +596,8 @@ class MultiDatasetRetriever:
                             "type": "integer",
                             "description": "Number of results to return",
                             "default": 5,
+                            "minimum": 1,
+                            "maximum": 20,
                         },
                     },
                     "required": ["query"],
@@ -638,8 +723,11 @@ class DifyCompatibleKBAPI:
         # Parse retrieval model config
         model = retrieval_model or {}
 
-        top_k = int(model.get("top_k", 5))
-        score_threshold = model.get("score_threshold")
+        resolved_query = _require_tool_query(query)
+        top_k = _require_tool_top_k(model.get("top_k", 5))
+        score_threshold = _require_tool_score_threshold(
+            model.get("score_threshold")
+        )
         rerank = model.get("reranking_enable", False)
 
         # Map Dify search method to our mode
@@ -655,7 +743,7 @@ class DifyCompatibleKBAPI:
         results, meta = await self.kb.retrieve(
             user=self.user_context,
             dataset_id=dataset_id,
-            query=query,
+            query=resolved_query,
             top_k=top_k,
             mode=mode,
             rerank=rerank,
@@ -686,7 +774,7 @@ class DifyCompatibleKBAPI:
             ],
             "metadata": {
                 "total": len(results),
-                "query": query,
+                "query": resolved_query,
                 "dataset_id": dataset_id,
             },
         }
@@ -792,12 +880,13 @@ class KnowledgeBaseTool:
         self.dataset_id = dataset_id
         self.user_context = user_context
         self.config = config or KBToolConfig()
+        self.config.top_k = _require_tool_top_k(self.config.top_k)
 
         # LangChain tool properties
         self.name = name or f"search_{dataset_id.replace('-', '_')}"
         self.description = description or (
             f"Search the '{dataset_id}' knowledge base for relevant information. "
-            f"Supports text and image retrieval. Use this tool when you need to find specific facts, documentation, or context."
+            f"Use this text retrieval tool when you need to find specific facts, documentation, or context."
         )
 
         # Build args schema as dict (compatible with OpenAI function calling)
@@ -807,16 +896,20 @@ class KnowledgeBaseTool:
                 "query": {
                     "type": "string",
                     "description": "The search query describing what information you're looking for",
+                    "minLength": 1,
+                    "maxLength": 4096,
                 },
                 "intent": {
                     "type": "string",
-                    "enum": ["general", "find_image", "find_document"],
-                    "description": "Retrieval intent: general=balanced, find_image=prioritize images, find_document=text only",
+                    "enum": ["general", "find_document"],
+                    "description": "Text retrieval intent",
                 },
                 "top_k": {
                     "type": "integer",
                     "description": "Number of results to return (default: 5)",
                     "default": self.config.top_k,
+                    "minimum": 1,
+                    "maximum": 20,
                 },
             },
             "required": ["query"],
@@ -830,29 +923,29 @@ class KnowledgeBaseTool:
         **kwargs,
     ) -> str:
         """Async execution (primary method for LangGraph)."""
+        resolved_query = _require_tool_query(query)
+        resolved_top_k = _require_tool_top_k(
+            self.config.top_k if top_k is None else top_k
+        )
+        _require_text_only_intent(intent)
+        if "score_threshold" in kwargs:
+            kwargs["score_threshold"] = _require_tool_score_threshold(
+                kwargs.get("score_threshold")
+            )
         try:
             # Build retrieve kwargs
             retrieve_kwargs = {
                 "user": self.user_context,
                 "dataset_id": self.dataset_id,
-                "query": query,
-                "top_k": top_k or self.config.top_k,
+                "query": resolved_query,
+                "top_k": resolved_top_k,
                 "mode": self.config.mode,
                 "rerank": self.config.rerank,
                 "mmr": self.config.mmr,
             }
 
-            # Add intent if provided
-            if intent is not None:
-                retrieve_kwargs["intent"] = intent
-
-            # Use retrieve_with_images_v2 for multimodal retrieval with intent support
-            if hasattr(self.kb, "retrieve_with_images_v2"):
-                results, meta = await self.kb.retrieve_with_images_v2(**retrieve_kwargs)
-            else:
-                # Fallback to regular retrieve, remove intent param if present
-                retrieve_kwargs.pop("intent", None)
-                results, meta = await self.kb.retrieve(**retrieve_kwargs)
+            retrieve_kwargs.update(kwargs)
+            results, _meta = await self.kb.retrieve(**retrieve_kwargs)
 
             search_results = [
                 KBSearchResult(
@@ -961,15 +1054,16 @@ class MultiKnowledgeBaseTool:
             raise AuthenticationRequiredError("Authenticated user context required")
 
         self.kb = knowledge_service
-        self.dataset_ids = dataset_ids
+        self.dataset_ids = _require_tool_dataset_ids(dataset_ids)
         self.user_context = user_context
         self.config = config or KBToolConfig()
+        self.config.top_k = _require_tool_top_k(self.config.top_k)
 
         self.name = name
-        dataset_list = ", ".join(f"'{d}'" for d in dataset_ids)
+        dataset_list = ", ".join(f"'{d}'" for d in self.dataset_ids)
         self.description = description or (
             f"Search across multiple knowledge bases for relevant information. "
-            f"Supports text and image retrieval. Available datasets: {dataset_list}. "
+            f"Available text datasets: {dataset_list}. "
             f"Optionally specify a dataset_id to search only that dataset."
         )
 
@@ -979,21 +1073,25 @@ class MultiKnowledgeBaseTool:
                 "query": {
                     "type": "string",
                     "description": "The search query describing what information you're looking for",
+                    "minLength": 1,
+                    "maxLength": 4096,
                 },
                 "intent": {
                     "type": "string",
-                    "enum": ["general", "find_image", "find_document"],
-                    "description": "Retrieval intent: general=balanced, find_image=prioritize images, find_document=text only",
+                    "enum": ["general", "find_document"],
+                    "description": "Text retrieval intent",
                 },
                 "dataset_id": {
                     "type": "string",
-                    "description": f"Optional: specific dataset to search ({', '.join(dataset_ids)})",
-                    "enum": dataset_ids,
+                    "description": f"Optional: specific dataset to search ({', '.join(self.dataset_ids)})",
+                    "enum": self.dataset_ids,
                 },
                 "top_k": {
                     "type": "integer",
                     "description": "Number of results (default: 5)",
                     "default": self.config.top_k,
+                    "minimum": 1,
+                    "maximum": 20,
                 },
             },
             "required": ["query"],
@@ -1008,7 +1106,15 @@ class MultiKnowledgeBaseTool:
         **kwargs,
     ) -> str:
         """Async execution."""
-        top_k = top_k or self.config.top_k
+        resolved_query = _require_tool_query(query)
+        top_k = _require_tool_top_k(self.config.top_k if top_k is None else top_k)
+        _require_text_only_intent(intent)
+        if "score_threshold" in kwargs:
+            kwargs["score_threshold"] = _require_tool_score_threshold(
+                kwargs.get("score_threshold")
+            )
+        if dataset_id is not None and dataset_id not in self.dataset_ids:
+            raise ValidationFailedError("knowledge tool dataset_id is not configured")
         datasets_to_search = [dataset_id] if dataset_id else self.dataset_ids
 
         all_results: list[KBSearchResult] = []
@@ -1019,24 +1125,15 @@ class MultiKnowledgeBaseTool:
                 retrieve_kwargs = {
                     "user": self.user_context,
                     "dataset_id": ds_id,
-                    "query": query,
+                    "query": resolved_query,
                     "top_k": top_k,
                     "mode": self.config.mode,
                     "rerank": self.config.rerank,
                     "mmr": self.config.mmr,
                 }
 
-                # Add intent if provided
-                if intent is not None:
-                    retrieve_kwargs["intent"] = intent
-
-                # Use retrieve_with_images_v2 for multimodal retrieval with intent support
-                if hasattr(self.kb, "retrieve_with_images_v2"):
-                    results, _ = await self.kb.retrieve_with_images_v2(**retrieve_kwargs)
-                else:
-                    # Fallback to regular retrieve, remove intent param if present
-                    retrieve_kwargs.pop("intent", None)
-                    results, _ = await self.kb.retrieve(**retrieve_kwargs)
+                retrieve_kwargs.update(kwargs)
+                results, _ = await self.kb.retrieve(**retrieve_kwargs)
                 return [
                     KBSearchResult(
                         content=r.text,

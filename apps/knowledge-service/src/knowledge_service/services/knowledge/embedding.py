@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import math
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -107,6 +109,38 @@ class BaseEmbedding(ABC):
         self.provider = provider
         self.model = model
         self._dimension: int | None = dimension
+        self._configured_cache_profile: dict[str, Any] = {}
+
+    def _configure_cache_profile(self, config: EmbeddingConfig) -> None:
+        """Record the effective config fields that define this embedding space."""
+        self._configured_cache_profile = _build_embedding_cache_profile(
+            provider=self.provider,
+            model=self.model,
+            dimension=self._dimension,
+            base_url=getattr(self, "base_url", None) or config.base_url,
+            api_key=getattr(self, "api_key", None) or config.api_key,
+        )
+
+    def _query_cache_profile(self, text_type: str) -> dict[str, Any]:
+        """Build the current cache profile for one embedding request."""
+        profile = dict(self._configured_cache_profile)
+        profile.update(
+            {
+                "provider": _canonical_provider(self.provider),
+                "model": self.model or "",
+                "dimension": self._dimension,
+                "text_type": text_type,
+            }
+        )
+
+        current_endpoint = _endpoint_fingerprint(getattr(self, "base_url", None))
+        if current_endpoint or "endpoint" not in profile:
+            profile["endpoint"] = current_endpoint
+
+        current_credential = _credential_fingerprint(getattr(self, "api_key", None))
+        if current_credential or "credential" not in profile:
+            profile["credential"] = current_credential
+        return profile
 
     @property
     def dimension(self) -> int:
@@ -123,16 +157,47 @@ class BaseEmbedding(ABC):
     async def close(self) -> None:
         return None
 
+    def _validate_vectors(
+        self,
+        vectors: list[list[float]],
+        expected_count: int,
+    ) -> None:
+        if len(vectors) != expected_count:
+            raise EmbeddingError(
+                f"{self.provider} embedding count mismatch: "
+                f"expected {expected_count}, received {len(vectors)}"
+            )
+        if self._dimension is None and vectors:
+            self._dimension = len(vectors[0])
+        invalid_dimensions = {len(vector) for vector in vectors if len(vector) != self.dimension}
+        if invalid_dimensions:
+            raise EmbeddingError(
+                f"{self.provider} embedding dimension mismatch: "
+                f"expected {self.dimension}, received {sorted(invalid_dimensions)}"
+            )
+
     async def embed_query(self, query: str) -> list[float]:
+        cache_profile = self._query_cache_profile(text_type="query")
         # Check cache first
-        cached = get_cached_query_embedding(self.provider, self.model, query)
+        cached = get_cached_query_embedding(
+            self.provider,
+            self.model,
+            query,
+            profile=cache_profile,
+        )
         if cached is not None:
             return cached
         # Compute embedding
         vectors = await self.embed_texts([query], text_type="query")
         result = vectors[0]
         # Cache the result
-        set_cached_query_embedding(self.provider, self.model, query, result)
+        set_cached_query_embedding(
+            self.provider,
+            self.model,
+            query,
+            result,
+            profile=self._query_cache_profile(text_type="query"),
+        )
         return result
 
     async def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
@@ -216,7 +281,7 @@ class GeminiEmbedding(BaseEmbedding):
             raise EmbeddingError("Gemini API key is required")
 
         self.api_key = api_key
-        self.base_url = base_url or self.GEMINI_API_URL
+        self.base_url = _effective_embedding_endpoint("gemini", base_url)
         self.output_dimension = dimension
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout_seconds, connect=5.0),
@@ -229,8 +294,14 @@ class GeminiEmbedding(BaseEmbedding):
 
     async def embed_query(self, query: str) -> list[float]:
         """Embed a query using RETRIEVAL_QUERY task type."""
+        cache_profile = self._query_cache_profile(text_type="query")
         # Check cache first
-        cached = get_cached_query_embedding(self.provider, self.model, query)
+        cached = get_cached_query_embedding(
+            self.provider,
+            self.model,
+            query,
+            profile=cache_profile,
+        )
         if cached is not None:
             return cached
 
@@ -238,7 +309,13 @@ class GeminiEmbedding(BaseEmbedding):
         result = vectors[0]
 
         # Cache the result
-        set_cached_query_embedding(self.provider, self.model, query, result)
+        set_cached_query_embedding(
+            self.provider,
+            self.model,
+            query,
+            result,
+            profile=self._query_cache_profile(text_type="query"),
+        )
         return result
 
     async def embed_texts(
@@ -405,6 +482,8 @@ class DashScopeEmbedding(BaseEmbedding):
         "text-embedding-v4": 1024,  # DashScope v4 default dimension
     }
 
+    DASHSCOPE_API_URL = "https://dashscope.aliyuncs.com/api/v1"
+
     # Max characters per text (conservative: ~2.5 chars/token)
     # DashScope v1/v2: max 2048 tokens, v3: max 8192 tokens
     # But in practice, shorter is safer to avoid InvalidParameter errors
@@ -439,21 +518,18 @@ class DashScopeEmbedding(BaseEmbedding):
             or 1024
         )
         super().__init__(provider="dashscope", model=model, dimension=dim)
+        self._requested_dimension = dimension
         if not api_key:
             raise EmbeddingError("DashScope api_key is required")
         self.api_key = api_key
-        self.base_url = base_url
+        self.base_url = _effective_embedding_endpoint("dashscope", base_url)
         self.max_chars = (
             self.MODEL_MAX_CHARS.get(model) or self.MODEL_MAX_CHARS.get(model.lower()) or 6000
         )
         try:
-            import dashscope
             from dashscope import TextEmbedding  # type: ignore
 
             self._TextEmbedding = TextEmbedding
-            # Set base URL if provided (careful: this is global)
-            if base_url:
-                dashscope.base_http_api_url = base_url
         except Exception as exc:  # pragma: no cover
             raise EmbeddingError(
                 "dashscope package is required for DashScopeEmbedding (pip install dashscope)"
@@ -516,6 +592,8 @@ class DashScopeEmbedding(BaseEmbedding):
                         model=self.model,
                         input=batch,
                         api_key=self.api_key,
+                        base_address=self.base_url,
+                        dimension=self._requested_dimension,
                         **kwargs,
                     ),
                     timeout=float(self.REQUEST_TIMEOUT),
@@ -595,6 +673,7 @@ class DashScopeEmbedding(BaseEmbedding):
 
             try:
                 vectors = await self._call_with_retry(batch, batch_info, **kwargs)
+                self._validate_vectors(vectors, expected_count=len(batch))
                 all_vectors.extend(vectors)
             except EmbeddingError as e:
                 # On timeout, fall back to smaller batches to reduce request cost.
@@ -602,6 +681,7 @@ class DashScopeEmbedding(BaseEmbedding):
                     for j, text in enumerate(batch):
                         single_info = f"{batch_info} (fallback {j + 1}/{len(batch)})"
                         vectors = await self._call_with_retry([text], single_info, **kwargs)
+                        self._validate_vectors(vectors, expected_count=1)
                         all_vectors.extend(vectors)
                 else:
                     raise
@@ -655,18 +735,16 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
     ):
         dim = dimension or self.MODEL_DIMENSIONS.get(model) or 1024
         super().__init__(provider="dashscope_multimodal", model=model, dimension=dim)
+        self._requested_dimension = dimension
         if not api_key:
             raise EmbeddingError("DashScope api_key is required for multimodal embedding")
         self.api_key = api_key
-        self.base_url = base_url
+        self.base_url = _effective_embedding_endpoint("dashscope_multimodal", base_url)
 
         try:
-            import dashscope
             from dashscope import MultiModalEmbedding  # type: ignore
 
             self._MultiModalEmbedding = MultiModalEmbedding
-            if base_url:
-                dashscope.base_http_api_url = base_url
         except ImportError as exc:
             raise EmbeddingError(
                 "dashscope package is required for DashScopeMultimodalEmbedding "
@@ -724,6 +802,8 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
                     model=self.model,
                     input=[{"text": text}],
                     api_key=self.api_key,
+                    base_address=getattr(self, "base_url", None),
+                    dimension=getattr(self, "_requested_dimension", None),
                 )
 
                 status_code = int(getattr(resp, "status_code", 0) or 0)
@@ -736,6 +816,7 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
 
                 output = getattr(resp, "output", None)
                 vectors = self._parse_multimodal_output(output)
+                self._validate_vectors(vectors, expected_count=1)
                 all_vectors.extend(vectors)
 
             except EmbeddingError:
@@ -794,6 +875,8 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
                         model=self.model,
                         input=[{"image": data_uri}],
                         api_key=self.api_key,
+                        base_address=getattr(self, "base_url", None),
+                        dimension=getattr(self, "_requested_dimension", None),
                     )
 
                     status_code = int(getattr(resp, "status_code", 0) or 0)
@@ -807,8 +890,7 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
 
                     output = getattr(resp, "output", None)
                     vectors = self._parse_multimodal_output(output)
-                    if not vectors:
-                        raise EmbeddingError(f"No embedding returned for image {idx}")
+                    self._validate_vectors(vectors, expected_count=1)
                     return vectors[0]
 
                 except EmbeddingError:
@@ -861,6 +943,8 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
                 model=self.model,
                 input=input_items,
                 api_key=self.api_key,
+                base_address=getattr(self, "base_url", None),
+                dimension=getattr(self, "_requested_dimension", None),
             )
 
             status_code = int(getattr(resp, "status_code", 0) or 0)
@@ -873,9 +957,7 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
 
             output = getattr(resp, "output", None)
             vectors = self._parse_multimodal_output(output)
-
-            if not vectors:
-                raise EmbeddingError("No embedding returned from multimodal API")
+            self._validate_vectors(vectors, expected_count=1)
 
             return vectors[0]
 
@@ -1083,7 +1165,7 @@ class SiliconFlowEmbedding(BaseEmbedding):
             raise EmbeddingError("SiliconFlow API key is required")
 
         self.api_key = api_key
-        self.base_url = base_url or self.SILICONFLOW_API_URL
+        self.base_url = _effective_embedding_endpoint("siliconflow", base_url)
         self.timeout_seconds = timeout_seconds
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout_seconds, connect=5.0),
@@ -1230,28 +1312,206 @@ from cachetools import TTLCache
 _query_embedding_cache: TTLCache[str, list[float]] = TTLCache(maxsize=1000, ttl=1800)
 
 
-def _get_query_cache_key(provider: str, model: str, query: str) -> str:
-    """Generate cache key for query embedding."""
-    return f"{provider}:{model}:{hashlib.md5(query.encode()).hexdigest()}"
+_PROVIDER_ALIASES: dict[str, str] = {
+    "builtin": "local",
+    "hash": "local",
+    "aliyun": "dashscope",
+    "aliyun_multimodal": "dashscope_multimodal",
+    "multimodal": "dashscope_multimodal",
+    "unified": "unified_multimodal",
+    "cross_modal": "unified_multimodal",
+    "google": "gemini",
+    "silicon": "siliconflow",
+    "sf": "siliconflow",
+}
 
 
-def get_cached_query_embedding(provider: str, model: str, query: str) -> list[float] | None:
+def _canonical_provider(provider: str | None) -> str:
+    normalized = (provider or "").strip().lower()
+    return _PROVIDER_ALIASES.get(normalized, normalized)
+
+
+def _effective_embedding_endpoint(provider: str | None, endpoint: str | None) -> str:
+    """Resolve once so runtime requests and cache identity use the same endpoint."""
+    provider = _canonical_provider(provider)
+    if provider == "local":
+        return ""
+    if endpoint and endpoint.strip():
+        return _normalize_endpoint(endpoint)
+    if provider in {"dashscope", "dashscope_multimodal", "unified_multimodal"}:
+        return DashScopeEmbedding.DASHSCOPE_API_URL
+    if provider == "gemini":
+        return GeminiEmbedding.GEMINI_API_URL
+    if provider == "siliconflow":
+        return SiliconFlowEmbedding.SILICONFLOW_API_URL
+    return ""
+
+
+def _normalize_endpoint(endpoint: str | None) -> str:
+    """Normalize endpoint spelling without collapsing distinct regions or paths."""
+    value = (endpoint or "").strip()
+    if not value:
+        return ""
+
+    parsed = urlsplit(value)
+    if not parsed.scheme or not parsed.netloc:
+        return value.rstrip("/")
+
+    host = (parsed.hostname or "").lower()
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    try:
+        port = parsed.port
+    except ValueError:
+        return value.rstrip("/")
+    if port and not (
+        (parsed.scheme.lower() == "http" and port == 80)
+        or (parsed.scheme.lower() == "https" and port == 443)
+    ):
+        host = f"{host}:{port}"
+    if "@" in parsed.netloc:
+        userinfo = parsed.netloc.rsplit("@", 1)[0]
+        host = f"{userinfo}@{host}"
+
+    return urlunsplit(
+        (
+            parsed.scheme.lower(),
+            host,
+            parsed.path.rstrip("/"),
+            parsed.query,
+            "",
+        )
+    )
+
+
+def _credential_fingerprint(api_key: str | None) -> str:
+    """Return a short irreversible account discriminator without exposing secrets."""
+    if not api_key:
+        return ""
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:24]
+
+
+def _endpoint_fingerprint(endpoint: str | None) -> str:
+    """Hash the normalized endpoint so URL credentials never enter cache profiles."""
+    normalized = _normalize_endpoint(endpoint)
+    if not normalized:
+        return ""
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+
+
+def _normalize_cache_value(value: Any) -> Any:
+    """Convert config values into a deterministic JSON-compatible structure."""
+    if isinstance(value, Mapping):
+        return {
+            str(key): _normalize_cache_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_normalize_cache_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        normalized = [_normalize_cache_value(item) for item in value]
+        return sorted(normalized, key=lambda item: json.dumps(item, sort_keys=True, default=str))
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _stable_cache_digest(payload: Mapping[str, Any]) -> str:
+    canonical = json.dumps(
+        _normalize_cache_value(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _build_embedding_cache_profile(
+    *,
+    provider: str | None,
+    model: str | None,
+    dimension: int | None,
+    base_url: str | None,
+    api_key: str | None,
+) -> dict[str, Any]:
+    return {
+        "provider": _canonical_provider(provider),
+        "model": (model or "").strip(),
+        "dimension": dimension,
+        "endpoint": _endpoint_fingerprint(base_url),
+        "credential": _credential_fingerprint(api_key),
+    }
+
+
+def _build_embedder_instance_profile(
+    config: EmbeddingConfig,
+    dimension: int | None,
+) -> dict[str, Any]:
+    """Build constructor identity without polluting semantic query cache keys."""
+    extra = config.extra or {}
+    effective_dimension = dimension
+    if effective_dimension is None and extra.get("dimension") is not None:
+        effective_dimension = extra["dimension"]
+    profile = _build_embedding_cache_profile(
+        provider=config.provider,
+        model=config.model,
+        dimension=effective_dimension,
+        base_url=_effective_embedding_endpoint(config.provider, config.base_url),
+        api_key=config.api_key,
+    )
+    provider = _canonical_provider(config.provider)
+    if provider in {"gemini", "siliconflow"}:
+        profile["timeout_seconds"] = config.timeout_seconds
+    profile["instance_options"] = dict(extra)
+    return profile
+
+
+def _get_query_cache_key(
+    provider: str,
+    model: str,
+    query: str,
+    profile: Mapping[str, Any] | None = None,
+) -> str:
+    """Generate a non-sensitive cache key for one effective embedding space."""
+    digest = _stable_cache_digest(
+        {
+            "provider": _canonical_provider(provider),
+            "model": model or "",
+            "query": query,
+            "profile": profile or {},
+        }
+    )
+    return f"query-embedding:v2:{digest}"
+
+
+def get_cached_query_embedding(
+    provider: str,
+    model: str,
+    query: str,
+    profile: Mapping[str, Any] | None = None,
+) -> list[float] | None:
     """Get cached query embedding if exists."""
-    key = _get_query_cache_key(provider, model, query)
-    return _query_embedding_cache.get(key)
+    key = _get_query_cache_key(provider, model, query, profile)
+    cached = _query_embedding_cache.get(key)
+    return list(cached) if cached is not None else None
 
 
 def set_cached_query_embedding(
-    provider: str, model: str, query: str, embedding: list[float]
+    provider: str,
+    model: str,
+    query: str,
+    embedding: list[float],
+    profile: Mapping[str, Any] | None = None,
 ) -> None:
     """Cache query embedding."""
-    key = _get_query_cache_key(provider, model, query)
-    _query_embedding_cache[key] = embedding
+    key = _get_query_cache_key(provider, model, query, profile)
+    _query_embedding_cache[key] = list(embedding)
 
 
 def _make_cache_key(config: EmbeddingConfig, dimension: int | None) -> str:
     """Generate cache key for embedder config."""
-    return f"{config.provider}:{config.model}:{config.api_key[:8] if config.api_key else ''}:{dimension or ''}"
+    profile = _build_embedder_instance_profile(config, dimension)
+    return f"embedder:v2:{_stable_cache_digest(profile)}"
 
 
 async def get_cached_embedder(
@@ -1270,56 +1530,61 @@ async def get_cached_embedder(
 
 
 def create_embedding(config: EmbeddingConfig, dimension: int | None = None) -> BaseEmbedding:
-    provider = (config.provider or "").lower()
-    if provider in {"local", "builtin", "hash"}:
-        return LocalHashEmbedding(
-            model=config.model or "hash-384",
+    provider = _canonical_provider(config.provider)
+    model = (config.model or "").strip()
+    if provider == "local":
+        embedding: BaseEmbedding = LocalHashEmbedding(
+            model=model or "hash-384",
             dimension=dimension or (config.extra or {}).get("dimension"),
         )
-    if provider in {"dashscope", "aliyun"}:
-        return DashScopeEmbedding(
-            model=config.model,
+    elif provider == "dashscope":
+        embedding = DashScopeEmbedding(
+            model=model,
             api_key=config.api_key or "",
             dimension=dimension,
             base_url=config.base_url,
         )
-    if provider in {"dashscope_multimodal", "aliyun_multimodal", "multimodal"}:
-        return DashScopeMultimodalEmbedding(
-            model=config.model or "multimodal-embedding-v1",
+    elif provider == "dashscope_multimodal":
+        embedding = DashScopeMultimodalEmbedding(
+            model=model or "multimodal-embedding-v1",
             api_key=config.api_key or "",
             dimension=dimension,
             base_url=config.base_url,
         )
-    if provider in {"unified_multimodal", "unified", "cross_modal"}:
-        return UnifiedMultimodalEmbedding(
-            model=config.model or "tongyi-embedding-vision-plus",
+    elif provider == "unified_multimodal":
+        embedding = UnifiedMultimodalEmbedding(
+            model=model or "tongyi-embedding-vision-plus",
             api_key=config.api_key or "",
             dimension=dimension,
             base_url=config.base_url,
             max_concurrent=(config.extra or {}).get("max_concurrent", 5),
         )
-    if provider in {"gemini", "google"}:
-        return GeminiEmbedding(
+    elif provider == "gemini":
+        embedding = GeminiEmbedding(
             api_key=config.api_key or "",
-            model=config.model or "gemini-embedding-001",
+            model=model or "gemini-embedding-001",
             dimension=dimension or 1024,
             base_url=config.base_url,
             timeout_seconds=config.timeout_seconds,
         )
-    if provider in {"siliconflow", "silicon", "sf"}:
-        return SiliconFlowEmbedding(
+    elif provider == "siliconflow":
+        embedding = SiliconFlowEmbedding(
             api_key=config.api_key or "",
-            model=config.model or "BAAI/bge-large-zh-v1.5",
+            model=model or "BAAI/bge-large-zh-v1.5",
             dimension=dimension,
             base_url=config.base_url,
             timeout_seconds=config.timeout_seconds,
         )
-    if provider in {"openai"}:
+    elif provider in {"openai"}:
         raise EmbeddingError(
             "OpenAI embedding provider has been removed. "
             "Please update your dataset to use 'gemini', 'dashscope', or 'siliconflow'."
         )
-    raise EmbeddingError(f"Unsupported embedding provider: {config.provider}")
+    else:
+        raise EmbeddingError(f"Unsupported embedding provider: {config.provider}")
+
+    embedding._configure_cache_profile(config)
+    return embedding
 
 
 def create_multimodal_embedding(
@@ -1434,17 +1699,15 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
             raise EmbeddingError("API key is required for UnifiedMultimodalEmbedding")
 
         self.api_key = api_key
-        self.base_url = base_url
+        self.base_url = _effective_embedding_endpoint("unified_multimodal", base_url)
+        self._requested_dimension = dimension
         self.max_concurrent = max_concurrent
         self._semaphore = asyncio.Semaphore(max_concurrent)
 
         try:
-            import dashscope
             from dashscope import MultiModalEmbedding
 
             self._MultiModalEmbedding = MultiModalEmbedding
-            if base_url:
-                dashscope.base_http_api_url = base_url
         except ImportError as exc:
             raise EmbeddingError(
                 "dashscope package required (pip install dashscope>=1.24.6)"
@@ -1505,6 +1768,8 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
                     model=self.model,
                     input=input_items,
                     api_key=self.api_key,
+                    base_address=getattr(self, "base_url", None),
+                    dimension=self._requested_dimension,
                 )
 
                 status_code = int(getattr(resp, "status_code", 0) or 0)
@@ -1517,8 +1782,7 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
 
                 output = getattr(resp, "output", None)
                 vectors = self._parse_output(output)
-                if not vectors:
-                    raise EmbeddingError("No vectors returned from API")
+                self._validate_vectors(vectors, expected_count=1)
                 return vectors[0]
 
             except EmbeddingError:

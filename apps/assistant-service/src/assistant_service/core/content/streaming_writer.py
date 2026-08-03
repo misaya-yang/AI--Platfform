@@ -268,17 +268,28 @@ class StreamingWriter:
                     if trigger_match:
                         trigger, position = trigger_match
 
-                        # Yield any text before the trigger
+                        # Extract verification query from context
+                        buffer_start = len(total_text) - len(buffer)
+                        query = self._extract_verification_query(
+                            total_text,
+                            trigger,
+                            trigger_position=buffer_start + position,
+                        )
+
+                        # A trigger can arrive before its claim. Keep it in the
+                        # buffer until enough context exists to form one query.
+                        if not query:
+                            continue
+
+                        # Yield any text before the trigger only when the
+                        # trigger is ready to be consumed.
                         if position > 0:
                             yield StreamChunk(
                                 type="text",
                                 content=buffer[:position],
                             )
 
-                        # Extract verification query from context
-                        query = self._extract_verification_query(total_text, trigger)
-
-                        if query and dataset_ids:
+                        if dataset_ids:
                             search_count += 1
 
                             # Emit search start event
@@ -335,7 +346,7 @@ class StreamingWriter:
                                 )
 
                         # Continue with text after the trigger
-                        buffer = buffer[position:]
+                        buffer = buffer[position + len(trigger) :]
 
                     # Yield buffered text when threshold is reached
                     elif len(buffer) > self.buffer_threshold:
@@ -421,7 +432,13 @@ class StreamingWriter:
             return (first_match, first_position)
         return None
 
-    def _extract_verification_query(self, text: str, trigger: str) -> str | None:
+    def _extract_verification_query(
+        self,
+        text: str,
+        trigger: str,
+        *,
+        trigger_position: int | None = None,
+    ) -> str | None:
         """
         Extract the topic/query around a verification trigger.
 
@@ -450,12 +467,13 @@ class StreamingWriter:
         if not text or not trigger:
             return None
 
-        # Find the trigger position in the text
-        trigger_lower = trigger.lower()
-        text_lower = text.lower()
-        trigger_pos = text_lower.rfind(trigger_lower)
+        # Use the exact match selected by the streaming buffer when available.
+        # Falling back to rfind preserves the public helper contract.
+        trigger_pos = trigger_position
+        if trigger_pos is None:
+            trigger_pos = text.lower().rfind(trigger.lower())
 
-        if trigger_pos == -1:
+        if trigger_pos < 0 or trigger_pos + len(trigger) > len(text):
             # Trigger not found - shouldn't happen but handle gracefully
             return None
 

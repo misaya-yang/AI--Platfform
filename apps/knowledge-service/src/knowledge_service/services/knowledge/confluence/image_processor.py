@@ -55,6 +55,7 @@ class ImageProcessingResult:
     failed_images: int
     segments: list[ImageSegment]
     errors: list[str]
+    skipped_attachments: list[dict[str, Any]] | None = None
 
     @property
     def success_rate(self) -> float:
@@ -166,6 +167,22 @@ class ConfluenceImageProcessor:
                 page_id=page_id, embeddable_only=True
             )
 
+            # The source-generation coordinator fingerprints the same
+            # deterministic policy before it takes the document owner lease.
+            # Keep this selection order identical so configured size/count
+            # limits do not look like attachment-manifest drift.
+            attachments = sorted(
+                (
+                    attachment
+                    for attachment in attachments
+                    if int(attachment.file_size or 0) <= self.max_image_size
+                ),
+                key=lambda attachment: (
+                    str(attachment.attachment_id),
+                    str(attachment.filename),
+                ),
+            )
+
             # 2. Limit number of images
             if len(attachments) > self.max_images_per_page:
                 logger.warning(
@@ -211,7 +228,7 @@ class ConfluenceImageProcessor:
 
             async def process_with_error_handling(
                 attachment: ConfluenceAttachment,
-            ) -> tuple[ImageSegment | None, str | None]:
+            ) -> tuple[ConfluenceAttachment, ImageSegment | None, str | None]:
                 """Process single image with error handling."""
                 try:
                     context_info: dict[str, Any] = {}
@@ -238,18 +255,19 @@ class ConfluenceImageProcessor:
                     # Track uploaded URL for potential rollback
                     if segment and segment.storage_url:
                         uploaded_storage_urls.append(segment.storage_url)
-                    return segment, None
+                    return attachment, segment, None
                 except Exception as e:
                     error_msg = f"Failed to process image {attachment.filename}: {e}"
                     logger.error(error_msg)
-                    return None, error_msg
+                    return attachment, None, error_msg
 
             # Launch all image processing tasks concurrently
             tasks = [process_with_error_handling(att) for att in attachments]
             results = await asyncio.gather(*tasks)
 
             # Collect results
-            for segment, error in results:
+            skipped_attachments: list[dict[str, Any]] = []
+            for attachment, segment, error in results:
                 if error:
                     failed += 1
                     errors.append(error)
@@ -257,6 +275,16 @@ class ConfluenceImageProcessor:
                     segments.append(segment)
                 else:
                     skipped += 1
+                    skipped_attachments.append(
+                        {
+                            "attachment_id": attachment.attachment_id,
+                            "filename": attachment.filename,
+                            "media_type": attachment.media_type,
+                            "file_size": attachment.file_size,
+                            "updated_at": attachment.updated_at,
+                            "reason": "empty_or_actual_size_exceeded",
+                        }
+                    )
 
             processed = len(segments)
             vlm_count = sum(1 for s in segments if s.vlm_description)
@@ -274,6 +302,7 @@ class ConfluenceImageProcessor:
                 failed_images=failed,
                 segments=segments,
                 errors=errors,
+                skipped_attachments=skipped_attachments,
             )
 
         except Exception as e:
@@ -471,6 +500,7 @@ class ConfluenceImageProcessor:
             "confluence_attachment_id": attachment.attachment_id,
             "page_id": attachment.page_id,
             "attachment_updated_at": attachment.updated_at,  # For change detection
+            "attachment_file_size": attachment.file_size,
         }
         if context_index is not None:
             metadata["context_index"] = context_index
@@ -650,6 +680,7 @@ class ConfluenceImageProcessor:
             "confluence_attachment_id": attachment.attachment_id,
             "page_id": attachment.page_id,
             "attachment_updated_at": attachment.updated_at,
+            "attachment_file_size": attachment.file_size,
         }
         if context_index is not None:
             metadata["context_index"] = context_index

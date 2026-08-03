@@ -30,6 +30,25 @@ from ai_gateway_core.logging import get_logger
 logger = get_logger(__name__)
 
 
+def _validate_workspace_filename(filename: str) -> str:
+    """Return a safe leaf filename for a sandbox workspace.
+
+    Input and KB files are copied into fixed workspace subdirectories. Nested
+    paths are not part of that contract, so reject them instead of silently
+    normalizing names that could collide or escape the workspace.
+    """
+
+    if not isinstance(filename, str) or not filename:
+        raise ValueError("workspace filename must be a non-empty string")
+    if filename in {".", ".."}:
+        raise ValueError("workspace filename must name a file")
+    if Path(filename).is_absolute() or "/" in filename or "\\" in filename:
+        raise ValueError("workspace filename must not contain a path")
+    if any(ord(character) < 32 or ord(character) == 127 for character in filename):
+        raise ValueError("workspace filename must not contain control characters")
+    return filename
+
+
 # =============================================================================
 # Data Classes
 # =============================================================================
@@ -485,6 +504,15 @@ class CodeExecutorService:
                 main.py         - User code with matplotlib setup
         """
         _ = config
+        input_names = [
+            _validate_workspace_filename(input_file.filename)
+            for input_file in input_files
+        ]
+        document_names = [
+            _validate_workspace_filename(kb_doc.filename)
+            for kb_doc in kb_documents
+        ]
+
         # Create temp directory in shared workspace (accessible by both
         # the gateway container and sibling sandbox containers via Docker socket).
         # Without this, Docker-in-Docker volume mounts fail because the host
@@ -508,13 +536,13 @@ class CodeExecutorService:
         main_script.write_text(wrapped_code, encoding="utf-8")
 
         # Write input files
-        for input_file in input_files:
-            file_path = input_dir / input_file.filename
+        for input_file, filename in zip(input_files, input_names, strict=True):
+            file_path = input_dir / filename
             file_path.write_bytes(input_file.content)
 
         # Write KB documents
-        for kb_doc in kb_documents:
-            doc_path = kb_docs_dir / kb_doc.filename
+        for kb_doc, filename in zip(kb_documents, document_names, strict=True):
+            doc_path = kb_docs_dir / filename
             doc_path.write_text(kb_doc.content, encoding="utf-8")
 
         logger.debug(

@@ -85,13 +85,25 @@ class KbRagasClient:
         ground_truth: str | None = None,
         llm_config: dict[str, Any] | None = None,
     ) -> list[KbRagasMetricResult]:
+        safe_llm_config = None
+        if llm_config:
+            unsupported = sorted(set(llm_config) - {"provider", "model"})
+            if unsupported:
+                raise ValueError(
+                    "KB RAGAS judge selector only accepts provider and model"
+                )
+            safe_llm_config = {
+                key: llm_config[key]
+                for key in ("provider", "model")
+                if llm_config.get(key) is not None
+            }
         payload = {
             "query": query,
             "contexts": contexts,
             "answer": answer,
             "metrics": metrics,
             "ground_truth": ground_truth,
-            "llm_config": llm_config,
+            "llm_config": safe_llm_config,
         }
         try:
             body = await self._get_service_client().request_json(

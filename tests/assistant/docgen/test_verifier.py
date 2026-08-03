@@ -2,21 +2,15 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 import pytest
 import yaml
-
 from assistant_service.core.docgen.ir import (
-    BulletBlock,
     DocxContent,
     DocxIR,
     HeadingBlock,
     ParagraphBlock,
-    PdfContent,
-    PdfIR,
-    PdfPage,
     PptxContent,
     PptxIR,
     PptxSlide,
@@ -27,8 +21,8 @@ from assistant_service.core.docgen.ir import (
     XlsxSheet,
 )
 from assistant_service.core.docgen.ir.base import DocMetadata
-from assistant_service.core.docgen.planners import Brief
 from assistant_service.core.docgen.pipeline import DocgenPipeline
+from assistant_service.core.docgen.planners import Brief
 from assistant_service.core.docgen.quality import (
     DocxXmlVerifier,
     FreshContextVisionCritic,
@@ -38,9 +32,13 @@ from assistant_service.core.docgen.quality import (
     XlsxFormulaVerifier,
     default_vision_critic,
 )
-from assistant_service.core.docgen.quality.types import IssueSeverity
+from assistant_service.core.docgen.quality.types import (
+    CriticReport,
+    Issue,
+    IssueCategory,
+    IssueSeverity,
+)
 from assistant_service.core.docgen.renderers import RendererDispatcher
-
 
 GOLDEN = Path(__file__).parent / "golden" / "prompts.yaml"
 
@@ -143,6 +141,60 @@ def test_xlsx_verifier_flags_error_cell(tmp_path):
     report = XlsxFormulaVerifier().verify(path)
     assert not report.passed
     assert any(i.category.value == "formula_error" for i in report.issues)
+
+
+def test_xlsx_fix_only_replaces_the_exact_flagged_formula():
+    ir = XlsxIR(
+        metadata=DocMetadata(title="targeted-fix"),
+        content=XlsxContent(
+            sheets=[
+                XlsxSheet(
+                    name="Broken",
+                    rows=[
+                        XlsxRow(
+                            cells=[
+                                XlsxCell(value=10, role="input"),
+                                XlsxCell(formula="A1*2", role="formula"),
+                            ]
+                        ),
+                        XlsxRow(
+                            cells=[
+                                XlsxCell(value=0, role="input"),
+                                XlsxCell(formula="A1/A2", role="formula"),
+                            ]
+                        ),
+                    ],
+                ),
+                XlsxSheet(
+                    name="Healthy",
+                    rows=[
+                        XlsxRow(
+                            cells=[XlsxCell(formula="1+1", role="formula")]
+                        )
+                    ],
+                ),
+            ]
+        ),
+    )
+    report = CriticReport(
+        passed=False,
+        backend="xlsx_formula",
+        issues=[
+            Issue(
+                category=IssueCategory.FORMULA_ERROR,
+                severity=IssueSeverity.CRITICAL,
+                message="formula error at Broken!B2=#DIV/0!",
+            )
+        ],
+    )
+
+    patched = VerifierPipeline()._patch_xlsx(ir, report)
+
+    assert patched.content.sheets[0].rows[1].cells[1].formula is None
+    assert patched.content.sheets[0].rows[1].cells[1].value == 0
+    assert patched.content.sheets[0].rows[0].cells[1].formula == "A1*2"
+    assert patched.content.sheets[1].rows[0].cells[0].formula == "1+1"
+    assert ir.content.sheets[0].rows[1].cells[1].formula == "A1/A2"
 
 
 # -------- PPTX visual (structural) --------

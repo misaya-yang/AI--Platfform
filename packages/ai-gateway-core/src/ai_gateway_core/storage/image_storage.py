@@ -13,15 +13,17 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import logging
 import shutil
+import time
 import unicodedata
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlencode, urlparse, urlunparse
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +153,11 @@ class BaseStorageBackend(ABC):
         # Prevent null byte injection
         sanitized = sanitized.replace("\x00", "")
 
+        if self._key_prefix and (
+            sanitized == self._key_prefix
+            or sanitized.startswith(f"{self._key_prefix}/")
+        ):
+            return sanitized
         if self._key_prefix:
             return f"{self._key_prefix}/{sanitized}"
         return sanitized
@@ -579,10 +586,16 @@ class S3StorageBackend(BaseStorageBackend):
                 continue
 
             delete_keys = [{"Key": obj["Key"]} for obj in objects]
-            await client.delete_objects(
+            response = await client.delete_objects(
                 Bucket=self.bucket,
                 Delete={"Objects": delete_keys},
             )
+            errors = response.get("Errors", []) if isinstance(response, dict) else []
+            if errors:
+                raise RuntimeError(
+                    "S3 prefix deletion was only partially applied; "
+                    f"{len(errors)} object(s) remain retryable"
+                )
             deleted += len(delete_keys)
 
         return deleted
@@ -898,19 +911,34 @@ class ImageStorageService:
         Returns:
             Signed URL if local and signing_key is configured, otherwise original URL
         """
-        if not url or not self._signing_key:
+        if not url:
             return url
 
         if url.startswith("file://"):
-            try:
-                from ...core.crypto import sign_url
-
-                return sign_url(
-                    url, self._signing_key, expiry_seconds=self.config.url_expiry_seconds
+            if not self._signing_key:
+                raise RuntimeError(
+                    "local image URLs require a configured HMAC signing key"
                 )
-            except Exception as e:
-                logger.warning(f"Failed to sign URL: {e}")
-                return url
+            parsed = urlparse(url)
+            expires = int(time.time()) + int(self.config.url_expiry_seconds)
+            query_params = parse_qs(parsed.query)
+            query_params["expires"] = [str(expires)]
+            signature = hmac.new(
+                self._signing_key.encode("utf-8"),
+                f"{parsed.path}:{expires}".encode(),
+                hashlib.sha256,
+            ).hexdigest()[:32]
+            query_params["sig"] = [signature]
+            return urlunparse(
+                (
+                    parsed.scheme,
+                    parsed.netloc,
+                    parsed.path,
+                    parsed.params,
+                    urlencode(query_params, doseq=True),
+                    parsed.fragment,
+                )
+            )
 
         return url
 
@@ -1057,6 +1085,36 @@ class ImageStorageService:
             Raw file bytes
         """
         return await self._backend.download(storage_key)
+
+    async def download_document_image(
+        self,
+        tenant_id: str,
+        document_id: str,
+        storage_key: str,
+    ) -> bytes:
+        """Download only an image object owned by the exact document scope."""
+
+        normalized_tenant, normalized_document = self._normalize_document_asset_scope(
+            tenant_id,
+            document_id,
+        )
+        normalized_key = str(storage_key or "").strip()
+        expected_prefix = (
+            f"knowledge/confluence/{normalized_tenant}/{normalized_document}/images/"
+        )
+        suffix = normalized_key[len(expected_prefix) :] if normalized_key.startswith(
+            expected_prefix
+        ) else ""
+        if (
+            not normalized_key
+            or normalized_key != str(storage_key)
+            or not suffix
+            or ".." in normalized_key
+            or "\\" in normalized_key
+            or "\x00" in normalized_key
+        ):
+            raise ValueError("image storage key is outside the document asset scope")
+        return await self._backend.download(normalized_key)
 
     async def download_original_file_to_path(self, storage_key: str, target_path: str) -> str:
         """
@@ -1219,6 +1277,22 @@ class ImageStorageService:
         key = self._generate_key(tenant_id, document_id, attachment_id, filename)
         return await self._backend.delete(key)
 
+    @staticmethod
+    def _normalize_document_asset_scope(
+        tenant_id: str,
+        document_id: str,
+    ) -> tuple[str, str]:
+        normalized: list[str] = []
+        for label, value in (
+            ("tenant_id", tenant_id),
+            ("document_id", document_id),
+        ):
+            item = str(value or "").strip()
+            if not item or "/" in item or "\\" in item or ".." in item:
+                raise ValueError(f"{label} is invalid for document asset deletion")
+            normalized.append(item)
+        return normalized[0], normalized[1]
+
     async def delete_document_images(
         self,
         tenant_id: str,
@@ -1234,9 +1308,35 @@ class ImageStorageService:
         Returns:
             Number of deleted images
         """
+        tenant_id, document_id = self._normalize_document_asset_scope(
+            tenant_id,
+            document_id,
+        )
         prefix = f"knowledge/confluence/{tenant_id}/{document_id}/images/"
         deleted = await self._backend.delete_prefix(prefix)
         logger.info(f"Deleted {deleted} images for document {document_id}")
+        return deleted
+
+    async def delete_document_assets(
+        self,
+        tenant_id: str,
+        document_id: str,
+    ) -> int:
+        """Delete every storage namespace owned by one exact document."""
+
+        tenant_id, document_id = self._normalize_document_asset_scope(
+            tenant_id,
+            document_id,
+        )
+
+        prefixes = (
+            f"knowledge/confluence/{tenant_id}/{document_id}/images/",
+            f"knowledge/documents/{tenant_id}/{document_id}/original/",
+        )
+        deleted = 0
+        for prefix in prefixes:
+            deleted += int(await self._backend.delete_prefix(prefix) or 0)
+        logger.info("Deleted %s stored assets for document %s", deleted, document_id)
         return deleted
 
     async def image_exists(

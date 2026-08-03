@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import copy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from knowledge_service.persistence.database import DatabaseStorage
-from knowledge_service.services.knowledge.dataset_service import DatasetService
+from knowledge_service.services.knowledge.dataset_service import (
+    DatasetService,
+    _dataset_revision_fingerprint,
+)
 
 
 class _Database:
@@ -114,6 +118,8 @@ async def test_catalog_fingerprint_excludes_credential_values() -> None:
     )
 
     first = await service.list_datasets(user)
+    assert database.index_config["retrieval"]["rerank"]["api_key"] == "secret-a"
+    assert database.embedding_config["api_key"] == "embedding-secret-a"
     database.index_config["retrieval"]["rerank"]["api_key"] = "rotated-secret"
     database.embedding_config["api_key"] = "rotated-embedding-secret"
     database.embedding_config["base_url"] = (
@@ -124,8 +130,8 @@ async def test_catalog_fingerprint_excludes_credential_values() -> None:
     assert first[0]["revision_fingerprint"] == second[0]["revision_fingerprint"]
     assert first[0]["index_config"]["retrieval"]["rerank"]["api_key"] == "*****"
     assert second[0]["embedding_config"]["api_key"] == "*****"
-    assert first[0]["embedding_config"]["base_url"] == "https://embedding.example/v1"
-    assert second[0]["embedding_config"]["base_url"] == "https://embedding.example/v1"
+    assert first[0]["embedding_config"]["base_url"] == "*****"
+    assert second[0]["embedding_config"]["base_url"] == "*****"
 
     database.embedding_config["base_url"] = "https://embedding-alt.example/v2"
     third = await service.list_datasets(user)
@@ -149,6 +155,56 @@ async def test_catalog_omits_fingerprint_without_authoritative_revision() -> Non
     datasets = await service.list_datasets(user)
 
     assert "revision_fingerprint" not in datasets[0]
+
+
+def test_fingerprint_includes_nested_fusion_rrf_weights() -> None:
+    dataset = {
+        "dataset_id": "dataset-a",
+        "content_revision": 7,
+        "index_config": {
+            "retrieval": {
+                "mode": "hybrid",
+                "fusion": {
+                    "strategy": "rrf",
+                    "rrf_k": 60,
+                    "rrf_weights": {"vector": 0.8, "keyword": 0.2},
+                },
+            }
+        },
+    }
+    changed = copy.deepcopy(dataset)
+    changed["index_config"]["retrieval"]["fusion"]["rrf_weights"] = {
+        "vector": 0.2,
+        "keyword": 0.8,
+    }
+
+    assert _dataset_revision_fingerprint(dataset) != _dataset_revision_fingerprint(changed)
+
+
+def test_fingerprint_includes_versioned_lexical_profile() -> None:
+    dataset = {
+        "dataset_id": "dataset-a",
+        "content_revision": 7,
+        "index_config": {
+            "retrieval": {
+                "lexical": {
+                    "active_version": "lexical_v1",
+                    "bm25_v2": {
+                        "shadow_write_enabled": True,
+                        "k": 1.2,
+                        "b": 0.75,
+                        "avg_len": 256,
+                        "tokenizer": "multilingual",
+                        "language": "none",
+                    },
+                }
+            }
+        },
+    }
+    changed = copy.deepcopy(dataset)
+    changed["index_config"]["retrieval"]["lexical"]["bm25_v2"]["avg_len"] = 384
+
+    assert _dataset_revision_fingerprint(dataset) != _dataset_revision_fingerprint(changed)
 
 
 class _Acquire:

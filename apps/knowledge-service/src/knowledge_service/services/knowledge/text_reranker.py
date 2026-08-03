@@ -21,10 +21,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
-import time
+import os
 import re
 import threading
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 
@@ -78,16 +80,33 @@ _TRANSIENT_FAILURE_COOLDOWN_SECONDS = 30.0
 _SUCCESS_HEALTH_WINDOW_SECONDS = 60.0
 
 
-def _make_rerank_cache_key(model: str, query: str, docs: list[str]) -> str:
+def _make_rerank_cache_key(
+    model: str,
+    query: str,
+    docs: list[str],
+    *,
+    profile: str = "",
+    top_n: int | None = None,
+) -> str:
     """Generate cache key for rerank result."""
-    docs_hash = hashlib.sha256("|||".join(docs).encode()).hexdigest()[:32]
+    docs_payload = json.dumps(docs, ensure_ascii=False, separators=(",", ":"))
+    docs_hash = hashlib.sha256(docs_payload.encode()).hexdigest()[:32]
     query_hash = hashlib.sha256(query.encode()).hexdigest()[:32]
-    return f"{model}:{query_hash}:{docs_hash}"
+    profile_hash = hashlib.sha256(profile.encode()).hexdigest()[:16]
+    top_n_key = "all" if top_n is None else str(int(top_n))
+    return f"{model}:{profile_hash}:{top_n_key}:{query_hash}:{docs_hash}"
 
 
-def _get_cached_rerank(model: str, query: str, docs: list[str]) -> list[tuple[int, float]] | None:
+def _get_cached_rerank(
+    model: str,
+    query: str,
+    docs: list[str],
+    *,
+    profile: str = "",
+    top_n: int | None = None,
+) -> list[tuple[int, float]] | None:
     """Get cached rerank result."""
-    key = _make_rerank_cache_key(model, query, docs)
+    key = _make_rerank_cache_key(model, query, docs, profile=profile, top_n=top_n)
     with _rerank_cache_lock:
         if key in _rerank_cache:
             _rerank_cache.move_to_end(key)
@@ -96,10 +115,16 @@ def _get_cached_rerank(model: str, query: str, docs: list[str]) -> list[tuple[in
 
 
 def _set_cached_rerank(
-    model: str, query: str, docs: list[str], result: list[tuple[int, float]]
+    model: str,
+    query: str,
+    docs: list[str],
+    result: list[tuple[int, float]],
+    *,
+    profile: str = "",
+    top_n: int | None = None,
 ) -> None:
     """Cache rerank result."""
-    key = _make_rerank_cache_key(model, query, docs)
+    key = _make_rerank_cache_key(model, query, docs, profile=profile, top_n=top_n)
     with _rerank_cache_lock:
         if key in _rerank_cache:
             _rerank_cache.move_to_end(key)
@@ -109,9 +134,21 @@ def _set_cached_rerank(
                 _rerank_cache.popitem(last=False)
 
 
-def _make_provider_failure_key(provider: str, model: str, base_url: str | None = None) -> str:
+def _credential_fingerprint(credential: str | None) -> str:
+    if not credential:
+        return "anonymous"
+    return hashlib.sha256(credential.encode()).hexdigest()[:16]
+
+
+def _make_provider_failure_key(
+    provider: str,
+    model: str,
+    base_url: str | None = None,
+    *,
+    credential: str | None = None,
+) -> str:
     normalized_url = (base_url or "").strip().lower()
-    return f"{provider}:{model}:{normalized_url}"
+    return f"{provider}:{model}:{normalized_url}:{_credential_fingerprint(credential)}"
 
 
 def _get_provider_failure_reason(key: str) -> str | None:
@@ -203,6 +240,57 @@ async def _get_http_client() -> httpx.AsyncClient:
     return _http_client
 
 
+def _resolve_dashscope_rerank_url(model: str | None = None) -> str:
+    """Resolve the model-compatible regional rerank endpoint.
+
+    ``DASHSCOPE_RERANK_BASE_URL`` is an exact endpoint override. Otherwise a
+    regional ``DASHSCOPE_BASE_URL`` is normalized by model. ``qwen3-rerank``
+    supports both the shared Singapore native endpoint (legacy schema) and a
+    regional Model Studio workspace endpoint (flat schema). It fails closed
+    when neither is configured instead of silently selecting the China host.
+    """
+
+    explicit = os.getenv("DASHSCOPE_RERANK_BASE_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+
+    normalized_model = str(model or "").strip().lower()
+    qwen3_text_rerank = normalized_model == "qwen3-rerank"
+    general = os.getenv("DASHSCOPE_BASE_URL", "").strip()
+    if not general:
+        if qwen3_text_rerank:
+            raise ValueError(
+                "qwen3-rerank requires DASHSCOPE_RERANK_BASE_URL or a "
+                "regional DASHSCOPE_BASE_URL for its configured region"
+            )
+        return AsyncTextReranker.DASHSCOPE_RERANK_URL
+
+    host = general.rstrip("/")
+    for suffix in (
+        "/compatible-mode/v1/chat/completions",
+        "/compatible-api/v1/reranks",
+        "/compatible-mode/v1/reranks",
+        "/compatible-mode/v1",
+        "/compatible-api/v1",
+        "/compatible-mode",
+        "/api/v1",
+    ):
+        if host.endswith(suffix):
+            host = host[: -len(suffix)]
+            break
+    if qwen3_text_rerank:
+        normalized_host = host.lower()
+        if ".maas.aliyuncs.com" in normalized_host:
+            return f"{host}/compatible-api/v1/reranks"
+        if normalized_host == "https://dashscope-intl.aliyuncs.com":
+            return f"{host}/api/v1/services/rerank/text-rerank/text-rerank"
+        raise ValueError(
+            "qwen3-rerank requires the shared Singapore or a regional Model Studio "
+            "workspace endpoint; set DASHSCOPE_RERANK_BASE_URL explicitly"
+        )
+    return f"{host}/api/v1/services/rerank/text-rerank/text-rerank"
+
+
 @dataclass
 class RerankResult:
     """Result from reranking."""
@@ -229,14 +317,42 @@ class AsyncTextReranker:
     def __init__(
         self,
         api_key: str,
-        model: str = "gte-rerank-v2",
+        model: str = "qwen3-rerank",
         base_url: str | None = None,
+        request_schema: str | None = None,
+        instruct: str | None = None,
     ):
         self.api_key = api_key
         self.model = model
-        self.base_url = base_url or self.DASHSCOPE_RERANK_URL
+        self.base_url = base_url or _resolve_dashscope_rerank_url(self.model)
+        configured_schema = str(
+            request_schema or os.getenv("DASHSCOPE_RERANK_REQUEST_SCHEMA") or "auto"
+        ).strip().lower()
+        if configured_schema not in {"auto", "legacy", "flat"}:
+            raise ValueError("DashScope rerank request_schema must be auto|legacy|flat")
+        self.request_schema = (
+            "flat"
+            if configured_schema == "auto" and self.base_url.rstrip("/").endswith("/reranks")
+            else "legacy"
+            if configured_schema == "auto"
+            else configured_schema
+        )
+        self.instruct = instruct or os.getenv("DASHSCOPE_RERANK_INSTRUCT") or None
+        if self.instruct and self.model not in {"qwen3-rerank", "qwen3-vl-rerank"}:
+            raise ValueError(f"rerank instruct is not supported by model {self.model}")
+        self._cache_profile = ":".join(
+            (
+                self.base_url.rstrip("/").lower(),
+                self.request_schema,
+                self.instruct or "",
+                _credential_fingerprint(self.api_key),
+            )
+        )
         self._provider_failure_key = _make_provider_failure_key(
-            "dashscope", self.model, self.base_url
+            "dashscope",
+            f"{self.model}:{self.request_schema}",
+            self.base_url,
+            credential=self.api_key,
         )
 
     async def rerank(
@@ -262,7 +378,13 @@ class AsyncTextReranker:
             return []
 
         # Check cache
-        cached = _get_cached_rerank(self.model, query, documents)
+        cached = _get_cached_rerank(
+            self.model,
+            query,
+            documents,
+            profile=self._cache_profile,
+            top_n=top_n,
+        )
         if cached is not None:
             logger.debug(f"Rerank cache hit for query: {query[:50]}...")
             results = [RerankResult(index=idx, relevance_score=score) for idx, score in cached]
@@ -286,18 +408,31 @@ class AsyncTextReranker:
                 probe_lock = None
 
         # Build request
-        payload = {
-            "model": self.model,
-            "input": {
+        if self.request_schema == "flat":
+            payload = {
+                "model": self.model,
                 "query": query,
                 "documents": documents,
-            },
-            "parameters": {
-                "return_documents": return_documents,
-            },
-        }
-        if top_n:
-            payload["parameters"]["top_n"] = top_n
+            }
+            if top_n:
+                payload["top_n"] = top_n
+            if self.instruct:
+                payload["instruct"] = self.instruct
+        else:
+            payload = {
+                "model": self.model,
+                "input": {
+                    "query": query,
+                    "documents": documents,
+                },
+                "parameters": {
+                    "return_documents": return_documents,
+                },
+            }
+            if top_n:
+                payload["parameters"]["top_n"] = top_n
+            if self.instruct:
+                payload["parameters"]["instruct"] = self.instruct
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -316,8 +451,10 @@ class AsyncTextReranker:
             _mark_provider_success(self._provider_failure_key)
 
             # Parse response
-            output = data.get("output", {})
-            results_data = output.get("results", [])
+            results_data = data.get("results")
+            if not isinstance(results_data, list):
+                output = data.get("output", {})
+                results_data = output.get("results", [])
 
             results: list[RerankResult] = []
             cache_data: list[tuple[int, float]] = []
@@ -334,7 +471,14 @@ class AsyncTextReranker:
             cache_data.sort(key=lambda x: x[1], reverse=True)
 
             # Cache result
-            _set_cached_rerank(self.model, query, documents, cache_data)
+            _set_cached_rerank(
+                self.model,
+                query,
+                documents,
+                cache_data,
+                profile=self._cache_profile,
+                top_n=top_n,
+            )
 
             logger.debug(f"Rerank completed: {len(results)} results for query: {query[:50]}...")
             return results
@@ -382,12 +526,18 @@ _reranker_cache: dict[str, AsyncTextReranker] = {}
 _reranker_cache_lock = threading.Lock()
 
 
-def get_text_reranker(api_key: str, model: str = "gte-rerank-v2") -> AsyncTextReranker:
+def get_text_reranker(api_key: str, model: str = "qwen3-rerank") -> AsyncTextReranker:
     """Get or create cached reranker instance."""
-    key = f"{api_key[:8]}:{model}"
+    endpoint = _resolve_dashscope_rerank_url(model)
+    credential_hash = hashlib.sha256(api_key.encode()).hexdigest()[:16]
+    key = f"{credential_hash}:{model}:{endpoint}"
     with _reranker_cache_lock:
         if key not in _reranker_cache:
-            _reranker_cache[key] = AsyncTextReranker(api_key=api_key, model=model)
+            _reranker_cache[key] = AsyncTextReranker(
+                api_key=api_key,
+                model=model,
+                base_url=endpoint,
+            )
         return _reranker_cache[key]
 
 
@@ -453,6 +603,7 @@ class BGEReranker:
         return_documents: bool = False,
     ) -> list[RerankResult]:
         """Rerank documents using BGE cross-encoder."""
+        _ = return_documents
         if not documents:
             return []
 
@@ -508,8 +659,14 @@ class CohereReranker:
     ):
         self.api_key = api_key
         self.model = model
+        self._cache_profile = (
+            f"{self.COHERE_RERANK_URL}:{_credential_fingerprint(self.api_key)}"
+        )
         self._provider_failure_key = _make_provider_failure_key(
-            "cohere", self.model, self.COHERE_RERANK_URL
+            "cohere",
+            self.model,
+            self.COHERE_RERANK_URL,
+            credential=self.api_key,
         )
 
     async def rerank(
@@ -524,7 +681,13 @@ class CohereReranker:
             return []
 
         # Check cache
-        cached = _get_cached_rerank(self.model, query, documents)
+        cached = _get_cached_rerank(
+            self.model,
+            query,
+            documents,
+            profile=self._cache_profile,
+            top_n=top_n,
+        )
         if cached is not None:
             results = [RerankResult(index=idx, relevance_score=score) for idx, score in cached]
             if top_n:
@@ -613,7 +776,14 @@ class CohereReranker:
         results.sort(key=lambda x: x.relevance_score, reverse=True)
         cache_data.sort(key=lambda x: x[1], reverse=True)
 
-        _set_cached_rerank(self.model, query, documents, cache_data)
+        _set_cached_rerank(
+            self.model,
+            query,
+            documents,
+            cache_data,
+            profile=self._cache_profile,
+            top_n=top_n,
+        )
 
         return results
 
@@ -672,6 +842,7 @@ class LocalCrossEncoderReranker:
         return_documents: bool = False,
     ) -> list[RerankResult]:
         """Rerank documents using local cross-encoder."""
+        _ = return_documents
         if not documents:
             return []
 
@@ -701,7 +872,7 @@ class LocalCrossEncoderReranker:
 # =============================================================================
 
 
-_DASHSCOPE_DEFAULT_MODEL = "gte-rerank-v2"
+_DASHSCOPE_DEFAULT_MODEL = "qwen3-rerank"
 _BGE_DEFAULT_MODEL = "BAAI/bge-reranker-v2-m3"
 _COHERE_DEFAULT_MODEL = "rerank-multilingual-v3.0"
 _LOCAL_DEFAULT_MODEL = "cross-encoder/ms-marco-MiniLM-L-12-v2"
@@ -738,8 +909,10 @@ def normalize_rerank_model(provider: str | None, model: str | None) -> str:
     model_text_lower = model_text.lower()
 
     if normalized_provider == "dashscope":
-        if not model_text or model_text_lower in {"gte-rerank", "gte-reranker", "default"}:
+        if not model_text or model_text_lower == "default":
             return _DASHSCOPE_DEFAULT_MODEL
+        if model_text_lower in {"gte-rerank", "gte-reranker"}:
+            return "gte-rerank-v2"
         return model_text
 
     if normalized_provider == "bge":

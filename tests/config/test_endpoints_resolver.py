@@ -8,9 +8,7 @@ between free/paid DashScope and Google endpoints.
 from __future__ import annotations
 
 import pytest
-
 from ai_gateway_core.config import endpoints
-
 
 # ---------------------------------------------------------------------------
 # Hygiene fixture: clear every env var the resolver reads so test order
@@ -124,6 +122,25 @@ def test_dashscope_url_swapped_between_domains(monkeypatch):
     _, embed_url = endpoints.resolve_dashscope("embedding")
     assert chat_url == "https://dashscope-intl.aliyuncs.com/compatible-mode"
     assert image_url == "https://dashscope-intl.aliyuncs.com/api/v1"
+    assert embed_url == "https://dashscope-intl.aliyuncs.com/api/v1"
+
+
+@pytest.mark.parametrize(
+    "configured_url",
+    [
+        "https://dashscope-intl.aliyuncs.com",
+        "https://dashscope-intl.aliyuncs.com/api/v1",
+        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+    ],
+)
+def test_dashscope_general_url_normalises_common_endpoint_shapes(monkeypatch, configured_url):
+    monkeypatch.setenv("DASHSCOPE_BASE_URL", configured_url)
+
+    _, chat_url = endpoints.resolve_dashscope("chat")
+    _, embed_url = endpoints.resolve_dashscope("embedding")
+
+    assert chat_url == "https://dashscope-intl.aliyuncs.com/compatible-mode"
     assert embed_url == "https://dashscope-intl.aliyuncs.com/api/v1"
 
 

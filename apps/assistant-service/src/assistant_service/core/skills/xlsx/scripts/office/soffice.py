@@ -14,10 +14,13 @@ Usage:
     subprocess.run(["soffice", ...], env=env)
 """
 
+import atexit
 import os
+import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 
 
@@ -36,9 +39,9 @@ def run_soffice(args: list[str], **kwargs) -> subprocess.CompletedProcess:
     env = get_soffice_env()
     return subprocess.run(["soffice"] + args, env=env, **kwargs)
 
-
-
-_SHIM_SO = Path(tempfile.gettempdir()) / "lo_socket_shim.so"
+_SHIM_LOCK = threading.Lock()
+_SHIM_DIR: Path | None = None
+_SHIM_SO: Path | None = None
 
 
 def _needs_shim() -> bool:
@@ -51,18 +54,41 @@ def _needs_shim() -> bool:
 
 
 def _ensure_shim() -> Path:
-    if _SHIM_SO.exists():
-        return _SHIM_SO
+    global _SHIM_DIR, _SHIM_SO
 
-    src = Path(tempfile.gettempdir()) / "lo_socket_shim.c"
-    src.write_text(_SHIM_SOURCE)
-    subprocess.run(
-        ["gcc", "-shared", "-fPIC", "-o", str(_SHIM_SO), str(src), "-ldl"],
-        check=True,
-        capture_output=True,
-    )
-    src.unlink()
-    return _SHIM_SO
+    with _SHIM_LOCK:
+        if _SHIM_SO is not None and _SHIM_SO.is_file():
+            return _SHIM_SO
+
+        shim_dir = Path(tempfile.mkdtemp(prefix="lo_socket_shim_"))
+        shim_dir.chmod(0o700)
+        src = shim_dir / "lo_socket_shim.c"
+        shim = shim_dir / "lo_socket_shim.so"
+        try:
+            src.write_text(_SHIM_SOURCE)
+            subprocess.run(
+                ["gcc", "-shared", "-fPIC", "-o", str(shim), str(src), "-ldl"],
+                check=True,
+                capture_output=True,
+            )
+            shim.chmod(0o700)
+        except Exception:
+            shutil.rmtree(shim_dir, ignore_errors=True)
+            raise
+        finally:
+            src.unlink(missing_ok=True)
+
+        _SHIM_DIR = shim_dir
+        _SHIM_SO = shim
+        return shim
+
+
+def _cleanup_shim() -> None:
+    if _SHIM_DIR is not None:
+        shutil.rmtree(_SHIM_DIR, ignore_errors=True)
+
+
+atexit.register(_cleanup_shim)
 
 
 

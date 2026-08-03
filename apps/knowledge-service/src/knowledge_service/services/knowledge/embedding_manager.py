@@ -1,7 +1,7 @@
 """Embedding provider management and configuration resolution."""
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ...core.exceptions import ValidationFailedError
 from ...core.observability.logging import get_logger
@@ -12,7 +12,61 @@ from .embedding import (
     create_embedding,
 )
 
+if TYPE_CHECKING:
+    from .embedding import UnifiedMultimodalEmbedding
+
 logger = get_logger(__name__)
+
+_SERVER_OWNED_EMBEDDING_FIELD_ALIASES = frozenset(
+    {
+        "apikey",
+        "key",
+        "accesskey",
+        "secret",
+        "secretkey",
+        "token",
+        "bearertoken",
+        "authorization",
+        "auth",
+        "credentials",
+        "headers",
+        "baseurl",
+        "endpoint",
+        "endpointurl",
+        "apibase",
+        "apiurl",
+        "url",
+        "host",
+    }
+)
+
+
+def _contains_server_owned_embedding_field(value: Any) -> bool:
+    """Reject legacy row credentials/endpoints, including common aliases."""
+
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            normalized = "".join(character for character in str(key).lower() if character.isalnum())
+            if any(
+                normalized.endswith(alias)
+                for alias in _SERVER_OWNED_EMBEDDING_FIELD_ALIASES
+            ):
+                return True
+            if _contains_server_owned_embedding_field(nested):
+                return True
+    elif isinstance(value, (list, tuple)):
+        return any(_contains_server_owned_embedding_field(item) for item in value)
+    return False
+
+
+def _require_server_owned_embedding_config(embedding_config: Any) -> dict[str, Any]:
+    config = _ensure_dict(embedding_config)
+    if _contains_server_owned_embedding_field(config):
+        raise ValidationFailedError(
+            "dataset embedding_config contains a legacy credential or endpoint; "
+            "remove it before embedding"
+        )
+    return config
 
 
 class EmbeddingManager:
@@ -68,14 +122,24 @@ class EmbeddingManager:
 
         Uses settings.knowledge.multimodal_embedding_* configuration.
         """
+        ec = _require_server_owned_embedding_config(
+            embedding_config
+            if embedding_config is not None
+            else dataset.get("embedding_config")
+        )
+
+        from ai_gateway_core.config import resolve_dashscope
+
         from .embedding import UnifiedMultimodalEmbedding
 
-        # Resolve API key from dataset config or gateway settings
-        ec = embedding_config or _ensure_dict(dataset.get("embedding_config"))
-        api_key = str(ec.get("api_key") or "").strip()
+        resolved_key, resolved_url = resolve_dashscope("embedding")
+        api_key = (
+            str(self.settings.knowledge.dashscope.api_key or "").strip()
+            or resolved_key
+        )
         if not api_key:
             raise ValidationFailedError(
-                "Multimodal embedding api_key is required in dataset embedding_config"
+                "server-owned DashScope embedding credentials are unavailable"
             )
 
         # Use model from dataset or fall back to settings
@@ -87,7 +151,7 @@ class EmbeddingManager:
         return UnifiedMultimodalEmbedding(
             api_key=api_key,
             model=model,
-            base_url=ec.get("base_url"),
+            base_url=resolved_url,
             max_concurrent=max_concurrent,
         )
 
@@ -97,10 +161,10 @@ class EmbeddingManager:
         embedding_config: dict[str, Any] | None = None,
     ) -> BaseEmbedding:
         """Create embedder for text-only datasets using dataset-level config."""
-        ec = (
-            _ensure_dict(embedding_config)
+        ec = _require_server_owned_embedding_config(
+            embedding_config
             if embedding_config is not None
-            else _ensure_dict(dataset.get("embedding_config"))
+            else dataset.get("embedding_config")
         )
         provider = str(dataset.get("embedding_provider") or "").lower() or "local"
         model = str(dataset.get("embedding_model") or "")
@@ -129,9 +193,10 @@ class EmbeddingManager:
     def resolve_embedding_config(
         self, provider: str, model: str, embedding_config: dict[str, Any]
     ) -> EmbeddingConfig:
+        embedding_config = _require_server_owned_embedding_config(embedding_config)
         provider_key = (provider or "").lower()
-        api_key = str(embedding_config.get("api_key") or "").strip()
-        base_url = str(embedding_config.get("base_url") or "").strip() or None
+        api_key: str | None = None
+        base_url: str | None = None
 
         if provider_key in {"local", "builtin", "hash"}:
             return EmbeddingConfig(
@@ -159,7 +224,7 @@ class EmbeddingManager:
                 ) or _os.environ.get("GEMINI_API_KEY", "").strip() or _os.environ.get("GOOGLE_API_KEY", "").strip()
             if not api_key:
                 raise ValidationFailedError(
-                    "Gemini api_key is required in dataset embedding_config"
+                    "server-owned Gemini embedding credentials are unavailable"
                 )
         elif provider_key in {"dashscope", "aliyun"}:
             # Use the canonical per-domain resolver from ai_gateway_core
@@ -181,14 +246,14 @@ class EmbeddingManager:
                 base_url = resolved_url
             if not api_key:
                 raise ValidationFailedError(
-                    "DashScope api_key is required in dataset embedding_config"
+                    "server-owned DashScope embedding credentials are unavailable"
                 )
         elif provider_key in {"siliconflow", "silicon", "sf"}:
             if not api_key:
                 api_key = str(self.settings.knowledge.siliconflow.api_key or "").strip()
             if not api_key:
                 raise ValidationFailedError(
-                    "SiliconFlow api_key is required in dataset embedding_config"
+                    "server-owned SiliconFlow embedding credentials are unavailable"
                 )
             endpoint = base_url or (
                 str(self.settings.knowledge.siliconflow.base_url or "").strip()

@@ -477,6 +477,37 @@ class TestWorkspaceSetup:
         finally:
             await executor._cleanup_workspace(workspace)
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "unsafe_name",
+        [
+            "../escape.txt",
+            "nested/escape.txt",
+            r"nested\escape.txt",
+            "/tmp/escape.txt",
+            "escape\x00.txt",
+            "escape\n.txt",
+        ],
+    )
+    async def test_setup_workspace_rejects_non_leaf_filenames(self, unsafe_name):
+        executor = CodeExecutorService()
+
+        with pytest.raises(ValueError, match="workspace filename"):
+            await executor._setup_workspace(
+                code="print('hello')",
+                input_files=[InputFile.from_text(unsafe_name, "input")],
+                kb_documents=[],
+                config=CodeExecutionConfig(),
+            )
+
+        with pytest.raises(ValueError, match="workspace filename"):
+            await executor._setup_workspace(
+                code="print('hello')",
+                input_files=[],
+                kb_documents=[KBDocument(filename=unsafe_name, content="document")],
+                config=CodeExecutionConfig(),
+            )
+
 
 class TestMimeTypeGuessing:
     """Test MIME type guessing."""

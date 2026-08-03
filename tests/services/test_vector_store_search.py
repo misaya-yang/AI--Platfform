@@ -1,10 +1,53 @@
+import asyncio
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+from knowledge_service.services.knowledge import vector_store
+from knowledge_service.services.knowledge.lexical_config import (
+    BM25_V2,
+    COLLECTION_SCOPE_METADATA_KEY,
+    LexicalConfig,
+)
+from knowledge_service.services.knowledge.vector_store import (
+    CollectionReadAuthorityError,
+    VectorStore,
+    VectorStoreError,
+)
 from qdrant_client.http import models as qmodels
 
-from knowledge_service.services.knowledge import vector_store
-from knowledge_service.services.knowledge.vector_store import VectorStore
+
+def _direct_filter_values(query_filter):
+    return {
+        condition.key: condition.match.value
+        for condition in (query_filter.must or [])
+        if isinstance(condition, qmodels.FieldCondition)
+    }
+
+
+def _assert_legacy_or_enabled_filter(query_filter):
+    enabled_filters = [
+        condition
+        for condition in (query_filter.must or [])
+        if isinstance(condition, qmodels.Filter)
+        and any(
+            isinstance(item, qmodels.FieldCondition) and item.key == "enabled"
+            for item in (condition.should or [])
+        )
+    ]
+    assert len(enabled_filters) == 1
+    should = enabled_filters[0].should or []
+    assert any(
+        isinstance(item, qmodels.FieldCondition)
+        and item.key == "enabled"
+        and item.match.value is True
+        for item in should
+    )
+    assert any(
+        isinstance(item, qmodels.IsEmptyCondition)
+        and item.is_empty.key == "enabled"
+        for item in should
+    )
 
 
 @pytest.mark.asyncio
@@ -12,6 +55,12 @@ async def test_search_passes_query_filter_and_score_threshold(monkeypatch):
     captured = {}
 
     class DummyClient:
+        async def get_collection(self, _collection_name):
+            return SimpleNamespace(
+                config=SimpleNamespace(strict_mode_config=None, metadata={}),
+                payload_schema={},
+            )
+
         async def query_points(self, **kwargs):
             captured.update(kwargs)
             return SimpleNamespace(points=[])
@@ -19,7 +68,7 @@ async def test_search_passes_query_filter_and_score_threshold(monkeypatch):
         async def close(self):
             return None
 
-    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **kwargs: DummyClient())
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
 
     vs = VectorStore(url="http://localhost:6333")
     flt = qmodels.Filter(
@@ -30,11 +79,18 @@ async def test_search_passes_query_filter_and_score_threshold(monkeypatch):
         collection_name="kb_ds_3",
         query_vector=[0.1, 0.2, 0.3],
         top_k=7,
+        tenant_id="tenant-a",
+        dataset_id="ds",
         query_filter=flt,
         score_threshold=0.42,
     )
 
-    assert captured["query_filter"] == flt
+    assert _direct_filter_values(captured["query_filter"]) == {
+        "document_id": "doc1",
+        "tenant_id": "tenant-a",
+        "dataset_id": "ds",
+    }
+    _assert_legacy_or_enabled_filter(captured["query_filter"])
     assert captured["score_threshold"] == 0.42
     assert captured["limit"] == 7
 
@@ -44,6 +100,12 @@ async def test_search_pushes_nested_metadata_filters(monkeypatch):
     captured = {}
 
     class DummyClient:
+        async def get_collection(self, _collection_name):
+            return SimpleNamespace(
+                config=SimpleNamespace(strict_mode_config=None, metadata={}),
+                payload_schema={},
+            )
+
         async def query_points(self, **kwargs):
             captured.update(kwargs)
             return SimpleNamespace(points=[])
@@ -51,20 +113,366 @@ async def test_search_pushes_nested_metadata_filters(monkeypatch):
         async def close(self):
             return None
 
-    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **kwargs: DummyClient())
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
 
     vs = VectorStore(url="http://localhost:6333")
     await vs.search(
         collection_name="kb_ds_3",
         query_vector=[0.1, 0.2, 0.3],
+        tenant_id="tenant-a",
+        dataset_id="ds",
         metadata_filter={"madhab": "hanafi", "authority_rank": 2},
     )
 
-    conditions = captured["query_filter"].must
-    assert [(condition.key, condition.match.value) for condition in conditions] == [
-        ("metadata.madhab", "hanafi"),
-        ("metadata.authority_rank", 2),
-    ]
+    assert _direct_filter_values(captured["query_filter"]) == {
+        "tenant_id": "tenant-a",
+        "dataset_id": "ds",
+        "metadata.madhab": "hanafi",
+        "metadata.authority_rank": 2,
+    }
+    _assert_legacy_or_enabled_filter(captured["query_filter"])
+
+
+@pytest.mark.asyncio
+async def test_search_rejects_legacy_collection_without_explicit_scope(monkeypatch):
+    class DummyClient:
+        async def get_collection(self, _collection_name):
+            return SimpleNamespace(
+                config=SimpleNamespace(strict_mode_config=None, metadata={}),
+                payload_schema={},
+            )
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
+
+    vs = VectorStore(url="http://localhost:6333")
+    with pytest.raises(VectorStoreError, match="requires non-empty tenant_id and dataset_id"):
+        await vs.search(
+            collection_name="kb_ds_3",
+            query_vector=[0.1, 0.2, 0.3],
+        )
+
+
+@pytest.mark.asyncio
+async def test_search_enforces_immutable_collection_scope(monkeypatch):
+    captured = {}
+    metadata = {
+        COLLECTION_SCOPE_METADATA_KEY: {
+            "schema_version": 1,
+            "tenant_id": "tenant-a",
+            "dataset_id": "ds",
+        }
+    }
+
+    class DummyClient:
+        async def get_collection(self, _collection_name):
+            return SimpleNamespace(
+                config=SimpleNamespace(strict_mode_config=None, metadata=metadata),
+                payload_schema={},
+            )
+
+        async def query_points(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(points=[])
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
+
+    vs = VectorStore(url="http://localhost:6333")
+    await vs.search(
+        collection_name="kb_ds_3",
+        query_vector=[0.1, 0.2, 0.3],
+    )
+    assert _direct_filter_values(captured["query_filter"]) == {
+        "tenant_id": "tenant-a",
+        "dataset_id": "ds",
+    }
+    _assert_legacy_or_enabled_filter(captured["query_filter"])
+
+    with pytest.raises(VectorStoreError, match="tenant scope mismatch"):
+        await vs.search(
+            collection_name="kb_ds_3",
+            query_vector=[0.1, 0.2, 0.3],
+            tenant_id="tenant-b",
+            dataset_id="ds",
+        )
+
+
+def _read_info(metadata):
+    return SimpleNamespace(
+        config=SimpleNamespace(strict_mode_config=None, metadata=metadata),
+        payload_schema={},
+    )
+
+
+async def _invoke_read_primitive(store, primitive):
+    if primitive == "dense":
+        return await store.search(
+            "collection-a",
+            [1.0, 0.0],
+            tenant_id="tenant-a",
+            dataset_id="dataset-a",
+        )
+    if primitive == "sparse":
+        return await store.sparse_search(
+            "collection-a",
+            [1],
+            [1.0],
+            tenant_id="tenant-a",
+            dataset_id="dataset-a",
+        )
+    return await store.hybrid_search_multi_native(
+        "collection-a",
+        routes=[
+            {
+                "query_vector": [1.0, 0.0],
+                "sparse_indices": [1],
+                "sparse_values": [1.0],
+            }
+        ],
+        top_k=2,
+        tenant_id="tenant-a",
+        dataset_id="dataset-a",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("primitive", ["dense", "sparse", "hybrid"])
+@pytest.mark.parametrize("profile", ["stored_active", "malformed_scope", "malformed_lexical"])
+async def test_read_primitives_reject_unsafe_collection_metadata(
+    monkeypatch,
+    primitive,
+    profile,
+):
+    scope = {
+        COLLECTION_SCOPE_METADATA_KEY: {
+            "schema_version": 1,
+            "tenant_id": "tenant-a",
+            "dataset_id": "dataset-a",
+        }
+    }
+    if profile == "stored_active":
+        active = LexicalConfig().with_runtime_selection(
+            active_version=BM25_V2,
+            shadow_write_enabled=True,
+        )
+        metadata = {**scope, **active.to_collection_metadata()}
+    elif profile == "malformed_scope":
+        metadata = {
+            COLLECTION_SCOPE_METADATA_KEY: {
+                "schema_version": "bad",
+                "tenant_id": "tenant-a",
+                "dataset_id": "dataset-a",
+            }
+        }
+    else:
+        metadata = {**scope, "knowledge_lexical": {"schema_version": 1}}
+
+    class DummyClient:
+        async def get_collection(self, _collection_name):
+            return _read_info(metadata)
+
+        async def count(self, **_kwargs):
+            pytest.fail("unsafe metadata must fail before sparse readiness")
+
+        async def query_points(self, **_kwargs):
+            pytest.fail("unsafe metadata must fail before query")
+
+        async def query_batch_points(self, **_kwargs):
+            pytest.fail("unsafe metadata must fail before query")
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
+    store = VectorStore(url="http://localhost:6333")
+
+    with pytest.raises(CollectionReadAuthorityError):
+        await _invoke_read_primitive(store, primitive)
+
+
+@pytest.mark.asyncio
+async def test_native_legacy_collection_requires_tenant_and_dataset_scope(monkeypatch):
+    queried = False
+
+    class DummyClient:
+        async def get_collection(self, _collection_name):
+            return _read_info({})
+
+        async def query_batch_points(self, **_kwargs):
+            nonlocal queried
+            queried = True
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
+    store = VectorStore(url="http://localhost:6333")
+
+    with pytest.raises(CollectionReadAuthorityError, match="tenant_id and dataset_id"):
+        await store.hybrid_search_multi_native(
+            "legacy-mixed",
+            routes=[
+                {
+                    "query_vector": [1.0, 0.0],
+                    "sparse_indices": [1],
+                    "sparse_values": [1.0],
+                }
+            ],
+            top_k=2,
+            dataset_id="dataset-a",
+        )
+    assert queried is False
+
+
+@pytest.mark.asyncio
+async def test_retrieve_vectors_is_server_and_client_scope_checked(monkeypatch):
+    captured = {}
+    metadata = {
+        COLLECTION_SCOPE_METADATA_KEY: {
+            "schema_version": 1,
+            "tenant_id": "tenant-a",
+            "dataset_id": "dataset-a",
+        }
+    }
+
+    class DummyClient:
+        async def get_collection(self, _collection_name):
+            return _read_info(metadata)
+
+        async def scroll(self, **kwargs):
+            captured.update(kwargs)
+            return (
+                [
+                    SimpleNamespace(
+                        id="segment-a",
+                        payload={"tenant_id": "tenant-a", "dataset_id": "dataset-a"},
+                        vector=[1.0, 0.0],
+                    )
+                ],
+                None,
+            )
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
+    store = VectorStore(url="http://localhost:6333")
+    vectors = await store.retrieve_vectors(
+        "collection-a",
+        ["segment-a"],
+        tenant_id="tenant-a",
+        dataset_id="dataset-a",
+    )
+
+    assert vectors == {"segment-a": [1.0, 0.0]}
+    assert captured["with_payload"] is True
+    assert {
+        condition.key: condition.match.value
+        for condition in captured["scroll_filter"].must
+        if isinstance(condition, qmodels.FieldCondition)
+    } == {"dataset_id": "dataset-a", "tenant_id": "tenant-a"}
+
+
+@pytest.mark.asyncio
+async def test_retrieve_vectors_rejects_foreign_record_even_if_server_ignores_filter(
+    monkeypatch,
+):
+    metadata = {
+        COLLECTION_SCOPE_METADATA_KEY: {
+            "schema_version": 1,
+            "tenant_id": "tenant-a",
+            "dataset_id": "dataset-a",
+        }
+    }
+
+    class DummyClient:
+        async def get_collection(self, _collection_name):
+            return _read_info(metadata)
+
+        async def scroll(self, **_kwargs):
+            return (
+                [
+                    SimpleNamespace(
+                        id="segment-a",
+                        payload={"tenant_id": "tenant-b", "dataset_id": "dataset-a"},
+                        vector=[1.0, 0.0],
+                    )
+                ],
+                None,
+            )
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
+    store = VectorStore(url="http://localhost:6333")
+
+    with pytest.raises(CollectionReadAuthorityError, match="out-of-scope"):
+        await store.retrieve_vectors(
+            "collection-a",
+            ["segment-a"],
+            tenant_id="tenant-a",
+            dataset_id="dataset-a",
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile", ["stored_active", "malformed_scope", "legacy_missing_scope"])
+async def test_retrieve_vectors_rejects_unsafe_profile_before_scroll(
+    monkeypatch,
+    profile,
+):
+    scope = {
+        COLLECTION_SCOPE_METADATA_KEY: {
+            "schema_version": 1,
+            "tenant_id": "tenant-a",
+            "dataset_id": "dataset-a",
+        }
+    }
+    tenant_id = "tenant-a"
+    if profile == "stored_active":
+        active = LexicalConfig().with_runtime_selection(
+            active_version=BM25_V2,
+            shadow_write_enabled=True,
+        )
+        metadata = {**scope, **active.to_collection_metadata()}
+    elif profile == "malformed_scope":
+        metadata = {
+            COLLECTION_SCOPE_METADATA_KEY: {
+                "schema_version": "bad",
+                "tenant_id": "tenant-a",
+                "dataset_id": "dataset-a",
+            }
+        }
+    else:
+        metadata = {}
+        tenant_id = ""
+
+    class DummyClient:
+        async def get_collection(self, _collection_name):
+            return _read_info(metadata)
+
+        async def scroll(self, **_kwargs):
+            pytest.fail("unsafe profile must fail before vector scroll")
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
+    store = VectorStore(url="http://localhost:6333")
+
+    with pytest.raises(CollectionReadAuthorityError):
+        await store.retrieve_vectors(
+            "collection-a",
+            ["segment-a"],
+            tenant_id=tenant_id,
+            dataset_id="dataset-a",
+        )
 
 
 @pytest.mark.asyncio
@@ -73,6 +481,12 @@ async def test_multi_native_rrf_uses_one_batch_request_with_per_query_fusion(mon
     count_calls = []
 
     class DummyClient:
+        async def get_collection(self, _collection_name):
+            return SimpleNamespace(
+                config=SimpleNamespace(strict_mode_config=None, metadata={}),
+                payload_schema={},
+            )
+
         async def count(self, **kwargs):
             count_calls.append(kwargs)
             return SimpleNamespace(count=3)
@@ -108,6 +522,10 @@ async def test_multi_native_rrf_uses_one_batch_request_with_per_query_fusion(mon
         ],
         top_k=60,
         rrf_k=60,
+        dense_weight=0.7,
+        sparse_weight=0.3,
+        tenant_id="tenant-a",
+        dataset_id="ds",
     )
 
     requests = captured["requests"]
@@ -120,9 +538,41 @@ async def test_multi_native_rrf_uses_one_batch_request_with_per_query_fusion(mon
         15,
     ]
     assert [request.query.rrf.k for request in requests] == [60, 60]
+    assert [request.query.rrf.weights for request in requests] == [
+        [0.7, 0.3],
+        [0.7, 0.3],
+    ]
     assert [request.limit for request in requests] == [60, 60]
-    assert requests[0].prefetch[0].filter.must[0].key == "metadata.madhab"
+    assert any(
+        condition.key == "metadata.madhab"
+        for condition in requests[0].prefetch[0].filter.must
+    )
     assert len(count_calls) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dense_weight", "sparse_weight"),
+    [(-1.0, 1.0), (float("nan"), 1.0), (0.0, 0.0)],
+)
+async def test_multi_native_rrf_rejects_invalid_weights(
+    monkeypatch, dense_weight, sparse_weight
+):
+    class DummyClient:
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
+    vs = VectorStore(url="http://localhost:6333")
+
+    with pytest.raises(vector_store.VectorStoreError, match="RRF weight"):
+        await vs.hybrid_search_multi_native(
+            collection_name="kb_ds_3",
+            routes=[],
+            top_k=10,
+            dense_weight=dense_weight,
+            sparse_weight=sparse_weight,
+        )
 
 
 @pytest.mark.asyncio
@@ -130,6 +580,12 @@ async def test_multi_native_rrf_requires_sparse_backfill(monkeypatch):
     query_called = False
 
     class DummyClient:
+        async def get_collection(self, _collection_name):
+            return SimpleNamespace(
+                config=SimpleNamespace(strict_mode_config=None, metadata={}),
+                payload_schema={},
+            )
+
         async def count(self, **kwargs):
             count_filter = kwargs.get("count_filter")
             return SimpleNamespace(count=0 if count_filter else 3)
@@ -155,6 +611,8 @@ async def test_multi_native_rrf_requires_sparse_backfill(monkeypatch):
                 }
             ],
             top_k=10,
+            tenant_id="tenant-a",
+            dataset_id="ds",
         )
 
     assert query_called is False
@@ -168,7 +626,14 @@ async def test_upsert_adds_sparse_vector_when_collection_supports_it(monkeypatch
             params=SimpleNamespace(
                 vectors=SimpleNamespace(size=2),
                 sparse_vectors={"bm25": object()},
-            )
+            ),
+            metadata={
+                "knowledge_scope": {
+                    "schema_version": 1,
+                    "dataset_id": "dataset-a",
+                    "tenant_id": "tenant-a",
+                }
+            },
         )
     )
 
@@ -178,6 +643,7 @@ async def test_upsert_adds_sparse_vector_when_collection_supports_it(monkeypatch
 
         async def upsert(self, **kwargs):
             captured.update(kwargs)
+            return SimpleNamespace(status="completed")
 
         async def close(self):
             return None
@@ -202,4 +668,274 @@ async def test_upsert_adds_sparse_vector_when_collection_supports_it(monkeypatch
     assert stored.vector[""] == [1.0, 0.0]
     assert stored.vector["bm25"].indices
     assert stored.vector["bm25"].values
+    assert stored.payload["dataset_id"] == "dataset-a"
+    assert stored.payload["tenant_id"] == "tenant-a"
     assert collection not in vs._sparse_readiness
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("primitive", ["dense", "sparse", "hybrid"])
+async def test_read_primitives_exclude_explicitly_disabled_points(
+    monkeypatch,
+    primitive,
+):
+    captured = {}
+    metadata = {
+        COLLECTION_SCOPE_METADATA_KEY: {
+            "schema_version": 1,
+            "tenant_id": "tenant-a",
+            "dataset_id": "dataset-a",
+        }
+    }
+
+    class DummyClient:
+        async def get_collection(self, _collection_name):
+            return _read_info(metadata)
+
+        async def count(self, **_kwargs):
+            return SimpleNamespace(count=0)
+
+        async def query_points(self, **kwargs):
+            captured["filter"] = kwargs["query_filter"]
+            return SimpleNamespace(points=[])
+
+        async def query_batch_points(self, **kwargs):
+            captured["prefetch_filters"] = [
+                prefetch.filter
+                for request in kwargs["requests"]
+                for prefetch in request.prefetch
+            ]
+            return [SimpleNamespace(points=[]) for _ in kwargs["requests"]]
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
+    store = VectorStore(url="http://localhost:6333")
+
+    await _invoke_read_primitive(store, primitive)
+
+    filters = (
+        captured["prefetch_filters"]
+        if primitive == "hybrid"
+        else [captured["filter"]]
+    )
+    assert filters
+    for query_filter in filters:
+        _assert_legacy_or_enabled_filter(query_filter)
+
+
+def _scope_metadata(tenant_id="tenant-a", dataset_id="dataset-a"):
+    return {
+        COLLECTION_SCOPE_METADATA_KEY: {
+            "schema_version": 1,
+            "tenant_id": tenant_id,
+            "dataset_id": dataset_id,
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_segment_payload_visibility_sweeps_all_owned_collections_and_is_retryable(
+    monkeypatch,
+):
+    writes = []
+    failed_once = False
+    metadata_by_collection = {
+        "base": _scope_metadata(),
+        "base_sections": _scope_metadata(),
+        "foreign": _scope_metadata(tenant_id="tenant-b"),
+    }
+
+    class DummyClient:
+        async def get_collections(self):
+            return SimpleNamespace(
+                collections=[
+                    SimpleNamespace(name=name) for name in metadata_by_collection
+                ]
+            )
+
+        async def get_collection(self, collection_name):
+            return _read_info(metadata_by_collection[collection_name])
+
+        async def set_payload(self, **kwargs):
+            nonlocal failed_once
+            writes.append(kwargs)
+            if kwargs["collection_name"] == "base_sections" and not failed_once:
+                failed_once = True
+                raise RuntimeError("second collection unavailable")
+            return SimpleNamespace(status="completed")
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
+    store = VectorStore(url="http://localhost:6333", max_retries=1)
+    kwargs = {
+        "tenant_id": "tenant-a",
+        "dataset_id": "dataset-a",
+        "document_id": "document-a",
+        "segment_id": "segment-a",
+        "enabled": False,
+        "lifecycle_lease_held": True,
+    }
+
+    with pytest.raises(VectorStoreError, match="second collection unavailable"):
+        await store.set_segment_payload_enabled(**kwargs)
+    touched = await store.set_segment_payload_enabled(**kwargs)
+
+    assert touched == ["base", "base_sections"]
+    assert [call["collection_name"] for call in writes] == [
+        "base",
+        "base_sections",
+        "base",
+        "base_sections",
+    ]
+    assert all(call["payload"] == {"enabled": False} for call in writes)
+    assert all(call["wait"] is True for call in writes)
+    assert not any(call["collection_name"] == "foreign" for call in writes)
+    selector = writes[0]["points"].filter
+    assert _direct_filter_values(selector) == {
+        "dataset_id": "dataset-a",
+        "document_id": "document-a",
+    }
+    identity_filters = [
+        condition
+        for condition in (selector.must or [])
+        if isinstance(condition, qmodels.Filter)
+        and any(
+            isinstance(item, qmodels.FieldCondition) and item.key == "segment_id"
+            for item in (condition.should or [])
+        )
+    ]
+    assert len(identity_filters) == 1
+    assert any(
+        isinstance(item, qmodels.FieldCondition)
+        and item.key == "segment_id"
+        and item.match.value == "segment-a"
+        for item in (identity_filters[0].should or [])
+    )
+
+
+@pytest.mark.asyncio
+async def test_segment_payload_visibility_requires_lifecycle_lease(monkeypatch):
+    class DummyClient:
+        async def get_collections(self):
+            pytest.fail("lease rejection must precede Qdrant discovery")
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
+    store = VectorStore(url="http://localhost:6333")
+
+    with pytest.raises(VectorStoreError, match="require a lifecycle lease"):
+        await store.set_segment_payload_enabled(
+            tenant_id="tenant-a",
+            dataset_id="dataset-a",
+            document_id="document-a",
+            segment_id="segment-a",
+            enabled=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_outer_lifecycle_lease_bypasses_nested_ensure_lease(monkeypatch):
+    lease_calls = 0
+    ensure_calls = []
+
+    @asynccontextmanager
+    async def dataset_lease(*_args, **_kwargs):
+        nonlocal lease_calls
+        lease_calls += 1
+        yield
+
+    class DummyClient:
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
+    store = VectorStore(
+        url="http://localhost:6333",
+        dataset_write_lease=dataset_lease,
+    )
+
+    async def ensure_unfenced(**kwargs):
+        ensure_calls.append(kwargs)
+        return "collection-a"
+
+    store._ensure_collection_unfenced = ensure_unfenced
+    await store.ensure_collection("dataset-a", 2, tenant_id="tenant-a")
+    await store.ensure_collection(
+        "dataset-a",
+        2,
+        tenant_id="tenant-a",
+        lifecycle_lease_held=True,
+    )
+
+    assert lease_calls == 1
+    assert len(ensure_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_concurrent_outer_leased_upserts_take_zero_nested_database_leases(
+    monkeypatch,
+):
+    nested_lease_calls = 0
+    qdrant_writes = []
+    collection_info = SimpleNamespace(
+        config=SimpleNamespace(
+            params=SimpleNamespace(
+                vectors=SimpleNamespace(size=2),
+                sparse_vectors={},
+            ),
+            metadata=_scope_metadata(),
+        )
+    )
+
+    @asynccontextmanager
+    async def nested_lease(*_args, **_kwargs):
+        nonlocal nested_lease_calls
+        nested_lease_calls += 1
+        yield
+
+    class DummyClient:
+        async def get_collection(self, _collection_name):
+            return collection_info
+
+        async def upsert(self, **kwargs):
+            qdrant_writes.append(kwargs)
+            return SimpleNamespace(status="completed")
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
+    store = VectorStore(
+        url="http://localhost:6333",
+        dataset_write_lease=nested_lease,
+    )
+
+    await asyncio.gather(
+        *[
+            store.upsert(
+                "collection-a",
+                [
+                    qmodels.PointStruct(
+                        id=f"vector-{index}",
+                        vector=[1.0, 0.0],
+                        payload={
+                            "segment_id": f"segment-{index}",
+                            "document_id": f"document-{index}",
+                            "text": "value",
+                        },
+                    )
+                ],
+                lifecycle_lease_held=True,
+            )
+            for index in range(4)
+        ]
+    )
+
+    assert nested_lease_calls == 0
+    assert len(qdrant_writes) == 4

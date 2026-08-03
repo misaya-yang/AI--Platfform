@@ -1015,8 +1015,8 @@
       "embeddingModel": "Embedding Model",
       "dimension": "{{dim}}D",
       "uploadFiles": "Click or drag files to upload",
-      "supportedFormats": "Supports .pdf, .doc, .docx, .txt, .md, .pptx, .ppt, .png, .jpg, .jpeg, .bmp, .gif, .xls, .xlsx and more",
-      "fileSizeLimit": "Max 100MB per document or 1000 pages, 20MB per image",
+      "supportedFormats": "Supports .pdf, .docx, .txt, .md, and .html documents",
+      "fileSizeLimit": "Maximum 100MB or 1000 pages per document; multimodal image indexing is not yet enabled",
       "addUrl": "Or add web URL",
       "urlPlaceholder": "Enter URL, e.g. https://example.com/doc.html",
       "urlTitle": "Document title (optional)",
@@ -1096,7 +1096,8 @@
         "invalidUrl": "Please enter a valid URL starting with http:// or https://",
         "duplicateUrl": "This URL has already been added",
         "fileTooLarge": "File \"{{name}}\" exceeds size limit ({{limit}})",
-        "duplicateFile": "File \"{{name}}\" has already been added"
+        "duplicateFile": "File \"{{name}}\" has already been added",
+        "unsupportedFile": "File \"{{name}}\" uses an unsupported format"
       },
       "embeddingGemini001": "Google Gemini Embedding 001",
       "embeddingDashscopeV4": "DashScope Text Embedding v4",
@@ -2650,6 +2651,7 @@
     "taskList": "Tasks",
     "taskRunning": "Task running...",
     "taskCompleted": "{{completed}}/{{total}} tasks completed",
+    "streamInterrupted": "The response stream was interrupted. The generated content above was preserved; please retry.",
     "processSummary": {
       "running": "Running {{tools}} tools",
       "preparing": "Preparing response",

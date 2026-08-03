@@ -70,23 +70,24 @@ def _as_grade_map(relevance: Mapping[str, float] | Iterable[str] | None) -> dict
     return {str(sid): 1.0 for sid in relevance}
 
 
-def _unique_ranked(retrieved: Iterable[str]) -> list[str]:
-    """Return a stable first-occurrence ranking.
+def _ranked_with_credit(retrieved: Iterable[str]) -> list[tuple[str, bool]]:
+    """Return every rank slot and whether that slot may receive credit.
 
-    A segment is one retrieval item and must not receive relevance credit more
-    than once. Provider/fusion regressions can still emit duplicate IDs, so the
-    metric boundary de-duplicates defensively before computing any score.
+    Provider/fusion regressions can emit duplicate IDs. A duplicate must still
+    occupy its original rank slot, otherwise a later relevant item is promoted
+    and ranking quality is overstated. Only the first occurrence of an ID may
+    receive relevance credit.
     """
 
-    unique: list[str] = []
+    ranked: list[tuple[str, bool]] = []
     seen: set[str] = set()
     for raw_segment_id in retrieved:
         segment_id = str(raw_segment_id)
-        if segment_id in seen:
-            continue
-        seen.add(segment_id)
-        unique.append(segment_id)
-    return unique
+        receives_credit = segment_id not in seen
+        if receives_credit:
+            seen.add(segment_id)
+        ranked.append((segment_id, receives_credit))
+    return ranked
 
 
 def hit_rate_at_k(
@@ -96,8 +97,8 @@ def hit_rate_at_k(
     grades = _as_grade_map(relevant)
     if not grades or k <= 0:
         return 0.0
-    for segment_id in _unique_ranked(retrieved)[:k]:
-        if grades.get(segment_id, 0.0) > 0:
+    for segment_id, receives_credit in _ranked_with_credit(retrieved)[:k]:
+        if receives_credit and grades.get(segment_id, 0.0) > 0:
             return 1.0
     return 0.0
 
@@ -109,8 +110,12 @@ def precision_at_k(
     grades = _as_grade_map(relevant)
     if k <= 0:
         return 0.0
-    top = _unique_ranked(retrieved)[:k]
-    hits = sum(1 for segment_id in top if grades.get(segment_id, 0.0) > 0)
+    top = _ranked_with_credit(retrieved)[:k]
+    hits = sum(
+        1
+        for segment_id, receives_credit in top
+        if receives_credit and grades.get(segment_id, 0.0) > 0
+    )
     return hits / k
 
 
@@ -122,7 +127,11 @@ def recall_at_k(
     relevant_ids = {sid for sid, g in grades.items() if g > 0}
     if not relevant_ids or k <= 0:
         return 0.0
-    hits = sum(1 for segment_id in _unique_ranked(retrieved)[:k] if segment_id in relevant_ids)
+    hits = sum(
+        1
+        for segment_id, receives_credit in _ranked_with_credit(retrieved)[:k]
+        if receives_credit and segment_id in relevant_ids
+    )
     return hits / len(relevant_ids)
 
 
@@ -133,13 +142,13 @@ def reciprocal_rank(
 ) -> float:
     """1/rank of the first relevant item, optionally truncated at K."""
     grades = _as_grade_map(relevant)
-    ranked = _unique_ranked(retrieved)
+    ranked = _ranked_with_credit(retrieved)
     if k is not None:
         if k <= 0:
             return 0.0
         ranked = ranked[:k]
-    for i, segment_id in enumerate(ranked, start=1):
-        if grades.get(segment_id, 0.0) > 0:
+    for i, (segment_id, receives_credit) in enumerate(ranked, start=1):
+        if receives_credit and grades.get(segment_id, 0.0) > 0:
             return 1.0 / i
     return 0.0
 
@@ -165,7 +174,10 @@ def ndcg_at_k(
     if k <= 0 or not grades:
         return 0.0
 
-    retrieved_grades = [grades.get(segment_id, 0.0) for segment_id in _unique_ranked(retrieved)[:k]]
+    retrieved_grades = [
+        grades.get(segment_id, 0.0) if receives_credit else 0.0
+        for segment_id, receives_credit in _ranked_with_credit(retrieved)[:k]
+    ]
     dcg = _dcg(retrieved_grades, k)
 
     ideal_grades = sorted(grades.values(), reverse=True)
@@ -190,13 +202,13 @@ def average_precision(
     relevant_ids = {sid for sid, g in grades.items() if g > 0}
     if not relevant_ids or (k is not None and k <= 0):
         return 0.0
-    ranked = _unique_ranked(retrieved)
+    ranked = _ranked_with_credit(retrieved)
     if k is not None:
         ranked = ranked[:k]
     hits = 0
     precision_sum = 0.0
-    for i, segment_id in enumerate(ranked, start=1):
-        if segment_id in relevant_ids:
+    for i, (segment_id, receives_credit) in enumerate(ranked, start=1):
+        if receives_credit and segment_id in relevant_ids:
             hits += 1
             precision_sum += hits / i
     denominator = min(len(relevant_ids), k) if k is not None else len(relevant_ids)
@@ -277,7 +289,10 @@ def score_single_query(
 ) -> dict[str, Any]:
     """Compute all metrics for a single query across the given K values."""
     grades = _as_grade_map(relevance)
-    ranked = _unique_ranked(retrieved)
+    ranked = [str(segment_id) for segment_id in retrieved]
+    unique_retrieved_count = sum(
+        1 for _segment_id, receives_credit in _ranked_with_credit(ranked) if receives_credit
+    )
     rr = reciprocal_rank(ranked, grades)
     ap = average_precision(ranked, grades)
     per_k: dict[str, Any] = {}
@@ -294,7 +309,7 @@ def score_single_query(
         "reciprocal_rank": rr,
         "average_precision": ap,
         "retrieved_count": len(retrieved),
-        "unique_retrieved_count": len(ranked),
+        "unique_retrieved_count": unique_retrieved_count,
         "by_k": per_k,
     }
 

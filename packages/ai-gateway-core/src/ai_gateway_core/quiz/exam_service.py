@@ -497,10 +497,16 @@ Use the exam language (Chinese if title is Chinese, otherwise English).
 
         return {"report_id": report_id, "content": content}
 
-    async def list_reports(self, exam_id: str) -> list[dict]:
+    async def list_reports(self, exam_id: str, tenant_id: str) -> list[dict]:
         rows = await self.db.fetch(
-            "SELECT id, model_id, generated_at FROM exam_analysis_reports WHERE exam_id = $1 ORDER BY generated_at DESC",
-            uuid.UUID(exam_id),
+            """
+            SELECT r.id, r.model_id, r.generated_at
+            FROM exam_analysis_reports r
+            JOIN exams e ON e.id = r.exam_id
+            WHERE r.exam_id = $1 AND e.tenant_id = $2
+            ORDER BY r.generated_at DESC
+            """,
+            uuid.UUID(exam_id), tenant_id,
         )
         return [
             {
@@ -511,10 +517,15 @@ Use the exam language (Chinese if title is Chinese, otherwise English).
             for r in rows
         ]
 
-    async def get_report(self, report_id: str) -> dict | None:
+    async def get_report(self, report_id: str, tenant_id: str) -> dict | None:
         row = await self.db.fetchrow(
-            "SELECT * FROM exam_analysis_reports WHERE id = $1",
-            uuid.UUID(report_id),
+            """
+            SELECT r.*
+            FROM exam_analysis_reports r
+            JOIN exams e ON e.id = r.exam_id
+            WHERE r.id = $1 AND e.tenant_id = $2
+            """,
+            uuid.UUID(report_id), tenant_id,
         )
         if not row:
             return None

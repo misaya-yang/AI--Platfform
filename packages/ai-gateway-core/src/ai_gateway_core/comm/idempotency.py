@@ -16,6 +16,7 @@ class CachedResponse:
     status_code: int
     headers: list[tuple[bytes, bytes]]
     body: bytes
+    request_body_digest: str | None = None
 
 
 class IdempotencyStore(Protocol):
@@ -144,6 +145,7 @@ class RedisIdempotencyStore:
                 for name, value in data.get("headers", [])
             ],
             body=bytes.fromhex(data.get("body_hex", "")),
+            request_body_digest=data.get("request_body_digest"),
         )
 
     async def try_begin(self, key: str, ttl_seconds: int) -> bool:
@@ -184,6 +186,7 @@ class RedisIdempotencyStore:
                     for name, value in response.headers
                 ],
                 "body_hex": response.body.hex(),
+                "request_body_digest": response.request_body_digest,
             },
             separators=(",", ":"),
         )
@@ -209,6 +212,7 @@ class IdempotencyMiddleware:
         ttl_seconds: int = 86_400,
         wait_timeout_seconds: float = 5.0,
         wait_poll_seconds: float = 0.05,
+        max_body_bytes: int = 50 * 1024 * 1024,
         header_name: str = "idempotency-key",
     ) -> None:
         self.app = app
@@ -216,6 +220,7 @@ class IdempotencyMiddleware:
         self.ttl_seconds = max(int(ttl_seconds), 1)
         self.wait_timeout_seconds = max(float(wait_timeout_seconds), 0.0)
         self.wait_poll_seconds = max(float(wait_poll_seconds), 0.001)
+        self.max_body_bytes = max(int(max_body_bytes), 0)
         self.header_name = header_name.lower()
 
     async def __call__(self, scope, receive, send) -> None:
@@ -230,11 +235,19 @@ class IdempotencyMiddleware:
         if not idem_key:
             await self.app(scope, receive, send)
             return
+
+        try:
+            body = await _read_body(receive, max_body_bytes=self.max_body_bytes)
+        except _RequestBodyTooLarge:
+            await _send_plain(send, 413, b"Idempotency request body is too large")
+            return
+
+        request_body_digest = hashlib.sha256(body).hexdigest()
         store_key = _store_key(scope, idem_key)
 
         cached = await self.store.get_cached(store_key)
         if cached is not None:
-            await _send_cached(send, cached)
+            await _send_cached_or_conflict(send, cached, request_body_digest)
             return
 
         owns_request = await self.store.try_begin(store_key, self.ttl_seconds)
@@ -245,12 +258,11 @@ class IdempotencyMiddleware:
                 poll_seconds=self.wait_poll_seconds,
             )
             if cached is not None:
-                await _send_cached(send, cached)
+                await _send_cached_or_conflict(send, cached, request_body_digest)
                 return
             await _send_plain(send, 409, b"Idempotency request still in progress")
             return
 
-        body = await _read_body(receive)
         replay = _ReplayReceive(body)
         status_code = 500
         response_headers: list[tuple[bytes, bytes]] = []
@@ -288,6 +300,7 @@ class IdempotencyMiddleware:
                 status_code=status_code,
                 headers=response_headers,
                 body=b"".join(chunks),
+                request_body_digest=request_body_digest,
             ),
             self.ttl_seconds,
         )
@@ -305,13 +318,22 @@ class _ReplayReceive:
         return {"type": "http.request", "body": self._body, "more_body": False}
 
 
-async def _read_body(receive) -> bytes:
+class _RequestBodyTooLarge(Exception):
+    """Raised when an idempotency-protected request exceeds its replay limit."""
+
+
+async def _read_body(receive, *, max_body_bytes: int) -> bytes:
     chunks: list[bytes] = []
+    total_bytes = 0
     while True:
         message = await receive()
         if message["type"] != "http.request":
             continue
-        chunks.append(message.get("body", b""))
+        chunk = message.get("body", b"")
+        total_bytes += len(chunk)
+        if total_bytes > max_body_bytes:
+            raise _RequestBodyTooLarge
+        chunks.append(chunk)
         if not message.get("more_body", False):
             return b"".join(chunks)
 
@@ -337,6 +359,23 @@ async def _send_cached(send, response: CachedResponse) -> None:
             "more_body": False,
         }
     )
+
+
+async def _send_cached_or_conflict(
+    send,
+    response: CachedResponse,
+    request_body_digest: str,
+) -> None:
+    """Replay only an identical request body for an existing idempotency key."""
+
+    if response.request_body_digest != request_body_digest:
+        await _send_plain(
+            send,
+            409,
+            b"Idempotency key was already used with a different request body",
+        )
+        return
+    await _send_cached(send, response)
 
 
 async def _send_plain(send, status_code: int, body: bytes) -> None:

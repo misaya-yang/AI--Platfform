@@ -310,7 +310,16 @@ export function BindingPagesPanel({
       // Poll if there are pages being processed
       const responseData = query.state.data;
       const pagesList = responseData?.pages || [];
-      const processingStatuses = ["uploaded", "parsing", "segmenting", "embedding", "embedding_images"];
+      const processingStatuses = [
+        "uploaded",
+        "queued",
+        "detecting",
+        "processing",
+        "parsing",
+        "segmenting",
+        "embedding",
+        "embedding_images",
+      ];
       const hasProcessing = pagesList.some(
         (p: { status: string; document_status?: string | null }) =>
           p.status === "pending" ||

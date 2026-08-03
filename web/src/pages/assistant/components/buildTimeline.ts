@@ -77,8 +77,12 @@ const DOC_TOOLS = new Set([
   "create_document",
 ]);
 
-function iconForTool(name: string): TimelineIcon {
-  const n = name.toLowerCase();
+function normalizeToolName(name: unknown): string {
+  return typeof name === "string" ? name.trim() : "";
+}
+
+function iconForTool(name: unknown): TimelineIcon {
+  const n = normalizeToolName(name).toLowerCase();
   if (WEB_TOOLS.has(n) || n.includes("search_web") || n.includes("web_fetch")) return "web";
   if (FILE_WRITE_TOOLS.has(n) || n.includes("write") || n.includes("edit")) return "file_write";
   if (FILE_READ_TOOLS.has(n) || n.includes("read") || n.includes("glob") || n.includes("grep")) return "file_read";
@@ -457,11 +461,18 @@ export function buildTimeline(
   let totalToolMs = 0;
 
   for (const tc of toolCalls) {
-    const icon = iconForTool(tc.name);
+    // Stream events can temporarily arrive out of order. Keep the rendering
+    // boundary total while a later tool_call_start restores the real name.
+    const toolName = normalizeToolName(tc.name);
+    const normalizedToolCall =
+      toolName === tc.name ? tc : { ...tc, name: toolName };
+    const icon = iconForTool(toolName);
     const tr = resultMap.get(tc.id);
     const processTool = processToolMap.get(tc.id);
-    const title = buildToolTitle(t, tc, icon);
-    const body = buildProcessToolBody(t, processTool) ?? buildToolBody(t, tc, tr, icon);
+    const title = buildToolTitle(t, normalizedToolCall, icon);
+    const body =
+      buildProcessToolBody(t, processTool) ??
+      buildToolBody(t, normalizedToolCall, tr, icon);
     const durationMs = tr?.duration_ms ?? processTool?.durationMs;
     if (typeof durationMs === "number") totalToolMs += durationMs;
 
@@ -484,7 +495,7 @@ export function buildTimeline(
     if (icon === "web") {
       const fromResult = tr ? extractSources(tr.result) : [];
       sources = fromResult.length ? fromResult : undefined;
-      if ((!sources || sources.length === 0) && tc.name.toLowerCase().includes("fetch")) {
+      if ((!sources || sources.length === 0) && toolName.toLowerCase().includes("fetch")) {
         const url = asString(tc.arguments?.url);
         if (url) {
           const domain = domainFromUrl(url);
@@ -510,7 +521,7 @@ export function buildTimeline(
       sources,
       durationMs,
       status,
-      toolName: tc.name,
+      toolName: toolName || undefined,
       queryArg: queryArg ?? undefined,
     });
     renderedToolIds.add(tc.id);
@@ -518,17 +529,23 @@ export function buildTimeline(
 
   for (const tool of processSummary?.tools ?? []) {
     if (renderedToolIds.has(tool.id)) continue;
-    const icon = iconForTool(tool.name);
+    const toolName = normalizeToolName(tool.name);
+    const title =
+      toolName ||
+      t("playground.activity.step.toolGenericNoName", {
+        defaultValue: "External tool",
+      });
+    const icon = iconForTool(toolName);
     if (typeof tool.durationMs === "number") totalToolMs += tool.durationMs;
     steps.push({
       kind: "tool",
       id: `process-tool-${tool.id}`,
       icon,
-      title: tool.name,
+      title,
       body: buildProcessToolBody(t, tool) ?? "",
       durationMs: tool.durationMs,
       status: timelineStatusFromProcessTool(tool.status),
-      toolName: tool.name,
+      toolName: toolName || undefined,
     });
   }
 

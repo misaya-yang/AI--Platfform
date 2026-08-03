@@ -1243,7 +1243,7 @@ export function useChatSession() {
         kb_dataset_ids: config.selected_datasets,
         kb_mode: config.selected_datasets?.length ? "auto" : "off",
         kb_top_k: 5,
-        kb_include_images: !!config.selected_datasets?.length,
+        kb_include_images: false,
         web_search_enabled: config.web_search_enabled,
         web_search_max_results: 5,
         file_paths: filePaths.length > 0 ? filePaths : undefined,
@@ -2037,12 +2037,29 @@ export function useChatSession() {
             const toolResultData = event.data as {
               tool_call_id: string;
               tool_name?: string;
-              result: unknown;
-              success: boolean;
+              result?: unknown;
+              result_preview?: unknown;
+              status?: string;
+              success?: boolean;
+              error?: unknown;
               result_count?: number;  // From backend metadata.total_results
               duration_ms?: number;
               timestamp: number;
             };
+            const toolResultStatus = toolResultData.status?.trim().toLowerCase();
+            const toolResultHasError =
+              typeof toolResultData.error === "string"
+                ? toolResultData.error.trim().length > 0
+                : toolResultData.error != null;
+            const toolResultSucceeded =
+              !toolResultHasError &&
+              toolResultData.success !== false &&
+              (toolResultData.success === true ||
+                toolResultStatus === "completed" ||
+                toolResultStatus === "succeeded" ||
+                toolResultStatus === "success");
+            const toolResultValue =
+              toolResultData.result ?? toolResultData.result_preview;
             // Update workingMemory (existing logic)
             setWorkingMemory((prev) => prev ? {
               ...prev,
@@ -2052,8 +2069,8 @@ export function useChatSession() {
                   st.id === toolResultData.tool_call_id
                     ? {
                         ...st,
-                        status: toolResultData.success ? "completed" : "failed",
-                        result: toolResultData.result,
+                        status: toolResultSucceeded ? "completed" : "failed",
+                        result: toolResultValue,
                         durationMs: toolResultData.duration_ms,
                       }
                     : st
@@ -2077,7 +2094,7 @@ export function useChatSession() {
                             s.type === statusType
                               ? {
                                   ...s,
-                                  state: toolResultData.success ? "completed" : "error",
+                                  state: toolResultSucceeded ? "completed" : "error",
                                   resultCount: toolResultData.result_count ?? s.resultCount,
                                   durationMs: toolResultData.duration_ms,
                                 }
@@ -2099,11 +2116,14 @@ export function useChatSession() {
                   tools: upsertTool(prev.tools, {
                     id: toolResultData.tool_call_id,
                     name: existing?.name || toolResultData.tool_name || "tool",
-                    status: toolResultData.success ? "completed" : "error",
+                    status: toolResultSucceeded ? "completed" : "error",
                     finishedAt: toolResultData.timestamp ?? now,
                     durationMs: toolResultData.duration_ms,
-                    summary: summarizeToolResult(toolResultData.result),
-                    error: toolResultData.success ? undefined : summarizeToolResult(toolResultData.result),
+                    summary: summarizeToolResult(toolResultValue),
+                    error: toolResultSucceeded
+                      ? undefined
+                      : summarizeToolResult(toolResultData.error) ??
+                        summarizeToolResult(toolResultValue),
                   }),
                 },
               };
@@ -2556,11 +2576,36 @@ export function useChatSession() {
             
           case "error":
             const errData = event.data as any;
+            const streamErrorMessage =
+              errData?.message || "Unknown error";
             streamTurnState = failStreamTurn(
               streamTurnState,
-              errData?.message || "Unknown error",
+              streamErrorMessage,
               now
             );
+            // A provider can disconnect after already streaming useful text.
+            // Keep that partial answer, but make the terminal failure visible
+            // instead of leaving a sentence cut off with no explanation.
+            const interruptionNotice = t(
+              "assistant.streamInterrupted",
+              "The response stream was interrupted. The generated content above was preserved; please retry."
+            );
+            if (!streamTurnState.content.includes(interruptionNotice)) {
+              streamTurnState = {
+                ...streamTurnState,
+                content: streamTurnState.content.trimEnd()
+                  ? `${streamTurnState.content.trimEnd()}\n\n> ⚠️ ${interruptionNotice}`
+                  : `⚠️ ${interruptionNotice}`,
+              };
+            }
+            updateAssistantMessage((m) => ({
+              ...m,
+              processSummary: finalizeProcessSummary(
+                m.processSummary,
+                "failed",
+                now
+              ),
+            }));
             syncTurnStateToMessage();
             break;
         }

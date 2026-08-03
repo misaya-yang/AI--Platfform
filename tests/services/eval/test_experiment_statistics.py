@@ -35,6 +35,9 @@ def _run(
     manifest: str = "manifest-a",
     prompt: str = "prompt-a",
 ) -> dict[str, Any]:
+    case_count = 12
+    failed_case_count = max(0, min(errors, case_count))
+    critical_failed_count = min(failed_case_count, 1)
     return {
         "run_id": run_id,
         "experiment_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -44,9 +47,22 @@ def _run(
         "dataset_manifest_hash": manifest,
         "evaluator_suite_hash": "suite-a",
         "score_summary": {
+            "schema_version": "eval-gate-metrics/v2",
+            "case_count": case_count,
+            "score_sum": score * case_count,
+            "failed_case_count": failed_case_count,
             "overall_score": score,
+            "pass_rate": (case_count - failed_case_count) / case_count,
+            "trajectory_case_count": case_count,
+            "trajectory_failed_count": failed_case_count,
+            "trajectory_pass_rate": (case_count - failed_case_count) / case_count,
+            "critical_case_count": 1,
+            "critical_failed_count": critical_failed_count,
+            "critical_pass_rate": 1.0 - critical_failed_count,
+            "stateful_case_count": 0,
+            "stateful_failed_count": 0,
+            "stateful_pass_rate": None,
             "behavior_pass_rate": 1.0,
-            "critical_pass_rate": 1.0,
             "flaky_rate": 0.0,
         },
         "metrics": {
@@ -235,3 +251,22 @@ async def test_compare_blocks_explicit_performance_constraint_and_manifest_misma
         "dataset_manifest_mismatch",
         "explicit_performance_constraint_failed",
     }
+
+
+@pytest.mark.asyncio
+async def test_compare_rejects_forged_versioned_gate_metrics() -> None:
+    baseline = _run("baseline")
+    candidate = _run("candidate")
+    candidate["score_summary"]["failed_case_count"] = 1
+    repository = _ComparisonRepository(baseline, candidate, _cases(), _cases())
+
+    comparison = await repository.compare_experiment_runs(
+        tenant_id="tenant-a",
+        baseline_run_id="baseline",
+        candidate_run_id="candidate",
+    )
+
+    assert comparison is not None
+    assert comparison["compatibility"]["compatible"] is False
+    assert "candidate_gate_metrics_unverifiable" in comparison["compatibility"]["reasons"]
+    assert comparison["gate"]["status"] == "fail"

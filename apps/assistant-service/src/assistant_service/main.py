@@ -210,6 +210,13 @@ async def lifespan(app: FastAPI):
             os.environ.get("VERTEX_BASE_URL") or "https://aiplatform.googleapis.com",
         ),
     }
+    provider_wire_protocols = {
+        "openai": os.environ.get("OPENAI_WIRE_PROTOCOL", "chat_completions"),
+        "dashscope": os.environ.get(
+            "DASHSCOPE_CHAT_WIRE_PROTOCOL",
+            "chat_completions",
+        ),
+    }
 
     for pid, (api_key, base_url) in providers_config.items():
         if not api_key:
@@ -219,6 +226,8 @@ async def lifespan(app: FastAPI):
             kwargs = {"api_key": api_key, "base_url": base_url}
             if pid == "google":
                 kwargs["backend"] = google_backend
+            if pid in provider_wire_protocols:
+                kwargs["wire_protocol"] = provider_wire_protocols[pid]
             model_registry.configure_provider(ModelProvider(pid), **kwargs)
             logger.info(f"Provider {pid} configured")
         except ValueError:
@@ -229,27 +238,19 @@ async def lifespan(app: FastAPI):
     # Load models from database
     if database and getattr(database, "_pool", None):
         try:
-            from .core.models.model_registry import ModelInfo
-
             async with database._pool.acquire() as conn:
                 rows = await conn.fetch(
-                    "SELECT model_id, display_name, provider_id, context_window, max_output_tokens "
+                    "SELECT model_id, display_name, provider_id, context_window, max_output_tokens, access_level "
                     "FROM llm_models WHERE tenant_id = $1 AND is_enabled = true "
                     "ORDER BY sort_order ASC, model_id ASC",
                     "default",
                 )
                 if rows:
-                    model_registry._models.clear()
-                    for r in rows:
-                        with suppress(ValueError):
-                            model_registry._models[r["model_id"]] = ModelInfo(
-                                id=r["model_id"],
-                                provider=ModelProvider(r["provider_id"]),
-                                name=r["display_name"] or r["model_id"],
-                                context_window=r["context_window"] or 32000,
-                                max_output_tokens=r["max_output_tokens"] or 4096,
-                            )
-                    logger.info(f"Loaded {len(rows)} models from DB")
+                    loaded_count = model_registry.replace_models_from_database_rows(
+                        rows,
+                        default_context_window=32000,
+                    )
+                    logger.info("Loaded %s models from DB", loaded_count)
         except Exception as e:
             logger.warning(f"DB model load failed: {e}")
 
@@ -318,6 +319,24 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Memory service init failed: {e}")
 
+    # Runtime memory/index/skill dependencies are process-scoped. Build the
+    # adapter once and share it with both the memory tool and every AgentLoop.
+    assistant_runtime_adapter = None
+    assistant_runtime_adapter_unavailable = False
+    if database is not None:
+        try:
+            from .core.runtime.compat.runtime_adapter import AssistantRuntimeAdapter
+
+            assistant_runtime_adapter = AssistantRuntimeAdapter.from_env(database=database)
+            logger.info("Assistant runtime adapter initialized")
+        except Exception as exc:
+            assistant_runtime_adapter_unavailable = True
+            logger.error(
+                "assistant.runtime_adapter_init_failed (exception_type=%s)",
+                type(exc).__name__,
+            )
+    app.state.assistant_runtime_adapter = assistant_runtime_adapter
+
     # ── Session Manager ──
     session_manager = None
     if database:
@@ -342,7 +361,7 @@ async def lifespan(app: FastAPI):
     register_builtin_tools(
         kb_service=kb_proxy,
         memory_service=memory_service,
-        database=database,
+        runtime_adapter=assistant_runtime_adapter,
     )
     register_document_generation_tool()
     with suppress(Exception):
@@ -429,6 +448,16 @@ async def lifespan(app: FastAPI):
 
             file_storage = NoOpFileStorage()
 
+    # One invoker owns the process-local result cache and policy/MCP adapters;
+    # the gateway and all per-request AgentLoop instances reuse this identity.
+    from .core.tool_invoker import create_tool_invoker
+
+    tool_invoker = create_tool_invoker(
+        tenant_tool_policy=tenant_tool_policy,
+        mcp_runtime=mcp_runtime,
+    )
+    app.state.tool_invoker = tool_invoker
+
     assistant_service = AssistantService(
         model_registry=model_registry,
         kb_service=None,
@@ -443,6 +472,9 @@ async def lifespan(app: FastAPI):
         file_storage=file_storage,
         mcp_runtime=mcp_runtime,
         tenant_tool_policy=tenant_tool_policy,
+        runtime_adapter=assistant_runtime_adapter,
+        tool_invoker=tool_invoker,
+        runtime_adapter_unavailable=assistant_runtime_adapter_unavailable,
     )
     app.state.assistant_service = assistant_service
     app.state.session_manager = session_manager
@@ -453,6 +485,8 @@ async def lifespan(app: FastAPI):
             AgentRuntimeMemoryCleanupService,
         )
 
+        # Governance cleanup intentionally keeps a separate adapter because it
+        # injects a deletion/readback-only Qdrant client with stricter receipts.
         app.state.runtime_memory_cleanup_service = AgentRuntimeMemoryCleanupService.from_env(
             database=database
         )
@@ -632,6 +666,15 @@ app.add_middleware(
 # the env MUST be set and ``ASSISTANT_APP__ALLOW_ANONYMOUS`` MUST be
 # ``false`` for the middleware to actively reject.
 _gateway_secret_env = os.environ.get("GATEWAY_ASSISTANT_SHARED_SECRET", "").strip()
+from ai_gateway_core.auth.gateway_secret_middleware import (  # noqa: E402
+    validate_gateway_auth_configuration,
+)
+
+validate_gateway_auth_configuration(
+    secret=_gateway_secret_env,
+    allow_anonymous=settings.app.allow_anonymous,
+    allow_anonymous_setting="ASSISTANT_APP__ALLOW_ANONYMOUS",
+)
 if _gateway_secret_env:
     from ai_gateway_core.auth.gateway_secret import GatewaySecret
 

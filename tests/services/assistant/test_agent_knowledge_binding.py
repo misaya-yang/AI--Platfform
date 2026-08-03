@@ -441,7 +441,7 @@ async def test_kb_executor_applies_sealed_config_per_dataset() -> None:
         def __init__(self) -> None:
             self.calls: list[dict[str, Any]] = []
 
-        async def retrieve_with_images_v2(self, **kwargs):
+        async def retrieve(self, **kwargs):
             self.calls.append(dict(kwargs))
             return [], {"dataset_name": kwargs["dataset_id"]}
 
@@ -470,7 +470,7 @@ async def test_kb_executor_applies_sealed_config_per_dataset() -> None:
                         "mode": "tool",
                         "top_k": 17,
                         "threshold": 0.85,
-                        "include_images": True,
+                        "include_images": False,
                     },
                 }
             },
@@ -484,11 +484,11 @@ async def test_kb_executor_applies_sealed_config_per_dataset() -> None:
     assert calls["dataset-a"]["include_images"] is False
     assert calls["dataset-b"]["top_k"] == 17
     assert calls["dataset-b"]["score_threshold"] == 0.85
-    assert calls["dataset-b"]["include_images"] is True
+    assert calls["dataset-b"]["include_images"] is False
 
 
 @pytest.mark.asyncio
-async def test_auto_rag_applies_sealed_config_per_dataset() -> None:
+async def test_auto_rag_rejects_unreleased_image_config_before_retrieval() -> None:
     class RecordingKnowledge:
         def __init__(self) -> None:
             self.calls: list[dict[str, Any]] = []
@@ -518,37 +518,31 @@ async def test_auto_rag_applies_sealed_config_per_dataset() -> None:
     service = object.__new__(AssistantService)
     service.kb_service = knowledge
 
-    contexts = await service._retrieve_context(  # noqa: SLF001
-        user=SimpleNamespace(user_id="user-a", tenant_id="tenant-a"),
-        query="exact auto config",
-        dataset_ids=["dataset-a", "dataset-b"],
-        top_k=1,
-        score_threshold=0.99,
-        include_images=False,
-        retrieval_configs={
-            "dataset-a": {
-                "mode": "auto",
-                "top_k": 4,
-                "threshold": 0.2,
-                "include_images": False,
+    with pytest.raises(ValueError, match="AGENT_KNOWLEDGE_CONFIG_INVALID"):
+        await service._retrieve_context(  # noqa: SLF001
+            user=SimpleNamespace(user_id="user-a", tenant_id="tenant-a"),
+            query="exact auto config",
+            dataset_ids=["dataset-a", "dataset-b"],
+            top_k=1,
+            score_threshold=0.99,
+            include_images=False,
+            retrieval_configs={
+                "dataset-a": {
+                    "mode": "auto",
+                    "top_k": 4,
+                    "threshold": 0.2,
+                    "include_images": False,
+                },
+                "dataset-b": {
+                    "mode": "auto",
+                    "top_k": 17,
+                    "threshold": 0.85,
+                    "include_images": True,
+                },
             },
-            "dataset-b": {
-                "mode": "auto",
-                "top_k": 17,
-                "threshold": 0.85,
-                "include_images": True,
-            },
-        },
-    )
+        )
 
-    assert len(contexts) == 2
-    calls = {call["dataset_id"]: call for call in knowledge.calls}
-    assert calls["dataset-a"]["method"] == "text"
-    assert calls["dataset-a"]["top_k"] == 4
-    assert calls["dataset-a"]["score_threshold"] == 0.2
-    assert calls["dataset-b"]["method"] == "images"
-    assert calls["dataset-b"]["top_k"] == 17
-    assert calls["dataset-b"]["score_threshold"] == 0.85
+    assert knowledge.calls == []
 
 
 @pytest.mark.asyncio

@@ -37,11 +37,13 @@ def _context(
     session_id: str = "session-1",
     scope_id: str | None = None,
     kb_dataset_ids: list[str] | None = None,
+    tenant_id: str = "tenant-1",
+    user_id: str = "user-1",
 ) -> ToolInvocationContext:
     return ToolInvocationContext(
         session_id=session_id,
-        user_id="user-1",
-        tenant_id="tenant-1",
+        user_id=user_id,
+        tenant_id=tenant_id,
         request_id="request-1",
         capability_allowlist=allowlist,
         scope_id=scope_id,
@@ -174,6 +176,68 @@ async def test_agent_scope_prevents_cross_runtime_cache_reuse() -> None:
     assert second.success is True
     assert second.metadata.get("cache_hit") is not True
     assert calls["search_knowledge_base"] == 2
+
+
+@pytest.mark.asyncio
+async def test_result_cache_does_not_cross_tenants_with_same_scope() -> None:
+    registry, calls = _registry_with_executors("search_knowledge_base")
+    invoker = RegistryToolInvoker(tool_registry=registry)
+    arguments = {"input": "same-query"}
+
+    first = await invoker.invoke(
+        "search_knowledge_base",
+        arguments,
+        _context(None, scope_id="shared-agent", tenant_id="tenant-a"),
+    )
+    second = await invoker.invoke(
+        "search_knowledge_base",
+        arguments,
+        _context(None, scope_id="shared-agent", tenant_id="tenant-b"),
+    )
+
+    assert first.success is True
+    assert second.success is True
+    assert second.metadata.get("cache_hit") is not True
+    assert calls["search_knowledge_base"] == 2
+
+
+@pytest.mark.asyncio
+async def test_result_cache_does_not_cross_users_with_same_scope() -> None:
+    registry, calls = _registry_with_executors("search_knowledge_base")
+    invoker = RegistryToolInvoker(tool_registry=registry)
+    arguments = {"input": "same-query"}
+
+    first = await invoker.invoke(
+        "search_knowledge_base",
+        arguments,
+        _context(None, scope_id="shared-agent", user_id="user-a"),
+    )
+    second = await invoker.invoke(
+        "search_knowledge_base",
+        arguments,
+        _context(None, scope_id="shared-agent", user_id="user-b"),
+    )
+
+    assert first.success is True
+    assert second.success is True
+    assert second.metadata.get("cache_hit") is not True
+    assert calls["search_knowledge_base"] == 2
+
+
+@pytest.mark.asyncio
+async def test_result_cache_reuses_same_principal_and_scope() -> None:
+    registry, calls = _registry_with_executors("search_knowledge_base")
+    invoker = RegistryToolInvoker(tool_registry=registry)
+    context = _context(None, scope_id="shared-agent")
+    arguments = {"input": "same-query"}
+
+    first = await invoker.invoke("search_knowledge_base", arguments, context)
+    second = await invoker.invoke("search_knowledge_base", arguments, context)
+
+    assert first.success is True
+    assert second.success is True
+    assert second.metadata.get("cache_hit") is True
+    assert calls["search_knowledge_base"] == 1
 
 
 @pytest.mark.asyncio

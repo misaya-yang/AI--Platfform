@@ -29,23 +29,24 @@ class HierarchicalStrategy(str, Enum):
 class DatasetCreateSchema(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    dataset_id: str | None = None
-    name: str
-    description: str | None = ""
+    dataset_id: str | None = Field(default=None, min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default="", max_length=8_000)
     visibility: str = "private"  # private|tenant|public
 
     # KB type and use case (multimodal support)
     kb_type: str = "document"  # document|data|image|audio_video
     use_case: str = "basic_qa"  # basic_qa|rich_text_response
 
-    # Text-First RAG: Default to Gemini embedding
-    embedding_provider: str = "gemini"  # gemini|dashscope|local
-    embedding_model: str = "gemini-embedding-001"
-    embedding_dimension: int | None = 1024  # Gemini supports 768/1024/1536/3072
+    # The open-source quickstart is DashScope-first.  Optional providers remain
+    # selectable, but an omitted provider must work with the only required key.
+    embedding_provider: str = Field(default="dashscope", min_length=1, max_length=64)
+    embedding_model: str = Field(default="text-embedding-v4", min_length=1, max_length=256)
+    embedding_dimension: int | None = Field(default=1024, ge=1, le=8192)
     embedding_config: dict[str, Any] = Field(default_factory=dict)
 
     index_config: dict[str, Any] = Field(default_factory=dict)
-    collection_name: str | None = None
+    collection_name: str | None = Field(default=None, min_length=1, max_length=255)
     indexing_technique: str = "high_quality"  # high_quality|economy
 
     # Optional process rules
@@ -55,14 +56,14 @@ class DatasetCreateSchema(BaseModel):
 class DatasetUpdateSchema(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    name: str | None = None
-    description: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=8_000)
     visibility: str | None = None
     kb_type: str | None = None  # document|data|image|audio_video
     use_case: str | None = None  # basic_qa|rich_text_response
-    embedding_provider: str | None = None
-    embedding_model: str | None = None
-    embedding_dimension: int | None = None
+    embedding_provider: str | None = Field(default=None, min_length=1, max_length=64)
+    embedding_model: str | None = Field(default=None, min_length=1, max_length=256)
+    embedding_dimension: int | None = Field(default=None, ge=1, le=8192)
     embedding_config: dict[str, Any] | None = None
     index_config: dict[str, Any] | None = None
     indexing_technique: str | None = None
@@ -123,22 +124,22 @@ class ProcessRuleSchema(BaseModel):
 class DocumentCreateTextSchema(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    title: str
-    content: str
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    title: str = Field(min_length=1, max_length=512)
+    content: str = Field(min_length=1, max_length=200_000)
+    metadata: dict[str, Any] = Field(default_factory=dict, max_length=64)
 
     # Optional process rule override
     process_rule: ProcessRuleSchema | None = None
     doc_form: str = "text_model"  # text_model|qa_model
-    doc_language: str | None = None
+    doc_language: str | None = Field(default=None, max_length=64)
 
 
 class DocumentCreateUrlSchema(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    url: str
-    title: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    url: str = Field(min_length=1, max_length=2_048)
+    title: str | None = Field(default=None, max_length=512)
+    metadata: dict[str, Any] = Field(default_factory=dict, max_length=64)
 
     # Optional process rule override
     process_rule: ProcessRuleSchema | None = None
@@ -149,18 +150,24 @@ class DocumentBatchCreateSchema(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    documents: list[DocumentCreateTextSchema] = Field(default_factory=list)
+    documents: list[DocumentCreateTextSchema] = Field(min_length=1, max_length=50)
     process_rule: ProcessRuleSchema | None = None
-    batch_name: str | None = None
+    batch_name: str | None = Field(default=None, max_length=256)
+
+    @model_validator(mode="after")
+    def _validate_aggregate_text_size(self) -> Self:
+        if sum(len(document.content) for document in self.documents) > 2_000_000:
+            raise ValueError("batch document content exceeds 2000000 characters")
+        return self
 
 
 class DocumentUpdateSchema(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    title: str | None = None
-    metadata: dict[str, Any] | None = None
-    doc_type: str | None = None
-    doc_language: str | None = None
+    title: str | None = Field(default=None, min_length=1, max_length=512)
+    metadata: dict[str, Any] | None = Field(default=None, max_length=64)
+    doc_type: str | None = Field(default=None, max_length=64)
+    doc_language: str | None = Field(default=None, max_length=64)
 
 
 class DocumentEnableDisableSchema(BaseModel):
@@ -173,16 +180,79 @@ class DocumentArchiveSchema(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     archived: bool
-    reason: str | None = None
+    reason: str | None = Field(default=None, max_length=2_000)
+
+
+def _validate_retrieval_fusion_parameters(value: Any) -> None:
+    """Validate request-level fusion knobs before either retrieval path sees them."""
+
+    rrf_k = getattr(value, "rrf_k", None)
+    if rrf_k is not None and (
+        isinstance(rrf_k, bool) or not 1 <= int(rrf_k) <= 10_000
+    ):
+        raise ValueError("rrf_k must be between 1 and 10000")
+
+    resolved_weights: list[tuple[str, float]] = []
+    for field_name in ("dense_weight", "bm25_weight"):
+        field_value = getattr(value, field_name, None)
+        if field_value is None:
+            continue
+        numeric = float(field_value)
+        if not math.isfinite(numeric) or numeric < 0.0:
+            raise ValueError(f"{field_name} must be finite and non-negative")
+        resolved_weights.append((field_name, numeric))
+    if len(resolved_weights) == 2 and not any(weight > 0.0 for _, weight in resolved_weights):
+        raise ValueError("at least one dense_weight or bm25_weight must be positive")
+
+    alpha = getattr(value, "alpha", None)
+    if alpha is not None:
+        numeric_alpha = float(alpha)
+        if not math.isfinite(numeric_alpha) or not 0.0 <= numeric_alpha <= 1.0:
+            raise ValueError("alpha must be finite and between 0 and 1")
+
+    rrf_weights = getattr(value, "rrf_weights", None)
+    if isinstance(rrf_weights, dict) and rrf_weights:
+        normalized_weights: list[float] = []
+        for weight in rrf_weights.values():
+            numeric = float(weight)
+            if not math.isfinite(numeric) or numeric < 0.0:
+                raise ValueError("rrf_weights values must be finite and non-negative")
+            normalized_weights.append(numeric)
+        if not any(weight > 0.0 for weight in normalized_weights):
+            raise ValueError("at least one rrf_weights value must be positive")
+
+
+def _reject_unreleased_multimodal_options(value: Any) -> None:
+    """Keep every public retrieval contract text-only for this release."""
+
+    if (
+        bool(getattr(value, "include_images", False))
+        or bool(getattr(value, "include_associated_images", False))
+        or bool(getattr(value, "multimodal_rerank", False))
+        or bool(getattr(value, "use_separate_thresholds", False))
+        or str(getattr(value, "content_type_filter", "") or "").strip().lower()
+        == "image"
+        or getattr(value, "vlm_rerank_weight", None) is not None
+        or getattr(value, "image_boost", None) is not None
+        or getattr(value, "image_score_threshold", None) is not None
+    ):
+        raise ValueError("multimodal retrieval is not enabled for this release")
+
+    supplied_fields = getattr(value, "model_fields_set", set())
+    if (
+        "image_search_enabled" in supplied_fields
+        and bool(getattr(value, "image_search_enabled", False))
+    ):
+        raise ValueError("multimodal retrieval is not enabled for this release")
 
 
 class RetrieveRequestSchema(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    query: str
-    top_k: int = 5
+    query: str = Field(min_length=1, max_length=4096)
+    top_k: int = Field(default=5, ge=1, le=100)
     mode: str = "hybrid"  # dense|bm25|hybrid (also accepts: keyword|vector for backwards compat)
-    document_id: str | None = None
+    document_id: str | None = Field(default=None, min_length=1, max_length=256)
 
     # Fusion weights for hybrid mode (0-1, sum to 1)
     dense_weight: float | None = None  # Weight for dense (vector) scores
@@ -196,19 +266,19 @@ class RetrieveRequestSchema(BaseModel):
     # Default 0.0 means no filtering. Recommended: 0.3-0.5 for keyword, 0.5-0.7 for vector
     score_threshold: float | None = None
 
-    # Advanced retrieval options (request-level overrides; dataset defaults in index_config.retrieval)
-    vector_top_k: int | None = None
-    keyword_top_k: int | None = None
-    candidate_top_k: int | None = None
-    keyword_candidate_k: int | None = None
+    # Advanced request overrides; dataset defaults live in index_config.retrieval.
+    vector_top_k: int | None = Field(default=None, ge=1, le=1000)
+    keyword_top_k: int | None = Field(default=None, ge=1, le=1000)
+    candidate_top_k: int | None = Field(default=None, ge=1, le=2000)
+    keyword_candidate_k: int | None = Field(default=None, ge=1, le=500)
 
     fusion: str | None = None  # Legacy: rrf|alpha (hybrid only)
-    rrf_k: int | None = None
-    rrf_weights: dict[str, float] = Field(default_factory=dict)  # Legacy
+    rrf_k: int | None = Field(default=None, ge=1, le=10_000)
+    rrf_weights: dict[str, float] = Field(default_factory=dict, max_length=16)  # Legacy
 
     rerank: bool | None = None
-    rerank_model: str | None = None
-    rerank_top_n: int | None = None
+    rerank_model: str | None = Field(default=None, min_length=1, max_length=256)
+    rerank_top_n: int | None = Field(default=None, ge=1, le=1000)
 
     mmr: bool | None = None
     mmr_lambda: float | None = None
@@ -221,23 +291,29 @@ class RetrieveRequestSchema(BaseModel):
     content_type_filter: str | None = None  # Filter by content type: text|image|None (all)
 
     # Advanced multimodal parameters (Phase 2 optimization)
-    image_search_enabled: bool = True  # Directly search image segments (not just associated)
+    image_search_enabled: bool = False  # Reserved until multimodal serving is released
     vlm_rerank_weight: float | None = None  # Weight of VLM score (0.0-1.0), default 0.4
     image_boost: float | None = None  # Boost factor for image results (>1 = prefer images)
     image_score_threshold: float | None = None  # Score threshold for images (lower than text)
     use_separate_thresholds: bool = False  # Use different thresholds for text vs image
 
     # Source/metadata filters
-    source_type_filter: str | None = None
-    language_filter: str | None = None  # Filter by language: ar|en|ar_en
-    metadata_filter: dict[str, Any] | None = None  # Exact-match metadata filter
+    source_type_filter: str | None = Field(default=None, max_length=128)
+    language_filter: str | None = Field(default=None, max_length=64)
+    metadata_filter: dict[str, Any] | None = Field(default=None, max_length=64)
 
     # Hierarchical retrieval options (for large document collections)
     hierarchical: bool = False  # Enable hierarchical 3-level retrieval
     hierarchical_strategy: HierarchicalStrategy = HierarchicalStrategy.CASCADE
-    l1_top_k: int = 5  # Documents to consider at L1 (summary level)
-    l2_top_k: int = 10  # Sections to consider at L2 (section level)
+    l1_top_k: int = Field(default=5, ge=1, le=100)
+    l2_top_k: int = Field(default=10, ge=1, le=200)
     include_context: bool = True  # Include parent context in L3 results
+
+    @model_validator(mode="after")
+    def _validate_production_fusion_parameters(self) -> Self:
+        _validate_retrieval_fusion_parameters(self)
+        _reject_unreleased_multimodal_options(self)
+        return self
 
 
 RetrievalEvalGrade = Annotated[
@@ -408,15 +484,28 @@ class RetrievalEvalRequestSchema(RetrieveRequestSchema):
             },
         )
         if multimodal is not None:
+            # Disabled preset blocks retain dormant tuning values for backward
+            # compatible serialization, but those values must not be promoted
+            # into an executable public request. Any enabled block or active
+            # boolean/content selector is still surfaced to the after-validator
+            # and rejected by the release-wide text-only gate.
+            multimodal_enabled = bool(multimodal.get("enabled", False))
+            if multimodal_enabled:
+                data.setdefault("include_images", True)
             mappings = {
                 "image_search_enabled": "image_search_enabled",
-                "image_score_threshold": "image_score_threshold",
                 "use_separate_thresholds": "use_separate_thresholds",
-                "image_boost": "image_boost",
                 "vlm_rerank_enabled": "multimodal_rerank",
-                "vlm_rerank_weight": "vlm_rerank_weight",
                 "content_type_filter": "content_type_filter",
             }
+            if multimodal_enabled:
+                mappings.update(
+                    {
+                        "image_score_threshold": "image_score_threshold",
+                        "image_boost": "image_boost",
+                        "vlm_rerank_weight": "vlm_rerank_weight",
+                    }
+                )
             for source, target in mappings.items():
                 if multimodal.get(source) is not None:
                     data.setdefault(target, multimodal[source])
@@ -551,9 +640,16 @@ class RetrieveResponseSchema(BaseModel):
 class SegmentUpdateSchema(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    text: str
-    answer: str | None = None  # For Q&A mode
-    keywords: list[str] | None = None
+    text: str = Field(min_length=1, max_length=200_000)
+    answer: str | None = Field(default=None, max_length=200_000)
+    keywords: list[str] | None = Field(default=None, max_length=100)
+
+    @field_validator("keywords")
+    @classmethod
+    def _validate_update_keywords(cls, values: list[str] | None) -> list[str] | None:
+        if values is not None and any(not value or len(value) > 256 for value in values):
+            raise ValueError("keywords must contain 1-256 characters")
+        return values
 
 
 class SegmentCreateSchema(BaseModel):
@@ -561,9 +657,16 @@ class SegmentCreateSchema(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    content: str
-    answer: str | None = None  # For Q&A mode
-    keywords: list[str] | None = None
+    content: str = Field(min_length=1, max_length=200_000)
+    answer: str | None = Field(default=None, max_length=200_000)
+    keywords: list[str] | None = Field(default=None, max_length=100)
+
+    @field_validator("keywords")
+    @classmethod
+    def _validate_create_keywords(cls, values: list[str] | None) -> list[str] | None:
+        if values is not None and any(not value or len(value) > 256 for value in values):
+            raise ValueError("keywords must contain 1-256 characters")
+        return values
 
 
 class SegmentEnableDisableSchema(BaseModel):
@@ -577,8 +680,16 @@ class SegmentBatchEnableDisableSchema(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    segment_ids: list[str]
+    segment_ids: list[str] = Field(min_length=1, max_length=500)
     enabled: bool
+
+    @field_validator("segment_ids")
+    @classmethod
+    def _validate_segment_ids(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip() for value in values]
+        if any(not value or len(value) > 256 for value in normalized):
+            raise ValueError("segment IDs must contain 1-256 characters")
+        return normalized
 
 
 # ============================================================
@@ -640,7 +751,7 @@ class BatchReindexSchema(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    document_ids: list[str] = Field(default_factory=list)
+    document_ids: list[str] = Field(default_factory=list, max_length=100)
     all_documents: bool = False  # If true, reindex all documents in dataset
 
 
@@ -649,7 +760,7 @@ class BatchDeleteSchema(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    document_ids: list[str]
+    document_ids: list[str] = Field(min_length=1, max_length=100)
 
 
 class BatchOperationResultSchema(BaseModel):
@@ -667,36 +778,39 @@ class BatchOperationResultSchema(BaseModel):
 
 
 class LLMConfigSchema(BaseModel):
-    """LLM configuration for QA testing"""
+    """Non-secret QA generation preferences.
 
-    model_config = ConfigDict(extra="allow")
+    Provider credentials and endpoints are server-owned.  Allowing a viewer to
+    pair an arbitrary endpoint with a server credential turns the QA test route
+    into an SSRF and credential-exfiltration primitive.
+    """
 
-    provider: str = "gemini"  # gemini | deepseek | dashscope
-    model: str = "gemini-2.0-flash"
-    api_key: str | None = None
-    base_url: str | None = None
-    temperature: float = 0.1
-    max_tokens: int = 2048
-    system_prompt: str | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str | None = None
+    model: str | None = None
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(default=None, ge=1, le=4096)
+    system_prompt: str | None = Field(default=None, max_length=4_000)
 
 
 class QAQuerySchema(BaseModel):
     """Request schema for QA query"""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
-    query: str
-    top_k: int = 5
+    query: str = Field(min_length=1, max_length=4_096)
+    top_k: int = Field(default=5, ge=1, le=100)
     mode: str = "hybrid"
     fusion_method: str | None = None
-    dense_weight: float | None = None
-    bm25_weight: float | None = None
-    score_threshold: float | None = None
+    dense_weight: float | None = Field(default=None, ge=0.0, le=1.0)
+    bm25_weight: float | None = Field(default=None, ge=0.0, le=1.0)
+    score_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
     document_id: str | None = None
     rerank: bool = False
-    rerank_top_n: int | None = None
+    rerank_top_n: int | None = Field(default=None, ge=1, le=200)
     mmr: bool = False
-    mmr_lambda: float | None = None
+    mmr_lambda: float | None = Field(default=None, ge=0.0, le=1.0)
 
     # LLM config override
     llm_config: LLMConfigSchema | None = None
@@ -720,20 +834,23 @@ class QAResultSchema(BaseModel):
 class QATestCaseSchema(BaseModel):
     """Test case for QA evaluation"""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
-    query: str
-    expected_answer: str | None = None
-    expected_segments: list[str] | None = None  # segment_ids
+    query: str = Field(min_length=1, max_length=4_096)
+    expected_answer: str | None = Field(default=None, max_length=20_000)
+    expected_segments: list[str] | None = Field(
+        default=None,
+        max_length=200,
+    )  # segment_ids
 
 
 class QABatchTestSchema(BaseModel):
     """Batch QA test request"""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
-    test_cases: list[QATestCaseSchema]
-    top_k: int = 5
+    test_cases: list[QATestCaseSchema] = Field(min_length=1, max_length=10)
+    top_k: int = Field(default=5, ge=1, le=100)
     mode: str = "hybrid"
     rerank: bool = False
     mmr: bool = False
@@ -769,30 +886,36 @@ class BatchRetrieveQuerySchema(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    query: str
-    document_id: str | None = None
+    query: str = Field(min_length=1, max_length=4096)
+    document_id: str | None = Field(default=None, min_length=1, max_length=256)
     mode: str | None = None
     fusion_method: str | None = None
     alpha: float | None = None
     dense_weight: float | None = None
     bm25_weight: float | None = None
-    rrf_k: int | None = None
-    vector_top_k: int | None = None
-    keyword_top_k: int | None = None
-    candidate_top_k: int | None = None
-    keyword_candidate_k: int | None = None
+    rrf_k: int | None = Field(default=None, ge=1, le=10_000)
+    vector_top_k: int | None = Field(default=None, ge=1, le=1000)
+    keyword_top_k: int | None = Field(default=None, ge=1, le=1000)
+    candidate_top_k: int | None = Field(default=None, ge=1, le=2000)
+    keyword_candidate_k: int | None = Field(default=None, ge=1, le=500)
     rerank: bool | None = None
-    rerank_model: str | None = None
-    rerank_top_n: int | None = None
+    rerank_model: str | None = Field(default=None, min_length=1, max_length=256)
+    rerank_top_n: int | None = Field(default=None, ge=1, le=1000)
     mmr: bool | None = None
     mmr_lambda: float | None = None
     mmr_threshold: float | None = None
     score_threshold: float | None = None
-    source_type_filter: str | None = None
-    language_filter: str | None = None
-    metadata_filter: dict[str, Any] | None = None
+    source_type_filter: str | None = Field(default=None, max_length=128)
+    language_filter: str | None = Field(default=None, max_length=64)
+    metadata_filter: dict[str, Any] | None = Field(default=None, max_length=64)
     include_images: bool | None = None
     include_associated_images: bool | None = None
+
+    @model_validator(mode="after")
+    def _validate_query_fusion_parameters(self) -> Self:
+        _validate_retrieval_fusion_parameters(self)
+        _reject_unreleased_multimodal_options(self)
+        return self
 
 
 class BatchRetrieveRequestSchema(BaseModel):
@@ -807,13 +930,15 @@ class BatchRetrieveRequestSchema(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    queries: list[str | BatchRetrieveQuerySchema] | None = (
-        None  # List of queries for batch retrieval
+    queries: list[str | BatchRetrieveQuerySchema] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=20,
     )
-    query: str | None = None  # Single query or comma-separated queries
-    top_k: int | None = None  # Explicit override; otherwise derived from unique query count
+    query: str | None = Field(default=None, min_length=1, max_length=81_939)
+    top_k: int | None = Field(default=None, ge=1, le=100)
     mode: str = "hybrid"
-    document_id: str | None = None
+    document_id: str | None = Field(default=None, min_length=1, max_length=256)
 
     # Fusion weights
     dense_weight: float | None = None
@@ -821,22 +946,22 @@ class BatchRetrieveRequestSchema(BaseModel):
     fusion_method: str | None = None
     alpha: float | None = None
     score_threshold: float | None = None
-    source_type_filter: str | None = None
-    language_filter: str | None = None
+    source_type_filter: str | None = Field(default=None, max_length=128)
+    language_filter: str | None = Field(default=None, max_length=64)
 
     # Advanced options
-    vector_top_k: int | None = None
-    keyword_top_k: int | None = None
-    candidate_top_k: int | None = None
-    keyword_candidate_k: int | None = None
+    vector_top_k: int | None = Field(default=None, ge=1, le=1000)
+    keyword_top_k: int | None = Field(default=None, ge=1, le=1000)
+    candidate_top_k: int | None = Field(default=None, ge=1, le=2000)
+    keyword_candidate_k: int | None = Field(default=None, ge=1, le=500)
     fusion: str | None = None
-    rrf_k: int | None = None
-    rrf_weights: dict[str, float] = Field(default_factory=dict)
+    rrf_k: int | None = Field(default=None, ge=1, le=10_000)
+    rrf_weights: dict[str, float] = Field(default_factory=dict, max_length=16)
 
     # Post-processing
     rerank: bool | None = None
-    rerank_model: str | None = None
-    rerank_top_n: int | None = None
+    rerank_model: str | None = Field(default=None, min_length=1, max_length=256)
+    rerank_top_n: int | None = Field(default=None, ge=1, le=1000)
     mmr: bool | None = None
     mmr_lambda: float | None = None
     mmr_threshold: float | None = None
@@ -845,8 +970,26 @@ class BatchRetrieveRequestSchema(BaseModel):
     include_associated_images: bool = False
 
     # Batch-specific options
-    max_parallel: int = 10  # Max parallel queries (limit concurrency)
+    max_parallel: int = Field(default=10, ge=1, le=10)
     dedupe_results: bool = False  # Compatibility flag; global segment dedupe is always applied
+
+    @model_validator(mode="after")
+    def _validate_batch_fusion_parameters(self) -> Self:
+        _validate_retrieval_fusion_parameters(self)
+        _reject_unreleased_multimodal_options(self)
+        raw_queries: list[str] = []
+        if self.queries:
+            raw_queries.extend(
+                item.query if isinstance(item, BatchRetrieveQuerySchema) else item
+                for item in self.queries
+            )
+        elif self.query:
+            raw_queries.extend(part.strip() for part in self.query.split(",") if part.strip())
+        if not 1 <= len(raw_queries) <= 20:
+            raise ValueError("batch retrieval requires between 1 and 20 queries")
+        if any(not query.strip() or len(query.strip()) > 4096 for query in raw_queries):
+            raise ValueError("each batch query must contain 1-4096 characters")
+        return self
 
 
 class BatchRetrieveResultSchema(BaseModel):
@@ -886,49 +1029,95 @@ class ChunkingConfigSchema(BaseModel):
     - qa: Question-answer pair format
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
-    mode: str = "automatic"
-    chunk_size: int = 2000  # ~400-500 tokens, matches ChunkingConfig default
-    chunk_overlap: int = 300  # 15% overlap, matches ChunkingConfig default
+    mode: str = Field(default="automatic", min_length=1, max_length=32)
+    chunk_size: int = Field(default=2000, ge=50, le=100_000)
+    chunk_overlap: int = Field(default=300, ge=0, le=50_000)
 
     # Token-based (preferred for production)
     use_token_count: bool = True
-    token_limit: int | None = None
-    min_chunk_tokens: int | None = None
-    max_chunk_tokens: int | None = None
-    parent_token_limit: int | None = None
-    child_token_limit: int | None = None
+    token_limit: int | None = Field(default=None, ge=1, le=100_000)
+    min_chunk_tokens: int | None = Field(default=None, ge=1, le=100_000)
+    max_chunk_tokens: int | None = Field(default=None, ge=1, le=100_000)
+    parent_token_limit: int | None = Field(default=None, ge=1, le=100_000)
+    child_token_limit: int | None = Field(default=None, ge=1, le=100_000)
 
     # Separator mode
-    separator: str = "\n"
-    primary_separator: str | None = None
+    separator: str = Field(default="\n", max_length=1_024)
+    primary_separator: str | None = Field(default=None, max_length=1_024)
     keep_separator: bool | None = None
 
     # Regex mode
-    regex_pattern: str | None = None
+    regex_pattern: str | None = Field(default=None, max_length=256)
 
     # Heading mode
     heading_level: str | None = None  # h1 | h2 | h3 etc
-    heading_patterns: list[str] | None = None
+    heading_patterns: list[str] | None = Field(default=None, max_length=20)
 
     # Paragraph mode
-    min_paragraph_length: int | None = None
+    min_paragraph_length: int | None = Field(default=None, ge=1, le=100_000)
     merge_short_paragraphs: bool | None = None
 
     # Hierarchical mode
     parent_mode: str | None = None  # paragraph | full_doc | section
-    parent_chunk_size: int | None = None
-    child_chunk_size: int | None = None
-    child_overlap: int | None = None
+    parent_chunk_size: int | None = Field(default=None, ge=50, le=100_000)
+    child_chunk_size: int | None = Field(default=None, ge=10, le=100_000)
+    child_overlap: int | None = Field(default=None, ge=0, le=50_000)
 
     # QA mode
-    question_prefix: str | None = None
-    answer_prefix: str | None = None
+    question_prefix: str | None = Field(default=None, max_length=128)
+    answer_prefix: str | None = Field(default=None, max_length=128)
 
     # Pre-processing
     remove_extra_spaces: bool = True
     remove_urls_emails: bool = False
+
+    @model_validator(mode="after")
+    def _validate_safe_chunking_contract(self) -> Self:
+        mode = self.mode.strip().lower()
+        if mode not in {
+            "automatic",
+            "auto",
+            "fixed_size",
+            "fixed",
+            "custom",
+            "paragraph",
+            "page",
+            "heading",
+            "section",
+            "regex",
+            "separator",
+            "recursive",
+            "hierarchical",
+            "parent_child",
+            "qa",
+        }:
+            raise ValueError("unsupported chunking mode")
+        if mode == "regex" or self.regex_pattern:
+            raise ValueError("custom regex chunking is disabled")
+        safe_heading_patterns = (
+            r"^#{1,6}\s+.+$",
+            r"^第[一二三四五六七八九十\d]+[章节条款]",
+            r"^[A-Z][A-Z \t]{4,}:?$",
+        )
+        if self.heading_patterns and tuple(self.heading_patterns) != safe_heading_patterns:
+            raise ValueError("custom heading regex patterns are disabled")
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError("chunk_overlap must be smaller than chunk_size")
+        if (
+            self.child_overlap is not None
+            and self.child_chunk_size is not None
+            and self.child_overlap >= self.child_chunk_size
+        ):
+            raise ValueError("child_overlap must be smaller than child_chunk_size")
+        if (
+            self.min_chunk_tokens is not None
+            and self.max_chunk_tokens is not None
+            and self.min_chunk_tokens > self.max_chunk_tokens
+        ):
+            raise ValueError("min_chunk_tokens must not exceed max_chunk_tokens")
+        return self
 
 
 class RetrievalConfigSchema(BaseModel):
@@ -937,30 +1126,30 @@ class RetrievalConfigSchema(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     mode: str = "hybrid"  # vector | keyword | hybrid
-    top_k: int = 5
-    score_threshold: float | None = None
+    top_k: int = Field(default=5, ge=1, le=100)
+    score_threshold: float | None = Field(default=None, ge=0.0, le=1.0, allow_inf_nan=False)
 
     # Vector search
     vector_enabled: bool = True
-    vector_top_k: int = 20
+    vector_top_k: int = Field(default=20, ge=1, le=1000)
 
     # Keyword search
     keyword_enabled: bool = True
-    keyword_top_k: int = 20
+    keyword_top_k: int = Field(default=20, ge=1, le=1000)
 
     # Fusion
     fusion_strategy: str = "rrf"  # rrf | weighted
-    rrf_k: int = 60
-    alpha: float = 0.75
+    rrf_k: int = Field(default=60, ge=1, le=10_000)
+    alpha: float = Field(default=0.75, ge=0.0, le=1.0, allow_inf_nan=False)
 
     # Rerank
     rerank_enabled: bool = False
-    rerank_model: str = "gte-rerank"
-    rerank_top_n: int | None = None
+    rerank_model: str = Field(default="qwen3-rerank", min_length=1, max_length=256)
+    rerank_top_n: int | None = Field(default=None, ge=1, le=1000)
 
     # MMR
     mmr_enabled: bool = False
-    mmr_lambda: float = 0.5
+    mmr_lambda: float = Field(default=0.5, ge=0.0, le=1.0, allow_inf_nan=False)
 
 
 class DatasetConfigUpdateSchema(BaseModel):
@@ -970,6 +1159,9 @@ class DatasetConfigUpdateSchema(BaseModel):
 
     chunking_config: ChunkingConfigSchema | None = None
     retrieval_config: RetrievalConfigSchema | None = None
+    embedding_provider: str | None = Field(default=None, min_length=1, max_length=64)
+    embedding_model: str | None = Field(default=None, min_length=1, max_length=256)
+    embedding_dimension: int | None = Field(default=None, ge=1, le=8192)
 
 
 class ChunkPreviewRequestSchema(BaseModel):
@@ -977,9 +1169,22 @@ class ChunkPreviewRequestSchema(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    text: str
+    text: str = Field(min_length=1, max_length=200_000)
     config: ChunkingConfigSchema | None = None
-    document_id: str | None = None
+    document_id: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def _reject_unsafe_regex_preview(self) -> Self:
+        config = self.config.model_dump(exclude_none=True) if self.config else {}
+        if (
+            str(config.get("mode") or "automatic").strip().lower() == "regex"
+            or bool(config.get("regex_pattern"))
+            or bool(config.get("regex"))
+            or bool(config.get("heading_patterns"))
+            or bool(config.get("page_marker"))
+        ):
+            raise ValueError("custom regex chunk preview is disabled")
+        return self
 
 
 class ChunkPreviewItemSchema(BaseModel):
