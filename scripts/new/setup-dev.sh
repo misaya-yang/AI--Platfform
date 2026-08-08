@@ -47,7 +47,7 @@ fi
 load_env
 
 # -- Dev container config (standalone, not via docker-compose) ----------------
-DEV_PG_CONTAINER="${POSTGRES_CONTAINER:-ai-gateway-postgres}"
+DEV_PG_CONTAINER="${POSTGRES_CONTAINER:-ai-gateway-pg}"
 DEV_REDIS_CONTAINER="${REDIS_CONTAINER:-ai-gateway-redis}"
 DEV_QDRANT_CONTAINER="${QDRANT_CONTAINER:-ai-gateway-qdrant}"
 DEV_POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:16-alpine}"

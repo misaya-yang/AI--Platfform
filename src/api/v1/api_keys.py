@@ -25,6 +25,11 @@ SELF_SERVICE_API_KEY_SCOPES = frozenset({"knowledge:read", "knowledge:write"})
 DEFAULT_SELF_SERVICE_API_KEY_SCOPES = ("knowledge:read", "knowledge:write")
 
 
+def _tenant_scope(current_user: dict[str, Any]) -> str:
+    """Return the authenticated tenant while preserving legacy default rows."""
+    return str(current_user.get("tenant_id") or "default")
+
+
 def get_database(request: Request) -> DatabaseStorage:
     """获取数据库连接"""
     db = getattr(request.app.state, "database", None)
@@ -152,6 +157,7 @@ async def list_api_keys(
 
     keys = await service.list_api_keys(
         user_id=user_id,
+        tenant_id=_tenant_scope(current_user),
         include_inactive=include_inactive,
     )
 
@@ -166,15 +172,20 @@ async def get_api_key_detail(
 ):
     """获取 API Key 详情"""
     service = APIKeyService(db)
-    key = await service.get_api_key(key_id)
+    key = await service.get_api_key(
+        key_id,
+        tenant_id=_tenant_scope(current_user),
+    )
 
     if not key:
         raise HTTPException(status_code=404, detail="API Key not found")
 
     # 非管理员只能看自己的
-    if "admin" not in current_user.get("roles", []):
-        if str(key["user_id"]) != str(current_user["user_id"]):
-            raise HTTPException(status_code=403, detail="Access denied")
+    if (
+        "admin" not in current_user.get("roles", [])
+        and str(key["user_id"]) != str(current_user["user_id"])
+    ):
+        raise HTTPException(status_code=403, detail="Access denied")
 
     return key
 
@@ -195,7 +206,11 @@ async def revoke_api_key(
     # 非管理员只能吊销自己的
     user_id = None if "admin" in current_user.get("roles", []) else current_user["user_id"]
 
-    success = await service.revoke_api_key(key_id, user_id=user_id)
+    success = await service.revoke_api_key(
+        key_id,
+        user_id=user_id,
+        tenant_id=_tenant_scope(current_user),
+    )
 
     if not success:
         raise HTTPException(status_code=404, detail="API Key not found")
@@ -216,7 +231,11 @@ async def delete_api_key(
     # 非管理员只能删除自己的
     user_id = None if "admin" in current_user.get("roles", []) else current_user["user_id"]
 
-    success = await service.delete_api_key(key_id, user_id=user_id)
+    success = await service.delete_api_key(
+        key_id,
+        user_id=user_id,
+        tenant_id=_tenant_scope(current_user),
+    )
 
     if not success:
         raise HTTPException(status_code=404, detail="API Key not found")

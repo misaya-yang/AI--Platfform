@@ -225,7 +225,9 @@ class APIKeyService:
             param_idx += 1
 
         if tenant_id:
-            conditions.append(f"tenant_id = ${param_idx}")
+            conditions.append(
+                f"COALESCE(NULLIF(tenant_id, ''), 'default') = ${param_idx}"
+            )
             params.append(tenant_id)
             param_idx += 1
 
@@ -251,10 +253,19 @@ class APIKeyService:
         rows = await self.db.fetch(query, *params)
         return [dict(row) for row in rows]
 
-    async def get_api_key(self, key_id: str) -> dict[str, Any] | None:
-        """获取 API Key 详情（不返回实际的 key）"""
+    async def get_api_key(
+        self,
+        key_id: str,
+        tenant_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """获取 API Key 详情，可选限制到单个租户。"""
         public_key_id_expr = self._public_key_id_sql()
         scope_column = await self._api_key_scope_column()
+        tenant_clause = ""
+        params: list[Any] = [key_id]
+        if tenant_id:
+            tenant_clause = " AND COALESCE(NULLIF(tenant_id, ''), 'default') = $2"
+            params.append(tenant_id)
         query = f"""
             SELECT
                 {public_key_id_expr} AS key_id,
@@ -265,20 +276,31 @@ class APIKeyService:
                 created_at, last_used_at, expires_at, use_count
             FROM api_keys
             WHERE {public_key_id_expr} = $1
+              {tenant_clause}
         """
 
-        row = await self.db.fetchrow(query, key_id)
+        row = await self.db.fetchrow(query, *params)
         return dict(row) if row else None
 
-    async def revoke_api_key(self, key_id: str, user_id: str | None = None) -> bool:
+    async def revoke_api_key(
+        self,
+        key_id: str,
+        user_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> bool:
         """吊销 API Key（设置 enabled=FALSE）"""
         public_key_id_expr = self._public_key_id_sql()
         conditions = [f"{public_key_id_expr} = $1"]
         params = [key_id]
 
         if user_id:
-            conditions.append("user_id = $2")
+            conditions.append(f"user_id = ${len(params) + 1}")
             params.append(str(user_id))
+        if tenant_id:
+            conditions.append(
+                f"COALESCE(NULLIF(tenant_id, ''), 'default') = ${len(params) + 1}"
+            )
+            params.append(tenant_id)
 
         query = f"""
             UPDATE api_keys
@@ -293,15 +315,25 @@ class APIKeyService:
             return True
         return False
 
-    async def delete_api_key(self, key_id: str, user_id: str | None = None) -> bool:
+    async def delete_api_key(
+        self,
+        key_id: str,
+        user_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> bool:
         """删除 API Key"""
         public_key_id_expr = self._public_key_id_sql()
         conditions = [f"{public_key_id_expr} = $1"]
         params = [key_id]
 
         if user_id:
-            conditions.append("user_id = $2")
+            conditions.append(f"user_id = ${len(params) + 1}")
             params.append(str(user_id))
+        if tenant_id:
+            conditions.append(
+                f"COALESCE(NULLIF(tenant_id, ''), 'default') = ${len(params) + 1}"
+            )
+            params.append(tenant_id)
 
         query = f"""
             DELETE FROM api_keys

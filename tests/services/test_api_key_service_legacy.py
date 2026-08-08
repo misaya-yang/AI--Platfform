@@ -45,6 +45,20 @@ async def test_list_api_keys_uses_permissions_as_scopes_for_base_schema():
 
 
 @pytest.mark.asyncio
+async def test_list_api_keys_scopes_default_tenant_with_legacy_compatibility():
+    db = AsyncMock()
+    db.fetchrow = AsyncMock(return_value={"column_name": "scopes"})
+    db.fetch = AsyncMock(return_value=[])
+
+    service = APIKeyService(db)
+    await service.list_api_keys(tenant_id="default")
+
+    query, tenant_id = db.fetch.call_args.args
+    assert "COALESCE(NULLIF(tenant_id, ''), 'default') = $1" in query
+    assert tenant_id == "default"
+
+
+@pytest.mark.asyncio
 async def test_create_api_key_uses_permissions_as_scopes_for_base_schema():
     db = AsyncMock()
     db.fetchrow = AsyncMock(
@@ -136,6 +150,20 @@ async def test_get_api_key_matches_by_public_legacy_key_id():
 
 
 @pytest.mark.asyncio
+async def test_get_api_key_can_be_scoped_to_tenant_with_default_legacy_compatibility():
+    db = AsyncMock()
+    db.fetchrow = AsyncMock(side_effect=[{"column_name": "scopes"}, None])
+
+    service = APIKeyService(db)
+    row = await service.get_api_key("ak_other", tenant_id="default")
+
+    assert row is None
+    query, key_id, tenant_id = db.fetchrow.call_args_list[1].args
+    assert "COALESCE(NULLIF(tenant_id, ''), 'default') = $2" in query
+    assert (key_id, tenant_id) == ("ak_other", "default")
+
+
+@pytest.mark.asyncio
 async def test_revoke_and_delete_use_public_legacy_key_id():
     db = AsyncMock()
     db.fetchrow = AsyncMock(side_effect=[{"key_id": "ak_legacy_7"}, {"key_id": "ak_legacy_7"}])
@@ -151,3 +179,27 @@ async def test_revoke_and_delete_use_public_legacy_key_id():
     delete_query = db.fetchrow.call_args_list[1].args[0]
     assert "COALESCE(key_id, ('ak_legacy_' || id::text)) = $1" in revoke_query
     assert "COALESCE(key_id, ('ak_legacy_' || id::text)) = $1" in delete_query
+
+
+@pytest.mark.asyncio
+async def test_revoke_and_delete_support_user_and_tenant_scope_together():
+    db = AsyncMock()
+    db.fetchrow = AsyncMock(side_effect=[None, None])
+    service = APIKeyService(db)
+
+    assert not await service.revoke_api_key(
+        "ak_other",
+        user_id="user-1",
+        tenant_id="tenant-1",
+    )
+    assert not await service.delete_api_key(
+        "ak_other",
+        user_id="user-1",
+        tenant_id="tenant-1",
+    )
+
+    for call in db.fetchrow.call_args_list:
+        query, key_id, user_id, tenant_id = call.args
+        assert "user_id = $2" in query
+        assert "COALESCE(NULLIF(tenant_id, ''), 'default') = $3" in query
+        assert (key_id, user_id, tenant_id) == ("ak_other", "user-1", "tenant-1")

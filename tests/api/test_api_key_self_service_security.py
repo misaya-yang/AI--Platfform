@@ -6,7 +6,14 @@ import pytest
 from fastapi import HTTPException
 
 import src.api.v1.api_keys as api_keys_module
-from src.api.v1.api_keys import CreateAPIKeyRequest, create_api_key
+from src.api.v1.api_keys import (
+    CreateAPIKeyRequest,
+    create_api_key,
+    delete_api_key,
+    get_api_key_detail,
+    list_api_keys,
+    revoke_api_key,
+)
 
 
 def _current_user(*, tier: str = "normal") -> dict[str, object]:
@@ -71,3 +78,41 @@ async def test_self_service_api_key_ignores_forged_tier_and_uses_caller_tier(
     assert create_key.await_args.kwargs["tier"] == "normal"
     assert create_key.await_args.kwargs["tier"] != request.tier
     clear_cache.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_api_key_management_routes_always_apply_authenticated_tenant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    list_keys = AsyncMock(return_value=[])
+    get_key = AsyncMock(
+        return_value={"key_id": "ak_test", "user_id": "user-1", "tenant_id": "tenant-1"}
+    )
+    revoke_key = AsyncMock(return_value=True)
+    delete_key = AsyncMock(return_value=True)
+    monkeypatch.setattr(api_keys_module.APIKeyService, "list_api_keys", list_keys)
+    monkeypatch.setattr(api_keys_module.APIKeyService, "get_api_key", get_key)
+    monkeypatch.setattr(api_keys_module.APIKeyService, "revoke_api_key", revoke_key)
+    monkeypatch.setattr(api_keys_module.APIKeyService, "delete_api_key", delete_key)
+    monkeypatch.setattr(api_keys_module, "clear_service_access_constraint_cache", Mock())
+    admin = {**_current_user(), "roles": ["admin"]}
+
+    await list_api_keys(db=object(), current_user=admin)
+    await get_api_key_detail("ak_test", db=object(), current_user=admin)
+    await revoke_api_key("ak_test", db=object(), current_user=admin)
+    await delete_api_key("ak_test", db=object(), current_user=admin)
+
+    assert list_keys.await_args.kwargs == {
+        "user_id": None,
+        "tenant_id": "tenant-1",
+        "include_inactive": False,
+    }
+    assert get_key.await_args.kwargs == {"tenant_id": "tenant-1"}
+    assert revoke_key.await_args.kwargs == {
+        "user_id": None,
+        "tenant_id": "tenant-1",
+    }
+    assert delete_key.await_args.kwargs == {
+        "user_id": None,
+        "tenant_id": "tenant-1",
+    }

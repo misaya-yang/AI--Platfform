@@ -433,6 +433,7 @@ def test_default_complete_stack_memory_ceiling_stays_below_3_5_gib() -> None:
 def test_standalone_dev_runtime_uses_pinned_images_and_memory_guards() -> None:
     script = (ROOT / "scripts/new/setup-dev.sh").read_text()
 
+    assert 'DEV_PG_CONTAINER="${POSTGRES_CONTAINER:-ai-gateway-pg}"' in script
     assert 'DEV_QDRANT_IMAGE="${QDRANT_IMAGE:-qdrant/qdrant:v1.18.2}"' in script
     assert "qdrant/qdrant:latest" not in script
     assert "assert_compose_owner" in script
