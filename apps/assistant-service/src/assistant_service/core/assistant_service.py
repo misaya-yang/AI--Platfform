@@ -69,6 +69,7 @@ from .files.file_processor import ProcessedFiles, create_file_processor
 from .models.model_registry import ChatMessage, ModelProvider, ModelRegistry
 from .prompts.system_prompt_v2 import (
     build_system_prompt_v2,
+    ensure_external_content_boundary,
     get_ttft_optimized_prompt,
     inject_document_context,
     inject_kb_context,
@@ -613,11 +614,7 @@ Workflow:
         enabled_tools: list[str] | None = None,
         scenario_rules: str = "",
     ) -> str:
-        """
-        Build the default Manus-style system prompt.
-
-        This is the new recommended approach that uses modular prompt design
-        with clear separation of guardrails and agent freedom.
+        """Build the compact default system prompt.
 
         Args:
             user_role: User's role for access display
@@ -626,7 +623,7 @@ Workflow:
             scenario_rules: Scenario-specific rules
 
         Returns:
-            Complete Manus-style system prompt
+            Stable platform prompt plus request-scoped capabilities
         """
         base_prompt = build_system_prompt_v2(
             user_role=user_role,
@@ -635,60 +632,19 @@ Workflow:
             scenario_rules=scenario_rules,
         )
 
-        # Add tool usage instructions (critical for function calling)
-        tool_instructions = """
-<tool_usage>
-## 工具使用规范
+        return base_prompt
 
-### 关键原则
-**你必须通过 function calling 机制调用工具，而不是在文本中写工具调用代码。**
-- 错误示例：在回复中写 `mcp_docgen__generate_document(format="pptx", ...)`
-- 正确做法：使用 function calling 功能调用工具
-
-### 调用流程
-1. 简要说明你将要做什么
-2. 调用相应的工具（系统自动处理）
-3. 工具执行后，总结结果告知用户
-
-### 常见工具
-- `mcp_docgen__generate_document`: 一个工具覆盖四种格式 —— 用 `format` 参数
-  在 docx / pptx / xlsx / pdf 之间选择。会自动规划结构、渲染、视觉复核，
-  返回可下载的签名 URL。
-- `web_search`: 搜索网络获取最新信息
-- `execute_python`: 执行 Python 代码（数据分析、临时计算）
-
-### 注意事项
-- 文件生成完成后告知用户
-- 不要在文本中输出 JSON 或函数调用语法
-</tool_usage>"""
-
-        return f"{base_prompt}\n\n{tool_instructions}"
-
-    # Use the new Manus-style prompt as default (lazy initialization in _build_messages)
+    # Build the stable prompt lazily with the request's actual capabilities.
     # Set to None to trigger dynamic building with context
     DEFAULT_SYSTEM_PROMPT = None  # Will be built dynamically with build_default_system_prompt()
 
     # Context injection template
-    CONTEXT_TEMPLATE = """## Relevant Context
-
-The following information was retrieved from the knowledge base and may be helpful for answering the user's question:
-
-{context}
-
----
-
-Please use this context to inform your response when relevant. If the context doesn't contain the answer, you may rely on your general knowledge but should indicate this."""
+    CONTEXT_TEMPLATE = """Knowledge base results:
+{context}"""
 
     # Web search context template
-    WEB_CONTEXT_TEMPLATE = """## Web Search Results
-
-The following information was retrieved from the web and may provide up-to-date context:
-
-{context}
-
----
-
-Please use this web search context to inform your response when relevant."""
+    WEB_CONTEXT_TEMPLATE = """Web results:
+{context}"""
 
     def __init__(
         self,
@@ -726,6 +682,9 @@ Please use this web search context to inform your response when relevant."""
         runtime_adapter_unavailable: bool = False,
     ):
         self.model_registry = model_registry
+        # Composition root may attach the optional DB-backed resolver after
+        # construction. Keep it out of the long-standing positional signature.
+        self.tenant_model_registry_resolver: Any | None = None
         if execution_gateway is not None:
             gateway_tool_invoker = getattr(execution_gateway, "tool_invoker", None)
             if gateway_tool_invoker is None:
@@ -1356,9 +1315,7 @@ Please use this web search context to inform your response when relevant."""
             or not isinstance(dataset_ids, list)
             or len(dataset_ids) > 8
             or any(
-                not isinstance(dataset_id, str)
-                or not dataset_id.strip()
-                or len(dataset_id) > 128
+                not isinstance(dataset_id, str) or not dataset_id.strip() or len(dataset_id) > 128
                 for dataset_id in dataset_ids
             )
             or len(set(dataset_ids)) != len(dataset_ids)
@@ -1377,8 +1334,7 @@ Please use this web search context to inform your response when relevant."""
         )
 
         if retrieval_configs is not None and (
-            not isinstance(retrieval_configs, dict)
-            or set(retrieval_configs) != set(dataset_ids)
+            not isinstance(retrieval_configs, dict) or set(retrieval_configs) != set(dataset_ids)
         ):
             raise ValueError("AGENT_KNOWLEDGE_CONFIG_INVALID")
         if retrieval_configs is not None and any(
@@ -1613,10 +1569,18 @@ Please use this web search context to inform your response when relevant."""
 
         logger.info(f"[AGENT LOOP] streaming-first model={loop_config.model_id}")
 
+        request_registry = None
+        if self.tenant_model_registry_resolver is not None:
+            request_registry = await self.tenant_model_registry_resolver.resolve(
+                user.tenant_id or "default",
+                config.model_id,
+            )
+        turn_model_registry = request_registry or self.model_registry
+
         # Create AgentLoop instance (system_prompt passed via loop_config).
         # Heavy runtime dependencies are process-scoped and injected here.
         agent_loop = AgentLoop(
-            model_registry=self.model_registry,
+            model_registry=turn_model_registry,
             kb_service=self.kb_service,
             memory_service=self.memory_service if hasattr(self, "memory_service") else None,
             session_manager=self.session_manager,
@@ -1644,64 +1608,69 @@ Please use this web search context to inform your response when relevant."""
                 logger.warning(f"Failed to load session history: {e}")
                 history = []
 
-        # Execute the agent loop
-        async for event in agent_loop.execute(
-            session_id=session_id,
-            user=user,
-            message=message,
-            config=loop_config,
-            history=history,
-            traceparent=config.traceparent,
-        ):
-            if event.event_type == StreamEventType.CONTEXT_BUDGET.value and isinstance(
-                event.data, dict
+        # Execute the agent loop. A DB-backed registry owns provider clients
+        # for this turn only, so tenant credentials never enter shared state.
+        try:
+            async for event in agent_loop.execute(
+                session_id=session_id,
+                user=user,
+                message=message,
+                config=loop_config,
+                history=history,
+                traceparent=config.traceparent,
             ):
-                packet_receipt = event.data.get("context_packet")
-                if isinstance(packet_receipt, dict) and packet_receipt:
-                    self._context_packet_receipts[context_cache_key] = packet_receipt
-            # Special handling for streaming_first_completed event
-            # Split into usage and done events for frontend compatibility
-            if event.event_type == "streaming_first_completed":
-                # Extract usage data
-                usage_data = event.data.get("usage", {}) if isinstance(event.data, dict) else {}
-                yield AssistantStreamEvent(
-                    event_type="usage",
-                    data=usage_data if usage_data else {"input_tokens": 0, "output_tokens": 0},
-                )
-                # Extract duration and emit done event
-                duration_ms = (
-                    event.data.get("total_time_ms", 0) if isinstance(event.data, dict) else 0
-                )
-                content_length = (
-                    event.data.get("content_length", 0) if isinstance(event.data, dict) else 0
-                )
-                yield AssistantStreamEvent(
-                    event_type="done",
-                    data={
-                        "session_id": session_id,
-                        "run_id": event.data.get("run_id")
-                        if isinstance(event.data, dict)
-                        else None,
-                        "duration_ms": duration_ms,
-                        "total_length": content_length,
-                        "terminal_envelope": event.data.get("terminal_envelope")
-                        if isinstance(event.data, dict)
-                        else None,
-                        "context_snapshot": event.data.get("context_snapshot")
-                        if isinstance(event.data, dict)
-                        else None,
-                    },
-                )
-                continue
+                if event.event_type == StreamEventType.CONTEXT_BUDGET.value and isinstance(
+                    event.data, dict
+                ):
+                    packet_receipt = event.data.get("context_packet")
+                    if isinstance(packet_receipt, dict) and packet_receipt:
+                        self._context_packet_receipts[context_cache_key] = packet_receipt
+                # Special handling for streaming_first_completed event
+                # Split into usage and done events for frontend compatibility
+                if event.event_type == "streaming_first_completed":
+                    # Extract usage data
+                    usage_data = event.data.get("usage", {}) if isinstance(event.data, dict) else {}
+                    yield AssistantStreamEvent(
+                        event_type="usage",
+                        data=usage_data if usage_data else {"input_tokens": 0, "output_tokens": 0},
+                    )
+                    # Extract duration and emit done event
+                    duration_ms = (
+                        event.data.get("total_time_ms", 0) if isinstance(event.data, dict) else 0
+                    )
+                    content_length = (
+                        event.data.get("content_length", 0) if isinstance(event.data, dict) else 0
+                    )
+                    yield AssistantStreamEvent(
+                        event_type="done",
+                        data={
+                            "session_id": session_id,
+                            "run_id": event.data.get("run_id")
+                            if isinstance(event.data, dict)
+                            else None,
+                            "duration_ms": duration_ms,
+                            "total_length": content_length,
+                            "terminal_envelope": event.data.get("terminal_envelope")
+                            if isinstance(event.data, dict)
+                            else None,
+                            "context_snapshot": event.data.get("context_snapshot")
+                            if isinstance(event.data, dict)
+                            else None,
+                        },
+                    )
+                    continue
 
-            # Canonical lifecycle events are emitted directly by AgentLoop.
-            # Suppress rolling-upgrade aliases so public consumers see one
-            # start/result/end per tool call.
-            if event.event_type in {"tool_call_started", "tool_call_completed"}:
-                continue
+                # Canonical lifecycle events are emitted directly by AgentLoop.
+                # Suppress rolling-upgrade aliases so public consumers see one
+                # start/result/end per tool call.
+                if event.event_type in {"tool_call_started", "tool_call_completed"}:
+                    continue
 
-            # Convert AgentLoopEvent to AssistantStreamEvent
-            yield self._convert_agent_loop_event(event)
+                # Convert AgentLoopEvent to AssistantStreamEvent
+                yield self._convert_agent_loop_event(event)
+        finally:
+            if request_registry is not None:
+                await request_registry.close()
 
     def _convert_agent_loop_event(
         self,
@@ -1926,6 +1895,8 @@ Please use this web search context to inform your response when relevant."""
                 scenario_rules=scenario_rules,
             )
             logger.info("[SYSTEM PROMPT] Built Manus-style modular prompt")
+
+        system_content = ensure_external_content_boundary(system_content)
 
         # Inject user preferences using new modular function
         if user_preferences:
@@ -2165,12 +2136,13 @@ Please use this web search context to inform your response when relevant."""
 
         # Build ContextStructure with layered content
         # Use TTFT-optimized prompt when context engine is enabled (no timestamps!)
-        effective_system_prompt = (
-            config.eval_system_prompt_override or ""
-        ).strip() or get_ttft_optimized_prompt(
-            user_role="user",
-            available_datasets=config.kb_dataset_ids,
-            scenario_rules=domain_rules,
+        effective_system_prompt = ensure_external_content_boundary(
+            (config.eval_system_prompt_override or "").strip()
+            or get_ttft_optimized_prompt(
+                user_role="user",
+                available_datasets=config.kb_dataset_ids,
+                scenario_rules=domain_rules,
+            )
         )
         if config.agent_runtime is not None:
             effective_system_prompt = compose_agent_system_prompt(

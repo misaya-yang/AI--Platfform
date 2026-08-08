@@ -114,6 +114,7 @@ def test_default_initializer_needs_only_dashscope_model_secret(tmp_path: Path) -
         "REDIS_PASSWORD",
         "JWT_SECRET",
         "GATEWAY_ASSISTANT_SHARED_SECRET",
+        "GATEWAY_ENCRYPTION_KEY",
         "DOCGEN_ARTIFACT_SIGN_KEY",
         "DEFAULT_USER_PASSWORD",
         "KB_EMBEDDING_API_KEY",
@@ -143,11 +144,41 @@ def test_default_initializer_needs_only_dashscope_model_secret(tmp_path: Path) -
         "REDIS_PASSWORD",
         "JWT_SECRET",
         "GATEWAY_ASSISTANT_SHARED_SECRET",
+        "GATEWAY_ENCRYPTION_KEY",
         "DOCGEN_ARTIFACT_SIGN_KEY",
         "DEFAULT_USER_PASSWORD",
     ):
         assert len(values[key]) >= 32
         assert "change_me" not in values[key]
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+def test_initializer_backfills_encryption_key_without_replacing_existing_env(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / ".env"
+    target.write_text("POSTGRES_PASSWORD=keep-this-value\n")
+
+    result = subprocess.run(
+        [
+            "bash",
+            "scripts/new/init-env.sh",
+            "--env",
+            str(target),
+            "--if-missing",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    values = _env_values(target)
+    assert values["POSTGRES_PASSWORD"] == "keep-this-value"
+    assert len(values["GATEWAY_ENCRYPTION_KEY"]) >= 32
+    assert values["GATEWAY_ENCRYPTION_KEY"] not in output
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
 

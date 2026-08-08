@@ -87,12 +87,9 @@ def _coerce_questions(raw: Any) -> list[dict[str, Any]]:
 QUIZ_GENERATION_DEFINITION = ToolDefinition(
     name="generate_quiz",
     description=(
-        "MUST USE this tool when user asks for a quiz, test, or practice questions. "
-        "You generate the quiz content yourself based on KB search results or uploaded file content, "
-        "then pass the complete questions array to this tool for interactive rendering. "
-        "CRITICAL: Do NOT write quiz questions, options, or answers as chat text — they will be "
-        "rendered by an interactive card from this tool's output. Your chat reply should be a brief "
-        "one-sentence confirmation only (e.g. '已为您生成5道测试题，请在下方卡片中作答')."
+        "Create an interactive quiz from content already available in the conversation or from "
+        "relevant retrieved knowledge. Supply the complete questions array. After a successful "
+        "call, reply with one brief confirmation because the UI renders the questions and answers."
     ),
     parameters=[
         ToolParameter(
@@ -201,12 +198,9 @@ QUIZ_GENERATION_DEFINITION = ToolDefinition(
         "external_service": True,
     },
     when_to_use=(
-        "ALWAYS use this tool when the user's message contains ANY of these intents: "
-        "quiz, test, 测验, 测试, 出题, 考考, 练习, flashcard, practice questions, "
-        "test my knowledge, check my understanding, 考我, 题目. "
-        "You must FIRST search the knowledge base (if available) to get factual content, "
-        "then generate questions based on that content and pass them to this tool. "
-        "If the user uploaded a file, generate questions from the file content visible in the conversation."
+        "Use when the user explicitly asks for a quiz, test, flashcards, or practice questions. "
+        "Retrieve knowledge first only when the requested quiz depends on available enterprise data; "
+        "use uploaded content directly when that is the requested source."
     ),
     when_not_to_use=(
         "Only skip if the user is asking a factual question expecting a direct answer."

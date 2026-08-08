@@ -317,9 +317,7 @@ def _experiment_score_id(
         "evaluator_version": str(payload.get("evaluator_version") or ""),
         "experiment_run_id": experiment_run_id,
         "score_name": str(payload.get("score_name") or ""),
-        "score_source": str(
-            payload.get("score_source") or payload.get("scorer_type") or "human"
-        ),
+        "score_source": str(payload.get("score_source") or payload.get("scorer_type") or "human"),
         "scorer_type": str(payload.get("scorer_type") or "human"),
         "span_id": str(span_id or ""),
         "target_id": str(target_id),
@@ -426,9 +424,7 @@ class AgentTraceRepository(BaseRepository):
             filters.append(f"t.channel = ${len(params)}")
         if turn_index is not None:
             params.append(str(turn_index))
-            filters.append(
-                f"t.metadata->'transcript_locator'->>'turn_index' = ${len(params)}"
-            )
+            filters.append(f"t.metadata->'transcript_locator'->>'turn_index' = ${len(params)}")
         if transcript_query:
             params.append(f"%{transcript_query}%")
             query_param = f"${len(params)}"
@@ -646,7 +642,7 @@ class AgentTraceRepository(BaseRepository):
             f"""
             SELECT *, 0::int AS scores_count
             FROM agent_traces
-            WHERE {' AND '.join(filters)}
+            WHERE {" AND ".join(filters)}
             ORDER BY array_position($1::uuid[], trace_id)
             """,
             *params,
@@ -910,7 +906,10 @@ class AgentTraceRepository(BaseRepository):
         return {"trace_id": trace_id, "status": "stored", "job_id": None}
 
     async def _upsert_ingested_span(self, trace_id: str, span: dict[str, Any]) -> None:
-        span_id = str(span.get("span_id") or uuid.uuid5(uuid.UUID(trace_id), span.get("name") or str(uuid.uuid4())))
+        span_id = str(
+            span.get("span_id")
+            or uuid.uuid5(uuid.UUID(trace_id), span.get("name") or str(uuid.uuid4()))
+        )
         await self.fetchrow(
             """
             INSERT INTO agent_trace_spans (
@@ -997,7 +996,7 @@ class AgentTraceRepository(BaseRepository):
             SELECT t.*, COUNT(s.score_id)::int AS scores_count
             FROM agent_traces t
             LEFT JOIN agent_trace_scores s ON s.trace_id = t.trace_id
-            WHERE {' AND '.join(filters)}
+            WHERE {" AND ".join(filters)}
             GROUP BY t.trace_id
             ORDER BY t.started_at ASC, t.created_at ASC
             LIMIT ${len(params) + 1}
@@ -1200,11 +1199,7 @@ class AgentTraceRepository(BaseRepository):
             tenant_id,
             dataset_id,
         )
-        return {
-            str(row["case_id"])
-            for row in rows
-            if row.get("case_id")
-        }
+        return {str(row["case_id"]) for row in rows if row.get("case_id")}
 
     async def import_examples(
         self,
@@ -1408,14 +1403,14 @@ class AgentTraceRepository(BaseRepository):
         row = await self.fetchrow(
             """
             INSERT INTO agent_trace_outbox (tenant_id, job_type, payload)
-            SELECT $1, 'trace.ingested', $2::jsonb
+            SELECT $1::varchar, 'trace.ingested'::varchar, $2::jsonb
             WHERE NOT EXISTS (
                 SELECT 1
                 FROM agent_trace_outbox
-                WHERE tenant_id = $1
+                WHERE tenant_id = $1::varchar
                   AND job_type = 'trace.ingested'
                   AND status IN ('queued', 'running')
-                  AND payload->>'trace_id' = $3
+                  AND payload->>'trace_id' = $3::text
             )
             RETURNING *
             """,
@@ -2096,7 +2091,9 @@ class AgentTraceRepository(BaseRepository):
             case = grouped.setdefault(
                 case_key,
                 {
-                    "example_id": str(row.get("example_id") or score_metadata.get("example_id") or "")
+                    "example_id": str(
+                        row.get("example_id") or score_metadata.get("example_id") or ""
+                    )
                     or None,
                     "case_id": str(
                         score_metadata.get("case_id")
@@ -2110,9 +2107,7 @@ class AgentTraceRepository(BaseRepository):
                     "aggregate_score": None,
                     "failure_reason": None,
                     "input": self._decode_json(row.get("input"), default={}),
-                    "expected_output": self._decode_json(
-                        row.get("expected_output"), default={}
-                    ),
+                    "expected_output": self._decode_json(row.get("expected_output"), default={}),
                     "trace": {
                         "trace_family": row.get("trace_family"),
                         "status": row.get("trace_status"),
@@ -2150,16 +2145,13 @@ class AgentTraceRepository(BaseRepository):
                 and not isinstance(score.get("numeric_value"), bool)
             ]
             case["aggregate_score"] = (
-                round(sum(numeric_scores) / len(numeric_scores), 4)
-                if numeric_scores
-                else None
+                round(sum(numeric_scores) / len(numeric_scores), 4) if numeric_scores else None
             )
             failed = next(
                 (
                     score
                     for score in scores
-                    if score.get("label") == "fail"
-                    or score.get("failure_kind") == "infrastructure"
+                    if score.get("label") == "fail" or score.get("failure_kind") == "infrastructure"
                 ),
                 None,
             )
@@ -2354,10 +2346,7 @@ class AgentTraceRepository(BaseRepository):
         changed_dimensions = [
             dimension
             for dimension, keys in fingerprint_dimensions.items()
-            if any(
-                baseline_fingerprint.get(key) != candidate_fingerprint.get(key)
-                for key in keys
-            )
+            if any(baseline_fingerprint.get(key) != candidate_fingerprint.get(key) for key in keys)
         ]
         metric_specs = {
             "quality_score": ("overall_score", "higher"),
@@ -2748,17 +2737,16 @@ class AgentTraceRepository(BaseRepository):
             "wired" if int(runtime_metrics.get("rag_captured_traces") or 0) > 0 else "partial"
         )
         runtime_metrics["langgraph_status"] = (
-            "wired"
-            if int(runtime_metrics.get("langgraph_captured_traces") or 0) > 0
-            else "partial"
+            "wired" if int(runtime_metrics.get("langgraph_captured_traces") or 0) > 0 else "partial"
         )
         metrics["latest_baseline"] = (latest_run_row or {}).get("latest_baseline")
         metrics["latest_candidate"] = (latest_run_row or {}).get("latest_candidate")
         metrics["pass_rate"] = runtime_metrics["pass_rate"]
         metrics["trajectory_pass_rate"] = runtime_metrics["trajectory_pass_rate"]
-        metrics["critical_failures"] = int(
-            runtime_metrics.get("critical_runtime_failures") or 0
-        ) + runtime_metrics["tool_safety_failures"]
+        metrics["critical_failures"] = (
+            int(runtime_metrics.get("critical_runtime_failures") or 0)
+            + runtime_metrics["tool_safety_failures"]
+        )
         metrics["tool_safety_failures"] = runtime_metrics["tool_safety_failures"]
         return {
             "metrics": metrics,
@@ -3106,9 +3094,7 @@ class AgentTraceRepository(BaseRepository):
         feedback_count = int(result.get("feedback_count") or 0)
         positive_feedback = int(result.get("positive_feedback_count") or 0)
         result["success_rate"] = (succeeded / total) if total else None
-        result["tool_success_rate"] = (
-            tool_succeeded / tool_calls if tool_calls else None
-        )
+        result["tool_success_rate"] = tool_succeeded / tool_calls if tool_calls else None
         result["knowledge_hit_rate"] = (
             knowledge_hits / knowledge_queries if knowledge_queries else None
         )
@@ -3117,9 +3103,7 @@ class AgentTraceRepository(BaseRepository):
         )
         result["breakdown"] = [self._decode_trace_row(item) for item in breakdown_rows]
         result["retention"] = self._decode_trace_row(retention or {})
-        result["retention_limited"] = bool(
-            (retention or {}).get("last_retention_cleanup_at")
-        )
+        result["retention_limited"] = bool((retention or {}).get("last_retention_cleanup_at"))
         return self._decode_trace_row(result)
 
     async def get_summary(
@@ -3167,7 +3151,7 @@ class AgentTraceRepository(BaseRepository):
             SELECT COUNT(DISTINCT s.trace_id)::int AS scored_traces
             FROM agent_trace_scores s
             INNER JOIN agent_traces t ON t.trace_id = s.trace_id
-            WHERE {' AND '.join(scored_filters)}
+            WHERE {" AND ".join(scored_filters)}
             """,
             *params,
         )
@@ -3296,7 +3280,7 @@ class AgentTraceRepository(BaseRepository):
             SELECT 1
             FROM agent_trace_scores s
             INNER JOIN agent_traces t ON t.trace_id = s.trace_id
-            WHERE {' AND '.join(filters)}
+            WHERE {" AND ".join(filters)}
             LIMIT 1
             """,
             *params,

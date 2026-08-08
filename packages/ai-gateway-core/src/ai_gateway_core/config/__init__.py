@@ -10,6 +10,7 @@ from .endpoints import (
     DASHSCOPE_DEFAULT_NATIVE_BASE_URL,
     GOOGLE_AI_STUDIO_BASE_URL,
     GOOGLE_VERTEX_BASE_URL,
+    normalize_dashscope_base,
     resolve_dashscope,
     resolve_google,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "DASHSCOPE_DEFAULT_NATIVE_BASE_URL",
     "GOOGLE_AI_STUDIO_BASE_URL",
     "GOOGLE_VERTEX_BASE_URL",
+    "normalize_dashscope_base",
     "resolve_dashscope",
     "resolve_google",
 ]

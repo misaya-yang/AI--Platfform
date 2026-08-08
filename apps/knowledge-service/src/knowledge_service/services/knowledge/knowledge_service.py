@@ -74,6 +74,7 @@ class KnowledgeService:
         document_service: Any | None = None,
         ingestion_service: Any | None = None,
         retrieval_service: Any | None = None,
+        tenant_embedding_credential_resolver: Any | None = None,
     ):
         self.settings = settings
         self.db = database
@@ -155,7 +156,10 @@ class KnowledgeService:
         )
         self.cache_manager = CacheManager(ttl_seconds=cache_ttl)
         self.document_processor = DocumentProcessor(settings, vlm_service)
-        self.embedding_manager = EmbeddingManager(settings)
+        self.embedding_manager = EmbeddingManager(
+            settings,
+            credential_resolver=tenant_embedding_credential_resolver,
+        )
         self.chunking_manager = ChunkingManager(
             settings, database, self.vector_store, knowledge_service=self,
         )
@@ -200,17 +204,19 @@ class KnowledgeService:
         """Delegate to EmbeddingManager."""
         return self.embedding_manager.is_multimodal_dataset(dataset)
 
-    def _get_unified_multimodal_embedder(
+    async def _get_unified_multimodal_embedder(
         self, dataset: dict[str, Any], embedding_config: dict[str, Any] | None = None,
     ) -> UnifiedMultimodalEmbedding:
         """Delegate to EmbeddingManager."""
-        return self.embedding_manager.get_unified_multimodal_embedder(dataset, embedding_config)
+        return await self.embedding_manager.get_unified_multimodal_embedder(
+            dataset, embedding_config
+        )
 
-    def _get_text_embedder(
+    async def _get_text_embedder(
         self, dataset: dict[str, Any], embedding_config: dict[str, Any] | None = None,
     ) -> BaseEmbedding:
         """Delegate to EmbeddingManager."""
-        return self.embedding_manager.get_text_embedder(dataset, embedding_config)
+        return await self.embedding_manager.get_text_embedder(dataset, embedding_config)
 
     def _convert_structured_chunks(
         self,
@@ -980,10 +986,20 @@ class KnowledgeService:
     ) -> tuple[str, str]:
         return self.document_processor.extract_text_from_bytes(content, filename, mime_type)
 
-    def _resolve_embedding_config(
-        self, provider: str, model: str, embedding_config: dict[str, Any]
+    async def _resolve_embedding_config(
+        self,
+        provider: str,
+        model: str,
+        embedding_config: dict[str, Any],
+        *,
+        tenant_id: str = "",
     ) -> EmbeddingConfig:
-        return self.embedding_manager.resolve_embedding_config(provider, model, embedding_config)
+        return await self.embedding_manager.resolve_embedding_config(
+            provider,
+            model,
+            embedding_config,
+            tenant_id=tenant_id,
+        )
 
     # ========================= Document Enable/Disable/Archive (delegated to DocumentService) =====
 

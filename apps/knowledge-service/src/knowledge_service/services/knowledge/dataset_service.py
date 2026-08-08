@@ -34,6 +34,7 @@ from .chunking import (
     validate_persisted_chunking_config,
 )
 from .common import ensure_dict as _ensure_dict
+from .common import maybe_await
 from .common import permission_rank as _permission_rank
 from .lexical_config import LEXICAL_V1, LexicalConfig, LexicalConfigError
 
@@ -774,10 +775,13 @@ class DatasetService:
         dim: int = 0
         collection: str = ""
         try:
-            econf = self._ks._resolve_embedding_config(
-                provider=embedding_provider,
-                model=embedding_model,
-                embedding_config=embedding_config,
+            econf = await maybe_await(
+                self._ks._resolve_embedding_config(
+                    provider=embedding_provider,
+                    model=embedding_model,
+                    embedding_config=embedding_config,
+                    tenant_id=str(user.tenant_id or ""),
+                )
             )
             embedder = create_embedding(econf, dimension=embedding_dimension)
             if embedder._dimension is None:
@@ -944,10 +948,13 @@ class DatasetService:
             embedder: BaseEmbedding | None = None
             dim: int = 0
             try:
-                econf = self._ks._resolve_embedding_config(
-                    provider=str(updated.get("embedding_provider") or "local"),
-                    model=str(updated.get("embedding_model") or "hash-384"),
-                    embedding_config=_ensure_dict(updated.get("embedding_config")),
+                econf = await maybe_await(
+                    self._ks._resolve_embedding_config(
+                        provider=str(updated.get("embedding_provider") or "local"),
+                        model=str(updated.get("embedding_model") or "hash-384"),
+                        embedding_config=_ensure_dict(updated.get("embedding_config")),
+                        tenant_id=str(updated.get("tenant_id") or ""),
+                    )
                 )
                 embedder = create_embedding(
                     econf, dimension=int(updated.get("embedding_dimension") or 0) or None

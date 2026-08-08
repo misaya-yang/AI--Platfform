@@ -1,9 +1,7 @@
 """Tests for ``get_time_context_block``.
 
-Guards against regressions that led to the NBA-score incident where the
-model wasted ~60s + 5 web searches doubting the date ("this appears to be
-a future date, I'll add a disclaimer…"). The time block must now assert
-authoritatively and explicitly instruct the model not to second-guess it.
+Guards against regressions where relative dates produced vague or repeated
+searches. The block provides literal dates without arguing with the model.
 """
 
 from __future__ import annotations
@@ -35,19 +33,15 @@ def test_time_block_contains_two_days_ago_date() -> None:
     assert two_days_ago_iso in block
 
 
-def test_time_block_asserts_no_doubt_instruction() -> None:
-    """Must explicitly tell the model NOT to question the date — this is
-    the direct fix for the observed CoT where the model wrote 'the system
-    prompt forces the date to 2026, I'll add a disclaimer'."""
+def test_time_block_avoids_adversarial_meta_instructions() -> None:
     block = get_time_context_block()
-    assert "NOT" in block, "expected a do-NOT-question-the-date instruction"
+    assert "do NOT" not in block
+    assert "training cutoff" not in block
 
 
-def test_time_block_discourages_future_date_disclaimers() -> None:
-    """The CoT explicitly mentioned 'future date' doubts. The block must
-    head off that failure mode."""
+def test_time_block_states_how_relative_dates_are_used() -> None:
     block = get_time_context_block().lower()
-    assert "future" in block or "disclaimer" in block
+    assert "relative-date" in block
 
 
 def test_time_block_includes_web_search_guidance_with_dated_example() -> None:

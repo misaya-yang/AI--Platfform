@@ -232,7 +232,10 @@ function buildProviderRows(
 
   providerConfigs.forEach((provider) => {
     const row = ensureProviderRow(rows, provider.provider_id, "providers", provider.display_name);
-    row.configured = row.configured || provider.is_enabled !== false;
+    row.configured = row.configured || Boolean(
+      provider.is_enabled !== false &&
+      (provider.has_api_key || provider.allow_environment_credentials)
+    );
     row.status = row.configured ? "configured" : "not_configured";
   });
 
@@ -250,10 +253,6 @@ function buildProviderRows(
     counts.sources.forEach((source) => addSource(row, source));
     row.model_count = Math.max(row.model_count, counts.all);
     row.enabled_model_count = Math.max(row.enabled_model_count, counts.enabled);
-    if (counts.enabled > 0) {
-      row.configured = true;
-      row.status = "configured";
-    }
   });
 
   return rows;

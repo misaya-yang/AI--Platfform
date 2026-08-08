@@ -18,9 +18,11 @@ DEFAULT_CONFIG_PATH = "config/mcp_servers.yaml"
 
 def _resolve_env_vars(value: str) -> str:
     """Resolve ${ENV_VAR} placeholders in string values."""
+
     def _replace(match: re.Match) -> str:
         var = match.group(1)
         return os.environ.get(var, "")
+
     return re.sub(r"\$\{(\w+)\}", _replace, value)
 
 
@@ -52,22 +54,25 @@ def load_mcp_config(path: str | None = None) -> list[MCPServerConfig]:
         if api_key == "":
             api_key = None
 
-        configs.append(MCPServerConfig(
-            name=srv["name"],
-            url=_resolve_env_vars(str(srv.get("url", ""))),
-            api_key=api_key,
-            transport="streamable_http",
-            timeout=float(srv.get("timeout", 30.0)),
-            enabled=srv.get("enabled", True),
-            description=srv.get("description", ""),
-            allowed_tools=srv.get("allowed_tools"),
-            blocked_tools=srv.get("blocked_tools"),
-            max_concurrent=int(srv.get("max_concurrent", 10)),
-            response_limit_bytes=int(srv.get("response_limit_bytes", 1048576)),
-            platform_managed=True,
-            allow_localhost=True,
-            allow_private_network=True,
-        ))
+        configs.append(
+            MCPServerConfig(
+                name=srv["name"],
+                url=_resolve_env_vars(str(srv.get("url", ""))),
+                api_key=api_key,
+                transport="streamable_http",
+                timeout=float(srv.get("timeout", 30.0)),
+                enabled=srv.get("enabled", True),
+                description=srv.get("description", ""),
+                allowed_tools=srv.get("allowed_tools"),
+                blocked_tools=srv.get("blocked_tools"),
+                max_concurrent=int(srv.get("max_concurrent", 10)),
+                response_limit_bytes=int(srv.get("response_limit_bytes", 1048576)),
+                platform_managed=True,
+                allow_localhost=True,
+                allow_private_network=True,
+                tool_capabilities=srv.get("tool_capabilities", {}),
+            )
+        )
 
     logger.info(f"Loaded {len(configs)} MCP server configs from {config_path}")
     return configs

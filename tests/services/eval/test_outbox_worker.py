@@ -148,7 +148,9 @@ async def test_outbox_worker_executes_eval_job_and_marks_success() -> None:
 
 
 @pytest.mark.asyncio
-async def test_outbox_worker_schedules_online_eval_on_trace_ingested(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_outbox_worker_schedules_online_eval_on_trace_ingested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     scheduled: list[dict[str, Any]] = []
 
     async def _schedule(repository, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN001
@@ -186,7 +188,9 @@ async def test_outbox_worker_marks_failed_job_for_retry() -> None:
     repo = FakeEvalRepository()
 
     class FailingExecutor(FakeEvaluatorExecutor):
-        async def run_job(self, *, tenant_id: str, job_payload: dict[str, Any]) -> EvaluatorRunResult:  # noqa: ARG002
+        async def run_job(
+            self, *, tenant_id: str, job_payload: dict[str, Any]
+        ) -> EvaluatorRunResult:  # noqa: ARG002
             raise RuntimeError("judge unavailable")
 
     worker = EvalOutboxWorker(repo, FailingExecutor(), poll_interval_s=0.01, batch_size=1)
@@ -236,9 +240,7 @@ async def test_outbox_worker_retries_infrastructure_review_run() -> None:
         }
     )
 
-    assert repo.failed == [
-        ("job-infrastructure", "KB RAGAS infrastructure failure requires retry")
-    ]
+    assert repo.failed == [("job-infrastructure", "KB RAGAS infrastructure failure requires retry")]
     assert repo.succeeded == []
 
 
@@ -290,6 +292,7 @@ class FakeTransaction:
 class FakeOutboxConnection:
     def __init__(self) -> None:
         self.fetch_calls: list[tuple[str, tuple[Any, ...]]] = []
+        self.fetchrow_calls: list[tuple[str, tuple[Any, ...]]] = []
 
     def transaction(self) -> FakeTransaction:
         return FakeTransaction()
@@ -305,6 +308,15 @@ class FakeOutboxConnection:
                 "attempts": 1,
             }
         ]
+
+    async def fetchrow(self, query: str, *args: Any) -> dict[str, Any]:
+        self.fetchrow_calls.append((query, args))
+        return {
+            "job_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "tenant_id": "tenant-a",
+            "job_type": "trace.ingested",
+            "payload": {"trace_id": "trace-a"},
+        }
 
 
 class FakePoolAcquire:
@@ -343,7 +355,9 @@ class _TraceIngestRepo:
 
     async def create_trace_ingested_outbox_job(self, **kwargs: Any) -> dict[str, Any] | None:
         trace_id = str(kwargs.get("trace_id") or "")
-        if await self.has_pending_trace_ingested_job(tenant_id=str(kwargs.get("tenant_id")), trace_id=trace_id):
+        if await self.has_pending_trace_ingested_job(
+            tenant_id=str(kwargs.get("tenant_id")), trace_id=trace_id
+        ):
             return None
         self.pending_trace_ids.add(trace_id)
         return await self.create_outbox_job(
@@ -385,3 +399,24 @@ async def test_repository_claim_outbox_jobs_uses_limit_and_max_attempts_only() -
     assert rows[0]["job_id"] == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     assert conn.fetch_calls
     assert conn.fetch_calls[0][1] == (3, 7)
+
+
+@pytest.mark.asyncio
+async def test_repository_trace_ingest_outbox_uses_unambiguous_parameter_types() -> None:
+    conn = FakeOutboxConnection()
+    repo = AgentTraceRepository(FakePoolHolder(conn))
+
+    result = await repo.create_trace_ingested_outbox_job(
+        tenant_id="tenant-a",
+        trace_id="trace-a",
+        trace_family="rag",
+        status="succeeded",
+        source_adapter="api",
+    )
+
+    assert result is not None
+    query, args = conn.fetchrow_calls[0]
+    assert "$1::varchar" in query
+    assert "$3::text" in query
+    assert args[0] == "tenant-a"
+    assert args[2] == "trace-a"

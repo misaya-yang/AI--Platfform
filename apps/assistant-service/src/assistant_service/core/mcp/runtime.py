@@ -525,9 +525,12 @@ class MCPRuntimeService:
                 )
             ),
             when_to_use="Only when this exact Agent Version binding requires it.",
-            when_not_to_use="When the connection, schema, caller, channel or server is unavailable.",
+            when_not_to_use=(
+                "When the connection, schema, caller, channel or server is unavailable."
+            ),
             timeout_seconds=max(1, int(item.get("timeout_ms") or 30000) // 1000),
             is_async=True,
+            argument_schema=schema,
         )
         definition.capability_metadata = {
             "kind": "mcp",

@@ -3,16 +3,14 @@
 Flow:
   1. If soffice available, convert pptx → pdf.
   2. pdftoppm -jpeg -r 150 (or pypdfium2 as a fallback) to render each page.
-  3. Send the JPEGs to a ``VisionCritic``. The CRITIC is intentionally
+  3. Send the JPEGs to a ``VisionCritic``. The critic is intentionally
      abstracted behind a Protocol so:
        - production uses a fresh Anthropic client
        - tests use a deterministic :class:`StructuralVisionCritic` that
          inspects slide text / layout without vision
   4. Map critic issues back to slide / page indices.
 
-Per the plan:
-  "Vision critic must use fresh Anthropic client. Fresh context. Prompt
-  pinned to 'Assume there are issues'."
+The critic reports only visible issues; an empty report is a valid result.
 """
 
 from __future__ import annotations
@@ -33,8 +31,9 @@ class VisionCritic(Protocol):
     def review(self, doc_type: str, images: list[Path], context: dict) -> list[Issue]: ...
 
 
-# The prompt the FreshContextVisionCritic sends. Plan §4.5 pins the wording.
-CRITIC_SYSTEM_PROMPT = """You are a design QA reviewer. Assume there ARE issues in this document.
+# The prompt the FreshContextVisionCritic sends.
+CRITIC_SYSTEM_PROMPT = """You are a design QA reviewer. Inspect the document critically and report
+only visible, evidence-backed issues. It is valid to return an empty array.
 
 Your job is to find:
   * overflow (text or images cropped past slide/page boundaries)
@@ -68,7 +67,7 @@ class FreshContextVisionCritic(VisionCritic):
     def review(self, doc_type: str, images: list[Path], context: dict) -> list[Issue]:
         del doc_type, context
         client = self._client_factory()  # fresh!
-        blocks = [{"type": "text", "text": CRITIC_SYSTEM_PROMPT}]
+        blocks = [{"type": "text", "text": "Review these rendered pages in order."}]
         for idx, img in enumerate(images):
             blocks.append({"type": "text", "text": f"\nPage/slide {idx + 1}:"})
             with open(img, "rb") as fh:

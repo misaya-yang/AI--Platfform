@@ -83,7 +83,7 @@ def _first(*candidates: str) -> str:
     return ""
 
 
-def _normalize_dashscope_base(url: str, domain: Domain) -> str:
+def normalize_dashscope_base(url: str, domain: Domain) -> str:
     """Make a DashScope base URL match the convention the consumer wants.
 
     chat domain → ``…/compatible-mode``  (OpenAI-compat client)
@@ -136,7 +136,7 @@ def resolve_dashscope(domain: Domain) -> tuple[str, str]:
         os.environ.get("DASHSCOPE_BASE_URL", ""),
     )
     if raw_url:
-        base_url = _normalize_dashscope_base(raw_url, domain)
+        base_url = normalize_dashscope_base(raw_url, domain)
     else:
         base_url = (
             DASHSCOPE_DEFAULT_CHAT_BASE_URL

@@ -32,8 +32,11 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+from ai_gateway_core.security import redact_trace_text
 
 # =============================================================================
 # Preserve Patterns
@@ -54,6 +57,22 @@ ARTIFACT_PATTERN: str = r"artifact[_-]?(?:id)?[:\s]*([a-zA-Z0-9_-]+)"
 # Maximum limits for preserved content to prevent memory bloat
 MAX_PRESERVED_URLS: int = 20
 MAX_PRESERVED_CODE_BLOCKS: int = 5
+MAX_PRESERVED_IDENTIFIERS: int = 50
+
+IDENTIFIER_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
+        r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b"
+    ),
+    re.compile(r"\b[0-9a-fA-F]{12,64}\b"),
+    re.compile(
+        r"\b[A-Za-z0-9_.-]+\.(?:py|pyi|js|jsx|ts|tsx|json|ya?ml|toml|md|txt|csv|"
+        r"sql|sh|pdf|docx|xlsx|pptx)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,24}\b"),
+    re.compile(r"\b[A-Z]{2,10}[-_][A-Z0-9][A-Z0-9_-]{2,63}\b"),
+)
 
 
 # =============================================================================
@@ -112,8 +131,10 @@ class CompressedContext:
     preserved_urls: list[str] = field(default_factory=list)
     preserved_code_blocks: list[str] = field(default_factory=list)
     key_artifacts: list[str] = field(default_factory=list)
+    preserved_identifiers: list[str] = field(default_factory=list)
     recent_messages: list[dict[str, Any]] = field(default_factory=list)
     token_count: int = 0
+    summary_stages: int = 1
 
 
 # =============================================================================
@@ -156,6 +177,9 @@ class ContextCompressor:
         messages: list[dict[str, Any]],
         target_tokens: int,
         preserve_recent: int = 6,
+        *,
+        staged: bool = False,
+        staged_min_source_tokens: int = 4000,
     ) -> CompressedContext:
         """
         Compress conversation messages to fit within target token count.
@@ -183,8 +207,10 @@ class ContextCompressor:
                 preserved_urls=[],
                 preserved_code_blocks=[],
                 key_artifacts=[],
+                preserved_identifiers=[],
                 recent_messages=[],
                 token_count=0,
+                summary_stages=0,
             )
 
         # Split messages into those to compress and those to preserve
@@ -195,26 +221,40 @@ class ContextCompressor:
                 preserved_urls=[],
                 preserved_code_blocks=[],
                 key_artifacts=[],
+                preserved_identifiers=[],
                 recent_messages=messages.copy(),
                 token_count=self._count_tokens(messages),
+                summary_stages=0,
             )
 
-        messages_to_compress = messages[:-preserve_recent]
+        messages_to_compress = self._redacted_messages(messages[:-preserve_recent])
         recent_messages = messages[-preserve_recent:]
 
         # Extract preservable content from messages to compress
         preserved_urls = self._extract_all(messages_to_compress, "urls")
         preserved_code_blocks = self._extract_all(messages_to_compress, "code_blocks")
         key_artifacts = self._extract_artifacts(messages_to_compress)
+        preserved_identifiers = self._extract_identifiers(messages_to_compress)
 
         # Apply limits to preserved content
         preserved_urls = preserved_urls[:MAX_PRESERVED_URLS]
         preserved_code_blocks = preserved_code_blocks[:MAX_PRESERVED_CODE_BLOCKS]
 
         # Generate summary of compressed messages
-        summary = await self._generate_summary(
-            messages_to_compress, budget_tokens=effective_summary_tokens
+        use_staged = bool(
+            staged
+            and self._count_tokens(messages_to_compress) >= max(1, int(staged_min_source_tokens))
         )
+        if use_staged:
+            summary, summary_stages = await self._generate_staged_summary(
+                messages_to_compress,
+                budget_tokens=effective_summary_tokens,
+            )
+        else:
+            summary = await self._generate_summary(
+                messages_to_compress, budget_tokens=effective_summary_tokens
+            )
+            summary_stages = 1
 
         # Calculate total token count
         token_count = self._estimate_compressed_tokens(
@@ -229,9 +269,97 @@ class ContextCompressor:
             preserved_urls=preserved_urls,
             preserved_code_blocks=preserved_code_blocks,
             key_artifacts=key_artifacts,
+            preserved_identifiers=preserved_identifiers,
             recent_messages=recent_messages,
             token_count=token_count,
+            summary_stages=summary_stages,
         )
+
+    @staticmethod
+    def _redacted_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Return a summary-only copy with secret-looking text removed."""
+
+        redacted: list[dict[str, Any]] = []
+        for message in messages:
+            candidate = dict(message)
+            content = candidate.get("content")
+            if isinstance(content, str):
+                candidate["content"] = redact_trace_text(content)
+            elif isinstance(content, list):
+                blocks: list[Any] = []
+                for block in content:
+                    if isinstance(block, str):
+                        blocks.append(redact_trace_text(block))
+                    elif isinstance(block, dict):
+                        item = dict(block)
+                        if isinstance(item.get("text"), str):
+                            item["text"] = redact_trace_text(item["text"])
+                        blocks.append(item)
+                    else:
+                        blocks.append(block)
+                candidate["content"] = blocks
+            redacted.append(candidate)
+        return redacted
+
+    def _extract_identifiers(self, messages: list[dict[str, Any]]) -> list[str]:
+        identifiers: list[str] = []
+        seen: set[str] = set()
+        for message in messages:
+            content = self._get_message_content(message)
+            for pattern in IDENTIFIER_PATTERNS:
+                for match in pattern.findall(content):
+                    value = str(match).strip()
+                    if not value or "redacted" in value.casefold() or value in seen:
+                        continue
+                    seen.add(value)
+                    identifiers.append(value)
+                    if len(identifiers) >= MAX_PRESERVED_IDENTIFIERS:
+                        return identifiers
+        return identifiers
+
+    async def _generate_staged_summary(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        budget_tokens: int,
+    ) -> tuple[str, int]:
+        """Summarize bounded chronological stages, then consolidate them."""
+
+        chunks: list[list[dict[str, Any]]] = []
+        current: list[dict[str, Any]] = []
+        current_chars = 0
+        for message in messages:
+            message_chars = len(self._get_message_content(message)) + 32
+            if current and current_chars + message_chars > 7000:
+                chunks.append(current)
+                current = []
+                current_chars = 0
+            current.append(message)
+            current_chars += message_chars
+        if current:
+            chunks.append(current)
+        if len(chunks) <= 1:
+            return (
+                await self._generate_summary(messages, budget_tokens=budget_tokens),
+                1,
+            )
+
+        partial_budget = max(100, min(240, budget_tokens))
+        partials: list[str] = []
+        for chunk in chunks:
+            partial = await self._generate_summary(chunk, budget_tokens=partial_budget)
+            if not partial:
+                return "", len(chunks)
+            partials.append(partial)
+        consolidation_input = [
+            {"role": "user", "content": f"Stage {index}: {partial}"}
+            for index, partial in enumerate(partials, start=1)
+        ]
+        summary = await self._generate_summary(
+            consolidation_input,
+            budget_tokens=budget_tokens,
+        )
+        return summary, len(chunks) + 1
 
     def _extract_all(
         self,
@@ -490,15 +618,19 @@ class ModelRegistryLLMService:
         model_id: str,
         max_tokens: int = 500,
         temperature: float = 0.3,
+        before_complete: Callable[[], None] | None = None,
     ) -> None:
         self._registry = model_registry
         self._model_id = model_id
         self._max_tokens = max_tokens
         self._temperature = temperature
+        self._before_complete = before_complete
 
     async def complete(self, prompt: str, max_tokens: int = 200) -> str:
         effective_max = min(max_tokens or self._max_tokens, self._max_tokens)
         try:
+            if self._before_complete is not None:
+                self._before_complete()
             content, _usage = await self._registry.chat(
                 model_id=self._model_id,
                 messages=[{"role": "user", "content": prompt}],

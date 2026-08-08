@@ -240,6 +240,7 @@ dependencies = [
     { name = "aioboto3" },
     { name = "aiofiles" },
     { name = "asyncpg" },
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "numpy" },
@@ -266,6 +267,7 @@ requires-dist = [
     { name = "aioboto3", specifier = ">=12" },
     { name = "aiofiles", specifier = ">=23" },
     { name = "asyncpg", specifier = ">=0.29" },
+    { name = "cryptography", specifier = ">=44.0" },
     { name = "fakeredis", marker = "extra == 'dev'", specifier = ">=2.20" },
     { name = "fastapi", specifier = ">=0.124.0" },
     { name = "httpx", specifier = ">=0.28.0" },
@@ -598,9 +600,11 @@ dependencies = [
     { name = "boto3" },
     { name = "cachetools" },
     { name = "defusedxml" },
+    { name = "docker" },
     { name = "fastapi" },
     { name = "google-genai" },
     { name = "httpx" },
+    { name = "jsonschema" },
     { name = "markdownify" },
     { name = "openai" },
     { name = "orjson" },
@@ -628,9 +632,11 @@ requires-dist = [
     { name = "boto3", specifier = ">=1.38.0" },
     { name = "cachetools", specifier = ">=5.5.0" },
     { name = "defusedxml", specifier = ">=0.7.1" },
+    { name = "docker", specifier = ">=7.0.0" },
     { name = "fastapi", specifier = ">=0.124.0" },
     { name = "google-genai", specifier = ">=1.0.0" },
     { name = "httpx", specifier = ">=0.28.0" },
+    { name = "jsonschema", specifier = ">=4.25.0" },
     { name = "markdownify", specifier = ">=0.14.0" },
     { name = "openai", specifier = ">=1.50.0,<2.0.0" },
     { name = "orjson", specifier = ">=3.11.0" },
@@ -1916,6 +1922,7 @@ name = "knowledge-service"
 version = "0.1.0"
 source = { editable = "apps/knowledge-service" }
 dependencies = [
+    { name = "ai-gateway-core" },
     { name = "aioboto3" },
     { name = "asyncpg" },
     { name = "bcrypt" },
@@ -1946,6 +1953,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "ai-gateway-core", editable = "packages/ai-gateway-core" },
     { name = "aioboto3", specifier = ">=14.0.0" },
     { name = "asyncpg", specifier = ">=0.31.0" },
     { name = "bcrypt", specifier = ">=4.2.0" },

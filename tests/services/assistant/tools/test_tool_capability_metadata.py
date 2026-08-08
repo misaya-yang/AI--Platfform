@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -15,6 +16,7 @@ from assistant_service.core.tools.context_tools import (
 )
 from assistant_service.core.tools.document_generator_tool import (
     DOCUMENT_GENERATION_DEFINITION,
+    _definition_for_executor,
 )
 from assistant_service.core.tools.pptx_generator_tool import PPTX_GENERATION_DEFINITION
 from assistant_service.core.tools.primitives import (
@@ -75,6 +77,18 @@ def test_repository_control_and_artifact_tools_declare_write_metadata(
 def test_external_write_boundaries_are_declared() -> None:
     assert SPAWN_SUBAGENT_DEFINITION.capability_metadata["external_service"] is True
     assert QUIZ_GENERATION_DEFINITION.capability_metadata["external_service"] is True
+
+
+def test_document_tool_advertises_only_runtime_supported_formats() -> None:
+    unavailable_pdf = SimpleNamespace(pdf_converter=SimpleNamespace(is_available=False))
+    definition = _definition_for_executor(unavailable_pdf)  # type: ignore[arg-type]
+    format_parameter = next(item for item in definition.parameters if item.name == "format")
+
+    assert format_parameter.enum == ["docx", "md"]
+    original_format = next(
+        item for item in DOCUMENT_GENERATION_DEFINITION.parameters if item.name == "format"
+    )
+    assert original_format.enum == ["docx", "pdf", "md"]
 
 
 class _ToolRegistry:
@@ -138,9 +152,12 @@ async def test_context_compact_validation_remains_pre_effect_failure() -> None:
     )
 
     assert result.success is False
-    assert result.error == "keep_recent_turns must be an integer"
-    assert result.metadata["tool_failure"]["failure_class"] == "invalid_input"
-    assert result.metadata["tool_failure"]["side_effect_state"] == "not_started"
+    assert result.error == "TOOL_ARGUMENT_VALIDATION_FAILED"
+    validation = result.metadata["tool_argument_validation"]
+    assert validation["valid"] is False
+    assert validation["issues"] == [
+        {"path": "$.keep_recent_turns", "rule": "type", "expected": "integer"}
+    ]
     assert result.metadata.get("side_effect_unknown") is not True
 
 

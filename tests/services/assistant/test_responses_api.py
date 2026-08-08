@@ -1212,6 +1212,40 @@ def test_qwen_default_request_remains_chat_completions_shape() -> None:
     assert "store" not in body
 
 
+def test_qwen_explicit_thinking_off_is_forwarded_for_both_wire_protocols() -> None:
+    registry = ModelRegistry(use_default_models=False)
+    registry.configure_provider(ModelProvider.DASHSCOPE, api_key="test-key")
+
+    messages = [ChatMessage(role="user", content="summarize the completed tool result")]
+    chat_body = registry._build_request_body(
+        ModelProvider.DASHSCOPE,
+        "qwen3.7-plus",
+        messages,
+        max_tokens=512,
+        stream=True,
+        thinking_level="off",
+    )
+
+    registry.configure_provider(
+        ModelProvider.DASHSCOPE,
+        api_key="test-key",
+        wire_protocol=RESPONSES_V1_WIRE_PROTOCOL,
+    )
+    responses_body = registry._build_request_body(
+        ModelProvider.DASHSCOPE,
+        "qwen3.7-plus",
+        messages,
+        max_tokens=512,
+        stream=True,
+        thinking_level="off",
+    )
+
+    assert chat_body["enable_thinking"] is False
+    assert chat_body["max_tokens"] == 512
+    assert responses_body["enable_thinking"] is False
+    assert responses_body["max_output_tokens"] == 512
+
+
 def test_responses_native_search_uses_provider_specific_tool_shape() -> None:
     registry = ModelRegistry(use_default_models=False)
     registry.configure_provider(

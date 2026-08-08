@@ -15,6 +15,7 @@ from knowledge_service.api.routes.knowledge import (
     get_document_version,
     get_image_segment,
     list_document_versions,
+    list_documents,
     reindex_document,
     restore_document_version,
 )
@@ -23,6 +24,7 @@ from knowledge_service.api.schemas.knowledge import (
     DocumentBatchCreateSchema,
 )
 from knowledge_service.core.auth.user_resolver import UserContext
+from knowledge_service.core.exceptions import ValidationFailedError
 
 USER = UserContext(user_id="user-a", tenant_id="tenant-a")
 ADMIN = UserContext(user_id="admin-a", tenant_id="tenant-a", user_tier="admin")
@@ -33,6 +35,41 @@ DATASET = {
     "index_config": {},
     "content_revision": 7,
 }
+
+
+@pytest.mark.asyncio
+async def test_document_list_maps_generation_race_to_retryable_conflict() -> None:
+    class _RaceService:
+        async def list_documents(self, _user: UserContext, _dataset_id: str) -> list[dict]:
+            raise ValidationFailedError(
+                "dataset content generation changed during read; retry the request"
+            )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await list_documents(
+            "dataset-a",
+            svc=_RaceService(),  # type: ignore[arg-type]
+            user=USER,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.headers == {"Retry-After": "1"}
+
+
+@pytest.mark.asyncio
+async def test_document_list_maps_other_validation_failures_without_500() -> None:
+    class _InvalidService:
+        async def list_documents(self, _user: UserContext, _dataset_id: str) -> list[dict]:
+            raise ValidationFailedError("dataset not found")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await list_documents(
+            "dataset-a",
+            svc=_InvalidService(),  # type: ignore[arg-type]
+            user=USER,
+        )
+
+    assert exc_info.value.status_code == 400
 
 
 class _BaseService:
@@ -345,9 +382,7 @@ async def test_batch_reindex_reports_only_newly_claimed_generations() -> None:
 
     result = await batch_reindex_documents(
         "dataset-a",
-        payload=BatchReindexSchema(
-            document_ids=["document-a", "document-b", "document-c"]
-        ),
+        payload=BatchReindexSchema(document_ids=["document-a", "document-b", "document-c"]),
         svc=service,  # type: ignore[arg-type]
         worker=Worker(),  # type: ignore[arg-type]
         user=USER,

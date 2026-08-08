@@ -586,6 +586,12 @@ class TestContextPacketBudget:
         )
 
         user_content = messages[-1]["content"]
+        assert user_content.index("## Historical Conversation Memory") < user_content.index(
+            "## Current Structured User Memory"
+        )
+        assert user_content.index("## Current Structured User Memory") < user_content.index(
+            "RAG snippet"
+        )
         assert user_content.index("RAG snippet") < user_content.index("## Source Summaries")
         assert user_content.index("## Source Summaries") < user_content.index(
             "## Recent Tool Results"

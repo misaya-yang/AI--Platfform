@@ -2,7 +2,7 @@
 
 AI Gateway is an open-source AI application platform for gateway routing, a general AI assistant, and a knowledge-base service backed by PostgreSQL, Redis, and Qdrant.
 
-The default Docker setup is intended for a local first run. `make quickstart` generates local infrastructure credentials, pulls versioned `linux/amd64` or `linux/arm64` application images, starts the complete stack, runs pending database migrations, and performs runtime validation. The default Qwen path needs only one user-supplied model secret: `DASHSCOPE_API_KEY`.
+The default Docker setup is intended for a local first run. `make quickstart` generates local infrastructure credentials, pulls versioned `linux/amd64` or `linux/arm64` application images, starts the complete stack, runs pending database migrations, and performs runtime validation. Configure a provider either before startup through environment variables or after startup in the web console.
 
 ## Services
 
@@ -24,13 +24,20 @@ Prerequisites:
 - Docker and Docker Compose
 - `make`
 - About 4 GiB available to Docker for the complete low-memory profile
-- A DashScope API key for the default Qwen configuration
+- A model-provider API key (it can be entered before or after startup)
 
-1. Export the model key without committing it:
+1. Choose one model setup path.
+
+CLI/environment setup for the default Qwen Assistant and KB:
 
 ```bash
 export DASHSCOPE_API_KEY='your-key'
 ```
+
+Or skip the export and use the web setup after the stack starts. The default
+`MODEL_SETUP_MODE=ui` keeps infrastructure and the console available while no
+provider is configured. Set `MODEL_SETUP_MODE=environment` in production when
+startup validation must reject that setup-only state.
 
 2. Pull the fixed release images and start the complete stack:
 
@@ -39,7 +46,7 @@ make quickstart
 ```
 
 The initializer creates `.env` with mode `0600` and generates PostgreSQL,
-Redis, JWT, service-HMAC, artifact-signing, and bootstrap-admin secrets without
+Redis, JWT, service-HMAC, provider-encryption, artifact-signing, and bootstrap-admin secrets without
 printing their values. The same DashScope key is used for Qwen chat,
 `text-embedding-v4`, and document generation unless you explicitly configure a
 dedicated provider key. Never commit `.env`; only `.env.example` is public.
@@ -67,6 +74,7 @@ Generated automatically for local quickstart:
 - `REDIS_PASSWORD`
 - `JWT_SECRET`
 - `GATEWAY_ASSISTANT_SHARED_SECRET`
+- `GATEWAY_ENCRYPTION_KEY`
 - `DOCGEN_ARTIFACT_SIGN_KEY`
 - `DEFAULT_USER_PASSWORD`
 
@@ -88,6 +96,13 @@ make validate-config
 - API docs: `http://localhost:8080/docs`
 - Gateway readiness: `http://localhost:8080/health/ready`
 - Gateway metrics: `http://localhost:8080/metrics`
+
+For web model setup, sign in as the generated bootstrap admin, open
+`http://localhost:8081/services`, add a provider with the guided wizard, test
+the connection, and synchronize its model catalog. The Assistant and KB
+embedding pipeline resolve the saved encrypted provider key for that tenant on
+the next operation; no service restart is required. Then open
+`http://localhost:8081/assistant`.
 
 Optional local demo data is available after the stack is running:
 
@@ -321,6 +336,46 @@ Set at least one chat provider key in `.env`. The runtime currently passes these
 - `OPENAI_API_KEY`
 - `ANTHROPIC_API_KEY`
 - `DEEPSEEK_API_KEY`
+
+### Agent Plugins 1.0.0
+
+The Assistant implements the portable Agent Plugins 1.0.0 loading contract in
+skills-only mode. It recognizes the canonical local schema identifier, reads a
+root `plugin.json`, and discovers immediate `skills/*/SKILL.md` children. It
+does not download schemas at runtime, recursively scan arbitrary paths, execute
+bundled scripts, honor a plugin's self-declared tool permissions, or start
+`mcp.json`. Invalid skills are isolated from valid sibling skills, while a
+fatal manifest error rejects the plugin before discovery.
+
+Validate a package without executing it:
+
+```bash
+uv run python scripts/validate_agent_plugin.py /path/to/plugin
+```
+
+Platform operators can canary one or more local packages by enabling Skills
+and listing plugin roots with the operating system path separator:
+
+```env
+ASSISTANT_RUNTIME_SKILLS=true
+ASSISTANT_AGENT_PLUGIN_PATHS=/opt/agent-plugins/acme-tools
+```
+
+For Docker, mount the parent directory read-only with a local Compose override;
+the configured paths are paths inside the Assistant container:
+
+```yaml
+services:
+  assistant-service:
+    volumes:
+      - ./agent-plugins:/opt/agent-plugins:ro
+```
+
+The feature remains off by default. Agent Plugins v1 explicitly permits
+skills-only conformant clients; portable MCP startup is intentionally deferred
+until plugin installation, credential, consent, and subprocess sandbox policy
+are implemented. Existing administrator-managed MCP configuration remains a
+separate trust boundary.
 
 ## Database and Qdrant Notes
 

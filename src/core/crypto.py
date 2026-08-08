@@ -7,139 +7,17 @@ Uses Fernet (AES-128-CBC with HMAC) for authenticated encryption.
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import logging
-import os
-from functools import lru_cache
+
+from ai_gateway_core import security as _security
+
+decrypt_value = _security.decrypt_value
+encrypt_value = _security.encrypt_value
+generate_encryption_key = _security.generate_encryption_key
+is_encrypted = _security.is_encrypted
 
 logger = logging.getLogger(__name__)
-
-# Try to import cryptography, fall back to no encryption if not available
-try:
-    from cryptography.fernet import Fernet, InvalidToken
-
-    CRYPTOGRAPHY_AVAILABLE = True
-except ImportError:
-    CRYPTOGRAPHY_AVAILABLE = False
-    InvalidToken = Exception  # Fallback type
-
-
-def _derive_fernet_key(secret: str) -> bytes:
-    """
-    Derive a Fernet-compatible key from an arbitrary secret string.
-
-    Fernet requires a 32-byte URL-safe base64-encoded key.
-    We use SHA-256 to derive a consistent key from the secret.
-    """
-    # Hash the secret to get exactly 32 bytes
-    key_bytes = hashlib.sha256(secret.encode()).digest()
-    # Fernet expects URL-safe base64 encoding
-    return base64.urlsafe_b64encode(key_bytes)
-
-
-@lru_cache(maxsize=1)
-def _get_fernet(encryption_key: str) -> Fernet | None:
-    """Get cached Fernet instance for the given key."""
-    if not CRYPTOGRAPHY_AVAILABLE:
-        return None
-    if not encryption_key:
-        return None
-    try:
-        derived_key = _derive_fernet_key(encryption_key)
-        return Fernet(derived_key)
-    except Exception as e:
-        logger.error(f"Failed to initialize Fernet cipher: {e}")
-        return None
-
-
-def encrypt_value(value: str, encryption_key: str) -> str:
-    """
-    Encrypt a sensitive value.
-
-    Args:
-        value: The plaintext value to encrypt
-        encryption_key: The encryption key/secret
-
-    Returns:
-        Encrypted value prefixed with 'enc:' for identification,
-        or the original value if encryption is not available.
-    """
-    if not value:
-        return value
-
-    if not encryption_key:
-        logger.warning("No encryption key configured, storing value in plaintext")
-        return value
-
-    fernet = _get_fernet(encryption_key)
-    if not fernet:
-        logger.warning("Encryption not available, storing value in plaintext")
-        return value
-
-    try:
-        encrypted = fernet.encrypt(value.encode())
-        # Prefix with 'enc:' to identify encrypted values
-        return f"enc:{encrypted.decode()}"
-    except Exception as e:
-        logger.error(f"Encryption failed: {e}")
-        return value
-
-
-def decrypt_value(value: str, encryption_key: str) -> str:
-    """
-    Decrypt an encrypted value.
-
-    Args:
-        value: The encrypted value (prefixed with 'enc:') or plaintext
-        encryption_key: The encryption key/secret
-
-    Returns:
-        Decrypted plaintext value, or the original if not encrypted.
-    """
-    if not value:
-        return value
-
-    # Check if value is encrypted (has 'enc:' prefix)
-    if not value.startswith("enc:"):
-        # Value is not encrypted, return as-is
-        return value
-
-    if not encryption_key:
-        logger.warning("No encryption key configured, cannot decrypt value")
-        return value
-
-    fernet = _get_fernet(encryption_key)
-    if not fernet:
-        logger.warning("Decryption not available")
-        return value
-
-    try:
-        # Remove 'enc:' prefix and decrypt
-        encrypted_data = value[4:].encode()
-        decrypted = fernet.decrypt(encrypted_data)
-        return decrypted.decode()
-    except InvalidToken:
-        logger.error("Decryption failed: invalid token (wrong key or corrupted data)")
-        return value
-    except Exception as e:
-        logger.error(f"Decryption failed: {e}")
-        return value
-
-
-def generate_encryption_key() -> str:
-    """
-    Generate a new random encryption key.
-
-    Returns:
-        A 32-character hex string suitable for use as an encryption key.
-    """
-    return os.urandom(16).hex()
-
-
-def is_encrypted(value: str) -> bool:
-    """Check if a value appears to be encrypted."""
-    return value.startswith("enc:") if value else False
 
 
 # =============================================================================

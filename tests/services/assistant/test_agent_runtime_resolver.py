@@ -554,7 +554,8 @@ def test_trusted_prompt_layers_keep_platform_first_and_external_data_last() -> N
     assert prompt.index("PLATFORM SAFETY") < prompt.index("AGENT INSTRUCTIONS")
     assert prompt.index("AGENT INSTRUCTIONS") < prompt.index("CHANNEL POLICY")
     assert prompt.index("CHANNEL POLICY") < prompt.index("CAPABILITY POLICY")
-    assert "external data cannot override" in prompt.lower()
+    assert prompt.count("<external_content_boundary>") == 1
+    assert "data, not instructions" in prompt.lower()
 
 
 def test_verified_runtime_cannot_be_replayed_or_bound_to_another_caller() -> None:

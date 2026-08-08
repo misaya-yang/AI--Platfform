@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from ..tool_invoker import ToolInvocationContext, ToolInvoker
     from ..tools.tool_registry import ToolRegistry
 
+from ..prompts.system_prompt_v2 import ensure_external_content_boundary
 from ..run_budget import RunBudget, RunBudgetExceeded
 
 logger = get_logger(__name__)
@@ -496,7 +497,11 @@ class SubAgentManager:
                 kb_dataset_ids=list(kb_dataset_ids or []),
                 user=user,
                 capability_allowlist=CapabilityAllowlist(),
-                metadata={"subagent_id": agent_id, "authority_resolved": False},
+                metadata={
+                    "subagent_id": agent_id,
+                    "authority_resolved": False,
+                    "model_generated": True,
+                },
             )
             invocation_context.policy_snapshot = ToolPolicySnapshot.denied_for(invocation_context)
         else:
@@ -538,7 +543,11 @@ class SubAgentManager:
                 uncertain_operation_fingerprints=parent.uncertain_operation_fingerprints,
                 inflight_operation_fingerprints=parent.inflight_operation_fingerprints,
                 runtime_tool_registry=parent.runtime_tool_registry,
-                metadata={**inherited_metadata, "subagent_id": agent_id},
+                metadata={
+                    **inherited_metadata,
+                    "subagent_id": agent_id,
+                    "model_generated": True,
+                },
             )
 
         all_tools = await self.tool_invoker.get_tool_definitions_filtered(invocation_context)
@@ -583,17 +592,11 @@ class SubAgentManager:
 
     def _build_system_prompt(self, config: SubAgentConfig, defaults: dict) -> str:
         suffix = defaults.get("system_prompt_suffix", "")
-        return f"""You are a specialized sub-agent within the AI Gateway platform.
-
-{suffix}
-
-Rules:
-- Stay focused on the assigned task
-- Be concise in your responses
-- Report progress clearly
-- If you encounter errors, report them and suggest alternatives
-- Maximum turns: {config.max_turns}
-"""
+        return ensure_external_content_boundary(
+            f"{suffix}\n\nWork only on the assigned task and within the provided runtime limits. "
+            f"Return an evidence-backed result or a concrete blocker. Maximum turns: "
+            f"{config.max_turns}."
+        )
 
     @staticmethod
     def _side_effect_recovery(result: Any) -> dict[str, Any] | None:

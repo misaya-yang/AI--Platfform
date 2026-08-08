@@ -1256,14 +1256,18 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
                         is_enabled=True,
                     )
                     logger.info(f"Created provider {provider_id} in database")
-                elif api_key and not existing.get("has_api_key"):
-                    # 更新 API key（如果数据库中没有但环境变量有）
+                elif api_key:
+                    # Keep the persisted runtime row aligned with the
+                    # environment-selected endpoint and re-encrypt legacy
+                    # plaintext values after an encryption key is introduced.
                     await provider_service.update_provider(
                         tenant_id=tenant_id,
                         provider_id=provider_id,
                         api_key=api_key,
+                        api_type=config["api_type"],
+                        base_url=base_url,
                     )
-                    logger.info(f"Updated API key for provider {provider_id}")
+                    logger.info(f"Updated runtime configuration for provider {provider_id}")
             except Exception as e:
                 logger.warning(f"Failed to sync provider {provider_id} to database: {e}")
 

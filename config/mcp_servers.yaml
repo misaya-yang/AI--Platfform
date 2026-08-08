@@ -20,3 +20,9 @@ mcp_servers:
     enabled: true
     max_concurrent: 4
     timeout: 120.0
+    # Operator-owned facts only. Remote MCP annotations cannot override these.
+    tool_capabilities:
+      generate_document:
+        operation_kind: write
+        read_only: false
+        idempotency_supported: false

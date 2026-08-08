@@ -20,6 +20,7 @@ from ...core.exceptions import ValidationFailedError
 from ...core.observability.logging import get_logger
 from ...persistence.database import DatabaseStorage, dataset_index_deletion_fence
 from .common import ensure_dict as _ensure_dict
+from .common import maybe_await
 from .embedding import (
     MULTIMODAL_EMBEDDING_MODELS,
     BaseEmbedding,
@@ -1382,12 +1383,19 @@ class RetrievalService:
                     logger.debug(
                         f"Using UnifiedMultimodalEmbedding for retrieval on multimodal dataset {dataset_id}"
                     )
-                    embedder = self._ks._get_unified_multimodal_embedder(dataset, embedding_config)
+                    embedder = await maybe_await(
+                        self._ks._get_unified_multimodal_embedder(
+                            dataset, embedding_config
+                        )
+                    )
                 else:
-                    econf = self._ks._resolve_embedding_config(
-                        provider=embedding_provider,
-                        model=embedding_model,
-                        embedding_config=embedding_config,
+                    econf = await maybe_await(
+                        self._ks._resolve_embedding_config(
+                            provider=embedding_provider,
+                            model=embedding_model,
+                            embedding_config=embedding_config,
+                            tenant_id=str(dataset.get("tenant_id") or ""),
+                        )
                     )
                     # Use cached embedder for better performance (connection reuse)
                     embedder = await get_cached_embedder(econf, dimension=dim)

@@ -10,13 +10,18 @@ from .safe_fetch import (
     safe_fetch_with_response,
     validate_callback_url,
 )
+from .secrets import decrypt_value, encrypt_value, generate_encryption_key, is_encrypted
 
 __all__ = [
     "REDACTION_PATTERNS",
     "SENSITIVE_KEY_RE",
     "SafeFetchError",
     "SafeFetchResponse",
+    "decrypt_value",
+    "encrypt_value",
+    "generate_encryption_key",
     "is_safe_destination",
+    "is_encrypted",
     "redact_trace_text",
     "safe_callback_post",
     "safe_fetch",

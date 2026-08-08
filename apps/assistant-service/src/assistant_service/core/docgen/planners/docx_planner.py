@@ -58,7 +58,7 @@ Absolute rules:
 - No `#` prefix on hex colours (6 hex digits only).
 - Every image block must carry non-empty `alt_text`.
 - Do not leave placeholders (xxxx / TODO / lorem).
-- Write at least 500 words of real content.
+- Match the requested scope and use real content rather than padding.
 """
 
 

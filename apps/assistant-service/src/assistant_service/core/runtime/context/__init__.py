@@ -7,6 +7,11 @@ from .assembler import (
     ContextPacketOverflowError,
 )
 from .cost_breakdown import ContextCostBreakdown
+from .external_content import (
+    ExternalContent,
+    envelope_external_content,
+    normalize_external_text,
+)
 
 __all__ = [
     "ContextAssemblerV2",
@@ -14,4 +19,7 @@ __all__ = [
     "ContextPacket",
     "ContextPacketIntegrityError",
     "ContextPacketOverflowError",
+    "ExternalContent",
+    "envelope_external_content",
+    "normalize_external_text",
 ]

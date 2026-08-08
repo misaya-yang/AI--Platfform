@@ -191,6 +191,29 @@ class TestAssistantConfig:
         assert config.kb_top_k == 10
         assert config.web_search_enabled is True
 
+    def test_route_config_keeps_model_for_request_scoped_tenant_provider(self):
+        from assistant_service.api.routes.chat import ChatRequest, _build_config
+        from assistant_service.core.models.model_registry import ModelInfo, ModelProvider
+
+        requested = ModelInfo(
+            id="qwen3.7-plus",
+            name="Qwen 3.7 Plus",
+            provider=ModelProvider.DASHSCOPE,
+        )
+        registry = MagicMock()
+        registry.get_model.return_value = requested
+        registry.is_provider_configured.return_value = False
+        registry.get_available_models.return_value = []
+
+        config = _build_config(
+            ChatRequest(message="hello", model_id="qwen3.7-plus"),
+            registry,
+            tenant_provider_resolution_available=True,
+        )
+
+        assert config.model_id == "qwen3.7-plus"
+        assert config.model_provider == ModelProvider.DASHSCOPE
+
     def test_route_config_carries_traceparent(self):
         """HTTP route config should preserve request trace correlation."""
         from assistant_service.api.routes.chat import ChatRequest, _build_config

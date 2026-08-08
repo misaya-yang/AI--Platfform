@@ -249,6 +249,8 @@ EXPECTED_AGENT_LOOP_CONFIG_FIELDS: frozenset[str] = frozenset(
         "min_recent_messages",
         "compressed_context_tokens",
         "max_summary_tokens",
+        "enable_staged_compaction",
+        "staged_compaction_min_source_tokens",
         "max_history_tokens",
         "enable_history_trimming",
         "use_context_engine",

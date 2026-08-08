@@ -11,10 +11,19 @@ Consolidates duplicated functions that previously existed in multiple files:
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import re
 from typing import Any
+
+
+async def maybe_await(value: Any) -> Any:
+    """Await production coroutines while preserving synchronous test adapters."""
+
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 # =============================================================================

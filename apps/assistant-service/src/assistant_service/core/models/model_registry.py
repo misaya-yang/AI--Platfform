@@ -46,6 +46,15 @@ __all__ = ["ModelAccessLevel", "ModelProvider", "ModelInfo", "ModelRegistry"]
 
 logger = get_logger(__name__)
 
+_QWEN_THINKING_DISABLED_LEVELS = frozenset({"disabled", "false", "none", "off"})
+
+
+def _qwen_thinking_enabled(model_id: str, thinking_level: str | None) -> bool | None:
+    """Return an explicit Qwen thinking flag without changing provider defaults."""
+    if thinking_level is None or "qwen3" not in model_id.lower():
+        return None
+    return thinking_level.strip().lower() not in _QWEN_THINKING_DISABLED_LEVELS
+
 
 @dataclass
 class ModelInfo:
@@ -1243,9 +1252,10 @@ class ModelRegistry:
                 reasoning_effort=reasoning_effort,
             )
             if provider == ModelProvider.DASHSCOPE:
-                if thinking_level and "qwen3" in model_id.lower():
-                    body["enable_thinking"] = True
-                    if "max_output_tokens" not in body:
+                qwen_thinking_enabled = _qwen_thinking_enabled(model_id, thinking_level)
+                if qwen_thinking_enabled is not None:
+                    body["enable_thinking"] = qwen_thinking_enabled
+                    if qwen_thinking_enabled and "max_output_tokens" not in body:
                         body["max_output_tokens"] = 16384
                 if native_search_config and native_search_config.get("enable_search"):
                     response_tools = body.setdefault("tools", [])
@@ -1353,12 +1363,13 @@ class ModelRegistry:
         #   body.enable_search = True → flag RESPECTED, model returns
         #     results with real team names and scores.
         # Same applies to enable_thinking.
-        if thinking_level and "qwen3" in model_id.lower():
-            body["enable_thinking"] = True
+        qwen_thinking_enabled = _qwen_thinking_enabled(model_id, thinking_level)
+        if qwen_thinking_enabled is not None:
+            body["enable_thinking"] = qwen_thinking_enabled
             # An explicit caller ceiling is a hard Context Packet boundary.
             # Only choose the provider-friendly default when the caller did
             # not reserve an output budget.
-            if "max_tokens" not in body:
+            if qwen_thinking_enabled and "max_tokens" not in body:
                 body["max_tokens"] = 16384
         if native_search_config and native_search_config.get("enable_search"):
             # DashScope CN vs Intl differ in where ``enable_search`` belongs:

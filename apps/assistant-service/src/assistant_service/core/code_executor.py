@@ -11,6 +11,7 @@ Provides safe execution of Python code with:
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import base64
 import contextlib
@@ -254,6 +255,26 @@ def _patched_fig_savefig(self, fname, *a, **kw):
     return _orig_fig_savefig(self, _redirect_relative_to_output(fname), *a, **kw)
 _Figure.savefig = _patched_fig_savefig
 """
+
+
+def _uses_matplotlib(code: str) -> bool:
+    """Return whether the submitted program imports matplotlib."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import) and any(
+            alias.name == "matplotlib" or alias.name.startswith("matplotlib.")
+            for alias in node.names
+        ):
+            return True
+        if isinstance(node, ast.ImportFrom) and (
+            node.module == "matplotlib"
+            or str(node.module or "").startswith("matplotlib.")
+        ):
+            return True
+    return False
 
 
 class CodeExecutorService:
@@ -530,9 +551,11 @@ class CodeExecutorService:
         output_dir.mkdir(exist_ok=True)
         kb_docs_dir.mkdir(exist_ok=True)
 
-        # Write main.py with matplotlib setup
+        # Inject the plotting shim only when the submitted program actually
+        # imports matplotlib. The minimal sandbox image intentionally does not
+        # force plotting dependencies onto ordinary Python tasks.
         main_script = workspace_dir / "main.py"
-        wrapped_code = MATPLOTLIB_SETUP + "\n" + code
+        wrapped_code = (MATPLOTLIB_SETUP + "\n" if _uses_matplotlib(code) else "") + code
         main_script.write_text(wrapped_code, encoding="utf-8")
 
         # Write input files

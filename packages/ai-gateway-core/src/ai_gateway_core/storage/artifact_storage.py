@@ -298,7 +298,7 @@ class ArtifactStorageService:
             try:
                 await conn.execute(
                     """
-                    INSERT INTO assistant.artifacts (
+                    INSERT INTO artifacts (
                         artifact_id, session_id, message_id, tenant_id, user_id,
                         type, format, title, filename, storage_key, size_bytes,
                         mime_type, source, metadata, created_at, updated_at,
@@ -358,7 +358,7 @@ class ArtifactStorageService:
                 legacy_metadata["__turn_id"] = artifact.turn_id
                 await conn.execute(
                     """
-                    INSERT INTO assistant.artifacts (
+                    INSERT INTO artifacts (
                         artifact_id, session_id, message_id, tenant_id, user_id,
                         type, format, title, filename, storage_key, size_bytes,
                         mime_type, source, metadata, created_at, updated_at
@@ -403,7 +403,7 @@ class ArtifactStorageService:
 
         async with self.database._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT * FROM assistant.artifacts WHERE artifact_id = $1",
+                "SELECT * FROM artifacts WHERE artifact_id = $1",
                 artifact_id,
             )
 
@@ -461,7 +461,7 @@ class ArtifactStorageService:
         try:
             async with self.database._pool.acquire() as conn:
                 base = await conn.fetchrow(
-                    "SELECT * FROM assistant.artifacts WHERE artifact_id = $1",
+                    "SELECT * FROM artifacts WHERE artifact_id = $1",
                     parent_or_self_artifact_id,
                 )
                 if not base:
@@ -483,13 +483,13 @@ class ArtifactStorageService:
 
                 if variant == "raw":
                     row = await conn.fetchrow(
-                        "SELECT * FROM assistant.artifacts WHERE artifact_id = $1",
+                        "SELECT * FROM artifacts WHERE artifact_id = $1",
                         raw_id,
                     )
                 else:
                     row = await conn.fetchrow(
                         """
-                        SELECT * FROM assistant.artifacts
+                        SELECT * FROM artifacts
                         WHERE parent_artifact_id = $1 AND variant = $2
                         ORDER BY created_at DESC
                         LIMIT 1
@@ -587,7 +587,7 @@ class ArtifactStorageService:
             if tenant_id:
                 rows = await conn.fetch(
                     """
-                    SELECT * FROM assistant.artifacts
+                    SELECT * FROM artifacts
                     WHERE session_id = $1 AND tenant_id = $2
                     ORDER BY created_at ASC
                     """,
@@ -597,7 +597,7 @@ class ArtifactStorageService:
             else:
                 rows = await conn.fetch(
                     """
-                    SELECT * FROM assistant.artifacts
+                    SELECT * FROM artifacts
                     WHERE session_id = $1
                     ORDER BY created_at ASC
                     """,
@@ -622,7 +622,7 @@ class ArtifactStorageService:
         if self.database and self.database._pool:
             async with self.database._pool.acquire() as conn:
                 await conn.execute(
-                    "DELETE FROM assistant.artifacts WHERE artifact_id = $1",
+                    "DELETE FROM artifacts WHERE artifact_id = $1",
                     artifact_id,
                 )
 

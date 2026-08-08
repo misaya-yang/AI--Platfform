@@ -26,6 +26,7 @@ from .chunking import (
     validate_persisted_chunking_config,
 )
 from .common import ensure_dict as _ensure_dict
+from .common import maybe_await
 from .embedding import BaseEmbedding, EmbeddingConfig, create_embedding
 from .lexical_config import LexicalConfig
 from .vector_store import VectorStore
@@ -154,8 +155,8 @@ class ChunkingManager:
                 cleaned.append(char)
         return "".join(cleaned)
 
-    def _resolve_embedding_config(self, **kwargs: Any) -> EmbeddingConfig:
-        return self._ks._resolve_embedding_config(**kwargs)
+    async def _resolve_embedding_config(self, **kwargs: Any) -> EmbeddingConfig:
+        return await maybe_await(self._ks._resolve_embedding_config(**kwargs))
 
     # ========================= Chunk conversion =========================
 
@@ -452,10 +453,11 @@ class ChunkingManager:
         embedding_model = str(dataset.get("embedding_model") or "hash-384")
         embedding_config = _ensure_dict(dataset.get("embedding_config"))
         dim = int(dataset.get("embedding_dimension") or 0) or None
-        econf = self._resolve_embedding_config(
+        econf = await self._resolve_embedding_config(
             provider=embedding_provider,
             model=embedding_model,
             embedding_config=embedding_config,
+            tenant_id=str(dataset.get("tenant_id") or ""),
         )
         lease_factory = getattr(self.db, "segment_index_update_lease", None)
         set_index_state = getattr(self.db, "set_segment_index_state", None)
@@ -879,10 +881,11 @@ class ChunkingManager:
                 )
                 dim = int(authoritative_dataset.get("embedding_dimension") or 0) or None
 
-                econf = self._resolve_embedding_config(
+                econf = await self._resolve_embedding_config(
                     provider=embedding_provider,
                     model=embedding_model,
                     embedding_config=embedding_config,
+                    tenant_id=str(authoritative_dataset.get("tenant_id") or ""),
                 )
 
                 embedder: BaseEmbedding | None = None

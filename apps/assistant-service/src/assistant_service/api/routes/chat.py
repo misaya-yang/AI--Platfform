@@ -191,6 +191,7 @@ def _build_config(
     *,
     traceparent: str | None = None,
     otel_trace_id: str | None = None,
+    tenant_provider_resolution_available: bool = False,
 ):
     """Build AssistantConfig from request body."""
     from ...core.assistant_service import AssistantConfig, RAGMode
@@ -207,7 +208,8 @@ def _build_config(
     if model_registry:
         mi = model_registry.get_model(model_id)
         provider_configured = bool(mi) and (
-            not hasattr(model_registry, "is_provider_configured")
+            tenant_provider_resolution_available
+            or not hasattr(model_registry, "is_provider_configured")
             or model_registry.is_provider_configured(mi.provider)
         )
         if mi is None or not provider_configured:
@@ -761,7 +763,14 @@ async def chat(
     assistant = get_assistant_service(request)
     model_registry = get_model_registry(request)
     traceparent = _request_traceparent(request)
-    config = _build_config(body, model_registry, traceparent=traceparent)
+    config = _build_config(
+        body,
+        model_registry,
+        traceparent=traceparent,
+        tenant_provider_resolution_available=(
+            getattr(assistant, "tenant_model_registry_resolver", None) is not None
+        ),
+    )
     history = body.history
 
     try:
@@ -826,7 +835,14 @@ async def chat_stream(
     assistant = get_assistant_service(request)
     model_registry = get_model_registry(request)
     traceparent = _request_traceparent(request)
-    config = _build_config(body, model_registry, traceparent=traceparent)
+    config = _build_config(
+        body,
+        model_registry,
+        traceparent=traceparent,
+        tenant_provider_resolution_available=(
+            getattr(assistant, "tenant_model_registry_resolver", None) is not None
+        ),
+    )
     history = body.history
 
     async def _agent_lines():

@@ -20,10 +20,15 @@ from ..tools.tool_registry import (
     ToolRiskLevel,
     get_tool_registry,
 )
-from .client import MCPClient, MCPError, MCPServerConfig, MCPTool
+from .client import (
+    MCPClient,
+    MCPError,
+    MCPServerConfig,
+    MCPStaticToolCapability,
+    MCPTool,
+)
 from .resilience import (
     MCPInvocationPolicy,
-    MCPOperationKind,
     build_operation_identity,
 )
 
@@ -51,17 +56,25 @@ class MCPManager:
         async def _init_one(config: MCPServerConfig) -> tuple[str, int]:
             if not config.enabled:
                 return config.name, 0
+            client: MCPClient | None = None
             try:
                 client = MCPClient(config)
                 await client.initialize()
                 tools = await client.list_tools()
+                self._validate_static_capabilities(config, tools)
                 self._clients[config.name] = client
                 for mcp_tool in tools:
                     self._register_mcp_tool(mcp_tool, client, tool_registry)
                 logger.info(f"MCP '{config.name}': {len(tools)} tools registered")
                 return config.name, len(tools)
-            except Exception as e:
-                logger.warning(f"MCP '{config.name}' failed: {e}")
+            except Exception as exc:
+                if client is not None:
+                    with suppress(Exception):
+                        await client.close()
+                logger.warning(
+                    "Static MCP initialization failed (exception_type=%s)",
+                    type(exc).__name__,
+                )
                 return config.name, -1
 
         init_results = await asyncio.gather(
@@ -92,6 +105,7 @@ class MCPManager:
         # credential-shaped leakage from untrusted MCP servers).
         safe_desc = self._sanitize_external_text(mcp_tool.description or "")
         keywords = self._relevance_keywords(mcp_tool, safe_desc)
+        capability = self._static_capability(client, mcp_tool.upstream_name)
 
         definition = ToolDefinition(
             name=registry_name,
@@ -111,12 +125,14 @@ class MCPManager:
                 + 1,
             ),
             is_async=True,
+            argument_schema=mcp_tool.input_schema,
         )
         definition.capability_metadata = self._capability_metadata(
             mcp_tool=mcp_tool,
             registry_name=registry_name,
             safe_description=safe_desc,
             keywords=keywords,
+            capability=capability,
         )
 
         # Create executor closure
@@ -127,14 +143,22 @@ class MCPManager:
             request_metadata = getattr(request, "metadata", None) or {}
             operation_metadata = request_metadata.get("tool_operation") or {}
             operation_id = str(operation_metadata.get("operation_id") or "")
+            idempotency_key = ""
             if not operation_id:
-                operation_id, _ = build_operation_identity(
+                operation_id, idempotency_key = build_operation_identity(
                     context=request_metadata,
                     tool_name=registry_name,
                     arguments=args,
                 )
+            elif capability.idempotency_supported:
+                _, idempotency_key = build_operation_identity(
+                    context=request_metadata,
+                    tool_name=registry_name,
+                    arguments=args,
+                    logical_operation_id=operation_id,
+                )
             invocation_policy = MCPInvocationPolicy(
-                operation_kind=MCPOperationKind.UNKNOWN,
+                operation_kind=capability.operation_kind,
                 operation_id=operation_id,
                 circuit_scope=":".join(
                     [
@@ -142,6 +166,10 @@ class MCPManager:
                         mcp_tool.server_name,
                     ]
                 ),
+                idempotency_key=(idempotency_key if capability.idempotency_supported else None),
+                idempotency_supported=capability.idempotency_supported,
+                read_back_tool=capability.read_back_tool,
+                max_attempts=(2 if capability.read_only or capability.idempotency_supported else 1),
             )
             try:
                 result = await client.call_tool(
@@ -258,8 +286,11 @@ class MCPManager:
                 for t in tools:
                     self._register_mcp_tool(t, client, tool_registry)
                 results[name] = len(tools)
-            except Exception as e:
-                logger.warning(f"MCP refresh '{name}' failed: {e}")
+            except Exception as exc:
+                logger.warning(
+                    "Static MCP refresh failed (exception_type=%s)",
+                    type(exc).__name__,
+                )
                 results[name] = -1
         return results
 
@@ -348,6 +379,7 @@ class MCPManager:
         registry_name: str,
         safe_description: str,
         keywords: list[str],
+        capability: MCPStaticToolCapability,
     ) -> dict[str, Any]:
         """Expose MCP catalog facts without loading remote schema/resource data."""
         return {
@@ -359,11 +391,13 @@ class MCPManager:
             "setup_state": "ready",
             "policy_scope": "tenant",
             "external_service": True,
-            # Remote annotations are untrusted; static MCP tools therefore
-            # default to unknown/write-capable and cannot be blindly replayed.
-            "read_only": False,
-            "operation_kind": "unknown",
-            "idempotency_supported": False,
+            # Only operator-owned static configuration reaches these fields.
+            # Remote annotations, descriptions and names remain untrusted.
+            "read_only": capability.read_only,
+            "operation_kind": capability.operation_kind.value,
+            "idempotency_supported": capability.idempotency_supported,
+            "read_back_available": bool(capability.read_back_tool),
+            "capability_source": "operator_static_config",
             "trigger_examples": keywords[:8],
             "progressive_disclosure": {
                 "level0": [
@@ -382,3 +416,30 @@ class MCPManager:
                 "schema_loaded_on_demand": True,
             },
         }
+
+    @staticmethod
+    def _static_capability(client: Any, tool_name: str) -> MCPStaticToolCapability:
+        config = getattr(client, "config", None)
+        if not isinstance(config, MCPServerConfig) or not config.platform_managed:
+            return MCPStaticToolCapability()
+        resolver = getattr(config, "static_tool_capability", None)
+        if callable(resolver):
+            capability = resolver(tool_name)
+            if isinstance(capability, MCPStaticToolCapability):
+                return capability
+        return MCPStaticToolCapability()
+
+    @staticmethod
+    def _validate_static_capabilities(
+        config: MCPServerConfig,
+        tools: list[MCPTool],
+    ) -> None:
+        if not config.tool_capabilities:
+            return
+        discovered = {tool.upstream_name for tool in tools}
+        configured = set(config.tool_capabilities)
+        if not configured.issubset(discovered):
+            raise ValueError("MCP_STATIC_CAPABILITY_TOOL_NOT_DISCOVERED")
+        for capability in config.tool_capabilities.values():
+            if capability.read_back_tool and capability.read_back_tool not in discovered:
+                raise ValueError("MCP_STATIC_CAPABILITY_READ_BACK_NOT_DISCOVERED")

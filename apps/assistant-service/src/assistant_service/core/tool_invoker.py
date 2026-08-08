@@ -1010,7 +1010,12 @@ class RegistryToolInvoker(ToolInvoker):
         6. Record metrics (if configured)
         7. Return result
         """
-        from .tools.tool_registry import ToolCallRequest, ToolCallResult, ToolDefinition
+        from .tools.tool_registry import (
+            ToolCallRequest,
+            ToolCallResult,
+            ToolDefinition,
+            validate_tool_arguments,
+        )
 
         start_time = time.time()
         call_id = str(uuid.uuid4())
@@ -1088,6 +1093,43 @@ class RegistryToolInvoker(ToolInvoker):
                 start_time=start_time,
                 metadata=policy_metadata,
             )
+        if binding_type == "mcp" and tool_definition is None:
+            if self.mcp_runtime is None or capability_binding is None:
+                return await self._deny_tool_call(
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    context=context,
+                    error="MCP capability is unavailable.",
+                    start_time=start_time,
+                    metadata=policy_metadata,
+                )
+            try:
+                dynamic_definitions = await self.mcp_runtime.get_tool_definitions(
+                    context=context,
+                    bindings={tool_name: capability_binding},
+                    tool_names={tool_name},
+                )
+            except Exception:
+                dynamic_definitions = []
+            tool_definition = next(
+                (
+                    definition
+                    for definition in dynamic_definitions
+                    if isinstance(definition, ToolDefinition) and definition.name == tool_name
+                ),
+                None,
+            )
+            if tool_definition is None:
+                return await self._deny_tool_call(
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    context=context,
+                    error="MCP capability schema is unavailable.",
+                    start_time=start_time,
+                    metadata=policy_metadata,
+                )
         connector_authorization: dict[str, Any] | None = None
         if binding_type == "connector":
             if self.mcp_runtime is None:
@@ -1157,6 +1199,47 @@ class RegistryToolInvoker(ToolInvoker):
                     "dataset_ids": sorted(allowed_dataset_ids),
                 }
 
+        validation_receipt: dict[str, Any] | None = None
+        if tool_definition is not None:
+            validation_receipt = validate_tool_arguments(
+                tool_definition,
+                arguments,
+            )
+        elif bool((context.metadata or {}).get("model_generated")):
+            validation_receipt = {
+                "schema_version": "assistant-tool-arguments/v1",
+                "schema_sha256": "",
+                "valid": False,
+                "code": "schema_unavailable",
+                "issue_count": 0,
+                "issues": [],
+            }
+        if validation_receipt is not None and not validation_receipt["valid"]:
+            validation_receipt = {
+                **validation_receipt,
+                "correction_supported": True,
+            }
+            return ToolCallResult(
+                call_id=call_id,
+                tool_name=tool_name,
+                success=False,
+                result=_json.dumps(
+                    {
+                        "error": {
+                            "code": "TOOL_ARGUMENT_VALIDATION_FAILED",
+                            "validation": validation_receipt,
+                        }
+                    },
+                    separators=(",", ":"),
+                ),
+                error="TOOL_ARGUMENT_VALIDATION_FAILED",
+                duration_ms=(time.time() - start_time) * 1000,
+                metadata={
+                    **policy_metadata,
+                    "tool_argument_validation": validation_receipt,
+                },
+            )
+
         # ADR-003 Phase 3: Check result cache for idempotent tools
         cache_key = None
         cached = None
@@ -1186,7 +1269,16 @@ class RegistryToolInvoker(ToolInvoker):
                 result=cached.result,
                 error=(_safe_public_error(cached.error) if cached.error is not None else None),
                 duration_ms=0,
-                metadata={**cached.metadata, **policy_metadata, "cache_hit": True},
+                metadata={
+                    **cached.metadata,
+                    **policy_metadata,
+                    **(
+                        {"tool_argument_validation": validation_receipt}
+                        if validation_receipt is not None
+                        else {}
+                    ),
+                    "cache_hit": True,
+                },
                 output_files=cached.output_files,
             )
             if self.tool_audit:
@@ -1222,6 +1314,13 @@ class RegistryToolInvoker(ToolInvoker):
                 tool_name=tool_name,
                 success=False,
                 error="Rate limit exceeded. Please try again later.",
+                metadata={
+                    **(
+                        {"tool_argument_validation": validation_receipt}
+                        if validation_receipt is not None
+                        else {}
+                    )
+                },
             )
 
         # Auto-inject kb_dataset_ids for KB search tool if not provided
@@ -1261,10 +1360,17 @@ class RegistryToolInvoker(ToolInvoker):
                     context=context,
                     error="SIDE_EFFECT_UNRESOLVED",
                     start_time=start_time,
-                    metadata=self._side_effect_unresolved_metadata(
-                        execution_policy,
-                        cause="previous_unresolved_operation",
-                    ),
+                    metadata={
+                        **self._side_effect_unresolved_metadata(
+                            execution_policy,
+                            cause="previous_unresolved_operation",
+                        ),
+                        **(
+                            {"tool_argument_validation": validation_receipt}
+                            if validation_receipt is not None
+                            else {}
+                        ),
+                    },
                 )
             if fingerprint in context.inflight_operation_fingerprints:
                 return await self._deny_tool_call(
@@ -1274,10 +1380,17 @@ class RegistryToolInvoker(ToolInvoker):
                     context=context,
                     error="SIDE_EFFECT_UNRESOLVED",
                     start_time=start_time,
-                    metadata=self._side_effect_unresolved_metadata(
-                        execution_policy,
-                        cause="operation_in_flight",
-                    ),
+                    metadata={
+                        **self._side_effect_unresolved_metadata(
+                            execution_policy,
+                            cause="operation_in_flight",
+                        ),
+                        **(
+                            {"tool_argument_validation": validation_receipt}
+                            if validation_receipt is not None
+                            else {}
+                        ),
+                    },
                 )
             context.inflight_operation_fingerprints.add(fingerprint)
             operation_claimed = True
@@ -1451,6 +1564,11 @@ class RegistryToolInvoker(ToolInvoker):
         result.metadata = {
             **(result.metadata or {}),
             **policy_metadata,
+            **(
+                {"tool_argument_validation": validation_receipt}
+                if validation_receipt is not None
+                else {}
+            ),
         }
 
         return result

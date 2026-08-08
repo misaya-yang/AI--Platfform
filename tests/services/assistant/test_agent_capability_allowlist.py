@@ -17,17 +17,28 @@ from assistant_service.core.tools.tool_registry import (
 
 
 def _tool(name: str) -> ToolDefinition:
+    parameters = [
+        ToolParameter(
+            name="input",
+            type="string",
+            description="test input",
+            required=False,
+        )
+    ]
+    if name == "search_knowledge_base":
+        parameters.append(
+            ToolParameter(
+                name="dataset_ids",
+                type="array",
+                description="Authorized datasets",
+                required=False,
+                items={"type": "string"},
+            )
+        )
     return ToolDefinition(
         name=name,
         description=f"test tool {name}",
-        parameters=[
-            ToolParameter(
-                name="input",
-                type="string",
-                description="test input",
-                required=False,
-            )
-        ],
+        parameters=parameters,
     )
 
 

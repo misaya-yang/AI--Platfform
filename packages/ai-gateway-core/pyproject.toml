@@ -29,6 +29,7 @@ dependencies = [
     "oss2>=2.18",           # ai_gateway_core.storage (alibaba OSS backend)
     "Pillow>=10",           # ai_gateway_core.storage.image_storage
     "redis>=5.0",           # ai_gateway_core.events (Redis Streams + asyncio client)
+    "cryptography>=44.0",   # shared provider-secret encryption/decryption
     # OpenTelemetry distributed tracing — gateway/AS/KS share these
     # exporters & instrumentors. ai_gateway_core.tracing wires them into
     # FastAPI lifespan + the httpx ServiceProxy. Audit P1-1 (slow chat

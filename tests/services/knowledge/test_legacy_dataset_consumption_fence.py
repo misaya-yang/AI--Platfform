@@ -43,7 +43,7 @@ def _embedding_settings() -> SimpleNamespace:
         {"credentials": {"token": "row-token"}},
     ],
 )
-def test_legacy_embedding_config_is_rejected_before_factory(
+async def test_legacy_embedding_config_is_rejected_before_factory(
     monkeypatch: pytest.MonkeyPatch,
     legacy_config: dict[str, Any],
 ) -> None:
@@ -64,12 +64,12 @@ def test_legacy_embedding_config_is_rejected_before_factory(
     }
 
     with pytest.raises(ValidationFailedError, match="legacy credential or endpoint"):
-        manager.get_text_embedder(dataset)
+        await manager.get_text_embedder(dataset)
 
     assert factory_calls == 0
 
 
-def test_legacy_multimodal_config_is_rejected_before_server_resolver(
+async def test_legacy_multimodal_config_is_rejected_before_server_resolver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     resolver_calls = 0
@@ -83,7 +83,7 @@ def test_legacy_multimodal_config_is_rejected_before_server_resolver(
     manager = EmbeddingManager(_embedding_settings())
 
     with pytest.raises(ValidationFailedError, match="legacy credential or endpoint"):
-        manager.get_unified_multimodal_embedder(
+        await manager.get_unified_multimodal_embedder(
             {
                 "embedding_provider": "unified_multimodal",
                 "embedding_model": "tongyi-embedding-vision-plus",

@@ -172,6 +172,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             from .persistence.database import DatabaseStorage as FullDatabaseStorage
             from .services.knowledge.knowledge_service import KnowledgeService
+            from .services.knowledge.tenant_provider import (
+                TenantEmbeddingCredentialResolver,
+            )
             from .services.knowledge.worker import KnowledgeWorker
 
             db_storage = FullDatabaseStorage(
@@ -299,6 +302,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 settings=compat_settings,
                 database=db_storage,
                 image_storage_service=image_storage,
+                tenant_embedding_credential_resolver=TenantEmbeddingCredentialResolver(
+                    db_storage,
+                    encryption_key=os.environ.get("GATEWAY_ENCRYPTION_KEY", ""),
+                ),
             )
             app.state.knowledge_service = knowledge_service
 

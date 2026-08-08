@@ -22,6 +22,7 @@ from ...persistence.database import (
     IndexLeaseUnavailableError,
     dataset_index_deletion_fence,
 )
+from ...services.knowledge.common import maybe_await
 from ...services.knowledge.document_service import (
     _dataset_content_generation,
     _require_dataset_index_readable,
@@ -63,9 +64,7 @@ router = APIRouter()
 RETRIEVAL_EVAL_MAX_CASES = 20
 RETRIEVAL_EVAL_TIMEOUT_SECONDS = 30.0
 
-_UNRELEASED_MULTIMODAL_TYPES = frozenset(
-    {"image", "page_image", "mixed", "multimodal", "vision"}
-)
+_UNRELEASED_MULTIMODAL_TYPES = frozenset({"image", "page_image", "mixed", "multimodal", "vision"})
 _UNRELEASED_IMAGE_METADATA_KEYS = frozenset(
     {
         "associatedimages",
@@ -105,9 +104,7 @@ def _strip_unreleased_image_metadata(value: Any) -> Any:
         projected: dict[str, Any] = {}
         for raw_key, nested in value.items():
             normalized_key = "".join(
-                character
-                for character in str(raw_key).lower()
-                if character.isalnum()
+                character for character in str(raw_key).lower() if character.isalnum()
             )
             if normalized_key in _UNRELEASED_IMAGE_METADATA_KEYS:
                 continue
@@ -133,9 +130,11 @@ def _build_server_qa_llm_config(selector: Any, settings: Settings) -> Any:
     from ...services.knowledge.qa_service import LLMConfig, LLMProvider
 
     config = settings.ragas_eval
-    provider_name = str(
-        selector.provider if selector and selector.provider else config.provider
-    ).strip().lower()
+    provider_name = (
+        str(selector.provider if selector and selector.provider else config.provider)
+        .strip()
+        .lower()
+    )
     model = str(selector.model if selector and selector.model else config.model).strip()
     if provider_name not in config.allowed_providers:
         raise ValidationFailedError(f"QA provider is not allowlisted: {provider_name}")
@@ -157,14 +156,10 @@ def _build_server_qa_llm_config(selector: Any, settings: Settings) -> Any:
         api_key=api_key,
         base_url=base_url,
         temperature=(
-            float(selector.temperature)
-            if selector and selector.temperature is not None
-            else 0.1
+            float(selector.temperature) if selector and selector.temperature is not None else 0.1
         ),
         max_tokens=(
-            int(selector.max_tokens)
-            if selector and selector.max_tokens is not None
-            else 2048
+            int(selector.max_tokens) if selector and selector.max_tokens is not None else 2048
         ),
         timeout_seconds=config.timeout_seconds,
         system_prompt=(
@@ -182,8 +177,7 @@ def _require_authenticated_user(user: UserContext) -> None:
         not bool(getattr(user, "is_authenticated", False))
         or bool(getattr(user, "is_anonymous", False))
         or str(getattr(user, "user_id", "") or "").strip().lower() == "anonymous"
-        or str(getattr(user, "user_type", "") or "").strip().lower()
-        in {"anonymous", "guest"}
+        or str(getattr(user, "user_type", "") or "").strip().lower() in {"anonymous", "guest"}
         or "guest" in {str(role).strip().lower() for role in (user.roles or [])}
     ):
         raise PermissionDeniedError("Authenticated user required")
@@ -337,9 +331,9 @@ async def require_admin_user(
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail="Admin role required") from exc
     roles = {str(role).strip().lower() for role in (user.roles or [])}
-    tier = str(
-        getattr(user, "tier", getattr(user, "user_tier", "normal")) or "normal"
-    ).strip().lower()
+    tier = (
+        str(getattr(user, "tier", getattr(user, "user_tier", "normal")) or "normal").strip().lower()
+    )
     if tier != "admin" and "admin" not in roles:
         raise HTTPException(status_code=403, detail="Admin role required")
     return user
@@ -479,6 +473,14 @@ async def list_documents(
         return await svc.list_documents(user, dataset_id)
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        if str(exc) == "dataset content generation changed during read; retry the request":
+            raise HTTPException(
+                status_code=409,
+                detail=str(exc),
+                headers={"Retry-After": "1"},
+            ) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/knowledge/{dataset_id}/documents/text")
@@ -792,8 +794,7 @@ async def batch_upload_documents(
                             )
                         if accepted_bytes + file_size > max_batch_size:
                             raise ValidationFailedError(
-                                "Batch upload exceeds aggregate limit of "
-                                f"{max_batch_size_mb}MB"
+                                f"Batch upload exceeds aggregate limit of {max_batch_size_mb}MB"
                             )
                         await out_file.write(chunk)
 
@@ -1075,25 +1076,19 @@ async def _run_hierarchical_retrieval(
 
     require_shadow_only_dataset(dataset)
     if svc._is_multimodal_dataset(dataset):
-        raise ValidationFailedError(
-            "multimodal dataset retrieval is not enabled for this release"
-        )
+        raise ValidationFailedError("multimodal dataset retrieval is not enabled for this release")
     retrieval_generation = dataset_retrieval_generation(dataset)
     collection_name = str(dataset.get("collection_name") or "").strip()
     dataset_tenant_id = str(dataset.get("tenant_id") or "").strip()
     if not collection_name:
-        raise ValidationFailedError(
-            "dataset retrieval requires a persisted Qdrant collection"
-        )
+        raise ValidationFailedError("dataset retrieval requires a persisted Qdrant collection")
     collection_guard = getattr(
         svc.vector_store,
         "require_hierarchical_collections_readable",
         None,
     )
     if not callable(collection_guard):
-        raise ValidationFailedError(
-            "vector store collection-read authority is unavailable"
-        )
+        raise ValidationFailedError("vector store collection-read authority is unavailable")
     try:
         await collection_guard(
             collection_name,
@@ -1101,9 +1096,7 @@ async def _run_hierarchical_retrieval(
             dataset_id=dataset_id,
         )
     except Exception as exc:
-        raise ValidationFailedError(
-            f"dataset collection is not readable: {exc}"
-        ) from exc
+        raise ValidationFailedError(f"dataset collection is not readable: {exc}") from exc
     embedding_config = dataset.get("embedding_config")
     if not isinstance(embedding_config, dict):
         embedding_config = {}
@@ -1113,10 +1106,13 @@ async def _run_hierarchical_retrieval(
     embedding_provider = str(dataset.get("embedding_provider") or "local")
     embedding_model = str(dataset.get("embedding_model") or "hash-384")
     embedding_dimension = int(dataset.get("embedding_dimension") or 0) or None
-    embedding_settings = svc._resolve_embedding_config(
-        provider=embedding_provider,
-        model=embedding_model,
-        embedding_config=embedding_config,
+    embedding_settings = await maybe_await(
+        svc._resolve_embedding_config(
+            provider=embedding_provider,
+            model=embedding_model,
+            embedding_config=embedding_config,
+            tenant_id=dataset_tenant_id,
+        )
     )
     embedder: Any = await get_cached_embedder(
         embedding_settings,
@@ -1145,9 +1141,7 @@ async def _run_hierarchical_retrieval(
         if _is_unreleased_multimodal_result(item):
             continue
         projected_item = copy.copy(item)
-        projected_item.metadata = _strip_unreleased_image_metadata(
-            getattr(item, "metadata", {})
-        )
+        projected_item.metadata = _strip_unreleased_image_metadata(getattr(item, "metadata", {}))
         text_only_results.append(projected_item)
     hierarchical_results = text_only_results
     document_ids = [
@@ -1158,9 +1152,7 @@ async def _run_hierarchical_retrieval(
     if hierarchical_results:
         filter_documents = getattr(svc.db, "filter_active_document_ids", None)
         if not callable(filter_documents):
-            raise ValidationFailedError(
-                "active-document database authority is unavailable"
-            )
+            raise ValidationFailedError("active-document database authority is unavailable")
         try:
             active_document_ids = await filter_documents(
                 dataset_id=dataset_id,
@@ -1183,13 +1175,10 @@ async def _run_hierarchical_retrieval(
         hierarchical_results = [
             item
             for item in hierarchical_results
-            if str(getattr(item, "document_id", "") or "").strip()
-            in normalized_active_documents
+            if str(getattr(item, "document_id", "") or "").strip() in normalized_active_documents
         ]
     segment_results = [
-        item
-        for item in hierarchical_results
-        if int(getattr(item, "level", 3) or 3) != 1
+        item for item in hierarchical_results if int(getattr(item, "level", 3) or 3) != 1
     ]
     segment_ids = [
         str(getattr(item, "segment_id", "") or "").strip()
@@ -1199,9 +1188,7 @@ async def _run_hierarchical_retrieval(
     if segment_results:
         filter_segments = getattr(svc.db, "filter_active_segment_ids", None)
         if not callable(filter_segments):
-            raise ValidationFailedError(
-                "active-segment database authority is unavailable"
-            )
+            raise ValidationFailedError("active-segment database authority is unavailable")
         try:
             active_segment_ids = await filter_segments(
                 dataset_id=dataset_id,
@@ -1209,9 +1196,7 @@ async def _run_hierarchical_retrieval(
                 segment_ids=segment_ids,
             )
         except Exception as exc:
-            raise ValidationFailedError(
-                f"active-segment database authority failed: {exc}"
-            ) from exc
+            raise ValidationFailedError(f"active-segment database authority failed: {exc}") from exc
         normalized_active_segments = {
             str(segment_id or "").strip()
             for segment_id in (active_segment_ids or set())
@@ -1225,8 +1210,7 @@ async def _run_hierarchical_retrieval(
             item
             for item in hierarchical_results
             if int(getattr(item, "level", 3) or 3) == 1
-            or str(getattr(item, "segment_id", "") or "").strip()
-            in normalized_active_segments
+            or str(getattr(item, "segment_id", "") or "").strip() in normalized_active_segments
         ]
     authoritative = await svc.require_dataset_access(
         user,
@@ -3007,9 +2991,7 @@ async def dedupe_segments(
             seg_id = str(seg.get("segment_id") or "").strip()
             try:
                 if not seg_id:
-                    raise ValidationFailedError(
-                        "duplicate segment has no durable segment identity"
-                    )
+                    raise ValidationFailedError("duplicate segment has no durable segment identity")
                 # Keep maintenance deletion on the same durable lifecycle path
                 # as the public segment API.  That path holds the exclusive
                 # dataset fence, sweeps every owned Qdrant generation, commits
@@ -3289,11 +3271,9 @@ async def restore_document_version(
                 dataset_id,
                 connection=lease_connection,
             )
-            if (
-                not authoritative_dataset
-                or str(authoritative_dataset.get("tenant_id") or "")
-                != str(dataset.get("tenant_id") or "")
-            ):
+            if not authoritative_dataset or str(
+                authoritative_dataset.get("tenant_id") or ""
+            ) != str(dataset.get("tenant_id") or ""):
                 raise ValidationFailedError("Dataset identity changed; retry the restore")
             _require_dataset_index_writable(authoritative_dataset)
 

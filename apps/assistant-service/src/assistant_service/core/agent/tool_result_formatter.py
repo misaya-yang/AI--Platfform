@@ -133,7 +133,10 @@ def compact_tool_result_for_model(
                 # Leading signal the model can read before scanning snippets. HIGH
                 # means "stop searching, answer now"; LOW/NONE means "try a
                 # different query or skip KB". Avoids blind re-retrieval loops.
-                f"RETRIEVAL_QUALITY: {quality} (top_score={top_score:.2f}, hits={len(flat_chunks)})",
+                (
+                    f"RETRIEVAL_QUALITY: {quality} "
+                    f"(top_score={top_score:.2f}, hits={len(flat_chunks)})"
+                ),
             ]
             q = tool_metadata.get("query")
             if q:
@@ -153,7 +156,19 @@ def compact_tool_result_for_model(
                 lines.append(truncate_chars(text_result, 1200))
             return "\n".join(lines)
 
-    return truncate_chars(text_result, 3000)
+    preview = truncate_chars(text_result, 3000)
+    spill = tool_metadata.get("tool_output_artifact") if isinstance(tool_metadata, dict) else None
+    if isinstance(spill, dict) and spill.get("artifact_id"):
+        artifact_id = str(spill["artifact_id"])
+        download_path = str(
+            spill.get("download_path") or f"/api/v1/assistant/artifacts/{artifact_id}/download"
+        )
+        return (
+            f"{preview}\n\nFull redacted output is stored as artifact {artifact_id}. "
+            f"The user can download it from {download_path}; use an authorized artifact "
+            "reader if one is available."
+        )
+    return preview
 
 
 def tool_schema_name(schema: Any) -> str:
@@ -176,9 +191,7 @@ def kb_query_fingerprint(arguments: dict[str, Any]) -> str:
     dataset_ids = arguments.get("dataset_ids")
     if isinstance(dataset_ids, list):
         normalized_ids = sorted(
-            str(dataset_id).strip()
-            for dataset_id in dataset_ids
-            if str(dataset_id).strip()
+            str(dataset_id).strip() for dataset_id in dataset_ids if str(dataset_id).strip()
         )
     elif dataset_ids is None:
         normalized_ids = []

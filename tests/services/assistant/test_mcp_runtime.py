@@ -782,7 +782,16 @@ def test_local_mcp_security_rejections_are_non_retryable_and_non_circuit(
 
 @pytest.mark.asyncio
 async def test_dynamic_mcp_write_requires_exact_single_use_gateway_approval() -> None:
-    item = _authorization_item(read_only=False, risk_level="low")
+    item = _authorization_item(
+        read_only=False,
+        risk_level="low",
+        input_schema={
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+            "additionalProperties": False,
+        },
+    )
     repository = _Repository(item)
     runtime = MCPRuntimeService(
         repository=repository,
@@ -1032,7 +1041,16 @@ async def test_hanging_telemetry_is_bounded_after_known_success() -> None:
 
 @pytest.mark.asyncio
 async def test_cancelled_dynamic_mcp_write_returns_unknown_and_is_fenced() -> None:
-    item = _authorization_item(read_only=False, risk_level="low")
+    item = _authorization_item(
+        read_only=False,
+        risk_level="low",
+        input_schema={
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+            "additionalProperties": False,
+        },
+    )
     started = asyncio.Event()
     never_finishes = asyncio.Event()
     calls = 0

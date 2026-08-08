@@ -32,6 +32,7 @@ from .chunking import (
     validate_persisted_chunking_config,
 )
 from .common import ensure_dict as _ensure_dict
+from .common import maybe_await
 from .embedding import BaseEmbedding
 from .ingestion import ExtractedImage as IngestionExtractedImage
 from .lexical_config import LexicalConfig, LexicalConfigError
@@ -699,12 +700,18 @@ class IngestionService:
                     logger.info(
                         f"Using UnifiedMultimodalEmbedding for multimodal dataset {dataset_id}"
                     )
-                    embedder = self._ks._get_unified_multimodal_embedder(dataset, embedding_config)
+                    embedder = await maybe_await(
+                        self._ks._get_unified_multimodal_embedder(
+                            dataset, embedding_config
+                        )
+                    )
                     embed_timeout = 90.0  # Longer timeout for multimodal
                     embedding_provider_used = "dashscope_multimodal"
                 else:
                     # Use dataset-configured text embedder
-                    embedder = self._ks._get_text_embedder(dataset, embedding_config)
+                    embedder = await maybe_await(
+                        self._ks._get_text_embedder(dataset, embedding_config)
+                    )
                     embed_timeout = 60.0
                     embedding_provider_used = str(
                         dataset.get("embedding_provider") or getattr(embedder, "provider", "local")

@@ -2677,7 +2677,7 @@
       "concise": {
         "name": "Concise",
         "desc": "Short and direct answers",
-        "prompt": "Respond briefly and directly. Avoid long explanations unless asked."
+        "prompt": "Lead with the answer. Preserve required evidence, caveats, and next steps; omit optional detail unless asked."
       },
       "formal": {
         "name": "Formal",
@@ -2687,12 +2687,12 @@
       "socratic": {
         "name": "Socratic",
         "desc": "Guide with questions and reasoning",
-        "prompt": "Guide the user with questions and reasoning steps rather than giving the final answer immediately."
+        "prompt": "For learning requests, use targeted questions or hints when helpful. If the user asks for a direct answer or action, provide it."
       },
       "comprehensive": {
         "name": "Comprehensive",
         "desc": "Detailed and thorough explanations",
-        "prompt": "Provide detailed, comprehensive answers with context, steps, and examples when helpful."
+        "prompt": "Include the context, steps, evidence, and examples needed for the task; avoid repetition and optional tangents."
       }
     },
     "composerAriaLabel": "Assistant message composer",

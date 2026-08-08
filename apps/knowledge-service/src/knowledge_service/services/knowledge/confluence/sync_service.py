@@ -1887,10 +1887,15 @@ class ConfluenceSyncService:
                             if not isinstance(embedding_config, dict):
                                 embedding_config = {}
 
-                            econf = self.knowledge_service._resolve_embedding_config(
-                                provider=embedding_provider,
-                                model=embedding_model,
-                                embedding_config=embedding_config,
+                            from ..common import maybe_await
+
+                            econf = await maybe_await(
+                                self.knowledge_service._resolve_embedding_config(
+                                    provider=embedding_provider,
+                                    model=embedding_model,
+                                    embedding_config=embedding_config,
+                                    tenant_id=str(dataset.get("tenant_id") or ""),
+                                )
                             )
 
                             collection_dim = int(dataset.get("embedding_dimension") or 1024)

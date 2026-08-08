@@ -43,6 +43,10 @@ MAX_DESCRIPTION_LENGTH: Final = 500
 MAX_TOOL_NAME_LENGTH: Final = 64
 DEFAULT_RESPONSE_LIMIT_BYTES: Final = 1024 * 1024
 _SESSION_ID_RE: Final = re.compile(r"^[\x21-\x7e]{1,256}$")
+_STATIC_TOOL_NAME_RE: Final = re.compile(r"^[A-Za-z0-9_.:/ -]{1,128}$")
+_STATIC_CAPABILITY_KEYS: Final = frozenset(
+    {"operation_kind", "read_only", "idempotency_supported", "read_back_tool"}
+)
 
 
 class MCPError(Exception):
@@ -77,6 +81,70 @@ class MCPError(Exception):
 DNSResolver = Callable[[str, int], Iterable[str]]
 
 
+@dataclass(frozen=True)
+class MCPStaticToolCapability:
+    """Operator-owned operation facts for one statically configured tool."""
+
+    operation_kind: MCPOperationKind = MCPOperationKind.UNKNOWN
+    read_only: bool = False
+    idempotency_supported: bool = False
+    read_back_tool: str | None = None
+
+    @classmethod
+    def from_config(cls, tool_name: str, value: Any) -> MCPStaticToolCapability:
+        if isinstance(value, cls):
+            return value
+        if not _STATIC_TOOL_NAME_RE.fullmatch(str(tool_name or "")):
+            raise ValueError("MCP_STATIC_CAPABILITY_TOOL_INVALID")
+        if not isinstance(value, dict) or set(value) - _STATIC_CAPABILITY_KEYS:
+            raise ValueError("MCP_STATIC_CAPABILITY_INVALID")
+
+        raw_kind = value.get("operation_kind")
+        try:
+            operation_kind = (
+                MCPOperationKind(str(raw_kind).strip().lower())
+                if raw_kind is not None
+                else MCPOperationKind.UNKNOWN
+            )
+        except ValueError as exc:
+            raise ValueError("MCP_STATIC_CAPABILITY_OPERATION_INVALID") from exc
+
+        for key in ("read_only", "idempotency_supported"):
+            if key in value and not isinstance(value[key], bool):
+                raise ValueError("MCP_STATIC_CAPABILITY_BOOLEAN_INVALID")
+        read_only_declared = value.get("read_only") is True
+        read_only_explicit_false = "read_only" in value and value.get("read_only") is False
+        if (
+            read_only_declared
+            and operation_kind
+            in {
+                MCPOperationKind.WRITE,
+                MCPOperationKind.UNKNOWN,
+            }
+            and raw_kind is not None
+        ):
+            raise ValueError("MCP_STATIC_CAPABILITY_CONFLICT")
+        if operation_kind is MCPOperationKind.READ and read_only_explicit_false:
+            raise ValueError("MCP_STATIC_CAPABILITY_CONFLICT")
+        if read_only_declared:
+            operation_kind = MCPOperationKind.READ
+        read_only = operation_kind is MCPOperationKind.READ
+
+        raw_read_back = value.get("read_back_tool")
+        if raw_read_back is not None and (
+            not isinstance(raw_read_back, str)
+            or not _STATIC_TOOL_NAME_RE.fullmatch(raw_read_back)
+            or raw_read_back == tool_name
+        ):
+            raise ValueError("MCP_STATIC_CAPABILITY_READ_BACK_INVALID")
+        return cls(
+            operation_kind=operation_kind,
+            read_only=read_only,
+            idempotency_supported=bool(value.get("idempotency_supported", False)),
+            read_back_tool=raw_read_back or None,
+        )
+
+
 @dataclass
 class MCPServerConfig:
     """Resolved runtime configuration for one remote MCP connection."""
@@ -109,6 +177,9 @@ class MCPServerConfig:
     allow_localhost: bool = False
     allow_private_network: bool = False
     platform_managed: bool = False
+    tool_capabilities: dict[str, MCPStaticToolCapability | dict[str, Any]] = field(
+        default_factory=dict
+    )
     dns_resolver: DNSResolver | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -133,6 +204,22 @@ class MCPServerConfig:
             raise ValueError("Invalid MCP circuit cooldown")
         if self.response_limit_bytes < 1024 or self.response_limit_bytes > 8 * 1024 * 1024:
             raise ValueError("Invalid MCP response limit")
+        if not isinstance(self.tool_capabilities, dict):
+            raise ValueError("MCP_STATIC_CAPABILITIES_INVALID")
+        if self.tool_capabilities and not self.platform_managed:
+            raise ValueError("MCP_STATIC_CAPABILITY_SOURCE_UNTRUSTED")
+        self.tool_capabilities = {
+            str(tool_name): MCPStaticToolCapability.from_config(str(tool_name), capability)
+            for tool_name, capability in self.tool_capabilities.items()
+        }
+
+    def static_tool_capability(self, tool_name: str) -> MCPStaticToolCapability:
+        capability = self.tool_capabilities.get(tool_name)
+        return (
+            capability
+            if isinstance(capability, MCPStaticToolCapability)
+            else MCPStaticToolCapability()
+        )
 
 
 @dataclass
@@ -967,6 +1054,7 @@ __all__ = [
     "MCPClient",
     "MCPError",
     "MCPServerConfig",
+    "MCPStaticToolCapability",
     "MCPTool",
     "MCPToolResult",
     "MCP_PROTOCOL_VERSION",

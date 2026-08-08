@@ -1,8 +1,8 @@
 /**
  * Assistant Style Presets
  *
- * Grok-inspired personality styles that modify the assistant's response behavior.
- * Each style adds a system prompt prefix to guide the model's responses.
+ * Optional response styles sent as lower-priority user guidance. They shape
+ * presentation without overriding the current request or runtime policy.
  */
 import i18n from "@/i18n";
 

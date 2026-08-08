@@ -61,19 +61,21 @@ class GatewayModelMeta:
     async def is_provider_configured(
         self, tenant_id: str, provider_id: str
     ) -> bool:
-        """Return whether Gateway metadata and Assistant runtime both agree.
+        """Return whether an enabled provider has a runtime credential path.
 
-        An enabled provider row is administration metadata, not proof that the
-        Assistant execution process received usable credentials. Agent Runtime
-        resolution therefore fails closed unless the provider was configured in
-        the shared startup environment as well.
+        Providers may be configured either through the shared startup
+        environment or by an encrypted tenant key resolved by Assistant for the
+        current request.
         """
         row = await self.provider_service.get_provider(tenant_id, provider_id)
         if not row:
             return False
         return bool(
             row.get("is_enabled")
-            and provider_id in self._runtime_configured_providers
+            and (
+                row.get("has_api_key")
+                or provider_id in self._runtime_configured_providers
+            )
         )
 
     async def list_enabled_providers(self, tenant_id: str) -> list[str]:

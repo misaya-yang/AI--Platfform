@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ai_gateway_core.agent_plugins import AgentPluginLoadError, load_agent_plugin
 from ai_gateway_core.security.redaction import redact_trace_text
 
 from ..context.assembler import ContextAssemblerV2
@@ -155,6 +156,71 @@ class AssistantRuntimeAdapter:
         self.skill_registry = skill_registry
         self.sandbox_resolver = sandbox_resolver
         self.lifecycle = lifecycle or MemoryProviderLifecycle()
+        self.agent_plugin_status: list[dict[str, Any]] = []
+
+    def _load_configured_agent_plugins(self) -> None:
+        """Load operator-selected, instruction-only Agent Plugin Skills."""
+
+        raw_paths = os.getenv("ASSISTANT_AGENT_PLUGIN_PATHS", "")
+        if not self.features.skills or not raw_paths.strip():
+            return
+
+        loaded_plugins = 0
+        loaded_skills = 0
+        seen_paths: set[Path] = set()
+        for raw_path in raw_paths.split(os.pathsep):
+            if not raw_path.strip():
+                continue
+            candidate = Path(raw_path).expanduser()
+            try:
+                resolved = candidate.resolve(strict=True)
+            except OSError:
+                self.agent_plugin_status.append(
+                    {"status": "rejected", "code": "AGENT_PLUGIN_ROOT_INVALID"}
+                )
+                logger.warning("agent_plugin.rejected code=AGENT_PLUGIN_ROOT_INVALID")
+                continue
+            if resolved in seen_paths:
+                continue
+            seen_paths.add(resolved)
+
+            try:
+                package = load_agent_plugin(resolved)
+            except AgentPluginLoadError as exc:
+                self.agent_plugin_status.append({"status": "rejected", "code": exc.code})
+                logger.warning("agent_plugin.rejected code=%s", exc.code)
+                continue
+
+            registered: list[str] = []
+            diagnostics = [item.to_dict() for item in package.diagnostics]
+            for skill in package.skills:
+                if self.skill_registry.get(skill.name) is not None:
+                    diagnostics.append(
+                        {
+                            "status": "warning",
+                            "code": "AGENT_PLUGIN_SKILL_NAME_CONFLICT",
+                            "component": skill.name,
+                        }
+                    )
+                    continue
+                self.skill_registry.register(skill)
+                registered.append(skill.name)
+                loaded_skills += 1
+            loaded_plugins += 1
+            self.agent_plugin_status.append(
+                {
+                    "status": "loaded",
+                    "plugin": package.manifest.name,
+                    "skills": registered,
+                    "mcp_supported": False,
+                    "diagnostics": diagnostics,
+                }
+            )
+        logger.info(
+            "agent_plugins.loaded plugins=%s skills=%s",
+            loaded_plugins,
+            loaded_skills,
+        )
 
     @classmethod
     def from_env(
@@ -181,7 +247,7 @@ class AssistantRuntimeAdapter:
             else os.getenv("ASSISTANT_RUNTIME_MEMORY_DIR")
         )
         memory_store = MemorySourceStore(configured_memory_dir)
-        return cls(
+        adapter = cls(
             features=features,
             memory_store=memory_store,
             memory_indexer=MemoryIndexer(
@@ -201,6 +267,8 @@ class AssistantRuntimeAdapter:
             sandbox_resolver=SandboxResolver(),
             lifecycle=MemoryProviderLifecycle(),
         )
+        adapter._load_configured_agent_plugins()
+        return adapter
 
     @staticmethod
     def normalize_mode(mode: str | None) -> str:

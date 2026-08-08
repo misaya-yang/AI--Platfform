@@ -72,8 +72,14 @@ def _require_server_owned_embedding_config(embedding_config: Any) -> dict[str, A
 class EmbeddingManager:
     """Creates and configures text/multimodal embedders from dataset settings."""
 
-    def __init__(self, settings: Any):
+    def __init__(self, settings: Any, credential_resolver: Any | None = None):
         self.settings = settings
+        self.credential_resolver = credential_resolver
+
+    async def _tenant_credential(self, tenant_id: str, provider: str) -> Any | None:
+        if self.credential_resolver is None:
+            return None
+        return await self.credential_resolver.resolve(tenant_id, provider)
 
     def is_multimodal_dataset(self, dataset: dict[str, Any]) -> bool:
         """Check if dataset is configured for multimodal (unified embedding space).
@@ -110,7 +116,7 @@ class EmbeddingManager:
         index_config = _ensure_dict(dataset.get("index_config"))
         return bool(index_config.get("multimodal_enabled") or index_config.get("enable_multimodal"))
 
-    def get_unified_multimodal_embedder(
+    async def get_unified_multimodal_embedder(
         self,
         dataset: dict[str, Any],
         embedding_config: dict[str, Any] | None = None,
@@ -133,8 +139,13 @@ class EmbeddingManager:
         from .embedding import UnifiedMultimodalEmbedding
 
         resolved_key, resolved_url = resolve_dashscope("embedding")
+        credential = await self._tenant_credential(
+            str(dataset.get("tenant_id") or ""),
+            "dashscope",
+        )
         api_key = (
-            str(self.settings.knowledge.dashscope.api_key or "").strip()
+            str(getattr(credential, "api_key", "") or "").strip()
+            or str(self.settings.knowledge.dashscope.api_key or "").strip()
             or resolved_key
         )
         if not api_key:
@@ -151,11 +162,11 @@ class EmbeddingManager:
         return UnifiedMultimodalEmbedding(
             api_key=api_key,
             model=model,
-            base_url=resolved_url,
+            base_url=getattr(credential, "base_url", None) or resolved_url,
             max_concurrent=max_concurrent,
         )
 
-    def get_text_embedder(
+    async def get_text_embedder(
         self,
         dataset: dict[str, Any],
         embedding_config: dict[str, Any] | None = None,
@@ -180,18 +191,24 @@ class EmbeddingManager:
         }.get(provider, "hash-384")
         resolved_model = model or default_model
 
-        econf = self.resolve_embedding_config(
+        econf = await self.resolve_embedding_config(
             provider=provider,
             model=resolved_model,
             embedding_config=ec,
+            tenant_id=str(dataset.get("tenant_id") or ""),
         )
         resolved_dimension = dimension
         if resolved_dimension is None and provider not in {"local", "builtin", "hash"}:
             resolved_dimension = self.settings.knowledge.text_embedding_dimension
         return create_embedding(econf, dimension=resolved_dimension)
 
-    def resolve_embedding_config(
-        self, provider: str, model: str, embedding_config: dict[str, Any]
+    async def resolve_embedding_config(
+        self,
+        provider: str,
+        model: str,
+        embedding_config: dict[str, Any],
+        *,
+        tenant_id: str = "",
     ) -> EmbeddingConfig:
         embedding_config = _require_server_owned_embedding_config(embedding_config)
         provider_key = (provider or "").lower()
@@ -207,6 +224,10 @@ class EmbeddingManager:
                 timeout_seconds=5.0,
                 extra=embedding_config or {},
             )
+        credential = await self._tenant_credential(tenant_id, provider_key)
+        if credential is not None:
+            api_key = str(getattr(credential, "api_key", "") or "").strip()
+            base_url = str(getattr(credential, "base_url", "") or "").strip() or None
         if provider_key in {"gemini", "google"}:
             if not api_key:
                 api_key = str(self.settings.knowledge.gemini.api_key or "").strip()

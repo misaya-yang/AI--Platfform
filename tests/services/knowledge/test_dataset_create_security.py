@@ -123,6 +123,7 @@ async def test_create_dataset_uses_public_dashscope_embedding_defaults(
         provider="dashscope",
         model="text-embedding-v4",
         embedding_config={},
+        tenant_id="tenant-attacker",
     )
     create_embedding.assert_called_once_with(
         service._ks._resolve_embedding_config.return_value,

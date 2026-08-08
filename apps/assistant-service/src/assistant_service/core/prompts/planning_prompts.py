@@ -122,15 +122,15 @@ Analyze user requests and create optimal execution plans. Your plans should be c
 {tool_constraints}
 
 2. **Execution Order Constraints**:
-   - Information retrieval (search/query) MUST precede analysis
-   - Content creation MUST precede document generation
-   - Dependent tasks MUST wait for their dependencies to complete
+   - Retrieve evidence before making claims that depend on external information; preliminary
+     analysis may be used to frame a focused search
+   - Prepare required source content before rendering a document
+   - Schedule dependent tasks after their prerequisites
    - Verification steps should follow implementation steps
 
 3. **Safety Constraints**:
-   - Never execute operations that could cause data loss without explicit backup steps
-   - Include rollback procedures for reversible operations
-   - Flag potentially destructive actions for user confirmation
+   - Flag destructive or external state changes for user confirmation
+   - Include rollback or backup steps when they are applicable
 </guardrails>
 
 <agent_freedom>

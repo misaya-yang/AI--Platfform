@@ -14,6 +14,7 @@ def _valid_env_text(*, secret: str, chat_assignment: str) -> str:
     env_text = env_text.replace("change_me_generate_with_openssl_32_bytes_minimum", secret)
     env_text = env_text.replace("change_me_generate_with_openssl", secret)
     env_text = env_text.replace("change_me_embedding_provider_key", "test-embedding-key")
+    env_text = _set_env_value(env_text, "MODEL_SETUP_MODE", "environment")
     return f"{env_text}\n{chat_assignment}\n"
 
 
@@ -225,6 +226,19 @@ def test_validate_env_example_mode_requires_public_env_shape(tmp_path: Path) -> 
     assert "change_me_generate_with_openssl" not in output
 
 
+def test_validate_env_allows_first_boot_into_ui_model_setup(tmp_path: Path) -> None:
+    secret = secrets.token_hex(32)
+    env_text = _valid_env_text(secret=secret, chat_assignment="")
+    env_text = _set_env_value(env_text, "MODEL_SETUP_MODE", "ui")
+
+    result = _run_validate_env(tmp_path, env_text, args=["--config-only"])
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "starting in UI model-setup mode" in output
+    assert secret not in output
+
+
 def test_validate_env_runtime_rejects_enabled_models_without_configured_provider(
     tmp_path: Path,
 ) -> None:
@@ -332,7 +346,7 @@ def test_validate_env_runtime_rejects_vertex_chat_key_without_vertex_backend(
 
     output = result.stdout + result.stderr
     assert result.returncode == 1, output
-    assert "Set a usable Qwen/DashScope chat API key" in output
+    assert "Set at least one supported chat provider key" in output
     assert secret not in output
     assert chat_key not in output
 
@@ -350,7 +364,7 @@ def test_validate_env_config_rejects_vertex_chat_key_without_vertex_backend(
 
     output = result.stdout + result.stderr
     assert result.returncode == 1, output
-    assert "Set a usable Qwen/DashScope chat API key" in output
+    assert "Set at least one supported chat provider key" in output
     assert secret not in output
     assert chat_key not in output
 

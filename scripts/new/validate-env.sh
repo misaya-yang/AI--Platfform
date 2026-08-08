@@ -398,23 +398,39 @@ has_any_key() {
     return 1
 }
 
+allows_ui_model_setup() {
+    [ "${MODEL_SETUP_MODE:-ui}" = "ui" ]
+}
+
 validate_embedding_provider_key() {
     local provider="$1"
 
     case "$provider" in
         dashscope)
             if ! has_any_key KB_EMBEDDING_API_KEY DASHSCOPE_API_KEY; then
-                fail "DashScope embeddings require DASHSCOPE_API_KEY or a dedicated KB_EMBEDDING_API_KEY."
+                if allows_ui_model_setup; then
+                    log_warn "DashScope embeddings are not configured yet; the UI can still open for model setup."
+                else
+                    fail "DashScope embeddings require DASHSCOPE_API_KEY or a dedicated KB_EMBEDDING_API_KEY."
+                fi
             fi
             ;;
         gemini)
             if ! has_any_key KB_EMBEDDING_API_KEY GEMINI_API_KEY GOOGLE_API_KEY; then
-                fail "Gemini embeddings require GEMINI_API_KEY, GOOGLE_API_KEY, or a dedicated KB_EMBEDDING_API_KEY."
+                if allows_ui_model_setup; then
+                    log_warn "Gemini embeddings are not configured yet; the UI can still open for model setup."
+                else
+                    fail "Gemini embeddings require GEMINI_API_KEY, GOOGLE_API_KEY, or a dedicated KB_EMBEDDING_API_KEY."
+                fi
             fi
             ;;
         siliconflow)
             if ! has_any_key KB_EMBEDDING_API_KEY SILICONFLOW_API_KEY; then
-                fail "SiliconFlow embeddings require SILICONFLOW_API_KEY or a dedicated KB_EMBEDDING_API_KEY."
+                if allows_ui_model_setup; then
+                    log_warn "SiliconFlow embeddings are not configured yet; the UI can still open for model setup."
+                else
+                    fail "SiliconFlow embeddings require SILICONFLOW_API_KEY or a dedicated KB_EMBEDDING_API_KEY."
+                fi
             fi
             ;;
     esac
@@ -561,6 +577,30 @@ query_enabled_model_providers() {
     fi
 }
 
+query_database_credential_providers() {
+    local sql="
+        SELECT DISTINCT m.provider_id
+        FROM llm_models AS m
+        JOIN llm_providers AS p
+          ON p.tenant_id = m.tenant_id
+         AND p.provider_id = m.provider_id
+        WHERE m.tenant_id = 'default'
+          AND m.is_enabled = true
+          AND p.is_enabled = true
+          AND COALESCE(p.api_key_encrypted, '') <> ''
+        ORDER BY m.provider_id;
+    "
+
+    if docker ps --format '{{.Names}}' | grep -q "^$(pg_container)$" 2>/dev/null; then
+        docker exec -i "$(pg_container)" psql -U "$(pg_user)" -d "$(pg_database)" -Atc "$sql" 2>/dev/null
+    elif command -v psql &>/dev/null; then
+        PGPASSWORD="$(pg_password)" psql -h "$(pg_host)" -p "$(pg_port)" \
+            -U "$(pg_user)" -d "$(pg_database)" -Atc "$sql" 2>/dev/null
+    else
+        return 1
+    fi
+}
+
 query_enabled_default_qwen_model() {
     local sql="
         SELECT COUNT(*)
@@ -582,9 +622,11 @@ query_enabled_default_qwen_model() {
 }
 
 validate_assistant_model_alignment() {
-    local configured providers_summary rows available_count enabled_summary provider count default_qwen_count
+    local configured database_configured providers_summary rows available_count enabled_summary provider count
 
     configured="$(configured_chat_providers)"
+    database_configured="$(query_database_credential_providers)" || database_configured=""
+    configured="$(printf '%s\n%s\n' "$configured" "$database_configured" | xargs)"
     rows="$(query_enabled_model_providers)" || {
         fail "Unable to query llm_models for assistant model/provider alignment."
         return
@@ -607,16 +649,11 @@ validate_assistant_model_alignment() {
 
     providers_summary="${configured:-none}"
     if [ "$available_count" -le 0 ]; then
-        fail "No enabled assistant models match configured chat providers. Configured providers: ${providers_summary}. Enabled model providers: ${enabled_summary}."
-        return
-    fi
-
-    default_qwen_count="$(query_enabled_default_qwen_model)" || {
-        fail "Unable to query llm_models for default Qwen model readiness."
-        return
-    }
-    if [ "${default_qwen_count:-0}" -le 0 ]; then
-        fail "Default chat model qwen3.7-plus is not enabled for provider dashscope in llm_models."
+        if allows_ui_model_setup; then
+            log_warn "Assistant model provider is not configured yet. Open the frontend provider setup, then rerun make validate. Enabled model providers: ${enabled_summary}."
+        else
+            fail "No enabled assistant models match configured chat providers. Configured providers: ${providers_summary}. Enabled model providers: ${enabled_summary}."
+        fi
         return
     fi
 
@@ -649,6 +686,7 @@ validate_config() {
 
     require_secret JWT_SECRET 32
     require_secret GATEWAY_ASSISTANT_SHARED_SECRET 32
+    require_secret GATEWAY_ENCRYPTION_KEY 32
     require_secret DOCGEN_ARTIFACT_SIGN_KEY 32
     require_secret_or_local_default DEFAULT_USER_PASSWORD 12 "ChangeMe-Admin-2026!"
     require_domain AUTH_ALLOWED_EMAIL_DOMAIN
@@ -669,6 +707,13 @@ validate_config() {
     validate_ports
 
     local embedding_provider="${KB_EMBEDDING_PROVIDER:-dashscope}"
+    case "${MODEL_SETUP_MODE:-ui}" in
+        ui|environment)
+            ;;
+        *)
+            fail "MODEL_SETUP_MODE must be one of: ui, environment."
+            ;;
+    esac
     case "$embedding_provider" in
         gemini|dashscope|siliconflow)
             ;;
@@ -687,8 +732,12 @@ validate_config() {
     require_versioned_image DOCGEN_IMAGE "ghcr.io/misaya-yang/ai-gateway-mcp-docgen-server:2.0.0"
     require_versioned_image MIGRATE_IMAGE "ghcr.io/misaya-yang/ai-gateway-migrate:2.0.0"
 
-    if ! has_any_key DASHSCOPE_CHAT_API_KEY DASHSCOPE_API_KEY; then
-        fail "Set a usable Qwen/DashScope chat API key: DASHSCOPE_CHAT_API_KEY or DASHSCOPE_API_KEY. OpenAI/Google keys are optional fallback keys and do not satisfy this project's default chat readiness gate."
+    if [ -z "$(configured_chat_providers)" ]; then
+        if allows_ui_model_setup; then
+            log_warn "No environment chat provider is configured; starting in UI model-setup mode."
+        else
+            fail "Set at least one supported chat provider key before starting in environment setup mode."
+        fi
     fi
 
     require_url ASSISTANT_SERVICE_URL
@@ -721,6 +770,8 @@ validate_example_config() {
         REDIS_PASSWORD
         JWT_SECRET
         GATEWAY_ASSISTANT_SHARED_SECRET
+        GATEWAY_ENCRYPTION_KEY
+        MODEL_SETUP_MODE
         INTERNAL_COMM_REDIS_URL
         AUTH_ALLOWED_EMAIL_DOMAIN
         DEFAULT_USER_PASSWORD

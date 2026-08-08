@@ -2,15 +2,18 @@
 Live Assistant API E2E tests.
 
 Run only when a real backend is up:
-    RUN_ASSISTANT_API_E2E=1 conda run -n ai_gateway pytest tests/integration/test_assistant_api_e2e_live.py -q -s
+    RUN_ASSISTANT_API_E2E=1 pytest \
+      tests/integration/test_assistant_api_e2e_live.py -q -s
 """
 
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import os
 import time
+import zipfile
 from typing import Any
 
 import httpx
@@ -24,7 +27,9 @@ AUTH_EMAIL_DOMAIN = os.getenv("ASSISTANT_E2E_AUTH_EMAIL_DOMAIN", "example.com")
 USER1_EMAIL = os.getenv("ASSISTANT_E2E_USER1_EMAIL", f"assistant.e2e.user1@{AUTH_EMAIL_DOMAIN}")
 USER2_EMAIL = os.getenv("ASSISTANT_E2E_USER2_EMAIL", f"assistant.e2e.user2@{AUTH_EMAIL_DOMAIN}")
 LOGIN_PASSWORD = os.getenv("ASSISTANT_E2E_PASSWORD", "")
-MODEL_ID = os.getenv("ASSISTANT_E2E_MODEL_ID", "gemini-3-flash-preview")
+USER2_PASSWORD = os.getenv("ASSISTANT_E2E_USER2_PASSWORD", LOGIN_PASSWORD)
+MODEL_ID = os.getenv("ASSISTANT_E2E_MODEL_ID", "qwen3.7-plus")
+REPETITIONS = int(os.getenv("ASSISTANT_CAPABILITY_REPETITIONS", "3"))
 
 
 def _require_live() -> None:
@@ -122,6 +127,8 @@ def _stream_chat(
     execution_profile: str = "safe",
     memory_mode: str = "auto",
     os_agent_enabled: bool = False,
+    resume_run_id: str | None = None,
+    resume_approval_id: str | None = None,
 ) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     with client.stream(
@@ -135,6 +142,8 @@ def _stream_chat(
             "execution_profile": execution_profile,
             "memory_mode": memory_mode,
             "os_agent_enabled": os_agent_enabled,
+            "resume_run_id": resume_run_id,
+            "resume_approval_id": resume_approval_id,
         },
         timeout=240.0,
     ) as resp:
@@ -163,9 +172,116 @@ def _extract_run_id(events: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def _stream_text(events: list[dict[str, Any]]) -> str:
+    chunks: list[str] = []
+    for event in events:
+        if event.get("event_type") not in {"text_delta", "text_message_content"}:
+            continue
+        data = event.get("data")
+        if isinstance(data, str):
+            chunks.append(data)
+            continue
+        if not isinstance(data, dict):
+            continue
+        for key in ("content", "message", "delta"):
+            value = data.get(key)
+            if isinstance(value, str):
+                chunks.append(value)
+                break
+    return "".join(chunks)
+
+
+def _session_artifacts(
+    client: httpx.Client,
+    token: str,
+    session_id: str,
+) -> list[dict[str, Any]]:
+    response = client.get(
+        f"{API_PREFIX}/assistant/sessions/{session_id}/artifacts",
+        headers=_headers(token),
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    artifacts = payload.get("artifacts")
+    assert isinstance(artifacts, list), payload
+    return [artifact for artifact in artifacts if isinstance(artifact, dict)]
+
+
+def _download_artifact(
+    client: httpx.Client,
+    token: str,
+    artifact_id: str,
+) -> bytes:
+    response = client.get(
+        f"{API_PREFIX}/assistant/artifacts/{artifact_id}/download",
+        headers=_headers(token),
+        timeout=120.0,
+        follow_redirects=True,
+    )
+    assert response.status_code == 200, response.text
+    assert response.content, response.headers
+    return response.content
+
+
+def _new_artifacts(
+    before: list[dict[str, Any]],
+    after: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    previous_ids = {str(artifact.get("artifact_id")) for artifact in before}
+    return [
+        artifact
+        for artifact in after
+        if artifact.get("artifact_id") and str(artifact["artifact_id"]) not in previous_ids
+    ]
+
+
+def _wait_for_new_artifacts(
+    client: httpx.Client,
+    token: str,
+    session_id: str,
+    before: list[dict[str, Any]],
+    *,
+    timeout_seconds: float = 10.0,
+) -> list[dict[str, Any]]:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        artifacts = _new_artifacts(
+            before,
+            _session_artifacts(client, token, session_id),
+        )
+        if artifacts:
+            return artifacts
+        time.sleep(0.25)
+    return []
+
+
+def _assert_valid_document(data: bytes, artifact: dict[str, Any]) -> None:
+    filename = str(artifact.get("filename") or "").lower()
+    mime_type = str(artifact.get("mime_type") or "").lower()
+    if filename.endswith(".pdf") or mime_type == "application/pdf":
+        assert data.startswith(b"%PDF-"), artifact
+        assert b"%%EOF" in data[-2048:], artifact
+        return
+    if filename.endswith(".docx") or "wordprocessingml" in mime_type:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            names = set(archive.namelist())
+            assert "[Content_Types].xml" in names, artifact
+            assert "word/document.xml" in names, artifact
+        return
+    raise AssertionError(f"Expected a PDF or DOCX artifact, got {artifact!r}")
+
+
 def _has_any_event(events: list[dict[str, Any]], *event_types: str) -> bool:
     names = {evt.get("event_type") for evt in events}
     return any(name in names for name in event_types)
+
+
+def _event_data(events: list[dict[str, Any]], event_type: str) -> dict[str, Any]:
+    event = next((item for item in events if item.get("event_type") == event_type), None)
+    assert event is not None, events
+    data = event.get("data")
+    assert isinstance(data, dict), event
+    return data
 
 
 def _assert_no_event(events: list[dict[str, Any]], event_type: str) -> None:
@@ -199,6 +315,39 @@ def _stream_chat_until_success(
             memory_mode=memory_mode,
             os_agent_enabled=os_agent_enabled,
         )
+        approval_event = next(
+            (
+                event
+                for event in last_events
+                if event.get("event_type") == "approval_required"
+            ),
+            None,
+        )
+        if approval_event is not None:
+            approval_data = approval_event.get("data")
+            assert isinstance(approval_data, dict), approval_event
+            approval_id = str(approval_data.get("approval_id") or "")
+            run_id = str(approval_data.get("run_id") or "")
+            assert approval_id and run_id, approval_data
+            approval_response = client.post(
+                f"{API_PREFIX}/assistant/approvals/{approval_id}",
+                headers=_headers(token),
+                json={"approved": True, "reason": "result-level live capability check"},
+            )
+            assert approval_response.status_code == 200, approval_response.text
+            assert approval_response.json().get("approval", {}).get("status") == "approved"
+            resumed = _stream_chat(
+                client=client,
+                token=token,
+                session_id=session_id,
+                message="Continue the exact approved tool call.",
+                execution_profile=execution_profile,
+                memory_mode=memory_mode,
+                os_agent_enabled=os_agent_enabled,
+                resume_run_id=run_id,
+                resume_approval_id=approval_id,
+            )
+            last_events.extend(resumed)
         has_content_or_tool = _has_any_event(last_events, "text_delta", "tool_call_result")
         has_run_error = _has_any_event(last_events, "run_error")
         if has_content_or_tool and not has_run_error:
@@ -209,7 +358,8 @@ def _stream_chat_until_success(
 
 
 @pytest.mark.integration
-def test_assistant_api_e2e_live_dialogues():
+@pytest.mark.parametrize("trial", range(1, REPETITIONS + 1))
+def test_assistant_api_e2e_live_dialogues(trial: int):
     """
     Comprehensive API-level dialogue validation.
 
@@ -222,17 +372,18 @@ def test_assistant_api_e2e_live_dialogues():
     - gateway policy + run tracking endpoints
     """
     _require_live()
+    assert 1 <= REPETITIONS <= 10
 
     with httpx.Client(timeout=60.0) as client:
         _assert_service_ready(client)
 
         # Login/create two users
         token1 = _login(client, USER1_EMAIL, LOGIN_PASSWORD)
-        token2 = _login(client, USER2_EMAIL, LOGIN_PASSWORD)
+        token2 = _login(client, USER2_EMAIL, USER2_PASSWORD)
 
         session1 = _create_session(client, token1)
         session2 = _create_session(client, token2)
-        context_secret = f"CTX-{int(time.time())}"
+        context_marker = f"CTX-{trial}-{time.time_ns()}"
 
         # Multi-user isolation: user2 cannot read user1 session
         isolation_resp = client.get(
@@ -250,19 +401,56 @@ def test_assistant_api_e2e_live_dialogues():
         policies = policies_resp.json().get("policies", {})
         assert "default_execution_profile" in policies
 
-        # Stream: code capability + context budget events + run tracking
+        # Stream: execute code, persist an exact output artifact, and retain a
+        # cross-turn marker. A non-empty prose response is not capability proof.
+        code_marker = f"CODE-OK-{trial}-{time.time_ns()}"
+        artifacts_before_code = _session_artifacts(client, token1, session1)
         events = _stream_chat_until_success(
             client,
             token1,
             session1,
-            f"请给我一个 Python 脚本来绘制 sin 曲线，并记住口令 {context_secret}。",
+            (
+                "请实际调用代码执行工具运行 Python：把唯一一行 "
+                f"{code_marker} 打印到 stdout，并写入 "
+                "/workspace/output/capability-result.txt。"
+                f"同时记住一个项目事实：我的项目代号是 {context_marker}。"
+                "不要只给代码示例。"
+            ),
             execution_profile="balanced",
+            os_agent_enabled=True,
+            max_attempts=1,
         )
-        assert _has_any_event(events, "text_delta", "tool_call_start", "tool_call_result")
+        assert _has_any_event(events, "tool_call_start", "tool_call_result")
+        if not _has_any_event(events, "code_execution_result", "artifact_created"):
+            raise AssertionError(
+                "event_types="
+                + ",".join(str(event.get("event_type") or "") for event in events)
+            )
         assert _has_any_event(events, "context_budget", "gateway_decision")
         assert _has_any_event(events, "run_started")
         assert _has_any_event(events, "done", "run_finished")
         _assert_no_event(events, "run_error")
+        execution_result = _event_data(events, "code_execution_result")
+        assert execution_result.get("success") is True, execution_result
+        assert execution_result.get("exit_code") == 0, execution_result
+        assert code_marker in str(execution_result.get("result") or ""), execution_result
+        code_artifacts = _wait_for_new_artifacts(
+            client,
+            token1,
+            session1,
+            artifacts_before_code,
+        )
+        code_artifact = next(
+            (
+                artifact
+                for artifact in code_artifacts
+                if str(artifact.get("filename") or "").endswith("capability-result.txt")
+            ),
+            None,
+        )
+        assert code_artifact is not None, code_artifacts
+        code_bytes = _download_artifact(client, token1, str(code_artifact["artifact_id"]))
+        assert code_bytes.decode("utf-8").strip() == code_marker
 
         run_id = _extract_run_id(events)
         if run_id:
@@ -278,37 +466,67 @@ def test_assistant_api_e2e_live_dialogues():
                 # Gateway disabled: run lifecycle persistence API can return 404.
                 assert run_resp.status_code in {200, 404}, run_resp.text
 
-        # Non-stream: image generation request path
-        image_result = _chat(
+        # Generate a real PDF/DOCX artifact and verify its container bytes.
+        artifacts_before_doc = _session_artifacts(client, token1, session1)
+        doc_events = _stream_chat_until_success(
             client,
             token1,
             session1,
-            "请帮我生成一张简洁风格的产品海报图片，并说明生成结果。",
+            (
+                "请实际调用文档生成工具创建一份两节的项目周报 PDF 或 DOCX，"
+                "标题为 Capability Weekly Report；必须生成可下载文件，不要只返回正文草稿。"
+            ),
             execution_profile="balanced",
+            max_attempts=1,
         )
-        assert len(image_result.get("content", "")) >= 20
+        _assert_no_event(doc_events, "run_error")
+        assert _has_any_event(doc_events, "document_generation_result", "artifact_created")
+        document_artifacts = _wait_for_new_artifacts(
+            client,
+            token1,
+            session1,
+            artifacts_before_doc,
+        )
+        document_artifact = next(
+            (
+                artifact
+                for artifact in document_artifacts
+                if str(artifact.get("filename") or "").lower().endswith((".pdf", ".docx"))
+            ),
+            None,
+        )
+        assert document_artifact is not None, document_artifacts
+        document_bytes = _download_artifact(
+            client,
+            token1,
+            str(document_artifact["artifact_id"]),
+        )
+        _assert_valid_document(document_bytes, document_artifact)
 
-        # Non-stream: document/pdf generation request path
-        doc_result = _chat(
+        # Second same-session distractor: marker recall must not depend on
+        # immediate adjacency to the turn that introduced it.
+        distractor = _chat(
             client,
             token1,
             session1,
-            "请生成一份项目周报 PDF 的正文草稿，并说明关键结构。",
+            "计算 17×19，只回复十进制整数。",
             execution_profile="balanced",
+            memory_mode="strict",
         )
-        assert len(doc_result.get("content", "")) >= 20
+        assert str(distractor.get("content") or "").strip() == "323", distractor
 
         # Context continuity validation (same session follow-up)
         follow_events = _stream_chat_until_success(
             client,
             token1,
             session1,
-            "请只回复我刚才让你记住的口令，不要其他文字。",
+            "请只回复我最早告诉你的项目代号，不要引号、代码块或其他文字。",
             execution_profile="balanced",
             memory_mode="strict",
         )
         assert _has_any_event(follow_events, "text_delta", "done", "run_finished")
         _assert_no_event(follow_events, "run_error")
+        assert _stream_text(follow_events).strip() == context_marker, follow_events
 
         history_resp = client.get(
             f"{API_PREFIX}/assistant/sessions/{session1}/history?limit=50",
@@ -318,7 +536,44 @@ def test_assistant_api_e2e_live_dialogues():
         history_payload = history_resp.json()
         messages = history_payload.get("messages", [])
         assert history_payload.get("total", 0) >= 4
-        assert any(context_secret in (m.get("content") or "") for m in messages), messages
+        assert any(context_marker in (m.get("content") or "") for m in messages), messages
+
+        # A corrected project fact supersedes the original value after another
+        # unrelated turn; stale-value reuse is a failure.
+        latest_marker = f"{context_marker}-LATEST"
+        update_result = _chat(
+            client,
+            token1,
+            session1,
+            (
+                f"更正一个项目事实：我的项目代号已经改为 {latest_marker}；"
+                "此前告诉你的旧项目代号已作废。只回复 OK。"
+            ),
+            execution_profile="balanced",
+            memory_mode="strict",
+        )
+        assert str(update_result.get("content") or "").strip().upper() == "OK", update_result
+        second_distractor = _chat(
+            client,
+            token1,
+            session1,
+            "法国首都是什么？只回复城市英文名。",
+            execution_profile="balanced",
+            memory_mode="strict",
+        )
+        assert str(second_distractor.get("content") or "").strip().casefold() == "paris", (
+            second_distractor
+        )
+        latest_events = _stream_chat_until_success(
+            client,
+            token1,
+            session1,
+            "只回复我当前的项目代号，不要引号、代码块或其他文字。",
+            execution_profile="balanced",
+            memory_mode="strict",
+        )
+        _assert_no_event(latest_events, "run_error")
+        assert _stream_text(latest_events).strip() == latest_marker, latest_events
 
         # User2 independent session should still work
         user2_result = _chat(
@@ -327,7 +582,8 @@ def test_assistant_api_e2e_live_dialogues():
             session2,
             "请给我三条今天可执行的学习计划。",
         )
-        assert len(user2_result.get("content", "")) >= 20
+        user2_text = str(user2_result.get("content") or "")
+        assert all(str(index) in user2_text for index in (1, 2, 3)), user2_result
 
         # Approval endpoint contract (non-existing id should return 404)
         approval_resp = client.post(
@@ -340,7 +596,8 @@ def test_assistant_api_e2e_live_dialogues():
 
 if __name__ == "__main__":
     # Manual debug run support:
-    # conda run -n ai_gateway RUN_ASSISTANT_API_E2E=1 pytest tests/integration/test_assistant_api_e2e_live.py -q -s
+    # RUN_ASSISTANT_API_E2E=1 pytest \
+    #   tests/integration/test_assistant_api_e2e_live.py -q -s
     start = time.time()
     code = pytest.main([__file__, "-q", "-s"])
     print(f"Finished in {(time.time() - start):.1f}s, code={code}")

@@ -8,17 +8,18 @@ import string
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
-
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, Field
+from urllib.parse import urlsplit
 
 from ai_gateway_core.logging import get_logger
 from ai_gateway_core.quiz import QuizGrader
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import RedirectResponse, StreamingResponse
+from pydantic import BaseModel, Field
 
 from ...core.auth.user_resolver import UserContext
 from ...core.client_ip import get_client_ip_from_request
 from ..deps import enforce_rate_limit, get_user_context
+from ._artifact_headers import attachment_content_disposition
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/assistant", tags=["conversation-shares"])
@@ -128,20 +129,24 @@ async def _collect_quiz_payloads(
                 except (ValueError, TypeError):
                     correct = []
             qid_str = str(qr["id"])
-            public_questions.append({
-                "id": qid_str,
-                "question_num": qr["question_num"],
-                "question_type": qr["question_type"],
-                "question_text": qr["question_text"],
-                "options": options or [],
-            })
-            grading_questions.append({
-                "id": qid_str,
-                "question_num": qr["question_num"],
-                "question_type": qr["question_type"],
-                "correct_answer": correct,
-                "explanation": qr["explanation"] or "",
-            })
+            public_questions.append(
+                {
+                    "id": qid_str,
+                    "question_num": qr["question_num"],
+                    "question_type": qr["question_type"],
+                    "question_text": qr["question_text"],
+                    "options": options or [],
+                }
+            )
+            grading_questions.append(
+                {
+                    "id": qid_str,
+                    "question_num": qr["question_num"],
+                    "question_type": qr["question_type"],
+                    "correct_answer": correct,
+                    "explanation": qr["explanation"] or "",
+                }
+            )
 
         public_quizzes[quiz_id] = {
             "quiz_id": quiz_id,
@@ -193,7 +198,11 @@ async def create_share(
     if not session["user_id"] or session["user_id"] != user.user_id:
         raise HTTPException(403, "Not your session")
 
-    history = session["history"] if isinstance(session["history"], (list, dict)) else json.loads(session["history"])
+    history = (
+        session["history"]
+        if isinstance(session["history"], (list, dict))
+        else json.loads(session["history"])
+    )
     if not history:
         raise HTTPException(400, "Session has no messages")
 
@@ -277,7 +286,9 @@ async def create_share(
     )
 
     share_url = f"/share/{share_code}"
-    logger.info(f"Created share {share_code} for session {session_id} ({len(history)} msgs, {len(artifacts_data)} artifacts)")
+    logger.info(
+        f"Created share {share_code} for session {session_id} ({len(history)} msgs, {len(artifacts_data)} artifacts)"
+    )
 
     return ShareResponse(
         share_code=share_code,
@@ -402,7 +413,9 @@ async def submit_shared_quiz(
         quiz_uuid,
     )
     if prior:
-        cached = prior["result"] if isinstance(prior["result"], dict) else json.loads(prior["result"])
+        cached = (
+            prior["result"] if isinstance(prior["result"], dict) else json.loads(prior["result"])
+        )
         cached["cached"] = True
         return cached
 
@@ -437,7 +450,11 @@ async def submit_shared_quiz(
             quiz_uuid,
         )
         if replay:
-            cached = replay["result"] if isinstance(replay["result"], dict) else json.loads(replay["result"])
+            cached = (
+                replay["result"]
+                if isinstance(replay["result"], dict)
+                else json.loads(replay["result"])
+            )
             cached["cached"] = True
             return cached
         raise HTTPException(500, "Failed to record attempt")
@@ -475,9 +492,20 @@ async def download_shared_artifact(share_code: str, artifact_id: str, request: R
         if not artifact:
             raise HTTPException(404, "Artifact not found in storage")
         url = await artifact_storage.get_presigned_download_url(artifact)
-        if not url:
-            raise HTTPException(500, "Failed to generate download URL")
-        return RedirectResponse(url=url, status_code=302)
+        if url and urlsplit(url).scheme.lower() in {"http", "https"}:
+            return RedirectResponse(url=url, status_code=302)
+
+        content = await artifact_storage.download_artifact(artifact_id)
+        if content is None:
+            raise HTTPException(404, "Artifact content not found")
+        return StreamingResponse(
+            iter([content]),
+            media_type=artifact.mime_type or "application/octet-stream",
+            headers={
+                "Content-Disposition": attachment_content_disposition(artifact.filename),
+                "Content-Length": str(len(content)),
+            },
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -518,7 +546,7 @@ async def revoke_share(
 ):
     """Revoke (deactivate) a share link."""
     db = _get_db(request)
-    result = await db.execute(
+    await db.execute(
         "UPDATE conversation_shares SET is_active = FALSE WHERE share_code = $1 AND user_id = $2",
         share_code,
         user.user_id,

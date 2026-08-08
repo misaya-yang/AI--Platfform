@@ -25,6 +25,7 @@ import json
 import logging
 import uuid
 from typing import Any
+from urllib.parse import urlsplit
 
 from ai_gateway_core.storage import get_artifact_storage
 from ai_gateway_core.style_presets import StylePreset  # noqa: F401 — pydantic schema uses it
@@ -52,11 +53,20 @@ from ..schemas.assistant import (
     ImageGenerationResponse,
     ModelsListResponse,
 )
+from ._artifact_headers import attachment_content_disposition
 
 router = APIRouter(prefix="/assistant", tags=["assistant"])
 logger = logging.getLogger(__name__)
 
 _CONTROL_AUDIT_TEXT_LIMIT = 4096
+
+
+def _browser_artifact_download_url(raw_url: str | None, artifact_id: str) -> str:
+    """Return only browser-reachable URLs; local file paths stay server-side."""
+
+    if raw_url and urlsplit(raw_url).scheme.lower() in {"http", "https"}:
+        return raw_url
+    return f"/api/v1/assistant/artifacts/{artifact_id}/download"
 
 
 def _control_audit_digest(value: Any) -> str:
@@ -867,7 +877,11 @@ async def list_session_artifacts(
         # Generate presigned download URLs
         artifact_list = []
         for art in artifacts:
-            download_url = await artifact_storage.get_presigned_download_url(art)
+            raw_download_url = await artifact_storage.get_presigned_download_url(art)
+            download_url = _browser_artifact_download_url(
+                raw_download_url,
+                art.artifact_id,
+            )
             artifact_list.append(
                 ArtifactInfo(
                     artifact_id=art.artifact_id,
@@ -931,7 +945,11 @@ async def get_artifact(
             raise HTTPException(status_code=404, detail="Artifact not found")
 
         # Generate fresh presigned URL
-        download_url = await artifact_storage.get_presigned_download_url(artifact)
+        raw_download_url = await artifact_storage.get_presigned_download_url(artifact)
+        download_url = _browser_artifact_download_url(
+            raw_download_url,
+            artifact.artifact_id,
+        )
 
         return ArtifactInfo(
             artifact_id=artifact.artifact_id,
@@ -1018,7 +1036,11 @@ async def create_artifact(
 
         # Generate download URL
         # Use presigned URL if available (S3), otherwise standard URL
-        download_url = await artifact_storage.get_presigned_download_url(artifact)
+        raw_download_url = await artifact_storage.get_presigned_download_url(artifact)
+        download_url = _browser_artifact_download_url(
+            raw_download_url,
+            artifact.artifact_id,
+        )
 
         return ArtifactInfo(
             artifact_id=artifact.artifact_id,
@@ -1120,7 +1142,7 @@ async def download_artifact(
 
         # Get presigned URL and redirect
         download_url = await artifact_storage.get_presigned_download_url(artifact)
-        if download_url:
+        if download_url and urlsplit(download_url).scheme.lower() in {"http", "https"}:
             from fastapi.responses import RedirectResponse
 
             return RedirectResponse(url=download_url)
@@ -1134,7 +1156,7 @@ async def download_artifact(
             iter([content]),
             media_type=artifact.mime_type or "application/octet-stream",
             headers={
-                "Content-Disposition": f'attachment; filename="{artifact.filename}"',
+                "Content-Disposition": attachment_content_disposition(artifact.filename),
                 "Content-Length": str(len(content)),
             },
         )

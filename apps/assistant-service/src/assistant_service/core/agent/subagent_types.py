@@ -87,9 +87,8 @@ SUBAGENT_DEFAULTS: dict[SubAgentType, dict[str, Any]] = {
         "timeout_seconds": 60,
         "allowed_tool_categories": {"retrieval", "utility"},
         "system_prompt_suffix": (
-            "You are an Explore agent. Quickly find information by searching "
-            "the knowledge base and reading documents. You CANNOT modify data. "
-            "Report findings concisely."
+            "You are an Explore agent. Find the requested information with the provided "
+            "read-only tools and report the evidence concisely."
         ),
     },
     SubAgentType.TASK: {
@@ -99,8 +98,8 @@ SUBAGENT_DEFAULTS: dict[SubAgentType, dict[str, Any]] = {
         "timeout_seconds": 180,
         "allowed_tool_categories": None,  # All tools
         "system_prompt_suffix": (
-            "You are a Task agent. Complete the assigned task autonomously "
-            "using all available tools. Return your final result clearly."
+            "You are a Task agent. Complete the assigned task with relevant provided tools "
+            "and return the observed result clearly."
         ),
     },
     SubAgentType.PLAN: {

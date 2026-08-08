@@ -583,7 +583,7 @@ async def test_gateway_snapshot_fails_closed_when_model_readiness_is_unknown() -
 
 
 @pytest.mark.asyncio
-async def test_gateway_snapshot_rejects_enabled_database_provider_without_runtime_config() -> None:
+async def test_gateway_snapshot_accepts_enabled_database_provider_with_saved_key() -> None:
     class ModelService:
         async def get_model(self, tenant_id: str, model_id: str) -> dict[str, Any]:
             assert tenant_id == "tenant-a"
@@ -602,8 +602,7 @@ async def test_gateway_snapshot_rejects_enabled_database_provider_without_runtim
             return {
                 "provider_id": provider_id,
                 "is_enabled": True,
-                # Database key metadata alone does not prove that the
-                # separate Assistant process loaded this provider.
+                # Assistant resolves this encrypted key per request.
                 "has_api_key": True,
             }
 
@@ -615,11 +614,11 @@ async def test_gateway_snapshot_rejects_enabled_database_provider_without_runtim
         is_authenticated=True,
     )
 
-    with pytest.raises(HTTPException) as error:
-        await _build_snapshot(request, runtime_resolution(), user, channel="api")
+    request.app.state.agent_runtime_knowledge_resolver = _AuthorizedKnowledgeResolver()
+    snapshot = await _build_snapshot(request, runtime_resolution(), user, channel="api")
 
-    assert error.value.status_code == 503
-    assert error.value.detail["code"] == "AGENT_RUNTIME_MODEL_UNAVAILABLE"
+    assert snapshot["model"]["id"] == "qwen3.7-plus"
+    assert snapshot["model"]["provider"] == "dashscope"
 
 
 @pytest.mark.asyncio

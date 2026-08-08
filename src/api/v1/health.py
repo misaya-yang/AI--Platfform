@@ -149,7 +149,10 @@ async def all_providers_health(
     providers_status = {}
     for provider in ModelProvider:
         pid = provider.value
-        is_configured = pid in enabled
+        is_configured = pid in enabled and await model_meta.is_provider_configured(
+            tenant_id,
+            pid,
+        )
         providers_status[pid] = {
             "name": provider_names.get(pid, pid),
             "status": "configured" if is_configured else "not_configured",

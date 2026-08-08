@@ -1,0 +1,18 @@
+# Explicit local-live capability override. The base quickstart intentionally
+# does not expose the Docker daemon to Assistant. Operators using this file
+# accept the local Docker-socket trust boundary and must provide the same
+# absolute workspace path on the host and inside the service container.
+services:
+  assistant-service:
+    # Docker Desktop's Unix socket is owned by the host user and cannot be
+    # reached by the image's unprivileged UID. This root override is confined
+    # to the explicit local capability profile; never use it in production.
+    user: "0:0"
+    environment:
+      ASSISTANT_GATEWAY_ENABLED: "true"
+      ASSISTANT_CODE_EXECUTOR_ENABLED: "true"
+      ASSISTANT_ALLOW_RUNC_CODE_EXECUTOR: "${ASSISTANT_ALLOW_RUNC_CODE_EXECUTOR:-false}"
+      SANDBOX_WORKSPACE: "${SANDBOX_WORKSPACE_HOST:?SANDBOX_WORKSPACE_HOST is required}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - "${SANDBOX_WORKSPACE_HOST}:${SANDBOX_WORKSPACE_HOST}"

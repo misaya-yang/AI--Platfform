@@ -458,6 +458,37 @@ async def lifespan(app: FastAPI):
     )
     app.state.tool_invoker = tool_invoker
 
+    code_executor = None
+    if os.getenv("ASSISTANT_CODE_EXECUTOR_ENABLED", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        from .core.code_executor import get_code_executor
+
+        code_executor = get_code_executor()
+        if not code_executor.is_docker_available():
+            raise RuntimeError(
+                "ASSISTANT_CODE_EXECUTOR_ENABLED requires a reachable Docker daemon "
+                "and an approved sandbox runtime"
+            )
+        logger.warning(
+            "Assistant code executor enabled; Docker sandbox policy must be reviewed "
+            "for this environment"
+        )
+
+    from .core.models.tenant_registry import TenantModelRegistryResolver
+
+    tenant_model_registry_resolver = (
+        TenantModelRegistryResolver(
+            database,
+            encryption_key=os.environ.get("GATEWAY_ENCRYPTION_KEY", ""),
+        )
+        if database is not None
+        else None
+    )
+
     assistant_service = AssistantService(
         model_registry=model_registry,
         kb_service=None,
@@ -475,7 +506,9 @@ async def lifespan(app: FastAPI):
         runtime_adapter=assistant_runtime_adapter,
         tool_invoker=tool_invoker,
         runtime_adapter_unavailable=assistant_runtime_adapter_unavailable,
+        code_executor=code_executor,
     )
+    assistant_service.tenant_model_registry_resolver = tenant_model_registry_resolver
     app.state.assistant_service = assistant_service
     app.state.session_manager = session_manager
     app.state.kb_proxy = kb_proxy

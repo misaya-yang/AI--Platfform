@@ -28,6 +28,7 @@ from ...persistence.database import (
 )
 from .chunking import validate_persisted_chunking_config
 from .common import ensure_dict as _ensure_dict
+from .common import maybe_await
 from .embedding import BaseEmbedding, create_embedding
 from .lexical_config import LexicalConfig
 
@@ -721,10 +722,13 @@ class DocumentService:
         embedding_model = str(dataset.get("embedding_model") or "hash-384")
         embedding_config = _ensure_dict(dataset.get("embedding_config"))
         dim = int(dataset.get("embedding_dimension") or 0) or None
-        econf = self._ks._resolve_embedding_config(
-            provider=embedding_provider,
-            model=embedding_model,
-            embedding_config=embedding_config,
+        econf = await maybe_await(
+            self._ks._resolve_embedding_config(
+                provider=embedding_provider,
+                model=embedding_model,
+                embedding_config=embedding_config,
+                tenant_id=str(dataset.get("tenant_id") or ""),
+            )
         )
 
         set_index_state = getattr(self.db, "set_segment_index_state", None)
@@ -1712,10 +1716,13 @@ class DocumentService:
                 embedding_config = _ensure_dict(dataset.get("embedding_config"))
                 dim = int(dataset.get("embedding_dimension") or 0) or None
 
-                econf = self._ks._resolve_embedding_config(
-                    provider=embedding_provider,
-                    model=embedding_model,
-                    embedding_config=embedding_config,
+                econf = await maybe_await(
+                    self._ks._resolve_embedding_config(
+                        provider=embedding_provider,
+                        model=embedding_model,
+                        embedding_config=embedding_config,
+                        tenant_id=str(dataset.get("tenant_id") or ""),
+                    )
                 )
 
                 embedder: BaseEmbedding | None = None

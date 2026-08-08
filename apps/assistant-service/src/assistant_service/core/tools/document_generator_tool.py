@@ -12,6 +12,7 @@ Uses python-docx for Word document generation.
 from __future__ import annotations
 
 import base64
+import copy
 import io
 import re
 import time
@@ -39,9 +40,10 @@ logger = get_logger(__name__)
 
 DOCUMENT_GENERATION_DEFINITION = ToolDefinition(
     name="generate_document",
-    description="Generate a formatted document (Word, PDF, or Markdown) from text content. "
-    "IMPORTANT: The content parameter must contain COMPLETE, DETAILED document content in Markdown format. "
-    "Before calling this tool, you MUST first write out the full document content in your chat response.",
+    description=(
+        "Generate a downloadable formatted document from complete Markdown content. Pass the "
+        "document content to the tool; do not duplicate it in chat unless the user asks for a preview."
+    ),
     parameters=[
         ToolParameter(
             name="title",
@@ -52,10 +54,9 @@ DOCUMENT_GENERATION_DEFINITION = ToolDefinition(
         ToolParameter(
             name="content",
             type="string",
-            description="COMPLETE document content in Markdown format. This MUST be the FULL detailed content, "
-            "not a skeleton or outline. Include: headers (# ## ###), detailed paragraphs, lists, "
-            "examples, and analysis. The content should be comprehensive and well-structured. "
-            "Minimum 500+ words for typical documents.",
+            description=(
+                "Complete document content in Markdown, including the requested sections and detail."
+            ),
             required=True,
         ),
         ToolParameter(
@@ -70,11 +71,10 @@ DOCUMENT_GENERATION_DEFINITION = ToolDefinition(
     category=ToolCategory.GENERATION,
     risk_level=ToolRiskLevel.LOW,
     capability_metadata={"operation_kind": "write"},
-    when_to_use="Use ONLY AFTER you have written out the complete document content in your chat response. "
-    "The user should see the full content before you generate the document file. "
-    "Good for creating detailed reports, plans, analyses, or documentation.",
-    when_not_to_use="Do NOT use with minimal/skeleton content. Do NOT use for simple responses. "
-    "Do NOT call immediately - first show the full content in chat, then generate.",
+    when_to_use=(
+        "Use when the user requests a downloadable report, plan, analysis, or documentation file."
+    ),
+    when_not_to_use="Skip for ordinary chat responses that do not request a file.",
     examples=[
         ToolExample(
             description="Generate a sales report",
@@ -438,6 +438,21 @@ class DocumentGeneratorExecutor(ToolExecutor):
 # =============================================================================
 
 
+def _definition_for_executor(executor: DocumentGeneratorExecutor) -> ToolDefinition:
+    """Expose only document formats supported by this process."""
+
+    definition = copy.deepcopy(DOCUMENT_GENERATION_DEFINITION)
+    supported_formats = ["docx", "md"]
+    if executor.pdf_converter.is_available:
+        supported_formats.insert(1, "pdf")
+    for parameter in definition.parameters:
+        if parameter.name == "format":
+            parameter.enum = supported_formats
+            parameter.description = "Output format: " + ", ".join(supported_formats) + "."
+            break
+    return definition
+
+
 def register_document_generation_tool() -> bool:
     """Register document generation tool with the global registry."""
     executor = DocumentGeneratorExecutor()
@@ -446,6 +461,6 @@ def register_document_generation_tool() -> bool:
         logger.warning("python-docx not installed, document generation tool not registered")
         return False
 
-    register_tool(DOCUMENT_GENERATION_DEFINITION, executor)
+    register_tool(_definition_for_executor(executor), executor)
     logger.info("Registered document generation tool")
     return True

@@ -9,7 +9,7 @@ import pytest
 from fastapi import FastAPI, HTTPException, Request
 
 from src.api.v1 import assistant as assistant_api
-from src.api.v1.assistant import _list_assistant_sessions
+from src.api.v1.assistant import _browser_artifact_download_url, _list_assistant_sessions
 from src.core.auth.user_resolver import UserContext
 from src.models.session import Session
 
@@ -189,6 +189,78 @@ async def test_artifact_lookup_returns_404_when_schema_missing(
 
     assert exc_info.value.status_code == 404
     assert exc_info.value.detail == "Artifact not found"
+
+
+def test_local_artifact_url_stays_behind_authenticated_http_route() -> None:
+    assert _browser_artifact_download_url("file:///private/result.txt", "artifact-1") == (
+        "/api/v1/assistant/artifacts/artifact-1/download"
+    )
+    assert (
+        _browser_artifact_download_url(
+            "https://storage.example/result.txt?signature=one",
+            "artifact-1",
+        )
+        == "https://storage.example/result.txt?signature=one"
+    )
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected"),
+    [
+        ("result.txt", 'attachment; filename="result.txt"'),
+        ("报告.txt", "attachment; filename*=UTF-8''%E6%8A%A5%E5%91%8A.txt"),
+        (
+            'report.txt\r\nX-Injected: yes"',
+            "attachment; filename*=UTF-8''report.txt%0D%0AX-Injected%3A%20yes%22",
+        ),
+    ],
+)
+def test_artifact_attachment_header_is_browser_safe(filename: str, expected: str) -> None:
+    assert assistant_api.attachment_content_disposition(filename) == expected
+
+
+@pytest.mark.asyncio
+async def test_download_artifact_streams_local_content_instead_of_file_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = UserContext(user_id="user_1", tenant_id="tenant_1", is_authenticated=True)
+    artifact = SimpleNamespace(
+        artifact_id="artifact-1",
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        mime_type="text/plain",
+        filename="result.txt",
+    )
+
+    class LocalArtifactStorage:
+        async def get_artifact(self, artifact_id: str):
+            assert artifact_id == artifact.artifact_id
+            return artifact
+
+        async def get_presigned_download_url(self, artifact_arg):
+            assert artifact_arg is artifact
+            return "file:///private/result.txt"
+
+        async def download_artifact(self, artifact_id: str):
+            assert artifact_id == artifact.artifact_id
+            return b"verified-result"
+
+    monkeypatch.setattr(
+        assistant_api,
+        "get_artifact_storage",
+        lambda: LocalArtifactStorage(),
+    )
+
+    response = await assistant_api.download_artifact(
+        artifact.artifact_id,
+        _build_request(AsyncMock()),
+        user,
+    )
+    body = b"".join([chunk async for chunk in response.body_iterator])
+
+    assert response.status_code == 200
+    assert body == b"verified-result"
+    assert response.headers["content-disposition"] == 'attachment; filename="result.txt"'
 
 
 @pytest.mark.asyncio

@@ -70,6 +70,7 @@ class FakeModelRegistry:
         self.last_tools: list[dict[str, Any]] | None = None
         self.tools_history: list[list[dict[str, Any]] | None] = []
         self.native_search_history: list[dict[str, Any] | None] = []
+        self.thinking_history: list[str | None] = []
 
     def get_model(self, _model_id: str) -> Any:
         return FakeModelInfo()
@@ -83,6 +84,7 @@ class FakeModelRegistry:
         self.last_tools = kwargs.get("tools")
         self.tools_history.append(self.last_tools)
         self.native_search_history.append(kwargs.get("native_search_config"))
+        self.thinking_history.append(kwargs.get("thinking_level"))
 
         idx = self._call_index
         self._call_index += 1
@@ -2251,8 +2253,8 @@ async def test_streaming_first_usage_preserves_provider_cache_metrics() -> None:
 async def test_streaming_first_system_prompt_keeps_client_prompt_out_of_system() -> None:
     """
     Regression: frontend may send a style-only system_prompt.
-    Streaming-first must keep the base tool/KB instructions in the system prompt,
-    but client-supplied prompt text must ride on the user turn with lower priority.
+    Streaming-first must advertise only actual capabilities. Client-supplied prompt
+    text rides on the user turn with lower priority.
     """
     from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
 
@@ -2284,12 +2286,13 @@ async def test_streaming_first_system_prompt_keeps_client_prompt_out_of_system()
     assert model.last_messages, "AgentLoop did not send messages to the model"
     assert model.last_messages[0]["role"] == "system"
     sys_content = str(model.last_messages[0].get("content") or "")
-    assert "search_knowledge_base" in sys_content
+    assert "search_knowledge_base" not in sys_content
     assert "STYLE_ONLY_PROMPT" not in sys_content
     assert "Additional System Instructions" not in sys_content
 
     user_content = str(model.last_messages[-1].get("content") or "")
-    assert "User Custom Instructions" in user_content
+    assert "User-selected response guidance" in user_content
+    assert "compatible with the current request" in user_content
     assert "STYLE_ONLY_PROMPT" in user_content
 
 
@@ -2315,10 +2318,10 @@ async def test_streaming_first_uses_trusted_eval_prompt_as_system_message() -> N
     ):
         pass
 
-    assert model.last_messages[0] == {
-        "role": "system",
-        "content": "TRUSTED_EVAL_PROMPT",
-    }
+    assert model.last_messages[0]["role"] == "system"
+    eval_prompt = str(model.last_messages[0]["content"])
+    assert eval_prompt.startswith("TRUSTED_EVAL_PROMPT\n\n<external_content_boundary>")
+    assert eval_prompt.count("<external_content_boundary>") == 1
     assert "STYLE_ONLY_PROMPT" in str(model.last_messages[-1].get("content") or "")
 
 
@@ -3031,6 +3034,95 @@ async def test_approval_resume_recorded_result_checkpoint_carries_exact_ack_iden
 
 
 @pytest.mark.asyncio
+async def test_approval_resume_acks_recorded_result_after_artifact_is_durable() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoopConfig
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+    from assistant_service.core.tools.tool_registry import ToolCallResult
+
+    invoker = FakeToolInvoker(results_by_name={"generate_image": {"success": True}})
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
+    writer = RecordingTraceWriter()
+    user = MockUserContext(user_id="u1")
+    run_id, approval_id = await _create_pending_approval(
+        invoker=invoker,
+        gateway=gateway,
+        trace_writer=writer,
+        user=user,
+    )
+    await gateway.approve(
+        approval_id=approval_id,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        approved=True,
+        approver_user_id=user.user_id,
+    )
+
+    command_id = "99999999-9999-4999-8999-999999999998"
+    image_bytes = b"durable-image"
+    gateway.invoke_tool = AsyncMock(  # type: ignore[method-assign]
+        return_value=ToolCallResult(
+            call_id="approval-artifact-result",
+            tool_name="generate_image",
+            success=True,
+            result={"ok": True},
+            metadata={
+                "command_id": command_id,
+                "queue_state": "result_recorded_succeeded",
+                "result_receipt_recorded": True,
+                "result_acknowledgement_required": True,
+                "result_output_files_present": True,
+            },
+            output_files=[
+                {
+                    "filename": "approved.png",
+                    "mime_type": "image/png",
+                    "size_bytes": len(image_bytes),
+                    "content_base64": base64.b64encode(image_bytes).decode("utf-8"),
+                }
+            ],
+        )
+    )
+    gateway.acknowledge_command_result = AsyncMock(  # type: ignore[method-assign]
+        return_value={"command_id": command_id, "committed": True}
+    )
+    loop = _confirmation_loop(
+        model=FakeModelRegistry(scripted=[[{"content": "done", "finish_reason": "stop"}]]),
+        invoker=invoker,
+        gateway=gateway,
+        trace_writer=None,
+    )
+    loop.artifact_storage = FakeArtifactStorage()
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="s1",
+            user=user,  # type: ignore[arg-type]
+            message="Continue",
+            config=AgentLoopConfig(
+                model_id="test",
+                max_tool_iterations=2,
+                resume_run_id=run_id,
+                resume_approval_id=approval_id,
+            ),
+            history=[],
+        )
+    ]
+
+    completed = next(
+        checkpoint
+        for checkpoint in reversed(gateway._checkpoints[run_id])
+        if checkpoint.phase == "tool_call_completed"
+    )
+    assert completed.idempotency_keys["command_result_acknowledgeable"] is True
+    assert completed.resume_payload["artifact_receipt_complete"] is True
+    assert completed.resume_payload["output_artifact_ids"] == ["art_123"]
+    gateway.acknowledge_command_result.assert_awaited_once()
+    assert any(event.event_type == "image_generation_result" for event in events)
+    assert any(event.event_type == "run_finished" for event in events)
+
+
+@pytest.mark.asyncio
 async def test_approval_resume_without_trace_writer_keeps_db_less_contract() -> None:
     from assistant_service.core.agent.agent_loop import AgentLoopConfig
     from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
@@ -3082,6 +3174,7 @@ async def test_approval_resume_without_trace_writer_keeps_db_less_contract() -> 
     )
     assert "run_finished" in event_types
     assert invoker.invocation_count == 1
+    assert loop.model_registry.thinking_history == ["off"]
 
 
 @pytest.mark.asyncio

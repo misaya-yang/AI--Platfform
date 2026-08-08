@@ -42,6 +42,8 @@ dependencies = [
     # Utilities
     "structlog>=25.1.0",
     "orjson>=3.11.0",
+    "jsonschema>=4.25.0",
+    "docker>=7.0.0",
     "python-dotenv>=1.2.0",
     "tiktoken>=0.8.0",
 

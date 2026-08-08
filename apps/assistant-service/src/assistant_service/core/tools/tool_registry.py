@@ -15,6 +15,7 @@ References:
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import os
@@ -27,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.logging import get_logger
 from ai_gateway_core.security import redact_trace_text
+from jsonschema import Draft202012Validator
 
 if TYPE_CHECKING:
     from ai_gateway_core.auth import UserContextLike
@@ -37,6 +39,9 @@ _MAX_PUBLIC_ERROR_CHARS = 200
 _TRUNCATION_SUFFIX = "...[truncated]"
 _PUBLIC_URL_RE = re.compile(r"https?://[^\s'\"]+")
 _PUBLIC_INTERNAL_FIELD_RE = re.compile(r"(?i)(host|server|user)\s*=\s*\S+")
+_UNTRUSTED_INSTRUCTION_RE = re.compile(
+    r"(?i)(ignore\s+(?:all\s+)?previous|system\s+prompt|developer\s+message|jailbreak)"
+)
 
 
 def _tool_log_label(tool_name: Any) -> str:
@@ -151,32 +156,62 @@ class ToolDefinition:
     )
     redaction_policy: str = "standard"
     capability_metadata: dict[str, Any] = field(default_factory=dict)
+    # Optional canonical JSON Schema. Dynamic MCP tools retain their exact
+    # authorized schema here instead of losing nested constraints while being
+    # converted to ToolParameter display metadata.
+    argument_schema: dict[str, Any] | None = field(default=None, repr=False)
+
+    def json_argument_schema(self) -> dict[str, Any]:
+        """Return the exact model-facing argument schema."""
+
+        if self.argument_schema is not None:
+            return copy.deepcopy(self.argument_schema)
+        return self._parameter_argument_schema()
+
+    def _parameter_argument_schema(self) -> dict[str, Any]:
+        properties: dict[str, Any] = {}
+        required: list[str] = []
+        for param in self.parameters:
+            prop: dict[str, Any] = {
+                "type": param.type,
+                "description": param.description,
+            }
+            if param.enum:
+                prop["enum"] = list(param.enum)
+            if param.items:
+                prop["items"] = copy.deepcopy(param.items)
+            if param.properties:
+                prop["properties"] = copy.deepcopy(param.properties)
+            if param.schema_constraints:
+                prop.update(copy.deepcopy(param.schema_constraints))
+            properties[param.name] = prop
+            if param.required:
+                required.append(param.name)
+        return {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": False,
+        }
+
+    def model_argument_schema(self) -> dict[str, Any]:
+        """Return a prompt-safe schema while retaining validation structure."""
+
+        schema = self.json_argument_schema()
+        if self.argument_schema is not None and not _schema_is_locally_safe(schema):
+            # Keep the tool visible with its sanitized ToolParameter projection,
+            # but the invocation boundary will still reject the unsafe exact
+            # schema rather than dispatching against this projection.
+            schema = self._parameter_argument_schema()
+        return _sanitize_schema_for_model(schema)
 
     def to_openai_schema(self, compact: bool = False) -> dict[str, Any]:
         """Convert to OpenAI function calling schema."""
-        properties = {}
-        required = []
-
-        for param in self.parameters:
-            prop = {
-                "type": param.type,
-                "description": self._compact_text(param.description, 140)
-                if compact
-                else param.description,
-            }
-            if param.enum:
-                prop["enum"] = param.enum
-            if param.items:
-                prop["items"] = param.items
-            if param.properties:
-                prop["properties"] = param.properties
-            if param.schema_constraints:
-                prop.update(param.schema_constraints)
-
-            properties[param.name] = prop
-
-            if param.required:
-                required.append(param.name)
+        parameters = self.model_argument_schema()
+        if compact:
+            for prop in (parameters.get("properties") or {}).values():
+                if isinstance(prop, dict) and isinstance(prop.get("description"), str):
+                    prop["description"] = self._compact_text(prop["description"], 140)
 
         return {
             "type": "function",
@@ -185,50 +220,24 @@ class ToolDefinition:
                 "description": self._compact_text(self.description, 220)
                 if compact
                 else self._build_full_description(),
-                "parameters": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required,
-                },
+                "parameters": parameters,
             },
         }
 
     def to_anthropic_schema(self, compact: bool = False) -> dict[str, Any]:
         """Convert to Anthropic tool use schema."""
-        properties = {}
-        required = []
-
-        for param in self.parameters:
-            prop = {
-                "type": param.type,
-                "description": self._compact_text(param.description, 140)
-                if compact
-                else param.description,
-            }
-            if param.enum:
-                prop["enum"] = param.enum
-            if param.items:
-                prop["items"] = param.items
-            if param.properties:
-                prop["properties"] = param.properties
-            if param.schema_constraints:
-                prop.update(param.schema_constraints)
-
-            properties[param.name] = prop
-
-            if param.required:
-                required.append(param.name)
+        input_schema = self.model_argument_schema()
+        if compact:
+            for prop in (input_schema.get("properties") or {}).values():
+                if isinstance(prop, dict) and isinstance(prop.get("description"), str):
+                    prop["description"] = self._compact_text(prop["description"], 140)
 
         return {
             "name": self.name,
             "description": self._compact_text(self.description, 220)
             if compact
             else self._build_full_description(),
-            "input_schema": {
-                "type": "object",
-                "properties": properties,
-                "required": required,
-            },
+            "input_schema": input_schema,
         }
 
     def _build_full_description(self) -> str:
@@ -257,6 +266,136 @@ class ToolDefinition:
         if len(value) <= max_len:
             return value
         return value[: max_len - 3].rstrip() + "..."
+
+
+def _schema_is_locally_safe(schema: dict[str, Any]) -> bool:
+    """Reject schemas that can resolve externally or consume unbounded work."""
+
+    try:
+        encoded = json.dumps(schema, sort_keys=True, separators=(",", ":"), default=str)
+    except Exception:
+        return False
+    if len(encoded.encode("utf-8")) > 65_536:
+        return False
+    stack: list[tuple[Any, int]] = [(schema, 0)]
+    nodes = 0
+    while stack:
+        value, depth = stack.pop()
+        nodes += 1
+        if nodes > 2_048 or depth > 16:
+            return False
+        if isinstance(value, dict):
+            if any(key in value for key in ("$ref", "$dynamicRef", "$recursiveRef")):
+                return False
+            pattern = value.get("pattern")
+            if isinstance(pattern, str) and len(pattern) > 256:
+                return False
+            stack.extend((child, depth + 1) for child in value.values())
+        elif isinstance(value, list):
+            stack.extend((child, depth + 1) for child in value)
+    return True
+
+
+def _sanitize_schema_for_model(value: Any, *, key: str = "") -> Any:
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for child_key, child in value.items():
+            if child_key in {"$comment", "default", "examples"}:
+                continue
+            sanitized[str(child_key)] = _sanitize_schema_for_model(
+                child,
+                key=str(child_key),
+            )
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_schema_for_model(child, key=key) for child in value]
+    if isinstance(value, str) and key in {"description", "title"}:
+        text = re.sub(r"[\x00-\x1f\x7f]", " ", redact_trace_text(value, limit=500))
+        text = _UNTRUSTED_INSTRUCTION_RE.sub("[untrusted-instruction]", text)
+        return " ".join(text.split())
+    return copy.deepcopy(value)
+
+
+def _safe_expected(value: Any) -> Any:
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    if isinstance(value, str):
+        return value[:120]
+    if (
+        isinstance(value, list)
+        and len(value) <= 12
+        and all(item is None or isinstance(item, bool | int | float | str) for item in value)
+    ):
+        return [item[:120] if isinstance(item, str) else item for item in value]
+    return None
+
+
+def validate_tool_arguments(
+    definition: ToolDefinition,
+    arguments: Any,
+) -> dict[str, Any]:
+    """Validate without coercion and return a value-free machine receipt."""
+
+    schema = definition.json_argument_schema()
+    try:
+        canonical = json.dumps(schema, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        canonical = ""
+    schema_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest() if canonical else ""
+    base = {
+        "schema_version": "assistant-tool-arguments/v1",
+        "schema_sha256": schema_hash,
+    }
+    if not isinstance(arguments, dict):
+        return {
+            **base,
+            "valid": False,
+            "code": "arguments_not_object",
+            "issue_count": 1,
+            "issues": [{"path": "$", "rule": "type", "expected": "object"}],
+        }
+    if not canonical or not _schema_is_locally_safe(schema):
+        return {
+            **base,
+            "valid": False,
+            "code": "schema_unavailable",
+            "issue_count": 0,
+            "issues": [],
+        }
+    try:
+        Draft202012Validator.check_schema(schema)
+        errors = sorted(
+            Draft202012Validator(schema).iter_errors(arguments),
+            key=lambda error: (list(error.absolute_path), str(error.validator or "")),
+        )
+    except Exception:
+        return {
+            **base,
+            "valid": False,
+            "code": "schema_unavailable",
+            "issue_count": 0,
+            "issues": [],
+        }
+    issues: list[dict[str, Any]] = []
+    for error in errors[:8]:
+        path = "$" + "".join(
+            f"[{part}]" if isinstance(part, int) else f".{part}" for part in error.absolute_path
+        )
+        issue: dict[str, Any] = {
+            "path": path,
+            "rule": str(error.validator or "invalid"),
+        }
+        expected = _safe_expected(error.validator_value)
+        if expected is not None:
+            issue["expected"] = expected
+        issues.append(issue)
+    return {
+        **base,
+        "valid": not errors,
+        "code": "ok" if not errors else "arguments_invalid",
+        "issue_count": len(errors),
+        "issues": issues,
+    }
 
 
 @dataclass
@@ -567,21 +706,25 @@ class ToolRegistry:
                 ),
             )
 
-        # Validate arguments (skip for non-ToolExecutor callables like MCP closures)
-        errors = (
-            executor.validate_arguments(definition, request.arguments)
-            if hasattr(executor, "validate_arguments")
-            else []
-        )
-        if errors:
+        # Enforce the model-facing JSON Schema even for plain callables such
+        # as static MCP closures. No implicit string/number/list coercion.
+        validation = validate_tool_arguments(definition, request.arguments)
+        if not validation["valid"]:
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=False,
-                error=_safe_public_error(
-                    f"Validation errors: {'; '.join(errors)}",
-                    fallback="Tool argument validation failed",
+                result=json.dumps(
+                    {
+                        "error": {
+                            "code": "TOOL_ARGUMENT_VALIDATION_FAILED",
+                            "validation": validation,
+                        }
+                    },
+                    separators=(",", ":"),
                 ),
+                error="TOOL_ARGUMENT_VALIDATION_FAILED",
+                metadata={"tool_argument_validation": validation},
             )
 
         if self._requires_gateway(definition) and not self._direct_execution_allowed(request):

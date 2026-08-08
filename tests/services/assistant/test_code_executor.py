@@ -399,7 +399,7 @@ class TestWorkspaceSetup:
 
     @pytest.mark.asyncio
     async def test_setup_workspace_writes_code(self):
-        """Test that workspace setup writes main.py with matplotlib setup."""
+        """Test that ordinary code does not require matplotlib."""
         executor = CodeExecutorService()
         config = CodeExecutionConfig()
 
@@ -414,8 +414,23 @@ class TestWorkspaceSetup:
             main_py = workspace / "main.py"
             content = main_py.read_text()
 
-            assert MATPLOTLIB_SETUP in content
+            assert MATPLOTLIB_SETUP not in content
             assert "print('hello')" in content
+        finally:
+            await executor._cleanup_workspace(workspace)
+
+    @pytest.mark.asyncio
+    async def test_setup_workspace_injects_matplotlib_only_when_imported(self):
+        executor = CodeExecutorService()
+        workspace = await executor._setup_workspace(
+            code="import matplotlib.pyplot as plt\nprint(plt)",
+            input_files=[],
+            kb_documents=[],
+            config=CodeExecutionConfig(),
+        )
+        try:
+            content = (workspace / "main.py").read_text()
+            assert MATPLOTLIB_SETUP in content
         finally:
             await executor._cleanup_workspace(workspace)
 
