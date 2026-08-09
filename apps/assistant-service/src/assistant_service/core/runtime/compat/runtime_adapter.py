@@ -10,20 +10,18 @@ from pathlib import Path
 from typing import Any
 
 from ai_gateway_core.agent_plugins import AgentPluginLoadError, load_agent_plugin
-from ai_gateway_core.security.redaction import redact_trace_text
 
 from ..context.assembler import ContextAssemblerV2
 from ..memory.indexer import MemoryIndexer
 from ..memory.lifecycle import (
     MemoryProviderLifecycle,
-    MemoryWriteResult,
     memory_hit_provenance,
-    should_sync_turn_to_memory,
 )
 from ..memory.reflector import DailyMemoryReflector
 from ..memory.retriever import HybridMemoryRetriever, MemorySearchHit
 from ..memory.scope import public_source_label
 from ..memory.source_store import MemorySourceStore
+from ..memory.turn_sync import CompletedTurnMemorySync, MemoryTurnSyncResult
 from ..scheduler.job_runner import SchedulerJobRunner
 from ..security.pii_filter import PIIFilter
 from ..security.sandbox_resolver import SandboxResolver
@@ -57,38 +55,6 @@ class MemoryProviderResult:
     def __post_init__(self) -> None:
         if self.provenance is None:
             self.provenance = [memory_hit_provenance(snippet) for snippet in self.snippets]
-
-
-@dataclass
-class MemoryTurnSyncResult:
-    """Completed-turn durable memory sync result."""
-
-    synced: bool
-    skipped: bool
-    reason: str
-    write: MemoryWriteResult | None = None
-    index_result: Any | None = None
-    pii_findings: list[str] | None = None
-    source_committed: bool = False
-    index_pending: bool = False
-    retryable: bool = False
-    errors: tuple[str, ...] = ()
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "synced": self.synced,
-            "skipped": self.skipped,
-            "reason": self.reason,
-            "write": self.write.to_dict() if self.write else None,
-            "index_result": self.index_result.__dict__
-            if hasattr(self.index_result, "__dict__")
-            else self.index_result,
-            "pii_findings": self.pii_findings or [],
-            "source_committed": self.source_committed,
-            "index_pending": self.index_pending,
-            "retryable": self.retryable,
-            "errors": list(self.errors),
-        }
 
 
 @dataclass
@@ -156,6 +122,12 @@ class AssistantRuntimeAdapter:
         self.skill_registry = skill_registry
         self.sandbox_resolver = sandbox_resolver
         self.lifecycle = lifecycle or MemoryProviderLifecycle()
+        self.memory_turn_sync = CompletedTurnMemorySync(
+            memory_store=self.memory_store,
+            memory_indexer=self.memory_indexer,
+            pii_filter=self.pii_filter,
+            lifecycle=self.lifecycle,
+        )
         self.agent_plugin_status: list[dict[str, Any]] = []
 
     def _load_configured_agent_plugins(self) -> None:
@@ -323,6 +295,8 @@ class AssistantRuntimeAdapter:
 
         loaded_sources = 0
         for doc in docs:
+            if self.memory_turn_sync.source_is_pending(tenant_id, user_id, doc.path):
+                continue
             try:
                 await self.memory_indexer.index_source(
                     tenant_id=tenant_id,
@@ -421,134 +395,30 @@ class AssistantRuntimeAdapter:
         terminal_envelope: dict[str, Any] | None,
         explicit_opt_in: bool = False,
     ) -> MemoryTurnSyncResult:
-        """Sync only eligible completed turns into durable daily memory."""
-        allowed, reason = should_sync_turn_to_memory(
-            terminal_envelope,
+        """Commit a completed turn, then refresh derived stores off-path."""
+        return await self.memory_turn_sync.sync(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            user_message=user_message,
+            assistant_message=assistant_message,
+            terminal_envelope=terminal_envelope,
             explicit_opt_in=explicit_opt_in,
         )
-        if not allowed:
-            return MemoryTurnSyncResult(synced=False, skipped=True, reason=reason)
 
-        conversation_snapshot = (
-            f"User: {str(user_message or '').strip()}\n\n"
-            f"Assistant: {str(assistant_message or '').strip()}"
-        )
-        if len(conversation_snapshot) > 6000:
-            conversation_snapshot = conversation_snapshot[:6000]
-        secret_redacted = redact_trace_text(conversation_snapshot)
-        redacted_text, findings = self.pii_filter.redact(secret_redacted)
-        write = self.memory_store.append_daily_entry_result(
-            tenant_id,
-            user_id,
-            redacted_text,
-        )
-        lifecycle_errors: list[str] = []
-        try:
-            await self.lifecycle.on_memory_write(
-                tenant_id=tenant_id,
-                user_id=user_id,
-                session_id=session_id,
-                write=write.to_dict(),
-            )
-        except Exception as exc:
-            logger.warning(
-                "Runtime memory write notification failed (%s)",
-                type(exc).__name__,
-            )
-            lifecycle_errors.append("memory_write_notification_pending")
+    async def flush_pending_memory_sync(
+        self,
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """Wait for queued memory derivatives at explicit lifecycle barriers."""
 
-        try:
-            source_document, source_handle = self.memory_store.read_owned_source_document(
-                tenant_id,
-                user_id,
-                write.path,
-                source_type=write.source_type,
-            )
-            index_result = await self.memory_indexer.index_source(
-                tenant_id=tenant_id,
-                user_id=user_id,
-                source_path=write.path,
-                source_type=write.source_type,
-                content=source_document.content,
-                metadata={
-                    "run_id": (terminal_envelope or {}).get("run_id"),
-                    "session_id": session_id,
-                    "source_type": write.source_type,
-                    "memory_layer": "durable_daily",
-                    "terminal_exit_reason": (terminal_envelope or {}).get("exit_reason"),
-                    "pii_findings": [finding.pattern for finding in findings],
-                    "write": write.to_dict(),
-                    "source_handle": source_handle,
-                },
-                updated_at=source_document.updated_at,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Runtime memory source committed with index pending (%s)",
-                type(exc).__name__,
-            )
-            return MemoryTurnSyncResult(
-                synced=False,
-                skipped=False,
-                reason="source_committed_index_pending",
-                write=write,
-                pii_findings=[finding.pattern for finding in findings],
-                source_committed=True,
-                index_pending=True,
-                retryable=True,
-                errors=tuple(dict.fromkeys([*lifecycle_errors, "memory_index_pending"])),
-            )
+        return await self.memory_turn_sync.flush_pending(timeout=timeout)
 
-        if getattr(index_result, "fallback_reason", None):
-            return MemoryTurnSyncResult(
-                synced=False,
-                skipped=False,
-                reason="source_committed_vector_index_pending",
-                write=write,
-                index_result=index_result,
-                pii_findings=[finding.pattern for finding in findings],
-                source_committed=True,
-                index_pending=True,
-                retryable=True,
-                errors=tuple(dict.fromkeys([*lifecycle_errors, "memory_vector_index_pending"])),
-            )
+    def memory_sync_status(self, operation_id: str) -> dict[str, Any] | None:
+        """Return a prompt-free background synchronization receipt."""
 
-        try:
-            await self.lifecycle.sync_turn(
-                tenant_id=tenant_id,
-                user_id=user_id,
-                session_id=session_id,
-                terminal_envelope=terminal_envelope,
-                write=write.to_dict(),
-            )
-        except Exception as exc:
-            logger.warning(
-                "Runtime memory provider sync notification failed (%s)",
-                type(exc).__name__,
-            )
-            lifecycle_errors.append("memory_provider_sync_pending")
-
-        if lifecycle_errors:
-            return MemoryTurnSyncResult(
-                synced=False,
-                skipped=False,
-                reason="source_committed_provider_sync_pending",
-                write=write,
-                index_result=index_result,
-                pii_findings=[finding.pattern for finding in findings],
-                source_committed=True,
-                retryable=True,
-                errors=tuple(dict.fromkeys(lifecycle_errors)),
-            )
-        return MemoryTurnSyncResult(
-            synced=True,
-            skipped=False,
-            reason="completed_turn",
-            write=write,
-            index_result=index_result,
-            pii_findings=[finding.pattern for finding in findings],
-            source_committed=True,
-        )
+        return self.memory_turn_sync.status(operation_id)
 
     async def delete_memory_source(
         self,
@@ -1324,6 +1194,7 @@ class AssistantRuntimeAdapter:
     ) -> dict[str, Any]:
         """Flush provider-side memory state before context compaction."""
         try:
+            background_sync = await self.flush_pending_memory_sync(timeout=5.0)
             hook_result = await self.lifecycle.on_pre_compact(
                 tenant_id=tenant_id,
                 user_id=user_id,
@@ -1340,6 +1211,7 @@ class AssistantRuntimeAdapter:
             )
             return {
                 "status": "ok",
+                "background_sync": background_sync,
                 "hook": hook_result,
                 "flush": flush_result,
             }

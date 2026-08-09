@@ -1,222 +1,186 @@
-"""
-Tool Selector — token-aware, relevance-scored tool selection.
+"""Deterministic, token-aware selection over a dynamic tool catalog.
 
-ADR-003 Phase 2: Replaces the binary question/creation filter with
-a scoring system that:
-1. Scores each tool by relevance to the user message (0-1.0)
-2. Prioritizes builtin tools over MCP/skill tools
-3. Enforces a token budget to prevent context explosion
-4. Always includes universal tools (KB search, memory)
+Selection is a prompt-size optimization, never an authorization mechanism.
+Unknown tools keep a non-zero baseline and the always-visible discovery
+bridges provide access to the authorized catalog when a full schema is not
+selected directly.
 """
 
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+import re
+from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.logging import get_logger
 
 from .constants import ToolName
+from .tool_discovery import DISCOVERY_TOOL_NAMES
 
 if TYPE_CHECKING:
     from .tool_registry import ToolDefinition
 
 logger = get_logger(__name__)
 
-# Default budget: ~2000 tokens for tool schemas (compact mode)
 DEFAULT_TOOL_TOKEN_BUDGET = 2000
 
-# Priority tiers (lower = higher priority, included first when budget tight)
-TIER_ALWAYS = 0   # Always included (KB search, memory)
-TIER_BUILTIN = 1  # Builtin generation/analysis tools
-TIER_SKILL = 2    # User-defined skills
-TIER_MCP = 3      # MCP tools (lowest priority by default)
+TIER_ALWAYS = 0
+TIER_BUILTIN = 1
+TIER_SKILL = 2
+TIER_MCP = 3
 
-# Tools that are always included regardless of relevance
-ALWAYS_INCLUDE = {ToolName.SEARCH_KB, ToolName.UPDATE_MEMORY, ToolName.SPAWN_SUBAGENT}
+ALWAYS_INCLUDE = {
+    ToolName.SEARCH_KB,
+    ToolName.UPDATE_MEMORY,
+    ToolName.SPAWN_SUBAGENT,
+    *DISCOVERY_TOOL_NAMES,
+}
 
-# Keyword → tool relevance mappings
+# Built-in aliases improve direct selection latency. Dynamic MCP and plugin
+# tools do not need an entry here: their own catalog metadata is indexed.
 _TOOL_KEYWORDS: dict[str, list[str]] = {
     ToolName.SEARCH_KB: [
-        "knowledge base", "knowledge", "kb", "internal document", "查找", "知识库", "知识", "文档",
+        "knowledge base",
+        "knowledge",
+        "kb",
+        "internal document",
+        "查找",
+        "知识库",
+        "知识",
+        "文档",
     ],
     ToolName.EXECUTE_CODE: [
-        "code", "python", "run", "execute", "script", "calculate", "compute", "plot",
-        "chart", "data", "analyze", "代码", "运行", "计算", "分析", "图表", "脚本",
+        "code",
+        "python",
+        "run",
+        "execute",
+        "script",
+        "calculate",
+        "compute",
+        "plot",
+        "chart",
+        "data",
+        "analyze",
+        "代码",
+        "运行",
+        "计算",
+        "分析",
+        "图表",
+        "脚本",
     ],
     ToolName.GENERATE_IMAGE: [
-        "image", "picture", "photo", "draw", "illustration", "poster", "图片", "图像",
-        "画", "海报", "生成图",
+        "image",
+        "picture",
+        "photo",
+        "draw",
+        "illustration",
+        "poster",
+        "图片",
+        "图像",
+        "画",
+        "海报",
+        "生成图",
     ],
     ToolName.GENERATE_DOCUMENT: [
-        "document", "docx", "word", "pdf", "report", "paper", "write", "draft",
-        "文档", "报告", "论文", "word",
+        "document",
+        "docx",
+        "word",
+        "pdf",
+        "report",
+        "paper",
+        "write",
+        "draft",
+        "文档",
+        "报告",
+        "论文",
     ],
     ToolName.GENERATE_PPTX: [
-        "ppt", "pptx", "slide", "presentation", "powerpoint", "幻灯片", "演示",
+        "ppt",
+        "pptx",
+        "slide",
+        "presentation",
+        "powerpoint",
+        "幻灯片",
+        "演示",
     ],
     ToolName.GENERATE_QUIZ: [
-        "quiz", "test", "exam", "question", "practice", "测验", "考试", "题",
-        "出题", "考考",
+        "quiz",
+        "test",
+        "exam",
+        "question",
+        "practice",
+        "测验",
+        "考试",
+        "题",
+        "出题",
+        "考考",
     ],
-    ToolName.UPDATE_MEMORY: [
-        "remember", "memory", "preference", "记住", "记忆", "偏好",
-    ],
+    ToolName.UPDATE_MEMORY: ["remember", "memory", "preference", "记住", "记忆", "偏好"],
 }
 
-# Confluence meta-tools declare their own `relevance_keywords` in the
-# ToolDefinition (see tools/confluence_tool.py). The central dict only
-# needs the obsolete per-tool entries for backwards-compat tests; new
-# deployments rely on self-declared keywords + name-token fallback.
-_CONFLUENCE_KEYWORDS = [
-    "confluence", "wiki", "atlassian", "page", "space",
-    "公司文档", "内部文档", "文档库", "知识库页面",
-    "空间", "页面", "排期", "wiki页", "站点",
-]
-_TOOL_KEYWORDS["confluence_read"] = _CONFLUENCE_KEYWORDS + [
-    "search", "find", "read", "content", "full", "complete",
-    "list", "which space", "children",
-    "搜索", "查找", "查", "内容", "详情", "完整", "全文", "打开",
-    "哪个空间", "空间列表", "工作区", "列出", "子页面",
-]
-_TOOL_KEYWORDS["confluence_write"] = _CONFLUENCE_KEYWORDS + [
-    "create", "new", "draft", "publish", "add page",
-    "update", "edit", "modify", "rewrite", "change",
-    "comment", "feedback", "annotate",
-    "delete", "remove", "trash", "archive",
-    "创建", "新建", "发布", "写一个",
-    "更新", "编辑", "修改", "改", "改为", "改成", "改动",
-    "评论", "反馈", "注释", "留言",
-    "删除", "移除", "归档",
-]
-
-# MCP server name → keywords that trigger inclusion
-_MCP_SERVER_KEYWORDS: dict[str, list[str]] = {
-    # docgen exposes a single ``generate_document`` tool that plans + renders
-    # docx / pptx / xlsx / pdf via an isolated MCP server. Keywords cover the
-    # common verbs and nouns users reach for when asking for a document —
-    # without them, the tool_selector's fallback only fires if the user
-    # literally types "docgen", which nobody does.
-    "docgen": [
-        "document", "doc", "docx", "word",
-        "pdf",
-        "pptx", "ppt", "powerpoint", "slides", "slide", "deck", "presentation",
-        "xlsx", "excel", "spreadsheet", "workbook",
-        "report", "memo", "letter", "brief",
-        "generate", "create", "export", "render", "produce",
-        "文档", "报告", "备忘录",
-        "幻灯片", "演示", "演示文稿", "ppt", "报告",
-        "电子表格", "表格", "excel",
-        "生成", "创建", "导出", "制作",
-    ],
-}
+_TOKEN_RE = re.compile(r"[a-z0-9]+|[\u3400-\u9fff]", re.IGNORECASE)
 
 
 def _estimate_tool_tokens(tool_def: ToolDefinition, compact: bool = True) -> int:
-    """Estimate token count for a tool's schema."""
     try:
         schema = tool_def.to_openai_schema(compact=compact)
-        text = json.dumps(schema, ensure_ascii=False, default=str)
-        # Rough estimate: ~4 chars per token for JSON
-        return len(text) // 4
+        return max(1, len(json.dumps(schema, ensure_ascii=False, default=str)) // 4)
     except Exception:
-        return 80  # Conservative fallback
+        return 80
+
+
+def _metadata_values(tool_def: ToolDefinition) -> list[str]:
+    metadata = getattr(tool_def, "capability_metadata", None) or {}
+    values: list[Any] = [
+        getattr(tool_def, "description", ""),
+        getattr(tool_def, "when_to_use", "") or "",
+        metadata.get("summary") or "",
+        metadata.get("mcp_server") or metadata.get("server_id") or "",
+        metadata.get("mcp_tool") or metadata.get("tool_id") or "",
+    ]
+    try:
+        properties = tool_def.model_argument_schema().get("properties") or {}
+        values.extend(str(name) for name in properties)
+    except Exception:
+        pass
+    return [str(value).lower() for value in values if value]
 
 
 def _score_tool(tool_def: ToolDefinition, message_lower: str) -> float:
-    """Score a tool's relevance to the user message (0.0 - 1.0).
+    """Score catalog relevance without making unknown tools unreachable."""
 
-    Keyword sources, checked in order:
-      1. Tool's self-declared `relevance_keywords` (authoritative)
-      2. Central `_TOOL_KEYWORDS` dict (legacy overrides)
-      3. Derived from `tool.name` by splitting on `_` — safety net so a
-         newly-added builtin tool never silently scores 0. Without this,
-         adding a tool without updating this module means it's filtered
-         out on every request (real bug we hit with the Confluence space
-         tools — selector never exposed them to the model).
-    """
     name = tool_def.name
-
-    # Always-include tools get max score
     if name in ALWAYS_INCLUDE:
         return 1.0
 
-    # MCP tools are scored against their *server's* keyword list first.
-    # Must come BEFORE the name_tokens path below — MCP tool names like
-    # ``mcp_docgen__generate_document`` tokenize to ['mcp','docgen',
-    # 'generate','document'], which would match generic words ("generate")
-    # in almost every message and yield a misleading 0.5 baseline. That
-    # crowds the per-tenant MCP budget and can still be too low to beat
-    # other high-score builtins. By keying off the server id we only
-    # surface the tool when the message is actually about that server.
-    if name.startswith("mcp_"):
-        for server, kws in _MCP_SERVER_KEYWORDS.items():
-            if name.startswith(f"mcp_{server}__"):
-                hits = sum(1 for kw in kws if kw in message_lower)
-                if hits:
-                    return min(0.4 + hits * 0.2, 1.0)
-                return 0.0  # MCP tool but no relevance signal — exclude
-        # Fallback for unknown MCP servers: match server name or tool
-        # action against message.
-        parts = name.split("__", 1)
-        server_part = parts[0].replace("mcp_", "") if parts else ""
-        action_part = parts[1] if len(parts) > 1 else ""
-        if server_part and server_part in message_lower:
-            return 0.6
-        if action_part and action_part.replace("_", " ") in message_lower:
-            return 0.5
-        return 0.0
+    aliases = [
+        *list(getattr(tool_def, "relevance_keywords", []) or []),
+        *_TOOL_KEYWORDS.get(name, []),
+    ]
+    search_text = " ".join(
+        [name.lower().replace("_", " ").replace("__", " "), *aliases, *_metadata_values(tool_def)]
+    )
+    phrase_hits = sum(1 for phrase in aliases if str(phrase).lower() in message_lower)
+    query_tokens = set(_TOKEN_RE.findall(message_lower))
+    catalog_tokens = set(_TOKEN_RE.findall(search_text))
+    token_hits = len(query_tokens & catalog_tokens)
+    if phrase_hits or token_hits:
+        return min(0.4 + (phrase_hits * 0.2) + (token_hits * 0.08), 1.0)
 
-    # 1) Tool-declared keywords take precedence.
-    declared = list(getattr(tool_def, "relevance_keywords", []) or [])
-    # 2) Central dict adds to the pool (backwards-compatible with existing tools).
-    central = _TOOL_KEYWORDS.get(name, [])
-    # 3) Last resort: tokens from the name itself, so the tool at least
-    #    scores above zero when the user mentions any part of its name.
-    name_tokens = [t for t in name.lower().split("_") if len(t) > 2]
-
-    keywords = declared + central + name_tokens
-    if keywords:
-        hits = sum(1 for kw in keywords if kw in message_lower)
-        if hits:
-            return min(0.3 + hits * 0.2, 1.0)  # 0.5 for 1 hit, 0.7 for 2, etc.
-        return 0.1  # Builtin but no keyword match — low baseline
-
-    # Deprecated: this branch is unreachable now that MCP tools are scored
-    # above, but kept as defensive no-op in case the mcp_ prefix convention
-    # ever changes.
-    if name.startswith("mcp_"):
-        for server, kws in _MCP_SERVER_KEYWORDS.items():
-            if name.startswith(f"mcp_{server}__"):
-                hits = sum(1 for kw in kws if kw in message_lower)
-                if hits:
-                    return min(0.4 + hits * 0.2, 1.0)
-                return 0.0  # MCP tool but no relevance signal — exclude
-        # Fallback for unknown MCP servers: match server name or tool action against message
-        parts = name.split("__", 1)
-        server_part = parts[0].replace("mcp_", "") if parts else ""
-        action_part = parts[1] if len(parts) > 1 else ""
-        if server_part and server_part in message_lower:
-            return 0.6
-        if action_part and action_part.replace("_", " ") in message_lower:
-            return 0.5
-        return 0.0
-
-    # Skill tools: moderate baseline
-    if tool_def.category and tool_def.category.value == "skill":
-        return 0.2
-
-    return 0.1  # Unknown tool — low priority
+    # Selection only controls which schemas are sent directly. A non-zero
+    # baseline plus tool_search means an opaque newly-installed MCP is still
+    # reachable without editing this module or guessing a server keyword.
+    category = getattr(getattr(tool_def, "category", None), "value", "")
+    return 0.15 if name.startswith("mcp_") or category in {"mcp", "skill"} else 0.1
 
 
 def _get_tier(tool_def: ToolDefinition) -> int:
-    """Get priority tier for a tool."""
     if tool_def.name in ALWAYS_INCLUDE:
         return TIER_ALWAYS
     if tool_def.name.startswith("mcp_"):
         return TIER_MCP
-    cat = tool_def.category.value if tool_def.category else ""
-    if cat == "skill":
+    category = getattr(getattr(tool_def, "category", None), "value", "")
+    if category == "skill":
         return TIER_SKILL
     return TIER_BUILTIN
 
@@ -226,75 +190,48 @@ def select_tools(
     user_message: str,
     max_tokens: int = DEFAULT_TOOL_TOKEN_BUDGET,
 ) -> list[ToolDefinition]:
-    """
-    Select tools for a request with relevance scoring and token budget.
+    """Select direct schemas while keeping discovery bridges visible."""
 
-    Strategy:
-    1. Score each tool by relevance to user_message
-    2. Sort by (tier ASC, score DESC) — always-include first, then highest scoring
-    3. Include tools until token budget exhausted
-    4. Always include TIER_ALWAYS tools regardless of budget
-
-    Returns:
-        List of selected ToolDefinitions, ordered by tier then score.
-    """
     if not all_tools:
         return []
-
     message_lower = (user_message or "").lower()
-
-    # Score and annotate each tool
     scored: list[tuple[ToolDefinition, float, int, int]] = []
     for tool in all_tools:
-        score = _score_tool(tool, message_lower)
-        tier = _get_tier(tool)
-        tokens = _estimate_tool_tokens(tool)
-        scored.append((tool, score, tier, tokens))
+        scored.append(
+            (tool, _score_tool(tool, message_lower), _get_tier(tool), _estimate_tool_tokens(tool))
+        )
 
-    # Sort: ALWAYS-tier tools first, then everything else by score DESC.
-    # The earlier ``(tier ASC, score DESC)`` put MCP tools dead last, so a
-    # perfectly-relevant MCP tool (score=1.0) could be starved of budget by
-    # weakly-relevant builtins (score=0.5) that merely happened to tier
-    # higher. For builtins vs skills vs MCP, a user's actual intent —
-    # captured in the score — is a better budget heuristic than a static
-    # tier preference.
-    # Tie-break by tier and name so the model sees deterministic tool schema
-    # order even when registries return tools in a different order.
     scored.sort(
-        key=lambda x: (
-            0 if x[2] == TIER_ALWAYS else 1,
-            -x[1],
-            x[2],
-            x[0].name.lower(),
+        key=lambda item: (
+            0 if item[2] == TIER_ALWAYS else 1,
+            -item[1],
+            item[2],
+            item[0].name.casefold(),
         )
     )
 
-    # Select within budget
     selected: list[ToolDefinition] = []
     used_tokens = 0
-
     for tool, score, tier, tokens in scored:
-        if tier == TIER_ALWAYS:
-            # Always include regardless of budget
-            selected.append(tool)
-            used_tokens += tokens
-        elif score <= 0.0:
-            # Zero relevance — skip entirely
-            continue
-        elif used_tokens + tokens <= max_tokens:
+        if tier == TIER_ALWAYS or used_tokens + tokens <= max_tokens:
             selected.append(tool)
             used_tokens += tokens
         else:
-            # Budget exhausted — log what was dropped
             logger.debug(
-                f"Tool '{tool.name}' dropped (score={score:.2f}, tokens={tokens}, "
-                f"budget={used_tokens}/{max_tokens})"
+                "Tool schema deferred (tool=%s score=%.2f tokens=%s budget=%s/%s)",
+                tool.name,
+                score,
+                tokens,
+                used_tokens,
+                max_tokens,
             )
 
     if len(selected) < len(all_tools):
         logger.info(
-            f"[ToolSelector] {len(selected)}/{len(all_tools)} tools selected, "
-            f"{used_tokens}/{max_tokens} tokens used"
+            "[ToolSelector] %s/%s direct schemas, %s/%s tokens; deferred tools remain discoverable",
+            len(selected),
+            len(all_tools),
+            used_tokens,
+            max_tokens,
         )
-
     return selected

@@ -680,7 +680,14 @@ class ContextAssemblerV2:
                 }
             )
 
-        add(kind="user_preferences", heading="User Preferences", value=user_preferences)
+        add(
+            kind="user_preferences",
+            heading="User Preferences",
+            value=user_preferences,
+            freshness="saved",
+            owner="memory",
+            conflict_policy="conversation_history_over_saved_preferences",
+        )
         add(
             kind="task_state",
             heading="Current Task State",
@@ -707,6 +714,7 @@ class ContextAssemblerV2:
                 value=snippet,
                 freshness="historical",
                 owner="memory",
+                conflict_policy="conversation_history_over_historical_memory",
                 max_chars=600,
                 included_by_source_limit=index < 6,
             )
@@ -721,7 +729,7 @@ class ContextAssemblerV2:
             value=long_term_memory,
             freshness="current",
             owner="memory",
-            conflict_policy="structured_memory_over_historical_snippets",
+            conflict_policy="conversation_then_structured_then_historical",
         )
 
         add(
@@ -785,9 +793,14 @@ class ContextAssemblerV2:
     def _render_source_record(cls, record: Mapping[str, Any]) -> str:
         source_id = str(record.get("source_id") or "source")
         heading = str(record.get("heading") or record.get("kind") or "Context")
+        conflict_policy = str(record.get("conflict_policy") or "current_request_wins")
+        precedence = (
+            ' precedence="conversation"' if conflict_policy.startswith("conversation") else ""
+        )
         payload = _boundary_safe_json({"content": str(record.get("content") or "")})
         return (
-            f'## {heading} [external data]\n<ctx-source id="{source_id}">\n{payload}\n</ctx-source>'
+            f"## {heading} [external data]\n"
+            f'<ctx-source id="{source_id}"{precedence}>\n{payload}\n</ctx-source>'
         )
 
     @classmethod

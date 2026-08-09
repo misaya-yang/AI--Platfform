@@ -18,10 +18,11 @@ import contextlib
 import os
 import re
 import shutil
+import stat
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -82,6 +83,7 @@ class CodeExecutionConfig:
 
     # Sandbox runtime — "runsc" for gVisor isolation, None for default runc
     sandbox_runtime: str | None = "runsc"
+    sandbox_backend: str = "docker"
     allow_default_runtime_fallback: bool = False
 
     # Docker image
@@ -311,11 +313,22 @@ class CodeExecutorService:
             config: Execution configuration. Uses defaults if not provided.
         """
         self.config = config or CodeExecutionConfig()
+        backend = os.environ.get("ASSISTANT_CODE_EXECUTOR_BACKEND", "").strip().lower()
+        if backend:
+            if backend not in {"docker", "sbx"}:
+                raise ValueError("ASSISTANT_CODE_EXECUTOR_BACKEND must be docker or sbx")
+            self.config.sandbox_backend = backend
         # Allow env var override: SANDBOX_RUNTIME=runsc|runc|""
         env_runtime = os.environ.get("SANDBOX_RUNTIME")
         if env_runtime is not None:
             self.config.sandbox_runtime = env_runtime or None
             self.config.allow_default_runtime_fallback = env_runtime == ""
+        if self.config.sandbox_backend == "sbx":
+            # Docker Sandboxes exposes a Docker-compatible endpoint backed by
+            # one nerdbox microVM per child container. It is a backend, not a
+            # Docker Engine runtime name such as runsc.
+            self.config.sandbox_runtime = None
+            self.config.allow_default_runtime_fallback = False
         if os.environ.get("ASSISTANT_ALLOW_RUNC_CODE_EXECUTOR", "").lower() in {
             "1",
             "true",
@@ -334,8 +347,31 @@ class CodeExecutorService:
             if not re.fullmatch(r"[A-Za-z0-9_./-]+", python_executable):
                 raise ValueError("ASSISTANT_CODE_EXECUTOR_PYTHON is invalid")
             self.config.python_executable = python_executable
+        self._sbx_api_version = os.environ.get(
+            "ASSISTANT_SBX_DOCKER_API_VERSION",
+            "1.51",
+        ).strip()
+        if not re.fullmatch(r"\d+\.\d+", self._sbx_api_version):
+            raise ValueError("ASSISTANT_SBX_DOCKER_API_VERSION is invalid")
         self._docker_client = None
         self._docker_available: bool | None = None
+
+    def _execution_config(
+        self,
+        override: CodeExecutionConfig | None,
+    ) -> CodeExecutionConfig:
+        """Apply per-call limits without changing the attested sandbox boundary."""
+
+        if override is None:
+            return self.config
+        return replace(
+            override,
+            network_disabled=self.config.network_disabled,
+            read_only_root=self.config.read_only_root,
+            sandbox_runtime=self.config.sandbox_runtime,
+            sandbox_backend=self.config.sandbox_backend,
+            allow_default_runtime_fallback=self.config.allow_default_runtime_fallback,
+        )
 
     @property
     def docker_client(self):
@@ -349,7 +385,12 @@ class CodeExecutorService:
             try:
                 import docker
 
-                self._docker_client = docker.from_env()
+                client_options = (
+                    {"version": self._sbx_api_version}
+                    if self.config.sandbox_backend == "sbx"
+                    else {}
+                )
+                self._docker_client = docker.from_env(**client_options)
                 # Test connection
                 self._docker_client.ping()
                 logger.info("Docker client initialized successfully")
@@ -373,11 +414,18 @@ class CodeExecutorService:
             if client is not None:
                 client.ping()
                 self._docker_available = True
+                info = client.info()
+                if self.config.sandbox_backend == "sbx":
+                    if info.get("DefaultRuntime") != "nerdbox":
+                        logger.error("Configured sbx backend is not backed by the nerdbox runtime")
+                        self._docker_available = False
+                        return self._docker_available
+                    logger.info("Docker Sandboxes microVM backend is available")
+                    return self._docker_available
                 # Check if configured sandbox runtime is available
                 rt = self.config.sandbox_runtime
                 if rt:
-                    info = client.info()
-                    runtimes = info.get("Runtimes", {})
+                    runtimes = info.get("Runtimes") or {}
                     if rt in runtimes:
                         logger.info(f"Docker available with sandbox runtime '{rt}' (gVisor)")
                     else:
@@ -392,7 +440,7 @@ class CodeExecutorService:
                         else:
                             self._docker_available = False
                 else:
-                    logger.info("Docker available (sandbox runtime: runc default)")
+                    logger.info("Docker available (sandbox runtime: default)")
             else:
                 self._docker_available = False
         except Exception as e:
@@ -421,7 +469,7 @@ class CodeExecutorService:
             CodeExecutionResult with execution status and outputs.
         """
         execution_id = str(uuid.uuid4())
-        exec_config = config or self.config
+        exec_config = self._execution_config(config)
         input_files = input_files or []
         kb_documents = kb_documents or []
 
@@ -598,6 +646,7 @@ class CodeExecutorService:
             Tuple of (container, stdout, stderr, exit_code)
         """
         from docker.errors import APIError, ContainerError, ImageNotFound
+        from docker.types import Mount
 
         client = self.docker_client
 
@@ -609,6 +658,8 @@ class CodeExecutorService:
             client.images.pull(config.image)
 
         workspace_mount_source = self._workspace_mount_source(workspace_dir)
+        stdout_capture = workspace_dir / ".assistant-stdout"
+        stderr_capture = workspace_dir / ".assistant-stderr"
 
         # Container configuration. The child receives no Docker socket or
         # provider credentials; it runs without network, Linux capabilities,
@@ -616,17 +667,17 @@ class CodeExecutorService:
         container_config = {
             "image": config.image,
             "command": [config.python_executable, config.main_script_path],
-            "volumes": {
-                str(workspace_mount_source): {
-                    "bind": config.workspace_path,
-                    "mode": "rw",
-                }
-            },
+            "mounts": [
+                Mount(
+                    target=config.workspace_path,
+                    source=str(workspace_mount_source),
+                    type="bind",
+                )
+            ],
             "working_dir": config.workspace_path,
             "user": f"{os.getuid()}:{os.getgid()}",
             "mem_limit": config.memory_limit,
             "nano_cpus": int(config.cpu_limit * 1e9),
-            "network_disabled": config.network_disabled,
             "cap_drop": ["ALL"],
             "security_opt": ["no-new-privileges:true"],
             "pids_limit": 64,
@@ -637,11 +688,36 @@ class CodeExecutorService:
                 "MPLCONFIGDIR": "/tmp/matplotlib",
                 "PYTHONDONTWRITEBYTECODE": "1",
             },
-            "init": True,
             "labels": {"com.misaya.ai-gateway.role": "code-sandbox"},
             "detach": True,
             "remove": False,  # We'll remove manually after getting logs
         }
+
+        if config.network_disabled:
+            if config.sandbox_backend == "sbx":
+                # Docker Sandboxes implements NetworkMode=none but rejects
+                # Docker Engine's legacy Config.NetworkDisabled flag.
+                container_config["network_mode"] = "none"
+            else:
+                container_config["network_disabled"] = True
+        if config.sandbox_backend != "sbx":
+            # The sbx Docker-compatible API rejects HostConfig.Init. Its
+            # nerdbox VM already owns the child process lifecycle.
+            container_config["init"] = True
+        else:
+            # sbx 0.38 implements container wait but not Docker's logs API.
+            # Redirect through fixed positional shell arguments and read the
+            # bind-mounted captures without following symlinks.
+            container_config["command"] = [
+                "/bin/sh",
+                "-c",
+                'exec "$1" "$2" >"$3" 2>"$4"',
+                "assistant-code",
+                config.python_executable,
+                config.main_script_path,
+                f"{config.workspace_path}/{stdout_capture.name}",
+                f"{config.workspace_path}/{stderr_capture.name}",
+            ]
 
         # ADR-002 Phase 2: gVisor sandbox runtime for kernel-level isolation
         if config.sandbox_runtime:
@@ -669,9 +745,18 @@ class CodeExecutorService:
 
             exit_code = wait_result.get("StatusCode", -1)
 
-            # Get logs
-            stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
-            stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
+            if config.sandbox_backend == "sbx":
+                stdout = self._read_capture(stdout_capture)
+                stderr = self._read_capture(stderr_capture)
+            else:
+                stdout = container.logs(stdout=True, stderr=False).decode(
+                    "utf-8",
+                    errors="replace",
+                )
+                stderr = container.logs(stdout=False, stderr=True).decode(
+                    "utf-8",
+                    errors="replace",
+                )
 
         except asyncio.TimeoutError:
             # Kill container on timeout
@@ -688,7 +773,28 @@ class CodeExecutorService:
             stderr = f"Docker API error: {e}"
             exit_code = -1
 
+        finally:
+            for capture in (stdout_capture, stderr_capture):
+                with contextlib.suppress(OSError):
+                    capture.unlink()
+
         return container, stdout, stderr, exit_code
+
+    @staticmethod
+    def _read_capture(path: Path, *, max_bytes: int = 2_000_000) -> str:
+        """Read a sandbox stream capture without following a forged link."""
+
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ValueError("sandbox stream capture is not a regular file")
+            payload = os.read(descriptor, max_bytes + 1)
+        finally:
+            os.close(descriptor)
+        if len(payload) > max_bytes:
+            payload = payload[:max_bytes] + b"\n...[stream truncated]"
+        return payload.decode("utf-8", errors="replace")
 
     @staticmethod
     def _workspace_mount_source(workspace_dir: Path) -> Path:
@@ -783,6 +889,9 @@ class CodeExecutorService:
                 continue
             if entry.name == "main.py":
                 continue
+            if entry.is_symlink():
+                logger.warning("[code_executor] rejected symlink artifact: %s", entry.name)
+                continue
             if entry.is_dir():
                 # Don't descend into unknown subdirectories — user code
                 # shouldn't be creating them at root, and we don't want
@@ -876,7 +985,7 @@ class CodeExecutorService:
                 for p in workspace_dir.iterdir():
                     if p.name in self._RESERVED_ROOT_NAMES:
                         continue
-                    kind = "d" if p.is_dir() else "f"
+                    kind = "l" if p.is_symlink() else "d" if p.is_dir() else "f"
                     try:
                         size = p.stat().st_size if p.is_file() else -1
                     except Exception:
@@ -893,6 +1002,12 @@ class CodeExecutorService:
                 )
 
         for file_path in all_entries:
+            if file_path.is_symlink():
+                logger.warning(
+                    "[code_executor] rejected symlink output: %s",
+                    file_path.name,
+                )
+                continue
             if file_path.is_file():
                 try:
                     content = file_path.read_bytes()

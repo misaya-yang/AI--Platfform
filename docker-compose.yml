@@ -193,8 +193,11 @@ services:
 
       # Database
       GATEWAY_DATABASE__ENABLED: "true"
-      GATEWAY_DATABASE__DSN: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-gateway}"
-      GATEWAY_DATABASE__AUTO_INIT: "true"
+      GATEWAY_DATABASE__DSN: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-gateway}?options=-csearch_path%3Dgateway%2Cassistant%2Cknowledge%2Cpublic"
+      # Fresh installs still bootstrap through the legacy initializer. After
+      # the per-service migration job has run, set this to false so Gateway
+      # cannot recreate Assistant/Knowledge tables in the gateway schema.
+      GATEWAY_DATABASE__AUTO_INIT: "${GATEWAY_DATABASE_AUTO_INIT:-true}"
 
       # Redis
       GATEWAY_REDIS__ENABLED: "true"
@@ -389,7 +392,7 @@ services:
       KNOWLEDGE_CORS__ALLOW_ORIGINS: '${KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON:-["http://localhost:80","http://localhost:3000","http://localhost:8081"]}'
       KNOWLEDGE_APP__HOST: "0.0.0.0"
       KNOWLEDGE_APP__PORT: "8092"
-      KNOWLEDGE_DATABASE__DSN: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-gateway}"
+      KNOWLEDGE_DATABASE__DSN: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-gateway}?options=-csearch_path%3Dknowledge%2Cgateway%2Cassistant%2Cpublic"
       KNOWLEDGE_REDIS__ENABLED: "true"
       KNOWLEDGE_REDIS__URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/2"
       KNOWLEDGE_QDRANT__URL: "http://qdrant:6333"
@@ -492,7 +495,7 @@ services:
     environment:
       <<: *container-proxy-env
       ASSISTANT_CORS__ALLOW_ORIGINS: '${ASSISTANT_CORS_ALLOW_ORIGINS_JSON:-["http://localhost:80","http://localhost:3000","http://localhost:8081"]}'
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-gateway}"
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-gateway}?options=-csearch_path%3Dassistant%2Cgateway%2Cknowledge%2Cpublic"
       REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
       KB_SERVICE_URL: "${KB_SERVICE_URL:-http://knowledge-service:8092}"
       KB_PROXY_CONNECT_TIMEOUT_SECONDS: "${KB_PROXY_CONNECT_TIMEOUT_SECONDS:-5}"

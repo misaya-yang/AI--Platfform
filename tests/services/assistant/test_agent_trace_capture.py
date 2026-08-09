@@ -1483,6 +1483,7 @@ async def test_streaming_first_event_does_not_wait_for_trace_persistence() -> No
     await stream.aclose()
     db.release.set()
     await writer.drain(timeout_s=1.0)
+    assert writer._submission_coroutines == {}
 
 
 @pytest.mark.asyncio

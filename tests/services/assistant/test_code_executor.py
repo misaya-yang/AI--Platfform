@@ -309,6 +309,64 @@ class TestCodeExecutorServiceInit:
         assert executor.config.image == "sandbox:2.0.0"
         assert executor.config.python_executable == "python3"
 
+    def test_init_applies_sbx_backend_without_docker_runtime(self, monkeypatch):
+        monkeypatch.setenv("ASSISTANT_CODE_EXECUTOR_BACKEND", "sbx")
+
+        executor = CodeExecutorService()
+
+        assert executor.config.sandbox_backend == "sbx"
+        assert executor.config.sandbox_runtime is None
+        assert executor.config.allow_default_runtime_fallback is False
+
+    def test_init_rejects_unknown_backend(self, monkeypatch):
+        monkeypatch.setenv("ASSISTANT_CODE_EXECUTOR_BACKEND", "unknown")
+
+        with pytest.raises(ValueError, match="BACKEND"):
+            CodeExecutorService()
+
+    def test_sbx_client_uses_explicit_supported_api_version(self, monkeypatch):
+        monkeypatch.setenv("ASSISTANT_CODE_EXECUTOR_BACKEND", "sbx")
+        client = MagicMock()
+        with patch("docker.from_env", return_value=client) as from_env:
+            executor = CodeExecutorService()
+
+            assert executor.docker_client is client
+
+        from_env.assert_called_once_with(version="1.51")
+        client.ping.assert_called_once()
+
+    def test_init_rejects_invalid_sbx_api_version(self, monkeypatch):
+        monkeypatch.setenv("ASSISTANT_SBX_DOCKER_API_VERSION", "latest")
+
+        with pytest.raises(ValueError, match="SBX_DOCKER_API_VERSION"):
+            CodeExecutorService()
+
+    def test_per_call_config_cannot_replace_attested_sandbox_boundary(self):
+        executor = CodeExecutorService(
+            CodeExecutionConfig(
+                sandbox_backend="sbx",
+                sandbox_runtime=None,
+                network_disabled=True,
+                read_only_root=True,
+            )
+        )
+
+        resolved = executor._execution_config(
+            CodeExecutionConfig(
+                memory_limit="1g",
+                sandbox_backend="docker",
+                sandbox_runtime="runc",
+                network_disabled=False,
+                read_only_root=False,
+            )
+        )
+
+        assert resolved.memory_limit == "1g"
+        assert resolved.sandbox_backend == "sbx"
+        assert resolved.sandbox_runtime is None
+        assert resolved.network_disabled is True
+        assert resolved.read_only_root is True
+
     def test_init_rejects_shell_syntax_in_python_executable(self, monkeypatch):
         monkeypatch.setenv("ASSISTANT_CODE_EXECUTOR_PYTHON", "python3; id")
 
@@ -374,6 +432,32 @@ class TestDockerAvailability:
         result = executor.is_docker_available()
 
         assert result is False
+
+    @patch(
+        "assistant_service.core.code_executor.CodeExecutorService.docker_client",
+        new_callable=PropertyMock,
+    )
+    def test_is_docker_available_attests_sbx_runtime(self, mock_client_prop, monkeypatch):
+        monkeypatch.setenv("ASSISTANT_CODE_EXECUTOR_BACKEND", "sbx")
+        mock_client = MagicMock()
+        mock_client.ping.return_value = True
+        mock_client.info.return_value = {"DefaultRuntime": "nerdbox", "Runtimes": None}
+        mock_client_prop.return_value = mock_client
+
+        assert CodeExecutorService().is_docker_available() is True
+
+    @patch(
+        "assistant_service.core.code_executor.CodeExecutorService.docker_client",
+        new_callable=PropertyMock,
+    )
+    def test_is_docker_available_rejects_false_sbx_endpoint(self, mock_client_prop, monkeypatch):
+        monkeypatch.setenv("ASSISTANT_CODE_EXECUTOR_BACKEND", "sbx")
+        mock_client = MagicMock()
+        mock_client.ping.return_value = True
+        mock_client.info.return_value = {"DefaultRuntime": "runc"}
+        mock_client_prop.return_value = mock_client
+
+        assert CodeExecutorService().is_docker_available() is False
 
     @patch(
         "assistant_service.core.code_executor.CodeExecutorService.docker_client",
@@ -609,11 +693,12 @@ class TestSandboxContainerPolicy:
         assert (stdout, stderr, exit_code) == ("ok\n", "", 0)
         call = client.containers.run.call_args.kwargs
         assert call["command"] == ["python3", "/workspace/main.py"]
-        assert call["volumes"] == {
-            "/host/sandbox-root/code_exec_123": {
-                "bind": "/workspace",
-                "mode": "rw",
-            }
+        mounts = [dict(mount) for mount in call["mounts"]]
+        assert mounts[0] == {
+            "Target": "/workspace",
+            "Source": "/host/sandbox-root/code_exec_123",
+            "Type": "bind",
+            "ReadOnly": False,
         }
         assert call["network_disabled"] is True
         assert call["cap_drop"] == ["ALL"]
@@ -622,6 +707,51 @@ class TestSandboxContainerPolicy:
         assert call["read_only"] is True
         assert call["user"]
         assert call["tmpfs"]["/tmp"].startswith("rw,noexec,nosuid")
+
+    @pytest.mark.asyncio
+    async def test_sbx_policy_uses_supported_network_and_process_fields(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        container_root = tmp_path / "container-root"
+        workspace = container_root / "code_exec_123"
+        workspace.mkdir(parents=True)
+        monkeypatch.setenv("SANDBOX_WORKSPACE", str(container_root))
+        monkeypatch.setenv("SANDBOX_WORKSPACE_HOST", "/host/sandbox-root")
+        monkeypatch.setenv("ASSISTANT_CODE_EXECUTOR_BACKEND", "sbx")
+
+        container = MagicMock()
+        container.wait.return_value = {"StatusCode": 0}
+        container.logs.side_effect = [b"ok\n", b""]
+        client = MagicMock()
+        client.containers.run.return_value = container
+        executor = CodeExecutorService()
+        executor._docker_client = client
+        (workspace / ".assistant-stdout").write_text("ok\n")
+        (workspace / ".assistant-stderr").write_text("")
+
+        await executor._run_container(workspace, executor.config)
+
+        call = client.containers.run.call_args.kwargs
+        assert call["network_mode"] == "none"
+        assert "network_disabled" not in call
+        assert "init" not in call
+        assert call["command"][:4] == [
+            "/bin/sh",
+            "-c",
+            'exec "$1" "$2" >"$3" 2>"$4"',
+            "assistant-code",
+        ]
+
+    def test_read_capture_rejects_symlink(self, tmp_path):
+        secret = tmp_path / "secret.txt"
+        secret.write_text("must-not-leak")
+        capture = tmp_path / ".assistant-stdout"
+        capture.symlink_to(secret)
+
+        with pytest.raises(OSError):
+            CodeExecutorService._read_capture(capture)
 
 
 class TestOutputFileCollection:
@@ -658,6 +788,24 @@ class TestOutputFileCollection:
             import shutil
 
             shutil.rmtree(workspace)
+
+    @pytest.mark.asyncio
+    async def test_collect_output_files_rejects_symlinks(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        output_dir = workspace / "output"
+        output_dir.mkdir(parents=True)
+        secret = tmp_path / "outside-secret.txt"
+        secret.write_text("must-not-leak")
+        (output_dir / "leak.txt").symlink_to(secret)
+        (workspace / "root-leak.txt").symlink_to(secret)
+
+        output_files = await CodeExecutorService()._collect_output_files(
+            workspace,
+            CodeExecutionConfig(),
+        )
+
+        assert output_files == []
+        assert not (output_dir / "root-leak.txt").exists()
 
     @pytest.mark.asyncio
     async def test_collect_output_files_empty_directory(self):

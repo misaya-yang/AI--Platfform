@@ -74,93 +74,8 @@ def _configure_agent_runtime_resource_policies(app: FastAPI, database):
     return tenant_tool_policy
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Startup / shutdown lifecycle."""
-    logger.info("Assistant Service starting...")
-    app.state.settings = settings
-
-    # ── OpenTelemetry SDK bootstrap — must run BEFORE database init below
-    # so AsyncPGInstrumentor patches asyncpg before any pool is created.
-    # Idempotent: a duplicate call is a debug-log no-op. Endpoint comes
-    # from OTEL_EXPORTER_OTLP_ENDPOINT env; unset → in-process spans only.
-    from ai_gateway_core.tracing import init_tracing
-
-    init_tracing("assistant-service")
-
-    # ── Graceful drain — install SIGTERM/SIGINT handlers so the orchestrator's
-    # "please stop" signal flips ``DRAIN`` and the shutdown path below can wait
-    # for in-flight requests to finish. The middleware that consumes ``DRAIN``
-    # is registered after the FastAPI() instance is built (see below — placed
-    # BEFORE CORSMiddleware so the 503 short-circuit fires first).
-    from ai_gateway_core.proxy.drain import DRAIN, install_signal_handlers
-
-    install_signal_handlers(asyncio.get_running_loop())
-
-    # Mandatory init failures (DB, Redis when REQUIRE_REDIS is set) raise
-    # from lifespan so the container crashes instead of starting in a half-broken
-    # state where /health returns 200 but every chat request 500s. Optional
-    # integrations (Confluence, Tavily, etc.) further down still warn-and-continue.
-    require_db = _env_truthy("ASSISTANT_REQUIRE_DB", default=True)
-    require_redis = _env_truthy("ASSISTANT_REQUIRE_REDIS", default=False)
-
-    # ── Database ──
-    database = None
-    db_dsn = os.getenv("DATABASE_URL", settings.database.dsn)
-    try:
-        from ai_gateway_core.persistence import DatabaseStorage
-
-        database = DatabaseStorage(db_dsn, enabled=True, auto_init=False)
-        await database.connect()
-        app.state.database = database
-        logger.info("Database connected")
-    except Exception as e:
-        if require_db:
-            logger.error("Database init failed (ASSISTANT_REQUIRE_DB=true): %s", e)
-            raise RuntimeError(
-                f"Database is mandatory but failed to initialize: {e}. "
-                "Either fix DATABASE_URL/connectivity or set ASSISTANT_REQUIRE_DB=false "
-                "(dev only — production must not run without DB)."
-            ) from e
-        logger.warning(f"Database init failed (running without DB): {e}")
-
-    tenant_tool_policy = _configure_agent_runtime_resource_policies(app, database)
-
-    # ── Redis ──
-    redis_client = None
-    redis_storage = None  # RedisStorage wrapper for shared session cache
-    redis_url = os.getenv("REDIS_URL", settings.redis.url)
-    if redis_url and settings.redis.enabled:
-        try:
-            import redis.asyncio as aioredis
-
-            redis_client = aioredis.from_url(redis_url, decode_responses=True)
-            await redis_client.ping()
-            app.state.redis = redis_client
-            logger.info("Redis connected")
-
-            # Build a RedisStorage wrapper that DatabaseSessionManager
-            # uses for cache. Shared with the gateway via the same Redis
-            # instance — mandatory for cache-coherence across processes.
-            # Without this, AS writes invalidate only its own in-process
-            # dict, leaving the gateway's Redis cache stale (incident
-            # 2026-04-28: chat sessions appearing empty after AS reload).
-            from ai_gateway_core.persistence import RedisStorage
-
-            redis_storage = RedisStorage(url=redis_url, enabled=True)
-            await redis_storage.connect()
-            app.state.redis_storage = redis_storage
-            logger.info("RedisStorage wrapper connected (shared session cache)")
-        except Exception as e:
-            if require_redis:
-                logger.error("Redis init failed (ASSISTANT_REQUIRE_REDIS=true): %s", e)
-                raise RuntimeError(
-                    f"Redis is mandatory but failed: {e}. "
-                    "Async image tasks fall back to in-process dict without Redis, "
-                    "which breaks across container restarts and multi-replica deploys."
-                ) from e
-            logger.warning(f"Redis init failed (running without Redis): {e}")
-
+async def _initialize_model_registry(database):
+    """Configure providers and load the default tenant model catalog."""
     # ── Model Registry ──
     from ai_gateway_core.config import resolve_dashscope, resolve_google
 
@@ -253,6 +168,122 @@ async def lifespan(app: FastAPI):
                     logger.info("Loaded %s models from DB", loaded_count)
         except Exception as e:
             logger.warning(f"DB model load failed: {e}")
+
+    return model_registry
+
+
+async def _shutdown_assistant_service(
+    *,
+    agent_plugin_mcp_manager,
+    database,
+    redis_client,
+) -> None:
+    """Drain requests, then close process-scoped resources in startup order."""
+    from ai_gateway_core.proxy.drain import DRAIN
+
+    if not await DRAIN.wait_drained(timeout=30.0):
+        logger.warning(
+            "drain timeout — %d request(s) still in flight at shutdown",
+            DRAIN.inflight,
+        )
+
+    if agent_plugin_mcp_manager is not None:
+        await agent_plugin_mcp_manager.shutdown()
+    if database:
+        await database.close()
+    if redis_client:
+        await redis_client.close()
+    logger.info("Assistant Service shut down")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup / shutdown lifecycle."""
+    logger.info("Assistant Service starting...")
+    app.state.settings = settings
+
+    # ── OpenTelemetry SDK bootstrap — must run BEFORE database init below
+    # so AsyncPGInstrumentor patches asyncpg before any pool is created.
+    # Idempotent: a duplicate call is a debug-log no-op. Endpoint comes
+    # from OTEL_EXPORTER_OTLP_ENDPOINT env; unset → in-process spans only.
+    from ai_gateway_core.tracing import init_tracing
+
+    init_tracing("assistant-service")
+
+    # ── Graceful drain — install SIGTERM/SIGINT handlers so the orchestrator's
+    # "please stop" signal flips ``DRAIN`` and the shutdown path below can wait
+    # for in-flight requests to finish. The middleware that consumes ``DRAIN``
+    # is registered after the FastAPI() instance is built (see below — placed
+    # BEFORE CORSMiddleware so the 503 short-circuit fires first).
+    from ai_gateway_core.proxy.drain import install_signal_handlers
+
+    install_signal_handlers(asyncio.get_running_loop())
+
+    # Mandatory init failures (DB, Redis when REQUIRE_REDIS is set) raise
+    # from lifespan so the container crashes instead of starting in a half-broken
+    # state where /health returns 200 but every chat request 500s. Optional
+    # integrations (Confluence, Tavily, etc.) further down still warn-and-continue.
+    require_db = _env_truthy("ASSISTANT_REQUIRE_DB", default=True)
+    require_redis = _env_truthy("ASSISTANT_REQUIRE_REDIS", default=False)
+
+    # ── Database ──
+    database = None
+    db_dsn = os.getenv("DATABASE_URL", settings.database.dsn)
+    try:
+        from ai_gateway_core.persistence import DatabaseStorage
+
+        database = DatabaseStorage(db_dsn, enabled=True, auto_init=False)
+        await database.connect()
+        app.state.database = database
+        logger.info("Database connected")
+    except Exception as e:
+        if require_db:
+            logger.error("Database init failed (ASSISTANT_REQUIRE_DB=true): %s", e)
+            raise RuntimeError(
+                f"Database is mandatory but failed to initialize: {e}. "
+                "Either fix DATABASE_URL/connectivity or set ASSISTANT_REQUIRE_DB=false "
+                "(dev only — production must not run without DB)."
+            ) from e
+        logger.warning(f"Database init failed (running without DB): {e}")
+
+    tenant_tool_policy = _configure_agent_runtime_resource_policies(app, database)
+
+    # ── Redis ──
+    redis_client = None
+    redis_storage = None  # RedisStorage wrapper for shared session cache
+    redis_url = os.getenv("REDIS_URL", settings.redis.url)
+    if redis_url and settings.redis.enabled:
+        try:
+            import redis.asyncio as aioredis
+
+            redis_client = aioredis.from_url(redis_url, decode_responses=True)
+            await redis_client.ping()
+            app.state.redis = redis_client
+            logger.info("Redis connected")
+
+            # Build a RedisStorage wrapper that DatabaseSessionManager
+            # uses for cache. Shared with the gateway via the same Redis
+            # instance — mandatory for cache-coherence across processes.
+            # Without this, AS writes invalidate only its own in-process
+            # dict, leaving the gateway's Redis cache stale (incident
+            # 2026-04-28: chat sessions appearing empty after AS reload).
+            from ai_gateway_core.persistence import RedisStorage
+
+            redis_storage = RedisStorage(url=redis_url, enabled=True)
+            await redis_storage.connect()
+            app.state.redis_storage = redis_storage
+            logger.info("RedisStorage wrapper connected (shared session cache)")
+        except Exception as e:
+            if require_redis:
+                logger.error("Redis init failed (ASSISTANT_REQUIRE_REDIS=true): %s", e)
+                raise RuntimeError(
+                    f"Redis is mandatory but failed: {e}. "
+                    "Async image tasks fall back to in-process dict without Redis, "
+                    "which breaks across container restarts and multi-replica deploys."
+                ) from e
+            logger.warning(f"Redis init failed (running without Redis): {e}")
+
+    model_registry = await _initialize_model_registry(database)
 
     app.state.model_registry = model_registry
 
@@ -421,6 +452,13 @@ async def lifespan(app: FastAPI):
     from .core.tools.context_tools import register_context_tools
 
     register_context_tools()
+
+    # Three small, stateless bridge schemas keep arbitrary tenant-authorized
+    # plugin/MCP catalogs reachable without sending every full schema on every
+    # model turn. Underlying calls still return through the canonical gateway.
+    from .core.tools.tool_discovery import register_tool_discovery_tools
+
+    register_tool_discovery_tools()
 
     if _register_subagent_tool_if_enabled():
         logger.info("Sub-agent delegation enabled")
@@ -645,24 +683,11 @@ async def lifespan(app: FastAPI):
 
     yield  # ── Running ──
 
-    # ── Shutdown ──
-    # Wait for in-flight requests to finish before closing pools. New requests
-    # were already rejected with 503 by ``DrainMiddleware`` once SIGTERM
-    # flipped ``DRAIN``. Bound the wait so a hung handler doesn't block
-    # container exit forever.
-    if not await DRAIN.wait_drained(timeout=30.0):
-        logger.warning(
-            "drain timeout — %d request(s) still in flight at shutdown",
-            DRAIN.inflight,
-        )
-
-    if agent_plugin_mcp_manager is not None:
-        await agent_plugin_mcp_manager.shutdown()
-    if database:
-        await database.close()
-    if redis_client:
-        await redis_client.close()
-    logger.info("Assistant Service shut down")
+    await _shutdown_assistant_service(
+        agent_plugin_mcp_manager=agent_plugin_mcp_manager,
+        database=database,
+        redis_client=redis_client,
+    )
 
 
 # ── Create App ──

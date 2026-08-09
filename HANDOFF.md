@@ -130,6 +130,21 @@ a primary-model baseline.
 
 ## Known issues / current breakage
 
+### 2026-08-09 local migration addendum
+
+- The explicitly authorized local per-service migration applied all six current
+  SQL files and an immediate rerun skipped all six as already applied.
+- Compose now gives Gateway, Assistant, and Knowledge service-owned search
+  paths. The migrated local environment sets `GATEWAY_DATABASE_AUTO_INIT=false`
+  so Gateway cannot recreate shadow Assistant/Knowledge tables.
+- The legacy runner now anchors its ledger in `public.schema_migrations` and
+  recognizes schema-split base tables instead of reapplying `schema.sql`.
+- The migrated local PostgreSQL run completed the formerly skipped memory test:
+  full Assistant result `1943 passed, 0 skipped`. Post-migration real
+  `qwen3.7-plus` E2E passed in `188.73s`.
+- This is local evidence only; no production migration, deployment, commit, or
+  push was performed.
+
 - No reproducible P0/P1 code breakage is known at this checkpoint.
 - Node 24 produces an engine warning because the repository declares Node 22;
   the recorded frontend type-check and production build still passed. Use Node

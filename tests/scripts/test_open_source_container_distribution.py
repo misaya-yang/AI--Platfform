@@ -105,10 +105,34 @@ def test_source_build_overlay_owns_every_compose_build_context() -> None:
     assert "\n  mcp-docgen-server:" not in overlay
 
 
+def test_service_database_search_paths_follow_schema_ownership() -> None:
+    rendered = _render_compose(GATEWAY_DATABASE_AUTO_INIT="false")
+    services = rendered["services"]
+
+    gateway_env = services["gateway"]["environment"]
+    assistant_env = services["assistant-service"]["environment"]
+    knowledge_env = services["knowledge-service"]["environment"]
+
+    assert gateway_env["GATEWAY_DATABASE__AUTO_INIT"] == "false"
+    assert gateway_env["GATEWAY_DATABASE__DSN"].endswith(
+        "?options=-csearch_path%3Dgateway%2Cassistant%2Cknowledge%2Cpublic"
+    )
+    assert assistant_env["DATABASE_URL"].endswith(
+        "?options=-csearch_path%3Dassistant%2Cgateway%2Cknowledge%2Cpublic"
+    )
+    assert knowledge_env["KNOWLEDGE_DATABASE__DSN"].endswith(
+        "?options=-csearch_path%3Dknowledge%2Cgateway%2Cassistant%2Cpublic"
+    )
+
+
 def test_default_initializer_needs_only_dashscope_model_secret(tmp_path: Path) -> None:
     target = tmp_path / ".env"
     model_key = "test-dashscope-runtime-key"
-    env = {**os.environ, "DASHSCOPE_API_KEY": model_key}
+    env = {
+        **os.environ,
+        "DASHSCOPE_API_KEY": model_key,
+        "GATEWAY_DATABASE_AUTO_INIT": "false",
+    }
     for key in (
         "POSTGRES_PASSWORD",
         "REDIS_PASSWORD",
@@ -138,6 +162,7 @@ def test_default_initializer_needs_only_dashscope_model_secret(tmp_path: Path) -
     assert values["KB_EMBEDDING_PROVIDER"] == "dashscope"
     assert values["KB_EMBEDDING_API_KEY"] == ""
     assert values["KB_EMBEDDING_MODEL"] == "text-embedding-v4"
+    assert values["GATEWAY_DATABASE_AUTO_INIT"] == "false"
     for key in (
         "POSTGRES_PASSWORD",
         "REDIS_PASSWORD",
@@ -444,7 +469,10 @@ def test_code_executor_is_an_explicit_local_overlay() -> None:
     assert "/var/run/docker.sock" not in assistant
 
     assert 'ASSISTANT_CODE_EXECUTOR_ENABLED: "true"' in overlay
-    assert "/var/run/docker.sock:/var/run/docker.sock" in overlay
+    assert "ASSISTANT_CODE_EXECUTOR_SOCKET" in overlay
+    assert (
+        'ASSISTANT_CODE_EXECUTOR_BACKEND: "${ASSISTANT_CODE_EXECUTOR_BACKEND:-docker}"' in overlay
+    )
     assert "ASSISTANT_SANDBOX_WORKSPACE_HOST" in overlay
     assert "DOCKER_SOCKET_GID" in overlay
     assert "ai-gateway-docgen-sandbox:2.0.0" in overlay
@@ -453,6 +481,9 @@ def test_code_executor_is_an_explicit_local_overlay() -> None:
 
     assert "assert_compose_owner" in script
     assert 'COMPOSE_PARALLEL_LIMIT="${COMPOSE_PARALLEL_LIMIT:-1}"' in script
+    assert "sbx daemon start --detach --policy deny-all" in script
+    assert "nerdbox" in script
+    assert 'docker save "$sandbox_image"' in script
     assert 'ASSISTANT_ALLOW_RUNC_CODE_EXECUTOR: "true"' in overlay
     assert "cap_drop" not in script  # enforced by CodeExecutorService itself
     for target in (

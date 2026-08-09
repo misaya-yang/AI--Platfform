@@ -107,14 +107,12 @@ def should_sync_turn_to_memory(
 ) -> tuple[bool, str]:
     """Return whether a completed turn should be synced into durable memory."""
 
-    if explicit_opt_in:
-        return True, "explicit_opt_in"
     if not terminal_envelope:
         return False, "terminal_envelope_missing"
     exit_reason = str(terminal_envelope.get("exit_reason") or "").strip().lower()
     status = str(terminal_envelope.get("status") or "").strip().lower()
     if exit_reason in _ALLOWED_SYNC_REASONS and status == "succeeded":
-        return True, "completed_turn"
+        return True, "explicit_opt_in_completed_turn" if explicit_opt_in else "completed_turn"
     if not exit_reason:
         return False, "terminal_exit_reason_missing"
     return False, f"terminal_exit_reason_{exit_reason}"

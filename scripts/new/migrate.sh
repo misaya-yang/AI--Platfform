@@ -53,7 +53,7 @@ cd "$PROJECT_ROOT"
 # -- Ensure migration tracking table exists ----------------------------------
 ensure_tracking_table() {
     run_sql "
-        CREATE TABLE IF NOT EXISTS schema_migrations (
+        CREATE TABLE IF NOT EXISTS public.schema_migrations (
             filename    TEXT PRIMARY KEY,
             applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
         );
@@ -64,7 +64,7 @@ tracking_mode() {
     if run_sql "
         SELECT 'filename'
         FROM information_schema.columns
-        WHERE table_schema = current_schema()
+        WHERE table_schema = 'public'
           AND table_name = 'schema_migrations'
           AND column_name = 'filename'
         LIMIT 1;
@@ -76,7 +76,7 @@ tracking_mode() {
     if run_sql "
         SELECT 'version'
         FROM information_schema.columns
-        WHERE table_schema = current_schema()
+        WHERE table_schema = 'public'
           AND table_name = 'schema_migrations'
           AND column_name = 'version'
         LIMIT 1;
@@ -93,7 +93,7 @@ legacy_tracking_has_dirty() {
     run_sql "
         SELECT 'dirty'
         FROM information_schema.columns
-        WHERE table_schema = current_schema()
+        WHERE table_schema = 'public'
           AND table_name = 'schema_migrations'
           AND column_name = 'dirty'
         LIMIT 1;
@@ -129,9 +129,9 @@ assert_unique_forward_migration_versions() {
         if [ -n "$existing_line" ]; then
             existing_file="${existing_line#*:}"
             if legacy_tracking_has_dirty; then
-                applied_query="SELECT 1 FROM schema_migrations WHERE version = ${version} AND dirty = FALSE;"
+                applied_query="SELECT 1 FROM public.schema_migrations WHERE version = ${version} AND dirty = FALSE;"
             else
-                applied_query="SELECT 1 FROM schema_migrations WHERE version = ${version};"
+                applied_query="SELECT 1 FROM public.schema_migrations WHERE version = ${version};"
             fi
             if run_sql "$applied_query" 2>/dev/null | grep -q "1"; then
                 log_warn "Duplicate migration version prefix ${version} is already recorded in legacy tracking; treating as historical duplicate: ${existing_file} and ${filename}"
@@ -154,10 +154,22 @@ guard_legacy_version_tracking() {
 base_schema_exists() {
     run_sql "
         SELECT CASE
-            WHEN to_regclass('public.services') IS NULL
-              OR to_regclass('public.datasets') IS NULL
-              OR to_regclass('public.documents') IS NULL
-              OR to_regclass('public.segments') IS NULL
+            WHEN COALESCE(
+                to_regclass('gateway.services'),
+                to_regclass('public.services')
+            ) IS NULL
+              OR COALESCE(
+                to_regclass('knowledge.datasets'),
+                to_regclass('public.datasets')
+              ) IS NULL
+              OR COALESCE(
+                to_regclass('knowledge.documents'),
+                to_regclass('public.documents')
+              ) IS NULL
+              OR COALESCE(
+                to_regclass('knowledge.segments'),
+                to_regclass('public.segments')
+              ) IS NULL
             THEN 'missing'
             ELSE 'present'
         END;
@@ -200,9 +212,9 @@ is_applied() {
     if [ "$(tracking_mode)" = "version" ]; then
         local version
         version=$(migration_version "$filename")
-        result=$(run_sql "SELECT 1 FROM schema_migrations WHERE version = ${version};" 2>/dev/null | grep -c "1" || true)
+        result=$(run_sql "SELECT 1 FROM public.schema_migrations WHERE version = ${version};" 2>/dev/null | grep -c "1" || true)
     else
-        result=$(run_sql "SELECT 1 FROM schema_migrations WHERE filename = '${filename}';" 2>/dev/null | grep -c "1" || true)
+        result=$(run_sql "SELECT 1 FROM public.schema_migrations WHERE filename = '${filename}';" 2>/dev/null | grep -c "1" || true)
     fi
     [ "$result" -gt 0 ]
 }
@@ -218,12 +230,12 @@ record_migration() {
         local version
         version=$(migration_version "$filename")
         if legacy_tracking_has_dirty; then
-            run_sql "INSERT INTO schema_migrations (version, dirty) VALUES (${version}, FALSE) ON CONFLICT (version) DO UPDATE SET dirty = FALSE;" >/dev/null
+            run_sql "INSERT INTO public.schema_migrations (version, dirty) VALUES (${version}, FALSE) ON CONFLICT (version) DO UPDATE SET dirty = FALSE;" >/dev/null
         else
-            run_sql "INSERT INTO schema_migrations (version) VALUES (${version}) ON CONFLICT (version) DO NOTHING;" >/dev/null
+            run_sql "INSERT INTO public.schema_migrations (version) VALUES (${version}) ON CONFLICT (version) DO NOTHING;" >/dev/null
         fi
     else
-        run_sql "INSERT INTO schema_migrations (filename) VALUES ('${filename}') ON CONFLICT DO NOTHING;" >/dev/null
+        run_sql "INSERT INTO public.schema_migrations (filename) VALUES ('${filename}') ON CONFLICT DO NOTHING;" >/dev/null
     fi
 }
 
@@ -237,16 +249,16 @@ if [ "$STATUS" = true ]; then
     echo "Applied migrations:"
     if [ "$(tracking_mode)" = "version" ]; then
         if legacy_tracking_has_dirty; then
-            run_sql "SELECT version, dirty FROM schema_migrations ORDER BY version;" 2>/dev/null
+            run_sql "SELECT version, dirty FROM public.schema_migrations ORDER BY version;" 2>/dev/null
         else
-            run_sql "SELECT version FROM schema_migrations ORDER BY version;" 2>/dev/null
+            run_sql "SELECT version FROM public.schema_migrations ORDER BY version;" 2>/dev/null
         fi
     else
-        run_sql "SELECT filename, applied_at FROM schema_migrations WHERE filename NOT LIKE '%_rollback.sql' ORDER BY filename;" 2>/dev/null
+        run_sql "SELECT filename, applied_at FROM public.schema_migrations WHERE filename NOT LIKE '%_rollback.sql' ORDER BY filename;" 2>/dev/null
 
         echo ""
         echo "Ignored rollback migration records:"
-        run_sql "SELECT filename, applied_at FROM schema_migrations WHERE filename LIKE '%_rollback.sql' ORDER BY filename;" 2>/dev/null
+        run_sql "SELECT filename, applied_at FROM public.schema_migrations WHERE filename LIKE '%_rollback.sql' ORDER BY filename;" 2>/dev/null
     fi
 
     echo ""

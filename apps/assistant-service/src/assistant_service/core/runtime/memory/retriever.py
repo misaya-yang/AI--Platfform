@@ -125,7 +125,7 @@ class HybridMemoryRetriever:
         ]
         scored.sort(key=lambda item: item[3], reverse=True)
 
-        top_chunk_ids = [item[0] for item in scored[:max_results]]
+        top_chunk_ids = [item[0] for item in scored[:candidate_size]]
         chunk_rows = await self._load_chunks(
             top_chunk_ids,
             tenant_id=tenant_id,
@@ -141,6 +141,7 @@ class HybridMemoryRetriever:
             metadata = _row_value(row, "metadata", {}) or {}
             if not isinstance(metadata, dict):
                 metadata = {}
+            source_updated_at = _row_value(row, "source_updated_at")
             results.append(
                 MemorySearchHit(
                     chunk_id=chunk_id,
@@ -155,13 +156,23 @@ class HybridMemoryRetriever:
                     metadata={
                         **metadata,
                         "source_id": str(_row_value(row, "source_id", "") or ""),
+                        "updated_at": (
+                            source_updated_at.isoformat()
+                            if hasattr(source_updated_at, "isoformat")
+                            else str(source_updated_at or "")
+                        ),
                     },
                 )
             )
-            if len(results) >= max_results:
-                break
-
-        return results
+        results.sort(
+            key=lambda hit: (
+                hit.final_score,
+                str(hit.metadata.get("updated_at") or ""),
+                hit.end_line,
+            ),
+            reverse=True,
+        )
+        return results[:max_results]
 
     async def _search_text(
         self,
@@ -183,7 +194,10 @@ class HybridMemoryRetriever:
                 SELECT
                     c.chunk_id,
                     row_number() OVER (
-                        ORDER BY ts_rank_cd(c.text_search, plainto_tsquery('simple', $3)) DESC
+                        ORDER BY
+                            ts_rank_cd(c.text_search, plainto_tsquery('simple', $3)) DESC,
+                            s.updated_at DESC,
+                            c.end_line DESC
                     ) AS rank
                 FROM assistant_memory_chunks c
                 JOIN assistant_memory_sources s ON s.source_id = c.source_id
@@ -343,7 +357,8 @@ class HybridMemoryRetriever:
                 c.metadata,
                 s.source_id,
                 s.source_path,
-                s.source_type
+                s.source_type,
+                s.updated_at AS source_updated_at
             FROM assistant_memory_chunks c
             JOIN assistant_memory_sources s ON s.source_id = c.source_id
             WHERE c.chunk_id = ANY($1::uuid[])

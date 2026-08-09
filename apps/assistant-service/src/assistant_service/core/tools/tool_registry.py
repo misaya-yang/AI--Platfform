@@ -42,6 +42,7 @@ _PUBLIC_INTERNAL_FIELD_RE = re.compile(r"(?i)(host|server|user)\s*=\s*\S+")
 _UNTRUSTED_INSTRUCTION_RE = re.compile(
     r"(?i)(ignore\s+(?:all\s+)?previous|system\s+prompt|developer\s+message|jailbreak)"
 )
+_RESERVED_PLATFORM_TOOL_NAMES = frozenset({"tool_search", "tool_describe", "tool_call"})
 
 
 def _tool_log_label(tool_name: Any) -> str:
@@ -533,6 +534,16 @@ class ToolRegistry:
         allow_override: bool = False,
     ) -> None:
         """Register a tool with its executor (thread-safe)."""
+        if (
+            definition.name in _RESERVED_PLATFORM_TOOL_NAMES
+            and (definition.capability_metadata or {}).get("kind") != "platform_tool_discovery"
+        ):
+            raise ValueError(
+                _safe_public_error(
+                    f"Reserved platform tool name: {definition.name}",
+                    fallback="Reserved platform tool name",
+                )
+            )
         with self._lock:
             if definition.name in self._tools:
                 if not allow_override:

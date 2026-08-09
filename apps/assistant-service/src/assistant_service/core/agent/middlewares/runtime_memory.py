@@ -33,32 +33,52 @@ logger = get_logger(__name__)
 # Max length per snippet after sanitization. Prevents any single snippet
 # from dominating the context block.
 _MAX_SNIPPET_LEN = 240
-
-_CURRENT_CONVERSATION_REFERENCES = (
-    re.compile(r"(?:当前|本次|这个|这次)(?:会话|对话)"),
-    re.compile(r"(?:刚才|方才|上一条|上一轮|上文)(?:说|提|写|告诉|消息|回复)?"),
-    re.compile(r"我(?:最早|之前|此前)告诉你的"),
-    re.compile(
-        r"\b(?:this|current)\s+(?:conversation|session|chat|thread)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"\b(?:earlier|previous|last)\s+(?:message|turn|reply)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"\bI\s+(?:just|earlier|previously)\s+(?:told|said|mentioned|wrote)\b", re.IGNORECASE
-    ),
-)
+_LEXICAL_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
 
 
-def _prefers_current_conversation(query: str) -> bool:
-    """Return whether the request explicitly scopes recall to this thread."""
+def _lexical_units(value: Any) -> set[str]:
+    """Build small language-neutral units for current-thread relevance."""
 
-    value = str(query or "").strip()
-    return bool(value) and any(
-        pattern.search(value) for pattern in _CURRENT_CONVERSATION_REFERENCES
-    )
+    units: set[str] = set()
+    for token in _LEXICAL_TOKEN_RE.findall(str(value or "").casefold()):
+        if token.isascii():
+            if len(token) >= 3:
+                units.add(token)
+            continue
+        characters = [character for character in token if character.isalnum()]
+        units.update(
+            "".join(characters[index : index + 2]) for index in range(max(0, len(characters) - 1))
+        )
+    return units
+
+
+def _current_conversation_is_relevant(
+    query: str,
+    messages: list[dict[str, Any]],
+) -> bool:
+    """Prefer session facts when the request overlaps an earlier turn.
+
+    This is based on the actual transcript rather than a list of prompt
+    phrases, so the rule works across languages and does not disable durable
+    recall merely because a conversation already has history.
+    """
+
+    query_text = str(query or "").strip()
+    query_units = _lexical_units(query_text)
+    if len(query_units) < 2:
+        return False
+    history_units: set[str] = set()
+    skipped_current = False
+    for message in reversed(messages):
+        if str(message.get("role") or "") not in {"user", "assistant"}:
+            continue
+        content = str(message.get("content") or "").strip()
+        if not skipped_current and content == query_text:
+            skipped_current = True
+            continue
+        history_units.update(_lexical_units(content))
+    shared = len(query_units & history_units)
+    return shared >= 2 and shared / min(len(query_units), 8) >= 0.25
 
 
 def _sanitize_snippet(text: str) -> str:
@@ -117,22 +137,22 @@ class RuntimeMemoryMiddleware:
         # (which imports middlewares lazily via the package entry point).
         from ..agent_loop import AgentLoopEvent
 
-        current_conversation_only = bool(
+        current_conversation_relevant = bool(
             getattr(ctx, "conversation_history_available", False)
-            and _prefers_current_conversation(ctx.message)
+            and _current_conversation_is_relevant(
+                ctx.message,
+                getattr(ctx, "conversation_history", None) or _messages,
+            )
         )
         try:
-            if current_conversation_only:
-                memory_result = None
-            else:
-                memory_result = await self._runtime.load_memory_context(
-                    tenant_id=ctx.tenant_id,
-                    user_id=memory_user_id,
-                    query=ctx.message,
-                    runtime_mode=ctx.config.runtime_mode,
-                    memory_profile=ctx.config.memory_profile,
-                    max_results=6,
-                )
+            memory_result = await self._runtime.load_memory_context(
+                tenant_id=ctx.tenant_id,
+                user_id=memory_user_id,
+                query=ctx.message,
+                runtime_mode=ctx.config.runtime_mode,
+                memory_profile=ctx.config.memory_profile,
+                max_results=6,
+            )
             # Store-only contract: the loop assembles these snippets into a
             # <context> block on the USER turn, not a system message — that
             # keeps the system prompt prefix stable for KV-cache hits.
@@ -152,18 +172,17 @@ class RuntimeMemoryMiddleware:
                 phase=self._phase,
                 event_type="memory_retrieved",
                 data={
-                    "loaded_sources": (
-                        0 if memory_result is None else memory_result.loaded_sources
+                    "loaded_sources": memory_result.loaded_sources,
+                    "snippet_count": len(memory_result.snippets),
+                    "fallback_used": memory_result.fallback_used,
+                    "fallback_reason": memory_result.fallback_reason,
+                    "provenance": memory_result.provenance,
+                    "history_priority": (
+                        "current_conversation"
+                        if current_conversation_relevant
+                        else "durable_memory"
                     ),
-                    "snippet_count": 0 if memory_result is None else len(memory_result.snippets),
-                    "fallback_used": current_conversation_only
-                    or (memory_result is not None and memory_result.fallback_used),
-                    "fallback_reason": (
-                        "current_conversation_preferred"
-                        if current_conversation_only
-                        else memory_result.fallback_reason
-                    ),
-                    "provenance": [] if memory_result is None else memory_result.provenance,
+                    "current_conversation_relevant": current_conversation_relevant,
                 },
             )
         except Exception as exc:

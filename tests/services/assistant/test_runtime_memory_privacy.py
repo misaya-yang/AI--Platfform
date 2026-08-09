@@ -2262,15 +2262,17 @@ async def test_completed_daily_tombstone_allows_new_trusted_generation_sync(
             "run_id": "run-new",
         },
     )
+    background = await adapter.flush_pending_memory_sync()
 
     assert synced.synced is True
+    assert background["status"] == "completed"
     assert database.metadata.get("deletion_pending") is None
     assert database.metadata.get("source_handle")
     assert Path(source_path).exists()
 
 
 @pytest.mark.asyncio
-async def test_index_failure_returns_source_committed_retry_receipt_without_host_path(
+async def test_index_failure_keeps_source_committed_and_reports_background_failure(
     tmp_path: Path,
 ) -> None:
     class FailingIndexer:
@@ -2292,12 +2294,20 @@ async def test_index_failure_returns_source_committed_retry_receipt_without_host
             "run_id": "run-a",
         },
     )
+    background = await adapter.flush_pending_memory_sync()
+    background_receipt = adapter.memory_sync_status(result.background_operation_id or "")
 
-    assert result.synced is False
-    assert result.reason == "source_committed_index_pending"
+    assert result.synced is True
+    assert result.reason == "completed_turn_source_committed"
     assert result.source_committed is True
     assert result.index_pending is True
-    assert result.retryable is True
+    assert result.retryable is False
+    assert background["status"] == "partial"
+    assert background_receipt is not None
+    assert background_receipt["status"] == "partial"
+    assert background_receipt["error_code"] is None
+    assert background_receipt["result"]["errors"] == ["memory_index_pending"]
+    assert (await adapter.flush_pending_memory_sync())["status"] == "completed"
     receipt = result.to_dict()
     assert "/" not in receipt["write"]["path"]
     assert "postgres" not in str(receipt).lower()

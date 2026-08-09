@@ -1316,8 +1316,12 @@ class TestRuntimeMemoryLifecycle:
                 "run_id": "run-a",
             },
         )
+        background = await adapter.flush_pending_memory_sync()
 
         assert result.synced is True
+        assert result.index_pending is True
+        assert result.background_operation_id
+        assert background["status"] == "completed"
         assert result.write is not None
         assert result.write.source_type == "daily"
         assert "secret=[redacted]" in indexer.calls[0]["content"]
@@ -1463,14 +1467,27 @@ class TestRuntimeMemoryLifecycle:
         runtime.schedule_daily_reflection.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_runtime_memory_prefers_explicit_current_conversation_recall(self):
+    async def test_runtime_memory_marks_current_conversation_as_higher_priority(self):
         from assistant_service.core.agent.agent_loop import AgentLoopPhase
         from assistant_service.core.agent.middlewares.runtime_memory import (
             RuntimeMemoryMiddleware,
         )
 
         runtime = SimpleNamespace(
-            load_memory_context=AsyncMock(),
+            load_memory_context=AsyncMock(
+                return_value=SimpleNamespace(
+                    snippets=[
+                        SimpleNamespace(
+                            source_type="profile",
+                            content="Preferred response format is concise.",
+                        )
+                    ],
+                    loaded_sources=1,
+                    fallback_used=False,
+                    fallback_reason=None,
+                    provenance=[],
+                )
+            ),
             schedule_daily_reflection=AsyncMock(return_value=None),
         )
         ctx = SimpleNamespace(
@@ -1488,6 +1505,10 @@ class TestRuntimeMemoryLifecycle:
             run_id="run-a",
             session_id="session-a",
             conversation_history_available=True,
+            conversation_history=[
+                {"role": "user", "content": "我告诉你的项目代号是 CTX-NEW。"},
+                {"role": "assistant", "content": "记住了。"},
+            ],
         )
 
         events = [
@@ -1498,10 +1519,63 @@ class TestRuntimeMemoryLifecycle:
             ).before_call(ctx, [])
         ]
 
-        runtime.load_memory_context.assert_not_awaited()
-        assert events[0].data["snippet_count"] == 0
-        assert events[0].data["fallback_reason"] == "current_conversation_preferred"
+        runtime.load_memory_context.assert_awaited_once()
+        assert ctx.runtime_memory_snippets == ["(profile) Preferred response format is concise."]
+        assert events[0].data["snippet_count"] == 1
+        assert events[0].data["fallback_reason"] is None
+        assert events[0].data["history_priority"] == "current_conversation"
+        assert events[0].data["current_conversation_relevant"] is True
         runtime.schedule_daily_reflection.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_runtime_memory_remains_available_for_unrelated_history(self):
+        from assistant_service.core.agent.agent_loop import AgentLoopPhase
+        from assistant_service.core.agent.middlewares.runtime_memory import (
+            RuntimeMemoryMiddleware,
+        )
+
+        runtime = SimpleNamespace(
+            load_memory_context=AsyncMock(
+                return_value=SimpleNamespace(
+                    snippets=[],
+                    loaded_sources=0,
+                    fallback_used=False,
+                    fallback_reason=None,
+                    provenance=[],
+                )
+            ),
+            schedule_daily_reflection=AsyncMock(return_value=None),
+        )
+        ctx = SimpleNamespace(
+            tenant_id="tenant_a",
+            user_id="user_a",
+            message="What is my preferred response format?",
+            config=SimpleNamespace(
+                runtime_mode="compat",
+                memory_mode="strict",
+                memory_profile="basic",
+                agent_runtime=None,
+            ),
+            runtime_memory_snippets=[],
+            runtime_memory_provenance=[],
+            run_id="run-a",
+            session_id="session-a",
+            conversation_history_available=True,
+            conversation_history=[
+                {"role": "user", "content": "Help me inspect a Python stack trace."}
+            ],
+        )
+
+        events = [
+            event
+            async for event in RuntimeMemoryMiddleware(
+                runtime,
+                AgentLoopPhase.MEMORY_LOADING,
+            ).before_call(ctx, [])
+        ]
+
+        runtime.load_memory_context.assert_awaited_once()
+        assert events[0].data["history_priority"] == "durable_memory"
 
 
 class TestMemoryToolBoundaries:

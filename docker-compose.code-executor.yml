@@ -11,6 +11,7 @@ services:
   assistant-service:
     environment:
       ASSISTANT_CODE_EXECUTOR_ENABLED: "true"
+      ASSISTANT_CODE_EXECUTOR_BACKEND: "${ASSISTANT_CODE_EXECUTOR_BACKEND:-docker}"
       ASSISTANT_ALLOW_RUNC_CODE_EXECUTOR: "true"
       SANDBOX_RUNTIME: "${SANDBOX_RUNTIME:-}"
       SANDBOX_WORKSPACE: "/opt/deploy/sandbox-workspace"
@@ -20,5 +21,5 @@ services:
     group_add:
       - "${DOCKER_SOCKET_GID:?DOCKER_SOCKET_GID is required}"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - "${ASSISTANT_CODE_EXECUTOR_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock"
       - "${ASSISTANT_SANDBOX_WORKSPACE_HOST}:/opt/deploy/sandbox-workspace"

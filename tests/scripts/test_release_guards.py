@@ -118,5 +118,9 @@ def test_migrate_shell_guards_legacy_version_tracking_duplicate_prefixes():
     assert "Duplicate migration version prefix" in script
     assert "treating as historical duplicate" in script
     assert "legacy_tracking_has_dirty()" in script
-    assert "INSERT INTO schema_migrations (version) VALUES" in script
+    assert "INSERT INTO public.schema_migrations (version) VALUES" in script
+    assert "table_schema = 'public'" in script
+    assert "table_schema = current_schema()" not in script
+    assert "to_regclass('gateway.services')" in script
+    assert "to_regclass('knowledge.datasets')" in script
     assert script.count("guard_legacy_version_tracking") >= 3

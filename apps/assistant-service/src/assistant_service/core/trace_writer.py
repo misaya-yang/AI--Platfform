@@ -221,10 +221,16 @@ def _runtime_trajectory_summary(
         if isinstance(envelope.get("context_snapshot"), dict)
         else {}
     )
-    memory = context_snapshot.get("memory") if isinstance(context_snapshot.get("memory"), dict) else {}
+    memory = (
+        context_snapshot.get("memory") if isinstance(context_snapshot.get("memory"), dict) else {}
+    )
     tools = context_snapshot.get("tools") if isinstance(context_snapshot.get("tools"), dict) else {}
-    policy = context_snapshot.get("policy") if isinstance(context_snapshot.get("policy"), dict) else {}
-    surface = context_snapshot.get("surface") if isinstance(context_snapshot.get("surface"), dict) else {}
+    policy = (
+        context_snapshot.get("policy") if isinstance(context_snapshot.get("policy"), dict) else {}
+    )
+    surface = (
+        context_snapshot.get("surface") if isinstance(context_snapshot.get("surface"), dict) else {}
+    )
     trace_writer_issues = sum(
         int(trace_writer_health.get(key) or 0)
         for key in ("dropped_writes", "failed_writes", "timed_out_writes")
@@ -247,9 +253,7 @@ def _runtime_trajectory_summary(
             "context_snapshot_hash": context_snapshot.get("snapshot_hash"),
             "memory": {
                 "runtime_memory_snippets": memory.get("runtime_memory_snippets"),
-                "runtime_memory_provenance_count": memory.get(
-                    "runtime_memory_provenance_count"
-                ),
+                "runtime_memory_provenance_count": memory.get("runtime_memory_provenance_count"),
                 "history_message_count": memory.get("history_message_count"),
                 "has_session_memory": memory.get("has_session_memory"),
                 "has_long_term_memory": memory.get("has_long_term_memory"),
@@ -276,13 +280,9 @@ def _runtime_trajectory_summary(
             "transcript_locator": {
                 "turn_index": ctx.transcript_locator.get("turn_index"),
                 "turn_id": ctx.transcript_locator.get("turn_id"),
-                "history_message_count": ctx.transcript_locator.get(
-                    "history_message_count"
-                ),
+                "history_message_count": ctx.transcript_locator.get("history_message_count"),
                 "message_index": ctx.transcript_locator.get("message_index"),
-                "transcript_fingerprint": ctx.transcript_locator.get(
-                    "transcript_fingerprint"
-                ),
+                "transcript_fingerprint": ctx.transcript_locator.get("transcript_fingerprint"),
                 "bounded": bool(ctx.transcript_locator),
             },
             "trace_writer_health": {
@@ -380,13 +380,15 @@ class AssistantTraceContext:
     ) -> AssistantTraceContext:
         resolved_traceparent = str(traceparent or "") or None
         resolved_otel_trace_id = str(otel_trace_id or "") or None
-        if not resolved_otel_trace_id and resolved_traceparent and resolved_traceparent.startswith("00-"):
+        if (
+            not resolved_otel_trace_id
+            and resolved_traceparent
+            and resolved_traceparent.startswith("00-")
+        ):
             parts = resolved_traceparent.split("-")
             if len(parts) >= 2 and parts[1]:
                 resolved_otel_trace_id = parts[1]
-        dimensions = (
-            agent_runtime.trace_dimensions() if agent_runtime is not None else {}
-        )
+        dimensions = agent_runtime.trace_dimensions() if agent_runtime is not None else {}
         return cls(
             trace_id=_trace_uuid(run_id),
             run_id=run_id,
@@ -428,6 +430,10 @@ class AssistantTraceWriter:
         self._pending: set[asyncio.Task[str]] = set()
         self._submission_generation = 0
         self._pending_submissions: dict[asyncio.Task[str], tuple[int, str]] = {}
+        self._submission_coroutines: dict[
+            asyncio.Task[str],
+            Coroutine[Any, Any, None],
+        ] = {}
         self._failed_outcomes: dict[str, tuple[int, str]] = {}
         self.dropped_writes = 0
         self.failed_writes = 0
@@ -637,6 +643,7 @@ class AssistantTraceWriter:
         task = loop.create_task(self._run(coro))
         self._pending.add(task)
         self._pending_submissions[task] = (generation, trace_id)
+        self._submission_coroutines[task] = coro
 
         def _done(done_task: asyncio.Task[str]) -> None:
             self._finalize_task_outcome(done_task)
@@ -646,7 +653,10 @@ class AssistantTraceWriter:
 
     def _finalize_task_outcome(self, task: asyncio.Task[str]) -> None:
         submission = self._pending_submissions.pop(task, None)
+        submitted_coro = self._submission_coroutines.pop(task, None)
         self._pending.discard(task)
+        if submitted_coro is not None:
+            self._close_coro(submitted_coro)
         if submission is None:
             return
         generation, trace_id = submission
@@ -813,7 +823,11 @@ class AssistantTraceWriter:
     ) -> None:
         ended_at = time.time()
         await self._upsert_trace_root(ctx)
-        total = total_latency_ms if total_latency_ms is not None else _duration_ms(ctx.started_at, ended_at)
+        total = (
+            total_latency_ms
+            if total_latency_ms is not None
+            else _duration_ms(ctx.started_at, ended_at)
+        )
         input_tokens = _usage_int(usage, "input_tokens")
         output_tokens = _usage_int(usage, "output_tokens")
         total_tokens = _usage_int(usage, "total_tokens") or input_tokens + output_tokens
@@ -931,7 +945,9 @@ class AssistantTraceWriter:
                 ctx.trace_id,
             )
         except Exception:
-            logger.debug("trace.ingested enqueue skipped for trace_id=%s", ctx.trace_id, exc_info=True)
+            logger.debug(
+                "trace.ingested enqueue skipped for trace_id=%s", ctx.trace_id, exc_info=True
+            )
 
     async def _upsert_trace_root(self, ctx: AssistantTraceContext) -> None:
         redaction_state = {
@@ -1061,8 +1077,10 @@ class AssistantTraceWriter:
         now = occurred_at or time.time()
         if event_type in {"run_started", "run_finished", "run_error"}:
             status = (
-                "failed" if event_type == "run_error"
-                else "succeeded" if event_type == "run_finished"
+                "failed"
+                if event_type == "run_error"
+                else "succeeded"
+                if event_type == "run_finished"
                 else "running"
             )
             await self._upsert_lifecycle_span(
@@ -1079,13 +1097,17 @@ class AssistantTraceWriter:
             "rag_retrieval_failed",
         }:
             status = (
-                "failed" if event_type == "rag_retrieval_failed"
-                else "succeeded" if event_type == "rag_retrieval_completed"
+                "failed"
+                if event_type == "rag_retrieval_failed"
+                else "succeeded"
+                if event_type == "rag_retrieval_completed"
                 else "running"
             )
             started_at = _payload_float(data, "started_at") or ctx.started_at
             ended_at = None if status == "running" else (_payload_float(data, "ended_at") or now)
-            query = data.get("gen_ai.retrieval.query.text") or data.get("query") or ctx.input_preview
+            query = (
+                data.get("gen_ai.retrieval.query.text") or data.get("query") or ctx.input_preview
+            )
             dataset_ids = data.get("retrieval.dataset_ids") or data.get("dataset_ids") or []
             document_count = data.get("retrieval.document_count", data.get("document_count", 0))
             attributes = {
@@ -1137,7 +1159,8 @@ class AssistantTraceWriter:
             for rank, chunk in enumerate(chunks[:12], start=1):
                 chunk_data = chunk if isinstance(chunk, dict) else {}
                 metadata = (
-                    chunk_data.get("metadata") if isinstance(chunk_data.get("metadata"), dict)
+                    chunk_data.get("metadata")
+                    if isinstance(chunk_data.get("metadata"), dict)
                     else {}
                 )
                 documents.append(
@@ -1176,7 +1199,9 @@ class AssistantTraceWriter:
                     "openinference.span.kind": "RETRIEVER",
                     "gen_ai.operation.name": "retrieve",
                     "gen_ai.retrieval.query.text": data.get("query") or ctx.input_preview,
-                    "retrieval.dataset_ids": [data.get("dataset_id")] if data.get("dataset_id") else [],
+                    "retrieval.dataset_ids": [data.get("dataset_id")]
+                    if data.get("dataset_id")
+                    else [],
                     "retrieval.dataset_count": 1 if data.get("dataset_id") else 0,
                     "retrieval.document_count": len(documents),
                     "retrieval.documents": documents,

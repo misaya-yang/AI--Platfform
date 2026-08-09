@@ -6,6 +6,7 @@ import asyncio
 import os
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -21,7 +22,7 @@ from .approval_lifecycle import ApprovalLifecycleMixin
 from .command_lifecycle import CommandLifecycleMixin
 from .execution_records import ApprovalRecord, RunCheckpointRecord, RunRecord
 from .execution_state import GatewayStateMixin
-from .policy_engine import AssistantPolicyEngine
+from .policy_engine import AssistantPolicyEngine, ToolPolicyDecision
 from .request_router import RoutedAssistantRequest
 from .run_lifecycle import RunLifecycleMixin
 from .run_resume import RunResumeMixin
@@ -31,6 +32,20 @@ logger = get_logger(__name__)
 
 def _env_truthy(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+@dataclass(frozen=True, slots=True)
+class _ToolInvocationPlan:
+    """Policy and scheduling inputs resolved before durable command handling."""
+
+    queue_mode: str
+    lane: str
+    priority: int
+    steer_payload: Any
+    decision: ToolPolicyDecision
+    definitions: list[Any]
+    decision_payload: dict[str, Any]
+    sandbox_payload: dict[str, Any]
 
 
 class AssistantExecutionGateway(
@@ -125,16 +140,16 @@ class AssistantExecutionGateway(
             "gateway_enabled": self.enabled,
         }
 
-    async def invoke_tool(
+    async def _prepare_tool_invocation(
         self,
+        *,
         tool_name: str,
         arguments: dict[str, Any],
         context: ToolInvocationContext,
-        routed_request: RoutedAssistantRequest | None = None,
-        cancel_event: asyncio.Event | None = None,
-    ) -> ToolCallResult:
-        """Invoke tool through queue + policy checks."""
-        started = time.time()
+        routed_request: RoutedAssistantRequest | None,
+    ) -> _ToolInvocationPlan:
+        """Resolve scheduling, policy, definition risk, sandbox, and audit state."""
+
         profile = (routed_request.execution_profile if routed_request else None) or getattr(
             context, "policy_profile", "safe"
         )
@@ -246,6 +261,153 @@ class AssistantExecutionGateway(
                     "reason": decision.reason,
                 }
             )
+
+        return _ToolInvocationPlan(
+            queue_mode=queue_mode,
+            lane=lane,
+            priority=priority,
+            steer_payload=steer_payload,
+            decision=decision,
+            definitions=definitions,
+            decision_payload=decision_payload,
+            sandbox_payload=sandbox_payload,
+        )
+
+    async def _finalize_tool_invocation(
+        self,
+        *,
+        result: ToolCallResult,
+        command_id: str,
+        command_durability: str,
+        requires_durable_command: bool,
+        decision_payload: dict[str, Any],
+        sandbox_payload: dict[str, Any],
+        queue_mode: str,
+        lane: str,
+    ) -> ToolCallResult:
+        """Persist the execution receipt and attach queue/side-effect metadata."""
+
+        final_state = (
+            "side_effect_unknown"
+            if self._result_has_unknown_side_effect(result)
+            else "succeeded"
+            if result.success
+            else "failed"
+        )
+        if final_state == "side_effect_unknown":
+            original_error = str(result.error or "")
+            if original_error and original_error not in {
+                "SIDE_EFFECT_UNKNOWN",
+                "SIDE_EFFECT_UNRESOLVED",
+            }:
+                result.metadata = {
+                    **dict(result.metadata or {}),
+                    "side_effect_error": redact_trace_text(original_error),
+                }
+            result.success = False
+            result.error = "SIDE_EFFECT_UNKNOWN"
+        queue_state = final_state
+        result_receipt_pending_ack = False
+        if self.database and requires_durable_command and final_state != "side_effect_unknown":
+            output_file_count = len(result.output_files or [])
+            result_recorded_state = (
+                "result_recorded_succeeded" if result.success else "result_recorded_failed"
+            )
+            result_recorded = await self._update_command(
+                command_id=command_id,
+                status=result_recorded_state,
+                result=result.result,
+                error=result.error,
+                receipt_metadata={
+                    "_result_receipt_recorded": True,
+                    "_result_success": bool(result.success),
+                    "_result_output_file_count": output_file_count,
+                    "_result_receipt_complete": output_file_count == 0,
+                },
+            )
+            if not result_recorded:
+                final_state = "side_effect_unknown"
+                queue_state = final_state
+                result.success = False
+                result.error = "SIDE_EFFECT_UNKNOWN"
+                command_durability = "database_fence_degraded"
+            else:
+                queue_state = result_recorded_state
+                result_receipt_pending_ack = True
+                command_durability = "database_result_recorded"
+        else:
+            final_persisted = await self._update_command(
+                command_id=command_id,
+                status=final_state,
+                result=result.result,
+                error=result.error,
+            )
+            if self.database and requires_durable_command and not final_persisted:
+                final_state = "side_effect_unknown"
+                queue_state = final_state
+                result.success = False
+                result.error = "SIDE_EFFECT_UNKNOWN"
+                command_durability = "database_fence_degraded"
+
+        metadata = dict(result.metadata or {})
+        metadata.update(
+            {
+                "queue_state": queue_state,
+                "command_id": command_id,
+                "command_durability": command_durability,
+                "gateway_decision": decision_payload,
+                "sandbox_decision": sandbox_payload,
+                "queue_mode": queue_mode,
+                "lane": lane,
+            }
+        )
+        if final_state == "side_effect_unknown":
+            metadata.update(
+                {
+                    "side_effect_unknown": True,
+                    "side_effect_state": "unknown",
+                    "blind_replay_allowed": False,
+                }
+            )
+        elif result_receipt_pending_ack:
+            metadata.update(
+                {
+                    "result_receipt_recorded": True,
+                    "result_acknowledgement_required": True,
+                    "result_output_files_present": bool(result.output_files),
+                    "finalization_acknowledged": False,
+                    "completion_acknowledged": False,
+                    "side_effect_state": "known",
+                    "blind_replay_allowed": False,
+                }
+            )
+        result.metadata = metadata
+        return result
+
+    async def invoke_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        context: ToolInvocationContext,
+        routed_request: RoutedAssistantRequest | None = None,
+        cancel_event: asyncio.Event | None = None,
+    ) -> ToolCallResult:
+        """Invoke tool through queue + policy checks."""
+        started = time.time()
+        plan = await self._prepare_tool_invocation(
+            tool_name=tool_name,
+            arguments=arguments,
+            context=context,
+            routed_request=routed_request,
+        )
+        decision = plan.decision
+        definitions = plan.definitions
+        decision_payload = plan.decision_payload
+        sandbox_payload = plan.sandbox_payload
+        queue_mode = plan.queue_mode
+        lane = plan.lane
+        priority = plan.priority
+        steer_payload = plan.steer_payload
 
         if not decision.allowed:
             return ToolCallResult(
@@ -679,103 +841,16 @@ class AssistantExecutionGateway(
             )
 
         result = await self._lane_scheduler.run_in_lane(lane, _invoke)
-
-        final_state = (
-            "side_effect_unknown"
-            if self._result_has_unknown_side_effect(result)
-            else "succeeded"
-            if result.success
-            else "failed"
+        return await self._finalize_tool_invocation(
+            result=result,
+            command_id=command_id,
+            command_durability=command_durability,
+            requires_durable_command=requires_durable_command,
+            decision_payload=decision_payload,
+            sandbox_payload=sandbox_payload,
+            queue_mode=queue_mode,
+            lane=lane,
         )
-        if final_state == "side_effect_unknown":
-            original_error = str(result.error or "")
-            if original_error and original_error not in {
-                "SIDE_EFFECT_UNKNOWN",
-                "SIDE_EFFECT_UNRESOLVED",
-            }:
-                result.metadata = {
-                    **dict(result.metadata or {}),
-                    "side_effect_error": redact_trace_text(original_error),
-                }
-            result.success = False
-            result.error = "SIDE_EFFECT_UNKNOWN"
-        queue_state = final_state
-        result_receipt_pending_ack = False
-        if self.database and requires_durable_command and final_state != "side_effect_unknown":
-            output_file_count = len(result.output_files or [])
-            result_recorded_state = (
-                "result_recorded_succeeded" if result.success else "result_recorded_failed"
-            )
-            result_recorded = await self._update_command(
-                command_id=command_id,
-                status=result_recorded_state,
-                result=result.result,
-                error=result.error,
-                receipt_metadata={
-                    "_result_receipt_recorded": True,
-                    "_result_success": bool(result.success),
-                    "_result_output_file_count": output_file_count,
-                    "_result_receipt_complete": output_file_count == 0,
-                },
-            )
-            if not result_recorded:
-                final_state = "side_effect_unknown"
-                queue_state = final_state
-                result.success = False
-                result.error = "SIDE_EFFECT_UNKNOWN"
-                command_durability = "database_fence_degraded"
-            else:
-                queue_state = result_recorded_state
-                result_receipt_pending_ack = True
-                command_durability = "database_result_recorded"
-        else:
-            final_persisted = await self._update_command(
-                command_id=command_id,
-                status=final_state,
-                result=result.result,
-                error=result.error,
-            )
-            if self.database and requires_durable_command and not final_persisted:
-                final_state = "side_effect_unknown"
-                queue_state = final_state
-                result.success = False
-                result.error = "SIDE_EFFECT_UNKNOWN"
-                command_durability = "database_fence_degraded"
-
-        metadata = dict(result.metadata or {})
-        metadata.update(
-            {
-                "queue_state": queue_state,
-                "command_id": command_id,
-                "command_durability": command_durability,
-                "gateway_decision": decision_payload,
-                "sandbox_decision": sandbox_payload,
-                "queue_mode": queue_mode,
-                "lane": lane,
-            }
-        )
-        if final_state == "side_effect_unknown":
-            metadata.update(
-                {
-                    "side_effect_unknown": True,
-                    "side_effect_state": "unknown",
-                    "blind_replay_allowed": False,
-                }
-            )
-        elif result_receipt_pending_ack:
-            metadata.update(
-                {
-                    "result_receipt_recorded": True,
-                    "result_acknowledgement_required": True,
-                    "result_output_files_present": bool(result.output_files),
-                    "finalization_acknowledged": False,
-                    "completion_acknowledged": False,
-                    "side_effect_state": "known",
-                    "blind_replay_allowed": False,
-                }
-            )
-        result.metadata = metadata
-        return result
 
     # ---------------------------------------------------------------------
     # Internal helpers - queue / approval storage

@@ -453,6 +453,17 @@ Workflow:
             database=db,
             enabled=gateway_enabled,
         )
+        configure_tool_discovery = getattr(
+            self.tool_invoker,
+            "configure_tool_discovery_gateway",
+            None,
+        )
+        if callable(configure_tool_discovery):
+            configure_tool_discovery(
+                self.execution_gateway
+                if bool(getattr(self.execution_gateway, "enabled", True))
+                else None
+            )
 
     @property
     def task_planner(self) -> TaskPlanner:

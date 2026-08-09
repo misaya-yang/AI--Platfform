@@ -380,6 +380,7 @@ class AgentLoopContext:
     runtime_memory_snippets: list[str] = field(default_factory=list)
     runtime_memory_provenance: list[dict[str, Any]] = field(default_factory=list)
     conversation_history_available: bool = False
+    conversation_history: list[dict[str, Any]] = field(default_factory=list, repr=False)
 
     # Step 2: Scenario
     scenario: ScenarioDetectionResult | None = None

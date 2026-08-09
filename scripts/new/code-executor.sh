@@ -10,9 +10,9 @@ usage() {
     cat <<'EOF'
 Usage: scripts/new/code-executor.sh [enable|test|status|disable]
 
-This is a trusted local-development feature. It grants the Assistant access to
-the Docker Engine, while executed code runs in a separate network-disabled,
-capability-free, read-only child container.
+This is a trusted local-development feature. On macOS it prefers Docker
+Sandboxes (sbx) microVMs when installed; otherwise it uses runsc when the
+Docker daemon provides it, or the hardened default runtime as a final fallback.
 EOF
 }
 
@@ -47,14 +47,9 @@ preserve_running_assistant_image() {
 }
 
 prepare_runtime() {
-    if [ ! -S /var/run/docker.sock ]; then
-        log_error "Docker socket is unavailable at /var/run/docker.sock"
-        exit 1
-    fi
-
     preserve_running_assistant_image
 
-    local workspace socket_probe_image
+    local backend sandbox_image sbx_socket socket_probe_image workspace
     workspace="$PROJECT_ROOT/tmp/code-sandbox"
     mkdir -p "$workspace"
     # The Assistant runs as uid 1000, which may differ from the host developer
@@ -65,6 +60,73 @@ prepare_runtime() {
     ASSISTANT_SANDBOX_WORKSPACE_HOST=$(python3 -c \
         'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' \
         "$workspace")
+
+    backend="${ASSISTANT_CODE_EXECUTOR_BACKEND:-auto}"
+    if [ "$backend" = "auto" ] && [ "$(uname -s)" = "Darwin" ] && command -v sbx >/dev/null 2>&1; then
+        backend="sbx"
+    elif [ "$backend" = "auto" ]; then
+        backend="docker"
+    fi
+
+    case "$backend" in
+        sbx)
+            if ! command -v sbx >/dev/null 2>&1; then
+                log_error "Docker Sandboxes is not installed; install docker/tap/sbx or select backend=docker"
+                exit 1
+            fi
+            if ! sbx daemon status >/dev/null 2>&1; then
+                log_step "Starting Docker Sandboxes daemon with deny-all network policy"
+                sbx daemon start --detach --policy deny-all
+            fi
+            sbx_socket="${SBX_DOCKER_SOCKET:-$HOME/.sbx/run/d/docker.sock}"
+            if [ ! -S "$sbx_socket" ]; then
+                log_error "Docker Sandboxes API socket is unavailable: $sbx_socket"
+                exit 1
+            fi
+            if [ "$(DOCKER_HOST="unix://$sbx_socket" docker info --format '{{.DefaultRuntime}}')" != "nerdbox" ]; then
+                log_error "Docker Sandboxes endpoint is not backed by nerdbox"
+                exit 1
+            fi
+            export ASSISTANT_CODE_EXECUTOR_BACKEND=sbx
+            export ASSISTANT_CODE_EXECUTOR_SOCKET="$sbx_socket"
+            export SANDBOX_RUNTIME=""
+            sandbox_image="${ASSISTANT_CODE_EXECUTOR_IMAGE:-ghcr.io/misaya-yang/ai-gateway-docgen-sandbox:2.0.0}"
+            export ASSISTANT_CODE_EXECUTOR_IMAGE="$sandbox_image"
+            if ! DOCKER_HOST="unix://$sbx_socket" docker image inspect "$sandbox_image" >/dev/null 2>&1; then
+                log_step "Pulling code executor image into Docker Sandboxes"
+                if ! DOCKER_HOST="unix://$sbx_socket" docker pull "$sandbox_image"; then
+                    if ! docker image inspect "$sandbox_image" >/dev/null 2>&1; then
+                        log_error "Code executor image is unavailable from the registry and local Docker"
+                        exit 1
+                    fi
+                    log_warn "Registry pull denied; importing the verified local image into Docker Sandboxes"
+                    docker save "$sandbox_image" \
+                        | DOCKER_HOST="unix://$sbx_socket" docker load
+                fi
+            fi
+            log_info "Using Docker Sandboxes nerdbox microVMs for code execution"
+            ;;
+        docker)
+            if [ ! -S /var/run/docker.sock ]; then
+                log_error "Docker socket is unavailable at /var/run/docker.sock"
+                exit 1
+            fi
+            export ASSISTANT_CODE_EXECUTOR_BACKEND=docker
+            export ASSISTANT_CODE_EXECUTOR_SOCKET=/var/run/docker.sock
+            if docker info --format '{{json .Runtimes}}' | grep -q '"runsc"'; then
+                export SANDBOX_RUNTIME=runsc
+                log_info "Using gVisor runsc for code execution"
+            else
+                export SANDBOX_RUNTIME=""
+                log_warn "runsc is unavailable; using hardened runc for trusted local development"
+            fi
+            ;;
+        *)
+            log_error "Unsupported code executor backend: $backend"
+            exit 2
+            ;;
+    esac
+
     export DOCKER_SOCKET_GID
     socket_probe_image="${ASSISTANT_IMAGE:?Assistant image is required for socket probing}"
     # Docker Desktop exposes a host symlink whose GID can differ from the
@@ -75,18 +137,10 @@ prepare_runtime() {
         --network none \
         --cap-drop ALL \
         --security-opt no-new-privileges:true \
-        --volume /var/run/docker.sock:/var/run/docker.sock:ro \
+        --volume "$ASSISTANT_CODE_EXECUTOR_SOCKET:/var/run/docker.sock:ro" \
         --entrypoint /opt/venv/bin/python \
         "$socket_probe_image" \
         -c 'import os; print(os.stat("/var/run/docker.sock").st_gid)')
-
-    if docker info --format '{{json .Runtimes}}' | grep -q '"runsc"'; then
-        export SANDBOX_RUNTIME=runsc
-        log_info "Using gVisor runsc for code execution"
-    else
-        export SANDBOX_RUNTIME=""
-        log_warn "runsc is unavailable; using hardened runc for trusted local development"
-    fi
 
 }
 
@@ -106,7 +160,7 @@ wait_for_assistant() {
 }
 
 show_status() {
-    local container enabled socket_mounted health
+    local backend container enabled socket_mounted health
     container="$(assistant_container)"
     if ! docker inspect "$container" >/dev/null 2>&1; then
         log_error "Assistant container is missing"
@@ -114,9 +168,11 @@ show_status() {
     fi
     enabled=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$container" \
         | grep '^ASSISTANT_CODE_EXECUTOR_ENABLED=' | cut -d= -f2- || true)
+    backend=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$container" \
+        | grep '^ASSISTANT_CODE_EXECUTOR_BACKEND=' | cut -d= -f2- || true)
     socket_mounted=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/var/run/docker.sock"}}yes{{end}}{{end}}' "$container")
     health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container")
-    log_info "enabled=${enabled:-false} docker_socket=${socket_mounted:-no} health=$health"
+    log_info "enabled=${enabled:-false} backend=${backend:-none} docker_socket=${socket_mounted:-no} health=$health"
 }
 
 run_smoke() {

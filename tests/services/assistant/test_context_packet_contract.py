@@ -136,6 +136,37 @@ def test_untrusted_sources_are_escaped_and_receipts_remain_prompt_free() -> None
     assert caller_claim["conflict_policy"] == "current_request_wins"
 
 
+def test_conversation_history_has_structural_precedence_over_saved_memory() -> None:
+    packet = _assembler().build_packet(
+        context=ContextStructure(
+            system_prompt="policy",
+            conversation_history=[
+                {"role": "user", "content": "the current value is NEW"},
+                {"role": "assistant", "content": "understood"},
+            ],
+            long_term_memory="the value is OLD",
+            current_query="what is the value?",
+        ),
+        model_context_window=4096,
+        memory_snippets=["historical value is OLDER"],
+        tool_definitions=[],
+    )
+
+    messages = packet.materialize_messages()
+    assert messages[1]["content"] == "the current value is NEW"
+    assert 'precedence="conversation"' in messages[-1]["content"]
+    assert messages[-1]["content"].endswith("what is the value?")
+    memory_policies = {
+        item["kind"]: item["conflict_policy"]
+        for item in packet.receipt()["provenance"]
+        if item["kind"] in {"memory_snippet", "long_term_memory"}
+    }
+    assert memory_policies == {
+        "memory_snippet": "conversation_history_over_historical_memory",
+        "long_term_memory": "conversation_then_structured_then_historical",
+    }
+
+
 def test_protected_context_overflow_is_typed_and_blocks_packet_creation() -> None:
     assembler = ContextAssemblerV2(
         provider="openai",
