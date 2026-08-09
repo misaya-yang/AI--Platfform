@@ -600,9 +600,7 @@ async def test_agent_loop_conflicting_session_cannot_finalize_existing_run(
             history=[],
         )
     ]
-    terminals = [
-        event for event in events if event.event_type in {"run_finished", "run_error"}
-    ]
+    terminals = [event for event in events if event.event_type in {"run_finished", "run_error"}]
     assert len(terminals) == 1
     assert terminals[0].event_type == "run_error"
     assert "different session" in terminals[0].data["error"]
@@ -971,7 +969,12 @@ async def test_resume_tool_event_aliases_converge_on_one_stable_span(
 
 
 @pytest.mark.asyncio
-async def test_non_stream_chat_returns_turn_contract_and_trace_metadata() -> None:
+async def test_non_stream_chat_returns_turn_contract_and_trace_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # RecordingDB implements the trace sink only, not the Gateway run store.
+    # Keep this test on the direct path so it exercises the intended contract.
+    monkeypatch.setenv("ASSISTANT_GATEWAY_ENABLED", "false")
     db = RecordingDB()
     writer = AssistantTraceWriter(db, write_timeout_s=1.0)
     service = AssistantService(

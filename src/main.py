@@ -143,9 +143,7 @@ def create_app() -> FastAPI:
     _log_format = os.environ.get("LOG_FORMAT")
     if not _log_format:
         _log_format = (
-            "json"
-            if os.environ.get("ENVIRONMENT", "").lower() == "production"
-            else "simple"
+            "json" if os.environ.get("ENVIRONMENT", "").lower() == "production" else "simple"
         )
     configure_structured_logging(
         level="INFO",
@@ -189,6 +187,7 @@ def create_app() -> FastAPI:
 
     # Stable anonymous identity for guest users (cookie/header) - 纯 ASGI
     from ai_gateway_core.proxy.version_middleware import APIVersionMiddleware
+
     app.add_middleware(APIVersionMiddleware)
 
     # Stable anonymous identity for guest users (cookie/header) - 纯 ASGI
@@ -301,6 +300,7 @@ def create_app() -> FastAPI:
     # ``apps/assistant-service/src/assistant_service/main.py`` and
     # ``apps/knowledge-service/src/knowledge_service/main.py``.
     from ai_gateway_core.proxy import DrainMiddleware
+
     app.add_middleware(DrainMiddleware)
 
     # OpenTelemetry inbound server-span middleware. Sits AFTER CORS (added
@@ -311,6 +311,7 @@ def create_app() -> FastAPI:
     # ``init_tracing`` is called in the startup handler below so the
     # middleware's tracer reference is valid by request time.
     from ai_gateway_core.tracing import OTelInboundMiddleware
+
     app.add_middleware(OTelInboundMiddleware)
 
     # Security response headers
@@ -401,7 +402,6 @@ def create_app() -> FastAPI:
             "redis": "unknown",
             "knowledge_service": "unknown",
             "assistant_service": "unknown",
-            "mcp_docgen": "unknown",
         }
         healthy = True
 
@@ -457,7 +457,6 @@ def create_app() -> FastAPI:
         service_results = await asyncio.gather(
             probe_http_service("knowledge_service", os.environ.get("KB_SERVICE_URL")),
             probe_http_service("assistant_service", os.environ.get("ASSISTANT_SERVICE_URL")),
-            probe_http_service("mcp_docgen", os.environ.get("MCP_DOCGEN_SERVICE_URL")),
         )
         if not all(service_results):
             healthy = False
@@ -494,6 +493,7 @@ def create_app() -> FastAPI:
         # OTLP endpoint resolved from OTEL_EXPORTER_OTLP_ENDPOINT env;
         # unset → no-op exporter (spans recorded in-process, dropped).
         from ai_gateway_core.tracing import init_tracing
+
         init_tracing("gateway")
 
         # Graceful drain — install SIGTERM/SIGINT handlers so the orchestrator's
@@ -503,6 +503,7 @@ def create_app() -> FastAPI:
         # so in-flight chat streams + tool calls get to finish.
         import asyncio as _asyncio_drain
         from ai_gateway_core.proxy.drain import install_signal_handlers
+
         install_signal_handlers(_asyncio_drain.get_running_loop())
 
         # 初始化容器（连接数据库、Redis 等）
@@ -608,8 +609,7 @@ def create_app() -> FastAPI:
             app.state.image_storage_service = image_storage_service
             url_signing = "enabled" if signing_key else "disabled"
             logger.info(
-                f"图片存储服务已初始化 (backend={storage_backend.value}, "
-                f"url_signing={url_signing})"
+                f"图片存储服务已初始化 (backend={storage_backend.value}, url_signing={url_signing})"
             )
 
             # Initialize artifact storage service (for document/image generation, code execution)
@@ -708,6 +708,7 @@ def create_app() -> FastAPI:
 
         # Initialize KB proxy client BEFORE assistant service (microservice mode)
         from ai_gateway_core.knowledge import KBProxyClient
+
         app.state.kb_proxy = KBProxyClient()
 
         # 初始化 Assistant Service (GPT-like 体验)
@@ -778,10 +779,9 @@ def create_app() -> FastAPI:
         # is already 503-ing fresh traffic; this bound stops a hung handler from
         # blocking container exit indefinitely.
         from ai_gateway_core.proxy.drain import DRAIN
+
         if not await DRAIN.wait_drained(timeout=30.0):
-            logger.warning(
-                f"drain timeout — {DRAIN.inflight} request(s) still in flight"
-            )
+            logger.warning(f"drain timeout — {DRAIN.inflight} request(s) still in flight")
 
         # Phase K5c: KB worker + Confluence scheduler no longer run in the
         # gateway process — they're owned by knowledge-service. Nothing to
@@ -929,17 +929,13 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     }
     app.state.agent_studio_mcp_enabled = mcp_enabled
     app.state.mcp_repository = DatabaseMCPRepository(container.database)
-    app.state.skill_artifact_repository = DatabaseSkillArtifactRepository(
-        container.database
-    )
+    app.state.skill_artifact_repository = DatabaseSkillArtifactRepository(container.database)
     app.state.agent_runtime_capability_resolver = DatabaseMCPAgentCapabilityResolver(
         app.state.mcp_repository,
         mcp_enabled=mcp_enabled,
         skill_repository=app.state.skill_artifact_repository,
     )
-    app.state.agent_runtime_knowledge_resolver = DatabaseAgentKnowledgeResolver(
-        container.database
-    )
+    app.state.agent_runtime_knowledge_resolver = DatabaseAgentKnowledgeResolver(container.database)
 
     # LangGraph 相关
     app.state.langgraph_proxy = container.langgraph_proxy
@@ -1354,6 +1350,7 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     provider_service = getattr(app.state, "provider_service", None)
     if model_service and provider_service:
         from .services.llm.gateway_model_meta import GatewayModelMeta
+
         app.state.model_meta = GatewayModelMeta(
             model_service,
             provider_service,

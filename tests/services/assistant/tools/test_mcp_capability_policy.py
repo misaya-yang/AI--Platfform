@@ -111,6 +111,20 @@ async def test_mcp_policy_defaults_to_deny_on_missing_or_failed_tenant_row() -> 
 
 
 @pytest.mark.asyncio
+async def test_operator_installed_mcp_is_available_until_tenant_policy_overrides() -> None:
+    service = TenantMCPConfigService(
+        database=_MissingRowDatabase(),
+        all_server_names=["docgen"],
+        default_allowed_servers={"docgen"},
+    )
+
+    config = await service.get_config("tenant-a")
+
+    assert config.allowed_servers == {"docgen"}
+    assert config.policy_source == "operator_installed_default"
+
+
+@pytest.mark.asyncio
 async def test_tenant_tool_policy_storage_failure_is_not_substituted_with_allow_all() -> None:
     service = TenantToolPolicyService(database=_FailingDatabase())
 

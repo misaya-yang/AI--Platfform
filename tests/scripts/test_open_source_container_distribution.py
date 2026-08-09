@@ -43,7 +43,6 @@ def _render_compose(**overrides: str) -> dict:
         "REDIS_PASSWORD": "b" * 64,
         "JWT_SECRET": "c" * 64,
         "GATEWAY_ASSISTANT_SHARED_SECRET": "d" * 64,
-        "DOCGEN_ARTIFACT_SIGN_KEY": "e" * 64,
         "DEFAULT_USER_PASSWORD": "f" * 64,
         "DASHSCOPE_API_KEY": "test-general-key",
         "DASHSCOPE_CHAT_API_KEY": "test-chat-key",
@@ -80,13 +79,14 @@ def test_base_compose_uses_versioned_published_images_without_build_contexts() -
         "frontend": "ghcr.io/misaya-yang/ai-gateway-web:2.0.0",
         "assistant-service": "ghcr.io/misaya-yang/ai-gateway-assistant-service:2.0.0",
         "knowledge-service": "ghcr.io/misaya-yang/ai-gateway-knowledge-service:2.0.0",
-        "mcp-docgen-server": "ghcr.io/misaya-yang/ai-gateway-mcp-docgen-server:2.0.0",
         "migrate": "ghcr.io/misaya-yang/ai-gateway-migrate:2.0.0",
     }
     for service, image in expected.items():
         section = _service_section(compose, service)
         assert image in section
         assert ":latest" not in section
+    assert "\n  mcp-docgen-server:" not in compose
+    assert "ai-gateway-mcp-docgen-server" not in compose
 
 
 def test_source_build_overlay_owns_every_compose_build_context() -> None:
@@ -96,13 +96,13 @@ def test_source_build_overlay_owns_every_compose_build_context() -> None:
         "frontend": "Dockerfile",
         "assistant-service": "apps/assistant-service/Dockerfile",
         "knowledge-service": "apps/knowledge-service/Dockerfile",
-        "mcp-docgen-server": "packages/mcp-docgen-server/Dockerfile",
         "migrate": "docker/migrate/Dockerfile",
     }
     for service, dockerfile in expected.items():
         section = _service_section(overlay, service)
         assert "    build:\n" in section
         assert f"dockerfile: {dockerfile}" in section
+    assert "\n  mcp-docgen-server:" not in overlay
 
 
 def test_default_initializer_needs_only_dashscope_model_secret(tmp_path: Path) -> None:
@@ -115,7 +115,6 @@ def test_default_initializer_needs_only_dashscope_model_secret(tmp_path: Path) -
         "JWT_SECRET",
         "GATEWAY_ASSISTANT_SHARED_SECRET",
         "GATEWAY_ENCRYPTION_KEY",
-        "DOCGEN_ARTIFACT_SIGN_KEY",
         "DEFAULT_USER_PASSWORD",
         "KB_EMBEDDING_API_KEY",
         "KB_EMBEDDING_PROVIDER",
@@ -145,7 +144,6 @@ def test_default_initializer_needs_only_dashscope_model_secret(tmp_path: Path) -
         "JWT_SECRET",
         "GATEWAY_ASSISTANT_SHARED_SECRET",
         "GATEWAY_ENCRYPTION_KEY",
-        "DOCGEN_ARTIFACT_SIGN_KEY",
         "DEFAULT_USER_PASSWORD",
     ):
         assert len(values[key]) >= 32
@@ -205,7 +203,6 @@ def test_dockerfiles_do_not_accept_provider_secrets_as_build_arguments() -> None
         ROOT / "docker/migrate/Dockerfile",
         ROOT / "docker/code-interpreter/Dockerfile",
         ROOT / "docker/sandbox.Dockerfile",
-        ROOT / "packages/mcp-docgen-server/Dockerfile",
     ]
     for path in dockerfiles:
         text = path.read_text()
@@ -220,10 +217,15 @@ def test_dockerfiles_do_not_accept_provider_secrets_as_build_arguments() -> None
         ROOT / "docker/migrate/Dockerfile",
         ROOT / "docker/code-interpreter/Dockerfile",
         ROOT / "docker/sandbox.Dockerfile",
-        ROOT / "packages/mcp-docgen-server/Dockerfile",
     ]
     for path in non_root:
         assert re.search(r"^USER\s+\S+", path.read_text(), re.MULTILINE)
+
+    standalone = ROOT / "packages/mcp-docgen-server/Dockerfile"
+    assert not standalone.exists()
+    assistant = (ROOT / "apps/assistant-service/Dockerfile").read_text()
+    assert 'pip install "./packages/mcp-docgen-server[mcp]"' in assistant
+    assert "COPY agent-plugins/ai-docgen/ /opt/agent-plugins/ai-docgen/" in assistant
 
 
 def test_redis_runtime_config_keeps_secrets_out_of_compose_command(
@@ -314,8 +316,8 @@ def test_dashscope_endpoint_overrides_are_documented_and_injected() -> None:
         in _service_section(compose, "knowledge-service")
     )
 
-    docgen = _service_section(compose, "mcp-docgen-server")
-    assert 'DOCGEN_LLM_ENDPOINT: "${DOCGEN_LLM_ENDPOINT:-}"' in docgen
+    assistant = _service_section(compose, "assistant-service")
+    assert 'DOCGEN_LLM_ENDPOINT: "${DOCGEN_LLM_ENDPOINT:-}"' in assistant
 
     initializer = (ROOT / "scripts/new/init-env.sh").read_text()
     copied_keys_match = re.search(
@@ -394,12 +396,12 @@ def test_publish_workflow_covers_all_images_and_both_cpu_architectures() -> None
         "ai-gateway-web",
         "ai-gateway-assistant-service",
         "ai-gateway-knowledge-service",
-        "ai-gateway-mcp-docgen-server",
         "ai-gateway-migrate",
         "ai-gateway-code-interpreter",
         "ai-gateway-docgen-sandbox",
     ):
         assert f"image: {image}" in workflow
+    assert "ai-gateway-mcp-docgen-server" not in workflow
     assert "platforms: linux/amd64,linux/arm64" in workflow
     assert "docker/setup-qemu-action@v3" in workflow
     assert "provenance: mode=max" in workflow
@@ -429,6 +431,39 @@ def test_sandbox_images_are_versioned_and_runnable_by_default() -> None:
     assert "/workspace/main.py" not in interpreter
 
 
+def test_code_executor_is_an_explicit_local_overlay() -> None:
+    base_compose = (ROOT / "docker-compose.yml").read_text()
+    assistant = _service_section(base_compose, "assistant-service")
+    overlay = (ROOT / "docker-compose.code-executor.yml").read_text()
+    script = (ROOT / "scripts/new/code-executor.sh").read_text()
+    makefile = (ROOT / "Makefile").read_text()
+
+    assert (
+        'ASSISTANT_CODE_EXECUTOR_ENABLED: "${ASSISTANT_CODE_EXECUTOR_ENABLED:-false}"' in assistant
+    )
+    assert "/var/run/docker.sock" not in assistant
+
+    assert 'ASSISTANT_CODE_EXECUTOR_ENABLED: "true"' in overlay
+    assert "/var/run/docker.sock:/var/run/docker.sock" in overlay
+    assert "ASSISTANT_SANDBOX_WORKSPACE_HOST" in overlay
+    assert "DOCKER_SOCKET_GID" in overlay
+    assert "ai-gateway-docgen-sandbox:2.0.0" in overlay
+    assert "docgen-sandbox:latest" not in overlay
+    assert "/Users/" not in overlay
+
+    assert "assert_compose_owner" in script
+    assert 'COMPOSE_PARALLEL_LIMIT="${COMPOSE_PARALLEL_LIMIT:-1}"' in script
+    assert 'ASSISTANT_ALLOW_RUNC_CODE_EXECUTOR: "true"' in overlay
+    assert "cap_drop" not in script  # enforced by CodeExecutorService itself
+    for target in (
+        "code-executor-enable:",
+        "code-executor-test:",
+        "code-executor-status:",
+        "code-executor-disable:",
+    ):
+        assert target in makefile
+
+
 def test_default_quickstart_never_builds_source() -> None:
     makefile = (ROOT / "Makefile").read_text()
     quickstart = re.search(
@@ -452,7 +487,7 @@ def test_default_complete_stack_memory_ceiling_stays_below_3_5_gib() -> None:
     compose = (ROOT / "docker-compose.yml").read_text()
     limits = [int(value) for value in re.findall(r'mem_limit: "\$\{[A-Z0-9_]+:-(\d+)m\}"', compose)]
 
-    assert len(limits) == 8
+    assert len(limits) == 7
     assert sum(limits) <= 3_584
     assert 'REDIS_MAXMEMORY: "${REDIS_MAXMEMORY:-192mb}"' in compose
     assert 'GATEWAY_TASK_WORKER_CONCURRENCY: "${GATEWAY_TASK_WORKER_CONCURRENCY:-1}"' in compose

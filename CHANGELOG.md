@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Bundled document generation as the trusted `ai-docgen` Agent Plugin inside
+  the Assistant image and removed the standalone docgen service, image, port,
+  signed-download endpoint, and release artifact.
+- Isolated Agent Plugin MCP parsing in a focused validation module.
+
 ### Open-source standalone release
 
 - Repositioned the project as a standalone AI Gateway platform with a general AI assistant and a knowledge-base service.

@@ -113,6 +113,25 @@ class TestAssistantServiceInit:
         assert service.builtin_domain_policy_enabled is True
         assert service.domain_policy_resolver is not None
 
+    def test_execution_gateway_is_enabled_by_default(self, monkeypatch):
+        """Bare Assistant processes must keep approval routing available."""
+        from assistant_service.core.assistant_service import AssistantService
+        from assistant_service.core.models.model_registry import ModelRegistry
+
+        monkeypatch.delenv("ASSISTANT_GATEWAY_ENABLED", raising=False)
+        service = AssistantService(model_registry=MagicMock(spec=ModelRegistry))
+
+        assert service.execution_gateway.enabled is True
+
+    def test_execution_gateway_can_be_explicitly_disabled(self, monkeypatch):
+        from assistant_service.core.assistant_service import AssistantService
+        from assistant_service.core.models.model_registry import ModelRegistry
+
+        monkeypatch.setenv("ASSISTANT_GATEWAY_ENABLED", "false")
+        service = AssistantService(model_registry=MagicMock(spec=ModelRegistry))
+
+        assert service.execution_gateway.enabled is False
+
 
 class TestAssistantConfig:
     """Tests for AssistantConfig dataclass."""

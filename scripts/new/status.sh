@@ -57,7 +57,7 @@ check_and_report "Redis" check_redis_status
 check_and_report "Qdrant" check_qdrant_health
 check_and_report "Knowledge" check_knowledge_health
 check_and_report "Assistant" check_assistant_health
-check_and_report "Docgen" check_docgen_health
+check_and_report "Docgen plugin" check_docgen_health
 check_and_report "Gateway" check_gateway_health
 check_and_report "Gateway metrics" check_gateway_metrics
 check_and_report "Frontend" check_frontend_health

@@ -43,9 +43,10 @@ print(result.artifact_uri)
 - Rendering runs sandbox-first (local subprocess or docker) so a bad IR can
   never crash the host service.
 
-## MCP wrapper
+## Agent Plugin runtime
 
-An MCP server that exposes the same capabilities over stdio lives at
-`packages/mcp-docgen-server/src/mcp_docgen_server/` (authored in parallel by
-Agent B). This package is the business-logic core; the MCP layer only wraps
-`DocgenService`.
+The `mcp_docgen_server` module exposes the same capabilities over stdio. It is
+installed in the Assistant image and launched by `agent-plugins/ai-docgen`, so
+the default product does not publish a separate docgen service, image, port, or
+download endpoint. This package remains the business-logic and MCP executable
+used by the bundled plugin.

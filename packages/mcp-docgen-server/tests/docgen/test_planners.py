@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pytest
-
 from docgen.ir import (
     BulletBlock,
     HeadingBlock,
-    ParagraphBlock,
 )
-from docgen.ir.root import DocxIR, PptxIR, XlsxIR, PdfIR
+from docgen.ir.root import DocxIR, PdfIR, PptxIR, XlsxIR
+from docgen.pipeline import DocgenPipeline
 from docgen.planners import (
     Brief,
     DocxPlanner,
@@ -20,11 +16,10 @@ from docgen.planners import (
     PptxPlanner,
     XlsxPlanner,
 )
-from docgen.pipeline import DocgenPipeline
-from docgen.style_guide import PALETTES, FONT_PAIRS, prompt_style_block
-
+from docgen.style_guide import FONT_PAIRS, PALETTES, prompt_style_block
 
 # -------- style guide
+
 
 def test_style_guide_has_ten_palettes_and_eight_fonts():
     assert len(PALETTES) >= 10
@@ -41,6 +36,7 @@ def test_prompt_style_block_contains_dont_rules():
 
 
 # -------- deterministic planners (no LLM)
+
 
 @pytest.mark.asyncio
 async def test_docx_planner_deterministic_from_markdown():
@@ -104,15 +100,15 @@ async def test_xlsx_planner_produces_valid_model():
     # header row + at least 3 more
     assert len(s.rows) >= 4
     # formula cells are not empty
-    formula_cells = [
-        c for r in s.rows for c in r.cells if c.formula
-    ]
+    formula_cells = [c for r in s.rows for c in r.cells if c.formula]
     assert len(formula_cells) >= 2
 
 
 @pytest.mark.asyncio
 async def test_pdf_planner_adds_cover_when_appropriate():
-    brief = Brief(doc_type="pdf", title="Quarterly Report", goal="Quarterly review report for the board")
+    brief = Brief(
+        doc_type="pdf", title="Quarterly Report", goal="Quarterly review report for the board"
+    )
     ir = (await PdfPlanner(llm=None).plan(brief)).ir
     assert isinstance(ir, PdfIR)
     assert ir.content.cover is not None
@@ -123,6 +119,7 @@ async def test_pdf_planner_adds_cover_when_appropriate():
 
 
 # -------- LLM path with a mock
+
 
 class _FakeLLM:
     def __init__(self, payload: dict) -> None:
@@ -156,20 +153,43 @@ async def test_docx_planner_uses_llm_when_provided():
 
 
 @pytest.mark.asyncio
-async def test_xlsx_planner_llm_invalid_json_raises():
-    bad_payload = {"doc_type": "xlsx", "content": {"doc_type": "xlsx", "sheets": []}}
-    planner = XlsxPlanner(llm=_FakeLLM(bad_payload))
-    with pytest.raises(Exception):
-        await planner.plan(Brief(doc_type="xlsx", title="t", goal="g"))
+@pytest.mark.parametrize(
+    ("planner_type", "doc_type", "ir_type"),
+    [
+        (XlsxPlanner, "xlsx", XlsxIR),
+        (PdfPlanner, "pdf", PdfIR),
+    ],
+)
+async def test_planner_llm_failure_falls_back_to_deterministic(
+    planner_type,
+    doc_type,
+    ir_type,
+):
+    class _FailingLLM:
+        async def generate_json(self, **_kwargs):
+            raise TimeoutError("provider timed out")
+
+    result = await planner_type(llm=_FailingLLM()).plan(
+        Brief(doc_type=doc_type, title="t", goal="g")
+    )
+
+    assert isinstance(result.ir, ir_type)
+    assert result.used_llm is False
 
 
 # -------- pipeline e2e (no LLM, deterministic fallback)
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("doc_type", ["docx", "pptx", "xlsx", "pdf"])
 async def test_pipeline_runs_each_format(tmp_path, doc_type):
     pipe = DocgenPipeline(llm=None)
-    brief = Brief(doc_type=doc_type, title=f"smoke-{doc_type}", goal="smoke test", body_markdown="# A\npara\n# B\n- one\n- two")
+    brief = Brief(
+        doc_type=doc_type,
+        title=f"smoke-{doc_type}",
+        goal="smoke test",
+        body_markdown="# A\npara\n# B\n- one\n- two",
+    )
     r = await pipe.run(brief, tmp_path)
     assert r.path.exists() and r.bytes_size > 0
     assert r.doc_type == doc_type
@@ -188,6 +208,7 @@ async def test_pipeline_streaming_emits_expected_events(tmp_path):
 
 
 # -------- PptxPlanner + layout rule engine integration
+
 
 @pytest.mark.asyncio
 async def test_pptx_planner_llm_path_applies_rule_engine():
@@ -213,7 +234,10 @@ async def test_pptx_planner_llm_path_applies_rule_engine():
                     "layout": "title_content",
                     "title": "Maturity Model",
                     "body": [
-                        {"kind": "paragraph", "text": "Level 1 ad-hoc. Level 2 shared. Level 3 automated."}
+                        {
+                            "kind": "paragraph",
+                            "text": "Level 1 ad-hoc. Level 2 shared. Level 3 automated.",
+                        }
                     ],
                 },
                 {"layout": "title_content", "title": "Closing"},
@@ -222,7 +246,7 @@ async def test_pptx_planner_llm_path_applies_rule_engine():
     }
 
     class _LLM:
-        async def generate_json(self, *, system, user, max_tokens=4000):
+        async def generate_json(self, **_kwargs):
             return payload
 
     res = await PptxPlanner(llm=_LLM()).plan(Brief(doc_type="pptx", title="h", goal="g"))
@@ -253,7 +277,7 @@ async def test_pptx_planner_big_stat_does_not_hijack_year():
     }
 
     class _LLM:
-        async def generate_json(self, *, system, user, max_tokens=4000):
+        async def generate_json(self, **_kwargs):
             return payload
 
     res = await PptxPlanner(llm=_LLM()).plan(Brief(doc_type="pptx", title="d", goal="g"))
@@ -279,10 +303,12 @@ async def test_pptx_planner_chinese_section_dividers():
     }
 
     class _LLM:
-        async def generate_json(self, *, system, user, max_tokens=4000):
+        async def generate_json(self, **_kwargs):
             return payload
 
-    res = await PptxPlanner(llm=_LLM()).plan(Brief(doc_type="pptx", title="t", goal="g", locale="zh-CN"))
+    res = await PptxPlanner(llm=_LLM()).plan(
+        Brief(doc_type="pptx", title="t", goal="g", locale="zh-CN")
+    )
     divider_count = sum(1 for s in res.ir.content.slides if s.layout == "section_divider")
     assert divider_count == 3
 
@@ -309,7 +335,7 @@ async def test_pptx_planner_custom_rules_list():
     }
 
     class _LLM:
-        async def generate_json(self, *, system, user, max_tokens=4000):
+        async def generate_json(self, **_kwargs):
             return payload
 
     # Only EyebrowHintRule → no big_stat upgrade even though text matches.

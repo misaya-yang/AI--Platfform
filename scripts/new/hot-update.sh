@@ -33,9 +33,9 @@ Options:
   --gateway       Copy gateway src/config/database and shared core, restart gateway
   --assistant     Copy assistant-service src and shared core, restart assistant
   --knowledge     Copy knowledge-service package and shared core, restart knowledge
-  --docgen        Copy mcp-docgen source, restart docgen
+  --docgen        Copy bundled docgen/plugin source into Assistant, restart Assistant
   --frontend      Build web/dist locally and copy it into the nginx container
-  --python        Update all Python services (gateway, assistant, knowledge, docgen)
+  --python        Update all Python services (gateway, assistant, knowledge, bundled docgen)
   --all           Update all supported services, including frontend
   --no-restart    Copy files only
   --env FILE      Use a specific env file instead of .env
@@ -163,7 +163,7 @@ warn_dependency_changes() {
         pyproject.toml uv.lock Dockerfile docker-compose.yml docker-compose.dev.yml \
         apps/assistant-service/pyproject.toml apps/assistant-service/Dockerfile \
         apps/knowledge-service/pyproject.toml apps/knowledge-service/Dockerfile \
-        packages/mcp-docgen-server/pyproject.toml packages/mcp-docgen-server/Dockerfile \
+        packages/mcp-docgen-server/pyproject.toml \
         web/package.json web/pnpm-lock.yaml web/Dockerfile 2>/dev/null || true)"
     if [ -n "$changed" ]; then
         log_warn "Dependency/Docker/build files changed; hot-update will not install dependencies or rebuild images."
@@ -203,10 +203,14 @@ if [ "$UPDATE_KNOWLEDGE" = true ]; then
 fi
 
 if [ "$UPDATE_DOCGEN" = true ]; then
-    docgen="$(docgen_container)"
-    copy_dir "packages/mcp-docgen-server/src/docgen" "$docgen" "/app/src/docgen" "docgen:docgen"
-    copy_dir "packages/mcp-docgen-server/src/mcp_docgen_server" "$docgen" "/app/src/mcp_docgen_server" "docgen:docgen"
-    restart_services+=("mcp-docgen-server")
+    assistant="$(assistant_container)"
+    assistant_site="$(site_packages "$assistant")"
+    copy_dir "packages/mcp-docgen-server/src/docgen" "$assistant" "$assistant_site/docgen" "appuser:appuser"
+    copy_dir "packages/mcp-docgen-server/src/mcp_docgen_server" "$assistant" "$assistant_site/mcp_docgen_server" "appuser:appuser"
+    copy_dir "agent-plugins/ai-docgen" "$assistant" "/opt/agent-plugins/ai-docgen"
+    if [ "$UPDATE_ASSISTANT" != true ]; then
+        restart_services+=("assistant-service")
+    fi
 fi
 
 if [ "$UPDATE_FRONTEND" = true ]; then
@@ -235,8 +239,8 @@ fi
 if [ "$UPDATE_ASSISTANT" = true ]; then
     wait_for_healthy "Assistant service" "check_assistant_health" 60 || log_warn "Assistant service may still be starting"
 fi
-if [ "$UPDATE_DOCGEN" = true ]; then
-    wait_for_healthy "MCP docgen service" "check_docgen_health" 60 || log_warn "MCP docgen service may still be starting"
+if [ "$UPDATE_DOCGEN" = true ] && [ "$UPDATE_ASSISTANT" != true ]; then
+    wait_for_healthy "Assistant service with bundled docgen" "check_assistant_health" 60 || log_warn "Assistant service may still be starting"
 fi
 if [ "$UPDATE_GATEWAY" = true ]; then
     wait_for_healthy "Gateway" "check_gateway_health" 60 || log_warn "Gateway may still be starting"

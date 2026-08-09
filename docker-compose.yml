@@ -17,11 +17,11 @@ x-container-proxy-env: &container-proxy-env
   HTTP_PROXY: "${CONTAINER_HTTP_PROXY:-}"
   HTTPS_PROXY: "${CONTAINER_HTTPS_PROXY:-${CONTAINER_HTTP_PROXY:-}}"
   ALL_PROXY: "${CONTAINER_ALL_PROXY:-${CONTAINER_HTTP_PROXY:-}}"
-  NO_PROXY: "${CONTAINER_NO_PROXY:-localhost,127.0.0.1,::1,postgres,redis,qdrant,gateway,frontend,knowledge-service,assistant-service,mcp-docgen-server,mcp-docgen-server.internal}"
+  NO_PROXY: "${CONTAINER_NO_PROXY:-localhost,127.0.0.1,::1,postgres,redis,qdrant,gateway,frontend,knowledge-service,assistant-service}"
   http_proxy: "${CONTAINER_HTTP_PROXY:-}"
   https_proxy: "${CONTAINER_HTTPS_PROXY:-${CONTAINER_HTTP_PROXY:-}}"
   all_proxy: "${CONTAINER_ALL_PROXY:-${CONTAINER_HTTP_PROXY:-}}"
-  no_proxy: "${CONTAINER_NO_PROXY:-localhost,127.0.0.1,::1,postgres,redis,qdrant,gateway,frontend,knowledge-service,assistant-service,mcp-docgen-server,mcp-docgen-server.internal}"
+  no_proxy: "${CONTAINER_NO_PROXY:-localhost,127.0.0.1,::1,postgres,redis,qdrant,gateway,frontend,knowledge-service,assistant-service}"
 
 services:
   # ===========================================================================
@@ -282,7 +282,6 @@ services:
       KB_PROXY_POOL_TIMEOUT_SECONDS: "${KB_PROXY_POOL_TIMEOUT_SECONDS:-10}"
       KB_PROXY_MAX_CONNECTIONS: "${KB_PROXY_MAX_CONNECTIONS:-50}"
       KB_PROXY_MAX_KEEPALIVE_CONNECTIONS: "${KB_PROXY_MAX_KEEPALIVE_CONNECTIONS:-10}"
-      MCP_DOCGEN_SERVICE_URL: "${MCP_DOCGEN_SERVICE_URL:-http://mcp-docgen-server.internal:8765}"
       GATEWAY_ASSISTANT_SHARED_SECRET: "${GATEWAY_ASSISTANT_SHARED_SECRET:?GATEWAY_ASSISTANT_SHARED_SECRET is required for gateway<->assistant-service auth}"
       GATEWAY_ENCRYPTION_KEY: "${GATEWAY_ENCRYPTION_KEY:?GATEWAY_ENCRYPTION_KEY is required}"
       INTERNAL_COMM_STATE_BACKEND: "${INTERNAL_COMM_STATE_BACKEND:-memory}"
@@ -339,8 +338,6 @@ services:
       knowledge-service:
         condition: service_healthy
       assistant-service:
-        condition: service_healthy
-      mcp-docgen-server:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
@@ -520,8 +517,12 @@ services:
       ASSISTANT_RUNTIME_MEMORY_V2: "${ASSISTANT_RUNTIME_MEMORY_V2:-true}"
       ASSISTANT_RUNTIME_CONTEXT_V2: "${ASSISTANT_RUNTIME_CONTEXT_V2:-true}"
       ASSISTANT_RUNTIME_TOOL_POLICY_V2: "${ASSISTANT_RUNTIME_TOOL_POLICY_V2:-false}"
-      ASSISTANT_RUNTIME_SKILLS: "${ASSISTANT_RUNTIME_SKILLS:-false}"
-      ASSISTANT_AGENT_PLUGIN_PATHS: "${ASSISTANT_AGENT_PLUGIN_PATHS:-}"
+      ASSISTANT_GATEWAY_ENABLED: "${ASSISTANT_GATEWAY_ENABLED:-true}"
+      ASSISTANT_RUNTIME_SKILLS: "${ASSISTANT_RUNTIME_SKILLS:-true}"
+      ASSISTANT_AGENT_PLUGIN_PATHS: "${ASSISTANT_AGENT_PLUGIN_PATHS:-/opt/agent-plugins/ai-docgen}"
+      ASSISTANT_AGENT_PLUGIN_DATA_ROOT: "${ASSISTANT_AGENT_PLUGIN_DATA_ROOT:-/app/data/agent-plugins}"
+      ASSISTANT_TRUSTED_AGENT_PLUGINS: "${ASSISTANT_TRUSTED_AGENT_PLUGINS:-ai-docgen@1.0.0}"
+      ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS: "${ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS:-/opt/agent-plugins/ai-docgen}"
       ASSISTANT_RUNTIME_SCHEDULER: "${ASSISTANT_RUNTIME_SCHEDULER:-false}"
       ASSISTANT_RUNTIME_FAILOVER_V2: "${ASSISTANT_RUNTIME_FAILOVER_V2:-false}"
       ASSISTANT_MODEL_FALLBACKS_JSON: "${ASSISTANT_MODEL_FALLBACKS_JSON:-{}}"
@@ -559,6 +560,8 @@ services:
       DASHSCOPE_CHAT_WIRE_PROTOCOL: "${DASHSCOPE_CHAT_WIRE_PROTOCOL:-chat_completions}"
       DASHSCOPE_EMBEDDING_BASE_URL: "${DASHSCOPE_EMBEDDING_BASE_URL:-}"
       DASHSCOPE_IMAGE_BASE_URL: "${DASHSCOPE_IMAGE_BASE_URL:-}"
+      DOCGEN_LLM_MODEL: "${DOCGEN_LLM_MODEL:-}"
+      DOCGEN_LLM_ENDPOINT: "${DOCGEN_LLM_ENDPOINT:-}"
       GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
       GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
       GOOGLE_API_BACKEND: "${GOOGLE_API_BACKEND:-}"
@@ -607,57 +610,6 @@ services:
     mem_limit: "${ASSISTANT_MEMORY_LIMIT:-640m}"
     init: true
 
-  # ---------------------------------------------------------------------------
-  # mcp-docgen-server
-  # Exposes a single ``generate_document`` MCP tool (docx / pptx / xlsx / pdf).
-  # Kept as a separate container so its heavy deps (LibreOffice, CJK fonts,
-  # poppler) don't bloat the gateway image. Reachable only on the internal
-  # network — the gateway's MCPClient connects via http://mcp-docgen-server:8765.
-  mcp-docgen-server:
-    container_name: ai-gateway-mcp-docgen-server
-    image: "${DOCGEN_IMAGE:-ghcr.io/misaya-yang/ai-gateway-mcp-docgen-server:2.0.0}"
-    environment:
-      <<: *container-proxy-env
-      MCP_TRANSPORT: http
-      PORT: "8765"
-      LOG_LEVEL: INFO
-      DOCGEN_ARTIFACT_ROOT: /var/lib/docgen/artifacts
-      # Signed-URL base must match the **public** host the browser will
-      # call, since we want users to be able to click the returned
-      # download_url. Signatures are path-only (see docgen/storage/signing.py)
-      # so the internal vs public host mismatch at verify time is fine.
-      DOCGEN_PUBLIC_URL: "${DOCGEN_PUBLIC_URL:-http://mcp-docgen-server.internal:8765}"
-      # Fed into docgen's planner — without it the pipeline falls back to
-      # a near-empty deterministic template and every deck/doc/sheet is a
-      # skeleton. See 2026-04-22 incident.
-      DASHSCOPE_API_KEY: "${DASHSCOPE_API_KEY:-}"
-      DOCGEN_LLM_MODEL: "${DOCGEN_LLM_MODEL:-}"
-      DOCGEN_LLM_ENDPOINT: "${DOCGEN_LLM_ENDPOINT:-}"
-      DOCGEN_ARTIFACT_SIGN_KEY: "${DOCGEN_ARTIFACT_SIGN_KEY:-}"
-    ports:
-      # Bind to loopback only — nginx on the host proxies public
-      # ``/docgen/artifacts/*`` requests here so users can actually
-      # download the signed URLs. Container-to-container traffic still
-      # uses the ``mcp-docgen-server.internal`` network alias.
-      - "127.0.0.1:8765:8765"
-    volumes:
-      - docgen-artifacts:/var/lib/docgen/artifacts
-    networks:
-      ai-gateway-net:
-        # ``.internal`` alias lets the gateway's MCPClient SSRF guard treat
-        # the hostname as a trusted docker-internal name and allow http://.
-        aliases:
-          - mcp-docgen-server.internal
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8765/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-    restart: unless-stopped
-    mem_limit: "${DOCGEN_MEMORY_LIMIT:-512m}"
-    init: true
-
 # =============================================================================
 # Networks
 # =============================================================================
@@ -677,5 +629,4 @@ volumes:
   gateway-data: {}
   assistant-memory-data: {}
   kb-data: {}
-  docgen-artifacts: {}
   tempo-data: {}

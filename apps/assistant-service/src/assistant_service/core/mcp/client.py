@@ -1,8 +1,10 @@
-"""Fail-closed MCP Streamable HTTP client.
+"""Fail-closed MCP clients for Streamable HTTP and trusted local stdio.
 
 Tenant-configurable MCP never launches local processes. The client pins DNS,
 refuses redirects and unsafe address ranges, validates Origin/OAuth audience,
 bounds response bytes, pins the MCP session, and returns stable redacted errors.
+Operator-installed stdio plugins run with a minimal allowlisted environment and
+may only return local artifacts from their client-owned plugin data directory.
 Remote catalog text is always treated as untrusted data.
 """
 
@@ -19,7 +21,8 @@ import urllib.parse
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any, Final
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
@@ -35,6 +38,9 @@ from .resilience import (
     decide_mcp_failure,
 )
 
+if TYPE_CHECKING:
+    from .stdio_client import MCPStdioClient
+
 logger = logging.getLogger(__name__)
 
 MCP_PROTOCOL_VERSION: Final = "2025-11-25"
@@ -45,8 +51,29 @@ DEFAULT_RESPONSE_LIMIT_BYTES: Final = 1024 * 1024
 _SESSION_ID_RE: Final = re.compile(r"^[\x21-\x7e]{1,256}$")
 _STATIC_TOOL_NAME_RE: Final = re.compile(r"^[A-Za-z0-9_.:/ -]{1,128}$")
 _STATIC_CAPABILITY_KEYS: Final = frozenset(
-    {"operation_kind", "read_only", "idempotency_supported", "read_back_tool"}
+    {
+        "operation_kind",
+        "read_only",
+        "idempotency_supported",
+        "read_back_tool",
+        "risk_level",
+        "requires_confirmation",
+    }
 )
+
+
+def _merge_generated_headers(
+    configured: dict[str, str],
+    generated: dict[str, str],
+) -> dict[str, str]:
+    """Merge headers with case-insensitive precedence for client values."""
+
+    generated_names = {name.casefold() for name in generated}
+    merged = {
+        name: value for name, value in configured.items() if name.casefold() not in generated_names
+    }
+    merged.update(generated)
+    return merged
 
 
 class MCPError(Exception):
@@ -89,6 +116,8 @@ class MCPStaticToolCapability:
     read_only: bool = False
     idempotency_supported: bool = False
     read_back_tool: str | None = None
+    risk_level: str | None = None
+    requires_confirmation: bool | None = None
 
     @classmethod
     def from_config(cls, tool_name: str, value: Any) -> MCPStaticToolCapability:
@@ -109,7 +138,7 @@ class MCPStaticToolCapability:
         except ValueError as exc:
             raise ValueError("MCP_STATIC_CAPABILITY_OPERATION_INVALID") from exc
 
-        for key in ("read_only", "idempotency_supported"):
+        for key in ("read_only", "idempotency_supported", "requires_confirmation"):
             if key in value and not isinstance(value[key], bool):
                 raise ValueError("MCP_STATIC_CAPABILITY_BOOLEAN_INVALID")
         read_only_declared = value.get("read_only") is True
@@ -137,11 +166,18 @@ class MCPStaticToolCapability:
             or raw_read_back == tool_name
         ):
             raise ValueError("MCP_STATIC_CAPABILITY_READ_BACK_INVALID")
+        raw_risk_level = value.get("risk_level")
+        if raw_risk_level is not None and raw_risk_level not in {"low", "medium", "high"}:
+            raise ValueError("MCP_STATIC_CAPABILITY_RISK_INVALID")
+        if raw_risk_level == "high" and value.get("requires_confirmation") is False:
+            raise ValueError("MCP_STATIC_CAPABILITY_CONFLICT")
         return cls(
             operation_kind=operation_kind,
             read_only=read_only,
             idempotency_supported=bool(value.get("idempotency_supported", False)),
             read_back_tool=raw_read_back or None,
+            risk_level=raw_risk_level,
+            requires_confirmation=value.get("requires_confirmation"),
         )
 
 
@@ -150,12 +186,13 @@ class MCPServerConfig:
     """Resolved runtime configuration for one remote MCP connection."""
 
     name: str
-    url: str
+    url: str = ""
     # Holds the resolved plaintext credential (Bearer secret / OAuth access
     # token). Keep it out of repr so stringifying the config can never leak
     # the secret into logs, tracebacks, or error reports (AS-MCP-002),
     # mirroring dns_resolver/code_verifier below.
     api_key: str | None = field(default=None, repr=False)
+    headers: dict[str, str] = field(default_factory=dict, repr=False)
     transport: str = "streamable_http"
     timeout: float = 30.0
     host_deadline: float | None = None
@@ -177,18 +214,49 @@ class MCPServerConfig:
     allow_localhost: bool = False
     allow_private_network: bool = False
     platform_managed: bool = False
+    default_tenant_enabled: bool = False
+    command: str = ""
+    args: tuple[str, ...] = ()
+    process_env: dict[str, str] = field(default_factory=dict, repr=False)
+    inherited_env_names: tuple[str, ...] = ()
+    cwd: str = ""
+    plugin_root: str = ""
+    plugin_data_dir: str = ""
     tool_capabilities: dict[str, MCPStaticToolCapability | dict[str, Any]] = field(
         default_factory=dict
     )
     dns_resolver: DNSResolver | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self.transport not in {"streamable_http", "http"}:
-            raise ValueError("Only MCP Streamable HTTP transport is supported")
+        if self.transport not in {"streamable_http", "http", "stdio"}:
+            raise ValueError("Unsupported MCP transport")
         # `http` was the legacy spelling. It remains readable for the static,
         # platform-managed compatibility config but is normalized immediately.
-        self.transport = "streamable_http"
-        if not self.endpoint_path.startswith("/") or ".." in self.endpoint_path:
+        if self.transport == "http":
+            self.transport = "streamable_http"
+        if self.transport == "stdio":
+            if not self.platform_managed or not self.command:
+                raise ValueError("MCP_STDIO_TRUST_REQUIRED")
+            if (
+                not Path(self.plugin_root).is_absolute()
+                or not Path(self.plugin_data_dir).is_absolute()
+            ):
+                raise ValueError("MCP_STDIO_PATH_INVALID")
+            if not isinstance(self.args, tuple) or any(
+                not isinstance(value, str) or "\x00" in value for value in self.args
+            ):
+                raise ValueError("MCP_STDIO_ARGUMENTS_INVALID")
+            if not isinstance(self.process_env, dict) or any(
+                not isinstance(key, str)
+                or not isinstance(value, str)
+                or "\x00" in key
+                or "\x00" in value
+                for key, value in self.process_env.items()
+            ):
+                raise ValueError("MCP_STDIO_ENV_INVALID")
+            if not self.cwd or not Path(self.cwd).is_absolute():
+                raise ValueError("MCP_STDIO_CWD_INVALID")
+        elif not self.endpoint_path.startswith("/") or ".." in self.endpoint_path:
             raise ValueError("Invalid MCP endpoint path")
         if self.max_concurrent < 1 or self.max_concurrent > 32:
             raise ValueError("Invalid MCP concurrency limit")
@@ -204,6 +272,11 @@ class MCPServerConfig:
             raise ValueError("Invalid MCP circuit cooldown")
         if self.response_limit_bytes < 1024 or self.response_limit_bytes > 8 * 1024 * 1024:
             raise ValueError("Invalid MCP response limit")
+        if not isinstance(self.headers, dict) or any(
+            not isinstance(name, str) or not isinstance(value, str)
+            for name, value in self.headers.items()
+        ):
+            raise ValueError("Invalid MCP fixed headers")
         if not isinstance(self.tool_capabilities, dict):
             raise ValueError("MCP_STATIC_CAPABILITIES_INVALID")
         if self.tool_capabilities and not self.platform_managed:
@@ -294,7 +367,7 @@ class MCPClient:
     @staticmethod
     def _default_resolver(hostname: str, port: int) -> Iterable[str]:
         return {
-            item[4][0]
+            str(item[4][0])
             for item in socket.getaddrinfo(
                 hostname,
                 port,
@@ -359,9 +432,14 @@ class MCPClient:
                 stable_code="MCP_URL_INVALID",
             )
         is_local_name = hostname.lower() == "localhost"
+        try:
+            is_loopback_literal = ipaddress.ip_address(hostname).is_loopback
+        except ValueError:
+            is_loopback_literal = False
         internal_name = hostname.lower().endswith((".internal", ".local"))
         local_exception = platform_managed and (
-            (allow_localhost and is_local_name) or (allow_private_network and internal_name)
+            (allow_localhost and (is_local_name or is_loopback_literal))
+            or (allow_private_network and internal_name)
         )
         if parsed.scheme.lower() != "https" and not local_exception:
             raise MCPError(
@@ -508,14 +586,17 @@ class MCPClient:
     async def initialize(self) -> dict[str, Any]:
         self._validate_origin_and_audience()
         self._validate_dns_pin()
-        headers = {
+        # Client-generated protocol and authorization headers take precedence
+        # over visible package configuration as required by Agent Plugins v1.
+        generated_headers = {
             "Accept": "application/json, text/event-stream",
             "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
         }
         if self.config.origin:
-            headers["Origin"] = self.config.origin.rstrip("/")
+            generated_headers["Origin"] = self.config.origin.rstrip("/")
         if self.config.api_key:
-            headers["Authorization"] = f"Bearer {self.config.api_key}"
+            generated_headers["Authorization"] = f"Bearer {self.config.api_key}"
+        headers = _merge_generated_headers(self.config.headers, generated_headers)
         if self._http is None:
             self._http = httpx.AsyncClient(
                 base_url=self.config.url,
@@ -604,7 +685,11 @@ class MCPClient:
         circuit: dict[str, Any] = {}
         failure: MCPFailureDecision | None = None
         try:
-            host_timeout = asyncio.timeout(float(self.config.host_deadline or self.config.timeout))
+            # The Assistant package requires Python 3.11+, while the monorepo
+            # root mypy target remains 3.10 for older services.
+            host_timeout = asyncio.timeout(  # type: ignore[attr-defined]
+                float(self.config.host_deadline or self.config.timeout)
+            )
             async with host_timeout, self._semaphore:
                 try:
                     lease = await circuit_breaker.acquire()
@@ -773,6 +858,126 @@ class MCPClient:
             failure=failure,
             circuit=circuit,
         )
+
+    async def download_resource_link(self, resource_url: str) -> tuple[bytes, str]:
+        """Download one same-origin HTTP resource through the pinned MCP connection."""
+
+        if self._http is None:
+            raise MCPError(
+                -1,
+                "MCP client is not connected",
+                stable_code="MCP_NOT_CONNECTED",
+            )
+        try:
+            base = urllib.parse.urlsplit(self.config.url)
+            resource = urllib.parse.urlsplit(resource_url)
+            base_port = base.port or (443 if base.scheme.lower() == "https" else 80)
+            resource_port = resource.port or (443 if resource.scheme.lower() == "https" else 80)
+        except ValueError as exc:
+            raise MCPError(
+                -26,
+                "MCP resource URL is invalid",
+                stable_code="MCP_RESOURCE_URL_INVALID",
+            ) from exc
+        resource_host = (resource.hostname or "").lower()
+        try:
+            resource_is_loopback = ipaddress.ip_address(resource_host).is_loopback
+        except ValueError:
+            resource_is_loopback = resource_host == "localhost"
+        loopback_alias = bool(
+            self.config.platform_managed
+            and self.config.allow_private_network
+            and resource_is_loopback
+            and resource.scheme.lower() == base.scheme.lower()
+            and resource_port == base_port
+            and resource.username is None
+            and resource.password is None
+            and not resource.fragment
+        )
+        if loopback_alias:
+            resource_url = urllib.parse.urlunsplit(
+                (
+                    base.scheme,
+                    base.netloc,
+                    resource.path,
+                    resource.query,
+                    "",
+                )
+            )
+            resource = urllib.parse.urlsplit(resource_url)
+        if (
+            resource.scheme.lower() != base.scheme.lower()
+            or (resource.hostname or "").lower() != (base.hostname or "").lower()
+            or resource_port != base_port
+            or resource.username is not None
+            or resource.password is not None
+            or bool(resource.fragment)
+        ):
+            raise MCPError(
+                -27,
+                "MCP resource origin is not permitted",
+                stable_code="MCP_RESOURCE_ORIGIN_MISMATCH",
+            )
+
+        addresses = self._validate_dns_pin()
+        target, host_header, sni_hostname = self._pinned_request_target(
+            resource_url,
+            addresses,
+        )
+        request = self._http.build_request("GET", target, headers={"Accept": "*/*"})
+        request.headers["Host"] = host_header
+        request.extensions["sni_hostname"] = sni_hostname
+        response: httpx.Response | None = None
+        try:
+            response = await self._http.send(
+                request,
+                stream=True,
+                follow_redirects=False,
+            )
+            if 300 <= response.status_code < 400:
+                raise MCPError(
+                    -22,
+                    "MCP redirects are not permitted",
+                    stable_code="MCP_REDIRECT_BLOCKED",
+                )
+            if response.status_code >= 500:
+                raise MCPError(
+                    response.status_code,
+                    "MCP resource was unavailable",
+                    stable_code="MCP_UPSTREAM_UNAVAILABLE",
+                )
+            if response.status_code < 200 or response.status_code >= 300:
+                raise MCPError(
+                    response.status_code,
+                    "MCP resource request was rejected",
+                    stable_code="MCP_UPSTREAM_REJECTED",
+                )
+            body = await self._read_response_body(response)
+            content_type = (
+                response.headers.get(
+                    "Content-Type",
+                    "application/octet-stream",
+                )
+                .split(";", 1)[0]
+                .strip()
+                .lower()
+            )
+            return body, content_type or "application/octet-stream"
+        except httpx.TimeoutException as exc:
+            raise MCPError(
+                -2,
+                "MCP resource request timed out",
+                stable_code="MCP_TIMEOUT",
+            ) from exc
+        except httpx.RequestError as exc:
+            raise MCPError(
+                -3,
+                "MCP resource is unavailable",
+                stable_code="MCP_UPSTREAM_UNAVAILABLE",
+            ) from exc
+        finally:
+            if response is not None:
+                await response.aclose()
 
     async def close(self) -> None:
         if self._http is not None and self._owns_http:
@@ -1050,8 +1255,19 @@ class MCPClient:
         return " ".join(clean.split())[:MAX_DESCRIPTION_LENGTH]
 
 
+def __getattr__(name: str) -> Any:
+    """Lazily expose the stdio client without creating an import cycle."""
+
+    if name == "MCPStdioClient":
+        from .stdio_client import MCPStdioClient
+
+        return MCPStdioClient
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = [
     "MCPClient",
+    "MCPStdioClient",
     "MCPError",
     "MCPServerConfig",
     "MCPStaticToolCapability",

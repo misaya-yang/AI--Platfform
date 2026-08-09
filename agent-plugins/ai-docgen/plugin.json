@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "ai-docgen",
+  "version": "1.0.0",
+  "description": "Generate reviewed DOCX, PPTX, XLSX, and PDF artifacts through one portable MCP tool.",
+  "author": {
+    "name": "AI Gateway Maintainers"
+  },
+  "license": "MIT",
+  "keywords": [
+    "documents",
+    "docx",
+    "pptx",
+    "xlsx",
+    "pdf",
+    "mcp"
+  ],
+  "extensions": {
+    "com.misaya.ai-gateway": {
+      "mcp": {
+        "docgen": {
+          "timeoutSeconds": 300,
+          "maxConcurrent": 4,
+          "responseLimitBytes": 8388608
+        }
+      }
+    }
+  }
+}

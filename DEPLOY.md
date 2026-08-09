@@ -12,8 +12,7 @@ The default stack contains:
 - `redis`: cache, sessions, and queues
 - `qdrant`: vector database for the knowledge base
 - `knowledge-service`: KB CRUD, ingestion, indexing, and retrieval
-- `assistant-service`: general AI assistant runtime
-- `mcp-docgen-server`: document-generation MCP tool server
+- `assistant-service`: general AI assistant plus bundled Agent Plugin runtime
 - `gateway`: public API, auth, proxy, sessions, and readiness
 - `frontend`: web console
 
@@ -43,7 +42,6 @@ Fill these required values:
 - `REDIS_PASSWORD`
 - `JWT_SECRET`
 - `GATEWAY_ASSISTANT_SHARED_SECRET`
-- `DOCGEN_ARTIFACT_SIGN_KEY`
 - At least one chat provider key
 - `KB_EMBEDDING_PROVIDER`
 - `KB_EMBEDDING_API_KEY`
@@ -84,7 +82,7 @@ This checks:
 - chat and embedding keys are configured
 - provider names and ports are valid
 - host ports are not duplicated
-- `DOCGEN_PUBLIC_URL` uses `https://` and is not localhost or loopback for non-local auth domains
+- bundled plugin paths and data roots are declared
 - `VITE_AUTH_EMAIL_DOMAIN` matches `AUTH_ALLOWED_EMAIL_DOMAIN` when set for non-local auth domains
 - `VITE_SUPPORT_EMAIL` is blank or uses a real non-example mailbox for non-local auth domains
 - explicit frontend API and telemetry runtime URLs use a same-origin path or `https://` and are not localhost or loopback for non-local auth domains
@@ -183,7 +181,11 @@ Compose uses the fixed project name `ai-gateway`, so volume names are stable:
 - `ai-gateway_qdrant-data`
 - `ai-gateway_gateway-data`
 - `ai-gateway_kb-data`
-- `ai-gateway_docgen-artifacts`
+
+Docgen plugin artifacts use the shared `ai-gateway_gateway-data` volume and are
+imported into the Assistant artifact store. Older deployments may still have an
+unused `ai-gateway_docgen-artifacts` volume; remove it only after confirming no
+legacy files are needed.
 
 PostgreSQL initializes its password when the volume is first created. If you change `POSTGRES_PASSWORD` after first boot without resetting the volume, authentication can fail. For local development, reset volumes intentionally with `docker compose down -v --remove-orphans`.
 
@@ -199,7 +201,9 @@ For production-like deployments:
 - Store `.env` in your secret-management system, not in Git.
 - Configure explicit CORS origins for your frontend domain.
 - Use S3-compatible storage by setting `GATEWAY_STORAGE__BACKEND=s3` and filling the S3 variables.
-- Monitor gateway `/health/ready`; it checks DB, Redis, knowledge service, assistant service, and docgen. Direct release smoke checks use knowledge-service and assistant-service `/health/ready`; MCP docgen currently exposes `/health`.
+- Monitor gateway `/health/ready`; it checks DB, Redis, knowledge service, and
+  Assistant. Runtime validation also verifies the bundled docgen stdio child
+  inside the Assistant container.
 - Scrape gateway `/metrics` from your monitoring system and include it in release smoke checks; `gateway_up` should be present after startup.
 
 ## Troubleshooting

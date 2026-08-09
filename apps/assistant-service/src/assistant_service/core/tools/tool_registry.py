@@ -811,10 +811,11 @@ class ToolRegistry:
 
     @staticmethod
     def _requires_gateway(definition: ToolDefinition) -> bool:
-        return definition.requires_confirmation or definition.risk_level in {
-            ToolRiskLevel.MEDIUM,
-            ToolRiskLevel.HIGH,
-        }
+        # Medium means a reversible side effect, not an automatic approval.
+        # Requiring the gateway for every medium tool made image generation,
+        # sandboxed code, and other explicitly unattended tools unusable when
+        # the optional gateway was disabled. High risk remains fail-closed.
+        return definition.requires_confirmation or definition.risk_level is ToolRiskLevel.HIGH
 
     @staticmethod
     def _direct_execution_allowed(request: ToolCallRequest) -> bool:

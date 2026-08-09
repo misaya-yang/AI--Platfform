@@ -9,8 +9,8 @@ produces a skeleton deck / doc / sheet — functionally worthless for the
 user's actual request. This module gives the MCP server a real caller
 so the pipeline plans with a model and we don't ship empty outlines.
 
-We target DashScope because (a) the production gateway already has
-``DASHSCOPE_API_KEY`` configured, (b) Qwen-3.6-Plus is reliable for JSON
+We target DashScope because (a) the production gateway already has a
+DashScope chat key configured, (b) Qwen 3.7 Plus is reliable for JSON
 mode, and (c) it's cheaper and faster than Gemini for planning-style
 structured-output calls.
 
@@ -21,10 +21,11 @@ a degraded output with a clear log line.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 
@@ -39,19 +40,17 @@ class DashScopeLLMCaller:
     returns raw JSON without the wrapper.
     """
 
-    #: Default to Qwen-3.6-Plus which is the production-blessed model for
+    #: Match the project's default Qwen chat model for structured output.
     #: structured output in this gateway.
-    DEFAULT_MODEL = "qwen3.5-plus"
-    DEFAULT_ENDPOINT = (
-        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-    )
+    DEFAULT_MODEL = "qwen3.7-plus"
+    DEFAULT_ENDPOINT = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
 
     def __init__(
         self,
         api_key: str,
         *,
-        model: Optional[str] = None,
-        endpoint: Optional[str] = None,
+        model: str | None = None,
+        endpoint: str | None = None,
         timeout: float = 180.0,
     ) -> None:
         self._api_key = api_key
@@ -64,10 +63,8 @@ class DashScopeLLMCaller:
         # Honour DOCGEN_LLM_TIMEOUT env override for fine-tuning per deploy.
         env_timeout = os.environ.get("DOCGEN_LLM_TIMEOUT")
         if env_timeout:
-            try:
+            with contextlib.suppress(ValueError):
                 timeout = float(env_timeout)
-            except ValueError:
-                pass
         self._timeout = timeout
 
     async def generate_json(
@@ -119,28 +116,29 @@ class DashScopeLLMCaller:
             raise RuntimeError(f"LLM did not return valid JSON: {exc}") from exc
 
 
-def build_default_llm() -> Optional[DashScopeLLMCaller]:
+def build_default_llm() -> DashScopeLLMCaller | None:
     """Return a caller wired to whatever credentials are in the env, or None.
 
     Env vars consulted:
-      ``DASHSCOPE_API_KEY``  — required for DashScope
-      ``DOCGEN_LLM_MODEL``   — override default model (``qwen3.5-plus``)
+      ``DASHSCOPE_CHAT_API_KEY`` or ``DASHSCOPE_API_KEY`` — DashScope credential
+      ``DOCGEN_LLM_MODEL``   — override default model (``qwen3.7-plus``)
       ``DOCGEN_LLM_ENDPOINT``— override default endpoint (DashScope compat mode)
 
     When no key is present we log and return ``None`` so the deterministic
     planner kicks in — a worse output, but not a crash.
     """
-    api_key = os.environ.get("DASHSCOPE_API_KEY")
+    api_key = os.environ.get("DASHSCOPE_CHAT_API_KEY") or os.environ.get("DASHSCOPE_API_KEY")
     if not api_key:
         logger.warning(
-            "[docgen-llm] DASHSCOPE_API_KEY not set — planner will fall back "
+            "[docgen-llm] DashScope chat key not set — planner will fall back "
             "to deterministic template; output quality will be noticeably "
-            "lower. Configure the key on the mcp-docgen-server container to "
-            "enable LLM-backed planning."
+            "lower. Configure the key on the Assistant service to enable "
+            "LLM-backed planning."
         )
         return None
     caller = DashScopeLLMCaller(api_key)
     logger.info(
-        "[docgen-llm] DashScope LLM caller wired (model=%s)", caller._model,
+        "[docgen-llm] DashScope LLM caller wired (model=%s)",
+        caller._model,
     )
     return caller

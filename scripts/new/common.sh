@@ -106,7 +106,6 @@ redis_container()  { echo "${REDIS_CONTAINER:-ai-gateway-redis}"; }
 qdrant_container() { echo "${QDRANT_CONTAINER:-ai-gateway-qdrant}"; }
 assistant_container() { echo "${ASSISTANT_CONTAINER:-ai-gateway-assistant-service}"; }
 knowledge_container() { echo "${KNOWLEDGE_CONTAINER:-ai-gateway-knowledge-service}"; }
-docgen_container()    { echo "${DOCGEN_CONTAINER:-ai-gateway-mcp-docgen-server}"; }
 gateway_container()   { echo "${GATEWAY_CONTAINER:-ai-gateway-backend}"; }
 frontend_container()  { echo "${FRONTEND_CONTAINER:-ai-gateway-frontend}"; }
 
@@ -121,8 +120,8 @@ assert_compose_owner() {
         "$(frontend_container)"
         "$(assistant_container)"
         "$(knowledge_container)"
-        "$(docgen_container)"
         # Legacy/other-checkout names that have caused local stack confusion.
+        ai-gateway-mcp-docgen-server
         assistant-service
         ai-gateway-knowledge
         mcp-docgen-server
@@ -250,7 +249,9 @@ check_assistant_health() {
 }
 
 check_docgen_health() {
-    docker exec "$(docgen_container)" curl -sf "http://127.0.0.1:8765/health" &>/dev/null
+    docker exec "$(assistant_container)" python -c \
+        'from pathlib import Path; assert any("mcp_docgen_server" in p.read_bytes().decode("utf-8", "ignore") for p in Path("/proc").glob("[0-9]*/cmdline"))' \
+        &>/dev/null
 }
 
 # -- Python workspace packages -----------------------------------------------

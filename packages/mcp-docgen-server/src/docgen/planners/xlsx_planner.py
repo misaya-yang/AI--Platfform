@@ -7,9 +7,9 @@ Non-trivial xlsx planning generally wants an LLM to lay out sheet roles.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
-from typing import Optional
 
 from ..ir import (
     XlsxCell,
@@ -21,7 +21,6 @@ from ..ir import (
 )
 from .base import BasePlanner, Brief, PlannerResult, metadata_for_brief, theme_for_brief
 from .docx_planner import LLMCaller
-
 
 SYSTEM_PROMPT = """You are a financial analyst producing an Excel model.
 
@@ -47,27 +46,36 @@ Absolute rules:
 class XlsxPlanner(BasePlanner):
     doc_type = "xlsx"
 
-    def __init__(self, llm: Optional[LLMCaller] = None) -> None:
+    def __init__(self, llm: LLMCaller | None = None) -> None:
         self._llm = llm
 
     async def plan(self, brief: Brief) -> PlannerResult:
         started = time.perf_counter()
+        used_llm = False
+        ir: XlsxIR | None = None
         if self._llm is not None:
-            ir = await self._plan_with_llm(brief)
-            used_llm = True
-        else:
+            try:
+                ir = await self._plan_with_llm(brief)
+                used_llm = True
+            except Exception as exc:  # noqa: BLE001
+                logging.getLogger(__name__).warning(
+                    "XlsxPlanner LLM path failed (%s); falling back to deterministic",
+                    type(exc).__name__,
+                )
+        if ir is None:
             ir = self._plan_deterministic(brief)
-            used_llm = False
         outline = self._outline(ir)
-        return PlannerResult(ir=ir, plan_text=outline, used_llm=used_llm, duration_ms=int((time.perf_counter() - started) * 1000))
+        return PlannerResult(
+            ir=ir,
+            plan_text=outline,
+            used_llm=used_llm,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+        )
 
     # ------------------------------------------------------------------ LLM
 
     async def _plan_with_llm(self, brief: Brief) -> XlsxIR:
-        user = (
-            f"Title: {brief.title}\n"
-            f"Brief: {brief.goal}\n"
-        )
+        user = f"Title: {brief.title}\nBrief: {brief.goal}\n"
         if brief.style_hints:
             user += f"\nStyle hints: {json.dumps(brief.style_hints)}\n"
         data = await self._llm.generate_json(system=SYSTEM_PROMPT, user=user, max_tokens=6000)
@@ -88,34 +96,44 @@ class XlsxPlanner(BasePlanner):
         theme = theme_for_brief(brief)
         sheet_name = self._safe_sheet_name(brief.style_hints.get("sheet_name") or "Model")
 
-        header = XlsxRow(cells=[
-            XlsxCell(value="Metric", role="header"),
-            XlsxCell(value="Year-1", role="header"),
-            XlsxCell(value="Year-2", role="header"),
-            XlsxCell(value="Year-3", role="header"),
-        ])
-        revenue = XlsxRow(cells=[
-            XlsxCell(value="Revenue", role="label"),
-            XlsxCell(value=1000, role="input", number_format="currency_usd"),
-            XlsxCell(value=1250, role="input", number_format="currency_usd"),
-            XlsxCell(formula="C2*(1+B5)", role="formula", number_format="currency_usd"),
-        ])
-        costs = XlsxRow(cells=[
-            XlsxCell(value="Costs", role="label"),
-            XlsxCell(value=600, role="input", number_format="currency_usd"),
-            XlsxCell(value=740, role="input", number_format="currency_usd"),
-            XlsxCell(formula="C3*(1+B5)", role="formula", number_format="currency_usd"),
-        ])
-        profit = XlsxRow(cells=[
-            XlsxCell(value="Gross profit", role="label"),
-            XlsxCell(formula="B2-B3", role="formula", number_format="currency_usd"),
-            XlsxCell(formula="C2-C3", role="formula", number_format="currency_usd"),
-            XlsxCell(formula="D2-D3", role="formula", number_format="currency_usd"),
-        ])
-        growth = XlsxRow(cells=[
-            XlsxCell(value="Assumed growth", role="label"),
-            XlsxCell(value=0.25, role="assumption", number_format="percent"),
-        ])
+        header = XlsxRow(
+            cells=[
+                XlsxCell(value="Metric", role="header"),
+                XlsxCell(value="Year-1", role="header"),
+                XlsxCell(value="Year-2", role="header"),
+                XlsxCell(value="Year-3", role="header"),
+            ]
+        )
+        revenue = XlsxRow(
+            cells=[
+                XlsxCell(value="Revenue", role="label"),
+                XlsxCell(value=1000, role="input", number_format="currency_usd"),
+                XlsxCell(value=1250, role="input", number_format="currency_usd"),
+                XlsxCell(formula="C2*(1+B5)", role="formula", number_format="currency_usd"),
+            ]
+        )
+        costs = XlsxRow(
+            cells=[
+                XlsxCell(value="Costs", role="label"),
+                XlsxCell(value=600, role="input", number_format="currency_usd"),
+                XlsxCell(value=740, role="input", number_format="currency_usd"),
+                XlsxCell(formula="C3*(1+B5)", role="formula", number_format="currency_usd"),
+            ]
+        )
+        profit = XlsxRow(
+            cells=[
+                XlsxCell(value="Gross profit", role="label"),
+                XlsxCell(formula="B2-B3", role="formula", number_format="currency_usd"),
+                XlsxCell(formula="C2-C3", role="formula", number_format="currency_usd"),
+                XlsxCell(formula="D2-D3", role="formula", number_format="currency_usd"),
+            ]
+        )
+        growth = XlsxRow(
+            cells=[
+                XlsxCell(value="Assumed growth", role="label"),
+                XlsxCell(value=0.25, role="assumption", number_format="percent"),
+            ]
+        )
 
         columns = [
             XlsxColumn(index=0, width_chars=18),
@@ -123,7 +141,9 @@ class XlsxPlanner(BasePlanner):
             XlsxColumn(index=2, width_chars=14),
             XlsxColumn(index=3, width_chars=14),
         ]
-        sheet = XlsxSheet(name=sheet_name, columns=columns, rows=[header, revenue, costs, profit, growth])
+        sheet = XlsxSheet(
+            name=sheet_name, columns=columns, rows=[header, revenue, costs, profit, growth]
+        )
         return XlsxIR(
             metadata=metadata_for_brief(brief),
             theme=theme,
@@ -135,5 +155,7 @@ class XlsxPlanner(BasePlanner):
     def _outline(self, ir: XlsxIR) -> str:
         lines = [f"# {ir.metadata.title}"]
         for s in ir.content.sheets:
-            lines.append(f"  sheet: {s.name} ({len(s.rows)} rows × {len(s.rows[0].cells) if s.rows else 0} cols)")
+            lines.append(
+                f"  sheet: {s.name} ({len(s.rows)} rows × {len(s.rows[0].cells) if s.rows else 0} cols)"
+            )
         return "\n".join(lines)

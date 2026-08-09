@@ -1,9 +1,8 @@
 """Agent Plugins 1.0.0 directory loader.
 
-The portable v1 format permits incremental client adoption.  AI Gateway is a
-skills-only client for now: plugin Skills are loaded as instruction-only
-artifacts, while ``mcp.json`` is reported but never started.  This keeps plugin
-installation from becoming an implicit code-execution or authorization path.
+The loader validates portable Skills plus stdio and Streamable HTTP MCP
+declarations.  It only parses package data; the Assistant composition root
+decides whether an operator-trusted stdio component may be launched.
 """
 
 from __future__ import annotations
@@ -16,6 +15,11 @@ from typing import Any, Final
 
 import yaml
 
+from .agent_plugin_mcp import (
+    MCP_SCHEMA_V1,
+    AgentPluginMCPServer,
+    load_agent_plugin_mcp,
+)
 from .skills.models import SkillManifest, SkillSource
 
 PLUGIN_SCHEMA_V1: Final = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
@@ -79,6 +83,7 @@ class LoadedAgentPlugin:
     root: Path
     manifest: AgentPluginManifest
     skills: tuple[SkillManifest, ...]
+    mcp_servers: tuple[AgentPluginMCPServer, ...]
     diagnostics: tuple[AgentPluginDiagnostic, ...]
     mcp_present: bool = False
 
@@ -325,21 +330,19 @@ def load_agent_plugin(path: str | Path) -> LoadedAgentPlugin:
                 except AgentPluginLoadError as exc:
                     diagnostics.append(AgentPluginDiagnostic(code=exc.code, component=child.name))
 
-    mcp_present = (root / "mcp.json").exists()
-    if mcp_present:
-        diagnostics.append(
-            AgentPluginDiagnostic(
-                code="AGENT_PLUGIN_MCP_UNSUPPORTED",
-                component="mcp.json",
-            )
-        )
+    mcp_result = load_agent_plugin_mcp(root)
+    diagnostics.extend(
+        AgentPluginDiagnostic(code=item.code, component=item.component)
+        for item in mcp_result.diagnostics
+    )
 
     return LoadedAgentPlugin(
         root=root,
         manifest=manifest,
         skills=tuple(skills),
+        mcp_servers=mcp_result.servers,
         diagnostics=tuple(diagnostics),
-        mcp_present=mcp_present,
+        mcp_present=mcp_result.present,
     )
 
 
@@ -347,7 +350,9 @@ __all__ = [
     "AgentPluginDiagnostic",
     "AgentPluginLoadError",
     "AgentPluginManifest",
+    "AgentPluginMCPServer",
     "LoadedAgentPlugin",
+    "MCP_SCHEMA_V1",
     "PLUGIN_SCHEMA_V1",
     "load_agent_plugin",
 ]

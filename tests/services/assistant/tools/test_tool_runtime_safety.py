@@ -64,7 +64,7 @@ def _definition(name: str, risk: ToolRiskLevel) -> ToolDefinition:
 
 
 @pytest.mark.asyncio
-async def test_direct_registry_execution_denies_medium_risk_without_gateway() -> None:
+async def test_direct_registry_allows_medium_risk_without_explicit_confirmation() -> None:
     registry = ToolRegistry()
     executor = _RecordingExecutor()
     registry.register(_definition("dangerous_tool", ToolRiskLevel.MEDIUM), executor)
@@ -72,6 +72,24 @@ async def test_direct_registry_execution_denies_medium_risk_without_gateway() ->
     result = await registry.execute(
         ToolCallRequest(
             call_id="call-a",
+            tool_name="dangerous_tool",
+            arguments={"value": "x"},
+        )
+    )
+
+    assert result.success is True
+    assert executor.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_direct_registry_denies_high_risk_without_gateway() -> None:
+    registry = ToolRegistry()
+    executor = _RecordingExecutor()
+    registry.register(_definition("dangerous_tool", ToolRiskLevel.HIGH), executor)
+
+    result = await registry.execute(
+        ToolCallRequest(
+            call_id="call-high",
             tool_name="dangerous_tool",
             arguments={"value": "x"},
         )
@@ -131,6 +149,34 @@ async def test_gateway_requires_tool_confirmation_in_power_profile() -> None:
             tenant_id="tenant-a",
             request_id="request-a",
             run_id="11111111-1111-1111-1111-111111111111",
+            policy_profile="power",
+        ),
+    )
+
+    assert result.success is False
+    assert result.error == "APPROVAL_REQUIRED"
+    assert result.metadata["approval_required"] is True
+    assert executor.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_gateway_requires_confirmation_for_high_risk_definition() -> None:
+    registry = ToolRegistry()
+    executor = _RecordingExecutor()
+    registry.register(_definition("external_destructive_action", ToolRiskLevel.HIGH), executor)
+    gateway = AssistantExecutionGateway(
+        tool_invoker=RegistryToolInvoker(registry),
+        database=None,
+    )
+
+    result = await gateway.invoke_tool(
+        "external_destructive_action",
+        {},
+        ToolInvocationContext(
+            session_id="session-high",
+            user_id="user-high",
+            tenant_id="tenant-high",
+            request_id="request-high",
             policy_profile="power",
         ),
     )

@@ -16,6 +16,8 @@
 #   make stop            停止所有服务
 #   make restart         重启所有服务
 #   make hot-update      热更新本地部署容器源码 (不 pip、不重建镜像)
+#   make code-executor-enable  启用可信本地代码沙箱
+#   make code-executor-test    实际执行代码与产物 smoke
 #
 #   make migrate         运行数据库迁移 (自动跳过已执行的)
 #   make migrate-init    首次初始化数据库 schema
@@ -75,7 +77,7 @@ seed-demo-apply:            ## 写入本地 demo 数据 (仅用于开发/本地�
 
 # -- Deployment ---------------------------------------------------------------
 
-.PHONY: deploy deploy-build deploy-cn deploy-infra deploy-app stop logs restart status hot-update
+.PHONY: deploy deploy-build deploy-cn deploy-infra deploy-app stop logs restart status hot-update code-executor-enable code-executor-test code-executor-status code-executor-disable
 
 deploy:                     ## 部署全部服务 (启动+迁移+健康检查，不默认重建镜像)
 	@bash $(SCRIPTS)/deploy.sh --env "$(ENV_FILE)" $(ARGS)
@@ -106,6 +108,18 @@ status:                     ## 查看所有服务状态和健康检查
 
 hot-update:                 ## 热更新本地部署容器源码 (不 pip、不重建镜像)
 	@bash $(SCRIPTS)/hot-update.sh --env "$(ENV_FILE)" $(ARGS)
+
+code-executor-enable:       ## 启用可信本地代码沙箱（Docker Engine 权限，仅本机开发）
+	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/code-executor.sh enable
+
+code-executor-test:         ## 运行真实代码执行与文件产物 smoke
+	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/code-executor.sh test
+
+code-executor-status:       ## 查看本地代码沙箱状态
+	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/code-executor.sh status
+
+code-executor-disable:      ## 关闭本地代码沙箱并移除 Docker socket 挂载
+	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/code-executor.sh disable
 
 # -- Database Migrations ------------------------------------------------------
 

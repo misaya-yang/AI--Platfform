@@ -45,24 +45,25 @@ def _write_fake_runtime_commands(tmp_path: Path) -> Path:
     fake_docker = fake_bin / "docker"
     fake_docker.write_text(
         "#!/bin/sh\n"
-        "if [ \"$1\" = \"compose\" ]; then\n"
-        "  case \"$2\" in\n"
+        'if [ "$1" = "compose" ]; then\n'
+        '  case "$2" in\n'
         "    version) exit 0 ;;\n"
         "    --env-file) exit 0 ;;\n"
         "  esac\n"
         "fi\n"
-        "if [ \"$1\" = \"info\" ]; then exit 0; fi\n"
-        "if [ \"$1\" = \"ps\" ]; then echo ai-gateway-pg; exit 0; fi\n"
-        "if [ \"$1\" = \"exec\" ]; then\n"
-        "  case \"$*\" in\n"
+        'if [ "$1" = "info" ]; then exit 0; fi\n'
+        'if [ "$1" = "ps" ]; then echo ai-gateway-pg; exit 0; fi\n'
+        'if [ "$1" = "exec" ]; then\n'
+        '  case "$*" in\n'
         "    *redis-cli*) echo PONG; exit 0 ;;\n"
         "    *psql*)\n"
-        "      case \"$*\" in\n"
+        '      case "$*" in\n'
         "        *qwen3.7-plus*) printf '%s\\n' \"${FAKE_DEFAULT_QWEN37_COUNT:-1}\"; exit 0 ;;\n"
         "        *provider_id*) printf '%s\\n' \"$FAKE_ENABLED_MODEL_PROVIDERS\"; exit 0 ;;\n"
         "        *) echo 1; exit 0 ;;\n"
         "      esac\n"
         "      ;;\n"
+        "    *mcp_docgen_server*) exit 0 ;;\n"
         "    *curl*) exit 0 ;;\n"
         "  esac\n"
         "fi\n"
@@ -73,8 +74,8 @@ def _write_fake_runtime_commands(tmp_path: Path) -> Path:
     fake_curl = fake_bin / "curl"
     fake_curl.write_text(
         "#!/bin/sh\n"
-        "case \"$*\" in\n"
-        "  *\"/metrics\"*)\n"
+        'case "$*" in\n'
+        '  *"/metrics"*)\n'
         "    echo '# HELP gateway_up Gateway metrics endpoint availability'\n"
         "    echo '# TYPE gateway_up gauge'\n"
         "    echo 'gateway_up 1'\n"
@@ -204,8 +205,7 @@ def test_validate_env_rejects_non_release_application_image_tag(
     output = result.stdout + result.stderr
     assert result.returncode == 1, output
     assert (
-        "GATEWAY_IMAGE must use a full semantic release tag "
-        "(for example 2.0.0) or sha256 digest."
+        "GATEWAY_IMAGE must use a full semantic release tag (for example 2.0.0) or sha256 digest."
     ) in output
     assert secret not in output
     assert chat_key not in output
@@ -213,7 +213,7 @@ def test_validate_env_rejects_non_release_application_image_tag(
 
 def test_validate_env_example_mode_requires_public_env_shape(tmp_path: Path) -> None:
     example_text = re.sub(
-        r"^DOCGEN_ARTIFACT_SIGN_KEY=.*\n",
+        r"^ASSISTANT_AGENT_PLUGIN_DATA_ROOT=.*\n",
         "",
         Path(".env.example").read_text(),
         flags=re.MULTILINE,
@@ -222,7 +222,7 @@ def test_validate_env_example_mode_requires_public_env_shape(tmp_path: Path) -> 
 
     output = result.stdout + result.stderr
     assert result.returncode == 1, output
-    assert "DOCGEN_ARTIFACT_SIGN_KEY must be declared in the example env file" in output
+    assert "ASSISTANT_AGENT_PLUGIN_DATA_ROOT must be declared in the example env file" in output
     assert "change_me_generate_with_openssl" not in output
 
 
@@ -369,24 +369,6 @@ def test_validate_env_config_rejects_vertex_chat_key_without_vertex_backend(
     assert chat_key not in output
 
 
-def test_validate_env_config_requires_stable_docgen_artifact_sign_key(
-    tmp_path: Path,
-) -> None:
-    secret = secrets.token_hex(32)
-    chat_key = "test-chat-key"
-    env_text = _valid_env_text(
-        secret=secret,
-        chat_assignment=f"DASHSCOPE_API_KEY={chat_key}\nDOCGEN_ARTIFACT_SIGN_KEY=",
-    )
-    result = _run_validate_env(tmp_path, env_text, args=["--config-only"])
-
-    output = result.stdout + result.stderr
-    assert result.returncode == 1, output
-    assert "DOCGEN_ARTIFACT_SIGN_KEY must be set to a non-placeholder secret" in output
-    assert secret not in output
-    assert chat_key not in output
-
-
 def test_validate_env_skips_compose_when_required_config_is_invalid(
     tmp_path: Path,
 ) -> None:
@@ -423,7 +405,6 @@ def test_validate_env_infra_only_does_not_require_application_secrets(
     assert "Infrastructure configuration validation passed" in output
     assert "JWT_SECRET" not in output
     assert "GATEWAY_ASSISTANT_SHARED_SECRET" not in output
-    assert "DOCGEN_ARTIFACT_SIGN_KEY" not in output
     assert secret not in output
 
     script = Path("scripts/new/validate-env.sh").read_text()
@@ -441,10 +422,7 @@ def test_compose_keeps_internal_service_ports_private() -> None:
             '"127.0.0.1:${QDRANT_GRPC_PORT:-6334}:6334"',
         ],
         "tempo": ['"127.0.0.1:3200:3200"', '"127.0.0.1:4317:4317"'],
-        "knowledge-service": [
-            '"127.0.0.1:${KNOWLEDGE_SERVICE_PORT:-8092}:8092"'
-        ],
-        "mcp-docgen-server": ['"127.0.0.1:8765:8765"'],
+        "knowledge-service": ['"127.0.0.1:${KNOWLEDGE_SERVICE_PORT:-8092}:8092"'],
     }
 
     for service, bindings in private_bindings.items():
@@ -455,6 +433,8 @@ def test_compose_keeps_internal_service_ports_private() -> None:
     assistant = _compose_service_section(compose, "assistant-service")
     assert "\n    ports:" not in assistant
     assert '\n    expose:\n      - "8093"' in assistant
+    assert "\n  mcp-docgen-server:" not in compose
+    assert "8765" not in compose
 
 
 def test_validate_env_rejects_localhost_cors_for_non_local_auth_domain(
@@ -467,12 +447,6 @@ def test_validate_env_rejects_localhost_cors_for_non_local_auth_domain(
         chat_assignment=f"DASHSCOPE_API_KEY={chat_key}",
     )
     env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "myapp.test")
-    env_text = _set_env_value(
-        env_text,
-        "DOCGEN_PUBLIC_URL",
-        "https://docs.myapp.test",
-    )
-
     result = _run_validate_env(tmp_path, env_text, args=["--config-only"])
 
     output = result.stdout + result.stderr
@@ -533,8 +507,7 @@ def test_validate_env_rejects_non_http_cors_origin(
     output = result.stdout + result.stderr
     assert result.returncode == 1, output
     assert (
-        "ASSISTANT_CORS_ALLOW_ORIGINS_JSON must be a JSON array of explicit "
-        "http(s) origins."
+        "ASSISTANT_CORS_ALLOW_ORIGINS_JSON must be a JSON array of explicit http(s) origins."
     ) in output
     assert secret not in output
     assert chat_key not in output
@@ -550,11 +523,6 @@ def test_validate_env_rejects_http_cors_for_non_local_auth_domain(
         chat_assignment=f"DASHSCOPE_API_KEY={chat_key}",
     )
     env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "myapp.test")
-    env_text = _set_env_value(
-        env_text,
-        "DOCGEN_PUBLIC_URL",
-        "https://docs.myapp.test",
-    )
     env_text = _set_env_value(
         env_text,
         "KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON",
@@ -595,11 +563,6 @@ def test_validate_env_accepts_explicit_https_cors_for_non_local_auth_domain(
     env_text = _set_env_value(env_text, "VITE_AUTH_EMAIL_DOMAIN", "myapp.test")
     env_text = _set_env_value(
         env_text,
-        "DOCGEN_PUBLIC_URL",
-        "https://docs.myapp.test",
-    )
-    env_text = _set_env_value(
-        env_text,
         "KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON",
         '["https://ai.myapp.test"]',
     )
@@ -629,7 +592,6 @@ def test_validate_env_rejects_frontend_auth_domain_mismatch_for_non_local_auth_d
     )
     env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "myapp.test")
     env_text = _set_env_value(env_text, "VITE_AUTH_EMAIL_DOMAIN", "example.com")
-    env_text = _set_env_value(env_text, "DOCGEN_PUBLIC_URL", "https://docs.myapp.test")
     env_text = _set_env_value(
         env_text,
         "KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON",
@@ -665,7 +627,6 @@ def test_validate_env_rejects_example_support_email_for_non_local_auth_domain(
     env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "myapp.test")
     env_text = _set_env_value(env_text, "VITE_AUTH_EMAIL_DOMAIN", "myapp.test")
     env_text = _set_env_value(env_text, "VITE_SUPPORT_EMAIL", "admin@example.com")
-    env_text = _set_env_value(env_text, "DOCGEN_PUBLIC_URL", "https://docs.myapp.test")
     env_text = _set_env_value(
         env_text,
         "KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON",
@@ -682,79 +643,7 @@ def test_validate_env_rejects_example_support_email_for_non_local_auth_domain(
     output = result.stdout + result.stderr
     assert result.returncode == 1, output
     assert (
-        "VITE_SUPPORT_EMAIL must not use example.com when "
-        "AUTH_ALLOWED_EMAIL_DOMAIN is non-local."
-    ) in output
-    assert secret not in output
-    assert chat_key not in output
-
-
-def test_validate_env_rejects_local_docgen_public_url_for_non_local_auth_domain(
-    tmp_path: Path,
-) -> None:
-    secret = secrets.token_hex(32)
-    chat_key = "test-chat-key"
-    env_text = _valid_env_text(
-        secret=secret,
-        chat_assignment=f"DASHSCOPE_API_KEY={chat_key}",
-    )
-    env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "myapp.test")
-    env_text = _set_env_value(
-        env_text,
-        "KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON",
-        '["https://ai.myapp.test"]',
-    )
-    env_text = _set_env_value(
-        env_text,
-        "ASSISTANT_CORS_ALLOW_ORIGINS_JSON",
-        '["https://ai.myapp.test"]',
-    )
-
-    result = _run_validate_env(tmp_path, env_text, args=["--config-only"])
-
-    output = result.stdout + result.stderr
-    assert result.returncode == 1, output
-    assert (
-        "DOCGEN_PUBLIC_URL must not use localhost or loopback when "
-        "AUTH_ALLOWED_EMAIL_DOMAIN is non-local."
-    ) in output
-    assert secret not in output
-    assert chat_key not in output
-
-
-def test_validate_env_rejects_http_docgen_public_url_for_non_local_auth_domain(
-    tmp_path: Path,
-) -> None:
-    secret = secrets.token_hex(32)
-    chat_key = "test-chat-key"
-    env_text = _valid_env_text(
-        secret=secret,
-        chat_assignment=f"DASHSCOPE_API_KEY={chat_key}",
-    )
-    env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "myapp.test")
-    env_text = _set_env_value(
-        env_text,
-        "DOCGEN_PUBLIC_URL",
-        "http://docs.myapp.test",
-    )
-    env_text = _set_env_value(
-        env_text,
-        "KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON",
-        '["https://ai.myapp.test"]',
-    )
-    env_text = _set_env_value(
-        env_text,
-        "ASSISTANT_CORS_ALLOW_ORIGINS_JSON",
-        '["https://ai.myapp.test"]',
-    )
-
-    result = _run_validate_env(tmp_path, env_text, args=["--config-only"])
-
-    output = result.stdout + result.stderr
-    assert result.returncode == 1, output
-    assert (
-        "DOCGEN_PUBLIC_URL must use https:// when "
-        "AUTH_ALLOWED_EMAIL_DOMAIN is non-local."
+        "VITE_SUPPORT_EMAIL must not use example.com when AUTH_ALLOWED_EMAIL_DOMAIN is non-local."
     ) in output
     assert secret not in output
     assert chat_key not in output
@@ -770,7 +659,6 @@ def test_validate_env_rejects_http_frontend_runtime_url_for_non_local_auth_domai
         chat_assignment=f"DASHSCOPE_API_KEY={chat_key}",
     )
     env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "myapp.test")
-    env_text = _set_env_value(env_text, "DOCGEN_PUBLIC_URL", "https://docs.myapp.test")
     env_text = _set_env_value(env_text, "VITE_API_URL", "http://api.myapp.test")
     env_text = _set_env_value(env_text, "VITE_API_BASE_URL", "http://api.myapp.test")
     env_text = _set_env_value(
@@ -819,7 +707,6 @@ def test_validate_env_rejects_local_frontend_runtime_url_for_non_local_auth_doma
         chat_assignment=f"DASHSCOPE_API_KEY={chat_key}",
     )
     env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "myapp.test")
-    env_text = _set_env_value(env_text, "DOCGEN_PUBLIC_URL", "https://docs.myapp.test")
     env_text = _set_env_value(env_text, "VITE_API_URL", "http://localhost:8080")
     env_text = _set_env_value(env_text, "VITE_API_BASE_URL", "https://[::1]:8080")
     env_text = _set_env_value(
@@ -873,7 +760,6 @@ def test_validate_env_accepts_same_origin_frontend_runtime_paths_for_non_local_a
     )
     env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "myapp.test")
     env_text = _set_env_value(env_text, "VITE_AUTH_EMAIL_DOMAIN", "myapp.test")
-    env_text = _set_env_value(env_text, "DOCGEN_PUBLIC_URL", "https://docs.myapp.test")
     env_text = _set_env_value(env_text, "VITE_API_URL", "/api")
     env_text = _set_env_value(env_text, "VITE_API_BASE_URL", "/api/v1")
     env_text = _set_env_value(env_text, "VITE_TELEMETRY_ENDPOINT", "/telemetry")
@@ -906,7 +792,6 @@ def test_validate_env_infra_only_ignores_missing_app_only_compose_vars(
         "DEFAULT_USER_PASSWORD",
         "JWT_SECRET",
         "GATEWAY_ASSISTANT_SHARED_SECRET",
-        "DOCGEN_ARTIFACT_SIGN_KEY",
         "AUTH_ALLOWED_EMAIL_DOMAIN",
     ]:
         env_text = re.sub(rf"^{key}=.*\n?", "", env_text, flags=re.MULTILINE)
@@ -978,17 +863,15 @@ def test_deploy_app_includes_application_microservices() -> None:
         "frontend",
         "knowledge-service",
         "assistant-service",
-        "mcp-docgen-server",
     }.issubset(services)
+    assert "mcp-docgen-server" not in services
 
 
 def test_deploy_pull_uses_selected_service_scope() -> None:
     script = Path("scripts/new/deploy.sh").read_text()
 
-    assert script.index("# -- Determine services to deploy") < script.index(
-        "# -- Pull base images"
-    )
-    assert re.search(r'pull \$SERVICES\b', script)
+    assert script.index("# -- Determine services to deploy") < script.index("# -- Pull base images")
+    assert re.search(r"pull \$SERVICES\b", script)
 
 
 def test_deploy_rejects_infra_and_app_together() -> None:
@@ -1028,14 +911,11 @@ def test_validate_runtime_checks_gateway_metrics_endpoint() -> None:
     status = Path("scripts/new/status.sh").read_text()
 
     assert "check_gateway_metrics()" in common
-    assert 'http://localhost:${GATEWAY_PORT:-8080}/metrics' in common
+    assert "http://localhost:${GATEWAY_PORT:-8080}/metrics" in common
     assert "grep -Eq '^# HELP |^# TYPE '" in common
     assert "grep -Eq '^gateway_up($|[ {])'" in common
     assert '[ -z "$body" ] && return 0' not in common
-    assert (
-        'wait_for_healthy "Gateway metrics endpoint" "check_gateway_metrics" 60'
-        in validate
-    )
+    assert 'wait_for_healthy "Gateway metrics endpoint" "check_gateway_metrics" 60' in validate
     assert 'fail "Gateway metrics check failed."' in validate
     assert 'check_and_report "Gateway metrics" check_gateway_metrics' in status
 
@@ -1046,12 +926,12 @@ def test_gateway_metrics_helper_requires_gateway_up_metric(tmp_path: Path) -> No
     fake_curl = fake_bin / "curl"
     fake_curl.write_text(
         "#!/bin/sh\n"
-        "case \"$METRICS_CASE\" in\n"
+        'case "$METRICS_CASE" in\n'
         "  empty) exit 0 ;;\n"
         "  generic) echo '# HELP other_metric Other'; echo 'other_metric 1'; exit 0 ;;\n"
         "  gateway) echo '# HELP gateway_up Gateway metrics endpoint availability'; echo 'gateway_up 1'; exit 0 ;;\n"
         "  protected)\n"
-        "    case \"$*\" in\n"
+        '    case "$*" in\n'
         "      *\"%{http_code}\"*) printf '403'; exit 0 ;;\n"
         "      *) exit 22 ;;\n"
         "    esac\n"
@@ -1091,9 +971,10 @@ def test_gateway_metrics_helper_requires_gateway_up_metric(tmp_path: Path) -> No
 def test_runtime_checks_microservice_readiness_not_only_liveness() -> None:
     common = Path("scripts/new/common.sh").read_text()
 
-    assert 'http://127.0.0.1:8092/health/ready' in common
-    assert 'http://127.0.0.1:8093/health/ready' in common
-    assert 'http://127.0.0.1:8765/health" &>/dev/null' in common
+    assert "http://127.0.0.1:8092/health/ready" in common
+    assert "http://127.0.0.1:8093/health/ready" in common
+    assert '"mcp_docgen_server" in p.read_bytes().decode' in common
+    assert "127.0.0.1:8765" not in common
     assert 'http://127.0.0.1:8092/health" &>/dev/null' not in common
     assert 'http://127.0.0.1:8093/health" &>/dev/null' not in common
 
@@ -1108,29 +989,27 @@ def test_migrate_auto_stops_on_failed_pending_migration(tmp_path: Path) -> None:
     (script_dir / "common.sh").write_text(
         "#!/bin/bash\n"
         "set -euo pipefail\n"
-        "SCRIPT_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}\")\" && pwd)\"\n"
-        "PROJECT_ROOT=\"$(cd \"$SCRIPT_DIR/../..\" && pwd)\"\n"
-        "log_info() { echo \"[INFO] $1\"; }\n"
-        "log_success() { echo \"[OK] $1\"; }\n"
-        "log_warn() { echo \"[WARN] $1\"; }\n"
-        "log_error() { echo \"[ERROR] $1\"; }\n"
-        "log_step() { echo \"=> $1\"; }\n"
+        'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}")" && pwd)"\n'
+        'PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"\n'
+        'log_info() { echo "[INFO] $1"; }\n'
+        'log_success() { echo "[OK] $1"; }\n'
+        'log_warn() { echo "[WARN] $1"; }\n'
+        'log_error() { echo "[ERROR] $1"; }\n'
+        'log_step() { echo "=> $1"; }\n'
         "load_env() { :; }\n"
         "run_sql() {\n"
-        "  case \"$1\" in\n"
+        '  case "$1" in\n'
         "    *\"to_regclass('public.datasets')\"*) echo present ;;\n"
         "  esac\n"
         "}\n"
         "run_sql_file() {\n"
-        "  case \"$1\" in\n"
-        "    *001_bad.sql) echo \"ERROR: simulated migration failure\"; return 1 ;;\n"
-        "    *) echo \"CREATE TABLE\" ;;\n"
+        '  case "$1" in\n'
+        '    *001_bad.sql) echo "ERROR: simulated migration failure"; return 1 ;;\n'
+        '    *) echo "CREATE TABLE" ;;\n'
         "  esac\n"
         "}\n"
     )
-    (tmp_path / "database" / "migrations" / "001_bad.sql").write_text(
-        "SELECT broken;\n"
-    )
+    (tmp_path / "database" / "migrations" / "001_bad.sql").write_text("SELECT broken;\n")
 
     result = subprocess.run(
         ["bash", str(migrate_script), "--auto"],
@@ -1163,22 +1042,22 @@ def test_migrate_auto_initializes_base_schema_before_pending_migrations(
     (script_dir / "common.sh").write_text(
         "#!/bin/bash\n"
         "set -euo pipefail\n"
-        "SCRIPT_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}\")\" && pwd)\"\n"
-        "PROJECT_ROOT=\"$(cd \"$SCRIPT_DIR/../..\" && pwd)\"\n"
-        "log_info() { echo \"[INFO] $1\"; }\n"
-        "log_success() { echo \"[OK] $1\"; }\n"
-        "log_warn() { echo \"[WARN] $1\"; }\n"
-        "log_error() { echo \"[ERROR] $1\"; }\n"
-        "log_step() { echo \"=> $1\"; }\n"
+        'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}")" && pwd)"\n'
+        'PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"\n'
+        'log_info() { echo "[INFO] $1"; }\n'
+        'log_success() { echo "[OK] $1"; }\n'
+        'log_warn() { echo "[WARN] $1"; }\n'
+        'log_error() { echo "[ERROR] $1"; }\n'
+        'log_step() { echo "=> $1"; }\n'
         "load_env() { :; }\n"
         "run_sql() {\n"
-        "  case \"$1\" in\n"
+        '  case "$1" in\n'
         "    *\"to_regclass('public.datasets')\"*) echo missing ;;\n"
         "  esac\n"
         "}\n"
         "run_sql_file() {\n"
-        "  printf '%s\\n' \"$1\" >> \"$RUN_SQL_FILE_LOG\"\n"
-        "  echo \"CREATE TABLE\"\n"
+        '  printf \'%s\\n\' "$1" >> "$RUN_SQL_FILE_LOG"\n'
+        '  echo "CREATE TABLE"\n'
         "}\n"
     )
 
@@ -1213,18 +1092,18 @@ def test_migrate_init_handles_long_schema_output_without_pipefail_sigpipe(
     (script_dir / "common.sh").write_text(
         "#!/bin/bash\n"
         "set -euo pipefail\n"
-        "SCRIPT_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}\")\" && pwd)\"\n"
-        "PROJECT_ROOT=\"$(cd \"$SCRIPT_DIR/../..\" && pwd)\"\n"
-        "log_info() { echo \"[INFO] $1\"; }\n"
-        "log_success() { echo \"[OK] $1\"; }\n"
-        "log_warn() { echo \"[WARN] $1\"; }\n"
-        "log_error() { echo \"[ERROR] $1\"; }\n"
-        "log_step() { echo \"=> $1\"; }\n"
+        'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}")" && pwd)"\n'
+        'PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"\n'
+        'log_info() { echo "[INFO] $1"; }\n'
+        'log_success() { echo "[OK] $1"; }\n'
+        'log_warn() { echo "[WARN] $1"; }\n'
+        'log_error() { echo "[ERROR] $1"; }\n'
+        'log_step() { echo "=> $1"; }\n'
         "load_env() { :; }\n"
         "run_sql() { :; }\n"
         "run_sql_file() {\n"
         "  for i in $(seq 1 200000); do\n"
-        "    echo \"CREATE TABLE t_$i\"\n"
+        '    echo "CREATE TABLE t_$i"\n'
         "  done\n"
         "}\n"
     )
@@ -1255,7 +1134,7 @@ def test_backup_restore_uses_env_file_and_stops_on_first_psql_error() -> None:
     script = Path("scripts/new/backup.sh").read_text()
 
     assert "--env FILE          Use a specific env file instead of .env" in script
-    assert '--env)' in script
+    assert "--env)" in script
     assert 'log_error "--env requires a file path"' in script
     assert 'ENV_FILE="$2"; shift 2 ;;' in script
     assert script.index("require_env_file") < script.index(
@@ -1274,12 +1153,12 @@ def test_backup_missing_env_does_not_create_backup_directory(tmp_path: Path) -> 
     (script_dir / "common.sh").write_text(
         "#!/bin/bash\n"
         "set -euo pipefail\n"
-        "SCRIPT_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}\")\" && pwd)\"\n"
-        "PROJECT_ROOT=\"$(cd \"$SCRIPT_DIR/../..\" && pwd)\"\n"
-        "DEFAULT_ENV_FILE=\"$PROJECT_ROOT/.env\"\n"
-        "ENV_FILE=\"${ENV_FILE:-$DEFAULT_ENV_FILE}\"\n"
-        "log_error() { echo \"[ERROR] $1\"; }\n"
-        "require_env_file() { [ -f \"$ENV_FILE\" ] || { log_error \"Env file not found: $ENV_FILE\"; exit 1; }; }\n"
+        'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}")" && pwd)"\n'
+        'PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"\n'
+        'DEFAULT_ENV_FILE="$PROJECT_ROOT/.env"\n'
+        'ENV_FILE="${ENV_FILE:-$DEFAULT_ENV_FILE}"\n'
+        'log_error() { echo "[ERROR] $1"; }\n'
+        'require_env_file() { [ -f "$ENV_FILE" ] || { log_error "Env file not found: $ENV_FILE"; exit 1; }; }\n'
         "load_env() { :; }\n"
     )
 
@@ -1328,7 +1207,7 @@ def test_deploy_script_accepts_and_forwards_env_file() -> None:
     script = Path("scripts/new/deploy.sh").read_text()
 
     assert "--env FILE   Use a specific env file instead of .env" in script
-    assert '--env)' in script
+    assert "--env)" in script
     assert 'log_error "--env requires a file path"' in script
     assert 'ENV_FILE="$2"; shift 2 ;;' in script
     assert 'validate-env.sh" --env "$ENV_FILE" --config-only' in script
@@ -1401,7 +1280,7 @@ def test_migrate_script_accepts_env_file() -> None:
     script = Path("scripts/new/migrate.sh").read_text()
 
     assert "--env FILE   Use a specific env file instead of .env" in script
-    assert '--env)' in script
+    assert "--env)" in script
     assert 'log_error "--env requires a file path"' in script
     assert 'ENV_FILE="$2"; shift 2 ;;' in script
     assert script.index('ENV_FILE="$2"; shift 2 ;;') < script.index("load_env")
@@ -1466,7 +1345,9 @@ def test_make_targets_forward_env_file() -> None:
     assert 'init-env.sh --env "$(ENV_FILE)" --if-missing' in makefile
     assert 'deploy.sh --env "$(ENV_FILE)" --pull' in makefile
     assert 'deploy.sh --env "$(ENV_FILE)" --build' in makefile
-    assert "BUILD_COMPOSE := $(COMPOSE) -f docker-compose.yml -f docker-compose.build.yml" in makefile
+    assert (
+        "BUILD_COMPOSE := $(COMPOSE) -f docker-compose.yml -f docker-compose.build.yml" in makefile
+    )
     assert '@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/status.sh' in makefile
     assert '@bash $(SCRIPTS)/migrate.sh --env "$(ENV_FILE)"' in makefile
     assert '@bash $(SCRIPTS)/deploy.sh --env "$(ENV_FILE)" $(ARGS)' in makefile
@@ -1487,9 +1368,7 @@ def test_quickstart_runs_migrations_before_runtime_validation() -> None:
         flags=re.MULTILINE | re.DOTALL,
     )
     assert quickstart
-    assert quickstart.group(0).index("init-env.sh") < quickstart.group(0).index(
-        "deploy.sh"
-    )
+    assert quickstart.group(0).index("init-env.sh") < quickstart.group(0).index("deploy.sh")
     assert "--pull" in quickstart.group(0)
     assert "--build" not in quickstart.group(0)
 
@@ -1512,16 +1391,16 @@ def test_status_script_uses_selected_env_file_for_compose_ps(tmp_path: Path) -> 
     fake_docker = fake_bin / "docker"
     fake_docker.write_text(
         "#!/bin/sh\n"
-        "printf '%s\\n' \"$*\" >> \"$DOCKER_CALL_LOG\"\n"
-        "if [ \"$1\" = \"compose\" ]; then\n"
-        "  if [ \"$2\" = \"version\" ]; then exit 0; fi\n"
-        "  if [ \"$2\" = \"--env-file\" ] && [ \"$3\" = \"$EXPECTED_ENV_FILE\" ] && [ \"$4\" = \"ps\" ]; then\n"
-        "    echo \"compose ps used selected env file\"\n"
+        'printf \'%s\\n\' "$*" >> "$DOCKER_CALL_LOG"\n'
+        'if [ "$1" = "compose" ]; then\n'
+        '  if [ "$2" = "version" ]; then exit 0; fi\n'
+        '  if [ "$2" = "--env-file" ] && [ "$3" = "$EXPECTED_ENV_FILE" ] && [ "$4" = "ps" ]; then\n'
+        '    echo "compose ps used selected env file"\n'
         "    exit 0\n"
         "  fi\n"
         "fi\n"
-        "if [ \"$1\" = \"exec\" ]; then exit 0; fi\n"
-        "if [ \"$1\" = \"inspect\" ]; then echo healthy; exit 0; fi\n"
+        'if [ "$1" = "exec" ]; then exit 0; fi\n'
+        'if [ "$1" = "inspect" ]; then echo healthy; exit 0; fi\n'
         "exit 1\n"
     )
     fake_docker.chmod(fake_docker.stat().st_mode | stat.S_IXUSR)
@@ -1529,7 +1408,7 @@ def test_status_script_uses_selected_env_file_for_compose_ps(tmp_path: Path) -> 
     fake_curl = fake_bin / "curl"
     fake_curl.write_text(
         "#!/bin/sh\n"
-        "case \"$*\" in\n"
+        'case "$*" in\n'
         "  *\"/metrics\"*) echo '# HELP gateway_up Gateway metrics endpoint availability'; echo 'gateway_up 1'; exit 0 ;;\n"
         "  *) exit 0 ;;\n"
         "esac\n"
@@ -1567,9 +1446,9 @@ def test_status_script_exits_nonzero_when_health_checks_fail(tmp_path: Path) -> 
     fake_docker = fake_bin / "docker"
     fake_docker.write_text(
         "#!/bin/sh\n"
-        "if [ \"$1\" = \"compose\" ]; then\n"
-        "  if [ \"$2\" = \"version\" ]; then exit 0; fi\n"
-        "  if [ \"$2\" = \"--env-file\" ]; then echo \"compose ps\"; exit 0; fi\n"
+        'if [ "$1" = "compose" ]; then\n'
+        '  if [ "$2" = "version" ]; then exit 0; fi\n'
+        '  if [ "$2" = "--env-file" ]; then echo "compose ps"; exit 0; fi\n'
         "fi\n"
         "exit 1\n"
     )

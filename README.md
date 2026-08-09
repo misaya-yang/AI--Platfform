@@ -12,7 +12,6 @@ The default Docker setup is intended for a local first run. `make quickstart` ge
 | Gateway | Public API, auth, proxy, sessions | `http://localhost:8080` |
 | Assistant service | General AI assistant runtime | Internal: `http://assistant-service:8093` |
 | Knowledge service | KB CRUD, document ingestion, retrieval | `http://localhost:8092` |
-| MCP docgen server | Document generation tool server | `http://localhost:8765` |
 | PostgreSQL | Primary relational database | `127.0.0.1:5432` |
 | Redis | Cache, sessions, queues | `127.0.0.1:6379` |
 | Qdrant | Vector database | `127.0.0.1:6333` |
@@ -46,7 +45,7 @@ make quickstart
 ```
 
 The initializer creates `.env` with mode `0600` and generates PostgreSQL,
-Redis, JWT, service-HMAC, provider-encryption, artifact-signing, and bootstrap-admin secrets without
+Redis, JWT, service-HMAC, provider-encryption, and bootstrap-admin secrets without
 printing their values. The same DashScope key is used for Qwen chat,
 `text-embedding-v4`, and document generation unless you explicitly configure a
 dedicated provider key. Never commit `.env`; only `.env.example` is public.
@@ -75,14 +74,13 @@ Generated automatically for local quickstart:
 - `JWT_SECRET`
 - `GATEWAY_ASSISTANT_SHARED_SECRET`
 - `GATEWAY_ENCRYPTION_KEY`
-- `DOCGEN_ARTIFACT_SIGN_KEY`
 - `DEFAULT_USER_PASSWORD`
 
 Optional overrides remain available for custom providers, dedicated embedding
 credentials, ports, image references, and production scaling. Published image
 references use immutable `2.0.0` tags by default and can be replaced through
-`GATEWAY_IMAGE`, `FRONTEND_IMAGE`, `ASSISTANT_IMAGE`, `KNOWLEDGE_IMAGE`,
-`DOCGEN_IMAGE`, and `MIGRATE_IMAGE`.
+`GATEWAY_IMAGE`, `FRONTEND_IMAGE`, `ASSISTANT_IMAGE`, `KNOWLEDGE_IMAGE`, and
+`MIGRATE_IMAGE`.
 
 3. Validate an existing configuration without starting containers:
 
@@ -239,7 +237,6 @@ The compose file wires services through Docker DNS names:
 - Gateway/assistant to knowledge service: `KB_SERVICE_URL=http://knowledge-service:8092`
 - Knowledge service to Qdrant: `http://qdrant:6333`
 - Gateway/assistant/knowledge to PostgreSQL and Redis through internal service names
-- MCP docgen server uses the internal alias `mcp-docgen-server.internal`
 
 Gateway-to-assistant and gateway-to-knowledge requests are protected by `GATEWAY_ASSISTANT_SHARED_SECRET` HMAC verification. Use the same value across gateway, assistant service, and knowledge service.
 
@@ -287,9 +284,6 @@ For shared or non-local deployments, replace those localhost origins with the
 actual `https://` frontend origin. `make validate-config` rejects missing CORS
 values, wildcard origins, non-HTTP origins, and localhost origins once
 `AUTH_ALLOWED_EMAIL_DOMAIN` is no longer the local `example.com` default.
-For the same non-local deployment mode, `DOCGEN_PUBLIC_URL` must not point at
-localhost or loopback and must use `https://`, because generated artifact links
-are opened by users' browsers.
 If you set `VITE_API_URL` or `VITE_API_BASE_URL`, use a same-origin path such as
 `/api` or an `https://` URL for non-local deployments; localhost and `http://`
 absolute API URLs are rejected once `AUTH_ALLOWED_EMAIL_DOMAIN` is non-local.
@@ -324,7 +318,9 @@ Provider notes:
 
 The assistant service is private to the Docker network. Public assistant traffic should go through the gateway/frontend path.
 
-Set at least one chat provider key in `.env`. The runtime currently passes these provider variables through to gateway, assistant service, and docgen where relevant:
+Set at least one chat provider key in `.env`. The runtime passes these provider
+variables to the gateway and Assistant where relevant. The bundled docgen child
+receives only its code-owned allowlist:
 
 - `DASHSCOPE_API_KEY`
 - `DASHSCOPE_CHAT_API_KEY`
@@ -339,13 +335,16 @@ Set at least one chat provider key in `.env`. The runtime currently passes these
 
 ### Agent Plugins 1.0.0
 
-The Assistant implements the portable Agent Plugins 1.0.0 loading contract in
-skills-only mode. It recognizes the canonical local schema identifier, reads a
-root `plugin.json`, and discovers immediate `skills/*/SKILL.md` children. It
-does not download schemas at runtime, recursively scan arbitrary paths, execute
-bundled scripts, honor a plugin's self-declared tool permissions, or start
-`mcp.json`. Invalid skills are isolated from valid sibling skills, while a
-fatal manifest error rejects the plugin before discovery.
+The Assistant implements portable Agent Plugins 1.0.0 Skills plus trusted stdio
+and Streamable HTTP MCP components. It recognizes the canonical local schema identifiers,
+reads root `plugin.json` and `mcp.json`, and discovers immediate
+`skills/*/SKILL.md` children. It does not download schemas at runtime,
+recursively scan arbitrary paths, execute untrusted subprocesses, or honor a plugin's
+self-declared tool permissions. Invalid skills and MCP server entries are
+isolated from valid siblings, while a fatal manifest error rejects the plugin
+before discovery. Local `stdio` execution is limited to operator-trusted plugin
+identities, uses a minimal code-owned environment allowlist, and confines local
+artifact imports to the plugin data directory. Legacy MCP `sse` remains unsupported.
 
 Validate a package without executing it:
 
@@ -353,29 +352,64 @@ Validate a package without executing it:
 uv run python scripts/validate_agent_plugin.py /path/to/plugin
 ```
 
-Platform operators can canary one or more local packages by enabling Skills
-and listing plugin roots with the operating system path separator:
+The bundled `agent-plugins/ai-docgen` package is enabled by default in Compose.
+Its stdio MCP executable and document dependencies ship inside the Assistant
+image, so document generation requires no second application image, service,
+port, or signed-download endpoint. Generated files are imported directly into
+the Assistant artifact store. The legacy in-process generators remain a
+startup fallback when the plugin handshake fails. Operators can install other
+packages by listing plugin roots with the operating system path separator:
 
 ```env
 ASSISTANT_RUNTIME_SKILLS=true
-ASSISTANT_AGENT_PLUGIN_PATHS=/opt/agent-plugins/acme-tools
+ASSISTANT_AGENT_PLUGIN_PATHS=/opt/agent-plugins/ai-docgen:/opt/operator-plugins/acme-tools
+ASSISTANT_AGENT_PLUGIN_DATA_ROOT=/app/data/agent-plugins
+ASSISTANT_TRUSTED_AGENT_PLUGINS=ai-docgen@1.0.0
+ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS=/opt/agent-plugins/ai-docgen
 ```
 
-For Docker, mount the parent directory read-only with a local Compose override;
-the configured paths are paths inside the Assistant container:
+The bundled package is copied into the Assistant image. For additional Docker
+plugins, mount an operator-controlled directory read-only and use container
+paths in `ASSISTANT_AGENT_PLUGIN_PATHS`:
 
 ```yaml
 services:
   assistant-service:
     volumes:
-      - ./agent-plugins:/opt/agent-plugins:ro
+      - ./operator-plugins:/opt/operator-plugins:ro
 ```
 
-The feature remains off by default. Agent Plugins v1 explicitly permits
-skills-only conformant clients; portable MCP startup is intentionally deferred
-until plugin installation, credential, consent, and subprocess sandbox policy
-are implemented. Existing administrator-managed MCP configuration remains a
-separate trust boundary.
+Plugin paths are an operator installation boundary. Portable packages cannot
+grant themselves credentials, static read/write classifications, or tenant
+permissions. A remote package URL must follow the Agent Plugins TLS/loopback
+rules. Only built-in plugin identities explicitly listed in
+`ASSISTANT_TRUSTED_AGENT_PLUGINS` and loaded from a canonical root listed in
+`ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS` may receive platform-owned
+unattended/default-tenant policy. Third-party plugins remain
+confirmation-gated and require tenant enablement; copying a trusted package
+identity at a different path does not grant stdio execution or a low-risk
+policy.
+
+### Trusted local code sandbox
+
+The default quickstart does not grant the Assistant access to the host Docker
+Engine. Maintainers can enable real Python execution explicitly:
+
+```bash
+make code-executor-enable
+make code-executor-test
+```
+
+The overlay runs submitted code in a separate child container with networking
+disabled, all Linux capabilities dropped, privilege escalation disabled,
+bounded CPU/memory/PIDs, a read-only root filesystem, and an execution-scoped
+workspace. It uses `runsc` when the host provides gVisor; Docker Desktop falls
+back to hardened `runc` and is intended only for trusted local development.
+Disable the feature and remove the Docker socket mount with:
+
+```bash
+make code-executor-disable
+```
 
 ## Database and Qdrant Notes
 
@@ -458,3 +492,9 @@ GATEWAY_ANONYMOUS__TTL_DAYS=30
 GATEWAY_SESSION__ANONYMOUS_TTL_SECONDS=86400
 GATEWAY_SESSION__AUTHENTICATED_TTL_SECONDS=604800
 ```
+
+## For agents
+
+Read `AGENTS.md` before changing the repository. For the current Assistant × KB
+session checkpoint, verified evidence boundaries, and continuation prompt, see
+`HANDOFF.md`; re-check live Git and runtime state before relying on the snapshot.

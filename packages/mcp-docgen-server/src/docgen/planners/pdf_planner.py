@@ -8,14 +8,20 @@ one-pager / report / proposal.
 from __future__ import annotations
 
 import json
+import logging
 import time
-from typing import Optional
 
 from ..ir import HeadingBlock, ParagraphBlock, PdfContent, PdfIR, PdfPage
 from ..ir.pdf import PdfCover
-from .base import BasePlanner, Brief, PlannerResult, metadata_for_brief, parse_markdown_to_blocks, theme_for_brief
+from .base import (
+    BasePlanner,
+    Brief,
+    PlannerResult,
+    metadata_for_brief,
+    parse_markdown_to_blocks,
+    theme_for_brief,
+)
 from .docx_planner import LLMCaller
-
 
 SYSTEM_PROMPT = """You are a technical writer producing a PDF document.
 
@@ -42,25 +48,46 @@ Absolute rules:
 """
 
 
-_COVER_KEYWORDS = ("report", "proposal", "plan", "brief", "memo", "review", "whitepaper", "one-pager")
+_COVER_KEYWORDS = (
+    "report",
+    "proposal",
+    "plan",
+    "brief",
+    "memo",
+    "review",
+    "whitepaper",
+    "one-pager",
+)
 
 
 class PdfPlanner(BasePlanner):
     doc_type = "pdf"
 
-    def __init__(self, llm: Optional[LLMCaller] = None) -> None:
+    def __init__(self, llm: LLMCaller | None = None) -> None:
         self._llm = llm
 
     async def plan(self, brief: Brief) -> PlannerResult:
         started = time.perf_counter()
+        used_llm = False
+        ir: PdfIR | None = None
         if self._llm is not None:
-            ir = await self._plan_with_llm(brief)
-            used_llm = True
-        else:
+            try:
+                ir = await self._plan_with_llm(brief)
+                used_llm = True
+            except Exception as exc:  # noqa: BLE001
+                logging.getLogger(__name__).warning(
+                    "PdfPlanner LLM path failed (%s); falling back to deterministic",
+                    type(exc).__name__,
+                )
+        if ir is None:
             ir = self._plan_deterministic(brief)
-            used_llm = False
         outline = self._outline(ir)
-        return PlannerResult(ir=ir, plan_text=outline, used_llm=used_llm, duration_ms=int((time.perf_counter() - started) * 1000))
+        return PlannerResult(
+            ir=ir,
+            plan_text=outline,
+            used_llm=used_llm,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+        )
 
     # ------------------------------------------------------------------ LLM
 

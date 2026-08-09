@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -17,6 +20,7 @@ from assistant_service.core.mcp.client import (
     MCPClient,
     MCPError,
     MCPServerConfig,
+    MCPStdioClient,
     MCPTool,
     MCPToolResult,
 )
@@ -63,6 +67,122 @@ def _config(
         origin="https://studio.example",
         dns_resolver=_resolver,
     )
+
+
+@pytest.mark.asyncio
+async def test_trusted_stdio_client_launches_with_minimal_env_and_imports_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin_root = tmp_path / "plugin"
+    plugin_data = tmp_path / "data"
+    plugin_root.mkdir()
+    plugin_data.mkdir()
+    server_script = plugin_root / "server.py"
+    server_script.write_text(
+        """
+import json
+import os
+import pathlib
+import sys
+
+for line in sys.stdin:
+    request = json.loads(line)
+    request_id = request.get("id")
+    if request_id is None:
+        continue
+    method = request.get("method")
+    if method == "initialize":
+        result = {
+            "protocolVersion": "2025-11-25",
+            "serverInfo": {"name": "fake-stdio", "version": "1"},
+        }
+    elif method == "tools/list":
+        result = {
+            "tools": [{
+                "name": "generate_document",
+                "description": "Generate",
+                "inputSchema": {"type": "object", "properties": {}},
+            }]
+        }
+    else:
+        target = pathlib.Path(os.environ["TEST_DATA"]) / "artifacts" / "report.docx"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"PK\\x03\\x04stdio")
+        result = {
+            "content": [
+                {"type": "text", "text": json.dumps({
+                    "unrelated_secret_visible": "UNRELATED_SECRET" in os.environ,
+                })},
+                {"type": "resource_link", "uri": target.resolve().as_uri(), "name": target.name},
+            ],
+            "isError": False,
+        }
+    print(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}), flush=True)
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("UNRELATED_SECRET", "must-not-cross-process-boundary")
+    config = MCPServerConfig(
+        name="fake",
+        transport="stdio",
+        platform_managed=True,
+        command=sys.executable,
+        args=(str(server_script),),
+        process_env={"TEST_DATA": str(plugin_data)},
+        cwd=str(plugin_data),
+        plugin_root=str(plugin_root),
+        plugin_data_dir=str(plugin_data),
+    )
+    client = MCPStdioClient(config)
+    try:
+        await client.initialize()
+        tools = await client.list_tools()
+        result = await client.call_tool("generate_document", {})
+        summary = json.loads(result.content[0]["text"])
+        body, mime_type = await client.download_resource_link(result.content[1]["uri"])
+        outside = tmp_path / "outside.docx"
+        outside.write_bytes(b"outside")
+        with pytest.raises(MCPError) as caught:
+            await client.download_resource_link(outside.resolve().as_uri())
+    finally:
+        await client.close()
+
+    assert [tool.name for tool in tools] == ["generate_document"]
+    assert summary["unrelated_secret_visible"] is False
+    assert body == b"PK\x03\x04stdio"
+    assert mime_type.endswith("wordprocessingml.document")
+    assert caught.value.stable_code == "MCP_RESOURCE_PATH_BLOCKED"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation may require Windows privileges")
+@pytest.mark.asyncio
+async def test_stdio_client_rejects_symlinked_cwd_escape(tmp_path: Path) -> None:
+    plugin_root = tmp_path / "plugin"
+    plugin_data = tmp_path / "data"
+    outside = tmp_path / "outside"
+    plugin_root.mkdir()
+    plugin_data.mkdir()
+    outside.mkdir()
+    escaped_cwd = plugin_data / "work"
+    escaped_cwd.symlink_to(outside, target_is_directory=True)
+    client = MCPStdioClient(
+        MCPServerConfig(
+            name="fake",
+            transport="stdio",
+            platform_managed=True,
+            command=sys.executable,
+            args=("-c", "raise SystemExit('must not launch')"),
+            cwd=str(escaped_cwd),
+            plugin_root=str(plugin_root),
+            plugin_data_dir=str(plugin_data),
+        )
+    )
+
+    with pytest.raises(MCPError) as caught:
+        await client.initialize()
+
+    assert caught.value.stable_code == "MCP_STDIO_CWD_OUTSIDE_PLUGIN"
 
 
 @pytest.mark.asyncio
@@ -130,6 +250,144 @@ async def test_streamable_http_no_auth_bearer_and_oauth_paths(
     expected = f"Bearer {token}" if token else None
     assert requests[0].headers.get("Authorization") == expected
     assert all(request.headers["Origin"] == "https://studio.example" for request in requests)
+
+
+@pytest.mark.asyncio
+async def test_client_generated_headers_override_plugin_headers_case_insensitively() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        payload = json.loads(request.content or b"{}")
+        if "id" not in payload:
+            return httpx.Response(202, headers={"Mcp-Session-Id": "session-1"})
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": payload["id"],
+                "result": {
+                    "protocolVersion": "2025-11-25",
+                    "serverInfo": {"name": "mock", "version": "1"},
+                },
+            },
+            headers={"Mcp-Session-Id": "session-1"},
+        )
+
+    config = _config(auth_method="bearer", token="client-token")
+    config.headers = {
+        "authorization": "Bearer plugin-token",
+        "accept": "text/plain",
+        "mcp-protocol-version": "obsolete",
+        "origin": "https://plugin.invalid",
+        "X-Plugin": "preserved",
+    }
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url=config.url,
+    )
+    client = MCPClient(config, http_client=http)
+    try:
+        await client.initialize()
+    finally:
+        await client.close()
+        await http.aclose()
+
+    headers = requests[0].headers
+    assert headers.get_list("Authorization") == ["Bearer client-token"]
+    assert headers.get_list("Accept") == ["application/json, text/event-stream"]
+    assert headers.get_list("MCP-Protocol-Version") == ["2025-11-25"]
+    assert headers.get_list("Origin") == ["https://studio.example"]
+    assert headers["X-Plugin"] == "preserved"
+
+
+@pytest.mark.asyncio
+async def test_same_origin_resource_link_download_uses_pinned_bounded_transport() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                content=b"PK\x03\x04docx",
+                headers={"Content-Type": "application/octet-stream"},
+            )
+        payload = json.loads(request.content or b"{}")
+        if "id" not in payload:
+            return httpx.Response(202, headers={"Mcp-Session-Id": "session-1"})
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": payload["id"],
+                "result": {
+                    "protocolVersion": "2025-11-25",
+                    "serverInfo": {"name": "mock", "version": "1"},
+                },
+            },
+            headers={"Mcp-Session-Id": "session-1"},
+        )
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://mcp.example",
+    )
+    client = MCPClient(_config(), http_client=http)
+    try:
+        await client.initialize()
+        data, mime_type = await client.download_resource_link(
+            "https://mcp.example/artifacts/report.docx?sig=opaque"
+        )
+        with pytest.raises(MCPError, match="origin") as caught:
+            await client.download_resource_link("https://files.example/report.docx")
+    finally:
+        await client.close()
+        await http.aclose()
+
+    get_request = next(request for request in requests if request.method == "GET")
+    assert get_request.url.path == "/artifacts/report.docx"
+    assert get_request.url.query == b"sig=opaque"
+    assert get_request.headers["Host"] == "mcp.example"
+    assert data == b"PK\x03\x04docx"
+    assert mime_type == "application/octet-stream"
+    assert caught.value.stable_code == "MCP_RESOURCE_ORIGIN_MISMATCH"
+
+
+@pytest.mark.asyncio
+async def test_operator_plugin_loopback_resource_alias_maps_to_pinned_service() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, content=b"artifact")
+
+    config = MCPServerConfig(
+        name="docgen",
+        url="http://mcp-docgen-server.internal:8765",
+        platform_managed=True,
+        allow_localhost=True,
+        allow_private_network=True,
+        dns_resolver=lambda _host, _port: ["10.0.0.9"],
+    )
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url=config.url,
+    )
+    client = MCPClient(config, http_client=http)
+    try:
+        data, _mime_type = await client.download_resource_link(
+            "http://localhost:8765/artifacts/report.docx?sig=opaque"
+        )
+    finally:
+        await client.close()
+        await http.aclose()
+
+    assert data == b"artifact"
+    assert requests[0].url.host == "10.0.0.9"
+    assert requests[0].url.path == "/artifacts/report.docx"
+    assert requests[0].url.query == b"sig=opaque"
+    assert requests[0].headers["Host"] == "mcp-docgen-server.internal:8765"
 
 
 @pytest.mark.asyncio

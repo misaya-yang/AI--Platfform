@@ -56,17 +56,14 @@ ensure_e2e_env() {
   export E2E_FRONTEND_PORT="${E2E_FRONTEND_PORT:-$(find_free_port)}"
   export E2E_KNOWLEDGE_PORT="${E2E_KNOWLEDGE_PORT:-8092}"
   export E2E_ASSISTANT_PORT="${E2E_ASSISTANT_PORT:-8093}"
-  export E2E_MCP_DOCGEN_PORT="${E2E_MCP_DOCGEN_PORT:-8765}"
   export E2E_API_URL="${E2E_API_URL:-http://127.0.0.1:${E2E_BACKEND_PORT}}"
   export E2E_BASE_URL="${E2E_BASE_URL:-http://127.0.0.1:${E2E_FRONTEND_PORT}}"
   export E2E_KNOWLEDGE_URL="${E2E_KNOWLEDGE_URL:-http://127.0.0.1:${E2E_KNOWLEDGE_PORT}}"
   export E2E_ASSISTANT_URL="${E2E_ASSISTANT_URL:-http://127.0.0.1:${E2E_ASSISTANT_PORT}}"
-  export E2E_MCP_DOCGEN_URL="${E2E_MCP_DOCGEN_URL:-http://127.0.0.1:${E2E_MCP_DOCGEN_PORT}}"
   export VITE_API_URL="$E2E_API_URL"
   export CORS_ALLOWED_ORIGINS="${CORS_ALLOWED_ORIGINS:-${E2E_BASE_URL},http://localhost:3000,http://127.0.0.1:3000}"
   export ASSISTANT_SERVICE_URL="${E2E_ASSISTANT_SERVICE_URL:-${E2E_ASSISTANT_URL}}"
   export KB_SERVICE_URL="${E2E_KB_SERVICE_URL:-${E2E_KNOWLEDGE_URL}}"
-  export MCP_DOCGEN_SERVICE_URL="${E2E_MCP_DOCGEN_SERVICE_URL:-${E2E_MCP_DOCGEN_URL}}"
 }
 
 json_array() {
@@ -156,7 +153,7 @@ run_knowledge() {
 run_assistant() {
   ensure_e2e_env
   ensure_dev_dependencies
-  export PYTHONPATH="$ROOT_DIR/apps/assistant-service/src:$ROOT_DIR/packages/ai-gateway-core/src:${PYTHONPATH:-}"
+  export PYTHONPATH="$ROOT_DIR/apps/assistant-service/src:$ROOT_DIR/packages/ai-gateway-core/src:$ROOT_DIR/packages/mcp-docgen-server/src:${PYTHONPATH:-}"
   export ASSISTANT_E2E_STUB_LLM="${ASSISTANT_E2E_STUB_LLM:-1}"
   export DATABASE_URL="$(database_url)"
   export REDIS_URL="${REDIS_URL:-$(redis_url)}"
@@ -168,6 +165,11 @@ run_assistant() {
   export ASSISTANT_CORS__ALLOW_ORIGINS="$(json_array "$E2E_BASE_URL" "http://localhost:3000" "http://127.0.0.1:3000")"
   export ASSISTANT_REQUIRE_DB="${ASSISTANT_REQUIRE_DB:-true}"
   export ASSISTANT_REQUIRE_REDIS="${ASSISTANT_REQUIRE_REDIS:-false}"
+  export ASSISTANT_RUNTIME_SKILLS="${ASSISTANT_RUNTIME_SKILLS:-true}"
+  export ASSISTANT_AGENT_PLUGIN_PATHS="${ASSISTANT_AGENT_PLUGIN_PATHS:-$ROOT_DIR/agent-plugins/ai-docgen}"
+  export ASSISTANT_AGENT_PLUGIN_DATA_ROOT="${ASSISTANT_AGENT_PLUGIN_DATA_ROOT:-$ROOT_DIR/tmp/e2e-agent-plugins}"
+  export ASSISTANT_TRUSTED_AGENT_PLUGINS="${ASSISTANT_TRUSTED_AGENT_PLUGINS:-ai-docgen@1.0.0}"
+  export ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS="${ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS:-$ROOT_DIR/agent-plugins/ai-docgen}"
 
   local conda_bin
   conda_bin="$(find_conda)" || {
@@ -181,27 +183,6 @@ run_assistant() {
   }
   cd "$ROOT_DIR"
   exec "$conda_bin" run --no-capture-output -n "$conda_env" python -m uvicorn assistant_service.main:app --host 127.0.0.1 --port "$E2E_ASSISTANT_PORT"
-}
-
-run_mcp_docgen() {
-  ensure_e2e_env
-  export PYTHONPATH="$ROOT_DIR/packages/mcp-docgen-server/src:${PYTHONPATH:-}"
-  export MCP_TRANSPORT="${MCP_TRANSPORT:-http}"
-  export PORT="$E2E_MCP_DOCGEN_PORT"
-  export DOCGEN_PUBLIC_URL="${DOCGEN_PUBLIC_URL:-$E2E_MCP_DOCGEN_URL}"
-
-  local conda_bin
-  conda_bin="$(find_conda)" || {
-    echo "Unable to find conda. Expected ~/miniconda3/bin/conda or conda on PATH." >&2
-    exit 1
-  }
-  local conda_env
-  conda_env="$(pick_conda_env "$conda_bin")" || {
-    echo "Unable to detect conda env. Activate the project env or create ai_gateway." >&2
-    exit 1
-  }
-  cd "$ROOT_DIR"
-  exec "$conda_bin" run --no-capture-output -n "$conda_env" python -m mcp_docgen_server
 }
 
 run_frontend() {
@@ -235,9 +216,6 @@ main() {
   local command="${1:-test}"
   shift || true
   case "$command" in
-    mcp-docgen)
-      run_mcp_docgen "$@"
-      ;;
     knowledge)
       run_knowledge "$@"
       ;;
@@ -257,7 +235,7 @@ main() {
       run_tests "$@"
       ;;
     *)
-      echo "Usage: $0 [mcp-docgen|knowledge|assistant|backend|frontend|verify|test] [playwright args...]" >&2
+      echo "Usage: $0 [knowledge|assistant|backend|frontend|verify|test] [playwright args...]" >&2
       exit 2
       ;;
   esac

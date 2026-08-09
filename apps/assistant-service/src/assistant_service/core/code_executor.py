@@ -16,6 +16,7 @@ import asyncio
 import base64
 import contextlib
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -77,7 +78,7 @@ class CodeExecutionConfig:
 
     # Security settings
     network_disabled: bool = True
-    read_only_root: bool = False
+    read_only_root: bool = True
 
     # Sandbox runtime — "runsc" for gVisor isolation, None for default runc
     sandbox_runtime: str | None = "runsc"
@@ -85,6 +86,7 @@ class CodeExecutionConfig:
 
     # Docker image
     image: str = "python:3.12-slim"
+    python_executable: str = "python"
 
     # Workspace paths (inside container)
     workspace_path: str = "/workspace"
@@ -270,8 +272,7 @@ def _uses_matplotlib(code: str) -> bool:
         ):
             return True
         if isinstance(node, ast.ImportFrom) and (
-            node.module == "matplotlib"
-            or str(node.module or "").startswith("matplotlib.")
+            node.module == "matplotlib" or str(node.module or "").startswith("matplotlib.")
         ):
             return True
     return False
@@ -322,6 +323,17 @@ class CodeExecutorService:
             "on",
         }:
             self.config.allow_default_runtime_fallback = True
+        image = os.environ.get("ASSISTANT_CODE_EXECUTOR_IMAGE", "").strip()
+        if image:
+            self.config.image = image
+        python_executable = os.environ.get(
+            "ASSISTANT_CODE_EXECUTOR_PYTHON",
+            "",
+        ).strip()
+        if python_executable:
+            if not re.fullmatch(r"[A-Za-z0-9_./-]+", python_executable):
+                raise ValueError("ASSISTANT_CODE_EXECUTOR_PYTHON is invalid")
+            self.config.python_executable = python_executable
         self._docker_client = None
         self._docker_available: bool | None = None
 
@@ -370,8 +382,7 @@ class CodeExecutorService:
                         logger.info(f"Docker available with sandbox runtime '{rt}' (gVisor)")
                     else:
                         logger.warning(
-                            f"Sandbox runtime '{rt}' not found. "
-                            f"Available: {list(runtimes.keys())}"
+                            f"Sandbox runtime '{rt}' not found. Available: {list(runtimes.keys())}"
                         )
                         if self.config.allow_default_runtime_fallback:
                             logger.warning(
@@ -457,12 +468,16 @@ class CodeExecutorService:
             # silent stdout (matplotlib saved but to wrong path).
             logger.info(
                 "[code_executor] exec_id=%s exit=%s stdout_len=%d stderr_len=%d",
-                execution_id, exit_code, len(stdout), len(stderr),
+                execution_id,
+                exit_code,
+                len(stdout),
+                len(stderr),
             )
             if stderr.strip():
                 logger.warning(
                     "[code_executor] exec_id=%s stderr_tail=%r",
-                    execution_id, stderr[-500:],
+                    execution_id,
+                    stderr[-500:],
                 )
 
             # Collect output files
@@ -526,13 +541,9 @@ class CodeExecutorService:
         """
         _ = config
         input_names = [
-            _validate_workspace_filename(input_file.filename)
-            for input_file in input_files
+            _validate_workspace_filename(input_file.filename) for input_file in input_files
         ]
-        document_names = [
-            _validate_workspace_filename(kb_doc.filename)
-            for kb_doc in kb_documents
-        ]
+        document_names = [_validate_workspace_filename(kb_doc.filename) for kb_doc in kb_documents]
 
         # Create temp directory in shared workspace (accessible by both
         # the gateway container and sibling sandbox containers via Docker socket).
@@ -597,20 +608,37 @@ class CodeExecutorService:
             logger.info(f"Pulling Docker image: {config.image}")
             client.images.pull(config.image)
 
-        # Container configuration
+        workspace_mount_source = self._workspace_mount_source(workspace_dir)
+
+        # Container configuration. The child receives no Docker socket or
+        # provider credentials; it runs without network, Linux capabilities,
+        # privilege escalation, or a writable root filesystem.
         container_config = {
             "image": config.image,
-            "command": ["python", config.main_script_path],
+            "command": [config.python_executable, config.main_script_path],
             "volumes": {
-                str(workspace_dir): {
+                str(workspace_mount_source): {
                     "bind": config.workspace_path,
                     "mode": "rw",
                 }
             },
             "working_dir": config.workspace_path,
+            "user": f"{os.getuid()}:{os.getgid()}",
             "mem_limit": config.memory_limit,
             "nano_cpus": int(config.cpu_limit * 1e9),
             "network_disabled": config.network_disabled,
+            "cap_drop": ["ALL"],
+            "security_opt": ["no-new-privileges:true"],
+            "pids_limit": 64,
+            "read_only": config.read_only_root,
+            "tmpfs": {"/tmp": "rw,noexec,nosuid,size=64m"},
+            "environment": {
+                "HOME": "/tmp",
+                "MPLCONFIGDIR": "/tmp/matplotlib",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+            "init": True,
+            "labels": {"com.misaya.ai-gateway.role": "code-sandbox"},
             "detach": True,
             "remove": False,  # We'll remove manually after getting logs
         }
@@ -662,22 +690,67 @@ class CodeExecutorService:
 
         return container, stdout, stderr, exit_code
 
+    @staticmethod
+    def _workspace_mount_source(workspace_dir: Path) -> Path:
+        """Translate the in-container workspace to the Docker host path.
+
+        A host Docker daemon cannot resolve a path that only exists inside the
+        Assistant container. Local opt-in deployments bind one host directory
+        into the Assistant and provide its host-side path separately.
+        """
+
+        container_root = Path(
+            os.environ.get("SANDBOX_WORKSPACE", "/opt/deploy/sandbox-workspace")
+        ).resolve()
+        resolved_workspace = workspace_dir.resolve()
+        try:
+            relative_workspace = resolved_workspace.relative_to(container_root)
+        except ValueError as exc:
+            raise ValueError("sandbox workspace escaped its configured root") from exc
+
+        host_root_value = os.environ.get("SANDBOX_WORKSPACE_HOST", "").strip()
+        if not host_root_value:
+            return resolved_workspace
+        host_root = Path(host_root_value)
+        if not host_root.is_absolute():
+            raise ValueError("SANDBOX_WORKSPACE_HOST must be absolute")
+        return host_root / relative_workspace
+
     # Extensions we consider user-facing artifacts when recovering stray
     # files written at the workspace root (outside /output). Kept
     # conservative so we don't slurp up .pyc caches, .lock files, etc.
-    _RECOVERABLE_EXTS: frozenset[str] = frozenset({
-        ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp",
-        ".pdf",
-        ".csv", ".tsv", ".xlsx", ".xls",
-        ".json", ".html", ".htm", ".xml",
-        ".txt", ".md",
-    })
+    _RECOVERABLE_EXTS: frozenset[str] = frozenset(
+        {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".svg",
+            ".webp",
+            ".bmp",
+            ".pdf",
+            ".csv",
+            ".tsv",
+            ".xlsx",
+            ".xls",
+            ".json",
+            ".html",
+            ".htm",
+            ".xml",
+            ".txt",
+            ".md",
+        }
+    )
 
     # Workspace-root directories we never sweep — they either belong to
     # the caller (input, kb_docs) or are our own scaffolding.
-    _RESERVED_ROOT_NAMES: frozenset[str] = frozenset({
-        "input", "kb_docs", "output",
-    })
+    _RESERVED_ROOT_NAMES: frozenset[str] = frozenset(
+        {
+            "input",
+            "kb_docs",
+            "output",
+        }
+    )
 
     def _recover_root_artifacts(self, workspace_dir: Path) -> list[Path]:
         """Move artifact-like files written at the workspace root (or in
@@ -698,8 +771,9 @@ class CodeExecutorService:
             root_entries = list(workspace_dir.iterdir())
         except Exception as e:
             logger.warning(
-                "[code_executor] failed to scan workspace root %s for "
-                "stray artifacts: %s", workspace_dir, e,
+                "[code_executor] failed to scan workspace root %s for stray artifacts: %s",
+                workspace_dir,
+                e,
             )
             return recovered
 
@@ -738,8 +812,10 @@ class CodeExecutorService:
                 recovered.append(target)
             except Exception as e:
                 logger.warning(
-                    "[code_executor] failed to move stray artifact %s "
-                    "-> %s: %s", entry, target, e,
+                    "[code_executor] failed to move stray artifact %s -> %s: %s",
+                    entry,
+                    target,
+                    e,
                 )
 
         return recovered
@@ -775,7 +851,8 @@ class CodeExecutorService:
             logger.warning(
                 "[code_executor] output_dir MISSING post-run: %s "
                 "(workspace_dir exists=%s). Container couldn't write back.",
-                output_dir, workspace_dir.exists(),
+                output_dir,
+                workspace_dir.exists(),
             )
             return output_files
 
@@ -806,14 +883,13 @@ class CodeExecutorService:
                         size = -1
                     root_listing.append(f"{kind}:{p.name}:{size}")
                 logger.warning(
-                    "[code_executor] output/ empty — workspace root "
-                    "contents (ex reserved): [%s]",
+                    "[code_executor] output/ empty — workspace root contents (ex reserved): [%s]",
                     ", ".join(root_listing[:40]) or "<empty>",
                 )
             except Exception as e:
                 logger.warning(
-                    "[code_executor] failed to enumerate workspace "
-                    "root for diagnostics: %s", e,
+                    "[code_executor] failed to enumerate workspace root for diagnostics: %s",
+                    e,
                 )
 
         for file_path in all_entries:

@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# Assistant Service — independent microservice
+# Assistant Service — independent microservice with bundled Agent Plugin runtime
 #
 # Phase 5f Batch C complete: the AS image no longer bundles gateway's src/.
 # All concretes the composition root needs (DatabaseStorage,
@@ -37,6 +37,15 @@ RUN --mount=type=cache,id=ai-gateway-pip,target=/root/.cache/pip,sharing=locked 
     --index-url ${PIP_INDEX_URL} \
     ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
 
+# The bundled ai-docgen Agent Plugin uses stdio MCP. Install its executable
+# runtime into the same venv so the published Assistant image is the only
+# application image required for document generation.
+COPY packages/mcp-docgen-server/ ./packages/mcp-docgen-server/
+RUN --mount=type=cache,id=ai-gateway-pip,target=/root/.cache/pip,sharing=locked \
+    pip install "./packages/mcp-docgen-server[mcp]" \
+    --index-url ${PIP_INDEX_URL} \
+    ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
+
 # Install assistant-service deps. No more pyproject.toml/src/ from the
 # gateway repo — the AS pyproject's ai-gateway-core dependency is
 # satisfied above, and main.py imports nothing from gateway src.
@@ -62,17 +71,31 @@ WORKDIR /app
 
 RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources && \
     apt-get -o Acquire::Retries=5 update && \
-    apt-get -o Acquire::Retries=5 install -y --no-install-recommends curl && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+      libreoffice-core \
+      libreoffice-impress \
+      libreoffice-calc \
+      libreoffice-writer \
+      fontconfig \
+      fonts-noto \
+      fonts-noto-cjk \
+      fonts-noto-cjk-extra \
+      poppler-utils \
+      curl \
+      ca-certificates \
+      locales && \
+    rm -rf /var/lib/apt/lists/* && \
+    fc-cache -f
 
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # Copy assistant service only — no gateway src/ shim required.
 COPY apps/assistant-service/src/ ./apps/assistant-service/src/
+COPY agent-plugins/ai-docgen/ /opt/agent-plugins/ai-docgen/
 
 RUN useradd --uid 1000 --create-home appuser && \
-    mkdir -p /app/logs /app/uploads && \
+    mkdir -p /app/logs /app/uploads /app/data/agent-plugins && \
     chown -R appuser:appuser /app
 USER appuser
 
@@ -82,7 +105,9 @@ EXPOSE 8093
 # into site-packages by the builder stage above.
 ENV PYTHONPATH="/app/apps/assistant-service/src" \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
 
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=20s \
     CMD curl -fsS http://localhost:8093/health || exit 1

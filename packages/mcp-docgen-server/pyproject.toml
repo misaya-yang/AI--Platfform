@@ -29,16 +29,17 @@ dependencies = [
 [project.optional-dependencies]
 vision = ["anthropic>=0.40"]
 # MCP server wrapper (packages/mcp-docgen-server/src/mcp_docgen_server/).
-# Install with ``pip install -e ".[mcp]"`` to enable the stdio / SSE server.
+# MCP 2.x is the supported plugin transport line.
+# Install with ``pip install -e ".[mcp]"`` to enable the stdio / HTTP server.
 mcp = [
-    "mcp>=1.0",
+    "mcp>=2.0,<3",
     "starlette>=0.37",
     "uvicorn>=0.30",
 ]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
-    "mcp>=1.0",
+    "mcp>=2.0,<3",
     "starlette>=0.37",
     "uvicorn>=0.30",
 ]

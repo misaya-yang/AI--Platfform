@@ -34,9 +34,15 @@ class TenantMCPConfig:
 class TenantMCPConfigService:
     """Load per-tenant MCP configs and filter available MCP tools."""
 
-    def __init__(self, database: Any, all_server_names: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        database: Any,
+        all_server_names: list[str] | None = None,
+        default_allowed_servers: set[str] | None = None,
+    ) -> None:
         self._database = database
         self._all_server_names = set(all_server_names or [])
+        self._default_allowed_servers = set(default_allowed_servers or [])
         self._cache: dict[
             str, tuple[TenantMCPConfig, float]
         ] = {}  # tenant_id → (config, expires_at)
@@ -72,8 +78,12 @@ class TenantMCPConfigService:
         if not self._database:
             return TenantMCPConfig(
                 tenant_id=tenant_id,
-                allowed_servers=set(),
-                policy_source="default_deny_no_database",
+                allowed_servers=set(self._default_allowed_servers),
+                policy_source=(
+                    "operator_installed_default"
+                    if self._default_allowed_servers
+                    else "default_deny_no_database"
+                ),
             )
 
         try:
@@ -92,8 +102,12 @@ class TenantMCPConfigService:
         if not row:
             return TenantMCPConfig(
                 tenant_id=tenant_id,
-                allowed_servers=set(),
-                policy_source="default_deny_missing_config",
+                allowed_servers=set(self._default_allowed_servers),
+                policy_source=(
+                    "operator_installed_default"
+                    if self._default_allowed_servers
+                    else "default_deny_missing_config"
+                ),
             )
 
         return TenantMCPConfig(

@@ -15,6 +15,7 @@ to the pre-refactor inline code so the SSE golden tests stay green.
 from __future__ import annotations
 
 import contextlib
+import re
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +33,32 @@ logger = get_logger(__name__)
 # Max length per snippet after sanitization. Prevents any single snippet
 # from dominating the context block.
 _MAX_SNIPPET_LEN = 240
+
+_CURRENT_CONVERSATION_REFERENCES = (
+    re.compile(r"(?:当前|本次|这个|这次)(?:会话|对话)"),
+    re.compile(r"(?:刚才|方才|上一条|上一轮|上文)(?:说|提|写|告诉|消息|回复)?"),
+    re.compile(r"我(?:最早|之前|此前)告诉你的"),
+    re.compile(
+        r"\b(?:this|current)\s+(?:conversation|session|chat|thread)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:earlier|previous|last)\s+(?:message|turn|reply)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bI\s+(?:just|earlier|previously)\s+(?:told|said|mentioned|wrote)\b", re.IGNORECASE
+    ),
+)
+
+
+def _prefers_current_conversation(query: str) -> bool:
+    """Return whether the request explicitly scopes recall to this thread."""
+
+    value = str(query or "").strip()
+    return bool(value) and any(
+        pattern.search(value) for pattern in _CURRENT_CONVERSATION_REFERENCES
+    )
 
 
 def _sanitize_snippet(text: str) -> str:
@@ -90,15 +117,22 @@ class RuntimeMemoryMiddleware:
         # (which imports middlewares lazily via the package entry point).
         from ..agent_loop import AgentLoopEvent
 
+        current_conversation_only = bool(
+            getattr(ctx, "conversation_history_available", False)
+            and _prefers_current_conversation(ctx.message)
+        )
         try:
-            memory_result = await self._runtime.load_memory_context(
-                tenant_id=ctx.tenant_id,
-                user_id=memory_user_id,
-                query=ctx.message,
-                runtime_mode=ctx.config.runtime_mode,
-                memory_profile=ctx.config.memory_profile,
-                max_results=6,
-            )
+            if current_conversation_only:
+                memory_result = None
+            else:
+                memory_result = await self._runtime.load_memory_context(
+                    tenant_id=ctx.tenant_id,
+                    user_id=memory_user_id,
+                    query=ctx.message,
+                    runtime_mode=ctx.config.runtime_mode,
+                    memory_profile=ctx.config.memory_profile,
+                    max_results=6,
+                )
             # Store-only contract: the loop assembles these snippets into a
             # <context> block on the USER turn, not a system message — that
             # keeps the system prompt prefix stable for KV-cache hits.
@@ -108,7 +142,7 @@ class RuntimeMemoryMiddleware:
             # control characters to prevent prompt injection — a snippet
             # containing `</context>\n\nIgnore previous instructions...` would
             # otherwise break the fence and take over the turn.
-            if memory_result.snippets:
+            if memory_result is not None and memory_result.snippets:
                 ctx.runtime_memory_snippets = [
                     _sanitize_snippet(f"({snippet.source_type}) {snippet.content}")
                     for snippet in memory_result.snippets
@@ -118,11 +152,18 @@ class RuntimeMemoryMiddleware:
                 phase=self._phase,
                 event_type="memory_retrieved",
                 data={
-                    "loaded_sources": memory_result.loaded_sources,
-                    "snippet_count": len(memory_result.snippets),
-                    "fallback_used": memory_result.fallback_used,
-                    "fallback_reason": memory_result.fallback_reason,
-                    "provenance": memory_result.provenance,
+                    "loaded_sources": (
+                        0 if memory_result is None else memory_result.loaded_sources
+                    ),
+                    "snippet_count": 0 if memory_result is None else len(memory_result.snippets),
+                    "fallback_used": current_conversation_only
+                    or (memory_result is not None and memory_result.fallback_used),
+                    "fallback_reason": (
+                        "current_conversation_preferred"
+                        if current_conversation_only
+                        else memory_result.fallback_reason
+                    ),
+                    "provenance": [] if memory_result is None else memory_result.provenance,
                 },
             )
         except Exception as exc:

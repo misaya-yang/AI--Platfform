@@ -1,7 +1,7 @@
 """MCP server wrapping docgen.
 
 # TODO(agent-A): ensure pyproject.toml [project.dependencies] includes:
-#   "mcp>=1.0"
+#   "mcp>=2.0,<3"
 #   "starlette>=0.37"   (for SSE transport + /artifacts/{id} route)
 #   "uvicorn>=0.30"
 #
@@ -28,13 +28,10 @@ import os
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from .llm_caller import build_default_llm
 from .resource_provider import (
-    DESIGN_SYSTEMS_URI,
-    SKILLS_URI_PREFIX,
-    TEMPLATES_URI_PREFIX,
     list_static_resources,
     parse_uri,
     read_design_systems,
@@ -109,9 +106,8 @@ class SamplingLLMCaller:
 def _tmp_artifact_root() -> Path:
     """Directory for generated artifacts.
 
-    In production ``DOCGEN_ARTIFACT_ROOT`` is set (Dockerfile sets
-    ``/var/lib/docgen/artifacts``, mounted as a volume). Locally we fall
-    back to a temp directory so tests / dev runs leave no traces.
+    The bundled Agent Plugin sets ``DOCGEN_ARTIFACT_ROOT`` below its private
+    plugin data directory. Direct local runs fall back to a temporary directory.
     """
     override = os.environ.get("DOCGEN_ARTIFACT_ROOT")
     root = Path(override) if override else Path(tempfile.gettempdir()) / "mcp_docgen_artifacts"
@@ -119,13 +115,13 @@ def _tmp_artifact_root() -> Path:
     return root
 
 
-def _default_service(base_download_url: str = "file://") -> Any:
+def _default_service(base_download_url: str | None = None) -> Any:
     """Build a DocgenService wired to a LocalArtifactStore + default LLM.
 
     Imports are local so ``import mcp_docgen_server`` works even when
     docgen hasn't been installed yet (Agent A territory).
 
-    ``llm`` is pulled from the environment (``DASHSCOPE_API_KEY``); when
+    ``llm`` is pulled from the allowlisted DashScope environment; when
     absent we fall back to ``None`` so the deterministic planner still
     produces *something* — but output quality drops to template-level.
     See ``build_default_llm`` for the full env contract.
@@ -133,7 +129,9 @@ def _default_service(base_download_url: str = "file://") -> Any:
     from docgen.service import DocgenService  # type: ignore
     from docgen.storage import LocalArtifactStore  # type: ignore
 
-    store = LocalArtifactStore(_tmp_artifact_root(), base_download_url=base_download_url)
+    store_root = _tmp_artifact_root().resolve()
+    resolved_download_url = base_download_url or store_root.as_uri()
+    store = LocalArtifactStore(store_root, base_download_url=resolved_download_url)
     return DocgenService(artifact_store=store, llm=build_default_llm())
 
 
@@ -165,9 +163,9 @@ async def _run_generate(
     payload: dict,
     *,
     tenant_id: str = "default",
-    session_id: Optional[str] = None,
-    turn_id: Optional[str] = None,
-    progress_cb: Optional[Any] = None,
+    session_id: str | None = None,
+    turn_id: str | None = None,
+    progress_cb: Any | None = None,
 ) -> dict:
     """Translate MCP tool args → ``GenerateRequest`` → dict for the tool."""
     from docgen.service import GenerateRequest  # type: ignore
@@ -185,9 +183,7 @@ async def _run_generate(
         body_markdown=validated.body_markdown,
         template_name=validated.template_name,
         style_hints=(
-            {"design_system": validated.design_system}
-            if validated.design_system
-            else None
+            {"design_system": validated.design_system} if validated.design_system else None
         ),
     )
 
@@ -230,87 +226,105 @@ def build_server(service: Any) -> Any:
     points can inject different service wiring (e.g. different artifact
     stores and download URL bases).
     """
-    from mcp.server import Server  # type: ignore
     from mcp import types as mcp_types  # type: ignore
+    from mcp.server import Server  # type: ignore
 
-    server = Server("mcp-docgen")
+    async def _list_tools(_context: Any, _params: Any) -> Any:
+        return mcp_types.ListToolsResult(
+            tools=[
+                mcp_types.Tool(
+                    name="generate_document",
+                    description=(
+                        "Generate a docx / pptx / xlsx / pdf file. USE THIS TOOL "
+                        "for any document/deck/spreadsheet request — do NOT write "
+                        "Python with python-pptx, openpyxl, or similar libraries; "
+                        "this tool handles rendering, critic review, and signed "
+                        "download URLs end-to-end. BEFORE calling: write the full "
+                        "content outline (headings + bullets + paragraphs) in "
+                        "markdown, then pass it as ``body_markdown`` so the "
+                        "planner produces a rich deck instead of a 3-slide "
+                        "skeleton. Inspect docgen://design-systems for palette "
+                        "options."
+                    ),
+                    inputSchema=input_json_schema(),
+                )
+            ]
+        )
 
-    @server.list_tools()
-    async def _list_tools() -> list:
-        return [
-            mcp_types.Tool(
-                name="generate_document",
-                description=(
-                    "Generate a docx / pptx / xlsx / pdf file. USE THIS TOOL "
-                    "for any document/deck/spreadsheet request — do NOT write "
-                    "Python with python-pptx, openpyxl, or similar libraries; "
-                    "this tool handles rendering, critic review, and signed "
-                    "download URLs end-to-end. BEFORE calling: write the full "
-                    "content outline (headings + bullets + paragraphs) in "
-                    "markdown, then pass it as ``body_markdown`` so the "
-                    "planner produces a rich deck instead of a 3-slide "
-                    "skeleton. Inspect docgen://design-systems for palette "
-                    "options."
-                ),
-                inputSchema=input_json_schema(),
-            )
-        ]
-
-    @server.call_tool()
-    async def _call_tool(name: str, arguments: dict) -> list:
-        if name != "generate_document":
-            raise ValueError(f"unknown tool: {name!r}")
-        result = await _run_generate(service, arguments or {})
-        doc_format = result.get("format") or (arguments or {}).get("format", "docx")
+    async def _call_tool(_context: Any, params: Any) -> Any:
+        if params.name != "generate_document":
+            raise ValueError(f"unknown tool: {params.name!r}")
+        arguments = params.arguments or {}
+        result = await _run_generate(service, arguments)
+        doc_format = result.get("format") or arguments.get("format", "docx")
         # Return TWO content items:
         #   1. TextContent — JSON summary for the model's context window.
         #   2. ResourceLink — MCP-native URL pointer so the agent pipeline
         #      emits an ARTIFACT_CREATED event independent of whether the
         #      model remembers to transcribe the URL into its text reply.
-        return [
-            mcp_types.TextContent(
-                type="text",
-                text=json.dumps(result, ensure_ascii=False, indent=2),
-            ),
-            mcp_types.ResourceLink(
-                type="resource_link",
-                uri=result["download_url"],
-                name=result["filename"],
-                mimeType=_DOC_MIME_TYPES.get(doc_format.lower(), "application/octet-stream"),
-                description=f"Generated {doc_format.upper()} document",
-            ),
-        ]
+        return mcp_types.CallToolResult(
+            content=[
+                mcp_types.TextContent(
+                    text=json.dumps(result, ensure_ascii=False, indent=2),
+                ),
+                mcp_types.ResourceLink(
+                    uri=result["download_url"],
+                    name=result["filename"],
+                    mimeType=_DOC_MIME_TYPES.get(
+                        doc_format.lower(),
+                        "application/octet-stream",
+                    ),
+                    description=f"Generated {doc_format.upper()} document",
+                    size=result.get("size_bytes"),
+                ),
+            ]
+        )
 
-    @server.list_resources()
-    async def _list_resources() -> list:
+    async def _list_resources(_context: Any, _params: Any) -> Any:
         descriptors = list_static_resources()
-        return [
-            mcp_types.Resource(
-                uri=d.uri,
-                name=d.name,
-                description=d.description,
-                mimeType=d.mime_type,
-            )
-            for d in descriptors
-        ]
+        return mcp_types.ListResourcesResult(
+            resources=[
+                mcp_types.Resource(
+                    uri=d.uri,
+                    name=d.name,
+                    description=d.description,
+                    mimeType=d.mime_type,
+                )
+                for d in descriptors
+            ]
+        )
 
-    @server.read_resource()
-    async def _read_resource(uri: str) -> str:
-        kind, tail = parse_uri(str(uri))
+    async def _read_resource(_context: Any, params: Any) -> Any:
+        uri = str(params.uri)
+        kind, tail = parse_uri(uri)
         if kind == "design-systems":
-            _mime, text = read_design_systems(service)
-            return text
-        if kind == "templates":
+            mime_type, text = read_design_systems(service)
+        elif kind == "templates":
             assert tail is not None
-            _mime, text = read_templates(service, tail)
-            return text
-        if kind == "skills":
+            mime_type, text = read_templates(service, tail)
+        elif kind == "skills":
             assert tail is not None
-            _mime, text = read_skill(service, tail)
-            return text
-        raise ValueError(f"unhandled resource kind: {kind!r}")
+            mime_type, text = read_skill(service, tail)
+        else:
+            raise ValueError(f"unhandled resource kind: {kind!r}")
+        return mcp_types.ReadResourceResult(
+            contents=[
+                mcp_types.TextResourceContents(
+                    uri=uri,
+                    mimeType=mime_type,
+                    text=text,
+                )
+            ]
+        )
 
-    return server
+    return Server(
+        "mcp-docgen",
+        version="1.0.0",
+        on_list_tools=_list_tools,
+        on_call_tool=_call_tool,
+        on_list_resources=_list_resources,
+        on_read_resource=_read_resource,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -321,7 +335,9 @@ async def main_stdio() -> None:
     """Run the MCP server over stdin/stdout JSON-RPC."""
     from mcp.server.stdio import stdio_server  # type: ignore
 
-    service = _default_service(base_download_url="file://")
+    # The absolute file URL is imported by the parent Assistant process and
+    # must point inside the client-owned PLUGIN_DATA/artifacts directory.
+    service = _default_service()
     server = build_server(service)
     async with stdio_server() as (read_stream, write_stream):
         await server.run(
@@ -371,9 +387,10 @@ async def main_sse() -> None:
     sse = SseServerTransport("/messages/")
 
     async def handle_sse(request: Request) -> Response:  # type: ignore[override]
-        async with sse.connect_sse(
-            request.scope, request.receive, request._send
-        ) as (reader, writer):
+        async with sse.connect_sse(request.scope, request.receive, request._send) as (
+            reader,
+            writer,
+        ):
             await server.run(reader, writer, server.create_initialization_options())
         # connect_sse handles the response lifecycle
         return Response(status_code=200)
@@ -474,7 +491,7 @@ async def main_http() -> None:
     def _result(request_id: Any, result: Any) -> dict:
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
-    async def _dispatch(payload: dict) -> Optional[dict]:
+    async def _dispatch(payload: dict) -> dict | None:
         """Return a JSON-RPC response, or None for notifications."""
         method = payload.get("method")
         params = payload.get("params") or {}
@@ -485,33 +502,39 @@ async def main_http() -> None:
             return None
 
         if method == "initialize":
-            return _result(req_id, {
-                "protocolVersion": params.get("protocolVersion", "2025-11-25"),
-                "capabilities": {"tools": {}, "resources": {}},
-                "serverInfo": {"name": "mcp-docgen", "version": "0.1.0"},
-            })
+            return _result(
+                req_id,
+                {
+                    "protocolVersion": params.get("protocolVersion", "2025-11-25"),
+                    "capabilities": {"tools": {}, "resources": {}},
+                    "serverInfo": {"name": "mcp-docgen", "version": "0.1.0"},
+                },
+            )
 
         if method == "tools/list":
-            return _result(req_id, {
-                "tools": [
-                    {
-                        "name": "generate_document",
-                        "description": (
-                            "Generate a docx / pptx / xlsx / pdf file. USE "
-                            "THIS TOOL for any document/deck/spreadsheet "
-                            "request — do NOT write Python with python-pptx, "
-                            "openpyxl, or similar libraries; this tool "
-                            "handles rendering, critic review, and signed "
-                            "download URLs end-to-end. BEFORE calling: write "
-                            "the full content outline (headings + bullets + "
-                            "paragraphs) in markdown, then pass it as "
-                            "``body_markdown`` so the planner produces a "
-                            "rich deck instead of a 3-slide skeleton."
-                        ),
-                        "inputSchema": input_json_schema(),
-                    }
-                ]
-            })
+            return _result(
+                req_id,
+                {
+                    "tools": [
+                        {
+                            "name": "generate_document",
+                            "description": (
+                                "Generate a docx / pptx / xlsx / pdf file. USE "
+                                "THIS TOOL for any document/deck/spreadsheet "
+                                "request — do NOT write Python with python-pptx, "
+                                "openpyxl, or similar libraries; this tool "
+                                "handles rendering, critic review, and signed "
+                                "download URLs end-to-end. BEFORE calling: write "
+                                "the full content outline (headings + bullets + "
+                                "paragraphs) in markdown, then pass it as "
+                                "``body_markdown`` so the planner produces a "
+                                "rich deck instead of a 3-slide skeleton."
+                            ),
+                            "inputSchema": input_json_schema(),
+                        }
+                    ]
+                },
+            )
 
         if method == "tools/call":
             name = params.get("name")
@@ -522,21 +545,27 @@ async def main_http() -> None:
                 result = await _run_generate(service, arguments)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("generate_document failed")
-                return _result(req_id, {
-                    "content": [{"type": "text", "text": f"Tool call failed: {exc}"}],
-                    "isError": True,
-                })
-            doc_format = result.get("format") or (arguments or {}).get("format", "docx")
-            return _result(req_id, {
-                "content": [
+                return _result(
+                    req_id,
                     {
-                        "type": "text",
-                        "text": json.dumps(result, ensure_ascii=False, indent=2),
+                        "content": [{"type": "text", "text": f"Tool call failed: {exc}"}],
+                        "isError": True,
                     },
-                    _build_resource_link_dict(result, doc_format),
-                ],
-                "isError": False,
-            })
+                )
+            doc_format = result.get("format") or (arguments or {}).get("format", "docx")
+            return _result(
+                req_id,
+                {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(result, ensure_ascii=False, indent=2),
+                        },
+                        _build_resource_link_dict(result, doc_format),
+                    ],
+                    "isError": False,
+                },
+            )
 
         return _error(req_id, -32601, f"method not found: {method!r}")
 

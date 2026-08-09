@@ -258,6 +258,9 @@ async def lifespan(app: FastAPI):
 
     # ── Tenant MCP registry/runtime ──
     mcp_runtime = None
+    agent_plugin_mcp_manager = None
+    agent_plugin_mcp_server_names: set[str] = set()
+    default_agent_plugin_mcp_server_names: set[str] = set()
     mcp_repository = None
     mcp_secret_resolver = None
     mcp_enabled = os.getenv("AGENT_STUDIO_MCP_ENABLED", "true").strip().lower() in {
@@ -363,9 +366,48 @@ async def lifespan(app: FastAPI):
         memory_service=memory_service,
         runtime_adapter=assistant_runtime_adapter,
     )
-    register_document_generation_tool()
-    with suppress(Exception):
-        register_pptx_generation_tool()
+
+    # Operator-installed Agent Plugins are an independent component boundary:
+    # valid Streamable HTTP servers connect even when a sibling Skill is
+    # invalid, and a connection failure falls back to the built-in generators.
+    agent_plugin_mcp_results: dict[str, int] = {}
+    try:
+        from .core.mcp.config import load_agent_plugin_mcp_config
+        from .core.mcp.manager import MCPManager
+
+        plugin_mcp_configs = load_agent_plugin_mcp_config()
+        if plugin_mcp_configs:
+            agent_plugin_mcp_manager = MCPManager(plugin_mcp_configs)
+            agent_plugin_mcp_results = await agent_plugin_mcp_manager.initialize_all()
+            agent_plugin_mcp_server_names = {
+                name for name, count in agent_plugin_mcp_results.items() if count > 0
+            }
+            default_agent_plugin_mcp_server_names = {
+                config.name
+                for config in plugin_mcp_configs
+                if config.default_tenant_enabled
+                and agent_plugin_mcp_results.get(config.name, 0) > 0
+            }
+            app.state.agent_plugin_mcp_manager = agent_plugin_mcp_manager
+            app.state.agent_plugin_mcp_status = dict(agent_plugin_mcp_results)
+            logger.info(
+                "Agent Plugin MCP initialized servers=%s tools=%s",
+                len(agent_plugin_mcp_server_names),
+                sum(max(0, count) for count in agent_plugin_mcp_results.values()),
+            )
+    except Exception as exc:
+        logger.warning(
+            "Agent Plugin MCP initialization failed (exception_type=%s)",
+            type(exc).__name__,
+        )
+
+    docgen_plugin_ready = agent_plugin_mcp_results.get("docgen", 0) > 0
+    if docgen_plugin_ready:
+        logger.info("Using Agent Plugin docgen tool; legacy document generators disabled")
+    else:
+        register_document_generation_tool()
+        with suppress(Exception):
+            register_pptx_generation_tool()
     register_image_generation_tool()
 
     # ── Todo tools (Phase 5) — always on; exposes the per-session
@@ -450,10 +492,18 @@ async def lifespan(app: FastAPI):
 
     # One invoker owns the process-local result cache and policy/MCP adapters;
     # the gateway and all per-request AgentLoop instances reuse this identity.
+    from .core.mcp.tenant_mcp_config import TenantMCPConfigService
     from .core.tool_invoker import create_tool_invoker
+
+    tenant_mcp_config = TenantMCPConfigService(
+        database=database,
+        all_server_names=sorted(agent_plugin_mcp_server_names),
+        default_allowed_servers=set(default_agent_plugin_mcp_server_names),
+    )
 
     tool_invoker = create_tool_invoker(
         tenant_tool_policy=tenant_tool_policy,
+        tenant_mcp_config=tenant_mcp_config,
         mcp_runtime=mcp_runtime,
     )
     app.state.tool_invoker = tool_invoker
@@ -606,6 +656,8 @@ async def lifespan(app: FastAPI):
             DRAIN.inflight,
         )
 
+    if agent_plugin_mcp_manager is not None:
+        await agent_plugin_mcp_manager.shutdown()
     if database:
         await database.close()
     if redis_client:

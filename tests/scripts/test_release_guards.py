@@ -74,12 +74,23 @@ def test_compose_isolates_runtime_memory_and_wires_cleanup_provider():
     )
     for name in (
         "ASSISTANT_RUNTIME_TOOL_POLICY_V2",
-        "ASSISTANT_RUNTIME_SKILLS",
         "ASSISTANT_RUNTIME_SCHEDULER",
         "ASSISTANT_RUNTIME_FAILOVER_V2",
         "ASSISTANT_SUBAGENTS_ENABLED",
     ):
         assert assistant_environment[name] == f"${{{name}:-false}}"
+    assert assistant_environment["ASSISTANT_RUNTIME_SKILLS"] == (
+        "${ASSISTANT_RUNTIME_SKILLS:-true}"
+    )
+    assert assistant_environment["ASSISTANT_AGENT_PLUGIN_PATHS"] == (
+        "${ASSISTANT_AGENT_PLUGIN_PATHS:-/opt/agent-plugins/ai-docgen}"
+    )
+    assert assistant_environment["ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS"] == (
+        "${ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS:-/opt/agent-plugins/ai-docgen}"
+    )
+    assert not any("/opt/agent-plugins" in str(volume) for volume in assistant_volumes)
+    assistant_dockerfile = _read("apps/assistant-service/Dockerfile")
+    assert "COPY agent-plugins/ai-docgen/ /opt/agent-plugins/ai-docgen/" in assistant_dockerfile
     assert services["gateway"]["environment"]["ASSISTANT_ROUTE_SESSIONS_PROXIED"] == (
         "${ASSISTANT_ROUTE_SESSIONS_PROXIED:-true}"
     )

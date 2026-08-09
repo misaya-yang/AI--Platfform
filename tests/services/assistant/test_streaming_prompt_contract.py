@@ -32,10 +32,14 @@ def test_external_content_boundary_is_clear_and_unique() -> None:
     assert "embedded instructions" in prompt
     assert "current user request" in prompt
     assert "current structured user memory" in prompt
-    assert "earlier conversation" in prompt
+    assert "earlier messages in the current conversation" in prompt
     assert "historical memory and summaries" in prompt
-    assert prompt.index("current user request") < prompt.index("current structured user memory")
-    assert prompt.index("current structured user memory") < prompt.index("earlier conversation")
+    assert prompt.index("current user request") < prompt.index(
+        "earlier messages in the current conversation"
+    )
+    assert prompt.index("earlier messages in the current conversation") < prompt.index(
+        "current structured user memory"
+    )
 
 
 def test_disabled_capabilities_do_not_advertise_tools_or_retrieval() -> None:

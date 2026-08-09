@@ -73,6 +73,19 @@ def _create_session(client: httpx.Client, token: str) -> str:
     return session_id
 
 
+def _visible_tool_names(client: httpx.Client, token: str) -> set[str]:
+    response = client.get(
+        f"{API_PREFIX}/assistant/tools",
+        headers=_headers(token),
+    )
+    assert response.status_code == 200, response.text
+    return {
+        str(tool.get("name") or "")
+        for tool in response.json().get("tools", [])
+        if isinstance(tool, dict)
+    }
+
+
 def _chat(
     client: httpx.Client,
     token: str,
@@ -316,11 +329,7 @@ def _stream_chat_until_success(
             os_agent_enabled=os_agent_enabled,
         )
         approval_event = next(
-            (
-                event
-                for event in last_events
-                if event.get("event_type") == "approval_required"
-            ),
+            (event for event in last_events if event.get("event_type") == "approval_required"),
             None,
         )
         if approval_event is not None:
@@ -355,6 +364,54 @@ def _stream_chat_until_success(
         if attempt < max_attempts:
             time.sleep(1.5 * attempt)
     return last_events
+
+
+@pytest.mark.integration
+def test_assistant_docgen_plugin_live():
+    """Verify the bundled Agent Plugin creates a downloadable document."""
+
+    _require_live()
+    with httpx.Client(timeout=60.0) as client:
+        _assert_service_ready(client)
+        token = _login(client, USER1_EMAIL, LOGIN_PASSWORD)
+        session_id = _create_session(client, token)
+
+        tool_names = _visible_tool_names(client, token)
+        assert "mcp_docgen__generate_document" in tool_names, tool_names
+
+        artifacts_before = _session_artifacts(client, token, session_id)
+        events = _stream_chat_until_success(
+            client,
+            token,
+            session_id,
+            (
+                "请实际调用文档生成工具创建一份两节的项目周报 PDF 或 DOCX，"
+                "标题为 Capability Weekly Report；必须生成可下载文件，不要只返回正文草稿。"
+            ),
+            execution_profile="balanced",
+            max_attempts=1,
+        )
+        _assert_no_event(events, "run_error")
+        assert _has_any_event(events, "tool_call_start", "tool_call_result")
+        assert _has_any_event(events, "document_generation_result", "artifact_created")
+
+        artifacts = _wait_for_new_artifacts(
+            client,
+            token,
+            session_id,
+            artifacts_before,
+        )
+        document = next(
+            (
+                artifact
+                for artifact in artifacts
+                if str(artifact.get("filename") or "").lower().endswith((".pdf", ".docx"))
+            ),
+            None,
+        )
+        assert document is not None, artifacts
+        document_bytes = _download_artifact(client, token, str(document["artifact_id"]))
+        _assert_valid_document(document_bytes, document)
 
 
 @pytest.mark.integration
@@ -401,6 +458,13 @@ def test_assistant_api_e2e_live_dialogues(trial: int):
         policies = policies_resp.json().get("policies", {})
         assert "default_execution_profile" in policies
 
+        tool_names = _visible_tool_names(client, token1)
+        if "execute_python_code" not in tool_names:
+            pytest.skip(
+                "ASSISTANT_CODE_EXECUTOR_ENABLED is off; run the dedicated docgen "
+                "live test for the default quickstart capability"
+            )
+
         # Stream: execute code, persist an exact output artifact, and retain a
         # cross-turn marker. A non-empty prose response is not capability proof.
         code_marker = f"CODE-OK-{trial}-{time.time_ns()}"
@@ -423,8 +487,7 @@ def test_assistant_api_e2e_live_dialogues(trial: int):
         assert _has_any_event(events, "tool_call_start", "tool_call_result")
         if not _has_any_event(events, "code_execution_result", "artifact_created"):
             raise AssertionError(
-                "event_types="
-                + ",".join(str(event.get("event_type") or "") for event in events)
+                "event_types=" + ",".join(str(event.get("event_type") or "") for event in events)
             )
         assert _has_any_event(events, "context_budget", "gateway_decision")
         assert _has_any_event(events, "run_started")

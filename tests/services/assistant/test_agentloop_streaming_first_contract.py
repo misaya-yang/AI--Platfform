@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from assistant_service.core.agent.agent_loop import _redact_trace_text
 
@@ -90,6 +91,9 @@ class FakeModelRegistry:
         self._call_index += 1
         deltas = self._scripted[idx] if idx < len(self._scripted) else []
         for d in deltas:
+            error = d.get("error")
+            if isinstance(error, BaseException):
+                raise error
             yield StreamDelta(
                 content=d.get("content", ""),
                 tool_calls=d.get("tool_calls"),
@@ -1137,6 +1141,54 @@ async def test_forced_synthesis_hides_incomplete_text_and_uses_no_capability_pro
         assert "## Local OS Agent" not in prompt
         assert "## Available Tools" not in prompt
     assert all(event.event_type != "run_error" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_post_tool_http_400_recovers_without_replaying_tool() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    tool_calls = [
+        {
+            "id": "tc_write",
+            "function": {"name": "write_data", "arguments": '{"value":1}'},
+        }
+    ]
+    request = httpx.Request("POST", "https://provider.invalid/v1/chat/completions")
+    bad_request = httpx.HTTPStatusError(
+        "Provider returned HTTP 400",
+        request=request,
+        response=httpx.Response(400, request=request),
+    )
+    model = FakeModelRegistry(
+        scripted=[
+            [{"tool_calls": tool_calls, "finish_reason": "tool_calls"}],
+            [{"error": bad_request}],
+            [{"content": "document ready", "finish_reason": "stop"}],
+        ]
+    )
+    invoker = FakeToolInvoker({"write_data": {"success": True, "result": "written"}})
+    loop = AgentLoop(model_registry=model, tool_invoker=invoker)  # type: ignore[arg-type]
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="s1",
+            user=MockUserContext(user_id="u1"),  # type: ignore[arg-type]
+            message="Write the result",
+            config=AgentLoopConfig(model_id="test", max_tool_iterations=2),
+            history=[],
+        )
+    ]
+
+    text = "".join(str(event.data) for event in events if event.event_type == "text_delta")
+    assert text == "document ready"
+    assert invoker.invocation_count == 1
+    assert model._call_index == 3
+    assert model.tools_history[2] is None
+    assert all(message.get("role") != "tool" for message in model.messages_history[2])
+    assert all(not message.get("tool_calls") for message in model.messages_history[2])
+    assert all(event.event_type not in {"error", "run_error"} for event in events)
+    assert sum(event.event_type == "streaming_first_completed" for event in events) == 1
 
 
 @pytest.mark.asyncio

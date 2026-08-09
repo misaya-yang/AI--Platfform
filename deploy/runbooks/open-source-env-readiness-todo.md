@@ -17,7 +17,7 @@ real deployments must still fail on missing, weak, or placeholder secrets.
 - [ ] Create or update a real env file outside the repository.
 - [ ] Set non-placeholder secrets for `POSTGRES_PASSWORD`, `REDIS_PASSWORD`,
       `JWT_SECRET`, `GATEWAY_ASSISTANT_SHARED_SECRET`, and
-      `DOCGEN_ARTIFACT_SIGN_KEY`.
+      `GATEWAY_ENCRYPTION_KEY`.
 - [ ] Set a real `AUTH_ALLOWED_EMAIL_DOMAIN` for any shared or production
       deployment.
 - [ ] Set explicit production CORS origin arrays for

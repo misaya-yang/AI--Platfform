@@ -7,7 +7,6 @@
 #   - ghcr.io/<owner>/ai-gateway-web
 #   - ghcr.io/<owner>/ai-gateway-assistant-service
 #   - ghcr.io/<owner>/ai-gateway-knowledge-service
-#   - ghcr.io/<owner>/ai-gateway-mcp-docgen-server
 #   - ghcr.io/<owner>/ai-gateway-migrate
 #   - ghcr.io/<owner>/ai-gateway-code-interpreter
 #   - ghcr.io/<owner>/ai-gateway-docgen-sandbox
@@ -45,9 +44,6 @@ jobs:
           - image: ai-gateway-knowledge-service
             context: .
             dockerfile: ./apps/knowledge-service/Dockerfile
-          - image: ai-gateway-mcp-docgen-server
-            context: .
-            dockerfile: ./packages/mcp-docgen-server/Dockerfile
           - image: ai-gateway-migrate
             context: .
             dockerfile: ./docker/migrate/Dockerfile

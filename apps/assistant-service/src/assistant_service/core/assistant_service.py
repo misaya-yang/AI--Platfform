@@ -24,14 +24,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import os
 import time
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field, replace
-from datetime import datetime
-from enum import Enum
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -54,23 +51,42 @@ from ai_gateway_core.storage import (
 )
 from cachetools import TTLCache
 
-from .agent.agent_loop import PRIOR_TOOL_RESULTS_MARKER, AgentLoopEvent
+from .agent.agent_loop import AgentLoopEvent
 from .agent.runtime_context import (
     AgentRuntimeExecutionContext,
     assert_session_runtime_pin,
-    compose_agent_system_prompt,
+)
+from .assistant_context_builder import AssistantContextMessageBuilderMixin
+from .assistant_context_keys import (
+    _context_receipt_key,
+    _context_receipt_scope,
+    _working_memory_scope,
+)
+from .assistant_history import (
+    _append_tool_results_block as _append_tool_results_block,
+)
+from .assistant_history import (
+    _session_history_to_messages,
+)
+from .assistant_models import (
+    AssistantConfig,
+    AssistantStreamEvent,
+    RetrievedContext,
+    StreamEventType,
+)
+from .assistant_models import (
+    RAGEvaluation as RAGEvaluation,
+)
+from .assistant_models import (
+    ToolErrorInfo as ToolErrorInfo,
 )
 from .code_executor import CodeExecutorService
-from .content.structured_output import (
-    OutputFormat,
-    OutputGuardrail,
-)
+from .content.structured_output import OutputGuardrail
 from .files.file_processor import ProcessedFiles, create_file_processor
-from .models.model_registry import ChatMessage, ModelProvider, ModelRegistry
+from .models.model_registry import ChatMessage, ModelRegistry
 from .prompts.system_prompt_v2 import (
     build_system_prompt_v2,
     ensure_external_content_boundary,
-    get_ttft_optimized_prompt,
     inject_document_context,
     inject_kb_context,
     inject_user_preferences,
@@ -87,18 +103,14 @@ from .quality.guardrails import (
 )
 from .rag.context_engine import ContextBudgetManager, ContextStructure
 from .rag.context_manager import ContextConfig, get_context_manager
-from .rag.rag_metrics import (
-    Citation,
-    RAGMetrics,
-    get_rag_evaluator,
-)
+from .rag.rag_metrics import get_rag_evaluator
 from .rag.scenario_analyzer import (
     ScenarioDetectionResult,
     create_scenario_analyzer,
 )
 from .runtime.context.assembler import ContextAssemblerV2
 from .tasks.task_planner import TaskPlanner
-from .tool_invoker import CapabilityAllowlist, ToolInvoker
+from .tool_invoker import ToolInvoker
 from .tools.code_executor_tool import CODE_EXECUTOR_TOOL, CodeExecutorToolExecutor
 from .trace_writer import AssistantTraceContext, AssistantTraceWriter, build_transcript_locator
 from .turn_contract import (
@@ -148,407 +160,7 @@ _DEFAULT_NOOP_ARTIFACT_STORAGE: ArtifactStorageLike = NoOpArtifactStorage()
 _DEFAULT_NOOP_FILE_STORAGE: FileStorageLike = NoOpFileStorage()
 
 
-def _context_receipt_scope(
-    *,
-    tenant_id: str,
-    user_id: str,
-    session_id: str,
-) -> str:
-    """Hash a length-delimited owner/session tuple without delimiter collisions."""
-
-    digest = hashlib.sha256()
-    for value in (tenant_id, user_id, session_id):
-        encoded = str(value).encode("utf-8")
-        digest.update(len(encoded).to_bytes(8, "big"))
-        digest.update(encoded)
-    return f"ctxscope_{digest.hexdigest()}"
-
-
-def _context_receipt_key(*, scope: str, model_id: str) -> str:
-    model_digest = hashlib.sha256(str(model_id).encode("utf-8")).hexdigest()
-    return f"{scope}:{model_digest}"
-
-
-def _working_memory_scope(
-    *,
-    tenant_id: str,
-    user_id: str,
-    session_id: str,
-) -> str:
-    """Hash a length-delimited owner/session tuple for process-local state."""
-
-    digest = hashlib.sha256()
-    for value in (tenant_id, user_id, session_id):
-        encoded = str(value).encode("utf-8")
-        digest.update(len(encoded).to_bytes(8, "big"))
-        digest.update(encoded)
-    return f"wmscope_{digest.hexdigest()}"
-
-
-class StreamEventType(str, Enum):
-    """SSE event types for assistant streaming responses."""
-
-    # Core streaming events
-    TEXT_DELTA = "text_delta"
-    THINKING_DELTA = "thinking_delta"
-    THINKING_START = "thinking_start"
-    THINKING_END = "thinking_end"
-    THINKING_ERROR = "thinking_error"
-    TOOL_CALL = "tool_call"
-    TOOL_RESULT = "tool_result"
-    TOOL_CALL_RESULT = "tool_call_result"  # AG-UI compatible tool result
-    TOOL_CALL_START = "tool_call_start"  # AG-UI tool call lifecycle start
-    TOOL_CALL_END = "tool_call_end"  # AG-UI tool call lifecycle end
-
-    # Context and retrieval events
-    CONTEXT_RETRIEVED = "context_retrieved"
-    RAG_RETRIEVAL_STARTED = "rag_retrieval_started"
-    RAG_RETRIEVAL_COMPLETED = "rag_retrieval_completed"
-    RAG_RETRIEVAL_FAILED = "rag_retrieval_failed"
-    WEB_SEARCH_RESULTS = "web_search_results"
-    RAG_EVALUATION = "rag_evaluation"
-    CONTEXT_BUDGET = "context_budget"
-    CONTEXT_COMPACTED = "context_compacted"
-    CONTEXT_DETAIL = "context_detail"
-    MEMORY_RETRIEVED = "memory_retrieved"
-    MEMORY_REFLECTION_SCHEDULED = "memory_reflection_scheduled"
-    QUEUE_STEERED = "queue_steered"
-    SKILL_SELECTED = "skill_selected"
-    SKILL_LOADED = "skill_loaded"
-    SKILL_CREATE_PENDING_APPROVAL = "skill_create_pending_approval"
-    SANDBOX_DECISION = "sandbox_decision"
-
-    # Gateway / queue / approvals
-    QUEUE_STATE = "queue_state"
-    APPROVAL_REQUIRED = "approval_required"
-    APPROVAL_RESULT = "approval_result"
-    GATEWAY_DECISION = "gateway_decision"
-
-    # Session events
-    SESSION_CREATED = "session_created"
-    SESSION_UPDATED = "session_updated"
-
-    # Status events
-    STATUS = "status"
-    USAGE = "usage"
-    FINISH = "finish"
-    DONE = "done"
-    ERROR = "error"
-    OUTPUT_WARNINGS = "output_warnings"
-
-    # Code execution events
-    CODE_EXECUTION_START = "code_execution_start"
-    CODE_EXECUTION_OUTPUT = "code_execution_output"
-    CODE_EXECUTION_RESULT = "code_execution_result"
-    ARTIFACT_CREATED = "artifact_created"
-
-    # Image generation events
-    IMAGE_GENERATION_START = "image_generation_start"
-    IMAGE_GENERATION_RESULT = "image_generation_result"
-
-    # Document generation events
-    DOCUMENT_GENERATION_START = "document_generation_start"
-    DOCUMENT_GENERATION_RESULT = "document_generation_result"
-
-    # KV-Cache metrics
-    CACHE_METRICS = "cache_metrics"
-
-    # File processing events
-    FILE_PROCESSED = "file_processed"
-
-    # Working memory events (Context Engine)
-    WORKING_MEMORY_UPDATE = "working_memory_update"
-    TASK_PLANNING = "task_planning"
-
-    # Memory manager events
-    MEMORY_LOADED = "memory_loaded"
-
-    # Tool execution error event (for error preservation)
-    TOOL_ERROR = "tool_error"
-
-    # Manus-style task visualization events
-    STEP_STARTED = "step_started"
-    STEP_FINISHED = "step_finished"
-    OUTLINE_READY = "outline_ready"
-
-    # Run lifecycle events
-    RUN_STARTED = "run_started"
-    RUN_FINISHED = "run_finished"
-    RUN_ERROR = "run_error"
-    RUN_BUDGET_EXCEEDED = "run_budget_exceeded"
-
-
-@dataclass
-class AssistantConfig:
-    """Configuration for an assistant conversation."""
-
-    # Model settings
-    model_provider: ModelProvider = ModelProvider.DASHSCOPE
-    model_id: str = "qwen3.7-plus"
-    temperature: float = 0.7
-    max_tokens: int | None = None
-
-    # Knowledge base settings (TTFT-optimized defaults)
-    kb_dataset_ids: list[str] = field(default_factory=list)
-    kb_retrieval_configs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    kb_mode: RAGMode = RAGMode.AUTO
-    kb_top_k: int = 5  # Number of KB results to retrieve
-    kb_score_threshold: float = 0.65  # Increased from 0.5 for higher quality results
-    kb_include_images: bool = False
-    kb_max_content_length: int = 400  # Max chars per chunk to reduce context size
-
-    # Web search settings
-    web_search_enabled: bool = False
-    web_search_max_results: int = 5
-
-    # File attachments
-    file_paths: list[str] = field(default_factory=list)
-
-    # System prompt
-    system_prompt: str | None = None
-    eval_system_prompt_override: str | None = None
-    trusted_agent_instructions: str | None = None
-    trusted_channel_instructions: str | None = None
-    trusted_capability_instructions: str | None = None
-
-    # Verified Agent-only boundary. ``None`` preserves the built-in Assistant;
-    # an explicit allowlist, including empty, can only reduce tool access.
-    capability_allowlist: CapabilityAllowlist | None = None
-    agent_runtime: AgentRuntimeExecutionContext | None = None
-    # Exact signed Skill resource IDs currently map one-to-one to registry
-    # names. ``None`` preserves the built-in Assistant's legacy all-skills
-    # behavior; an explicit set is a non-expanding Agent upper bound.
-    allowed_skill_ids: frozenset[str] | None = None
-    # Exact immutable database versions keyed by stable Skill name.  ``None``
-    # keeps the built-in Assistant and legacy bundled-Skill behavior unchanged.
-    allowed_skill_versions: dict[str, str] | None = None
-
-    # Tools (future extension)
-    tools_enabled: list[str] = field(default_factory=list)
-
-    # Phase 4: Output validation settings
-    output_max_length: int = 10000
-    output_check_pii: bool = True
-    output_format: OutputFormat = OutputFormat.TEXT
-
-    # Context Engine settings (Phase 5: KV-Cache optimization)
-    use_context_engine: bool = True  # ENABLED: Use Context Engine for KV-Cache optimization
-    user_preferences: str | None = None  # User-level preferences for context
-    long_term_memory: str | None = None  # Persistent user knowledge
-
-    # Task Planning settings (Phase 2.4: Multi-step task planning)
-    enable_task_planning: bool = (
-        False  # Disabled by default - enable for complex multi-step tasks only
-    )
-    confirm_plan: bool = (
-        False  # When True, pause and require user confirmation before executing template plans
-    )
-    max_parallel_tools: int = 5  # Maximum number of tools to execute in parallel
-
-    # Agent Loop settings (Enterprise unified 8-step flow)
-    use_agent_loop: bool = True  # Enabled for streaming-first TTFT optimization
-    use_scenario_retrieval: bool = (
-        False  # Disabled - scenario detection still runs but no heavy retrieval
-    )
-    enable_rag_metrics: bool = False  # Disabled in production for performance
-
-    # Memory and ReAct settings (Manus architecture core features)
-    enable_memory_loading: bool = False  # Disabled by default - reduces TTFT significantly
-    enable_react_loop: bool = False  # Disabled by default - simple generation for most queries
-
-    # Assistant Gateway policy profile (runtime-policy)
-    execution_profile: str = "safe"  # safe | balanced | power
-    memory_mode: str = "auto"  # auto | strict | off
-    os_agent_enabled: bool = False  # gated by policy engine + tenant/user permissions
-    runtime_mode: str = "compat"  # off | compat | full
-    queue_mode: str = "collect"  # collect | followup | steer | interrupt
-    context_detail: bool = False  # emit detailed context cost breakdown
-    skills_enabled: bool | None = None  # per-request skill toggle
-    memory_profile: str | None = None  # off | basic | hybrid
-
-    # Distributed trace correlation (W3C traceparent from gateway)
-    traceparent: str | None = None
-    otel_trace_id: str | None = None
-
-    # Approval resume continuation for a paused run.
-    resume_run_id: str | None = None
-    resume_approval_id: str | None = None
-
-
-@dataclass
-class AssistantStreamEvent:
-    """Event emitted during streaming."""
-
-    event_type: str  # context_retrieved, text_delta, tool_call, tool_result, usage, done
-    data: Any = None
-    timestamp: float = field(default_factory=time.time)
-
-
-@dataclass
-class RetrievedContext:
-    """Context retrieved from knowledge bases."""
-
-    dataset_id: str
-    dataset_name: str
-    chunks: list[dict[str, Any]]
-    query: str
-    took_ms: float
-
-    # Phase 3: RAG metrics
-    avg_score: float = 0.0
-    top_score: float = 0.0
-
-
-@dataclass
-class RAGEvaluation:
-    """Phase 3: RAG evaluation results for a conversation turn."""
-
-    metrics: RAGMetrics | None = None
-    citations: list[Citation] = field(default_factory=list)
-    quality_score: float = 0.0
-    grounding_ratio: float = 0.0  # What % of response is grounded in sources
-
-
-@dataclass
-class ToolErrorInfo:
-    """
-    Structured error information for tool execution failures.
-
-    Based on Manus Context Engineering principle: Don't hide failures from the agent.
-    By preserving rich error context, the model can:
-    - Understand what went wrong
-    - Adjust its approach on retry
-    - Provide better feedback to users
-
-    Attributes:
-        tool_name: Name of the tool that failed
-        tool_call_id: ID of the tool call
-        error_type: Type/class of the error
-        error_message: Human-readable error message
-        arguments: The arguments that were passed to the tool
-        suggestion: Optional suggestion for how to fix the issue
-        timestamp: When the error occurred
-    """
-
-    tool_name: str
-    tool_call_id: str
-    error_type: str
-    error_message: str
-    arguments: dict[str, Any] = field(default_factory=dict)
-    suggestion: str | None = None
-    timestamp: datetime = field(default_factory=datetime.utcnow)
-
-    def to_rich_context(self) -> str:
-        """
-        Format error as rich context for the model.
-
-        This format is designed to help the model understand and potentially
-        recover from the error. The structure is:
-        - Clear error type and message
-        - Arguments that caused the failure
-        - Actionable suggestion when available
-        """
-        lines = [
-            f"[TOOL ERROR] {self.tool_name} failed",
-            f"Error Type: {self.error_type}",
-            f"Error Message: {self.error_message}",
-        ]
-
-        if self.arguments:
-            args_str = ", ".join(f"{k}={repr(v)[:100]}" for k, v in self.arguments.items())
-            lines.append(f"Arguments: {args_str}")
-
-        if self.suggestion:
-            lines.append(f"Suggestion: {self.suggestion}")
-
-        return "\n".join(lines)
-
-
-def _session_history_to_messages(
-    session_history: list[Any],
-) -> list[dict[str, Any]]:
-    """Convert ``SessionMessage`` records to the ``{role, content}`` shape the
-    rest of the pipeline expects, while preserving prior tool output so
-    cross-turn (and especially cross-model) follow-ups can reference it.
-
-    Bug fix 2026-04-21: previously this was a naive
-    ``[{"role": m.role, "content": m.content} for m in session.history]``.
-    That drops ``m.metadata.tool_results`` entirely — so when a tool (quiz,
-    web search, …) produced rich output on turn N and the user asked
-    "explain those questions above" on turn N+1 (possibly on a different
-    model that doesn't keep provider-side state), the follow-up model saw
-    only the assistant's terse text ("已为您生成5道测试题…") and
-    hallucinated a brand-new quiz.
-
-    We now append a compact ``[Previous tool results]`` block to the
-    assistant message content whenever the persisted metadata contains
-    tool_results. The block is bounded per-tool and per-turn to keep
-    history budgets predictable.
-    """
-    out: list[dict[str, Any]] = []
-    for m in session_history or []:
-        role = getattr(m, "role", None) or "user"
-        content = getattr(m, "content", "")
-        if role not in ("user", "assistant"):
-            continue
-        metadata = getattr(m, "metadata", None) or {}
-        tool_results = metadata.get("tool_results") if isinstance(metadata, dict) else None
-        if role == "assistant" and isinstance(tool_results, list) and tool_results:
-            content = _append_tool_results_block(str(content or ""), tool_results)
-        out.append({"role": role, "content": content})
-    return out
-
-
-def _append_tool_results_block(
-    content: str,
-    tool_results: list[dict[str, Any]],
-    *,
-    per_tool_char_cap: int = 2000,
-    total_char_cap: int = 6000,
-) -> str:
-    """Append a ``[Previous tool results]`` block to an assistant message.
-
-    Each tool entry is capped independently so one verbose tool (e.g. a
-    50-question quiz) can't crowd out the others; a total budget also
-    protects the full history from blowing up token counts. The block is
-    framed with explicit markers so the next-turn model reads it as prior
-    context rather than a new instruction.
-    """
-    if not tool_results:
-        return content
-
-    total_used = 0
-    # Keep the opening marker stable across stored history and runtime prompt
-    # assembly so prior tool evidence remains clearly framed as untrusted data.
-    lines: list[str] = [
-        "",
-        f"{PRIOR_TOOL_RESULTS_MARKER} — for your reference only, not shown to the user]",
-    ]
-    for entry in tool_results:
-        if not isinstance(entry, dict):
-            continue
-        name = str(entry.get("name") or "tool").strip() or "tool"
-        result = entry.get("result")
-        if result is None:
-            continue
-        text = str(result).strip()
-        if not text:
-            continue
-        if len(text) > per_tool_char_cap:
-            text = text[: per_tool_char_cap - 3].rstrip() + "..."
-        remaining = total_char_cap - total_used
-        if remaining <= 0:
-            lines.append("... [more tool results truncated from history]")
-            break
-        if len(text) > remaining:
-            text = text[: max(0, remaining - 3)].rstrip() + "..."
-        lines.append(f"- {name}: {text}")
-        total_used += len(text)
-    lines.append("[End previous tool results]")
-    return (content or "") + "\n" + "\n".join(lines)
-
-
-class AssistantService:
+class AssistantService(AssistantContextMessageBuilderMixin):
     """
     GPT-like assistant with multi-model support and KB integration.
 
@@ -823,7 +435,9 @@ Workflow:
 
         gateway_enabled = True
         with contextlib.suppress(Exception):
-            gateway_enabled = os.getenv("ASSISTANT_GATEWAY_ENABLED", "false").lower() == "true"
+            gateway_enabled = (
+                os.getenv("ASSISTANT_GATEWAY_ENABLED", "true").strip().lower() == "true"
+            )
 
         self.tool_invoker = tool_invoker
         if self.tool_invoker is None:
@@ -2012,241 +1626,6 @@ Workflow:
         # Current message (with potential file content and images)
         messages.append(ChatMessage(role="user", content=final_message, images=user_images))
 
-        return messages
-
-    def _build_messages_with_context_engine(
-        self,
-        message: str,
-        history: list[dict[str, str]],
-        config: AssistantConfig,
-        retrieved_contexts: list[RetrievedContext],
-        web_search_context: str | None = None,
-        processed_files: ProcessedFiles | None = None,
-        model_supports_vision: bool = False,
-        session_id: str | None = None,
-        user_preferences: str | None = None,
-        domain_rules: str = "",
-        include_citations: bool = False,
-        context_packet_receipt: dict[str, Any] | None = None,
-        context_cache_scope: str | None = None,
-        working_memory_scope: str | None = None,
-    ) -> list[ChatMessage]:
-        """Build messages using Context Engine for KV-Cache optimization.
-
-        This method uses the ContextEngine class to construct messages with
-        a stable prefix design that maximizes cache hit rates.
-
-        Key differences from legacy _build_messages:
-        - System prompt is built with layered structure (stable first)
-        - User preferences and long-term memory are injected into system prompt
-        - Working memory (task state) is included for multi-step task focus
-        - KB/web context goes into current_context (end of user message)
-
-        Args:
-            message: The user's message text.
-            history: Previous conversation history.
-            config: Assistant configuration.
-            retrieved_contexts: KB retrieval results.
-            web_search_context: Web search results as formatted text.
-            processed_files: Processed file contents.
-            model_supports_vision: Whether the model supports vision.
-            session_id: Session ID for working memory lookup.
-            user_preferences: User preferences loaded from MemoryManager (formatted string).
-
-        Returns:
-            List of ChatMessage objects with optimized structure.
-        """
-        # Get provider from model_id to configure the shared Context Packet.
-        provider = self._get_provider_from_model(config.model_id)
-
-        # Build current context (KB + web search results)
-        current_context_parts: list[str] = []
-        if retrieved_contexts:
-            context_text = self._format_context(
-                retrieved_contexts,
-                include_citations=include_citations,
-            )
-            current_context_parts.append(self.CONTEXT_TEMPLATE.format(context=context_text))
-            logger.info(f"[CONTEXT ENGINE] KB context: {len(context_text)} chars")
-
-        if web_search_context:
-            current_context_parts.append(
-                self.WEB_CONTEXT_TEMPLATE.format(context=web_search_context)
-            )
-            logger.info(f"[CONTEXT ENGINE] Web context: {len(web_search_context)} chars")
-
-        client_prompt = (config.system_prompt or "").strip()
-        if client_prompt:
-            current_context_parts.append(
-                "## User Custom Instructions (client-supplied, lower priority than system)\n"
-                + client_prompt[:500]
-            )
-
-        injected_file_sources: list[dict[str, Any]] = []
-        current_images: list[str] = []
-        if processed_files:
-            injected_file_sources.extend(dict(item) for item in processed_files.file_metadata or [])
-            text_content = str(processed_files.text_content or "")
-            if text_content:
-                injected_file_sources.append(
-                    {
-                        "path": "uploaded-text",
-                        "source_type": "upload",
-                        "content": text_content,
-                    }
-                )
-            if processed_files.image_descriptions and not model_supports_vision:
-                descriptions = "\n".join(
-                    f"- Image {index + 1}: {description}"
-                    for index, description in enumerate(processed_files.image_descriptions)
-                )
-                if descriptions:
-                    injected_file_sources.append(
-                        {
-                            "path": "image-descriptions",
-                            "source_type": "derived",
-                            "content": descriptions,
-                        }
-                    )
-            if model_supports_vision and processed_files.has_images:
-                current_images.extend(
-                    f"data:{image.media_type};base64,{image.base64_data}"
-                    for image in processed_files.images
-                )
-                current_images.extend(
-                    f"data:{page.media_type};base64,{page.base64_data}"
-                    for page in processed_files.pdf_pages
-                )
-
-        # Get working memory task state if available
-        task_state: str | None = None
-        working_memory_key = working_memory_scope or session_id
-        if working_memory_key and working_memory_key in self._working_memories:
-            working_memory = self._working_memories[working_memory_key]
-            task_state = working_memory.to_markdown()
-            logger.info(f"[CONTEXT ENGINE] Task state injected: {len(task_state)} chars")
-
-        # Determine user_preferences: prefer loaded preferences from MemoryManager,
-        # fallback to config.user_preferences
-        effective_user_preferences = user_preferences or config.user_preferences
-        if effective_user_preferences:
-            logger.info(
-                f"[CONTEXT ENGINE] User preferences: {len(effective_user_preferences)} chars"
-            )
-
-        # Build ContextStructure with layered content
-        # Use TTFT-optimized prompt when context engine is enabled (no timestamps!)
-        effective_system_prompt = ensure_external_content_boundary(
-            (config.eval_system_prompt_override or "").strip()
-            or get_ttft_optimized_prompt(
-                user_role="user",
-                available_datasets=config.kb_dataset_ids,
-                scenario_rules=domain_rules,
-            )
-        )
-        if config.agent_runtime is not None:
-            effective_system_prompt = compose_agent_system_prompt(
-                platform_prompt=effective_system_prompt,
-                agent_instructions=config.trusted_agent_instructions,
-                channel_instructions=config.trusted_channel_instructions,
-                capability_instructions=config.trusted_capability_instructions,
-            )
-        logger.info("[CONTEXT ENGINE] Built trusted stable system prompt")
-
-        context_structure = ContextStructure(
-            system_prompt=effective_system_prompt,
-            tool_definitions=[],  # Tool definitions handled separately
-            user_preferences=effective_user_preferences,
-            long_term_memory=config.long_term_memory,
-            task_state=task_state,
-            conversation_history=[
-                dict(h)
-                for h in history
-                if h.get("role") in ("user", "assistant", "tool")
-                and (h.get("role") == "tool" or h.get("content") or h.get("tool_calls"))
-            ],
-            current_context="\n\n".join(current_context_parts) if current_context_parts else None,
-            current_query=message,
-            current_images=current_images,
-        )
-
-        model_info = self.model_registry.get_model(config.model_id)
-        context_window = int(getattr(model_info, "context_window", 0) or 128000)
-        allowlist = config.capability_allowlist
-        permission_snapshot: Any = (
-            sorted(allowlist.tool_names)
-            if allowlist is not None
-            else "legacy-no-explicit-allowlist"
-        )
-        if config.agent_runtime is not None:
-            permission_snapshot = {
-                "runtime_fingerprint": config.agent_runtime.runtime_fingerprint,
-                "allowlist": permission_snapshot,
-            }
-        cache_receipt_key = (
-            _context_receipt_key(
-                scope=context_cache_scope,
-                model_id=config.model_id,
-            )
-            if context_cache_scope
-            else None
-        )
-        previous_cache_receipt = (
-            self._context_packet_receipts.get(cache_receipt_key)
-            if cache_receipt_key is not None
-            else None
-        )
-        packet = ContextAssemblerV2(provider=provider).build_packet(
-            context=context_structure,
-            model_context_window=context_window,
-            injected_files=injected_file_sources,
-            provenance=[
-                {
-                    "kind": "knowledge",
-                    "trust": "untrusted",
-                    "source_id": {
-                        "dataset_id": item.dataset_id,
-                        "dataset_name": item.dataset_name,
-                    },
-                }
-                for item in retrieved_contexts
-            ],
-            cache_dimensions={
-                "model": config.model_id,
-                "permission_snapshot": permission_snapshot,
-                "rule_revision": {
-                    "domain_rules": domain_rules,
-                    "agent_instructions": config.trusted_agent_instructions,
-                    "channel_instructions": config.trusted_channel_instructions,
-                    "capability_instructions": config.trusted_capability_instructions,
-                },
-            },
-            previous_cache_receipt=previous_cache_receipt,
-        )
-        raw_messages = packet.materialize_messages()
-        packet_receipt = packet.receipt()
-        if cache_receipt_key is not None:
-            self._context_packet_receipts[cache_receipt_key] = packet_receipt
-        if context_packet_receipt is not None:
-            context_packet_receipt.update(packet_receipt)
-
-        # Convert to ChatMessage objects and handle file content
-        messages: list[ChatMessage] = []
-        for msg in raw_messages:
-            role = msg["role"]
-            messages.append(
-                ChatMessage(
-                    role=role,
-                    content=msg.get("content", ""),
-                    name=msg.get("name"),
-                    tool_calls=msg.get("tool_calls"),
-                    tool_call_id=msg.get("tool_call_id"),
-                    images=msg.get("images"),
-                    thought_signature=msg.get("thought_signature"),
-                )
-            )
-
-        logger.info(f"[CONTEXT ENGINE] Built {len(messages)} messages with stable prefix design")
         return messages
 
     def _inject_file_content(

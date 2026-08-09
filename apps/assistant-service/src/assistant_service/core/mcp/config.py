@@ -2,18 +2,72 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
+import urllib.parse
 from pathlib import Path
 
 import yaml
+from ai_gateway_core.agent_plugins import AgentPluginLoadError, load_agent_plugin
 
-from .client import MCPServerConfig
+from .client import MCPServerConfig, MCPStaticToolCapability
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = "config/mcp_servers.yaml"
+AI_GATEWAY_PLUGIN_EXTENSION = "com.misaya.ai-gateway"
+_PLUGIN_MCP_EXTENSION_FIELDS = frozenset(
+    {
+        "urlEnv",
+        "timeoutSeconds",
+        "maxConcurrent",
+        "responseLimitBytes",
+    }
+)
+_TRUSTED_PLUGIN_ID_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?@[0-9A-Za-z.+-]+$")
+_BUILTIN_PLUGIN_TOOL_CAPABILITIES = {
+    ("ai-docgen@1.0.0", "docgen"): {
+        "generate_document": MCPStaticToolCapability.from_config(
+            "generate_document",
+            {
+                "operation_kind": "write",
+                "risk_level": "low",
+                "requires_confirmation": False,
+            },
+        )
+    }
+}
+_BUILTIN_PLUGIN_PROCESS_ENV = {
+    ("ai-docgen@1.0.0", "docgen"): (
+        "DASHSCOPE_CHAT_API_KEY",
+        "DASHSCOPE_API_KEY",
+        "DOCGEN_LLM_MODEL",
+        "DOCGEN_LLM_ENDPOINT",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    )
+}
+_URL_ENV_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
+_RUNTIME_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$")
+
+
+def _runtime_server_name(declared_name: str) -> str:
+    """Map a portable server key to a bounded ToolRegistry-safe name."""
+
+    if _RUNTIME_SERVER_NAME_RE.fullmatch(declared_name):
+        return declared_name
+    base = re.sub(r"[^A-Za-z0-9_-]+", "_", declared_name).strip("_-")
+    base = base[:34].rstrip("_-") or "server"
+    digest = hashlib.sha256(declared_name.encode("utf-8")).hexdigest()[:10]
+    return f"{base}__{digest}"
 
 
 def _resolve_env_vars(value: str) -> str:
@@ -75,4 +129,249 @@ def load_mcp_config(path: str | None = None) -> list[MCPServerConfig]:
         )
 
     logger.info(f"Loaded {len(configs)} MCP server configs from {config_path}")
+    return configs
+
+
+def _plugin_endpoint(
+    declared_url: str,
+    *,
+    override_url: str | None,
+) -> tuple[str, str]:
+    """Map a portable endpoint URL to MCPClient's origin + endpoint path."""
+
+    declared = urllib.parse.urlsplit(declared_url)
+    selected = urllib.parse.urlsplit(override_url) if override_url else declared
+    endpoint_path = selected.path or declared.path or "/mcp"
+    endpoint_query = selected.query or (declared.query if not selected.path else "")
+    if endpoint_query:
+        endpoint_path = f"{endpoint_path}?{endpoint_query}"
+    origin = urllib.parse.urlunsplit((selected.scheme, selected.netloc, "", "", "")).rstrip("/")
+    return origin, endpoint_path
+
+
+def _trusted_plugin_ids() -> set[str]:
+    """Return operator-approved built-in plugin identities from process config."""
+
+    trusted: set[str] = set()
+    for raw_id in os.getenv("ASSISTANT_TRUSTED_AGENT_PLUGINS", "").split(","):
+        plugin_id = raw_id.strip()
+        if not plugin_id:
+            continue
+        if not _TRUSTED_PLUGIN_ID_RE.fullmatch(plugin_id):
+            logger.warning("agent_plugin.trusted_id_invalid")
+            continue
+        trusted.add(plugin_id)
+    return trusted
+
+
+def _trusted_plugin_roots() -> set[Path]:
+    """Resolve operator-owned plugin roots that may launch local code.
+
+    Identity metadata is self-declared, so it is never sufficient to cross the
+    stdio execution boundary. Requiring an independently configured canonical
+    root prevents a third-party package from impersonating a bundled plugin by
+    copying its name and version.
+    """
+
+    trusted: set[Path] = set()
+    configured = os.getenv("ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS", "")
+    for raw_path in configured.split(os.pathsep):
+        value = raw_path.strip()
+        if not value:
+            continue
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            logger.warning("agent_plugin.trusted_root_invalid")
+            continue
+        try:
+            root = candidate.resolve(strict=True)
+        except OSError:
+            logger.warning("agent_plugin.trusted_root_invalid")
+            continue
+        if not root.is_dir():
+            logger.warning("agent_plugin.trusted_root_invalid")
+            continue
+        trusted.add(root)
+    return trusted
+
+
+def _expand_plugin_placeholders(value: str, *, plugin_root: Path, plugin_data: Path) -> str:
+    return value.replace("${PLUGIN_ROOT}", str(plugin_root)).replace(
+        "${PLUGIN_DATA}",
+        str(plugin_data),
+    )
+
+
+def _plugin_data_dir(plugin_name: str) -> Path:
+    raw_root = os.getenv("ASSISTANT_AGENT_PLUGIN_DATA_ROOT", "/app/data/agent-plugins")
+    base = Path(raw_root).expanduser()
+    if not base.is_absolute():
+        raise ValueError("ASSISTANT_AGENT_PLUGIN_DATA_ROOT must be absolute")
+    return base.resolve(strict=False) / plugin_name
+
+
+def load_agent_plugin_mcp_config(raw_paths: str | None = None) -> list[MCPServerConfig]:
+    """Load operator-installed Streamable HTTP MCP components.
+
+    A configured plugin path is the installation boundary. Portable URLs stay
+    subject to Agent Plugins URL rules; the AI Gateway extension may select an
+    operator-owned URL environment variable for container/service discovery.
+    """
+
+    configured = (
+        raw_paths if raw_paths is not None else os.getenv("ASSISTANT_AGENT_PLUGIN_PATHS", "")
+    )
+    configs: list[MCPServerConfig] = []
+    seen_names: set[str] = set()
+    trusted_plugin_ids = _trusted_plugin_ids()
+    trusted_plugin_roots = _trusted_plugin_roots()
+    for raw_path in configured.split(os.pathsep):
+        if not raw_path.strip():
+            continue
+        try:
+            package = load_agent_plugin(Path(raw_path).expanduser())
+        except AgentPluginLoadError as exc:
+            logger.warning("agent_plugin.mcp_rejected code=%s", exc.code)
+            continue
+
+        raw_extension = package.manifest.extensions.get(
+            AI_GATEWAY_PLUGIN_EXTENSION,
+            {},
+        )
+        extension = raw_extension.get("mcp", {}) if isinstance(raw_extension, dict) else {}
+        if not isinstance(extension, dict):
+            logger.warning("agent_plugin.mcp_extension_invalid plugin=%s", package.manifest.name)
+            extension = {}
+
+        for server in package.mcp_servers:
+            runtime_name = _runtime_server_name(server.name)
+            if runtime_name in seen_names:
+                logger.warning("agent_plugin.mcp_name_conflict server=%s", server.name)
+                continue
+            settings = extension.get(server.name, {})
+            if not isinstance(settings, dict) or set(settings) - _PLUGIN_MCP_EXTENSION_FIELDS:
+                logger.warning("agent_plugin.mcp_extension_invalid server=%s", server.name)
+                settings = {}
+
+            plugin_id = f"{package.manifest.name}@{package.manifest.version}"
+            trusted_plugin = (
+                plugin_id in trusted_plugin_ids and package.root in trusted_plugin_roots
+            )
+            if plugin_id in trusted_plugin_ids and package.root not in trusted_plugin_roots:
+                logger.warning("agent_plugin.trusted_root_mismatch server=%s", server.name)
+            if server.transport == "stdio" and not trusted_plugin:
+                # A stdio component is executable code. Parsing is portable,
+                # but only an operator-trusted plugin may cross this boundary.
+                logger.warning("agent_plugin.mcp_stdio_untrusted server=%s", server.name)
+                continue
+
+            override_url: str | None = None
+            url_env = settings.get("urlEnv")
+            if url_env is not None and server.transport != "streamable-http":
+                logger.warning("agent_plugin.mcp_extension_invalid server=%s", server.name)
+                continue
+            if url_env is not None:
+                if not isinstance(url_env, str) or not _URL_ENV_RE.fullmatch(url_env):
+                    logger.warning("agent_plugin.mcp_url_env_invalid server=%s", server.name)
+                    continue
+                override_url = os.getenv(url_env, "").strip() or None
+
+            timeout = settings.get("timeoutSeconds", 30.0)
+            max_concurrent = settings.get("maxConcurrent", 10)
+            response_limit_bytes = settings.get("responseLimitBytes", 1024 * 1024)
+            if (
+                isinstance(timeout, bool)
+                or not isinstance(timeout, (int, float))
+                or not 0 < float(timeout) <= 600
+                or isinstance(max_concurrent, bool)
+                or not isinstance(max_concurrent, int)
+                or not 1 <= max_concurrent <= 32
+                or isinstance(response_limit_bytes, bool)
+                or not isinstance(response_limit_bytes, int)
+                or not 1024 <= response_limit_bytes <= 8 * 1024 * 1024
+            ):
+                logger.warning("agent_plugin.mcp_extension_invalid server=%s", server.name)
+                continue
+
+            tool_capabilities = (
+                _BUILTIN_PLUGIN_TOOL_CAPABILITIES.get((plugin_id, server.name), {})
+                if trusted_plugin
+                else {}
+            )
+            if server.transport == "stdio":
+                plugin_data = _plugin_data_dir(package.manifest.name)
+                command = server.command
+                if command.startswith("./"):
+                    command = str((package.root / command.removeprefix("./")).resolve(strict=True))
+                args = tuple(
+                    _expand_plugin_placeholders(
+                        value,
+                        plugin_root=package.root,
+                        plugin_data=plugin_data,
+                    )
+                    for value in server.args
+                )
+                process_env = {
+                    key: _expand_plugin_placeholders(
+                        value,
+                        plugin_root=package.root,
+                        plugin_data=plugin_data,
+                    )
+                    for key, value in server.env.items()
+                }
+                raw_cwd = server.cwd or "${PLUGIN_ROOT}"
+                cwd = _expand_plugin_placeholders(
+                    raw_cwd,
+                    plugin_root=package.root,
+                    plugin_data=plugin_data,
+                )
+                configs.append(
+                    MCPServerConfig(
+                        name=runtime_name,
+                        transport="stdio",
+                        timeout=float(timeout),
+                        description=package.manifest.description,
+                        max_concurrent=max_concurrent,
+                        response_limit_bytes=response_limit_bytes,
+                        platform_managed=True,
+                        default_tenant_enabled=trusted_plugin,
+                        command=command,
+                        args=args,
+                        process_env=process_env,
+                        inherited_env_names=_BUILTIN_PLUGIN_PROCESS_ENV.get(
+                            (plugin_id, server.name),
+                            (),
+                        ),
+                        cwd=cwd,
+                        plugin_root=str(package.root),
+                        plugin_data_dir=str(plugin_data),
+                        tool_capabilities=dict(tool_capabilities),
+                    )
+                )
+                seen_names.add(runtime_name)
+                continue
+
+            origin, endpoint_path = _plugin_endpoint(
+                server.url,
+                override_url=override_url,
+            )
+            configs.append(
+                MCPServerConfig(
+                    name=runtime_name,
+                    url=origin,
+                    headers=dict(server.headers),
+                    transport="streamable_http",
+                    timeout=float(timeout),
+                    description=package.manifest.description,
+                    max_concurrent=max_concurrent,
+                    response_limit_bytes=response_limit_bytes,
+                    endpoint_path=endpoint_path,
+                    platform_managed=True,
+                    default_tenant_enabled=trusted_plugin,
+                    allow_localhost=True,
+                    allow_private_network=override_url is not None,
+                    tool_capabilities=dict(tool_capabilities),
+                )
+            )
+            seen_names.add(runtime_name)
     return configs

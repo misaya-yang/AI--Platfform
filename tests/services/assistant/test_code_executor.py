@@ -63,7 +63,9 @@ class TestCodeExecutionConfig:
         assert config.cpu_limit == 0.5
         assert config.timeout_seconds == 30
         assert config.network_disabled is True
+        assert config.read_only_root is True
         assert config.image == "python:3.12-slim"
+        assert config.python_executable == "python"
         assert config.workspace_path == "/workspace"
         assert config.input_path == "/workspace/input"
         assert config.output_path == "/workspace/output"
@@ -298,6 +300,21 @@ class TestCodeExecutorServiceInit:
         assert executor.config.memory_limit == "1g"
         assert executor.config.timeout_seconds == 60
 
+    def test_init_applies_operator_image_and_python(self, monkeypatch):
+        monkeypatch.setenv("ASSISTANT_CODE_EXECUTOR_IMAGE", "sandbox:2.0.0")
+        monkeypatch.setenv("ASSISTANT_CODE_EXECUTOR_PYTHON", "python3")
+
+        executor = CodeExecutorService()
+
+        assert executor.config.image == "sandbox:2.0.0"
+        assert executor.config.python_executable == "python3"
+
+    def test_init_rejects_shell_syntax_in_python_executable(self, monkeypatch):
+        monkeypatch.setenv("ASSISTANT_CODE_EXECUTOR_PYTHON", "python3; id")
+
+        with pytest.raises(ValueError, match="CODE_EXECUTOR_PYTHON"):
+            CodeExecutorService()
+
 
 class TestDockerAvailability:
     """Test Docker availability checking."""
@@ -396,6 +413,27 @@ class TestWorkspaceSetup:
             assert (workspace / "main.py").exists()
         finally:
             await executor._cleanup_workspace(workspace)
+
+    def test_workspace_mount_source_translates_to_host_root(self, monkeypatch, tmp_path):
+        container_root = tmp_path / "container-root"
+        workspace = container_root / "code_exec_123"
+        workspace.mkdir(parents=True)
+        monkeypatch.setenv("SANDBOX_WORKSPACE", str(container_root))
+        monkeypatch.setenv("SANDBOX_WORKSPACE_HOST", "/host/sandbox-root")
+
+        source = CodeExecutorService._workspace_mount_source(workspace)
+
+        assert source == Path("/host/sandbox-root/code_exec_123")
+
+    def test_workspace_mount_source_rejects_escape(self, monkeypatch, tmp_path):
+        container_root = tmp_path / "container-root"
+        container_root.mkdir()
+        escaped = tmp_path / "escaped"
+        escaped.mkdir()
+        monkeypatch.setenv("SANDBOX_WORKSPACE", str(container_root))
+
+        with pytest.raises(ValueError, match="escaped"):
+            CodeExecutorService._workspace_mount_source(escaped)
 
     @pytest.mark.asyncio
     async def test_setup_workspace_writes_code(self):
@@ -545,6 +583,45 @@ class TestMimeTypeGuessing:
 
         assert executor._guess_mime_type("file.xyz") == "application/octet-stream"
         assert executor._guess_mime_type("noextension") == "application/octet-stream"
+
+
+class TestSandboxContainerPolicy:
+    @pytest.mark.asyncio
+    async def test_run_container_applies_hardened_policy(self, monkeypatch, tmp_path):
+        container_root = tmp_path / "container-root"
+        workspace = container_root / "code_exec_123"
+        workspace.mkdir(parents=True)
+        monkeypatch.setenv("SANDBOX_WORKSPACE", str(container_root))
+        monkeypatch.setenv("SANDBOX_WORKSPACE_HOST", "/host/sandbox-root")
+
+        container = MagicMock()
+        container.wait.return_value = {"StatusCode": 0}
+        container.logs.side_effect = [b"ok\n", b""]
+        client = MagicMock()
+        client.containers.run.return_value = container
+
+        executor = CodeExecutorService()
+        executor._docker_client = client
+        config = CodeExecutionConfig(python_executable="python3")
+
+        _, stdout, stderr, exit_code = await executor._run_container(workspace, config)
+
+        assert (stdout, stderr, exit_code) == ("ok\n", "", 0)
+        call = client.containers.run.call_args.kwargs
+        assert call["command"] == ["python3", "/workspace/main.py"]
+        assert call["volumes"] == {
+            "/host/sandbox-root/code_exec_123": {
+                "bind": "/workspace",
+                "mode": "rw",
+            }
+        }
+        assert call["network_disabled"] is True
+        assert call["cap_drop"] == ["ALL"]
+        assert call["security_opt"] == ["no-new-privileges:true"]
+        assert call["pids_limit"] == 64
+        assert call["read_only"] is True
+        assert call["user"]
+        assert call["tmpfs"]["/tmp"].startswith("rw,noexec,nosuid")
 
 
 class TestOutputFileCollection:

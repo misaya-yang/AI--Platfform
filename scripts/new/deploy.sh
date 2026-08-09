@@ -92,7 +92,7 @@ compose() {
 cd "$PROJECT_ROOT"
 
 INFRA_SERVICES="postgres redis qdrant"
-FULL_APP_SERVICES="gateway frontend knowledge-service assistant-service mcp-docgen-server"
+FULL_APP_SERVICES="gateway frontend knowledge-service assistant-service"
 
 assert_compose_owner
 
@@ -101,7 +101,7 @@ SERVICES=""
 if [ "$INFRA_ONLY" = true ]; then
     SERVICES="$INFRA_SERVICES"
 elif [ "$APP_ONLY" = true ]; then
-    SERVICES="gateway frontend knowledge-service assistant-service mcp-docgen-server"
+    SERVICES="gateway frontend knowledge-service assistant-service"
 fi
 
 # -- Pull base images --------------------------------------------------------
@@ -192,7 +192,7 @@ fi
 if [ "$INFRA_ONLY" != true ]; then
     wait_for_healthy "Knowledge service" "check_knowledge_health" 60 || log_warn "Knowledge service may still be starting"
     wait_for_healthy "Assistant service" "check_assistant_health" 60 || log_warn "Assistant service may still be starting"
-    wait_for_healthy "MCP docgen service" "check_docgen_health" 60 || log_warn "MCP docgen service may still be starting"
+    wait_for_healthy "Bundled docgen plugin" "check_docgen_health" 60 || log_warn "Bundled docgen plugin may still be starting"
     wait_for_healthy "Gateway" "check_gateway_health" 60 || log_warn "Gateway may still be starting"
     wait_for_healthy "Frontend" "check_frontend_health" 30 || log_warn "Frontend may still be starting"
 fi

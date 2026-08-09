@@ -7,10 +7,13 @@ them into the agent's ToolRegistry with prefix `mcp_{server}:{tool}`.
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import logging
 import math
 import re
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import Any
 
 from ..tools.tool_registry import (
@@ -31,8 +34,15 @@ from .resilience import (
     MCPInvocationPolicy,
     build_operation_identity,
 )
+from .stdio_client import MCPStdioClient
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _MCPToolRegistration:
+    definition: ToolDefinition
+    executor: Any
 
 
 class MCPManager:
@@ -41,6 +51,7 @@ class MCPManager:
     def __init__(self, configs: list[MCPServerConfig] | None = None) -> None:
         self._configs = configs or []
         self._clients: dict[str, MCPClient] = {}
+        self._registrations: dict[str, list[_MCPToolRegistration]] = {}
 
     async def initialize_all(self) -> dict[str, int]:
         """Connect to all configured MCP servers and discover tools.
@@ -50,30 +61,39 @@ class MCPManager:
         results: dict[str, int] = {}
         tool_registry = get_tool_registry()
 
-        # Parallel initialization of all servers
-        import asyncio
-
         async def _init_one(config: MCPServerConfig) -> tuple[str, int]:
             if not config.enabled:
                 return config.name, 0
             client: MCPClient | None = None
             try:
-                client = MCPClient(config)
+                client = (
+                    MCPStdioClient(config) if config.transport == "stdio" else MCPClient(config)
+                )
                 await client.initialize()
                 tools = await client.list_tools()
                 self._validate_static_capabilities(config, tools)
+                registrations = [self._build_mcp_tool(tool, client) for tool in tools]
+                previous = self._registrations.get(config.name, [])
+                self._replace_registrations(tool_registry, previous, registrations)
+                previous_client = self._clients.get(config.name)
                 self._clients[config.name] = client
-                for mcp_tool in tools:
-                    self._register_mcp_tool(mcp_tool, client, tool_registry)
+                self._registrations[config.name] = registrations
+                if previous_client is not None and previous_client is not client:
+                    with suppress(Exception):
+                        await previous_client.close()
                 logger.info(f"MCP '{config.name}': {len(tools)} tools registered")
                 return config.name, len(tools)
             except Exception as exc:
                 if client is not None:
                     with suppress(Exception):
                         await client.close()
+                stable_code = (
+                    exc.stable_code if isinstance(exc, MCPError) else "MCP_INITIALIZATION_FAILED"
+                )
                 logger.warning(
-                    "Static MCP initialization failed (exception_type=%s)",
+                    "Static MCP initialization failed (exception_type=%s code=%s)",
                     type(exc).__name__,
+                    stable_code,
                 )
                 return config.name, -1
 
@@ -82,7 +102,7 @@ class MCPManager:
             return_exceptions=True,
         )
         for r in init_results:
-            if isinstance(r, Exception):
+            if isinstance(r, BaseException):
                 continue
             results[r[0]] = r[1]
 
@@ -95,6 +115,15 @@ class MCPManager:
         tool_registry: Any,
     ) -> None:
         """Register an MCP tool as a callable tool in ToolRegistry."""
+        registration = self._build_mcp_tool(mcp_tool, client)
+        tool_registry.register(registration.definition, registration.executor)
+
+    def _build_mcp_tool(
+        self,
+        mcp_tool: MCPTool,
+        client: MCPClient,
+    ) -> _MCPToolRegistration:
+        """Build a registry entry without mutating the shared registry."""
         # Sanitize tool name for ToolRegistry (no colons allowed in some LLM APIs)
         registry_name = f"mcp_{mcp_tool.server_name}__{mcp_tool.name}"
 
@@ -106,14 +135,24 @@ class MCPManager:
         safe_desc = self._sanitize_external_text(mcp_tool.description or "")
         keywords = self._relevance_keywords(mcp_tool, safe_desc)
         capability = self._static_capability(client, mcp_tool.upstream_name)
+        risk_level = (
+            ToolRiskLevel(capability.risk_level)
+            if capability.risk_level is not None
+            else ToolRiskLevel.MEDIUM
+        )
+        requires_confirmation = (
+            capability.requires_confirmation
+            if capability.requires_confirmation is not None
+            else True
+        )
 
         definition = ToolDefinition(
             name=registry_name,
             description=f"[{mcp_tool.server_name}] {safe_desc}",
             parameters=params,
             category=ToolCategory.MCP,
-            risk_level=ToolRiskLevel.MEDIUM,
-            requires_confirmation=True,
+            risk_level=risk_level,
+            requires_confirmation=requires_confirmation,
             when_to_use=safe_desc,
             when_not_to_use="When this tenant has not explicitly enabled the MCP server.",
             relevance_keywords=keywords,
@@ -207,16 +246,40 @@ class MCPManager:
                     # tool produced. Flat shape (uri/name/mimeType at top level).
                     uri = c.get("uri") or ""
                     if uri:
-                        file_outputs.append(
-                            {
-                                "download_url": uri,
-                                "filename": c.get("name") or c.get("title") or "artifact",
-                                "mime_type": c.get("mimeType") or c.get("mime_type"),
-                                "size_bytes": c.get("size") or c.get("size_bytes"),
-                                "source": "mcp",
-                                "externally_hosted": True,
-                            }
-                        )
+                        filename = c.get("name") or c.get("title") or "artifact"
+                        mime_type = c.get("mimeType") or c.get("mime_type")
+                        try:
+                            resource_bytes, fetched_mime = await client.download_resource_link(uri)
+                        except MCPError as exc:
+                            logger.warning(
+                                "MCP resource import failed: server=%s tool=%s code=%s",
+                                mcp_tool.server_name,
+                                mcp_tool.name,
+                                exc.stable_code,
+                            )
+                            return ToolCallResult(
+                                call_id=getattr(request, "call_id", ""),
+                                tool_name=registry_name,
+                                success=False,
+                                error="MCP_RESOURCE_IMPORT_REJECTED",
+                                metadata={
+                                    "mcp_server": mcp_tool.server_name,
+                                    "mcp_tool": mcp_tool.name,
+                                    "mcp_resource_error": exc.stable_code,
+                                },
+                            )
+                        else:
+                            file_outputs.append(
+                                {
+                                    "filename": filename,
+                                    "mime_type": mime_type or fetched_mime,
+                                    "size_bytes": len(resource_bytes),
+                                    "content_base64": base64.b64encode(resource_bytes).decode(
+                                        "ascii"
+                                    ),
+                                    "source": "mcp_resource_import",
+                                }
+                            )
                 elif ctype == "resource":
                     # MCP "embedded resource" content — nested resource object.
                     r = c.get("resource") or {}
@@ -263,7 +326,51 @@ class MCPManager:
                 },
             )
 
-        tool_registry.register(definition, executor)
+        return _MCPToolRegistration(definition=definition, executor=executor)
+
+    @staticmethod
+    def _replace_registrations(
+        tool_registry: Any,
+        previous: list[_MCPToolRegistration],
+        replacements: list[_MCPToolRegistration],
+    ) -> None:
+        """Replace one server's registrations and roll back partial changes."""
+
+        previous_by_name = {item.definition.name: item for item in previous}
+        replacement_names = {item.definition.name for item in replacements}
+        installed: list[str] = []
+        removed: list[_MCPToolRegistration] = []
+        try:
+            for item in replacements:
+                tool_registry.register(
+                    item.definition,
+                    item.executor,
+                    allow_override=item.definition.name in previous_by_name,
+                )
+                installed.append(item.definition.name)
+            for item in previous:
+                if item.definition.name not in replacement_names and tool_registry.unregister(
+                    item.definition.name
+                ):
+                    removed.append(item)
+        except Exception:
+            for name in reversed(installed):
+                prior = previous_by_name.get(name)
+                if prior is None:
+                    tool_registry.unregister(name)
+                else:
+                    tool_registry.register(
+                        prior.definition,
+                        prior.executor,
+                        allow_override=True,
+                    )
+            for prior in removed:
+                tool_registry.register(
+                    prior.definition,
+                    prior.executor,
+                    allow_override=True,
+                )
+            raise
 
     async def refresh_tools(self, server_name: str | None = None) -> dict[str, int]:
         """Re-discover tools from MCP servers. Deregisters stale tools."""
@@ -276,15 +383,13 @@ class MCPManager:
                 results[name] = -1
                 continue
             try:
-                # Deregister old tools for this server before re-registering
-                prefix = f"mcp_{name}__"
-                for existing in tool_registry.list_tools():
-                    if existing.name.startswith(prefix):
-                        tool_registry.unregister(existing.name)
-
                 tools = await client.list_tools()
-                for t in tools:
-                    self._register_mcp_tool(t, client, tool_registry)
+                config = client.config
+                self._validate_static_capabilities(config, tools)
+                replacements = [self._build_mcp_tool(tool, client) for tool in tools]
+                previous = self._registrations.get(name, [])
+                self._replace_registrations(tool_registry, previous, replacements)
+                self._registrations[name] = replacements
                 results[name] = len(tools)
             except Exception as exc:
                 logger.warning(
@@ -300,6 +405,7 @@ class MCPManager:
             with suppress(Exception):
                 await client.close()
         self._clients.clear()
+        self._registrations.clear()
 
     @property
     def server_names(self) -> list[str]:
@@ -441,5 +547,7 @@ class MCPManager:
         if not configured.issubset(discovered):
             raise ValueError("MCP_STATIC_CAPABILITY_TOOL_NOT_DISCOVERED")
         for capability in config.tool_capabilities.values():
+            if not isinstance(capability, MCPStaticToolCapability):
+                raise ValueError("MCP_STATIC_CAPABILITIES_INVALID")
             if capability.read_back_tool and capability.read_back_tool not in discovered:
                 raise ValueError("MCP_STATIC_CAPABILITY_READ_BACK_NOT_DISCOVERED")

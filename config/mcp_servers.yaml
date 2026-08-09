@@ -1,28 +1,8 @@
 # MCP Server Configuration
-# Each entry defines an external system that the AI agent can interact with.
-# Change URLs from mock to real services when ready — agent code stays the same.
+# Each entry defines an operator-managed remote system that the AI agent can use.
 
-mcp_servers:
-  # Document generation — plans + renders docx / pptx / xlsx / pdf with
-  # a design-system driven pipeline. Kept as a single tool
-  # ``generate_document`` so the agent doesn't need to know about the
-  # heavy per-format skill docs (which the server keeps to itself).
-  - name: docgen
-    # This file is platform-managed; tenant registrations remain HTTPS-only.
-    # The explicit platform flag in the loader permits this private Docker hop
-    # while metadata/link-local addresses and redirects remain blocked.
-    # The alias is declared on the mcp-docgen-server service in docker-compose.yml.
-    # For local (non-docker) testing, point this at ``http://localhost:8765``
-    # and run the server directly with ``MCP_TRANSPORT=http``.
-    url: http://mcp-docgen-server.internal:8765
-    transport: streamable_http
-    description: "Generate docx / pptx / xlsx / pdf — design-system driven, returns signed download URL"
-    enabled: true
-    max_concurrent: 4
-    timeout: 120.0
-    # Operator-owned facts only. Remote MCP annotations cannot override these.
-    tool_capabilities:
-      generate_document:
-        operation_kind: write
-        read_only: false
-        idempotency_supported: false
+mcp_servers: []
+
+# Built-in document generation is distributed as agent-plugins/ai-docgen and
+# launched by assistant-service over stdio. Keep this file for platform-managed
+# remote Streamable HTTP servers; tenant registrations remain HTTPS-only.

@@ -23,7 +23,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.models.session import Session
 from src.services.session.database_session_manager import DatabaseSessionManager
 
 
@@ -163,10 +162,9 @@ async def test_agent_loop_turn_persists_activity_fields_via_live_save_path():
     field at the top of the function but forgets to thread it into the
     `add_message` call at the bottom.
     """
-    import importlib
-    agent_loop_mod = importlib.import_module(
-        "assistant_service.core.agent.agent_loop"
-    )
+    import inspect
+
+    from assistant_service.core.agent.streaming_execution import StreamingExecutionMixin
 
     # The real AgentLoop has heavy dependencies. We only need to verify
     # that the three turn-level accumulators are present in scope and
@@ -174,9 +172,7 @@ async def test_agent_loop_turn_persists_activity_fields_via_live_save_path():
     # a source-level assertion: the literal keys must appear in the
     # add_message(...) call in the file. This is equivalent to a
     # hermetic mock-driven test but more robust to internal refactors.
-    import inspect
-
-    source = inspect.getsource(agent_loop_mod)
+    source = inspect.getsource(StreamingExecutionMixin._persist_streaming_assistant_message)
     assert '"thinking_content": _persisted_thinking' in source, (
         "agent_loop.py must persist thinking_content on the final "
         "assistant message (broken = Activity drawer shows 0 steps on "
@@ -208,10 +204,7 @@ async def test_persisted_thinking_is_capped_to_prevent_jsonb_bloat():
     huge = "x" * 50_000
     # Mirror the production cap so the test fails loudly if the cap
     # constants drift.
-    if len(huge) > 16000:
-        persisted = huge[:8000] + "\n\n…[truncated]…\n\n" + huge[-8000:]
-    else:
-        persisted = huge
+    persisted = huge[:8000] + "\n\n…[truncated]…\n\n" + huge[-8000:] if len(huge) > 16000 else huge
 
     await manager.add_message(
         session_id=session.session_id,

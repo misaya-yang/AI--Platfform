@@ -289,24 +289,6 @@ require_support_email_release_ready() {
     fi
 }
 
-require_public_url() {
-    local key="$1"
-    local value
-    value="$(env_value "$key")"
-
-    require_url "$key"
-    [ -z "$value" ] && return
-
-    if is_non_local_auth_domain; then
-        if [[ ! "$value" =~ ^https:// ]]; then
-            fail "$key must use https:// when AUTH_ALLOWED_EMAIL_DOMAIN is non-local."
-        fi
-        if [[ "$value" =~ ^https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])([:/]|$) ]]; then
-            fail "$key must not use localhost or loopback when AUTH_ALLOWED_EMAIL_DOMAIN is non-local."
-        fi
-    fi
-}
-
 require_frontend_runtime_url() {
     local key="$1"
     local value
@@ -687,7 +669,6 @@ validate_config() {
     require_secret JWT_SECRET 32
     require_secret GATEWAY_ASSISTANT_SHARED_SECRET 32
     require_secret GATEWAY_ENCRYPTION_KEY 32
-    require_secret DOCGEN_ARTIFACT_SIGN_KEY 32
     require_secret_or_local_default DEFAULT_USER_PASSWORD 12 "ChangeMe-Admin-2026!"
     require_domain AUTH_ALLOWED_EMAIL_DOMAIN
     require_frontend_auth_domain_alignment
@@ -729,7 +710,6 @@ validate_config() {
     require_versioned_image FRONTEND_IMAGE "ghcr.io/misaya-yang/ai-gateway-web:2.0.0"
     require_versioned_image ASSISTANT_IMAGE "ghcr.io/misaya-yang/ai-gateway-assistant-service:2.0.0"
     require_versioned_image KNOWLEDGE_IMAGE "ghcr.io/misaya-yang/ai-gateway-knowledge-service:2.0.0"
-    require_versioned_image DOCGEN_IMAGE "ghcr.io/misaya-yang/ai-gateway-mcp-docgen-server:2.0.0"
     require_versioned_image MIGRATE_IMAGE "ghcr.io/misaya-yang/ai-gateway-migrate:2.0.0"
 
     if [ -z "$(configured_chat_providers)" ]; then
@@ -742,11 +722,9 @@ validate_config() {
 
     require_url ASSISTANT_SERVICE_URL
     require_url KB_SERVICE_URL
-    require_public_url DOCGEN_PUBLIC_URL
     require_frontend_runtime_url VITE_API_URL
     require_frontend_runtime_url VITE_API_BASE_URL
     require_frontend_runtime_url VITE_TELEMETRY_ENDPOINT
-    require_url MCP_DOCGEN_SERVICE_URL
     require_cors_origins KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON
     require_cors_origins ASSISTANT_CORS_ALLOW_ORIGINS_JSON
 
@@ -776,15 +754,14 @@ validate_example_config() {
         AUTH_ALLOWED_EMAIL_DOMAIN
         DEFAULT_USER_PASSWORD
         ASSISTANT_SERVICE_URL
+        ASSISTANT_AGENT_PLUGIN_PATHS
+        ASSISTANT_AGENT_PLUGIN_DATA_ROOT
+        ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS
         KB_SERVICE_URL
-        MCP_DOCGEN_SERVICE_URL
-        DOCGEN_PUBLIC_URL
-        DOCGEN_ARTIFACT_SIGN_KEY
         GATEWAY_IMAGE
         FRONTEND_IMAGE
         ASSISTANT_IMAGE
         KNOWLEDGE_IMAGE
-        DOCGEN_IMAGE
         MIGRATE_IMAGE
         KB_EMBEDDING_PROVIDER
         KB_EMBEDDING_MODEL
@@ -827,8 +804,6 @@ validate_example_config() {
     require_support_email_release_ready
     require_url ASSISTANT_SERVICE_URL
     require_url KB_SERVICE_URL
-    require_url MCP_DOCGEN_SERVICE_URL
-    require_public_url DOCGEN_PUBLIC_URL
     require_frontend_runtime_url VITE_API_URL
     require_frontend_runtime_url VITE_API_BASE_URL
     require_frontend_runtime_url VITE_TELEMETRY_ENDPOINT
@@ -844,7 +819,7 @@ validate_example_config() {
             ;;
     esac
 
-    for key in GATEWAY_IMAGE FRONTEND_IMAGE ASSISTANT_IMAGE KNOWLEDGE_IMAGE DOCGEN_IMAGE MIGRATE_IMAGE; do
+    for key in GATEWAY_IMAGE FRONTEND_IMAGE ASSISTANT_IMAGE KNOWLEDGE_IMAGE MIGRATE_IMAGE; do
         require_versioned_image "$key"
     done
 
@@ -873,7 +848,7 @@ validate_runtime() {
 
     wait_for_healthy "Knowledge service" "check_knowledge_health" 60 || fail "Knowledge service runtime check failed."
     wait_for_healthy "Assistant service" "check_assistant_health" 60 || fail "Assistant service runtime check failed."
-    wait_for_healthy "MCP docgen service" "check_docgen_health" 60 || fail "MCP docgen runtime check failed."
+    wait_for_healthy "Bundled docgen plugin" "check_docgen_health" 60 || fail "Bundled docgen runtime check failed."
     wait_for_healthy "Gateway readiness" "check_gateway_health" 60 || fail "Gateway runtime check failed."
     wait_for_healthy "Gateway metrics endpoint" "check_gateway_metrics" 60 || fail "Gateway metrics check failed."
     wait_for_healthy "Frontend health endpoint" "check_frontend_health" 60 || fail "Frontend runtime check failed."

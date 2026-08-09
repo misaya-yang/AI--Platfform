@@ -159,7 +159,7 @@ class AssistantRuntimeAdapter:
         self.agent_plugin_status: list[dict[str, Any]] = []
 
     def _load_configured_agent_plugins(self) -> None:
-        """Load operator-selected, instruction-only Agent Plugin Skills."""
+        """Load operator-selected Agent Plugin Skills and component status."""
 
         raw_paths = os.getenv("ASSISTANT_AGENT_PLUGIN_PATHS", "")
         if not self.features.skills or not raw_paths.strip():
@@ -212,7 +212,8 @@ class AssistantRuntimeAdapter:
                     "status": "loaded",
                     "plugin": package.manifest.name,
                     "skills": registered,
-                    "mcp_supported": False,
+                    "mcp_supported": bool(package.mcp_servers),
+                    "mcp_servers": [server.name for server in package.mcp_servers],
                     "diagnostics": diagnostics,
                 }
             )
