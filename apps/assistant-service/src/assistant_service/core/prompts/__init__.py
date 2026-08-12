@@ -1,34 +1,21 @@
 """
-System Prompts for Enterprise Agent.
+System prompts for the general enterprise Assistant.
 
-This module provides prompt templates that clearly separate:
-1. Guardrails (硬性要求) - Must be followed, non-negotiable
-2. Agent Freedom (自由空间) - Agent can decide within boundaries
+The production system prompt is built by ``build_system_prompt_v2`` in
+``system_prompt_v2``: one small stable policy plus only the capabilities
+available for the current request. Authorization, approvals, tool schema
+validation, and side-effect controls are runtime responsibilities, not
+prompt text.
 
-Design Philosophy:
-- Guardrails define WHAT boundaries exist
-- Agent decides HOW to work within boundaries
-- Clear separation improves both compliance and creativity
+``scenario_analysis_prompts`` and ``generation_prompts`` are the remaining
+specialized surfaces; each has live callers in ``core/rag`` and ``core/agent``.
 
-Reference: https://manus.im/blog/Context-Engineering-for-AI-Agents-Lessons-from-Building-Manus
+The ``agent_freedom`` and ``planning_prompts`` modules were removed because
+every symbol they exported was unreferenced outside this package. The legacy
+"guardrails + freedom" prompt-stack they belonged to was superseded by the
+compact builder above.
 """
 
-from .agent_freedom import (
-    AGENT_FREEDOM,
-    COMMUNICATION_STYLE,
-    CUSTOMER_SERVICE_FREEDOM,
-    DATA_ANALYSIS_FREEDOM,
-    GENERAL_INQUIRY_FREEDOM,
-    POLICY_INQUIRY_FREEDOM,
-    PRODUCT_INQUIRY_FREEDOM,
-    SALES_CONSULTATION_FREEDOM,
-    SCENARIO_FREEDOM_MAP,
-    TECHNICAL_SUPPORT_FREEDOM,
-    get_agent_freedom,
-    get_agentic_freedom,
-    get_freedom_for_scenario,
-    get_minimal_agent_freedom,
-)
 from .generation_prompts import (
     DOCUMENT_GENERATION_SYSTEM_PROMPT,
     EMAIL_GENERATION_PROMPT,
@@ -61,28 +48,6 @@ from .guardrails import (
     get_guardrails,
     get_guardrails_for_scenario,
     get_minimal_guardrails,
-)
-from .planning_prompts import (
-    AGENTIC_TASK_DECOMPOSITION_PROMPT,
-    COMPLEXITY_LEVELS,
-    EXECUTION_REFLECTION_PROMPT,
-    INTENT_ANALYSIS_PROMPT,
-    # Constants
-    INTENT_TYPES,
-    TASK_PLANNING_SYSTEM_PROMPT,
-    TASK_REFINEMENT_PROMPT,
-    TODO_TRACKING_PROMPT,
-    build_execution_reflection_prompt,
-    build_intent_analysis_prompt,
-    # Builder functions
-    build_planning_prompt,
-    build_task_decomposition_prompt,
-    build_task_refinement_prompt,
-    build_todo_tracking_prompt,
-    get_complexity_info,
-    get_intent_type_info,
-    # Helper functions
-    get_intent_types_description,
 )
 from .scenario_analysis_prompts import (
     DOCUMENT_ANALYSIS_PROMPT,
@@ -184,24 +149,6 @@ __all__ = [
     "build_report_prompt",
     "build_email_prompt",
     "build_summary_prompt",
-    # Planning Prompts
-    "INTENT_TYPES",
-    "COMPLEXITY_LEVELS",
-    "TASK_PLANNING_SYSTEM_PROMPT",
-    "INTENT_ANALYSIS_PROMPT",
-    "AGENTIC_TASK_DECOMPOSITION_PROMPT",
-    "TODO_TRACKING_PROMPT",
-    "TASK_REFINEMENT_PROMPT",
-    "EXECUTION_REFLECTION_PROMPT",
-    "get_intent_types_description",
-    "get_intent_type_info",
-    "get_complexity_info",
-    "build_planning_prompt",
-    "build_intent_analysis_prompt",
-    "build_task_decomposition_prompt",
-    "build_todo_tracking_prompt",
-    "build_task_refinement_prompt",
-    "build_execution_reflection_prompt",
     # Scenario Analysis Prompts - Constants
     "SCENARIO_TYPES",
     "EXPERT_TEMPLATES",
@@ -290,19 +237,4 @@ __all__ = [
     "get_minimal_guardrails",
     "get_anti_hallucination_guardrails",
     "get_guardrails_for_scenario",
-    # Agent Freedom
-    "AGENT_FREEDOM",
-    "COMMUNICATION_STYLE",
-    "CUSTOMER_SERVICE_FREEDOM",
-    "SALES_CONSULTATION_FREEDOM",
-    "TECHNICAL_SUPPORT_FREEDOM",
-    "PRODUCT_INQUIRY_FREEDOM",
-    "POLICY_INQUIRY_FREEDOM",
-    "DATA_ANALYSIS_FREEDOM",
-    "GENERAL_INQUIRY_FREEDOM",
-    "SCENARIO_FREEDOM_MAP",
-    "get_agent_freedom",
-    "get_minimal_agent_freedom",
-    "get_agentic_freedom",
-    "get_freedom_for_scenario",
 ]

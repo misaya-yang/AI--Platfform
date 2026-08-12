@@ -380,10 +380,13 @@ async def test_subagent_model_failure_is_one_structured_failed_terminal() -> Non
     assert len(terminals) == 1
     assert terminals[0]["data"]["status"] == "failed"
     assert set(terminals[0]["data"]["result"]) == {
+        "schema_version",
         "status",
+        "structured_payload",
         "claims",
         "evidence",
         "limitations",
+        "usage",
         "attempt_id",
     }
     assert manager._active == {}
@@ -569,13 +572,13 @@ async def test_subagent_parallelism_is_bounded_and_each_child_finishes_once() ->
         model_registry=model,  # type: ignore[arg-type]
         tool_registry=ToolRegistry(),
     )
-    configs = [SubAgentConfig(agent_type=SubAgentType.TASK, prompt=str(i)) for i in range(6)]
+    configs = [SubAgentConfig(agent_type=SubAgentType.TASK, prompt=str(i)) for i in range(5)]
 
     events = [event async for event in manager.spawn_parallel(configs, max_concurrency=2)]
 
     terminals = [event for event in events if event["event_type"] == "subagent_finished"]
-    assert len(terminals) == 6
-    assert len({event["data"]["agent_id"] for event in terminals}) == 6
+    assert len(terminals) == 5
+    assert len({event["data"]["agent_id"] for event in terminals}) == 5
     assert model.max_active == 2
     assert manager._active == {}
 
@@ -710,7 +713,11 @@ def test_subagent_tool_registration_is_explicitly_flagged(
     from assistant_service.core.tools import subagent_tool
 
     registered: list[bool] = []
-    monkeypatch.setattr(subagent_tool, "register_subagent_tool", lambda: registered.append(True))
+    monkeypatch.setattr(
+        subagent_tool,
+        "register_subagent_tool",
+        lambda **_kwargs: registered.append(True),
+    )
     monkeypatch.delenv("ASSISTANT_SUBAGENTS_ENABLED", raising=False)
     assert main._register_subagent_tool_if_enabled() is False
     assert registered == []
@@ -718,3 +725,14 @@ def test_subagent_tool_registration_is_explicitly_flagged(
     monkeypatch.setenv("ASSISTANT_SUBAGENTS_ENABLED", "true")
     assert main._register_subagent_tool_if_enabled() is True
     assert registered == [True]
+
+    registered.clear()
+    definitions = (object(),)
+    captured: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        subagent_tool,
+        "register_subagent_tool",
+        lambda *, agent_definitions: captured.append(tuple(agent_definitions)),
+    )
+    assert main._register_subagent_tool_if_enabled(definitions) is True
+    assert captured == [definitions]

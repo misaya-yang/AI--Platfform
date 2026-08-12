@@ -147,6 +147,16 @@ def _runtime_context_v2_enabled(requested: bool) -> bool:
     }
 
 
+def _operator_int(name: str, *, default: int, minimum: int, maximum: int) -> int:
+    """Read a bounded operator ceiling without exposing it to request payloads."""
+
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return min(maximum, max(minimum, value))
+
+
 # ``RAGMode`` is now defined in ``ai_gateway_core.enums`` so gateway routes
 # (assistant.py) can import the enum without pulling in ``assistant_service``.
 # Kept as a local re-export until AS-internal imports migrate to the shared
@@ -322,6 +332,11 @@ Workflow:
         # per-turn coordinator, but its memory/index/skill adapter and tool
         # invoker must not be rebuilt for every request.
         self.runtime_adapter = runtime_adapter
+        # A trusted composition root may set this through
+        # ``configure_local_node_tool_provider``.  Keeping it out of the
+        # constructor preserves the existing positional dependency contract.
+        self.local_node_tool_provider: Any | None = None
+        self.openai_responses_local_binding_resolver: Any | None = None
         self.runtime_adapter_unavailable = bool(
             runtime_adapter_unavailable and self.runtime_adapter is None
         )
@@ -464,6 +479,31 @@ Workflow:
                 if bool(getattr(self.execution_gateway, "enabled", True))
                 else None
             )
+
+    def configure_local_node_tool_provider(self, provider: Any | None) -> None:
+        """Inject the trusted Local Node provider without changing request APIs."""
+
+        if provider is not None:
+            from .local_node.tool_bridge import LocalNodeToolProvider
+
+            if not isinstance(provider, LocalNodeToolProvider):
+                raise TypeError("Local Node provider does not implement the trusted protocol")
+        self.local_node_tool_provider = provider
+
+    def configure_openai_responses_local_binding_resolver(
+        self,
+        resolver: Any | None,
+    ) -> None:
+        """Inject trusted native-provider target resolution; absent by default."""
+
+        if resolver is not None:
+            from .providers.openai_responses_runtime import (
+                OpenAIResponsesLocalBindingResolver,
+            )
+
+            if not isinstance(resolver, OpenAIResponsesLocalBindingResolver):
+                raise TypeError("OpenAI Responses Local Node binding resolver is invalid")
+        self.openai_responses_local_binding_resolver = resolver
 
     @property
     def task_planner(self) -> TaskPlanner:
@@ -1084,7 +1124,7 @@ Workflow:
         persist_messages: bool = True,
     ) -> AsyncIterator[AssistantStreamEvent]:
         """
-        Execute using the unified 8-step AgentLoop.
+        Execute using the streaming-first AgentLoop turn lifecycle.
 
         This is the new enterprise-grade execution path that integrates:
         - ScenarioAwareRetriever for intelligent RAG
@@ -1116,9 +1156,51 @@ Workflow:
             scope=context_cache_scope,
             model_id=config.model_id,
         )
-        legacy_budget = RunBudgetLimits.from_legacy(
-            max_tool_iterations=5,
-            max_concurrent_tools=config.max_parallel_tools,
+        hard_tool_iterations = _operator_int(
+            "ASSISTANT_PARENT_HARD_TOOL_ITERATIONS",
+            default=32,
+            minimum=4,
+            maximum=128,
+        )
+        initial_tool_iterations = min(
+            hard_tool_iterations,
+            _operator_int(
+                "ASSISTANT_PARENT_INITIAL_TOOL_ITERATIONS",
+                default=8,
+                minimum=2,
+                maximum=32,
+            ),
+        )
+        final_synthesis_headroom = 2
+        operator_budget = RunBudgetLimits(
+            max_model_turns=_operator_int(
+                "ASSISTANT_RUN_MAX_MODEL_TURNS",
+                default=96,
+                minimum=hard_tool_iterations + final_synthesis_headroom,
+                maximum=512,
+            ),
+            max_tool_calls=_operator_int(
+                "ASSISTANT_RUN_MAX_TOOL_CALLS",
+                default=256,
+                minimum=hard_tool_iterations,
+                maximum=2048,
+            ),
+            max_parallel_tool_calls=max(1, config.max_parallel_tools),
+            max_wall_time_seconds=float(
+                _operator_int(
+                    "ASSISTANT_RUN_MAX_WALL_TIME_SECONDS",
+                    default=1800,
+                    minimum=60,
+                    maximum=7200,
+                )
+            ),
+            max_tool_result_bytes=_operator_int(
+                "ASSISTANT_RUN_MAX_TOOL_RESULT_BYTES",
+                default=8_000_000,
+                minimum=256_000,
+                maximum=64_000_000,
+            ),
+            final_synthesis_headroom=final_synthesis_headroom,
         )
         kb_retrieval_configs = {
             str(dataset_id): dict(dataset_config)
@@ -1166,13 +1248,17 @@ Workflow:
             kb_top_k=config.kb_top_k,
             kb_min_relevance=config.kb_score_threshold,
             kb_include_images=config.kb_include_images,
-            max_tool_iterations=5,
+            max_tool_iterations=hard_tool_iterations,
+            initial_tool_iterations=initial_tool_iterations,
+            final_synthesis_headroom=final_synthesis_headroom,
             max_concurrent_tools=config.max_parallel_tools,
-            run_budget_limits=legacy_budget,
+            run_budget_limits=operator_budget,
             persist_messages=persist_messages,
             execution_profile=config.execution_profile,
             memory_mode=config.memory_mode,
             os_agent_enabled=config.os_agent_enabled,
+            local_node_device_id=config.local_node_device_id,
+            local_node_grant_ids=list(config.local_node_grant_ids),
             runtime_mode=config.runtime_mode,
             queue_mode=config.queue_mode,
             context_detail=config.context_detail,
@@ -1219,6 +1305,10 @@ Workflow:
             tool_invoker=self.tool_invoker,
             task_planner=self.task_planner,
             runtime_adapter_unavailable=self.runtime_adapter_unavailable,
+        )
+        agent_loop.local_node_tool_provider = self.local_node_tool_provider
+        agent_loop.openai_responses_local_binding_resolver = (
+            self.openai_responses_local_binding_resolver
         )
 
         # Load history if not provided

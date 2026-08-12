@@ -62,6 +62,18 @@ class ArtifactStorageLike(Protocol):
         self, artifact: Any, expiry_seconds: int = 3600
     ) -> str: ...
 
+    def supports_scoped_artifact_reads(self) -> bool: ...
+
+    async def read_artifact_scoped(
+        self,
+        artifact_id: str,
+        *,
+        tenant_id: str,
+        session_id: str,
+        user_id: str,
+        max_bytes: int,
+    ) -> tuple[Any, bytes] | None: ...
+
 
 class _NoOpConfig:
     """Minimal stand-in for StorageConfig used by NoOpFileStorage."""
@@ -88,6 +100,7 @@ class NoOpFileStorage:
         return False
 
     async def download_file(self, path: str) -> bytes:
+        del path
         return b""
 
 
@@ -101,12 +114,27 @@ class NoOpArtifactStorage:
         return False
 
     async def create_artifact(self, **fields: Any) -> Any:
+        del fields
         return None
 
-    async def get_presigned_download_url(
-        self, artifact: Any, expiry_seconds: int = 3600
-    ) -> str:
+    async def get_presigned_download_url(self, artifact: Any, expiry_seconds: int = 3600) -> str:
+        del artifact, expiry_seconds
         return ""
+
+    def supports_scoped_artifact_reads(self) -> bool:
+        return False
+
+    async def read_artifact_scoped(
+        self,
+        artifact_id: str,
+        *,
+        tenant_id: str,
+        session_id: str,
+        user_id: str,
+        max_bytes: int,
+    ) -> tuple[Any, bytes] | None:
+        del artifact_id, tenant_id, session_id, user_id, max_bytes
+        return None
 
 
 __all__ = [

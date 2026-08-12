@@ -73,6 +73,8 @@ export interface ChatRequest {
   execution_profile?: "safe" | "balanced" | "power";
   memory_mode?: "auto" | "strict" | "off";
   os_agent_enabled?: boolean;
+  local_node_device_id?: string;
+  local_node_grant_ids?: string[];
   resume_run_id?: string;
   resume_approval_id?: string;
 }

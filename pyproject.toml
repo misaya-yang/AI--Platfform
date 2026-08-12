@@ -188,6 +188,11 @@ include = [
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
+# Evaluation fixtures under tests/fixtures/eval/ are sample repositories fed to
+# the agent as task input. They ship their own tests/ directories, which pytest
+# would otherwise collect as project tests and fail on their unresolvable
+# imports (e.g. `No module named 'settlement'`). They are data, not our suite.
+norecursedirs = ["tests/fixtures/eval/*/*/repository"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = [

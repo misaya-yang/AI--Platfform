@@ -89,6 +89,7 @@ class ToolCategory(str, Enum):
     UTILITY = "utility"  # Helper functions
     SKILL = "skill"  # User-defined or builtin skills
     MCP = "mcp"  # External system tools via Model Context Protocol
+    LOCAL = "local"  # Request-scoped capabilities provided by a paired Local Node
 
 
 @dataclass
@@ -826,7 +827,11 @@ class ToolRegistry:
         # Requiring the gateway for every medium tool made image generation,
         # sandboxed code, and other explicitly unattended tools unusable when
         # the optional gateway was disabled. High risk remains fail-closed.
-        return definition.requires_confirmation or definition.risk_level is ToolRiskLevel.HIGH
+        return (
+            definition.capability_metadata.get("requires_gateway") is True
+            or definition.requires_confirmation
+            or definition.risk_level is ToolRiskLevel.HIGH
+        )
 
     @staticmethod
     def _direct_execution_allowed(request: ToolCallRequest) -> bool:

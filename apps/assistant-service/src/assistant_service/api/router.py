@@ -4,6 +4,8 @@ from fastapi import APIRouter
 
 from .routes.chat import router as chat_router
 from .routes.images import router as images_router
+from .routes.local_node_device_channel import router as local_node_device_channel_router
+from .routes.local_nodes import router as local_nodes_router
 from .routes.mcp import router as mcp_router
 from .routes.models import router as models_router
 from .routes.responses import router as responses_router
@@ -23,3 +25,5 @@ router.include_router(runs_approvals_router, tags=["Runs+Approvals"])
 router.include_router(runtime_cleanup_router, tags=["Internal"])
 router.include_router(images_router, tags=["Images"])
 router.include_router(mcp_router, tags=["MCP"])
+router.include_router(local_nodes_router, tags=["Local Nodes"])
+router.include_router(local_node_device_channel_router, tags=["Local Node Device Channel"])

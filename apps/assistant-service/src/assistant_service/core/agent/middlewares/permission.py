@@ -9,8 +9,8 @@ with a stricter policy lets a deployment:
 - Require user confirmation (confirm verdict → frontend approval flow).
 - Allow-list per tenant / execution_profile.
 
-This ships the pattern and a permissive default policy; wiring the UI
-approval round-trip for `confirm` verdicts is a separate follow-up.
+The middleware requires an explicit policy. Policy bugs fail closed at this
+security boundary; ordinary non-security middleware hooks remain best-effort.
 """
 
 from __future__ import annotations
@@ -34,12 +34,9 @@ Policy = Callable[
 ]
 
 
-def allow_all(
-    tool_name: str, arguments: dict[str, Any], ctx: AgentLoopContext
-) -> ToolVerdict:
-    """Default policy: permit everything. Keep the default opt-out so adding
-    this middleware to the chain never changes behavior until a deployment
-    provides a real policy."""
+def allow_all(tool_name: str, arguments: dict[str, Any], ctx: AgentLoopContext) -> ToolVerdict:
+    """Explicit pass-through policy for callers that deliberately opt in."""
+    del tool_name, arguments, ctx
     return ToolVerdict.allow(source="permission")
 
 
@@ -48,8 +45,10 @@ class PermissionMiddleware:
 
     name = "permission"
 
-    def __init__(self, policy: Policy | None = None) -> None:
-        self._policy: Policy = policy or allow_all
+    def __init__(self, policy: Policy) -> None:
+        if not callable(policy):
+            raise TypeError("PermissionMiddleware requires an explicit callable policy")
+        self._policy = policy
 
     async def on_tool_call(
         self,
@@ -59,19 +58,26 @@ class PermissionMiddleware:
     ) -> ToolVerdict:
         import inspect
 
-        result = self._policy(tool_name, arguments, ctx)
-        if inspect.isawaitable(result):
-            result = await result
+        try:
+            result = self._policy(tool_name, arguments, ctx)
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception:  # noqa: BLE001 - policy failures must deny, not escape to chain
+            logger.exception("permission policy failed for tool %s; denying", tool_name)
+            return ToolVerdict.deny(
+                reason="permission policy failed closed",
+                source="permission",
+            )
         if not isinstance(result, ToolVerdict):
-            # Policy returned something unexpected (e.g. None or a string).
-            # Log and treat as allow — fail-open is safer than silently
-            # blocking every call on a misconfigured policy.
             logger.warning(
-                "permission policy returned non-ToolVerdict %r for tool %s; allowing",
+                "permission policy returned non-ToolVerdict %r for tool %s; denying",
                 type(result).__name__,
                 tool_name,
             )
-            return ToolVerdict.allow(source="permission")
+            return ToolVerdict.deny(
+                reason="permission policy returned an invalid decision",
+                source="permission",
+            )
         return result if result.source else result.with_source("permission")
 
 

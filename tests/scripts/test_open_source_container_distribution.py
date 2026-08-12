@@ -251,6 +251,13 @@ def test_dockerfiles_do_not_accept_provider_secrets_as_build_arguments() -> None
     assistant = (ROOT / "apps/assistant-service/Dockerfile").read_text()
     assert 'pip install "./packages/mcp-docgen-server[mcp]"' in assistant
     assert "COPY agent-plugins/ai-docgen/ /opt/agent-plugins/ai-docgen/" in assistant
+    assert (
+        "COPY agent-plugins/community-doublecheck/ /opt/agent-plugins/community-doublecheck/"
+    ) in assistant
+    assert (
+        "COPY agent-plugins/community-engineering-reviewers/ "
+        "/opt/agent-plugins/community-engineering-reviewers/"
+    ) in assistant
 
 
 def test_redis_runtime_config_keeps_secrets_out_of_compose_command(
@@ -483,6 +490,9 @@ def test_code_executor_is_an_explicit_local_overlay() -> None:
     assert 'COMPOSE_PARALLEL_LIMIT="${COMPOSE_PARALLEL_LIMIT:-1}"' in script
     assert "sbx daemon start --detach --policy deny-all" in script
     assert "nerdbox" in script
+    assert 'if [ "$backend" = "auto" ]; then' in script
+    assert 'backend="docker"' in script
+    assert 'command -v sbx >/dev/null 2>&1; then\n        backend="sbx"' not in script
     assert 'docker save "$sandbox_image"' in script
     assert 'ASSISTANT_ALLOW_RUNC_CODE_EXECUTOR: "true"' in overlay
     assert "cap_drop" not in script  # enforced by CodeExecutorService itself

@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.agent_plugins import AgentPluginLoadError, load_agent_plugin
 
@@ -26,6 +26,9 @@ from ..scheduler.job_runner import SchedulerJobRunner
 from ..security.pii_filter import PIIFilter
 from ..security.sandbox_resolver import SandboxResolver
 from ..skills.registry import SkillRegistry
+
+if TYPE_CHECKING:
+    from ...agent.plugin_catalog import AgentPluginCatalog
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +114,7 @@ class AssistantRuntimeAdapter:
         skill_registry: SkillRegistry,
         sandbox_resolver: SandboxResolver,
         lifecycle: MemoryProviderLifecycle | None = None,
+        agent_plugin_catalog: AgentPluginCatalog | None = None,
     ) -> None:
         self.features = features
         self.memory_store = memory_store
@@ -129,9 +133,13 @@ class AssistantRuntimeAdapter:
             lifecycle=self.lifecycle,
         )
         self.agent_plugin_status: list[dict[str, Any]] = []
+        # Compatibility view only: discovery belongs to the process-scoped,
+        # DB-independent catalog built by the composition root.
+        self.agent_plugin_catalog = agent_plugin_catalog
+        self.agent_plugin_agents = list(agent_plugin_catalog.agents) if agent_plugin_catalog else []
 
     def _load_configured_agent_plugins(self) -> None:
-        """Load operator-selected Agent Plugin Skills and component status."""
+        """Load operator-selected Skills without granting plugin authority."""
 
         raw_paths = os.getenv("ASSISTANT_AGENT_PLUGIN_PATHS", "")
         if not self.features.skills or not raw_paths.strip():
@@ -203,13 +211,14 @@ class AssistantRuntimeAdapter:
         vector_store: Any | None = None,
         embedder: Any | None = None,
         base_memory_dir: str | None = None,
+        agent_plugin_catalog: AgentPluginCatalog | None = None,
     ) -> AssistantRuntimeAdapter:
         """Build runtime adapter with env-driven feature flags."""
         features = AssistantRuntimeFeatures(
             memory_v2=_env_flag("ASSISTANT_RUNTIME_MEMORY_V2", True),
             context_v2=_env_flag("ASSISTANT_RUNTIME_CONTEXT_V2", True),
             tool_policy_v2=_env_flag("ASSISTANT_RUNTIME_TOOL_POLICY_V2", False),
-            skills=_env_flag("ASSISTANT_RUNTIME_SKILLS", False),
+            skills=_env_flag("ASSISTANT_RUNTIME_SKILLS", True),
             scheduler=_env_flag("ASSISTANT_RUNTIME_SCHEDULER", False),
             failover_v2=_env_flag("ASSISTANT_RUNTIME_FAILOVER_V2", False),
         )
@@ -239,6 +248,7 @@ class AssistantRuntimeAdapter:
             skill_registry=SkillRegistry(database),
             sandbox_resolver=SandboxResolver(),
             lifecycle=MemoryProviderLifecycle(),
+            agent_plugin_catalog=agent_plugin_catalog,
         )
         adapter._load_configured_agent_plugins()
         return adapter

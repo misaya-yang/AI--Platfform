@@ -156,7 +156,7 @@ class SkillRegistry:
     def select_for_query(
         self,
         query: str,
-        max_skills: int = 3,
+        max_skills: int | None = 3,
         *,
         allowed_names: frozenset[str] | None = None,
         scope: tuple[str, str] | None = None,
@@ -185,7 +185,7 @@ class SkillRegistry:
                 scored.append(SkillSelection(skill=skill, score=score))
 
         scored.sort(key=lambda item: item.score, reverse=True)
-        return scored[:max_skills]
+        return scored if max_skills is None else scored[: max(0, max_skills)]
 
     async def load_from_database(
         self,

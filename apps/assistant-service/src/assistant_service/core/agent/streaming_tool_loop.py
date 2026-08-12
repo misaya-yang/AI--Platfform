@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
@@ -54,11 +56,26 @@ class StreamingToolLoopMixin(StreamingToolCallMixin):
     ) -> AsyncGenerator[AgentLoopEvent, None]:
         state = StreamingToolLoopState.from_preparation(
             prepared,
+            initial_iteration_lease=min(
+                ctx.config.max_tool_iterations,
+                max(
+                    1,
+                    int(
+                        ctx.config.initial_tool_iterations
+                        if ctx.config.initial_tool_iterations is not None
+                        else ctx.config.max_tool_iterations
+                    ),
+                ),
+            ),
             max_iterations=ctx.config.max_tool_iterations,
-            kb_call_limit=max(1, int(getattr(ctx.config, "kb_max_queries", 1) or 1)),
             first_token_emitted=first_token_emitted,
         )
-        while state.iteration < state.max_iterations:
+        iteration_lease = state.initial_iteration_lease
+        while (
+            state.iteration < iteration_lease
+            and ctx.run_budget is not None
+            and ctx.run_budget.remaining_work_model_turns > 0
+        ):
             state.iteration += 1
 
             # Check for cancellation
@@ -98,7 +115,6 @@ class StreamingToolLoopMixin(StreamingToolCallMixin):
                     started_at=state.started_at,
                     ttft_start=ttft_start,
                     denied_tools=state.denied_tools,
-                    kb_search_completed=state.kb_dedup.search_completed,
                     dataset_name_map=state.dataset_name_map,
                     result=model_turn,
                 ):
@@ -254,6 +270,7 @@ class StreamingToolLoopMixin(StreamingToolCallMixin):
             _subagent_results: dict[str, str] = {}
 
             # Execute each tool call
+            progress_before = len(state.progress_fingerprints)
             for tool_index, tool_call in enumerate(tool_calls_batch, start=1):
                 frame = StreamingToolCallState(
                     tool_index=tool_index,
@@ -273,13 +290,44 @@ class StreamingToolLoopMixin(StreamingToolCallMixin):
                 if out.terminal:
                     return
 
+                if frame.step_success is True:
+                    progress_receipt = hashlib.sha256(
+                        json.dumps(
+                            {
+                                "tool": frame.tool_name,
+                                "arguments": frame.tool_args,
+                                "artifact_ids": state.created_artifact_ids,
+                                "evidence": frame.tool_result_for_model,
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            default=str,
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    state.progress_fingerprints.add(progress_receipt)
+
                 # Only lineage-backed compaction may replace tool results.
 
             # Continue loop to get LLM's response to tool results
+            if (
+                state.iteration >= iteration_lease
+                and len(state.progress_fingerprints) > progress_before
+                and iteration_lease < state.max_iterations
+            ):
+                iteration_lease = min(state.max_iterations, iteration_lease + 2)
+                state.lease_extensions += 1
 
         out.iteration = state.iteration
         out.last_tool_failed = state.last_tool_failed
-        out.max_iterations = state.max_iterations
+        # If evidence work consumed every ordinary turn, report the effective
+        # work lease as reached so the caller uses the protected synthesis path.
+        work_budget_stopped = bool(
+            not state.model_terminated_cleanly
+            and state.iteration < iteration_lease
+            and ctx.run_budget is not None
+            and ctx.run_budget.remaining_work_model_turns == 0
+        )
+        out.max_iterations = state.iteration if work_budget_stopped else iteration_lease
         out.model_terminated_cleanly = state.model_terminated_cleanly
         out.quiz_id_for_persistence = state.quiz_id_for_persistence
         out.turn_thinking_content = state.turn_thinking_content

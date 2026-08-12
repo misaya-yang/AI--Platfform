@@ -58,9 +58,7 @@ def _truncate_str(text: str, max_chars: int, max_tokens: int) -> str:
     return text[:keep] + hint
 
 
-def _truncate_dict(
-    data: dict[str, Any], max_chars: int, max_tokens: int
-) -> dict[str, Any]:
+def _truncate_dict(data: dict[str, Any], max_chars: int, max_tokens: int) -> dict[str, Any]:
     """If serialized size exceeds budget, truncate the single largest string
     field in-place (shallow-copied) rather than blowing away the structure."""
     serialized = json.dumps(data, ensure_ascii=False, default=str)
@@ -152,8 +150,10 @@ class ResponseCapMiddleware:
 
         # Preserve structured metadata so downstream code can see truncation.
         new_metadata = dict(getattr(result, "metadata", {}) or {})
-        new_metadata.setdefault("response_cap_applied", True)
-        new_metadata.setdefault("response_cap_max_tokens", budget)
+        # These are host-owned verdict fields. Tool-provided metadata must not
+        # be able to disguise a capped result as complete or inflate its cap.
+        new_metadata["response_cap_applied"] = True
+        new_metadata["response_cap_max_tokens"] = budget
 
         if is_dataclass(result):
             return replace(result, result=capped, metadata=new_metadata)

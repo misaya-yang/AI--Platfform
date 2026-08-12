@@ -10,9 +10,10 @@ usage() {
     cat <<'EOF'
 Usage: scripts/new/code-executor.sh [enable|test|status|disable]
 
-This is a trusted local-development feature. On macOS it prefers Docker
-Sandboxes (sbx) microVMs when installed; otherwise it uses runsc when the
-Docker daemon provides it, or the hardened default runtime as a final fallback.
+This is a trusted local-development feature. The default uses the configured
+Docker daemon (preferring runsc when available). Docker Sandboxes (sbx) is an
+explicit opt-in via ASSISTANT_CODE_EXECUTOR_BACKEND=sbx because first launch
+may invoke a downloaded host shim and trigger an operating-system prompt.
 EOF
 }
 
@@ -62,9 +63,7 @@ prepare_runtime() {
         "$workspace")
 
     backend="${ASSISTANT_CODE_EXECUTOR_BACKEND:-auto}"
-    if [ "$backend" = "auto" ] && [ "$(uname -s)" = "Darwin" ] && command -v sbx >/dev/null 2>&1; then
-        backend="sbx"
-    elif [ "$backend" = "auto" ]; then
+    if [ "$backend" = "auto" ]; then
         backend="docker"
     fi
 

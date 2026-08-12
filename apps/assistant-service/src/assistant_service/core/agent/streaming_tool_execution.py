@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import json
 import time
 from collections.abc import AsyncGenerator
@@ -28,6 +30,17 @@ from .streaming_state import (
     StreamingToolCallState,
     StreamingToolLoopState,
 )
+from .subagent_dispatch_runtime import (
+    GLOBAL_SUBAGENT_DISPATCH_REGISTRY,
+    DispatchScope,
+    SubAgentDispatchCapacityExceeded,
+    SubAgentDispatchConflict,
+    SubAgentDispatchCoordinator,
+    SubAgentDispatchInFlight,
+    SubAgentDispatchRegistry,
+    SubAgentDispatchUncertain,
+)
+from .subagent_types import SubAgentConfig
 from .tool_dedup import KB_REUSE_MESSAGE
 
 if TYPE_CHECKING:
@@ -40,7 +53,254 @@ logger = get_logger(__name__)
 class StreamingToolExecutionMixin:
     """Execute an approved tool and ingest its durable result."""
 
+    def _subagent_dispatch_registry(self) -> SubAgentDispatchRegistry:
+        return GLOBAL_SUBAGENT_DISPATCH_REGISTRY
+
+    def _track_open_subagent_dispatch(
+        self,
+        frame: StreamingToolCallState,
+        dispatch: SubAgentDispatchCoordinator,
+    ) -> None:
+        claims = getattr(self, "_open_subagent_dispatches", None)
+        if claims is None:
+            claims = {}
+            self._open_subagent_dispatches = claims
+        prior = claims.pop(id(frame), None)
+        if prior is not None:
+            prior.abort("streaming_claim_replaced")
+        claims[id(frame)] = dispatch
+
+    def _abort_open_subagent_dispatch(
+        self,
+        frame: StreamingToolCallState,
+        *,
+        reason: str,
+    ) -> None:
+        claims = getattr(self, "_open_subagent_dispatches", None)
+        claim = claims.pop(id(frame), None) if claims is not None else None
+        if claim is None:
+            return
+        claim.abort(reason)
+
+    @staticmethod
+    def _subagent_dispatch_scope(ctx: AgentLoopContext) -> DispatchScope:
+        return DispatchScope(
+            tenant_id=str(ctx.tenant_id or "unknown"),
+            session_id=str(ctx.session_id or "unknown"),
+            run_id=str(ctx.run_id or "unknown"),
+        )
+
+    @staticmethod
+    def _subagent_request_identity(marker: dict[str, Any]) -> tuple[str, str]:
+        delegation_id = str(marker.get("delegation_id") or "").strip()
+        request_sha256 = str(marker.get("request_sha256") or "").strip()
+        if not delegation_id or not request_sha256:
+            raise ValueError("sub-agent marker is missing dispatch identity")
+        # Internal marker content is schema-validated separately by
+        # SubAgentConfig.from_marker.  This digest labels the normalized
+        # request recorded by the tool executor.
+        if len(request_sha256) != 64 or any(
+            char not in "0123456789abcdef" for char in request_sha256
+        ):
+            raise ValueError("sub-agent marker has an invalid request_sha256")
+        return delegation_id, request_sha256
+
+    def _begin_subagent_dispatch(
+        self,
+        ctx: AgentLoopContext,
+        frame: StreamingToolCallState,
+        marker: dict[str, Any],
+    ) -> tuple[str, SubAgentDispatchCoordinator | None]:
+        delegation_id, request_sha256 = self._subagent_request_identity(marker)
+        try:
+            dispatch = SubAgentDispatchCoordinator.begin(
+                self._subagent_dispatch_registry(),
+                self._subagent_dispatch_scope(ctx),
+                delegation_id=delegation_id,
+                request_sha256=request_sha256,
+            )
+        except (
+            SubAgentDispatchCapacityExceeded,
+            SubAgentDispatchConflict,
+            SubAgentDispatchInFlight,
+            SubAgentDispatchUncertain,
+        ) as exc:
+            frame.tool_success = False
+            frame.tool_error = type(exc).__name__.upper()
+            frame.tool_metadata = {
+                **frame.tool_metadata,
+                "delegation_id": delegation_id,
+                "subagent_dispatch_error": type(exc).__name__,
+            }
+            frame.result.success = False
+            frame.result.result = None
+            frame.result.error = frame.tool_error
+            frame.result.metadata = frame.tool_metadata
+            return delegation_id, None
+        if dispatch.is_open:
+            self._track_open_subagent_dispatch(frame, dispatch)
+        return delegation_id, dispatch
+
+    def _finish_subagent_dispatch(
+        self,
+        dispatch: SubAgentDispatchCoordinator | None,
+        *,
+        receipt: dict[str, Any],
+        reusable: bool,
+    ) -> None:
+        if dispatch is None or not dispatch.is_open:
+            return
+        dispatch.finish(receipt=receipt, reusable=reusable)
+
+    @staticmethod
+    def _rebind_cached_subagent_receipt(
+        receipt: dict[str, Any],
+        *,
+        attempt_id: str,
+    ) -> dict[str, Any]:
+        """Rebind trusted cached evidence to the consuming attempt with provenance."""
+
+        rebound = copy.deepcopy(receipt)
+        prior_attempt_id = str(rebound.get("attempt_id") or "")
+        if prior_attempt_id:
+            rebound["reused_from_attempt_id"] = prior_attempt_id
+        rebound["attempt_id"] = attempt_id
+        result = rebound.get("result")
+        if isinstance(result, dict):
+            result["attempt_id"] = attempt_id
+        for child in rebound.get("results") or ():
+            if not isinstance(child, dict):
+                continue
+            child_result = child.get("result")
+            if isinstance(child_result, dict):
+                child_result["attempt_id"] = attempt_id
+        return rebound
+
+    def _reuse_subagent_dispatch(
+        self,
+        ctx: AgentLoopContext,
+        frame: StreamingToolCallState,
+        dispatch: SubAgentDispatchCoordinator,
+        *,
+        task_data: dict[str, Any],
+        phase: AgentLoopPhase,
+    ) -> tuple[dict[str, Any], AgentLoopEvent]:
+        cached = self._rebind_cached_subagent_receipt(
+            dispatch.decision.receipt or {},
+            attempt_id=ctx.attempt_id,
+        )
+        frame.tool_metadata = {
+            **frame.tool_metadata,
+            "delegation_id": dispatch.delegation_id,
+            "subagent_dispatch_reused": True,
+        }
+        return cached, AgentLoopEvent(
+            phase=phase,
+            event_type="subagent_dispatch_reused",
+            data={
+                "delegation_id": dispatch.delegation_id,
+                **task_data,
+                "attempt_id": ctx.attempt_id,
+            },
+        )
+
+    def _subagent_spawn_kwargs(
+        self,
+        ctx: AgentLoopContext,
+        user: UserContextLike,
+    ) -> dict[str, Any]:
+        return {
+            "parent_user": user,
+            "parent_tenant_id": ctx.tenant_id,
+            "kb_dataset_ids": ctx.config.kb_dataset_ids or [],
+            "parent_invocation_context": self._build_invocation_context(ctx, user=user),
+            "parent_cancel_event": ctx.cancel_event,
+            "parent_attempt_id": ctx.attempt_id,
+            "parent_model_id": ctx.config.model_id,
+            "parent_max_turns": ctx.config.max_tool_iterations,
+            "parent_max_tool_calls": (
+                ctx.config.max_tool_iterations * ctx.config.max_concurrent_tools
+            ),
+            "parent_max_tokens": ctx.config.max_tokens,
+            "run_budget": ctx.run_budget,
+        }
+
+    @staticmethod
+    def _subagent_recovery_details(
+        recovery: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        failure = dict(recovery.get("failure") or {})
+        failure.setdefault("failure_kind", "side_effect_unknown")
+        failure.setdefault("side_effect_state", "unknown")
+        failure.setdefault(
+            "recovery_action",
+            recovery.get("recovery_action") or "pause",
+        )
+        operation = {
+            "operation_id": str(recovery.get("operation_id") or ""),
+            "read_back_available": bool(recovery.get("read_back_available")),
+            "compensation_available": bool(recovery.get("compensation_available")),
+        }
+        return failure, operation
+
+    def _tool_side_effect_state(
+        self,
+        ctx: AgentLoopContext,
+        frame: StreamingToolCallState,
+    ) -> str:
+        """Build a typed public receipt from host-owned capability metadata."""
+
+        metadata = frame.tool_metadata if isinstance(frame.tool_metadata, dict) else {}
+        if (
+            metadata.get("side_effect_unknown") is True
+            or str(metadata.get("side_effect_state") or "").casefold() == "unknown"
+        ):
+            return "write_unknown"
+        definition = self._tool_definition_for_context(ctx, frame.tool_name)
+        capability = dict(getattr(definition, "capability_metadata", None) or {})
+        operation_kind = str(capability.get("operation_kind") or "").casefold()
+        if operation_kind == "read" or capability.get("read_only") is True:
+            return "read_only"
+        if operation_kind == "write":
+            return "write_known" if frame.tool_success else "write_unknown"
+        # Ambiguous tools must never acquire a side-effect-free receipt merely
+        # because execution returned successfully.
+        return "write_unknown"
+
     async def _invoke_streaming_tool(
+        self,
+        ctx: AgentLoopContext,
+        user: UserContextLike,
+        *,
+        phase: AgentLoopPhase,
+        state: StreamingToolLoopState,
+        frame: StreamingToolCallState,
+        out: StreamingLoopResult,
+    ) -> AsyncGenerator[AgentLoopEvent, None]:
+        abort_reason = "streaming_completed_without_dispatch_terminal"
+        try:
+            async for event in self._invoke_streaming_tool_impl(
+                ctx,
+                user,
+                phase=phase,
+                state=state,
+                frame=frame,
+                out=out,
+            ):
+                yield event
+        except asyncio.CancelledError:
+            abort_reason = "streaming_cancelled"
+            raise
+        except GeneratorExit:
+            abort_reason = "streaming_consumer_closed"
+            raise
+        except BaseException:
+            abort_reason = "streaming_coordinator_exception"
+            raise
+        finally:
+            self._abort_open_subagent_dispatch(frame, reason=abort_reason)
+
+    async def _invoke_streaming_tool_impl(
         self,
         ctx: AgentLoopContext,
         user: UserContextLike,
@@ -69,58 +329,54 @@ class StreamingToolExecutionMixin:
             frame.tool_result = frame.tool_result_text
             frame.tool_result_for_model = frame.tool_result_text
         elif self.tool_invoker:
-            if frame.tool_name == "search_knowledge_base":
-                state.kb_call_count += 1
-                if not frame.short_circuit_kb:
-                    frame.kb_rag_started_at = time.time()
-                    frame.kb_rag_query = str(frame.tool_args.get("query") or ctx.message)
-                    raw_dataset_ids = frame.tool_args.get("dataset_ids")
-                    if isinstance(raw_dataset_ids, list) and raw_dataset_ids:
-                        frame.kb_rag_dataset_ids = [str(value) for value in raw_dataset_ids]
-                    else:
-                        frame.kb_rag_dataset_ids = list(ctx.config.kb_dataset_ids or [])
-                    if ctx.config.agent_runtime is not None:
-                        frame.kb_rag_retrieval_configs = {
-                            dataset_id: dict(ctx.config.kb_retrieval_configs[dataset_id])
-                            for dataset_id in frame.kb_rag_dataset_ids
-                            if dataset_id in ctx.config.kb_retrieval_configs
-                        }
-                    if frame.kb_rag_retrieval_configs:
-                        frame.kb_rag_top_k = max(
-                            dataset_config["top_k"]
-                            for dataset_config in frame.kb_rag_retrieval_configs.values()
-                        )
-                        frame.kb_rag_score_threshold = min(
-                            dataset_config["threshold"]
-                            for dataset_config in frame.kb_rag_retrieval_configs.values()
-                        )
-                        frame.kb_rag_include_images = any(
-                            dataset_config["include_images"]
-                            for dataset_config in frame.kb_rag_retrieval_configs.values()
-                        )
-                    else:
-                        frame.kb_rag_top_k = int(
-                            frame.tool_args.get("top_k") or ctx.config.kb_top_k
-                        )
-                        frame.kb_rag_score_threshold = float(
-                            frame.tool_args.get("score_threshold")
-                            if frame.tool_args.get("score_threshold") is not None
-                            else ctx.config.kb_min_relevance
-                        )
-                    self._capture_rag_retrieval_trace(
-                        ctx,
-                        event_type="rag_retrieval_started",
-                        payload=build_rag_trace_payload(
-                            query=frame.kb_rag_query,
-                            dataset_ids=frame.kb_rag_dataset_ids,
-                            top_k=frame.kb_rag_top_k,
-                            score_threshold=frame.kb_rag_score_threshold,
-                            include_images=frame.kb_rag_include_images,
-                            started_at=frame.kb_rag_started_at,
-                            tool_id=frame.tool_id,
-                            retrieval_configs=frame.kb_rag_retrieval_configs,
-                        ),
+            if frame.tool_name == "search_knowledge_base" and not frame.short_circuit_kb:
+                frame.kb_rag_started_at = time.time()
+                frame.kb_rag_query = str(frame.tool_args.get("query") or ctx.message)
+                raw_dataset_ids = frame.tool_args.get("dataset_ids")
+                if isinstance(raw_dataset_ids, list) and raw_dataset_ids:
+                    frame.kb_rag_dataset_ids = [str(value) for value in raw_dataset_ids]
+                else:
+                    frame.kb_rag_dataset_ids = list(ctx.config.kb_dataset_ids or [])
+                if ctx.config.agent_runtime is not None:
+                    frame.kb_rag_retrieval_configs = {
+                        dataset_id: dict(ctx.config.kb_retrieval_configs[dataset_id])
+                        for dataset_id in frame.kb_rag_dataset_ids
+                        if dataset_id in ctx.config.kb_retrieval_configs
+                    }
+                if frame.kb_rag_retrieval_configs:
+                    frame.kb_rag_top_k = max(
+                        dataset_config["top_k"]
+                        for dataset_config in frame.kb_rag_retrieval_configs.values()
                     )
+                    frame.kb_rag_score_threshold = min(
+                        dataset_config["threshold"]
+                        for dataset_config in frame.kb_rag_retrieval_configs.values()
+                    )
+                    frame.kb_rag_include_images = any(
+                        dataset_config["include_images"]
+                        for dataset_config in frame.kb_rag_retrieval_configs.values()
+                    )
+                else:
+                    frame.kb_rag_top_k = int(frame.tool_args.get("top_k") or ctx.config.kb_top_k)
+                    frame.kb_rag_score_threshold = float(
+                        frame.tool_args.get("score_threshold")
+                        if frame.tool_args.get("score_threshold") is not None
+                        else ctx.config.kb_min_relevance
+                    )
+                self._capture_rag_retrieval_trace(
+                    ctx,
+                    event_type="rag_retrieval_started",
+                    payload=build_rag_trace_payload(
+                        query=frame.kb_rag_query,
+                        dataset_ids=frame.kb_rag_dataset_ids,
+                        top_k=frame.kb_rag_top_k,
+                        score_threshold=frame.kb_rag_score_threshold,
+                        include_images=frame.kb_rag_include_images,
+                        started_at=frame.kb_rag_started_at,
+                        tool_id=frame.tool_id,
+                        retrieval_configs=frame.kb_rag_retrieval_configs,
+                    ),
+                )
             frame.result = await self._invoke_tool(
                 ctx=ctx,
                 user=user,
@@ -175,43 +431,52 @@ class StreamingToolExecutionMixin:
                 and frame.result.result.get("__subagent__")
                 and self.model_registry
             ):
+                marker = frame.result.result
+                delegation_id, dispatch = self._begin_subagent_dispatch(ctx, frame, marker)
                 subagent_terminal: dict[str, Any] | None = None
-                if frame.tool_id in frame.subagent_results:
+                subagent_terminal_receipt: dict[str, Any] | None = None
+                subagent_config = SubAgentConfig.from_marker(marker.get("config"))
+                if dispatch is None:
+                    subagent_result = ""
+                    subagent_recovery = None
+                elif dispatch.decision.action == "reuse":
+                    cached, reuse_event = self._reuse_subagent_dispatch(
+                        ctx,
+                        frame,
+                        dispatch,
+                        task_data={"task_id": subagent_config.task_id},
+                        phase=phase,
+                    )
+                    subagent_result = str(cached.get("result_summary") or "")
+                    subagent_terminal_receipt = cached
+                    subagent_terminal = self._validate_subagent_terminal(
+                        cached,
+                        expected_attempt_id=ctx.attempt_id,
+                    )
+                    subagent_recovery = None
+                    yield reuse_event
+                elif frame.tool_id in frame.subagent_results:
                     subagent_result = frame.subagent_results[frame.tool_id]
                     subagent_recovery = None
                 else:
                     sub_mgr = self._get_subagent_manager()
                     subagent_result = ""
                     subagent_recovery: dict[str, Any] | None = None
-                    parent_invocation_context = self._build_invocation_context(
-                        ctx,
-                        user=user,
-                    )
                     async for sub_event in sub_mgr.spawn(
-                        frame.result.result["config"],
-                        parent_user=user,
-                        parent_tenant_id=ctx.tenant_id,
-                        kb_dataset_ids=ctx.config.kb_dataset_ids or [],
-                        parent_invocation_context=parent_invocation_context,
-                        parent_cancel_event=ctx.cancel_event,
-                        parent_attempt_id=ctx.attempt_id,
-                        parent_model_id=ctx.config.model_id,
-                        parent_max_turns=ctx.config.max_tool_iterations,
-                        parent_max_tool_calls=(
-                            ctx.config.max_tool_iterations * ctx.config.max_concurrent_tools
-                        ),
-                        parent_max_tokens=ctx.config.max_tokens,
-                        run_budget=ctx.run_budget,
+                        subagent_config,
+                        **self._subagent_spawn_kwargs(ctx, user),
                     ):
+                        dispatch.touch()
                         yield AgentLoopEvent(
                             phase=phase,
                             event_type=sub_event["event_type"],
                             data=sub_event["data"],
                         )
                         if sub_event["event_type"] == "subagent_finished":
-                            subagent_result = sub_event["data"].get("result_summary", "")
+                            subagent_terminal_receipt = copy.deepcopy(sub_event["data"])
+                            subagent_result = subagent_terminal_receipt.get("result_summary", "")
                             subagent_terminal = self._validate_subagent_terminal(
-                                sub_event["data"],
+                                subagent_terminal_receipt,
                                 expected_attempt_id=ctx.attempt_id,
                             )
                             if (
@@ -221,21 +486,20 @@ class StreamingToolExecutionMixin:
                                 subagent_recovery = dict(sub_event["data"].get("recovery") or {})
                         elif sub_event["event_type"] == "subagent_side_effect_unknown":
                             subagent_recovery = dict(sub_event["data"])
-                if subagent_recovery is not None:
-                    failure = dict(subagent_recovery.get("failure") or {})
-                    failure.setdefault("failure_kind", "side_effect_unknown")
-                    failure.setdefault("side_effect_state", "unknown")
-                    failure.setdefault(
-                        "recovery_action",
-                        subagent_recovery.get("recovery_action") or "pause",
-                    )
-                    operation = {
-                        "operation_id": str(subagent_recovery.get("operation_id") or ""),
-                        "read_back_available": bool(subagent_recovery.get("read_back_available")),
-                        "compensation_available": bool(
-                            subagent_recovery.get("compensation_available")
-                        ),
-                    }
+                reusable = (
+                    subagent_terminal is not None
+                    and subagent_terminal_receipt is not None
+                    and subagent_recovery is None
+                )
+                self._finish_subagent_dispatch(
+                    dispatch,
+                    receipt=subagent_terminal_receipt or {},
+                    reusable=reusable,
+                )
+                if dispatch is None:
+                    pass
+                elif subagent_recovery is not None:
+                    failure, operation = self._subagent_recovery_details(subagent_recovery)
                     frame.tool_success = False
                     frame.tool_error = "SIDE_EFFECT_UNKNOWN"
                     frame.tool_metadata = {
@@ -272,6 +536,192 @@ class StreamingToolExecutionMixin:
                         "subagent_result": subagent_terminal,
                     }
                     frame.result.metadata = frame.tool_metadata
+
+            # Model-facing bounded parallel dispatch.  The manager forwards
+            # child progress as it happens; this layer retains terminal
+            # receipts by dispatch_index so model ingestion is deterministic.
+            elif (
+                isinstance(frame.result.result, dict)
+                and frame.result.result.get("__subagent_batch__")
+                and self.model_registry
+            ):
+                marker = frame.result.result
+                delegation_id, dispatch = self._begin_subagent_dispatch(ctx, frame, marker)
+                configs = [
+                    SubAgentConfig.from_marker(value) for value in list(marker.get("configs") or [])
+                ]
+                terminals: list[dict[str, Any] | None] = [None] * len(configs)
+                started_counts = [0] * len(configs)
+                terminal_counts = [0] * len(configs)
+                subagent_recovery: dict[str, Any] | None = None
+                cached_batch_result: dict[str, Any] | None = None
+                if dispatch is not None and dispatch.decision.action == "reuse":
+                    cached_batch_result, reuse_event = self._reuse_subagent_dispatch(
+                        ctx,
+                        frame,
+                        dispatch,
+                        task_data={"task_ids": [config.task_id for config in configs]},
+                        phase=phase,
+                    )
+                    yield reuse_event
+                elif dispatch is not None:
+                    sub_mgr = self._get_subagent_manager()
+                    async for sub_event in sub_mgr.spawn_parallel(
+                        configs,
+                        max_concurrency=int(marker.get("max_concurrency") or 3),
+                        **self._subagent_spawn_kwargs(ctx, user),
+                    ):
+                        dispatch.touch()
+                        yield AgentLoopEvent(
+                            phase=phase,
+                            event_type=sub_event["event_type"],
+                            data=sub_event["data"],
+                        )
+                        if sub_event["event_type"] == "subagent_started":
+                            index = sub_event["data"].get("dispatch_index")
+                            if (
+                                isinstance(index, int)
+                                and not isinstance(index, bool)
+                                and 0 <= index < len(started_counts)
+                            ):
+                                started_counts[index] += 1
+                        elif sub_event["event_type"] == "subagent_finished":
+                            data = sub_event["data"]
+                            index = data.get("dispatch_index")
+                            terminal = self._validate_subagent_terminal(
+                                data,
+                                expected_attempt_id=ctx.attempt_id,
+                            )
+                            if (
+                                isinstance(index, int)
+                                and not isinstance(index, bool)
+                                and 0 <= index < len(terminals)
+                                and terminal is not None
+                            ):
+                                terminal_counts[index] += 1
+                                if terminals[index] is None:
+                                    terminals[index] = {
+                                        "dispatch_index": index,
+                                        "agent_id": str(data.get("agent_id") or ""),
+                                        "profile_id": data.get("profile_id"),
+                                        "definition_sha256": data.get("definition_sha256"),
+                                        "source_plugin": data.get("source_plugin"),
+                                        "delegation_id": data.get("delegation_id"),
+                                        "task_id": data.get("task_id"),
+                                        "parent_task_id": data.get("parent_task_id"),
+                                        "lineage": data.get("lineage", []),
+                                        "depth": data.get("depth"),
+                                        "effective_execution": data.get("effective_execution", {}),
+                                        "status": terminal["status"],
+                                        "result_summary": str(data.get("result_summary") or ""),
+                                        "result": terminal,
+                                    }
+                            if data.get("status") == "blocked" and subagent_recovery is None:
+                                subagent_recovery = dict(data.get("recovery") or {})
+                        elif sub_event["event_type"] == "subagent_side_effect_unknown":
+                            subagent_recovery = dict(sub_event["data"])
+
+                if cached_batch_result is not None:
+                    batch_result = cached_batch_result
+                    batch_status = str(batch_result.get("status") or "failed")
+                    ordered_receipts = list(batch_result.get("results") or [])
+                    subagent_recovery = None
+                else:
+                    ordered_receipts = []
+                    for index, terminal in enumerate(terminals):
+                        lifecycle_valid = started_counts[index] == 1 and terminal_counts[index] == 1
+                        ordered_receipts.append(
+                            terminal
+                            if lifecycle_valid and terminal is not None
+                            else {
+                                "dispatch_index": index,
+                                "task_id": configs[index].task_id,
+                                "status": "invalid",
+                                "result_summary": "",
+                                "result": {
+                                    "limitations": [
+                                        "Sub-agent lifecycle must contain exactly one start and terminal"
+                                    ]
+                                },
+                            }
+                        )
+                    statuses = [str(receipt["status"]) for receipt in ordered_receipts]
+                    if subagent_recovery is not None:
+                        batch_status = "blocked"
+                    elif statuses and all(status == "completed" for status in statuses):
+                        batch_status = "completed"
+                    elif any(status == "completed" for status in statuses):
+                        batch_status = "partial"
+                    elif statuses and all(status == "cancelled" for status in statuses):
+                        batch_status = "cancelled"
+                    else:
+                        batch_status = "failed"
+                    batch_result = {
+                        "schema_version": "assistant-subagent-batch/v1",
+                        "status": batch_status,
+                        "attempt_id": ctx.attempt_id,
+                        "delegation_id": delegation_id,
+                        "claims": [
+                            {
+                                "dispatch_index": receipt["dispatch_index"],
+                                "claims": receipt["result"].get("claims", []),
+                            }
+                            for receipt in ordered_receipts
+                            if receipt["status"] == "completed"
+                        ],
+                        "evidence": [
+                            {
+                                "dispatch_index": receipt["dispatch_index"],
+                                "evidence": receipt["result"].get("evidence", []),
+                            }
+                            for receipt in ordered_receipts
+                        ],
+                        "limitations": [
+                            {
+                                "dispatch_index": receipt["dispatch_index"],
+                                "limitations": receipt["result"].get("limitations", []),
+                            }
+                            for receipt in ordered_receipts
+                            if receipt["status"] != "completed"
+                            or receipt["result"].get("limitations")
+                        ],
+                        "results": ordered_receipts,
+                    }
+                self._finish_subagent_dispatch(
+                    dispatch,
+                    receipt=batch_result,
+                    reusable=(
+                        cached_batch_result is None
+                        and subagent_recovery is None
+                        and batch_status in {"completed", "partial"}
+                    ),
+                )
+                frame.tool_metadata = {
+                    **frame.tool_metadata,
+                    "subagent_result": batch_result,
+                    "subagent_batch_size": len(ordered_receipts),
+                }
+                if subagent_recovery is not None:
+                    failure, operation = self._subagent_recovery_details(subagent_recovery)
+                    frame.tool_metadata.update(
+                        {
+                            "side_effect_unknown": True,
+                            "tool_failure": failure,
+                            "tool_operation": operation,
+                        }
+                    )
+                    frame.tool_error = "SIDE_EFFECT_UNKNOWN"
+                elif dispatch is not None and batch_status not in {"completed", "partial"}:
+                    frame.tool_error = f"SUBAGENT_BATCH_{batch_status.upper()}"
+
+                frame.tool_success = batch_status in {"completed", "partial"}
+                frame.result.success = frame.tool_success
+                # Preserve the full host-generated aggregate for the parent's
+                # synthesis context; display summaries remain available in
+                # each ordered result item.
+                frame.result.result = batch_result if frame.tool_success else None
+                frame.result.error = frame.tool_error
+                frame.result.metadata = frame.tool_metadata
 
             queue_state = frame.tool_metadata.get("queue_state")
             if queue_state:
@@ -706,6 +1156,8 @@ class StreamingToolExecutionMixin:
                 },
             )
 
+        side_effect_state = self._tool_side_effect_state(ctx, frame)
+
         # Emit tool_call_completed event (frontend tool cards + search status)
         yield AgentLoopEvent(
             phase=phase,
@@ -721,6 +1173,7 @@ class StreamingToolExecutionMixin:
                 "metadata": frame.tool_metadata or {},
                 "duration_ms": frame.tool_duration_ms,
                 "error": tool_error_for_event,
+                "side_effect_state": side_effect_state,
             },
         )
         tool_status = "completed" if frame.tool_success else "error"
@@ -810,6 +1263,7 @@ class StreamingToolExecutionMixin:
                 "result_preview": frame.tool_result_preview,
                 "error": tool_error_for_event,
                 "duration_ms": frame.tool_duration_ms,
+                "side_effect_state": side_effect_state,
             },
         )
         yield AgentLoopEvent(
@@ -824,6 +1278,7 @@ class StreamingToolExecutionMixin:
                 "status": tool_status,
                 "duration_ms": frame.tool_duration_ms,
                 "error": tool_error_for_event,
+                "side_effect_state": side_effect_state,
             },
         )
         # Bound persisted tool previews while retaining activity status.
@@ -838,6 +1293,7 @@ class StreamingToolExecutionMixin:
                 "result": _stored_result,
                 "error": tool_error_for_event,
                 "duration_ms": frame.tool_duration_ms,
+                "side_effect_state": side_effect_state,
             }
         )
         frame.step_success = frame.tool_success

@@ -35,6 +35,11 @@ from .quiz_tool import (
     QuizGeneratorExecutor,
     register_quiz_tool,
 )
+from .tool_artifact_reader import (
+    READ_TOOL_ARTIFACT_DEFINITION,
+    ReadToolArtifactExecutor,
+    register_tool_artifact_reader,
+)
 from .tool_registry import (
     ToolCallRequest,
     ToolCallResult,
@@ -62,6 +67,9 @@ __all__ = [
     "ToolCallResult",
     "get_tool_registry",
     "register_tool",
+    "READ_TOOL_ARTIFACT_DEFINITION",
+    "ReadToolArtifactExecutor",
+    "register_tool_artifact_reader",
     # Built-in tools
     "KB_SEARCH_DEFINITION",
     "KBSearchExecutor",

@@ -175,3 +175,7 @@ CLAUDE_CODE_OPTIMIZATION_PROMPT.md
 # Test output
 test-results/
 .claude/worktrees/
+
+# Scratch orchestration scripts written during live evaluation runs.
+# These embed machine-specific temp paths (e.g. /tmp/<run-id>/auth.env).
+.tmp-*

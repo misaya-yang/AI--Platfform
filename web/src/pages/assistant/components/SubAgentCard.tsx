@@ -1,99 +1,267 @@
 /**
- * SubAgentCard — Claude Desktop-inspired sub-agent execution display.
- * Collapsible card with tool timeline and result rendering.
+ * Compact workbench row for one delegated agent.
+ *
+ * The collapsed row deliberately exposes only host-owned lifecycle metadata:
+ * profile, safe tool/step label, status, and elapsed time. Expanding the row
+ * reveals the assigned summary and terminal receipt, never chain-of-thought or
+ * raw tool arguments.
  */
-import React, { useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import type { SubAgentState } from "../types";
+import { useId, useState } from "react";
+import {
+  Bot,
+  ChevronDown,
+  CircleAlert,
+  CircleCheck,
+  CircleStop,
+  Clock3,
+  ShieldQuestion,
+} from "lucide-react";
 import { formatDuration } from "@/lib/format";
+import { cn } from "@/lib/utils";
+import type { SubAgentState, SubAgentStatus } from "../types";
 
-const TYPE_META: Record<string, { icon: string; label: string; bg: string; border: string; ring: string }> = {
-  explore: { icon: "🔍", label: "Explore", bg: "bg-blue-50 dark:bg-blue-950/20", border: "border-blue-200 dark:border-blue-800/40", ring: "border-blue-400" },
-  task:    { icon: "⚙️", label: "Task",    bg: "bg-violet-50 dark:bg-violet-950/20", border: "border-violet-200 dark:border-violet-800/40", ring: "border-violet-400" },
-  plan:    { icon: "📋", label: "Plan",    bg: "bg-emerald-50 dark:bg-emerald-950/20", border: "border-emerald-200 dark:border-emerald-800/40", ring: "border-emerald-400" },
+const SECRET_PATTERNS = [
+  /\bsk-[A-Za-z0-9_-]{12,}\b/g,
+  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g,
+  /\b(?:ghp|github_pat|glpat)-?[A-Za-z0-9_-]{12,}\b/gi,
+  /\bAIza[A-Za-z0-9_-]{20,}\b/g,
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}\b/gi,
+  /\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|client[_-]?secret|secret|password|credential|authorization|cookie|private[_-]?key)\b["']?\s*[:=]\s*["']?[^\s,;"'}]+/gi,
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
+] as const;
+
+const GLYPH_COLORS = [
+  "text-violet-500 bg-violet-500/12",
+  "text-cyan-500 bg-cyan-500/12",
+  "text-emerald-500 bg-emerald-500/12",
+  "text-amber-500 bg-amber-500/12",
+  "text-rose-500 bg-rose-500/12",
+] as const;
+
+const STATUS_META: Record<SubAgentStatus, {
+  label: string;
+  text: string;
+  icon: typeof CircleCheck;
+}> = {
+  running: { label: "Running", text: "", icon: Clock3 },
+  completed: { label: "Completed", text: "", icon: CircleCheck },
+  failed: { label: "Failed", text: "", icon: CircleAlert },
+  cancelled: { label: "Cancelled", text: "", icon: CircleStop },
+  blocked: { label: "Blocked", text: "", icon: ShieldQuestion },
+  partial: { label: "Partial", text: "", icon: CircleAlert },
 };
 
-export function SubAgentCard({ subAgent }: { subAgent: SubAgentState }) {
-  const [expanded, setExpanded] = useState(true);
-  const meta = TYPE_META[subAgent.agentType] || TYPE_META.explore;
-  const isRunning = subAgent.status === "running";
-  const isDone = subAgent.status === "completed";
-  const isFailed = subAgent.status === "failed";
+function safeSubAgentText(value: string | undefined, maxLength = 500): string {
+  let safe = [...(value ?? "")]
+    .map((character) => {
+      const code = character.charCodeAt(0);
+      return (code < 32 && code !== 9 && code !== 10 && code !== 13) || code === 127
+        ? " "
+        : character;
+    })
+    .join("");
+  for (const pattern of SECRET_PATTERNS) safe = safe.replace(pattern, "[redacted]");
+  return safe.trim().slice(0, maxLength);
+}
+
+function safeToolLabel(toolName: string): string {
+  const words = safeSubAgentText(toolName, 120)
+    .replace(/[^A-Za-z0-9\u4e00-\u9fff]+/g, " ")
+    .trim()
+    .slice(0, 80);
+  return words || "external tool";
+}
+
+function hashIndex(value: string): number {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = ((hash << 5) - hash + value.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash) % GLYPH_COLORS.length;
+}
+
+function usageLabel(key: string): string {
+  return key.replace(/_/g, " ");
+}
+
+function currentAction(subAgent: SubAgentState): string {
+  const runningTool = [...subAgent.steps].reverse().find((step) => step.status === "running");
+  if (runningTool) return `Using ${safeToolLabel(runningTool.toolName)}`;
+  const step = safeSubAgentText(subAgent.currentStep, 120);
+  if (subAgent.status === "running" && step) return step;
+  if (subAgent.status === "blocked") return "Waiting for operator approval";
+  if (subAgent.status === "cancelled") return "Cancelled by parent run";
+  if (subAgent.status === "failed") return "Execution failed";
+  if (subAgent.status === "partial") return "Completed with limitations";
+  if (subAgent.status === "completed") return "Result delivered to parent";
+  return step || "Waiting for progress";
+}
+
+function elapsedLabel(subAgent: SubAgentState, nowMs: number): string {
+  const elapsed = subAgent.durationMs
+    ?? (subAgent.startedAtMs ? Math.max(0, nowMs - subAgent.startedAtMs) : undefined);
+  return elapsed === undefined ? "—" : formatDuration(elapsed);
+}
+
+export function SubAgentCard({
+  subAgent,
+  nowMs,
+}: {
+  subAgent: SubAgentState;
+  nowMs: number;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const detailsId = useId();
+  const meta = STATUS_META[subAgent.status];
+  const StatusIcon = meta.icon;
+  const profileName = safeSubAgentText(
+    subAgent.profileName || subAgent.profileId || `${subAgent.agentType} agent`,
+    100,
+  );
+  const finishedTime = subAgent.finishedAtMs
+    ? new Date(subAgent.finishedAtMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : undefined;
+  const hasStructuredResult = subAgent.structuredResult !== undefined
+    && subAgent.structuredResult !== null;
 
   return (
-    <div className={`rounded-xl border ${meta.border} ${meta.bg} overflow-hidden transition-all my-2`}>
-      {/* Header */}
+    <article
+      className="border-b border-[hsl(var(--assistant-border-soft))] last:border-b-0"
+      data-subagent-id={subAgent.agentId}
+      data-status={subAgent.status}
+    >
       <button
-        className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-left hover:bg-black/2 dark:hover:bg-white/2 transition-colors"
-        onClick={() => setExpanded(!expanded)}
+        type="button"
+        onClick={() => setExpanded((current) => !current)}
+        aria-expanded={expanded}
+        aria-controls={detailsId}
+        className="group flex w-full items-center gap-3 rounded-lg px-2 py-3 text-left hover:bg-[hsl(var(--assistant-surface-soft))] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--assistant-accent))]"
       >
-        <span className="text-base shrink-0">{meta.icon}</span>
-        <span className="text-[13px] font-semibold text-foreground">{meta.label}</span>
-        <span className="text-[13px] text-muted-foreground truncate flex-1">{subAgent.description}</span>
-
-        <span className="flex items-center gap-1.5 shrink-0">
-          {isRunning && <span className={`w-2 h-2 rounded-full ${meta.ring} border-[1.5px] border-t-transparent animate-spin`} />}
-          {isDone && <span className="text-green-500 text-xs">✓</span>}
-          {isFailed && <span className="text-red-500 text-xs">✗</span>}
-          {subAgent.durationMs != null && (
-            <span className="text-[11px] text-muted-foreground tabular-nums">{formatDuration(subAgent.durationMs)}</span>
+        <span
+          className={cn(
+            "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
+            GLYPH_COLORS[hashIndex(subAgent.agentId)],
           )}
-          <svg className={`w-3 h-3 text-muted-foreground/50 transition-transform ${expanded ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-          </svg>
+          aria-hidden="true"
+        >
+          <Bot className="h-[18px] w-[18px]" strokeWidth={1.8} />
         </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex min-w-0 items-center gap-2">
+            <span className="truncate text-[13px] font-semibold" style={{ color: "hsl(var(--assistant-text-primary))" }}>
+              {profileName}
+            </span>
+          </span>
+          <span className="mt-0.5 block truncate text-[12px]" style={{ color: "hsl(var(--assistant-text-secondary))" }}>
+            {currentAction(subAgent)}
+          </span>
+        </span>
+        <span className="shrink-0 text-right">
+          <span className="block font-mono text-[11px] tabular-nums" style={{ color: "hsl(var(--assistant-text-secondary))" }}>
+            {elapsedLabel(subAgent, nowMs)}
+          </span>
+          <span
+            className={cn("mt-0.5 flex items-center justify-end gap-1 text-[10px]", meta.text)}
+            style={{ color: "hsl(var(--assistant-text-primary))" }}
+            aria-label={`Status: ${meta.label}`}
+          >
+            <StatusIcon className={cn("h-3 w-3", subAgent.status === "running" && "animate-pulse")} />
+            {meta.label}
+          </span>
+        </span>
+        <ChevronDown
+          className={cn(
+            "h-3.5 w-3.5 shrink-0 transition-transform",
+            expanded && "rotate-180",
+          )}
+          style={{ color: "hsl(var(--assistant-text-secondary))" }}
+          aria-hidden="true"
+        />
       </button>
 
-      {/* Content */}
-      {expanded && (
-        <div className="px-3.5 pb-3 space-y-2">
-          {/* Tool steps */}
-          {subAgent.steps.length > 0 && (
-            <div className="space-y-px">
-              {subAgent.steps.map((step) => (
-                <div key={step.callId} className="flex items-center gap-2 py-0.5 text-[12px]">
-                  <span className="w-3 text-center shrink-0">
-                    {step.status === "running" ? <span className="text-blue-500">→</span>
-                      : step.status === "completed" ? <span className="text-green-500">✓</span>
-                      : <span className="text-red-500">✗</span>}
-                  </span>
-                  <code className="text-[11px] text-muted-foreground font-mono">{step.toolName}</code>
-                  {step.summary && (
-                    <span className="text-muted-foreground/50 truncate flex-1 text-[11px]">{step.summary}</span>
-                  )}
-                  {step.durationMs != null && (
-                    <span className="text-muted-foreground/40 text-[10px] tabular-nums shrink-0">{formatDuration(step.durationMs)}</span>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
+      {expanded ? (
+        <div
+          id={detailsId}
+          className="mb-3 ml-11 space-y-3 border-l border-[hsl(var(--assistant-border))] pl-3 pr-2 text-[12px]"
+        >
+          <section>
+            <h4 className="font-semibold" style={{ color: "hsl(var(--assistant-text-primary))" }}>Assigned task</h4>
+            <p className="mt-1 leading-relaxed" style={{ color: "hsl(var(--assistant-text-secondary))" }}>
+              {safeSubAgentText(subAgent.description, 500) || "No host-provided task summary."}
+            </p>
+          </section>
 
-          {/* Streaming text */}
-          {subAgent.streamingText && isRunning && (
-            <div className="p-2 rounded-lg bg-black/3 dark:bg-white/3 text-[12px] font-mono max-h-[120px] overflow-y-auto text-muted-foreground/70 leading-relaxed">
-              {subAgent.streamingText.slice(-400)}
+          {subAgent.error ? (
+            <div className="rounded-md border border-red-500/25 bg-red-500/8 px-2.5 py-2 text-red-700 dark:text-red-300" role="alert">
+              {safeSubAgentText(subAgent.error, 800)}
             </div>
-          )}
+          ) : null}
 
-          {/* Result */}
-          {subAgent.resultSummary && isDone && (
-            <div className="p-2.5 rounded-lg bg-white/80 dark:bg-slate-800/50 border border-slate-200/50 dark:border-slate-700/30 text-[13px] leading-relaxed prose prose-sm dark:prose-invert max-w-none max-h-[250px] overflow-y-auto">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {subAgent.resultSummary.length > 600 ? subAgent.resultSummary.slice(0, 600) + "\n\n..." : subAgent.resultSummary}
-              </ReactMarkdown>
-            </div>
-          )}
+          {subAgent.resultSummary ? (
+            <section>
+              <h4 className="font-semibold" style={{ color: "hsl(var(--assistant-text-primary))" }}>Result</h4>
+              <p className="mt-1 whitespace-pre-wrap break-words text-[12px] leading-relaxed" style={{ color: "hsl(var(--assistant-text-secondary))" }}>
+                {safeSubAgentText(subAgent.resultSummary, 4_000)}
+              </p>
+            </section>
+          ) : null}
 
-          {/* Error */}
-          {subAgent.error && isFailed && (
-            <div className="p-2 rounded-lg bg-red-50 dark:bg-red-950/20 text-[12px] text-red-600 dark:text-red-400">
-              {subAgent.error}
-            </div>
-          )}
+          {subAgent.evidence && subAgent.evidence.length > 0 ? (
+            <section>
+              <h4 className="font-semibold" style={{ color: "hsl(var(--assistant-text-primary))" }}>Evidence</h4>
+              <ul className="mt-1 space-y-1.5">
+                {subAgent.evidence.map((evidence, index) => (
+                  <li key={evidence.evidenceId || evidence.callId || index} className="rounded-md bg-[hsl(var(--assistant-surface-soft))] px-2.5 py-2">
+                    <span className="font-mono text-[10px]" style={{ color: "hsl(var(--assistant-text-secondary))" }}>
+                      {safeToolLabel(evidence.toolName || "observed evidence")}
+                    </span>
+                    {evidence.summary ? (
+                      <span className="mt-0.5 block" style={{ color: "hsl(var(--assistant-text-secondary))" }}>
+                        {safeSubAgentText(evidence.summary, 500)}
+                      </span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+
+          {subAgent.limitations && subAgent.limitations.length > 0 ? (
+            <section>
+              <h4 className="font-semibold text-amber-800 dark:text-amber-300">Limitations</h4>
+              <ul className="mt-1 list-disc space-y-1 pl-4" style={{ color: "hsl(var(--assistant-text-secondary))" }}>
+                {subAgent.limitations.map((limitation, index) => (
+                  <li key={`${index}-${limitation.slice(0, 24)}`}>{safeSubAgentText(limitation, 500)}</li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+
+          {hasStructuredResult ? (
+            <details>
+              <summary className="cursor-pointer font-semibold" style={{ color: "hsl(var(--assistant-text-primary))" }}>
+                Structured result
+              </summary>
+              <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-[hsl(var(--assistant-surface-soft))] p-2 font-mono text-[10px]" style={{ color: "hsl(var(--assistant-text-secondary))" }}>
+                {safeSubAgentText(JSON.stringify(subAgent.structuredResult, null, 2), 12_000)}
+              </pre>
+            </details>
+          ) : null}
+
+          <section className="flex flex-wrap gap-x-3 gap-y-1 border-t border-[hsl(var(--assistant-border-soft))] pt-2 font-mono text-[10px]" style={{ color: "hsl(var(--assistant-text-secondary))" }}>
+            {Object.entries(subAgent.usage ?? {}).map(([key, value]) => (
+              <span key={key}>{usageLabel(key)} {Math.round(value)}</span>
+            ))}
+            {subAgent.effectiveExecution?.modelId ? (
+              <span>model {safeSubAgentText(subAgent.effectiveExecution.modelId, 80)}</span>
+            ) : null}
+            {subAgent.sourcePlugin ? (
+              <span>source {safeSubAgentText(subAgent.sourcePlugin, 80)}</span>
+            ) : null}
+            {finishedTime ? <span>finished {finishedTime}</span> : null}
+          </section>
         </div>
-      )}
-    </div>
+      ) : null}
+    </article>
   );
 }

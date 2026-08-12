@@ -25,10 +25,10 @@ import {
   CheckCircle2,
   Download,
   ExternalLink,
+  Network,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { StreamOutput } from "@/components/StreamOutput";
-import { SubAgentCard } from "./SubAgentCard";
 import { ContextDisplay } from "./ContextDisplay";
 import { CitationDisplay } from "./CitationDisplay";
 import { DocumentPreview } from "./DocumentPreview";
@@ -332,7 +332,7 @@ function formatDurationLabel(ms: number): string {
 export function ChatMessage({ message }: ChatMessageProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
-  const { openActivity } = useRightPanel();
+  const { openActivity, openSubagents } = useRightPanel();
 
   // Live-elapsed ticker for the pill subtitle while streaming. Kept local
   // to the pill so the panel doesn't re-render every 500ms.
@@ -452,13 +452,20 @@ export function ChatMessage({ message }: ChatMessageProps) {
             <ContextDisplay contexts={message.contexts} />
           )}
 
-          {/* Sub-Agent Cards (ADR-003) */}
+          {/* Compact launcher; child details live in the shared right-side lane. */}
           {message.activeSubAgents && message.activeSubAgents.length > 0 && (
-            <div className="mb-3 space-y-1">
-              {message.activeSubAgents.map((sa) => (
-                <SubAgentCard key={sa.agentId} subAgent={sa} />
-              ))}
-            </div>
+            <button
+              type="button"
+              onClick={() => openSubagents(message.id)}
+              className="mb-3 inline-flex items-center gap-2 rounded-full border border-[hsl(var(--assistant-border-soft))] bg-[hsl(var(--assistant-surface-soft))] px-3 py-1.5 text-[12px] text-[hsl(var(--assistant-text-secondary))] transition-colors hover:text-[hsl(var(--assistant-text-primary))] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--assistant-accent))]"
+              aria-label={`Open ${message.activeSubAgents.length} sub-agents`}
+            >
+              <Network className="h-3.5 w-3.5 text-[hsl(var(--assistant-accent))]" aria-hidden="true" />
+              <span>{message.activeSubAgents.length} sub-agents</span>
+              <span className="font-mono text-[10px] tabular-nums text-[hsl(var(--assistant-text-tertiary))]">
+                {message.activeSubAgents.filter((agent) => agent.status === "running").length} active
+              </span>
+            </button>
           )}
 
           {/* Message content */}

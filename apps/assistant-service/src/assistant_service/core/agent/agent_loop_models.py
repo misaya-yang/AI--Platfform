@@ -45,7 +45,7 @@ def _env_int(name: str, *, default: int, minimum: int) -> int:
 
 
 class AgentLoopPhase(str, Enum):
-    """Phases in the 8-step agent loop."""
+    """Compatibility phase labels used by turn events and persisted traces."""
 
     MEMORY_LOADING = "memory_loading"
     SCENARIO_ANALYSIS = "scenario_analysis"
@@ -208,7 +208,9 @@ class AgentLoopConfig:
     kb_top_k: int = 8  # More results per search to reduce need for multiple calls (was 5)
     kb_min_relevance: float = 0.5  # Slightly relaxed for bilingual content (was 0.6)
     kb_include_images: bool = False
-    kb_max_queries: int = 1  # Single query for speed (was 3)
+    # Deprecated compatibility field. Distinct retrieval is governed by the
+    # run-wide tool/context budgets; only exact repeats are deduplicated.
+    kb_max_queries: int = 8
     kb_results_per_query: int = 3  # Results per query
     kb_max_content_length: int = 600  # Reduced for faster processing (was 800)
 
@@ -223,6 +225,10 @@ class AgentLoopConfig:
 
     # Execution limits
     max_tool_iterations: int = 10
+    # Initial loop lease. Novel successful evidence work may extend this lease
+    # up to ``max_tool_iterations``; repeated failures and duplicate calls do not.
+    initial_tool_iterations: int | None = None
+    final_synthesis_headroom: int = 0
     max_concurrent_tools: int = 5
     # Optional hard limits for tests and internal callers.  ``None`` maps the
     # two legacy knobs above into a finite compatibility budget.
@@ -277,6 +283,8 @@ class AgentLoopConfig:
     execution_profile: str = "safe"
     memory_mode: str = "auto"
     os_agent_enabled: bool = False
+    local_node_device_id: str | None = None
+    local_node_grant_ids: list[str] = field(default_factory=list)
     runtime_mode: str = "compat"  # off | compat | full
     queue_mode: str = "collect"  # collect | followup | steer | interrupt
     context_detail: bool = False
@@ -315,10 +323,14 @@ class AgentLoopConfig:
             "kb_include_images": self.kb_include_images,
             "file_paths": self.file_paths,
             "max_tool_iterations": self.max_tool_iterations,
+            "initial_tool_iterations": self.initial_tool_iterations,
+            "final_synthesis_headroom": self.final_synthesis_headroom,
             "max_concurrent_tools": self.max_concurrent_tools,
             "execution_profile": self.execution_profile,
             "memory_mode": self.memory_mode,
             "os_agent_enabled": self.os_agent_enabled,
+            "local_node_device_id": self.local_node_device_id,
+            "local_node_grant_ids": list(self.local_node_grant_ids),
             "runtime_mode": self.runtime_mode,
             "queue_mode": self.queue_mode,
             "context_detail": self.context_detail,
@@ -353,9 +365,9 @@ class AgentLoopConfig:
 @dataclass
 class AgentLoopContext:
     """
-    Context passed through all 8 steps.
+    Mutable context shared across the streaming-first turn lifecycle.
 
-    Accumulates results from each step for use in subsequent steps.
+    Accumulates preparation, execution, and terminal results for later stages.
     """
 
     # Request info
@@ -404,6 +416,8 @@ class AgentLoopContext:
     runtime_skills_metadata: list[dict[str, Any]] = field(default_factory=list)
     runtime_skill_registry: Any | None = field(default=None, repr=False)
     runtime_tool_registry: Any | None = field(default=None, repr=False)
+    openai_responses_local_runtime: Any | None = field(default=None, repr=False)
+    openai_responses_local_readiness: dict[str, str] = field(default_factory=dict)
     served_model_id: str | None = None
     model_failover_receipts: list[dict[str, Any]] = field(default_factory=list)
     tool_schema_correction_counts: dict[str, int] = field(default_factory=dict)
@@ -430,6 +444,7 @@ class AgentLoopContext:
     transcript_locator: dict[str, Any] = field(default_factory=dict)
     trace_started_at: float = field(default_factory=time.time)
     trace_sequence_no: int = 0
+    trace_capture_disabled: bool = False
     traceparent: str | None = None
     otel_trace_id: str | None = None
     context_snapshot: dict[str, Any] = field(default_factory=dict)

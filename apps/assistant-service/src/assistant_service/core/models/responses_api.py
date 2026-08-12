@@ -8,6 +8,7 @@ adapter only; it does not expose a gateway ``/v1/responses`` route.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 from collections.abc import AsyncIterable, AsyncIterator
@@ -42,6 +43,10 @@ class ResponsesStreamDelta:
     finish_reason: str | None = None
     usage: dict[str, int] | None = None
     thinking_content: str | None = None
+    # Complete provider-native local-call blocks emitted once an output item
+    # closes.  AgentLoop replays these only through the internal OpenAI local
+    # runtime; public Responses ingress never supplies this option.
+    provider_content_blocks: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +74,7 @@ class _OutputBinding:
     item_done: bool = False
     server_tool_phase: int = -1
     server_tool_fingerprint: str | None = None
+    native_item: dict[str, Any] | None = None
 
 
 def _nonempty_string(value: Any, error_type: str) -> str:
@@ -112,10 +118,27 @@ def _tool_call_from_chat(raw_call: Any) -> dict[str, Any]:
     }
 
 
-def _responses_input(messages: list[ChatMessage]) -> list[dict[str, Any]]:
+def _responses_input(
+    messages: list[ChatMessage],
+    *,
+    local_runtime: Any | None = None,
+) -> list[dict[str, Any]]:
     from ..prompts.system_prompt_v2 import CACHE_SPLIT_MARKER
 
     items: list[dict[str, Any]] = []
+    native_results: dict[str, list[dict[str, Any]]] = {}
+    for raw_message in messages:
+        message = _normalize_message(raw_message)
+        for block in message.provider_content_blocks or []:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "openai_responses_local_result"
+                and isinstance(block.get("provider_call_id"), str)
+                and block.get("provider_call_id")
+            ):
+                native_results.setdefault(block["provider_call_id"], []).append(
+                    copy.deepcopy(block)
+                )
     for raw_message in messages:
         message = _normalize_message(raw_message)
         role = str(message.role or "")
@@ -125,6 +148,23 @@ def _responses_input(messages: list[ChatMessage]) -> list[dict[str, Any]]:
             raise ResponsesAPIError("invalid_message_content")
 
         if role == "tool":
+            native_blocks = (
+                message.provider_content_blocks
+                if isinstance(message.provider_content_blocks, list)
+                else []
+            )
+            if native_blocks:
+                if local_runtime is None or not hasattr(local_runtime, "build_provider_output"):
+                    raise ResponsesAPIError("native_local_runtime_unavailable")
+                if any(
+                    not isinstance(block, dict)
+                    or block.get("type") != "openai_responses_local_result"
+                    for block in native_blocks
+                ):
+                    raise ResponsesAPIError("invalid_native_local_continuation")
+                # The provider call/output pair is emitted at the preceding
+                # assistant item after all result blocks have been indexed.
+                continue
             if message.images or message.tool_calls:
                 raise ResponsesAPIError("invalid_function_call_output")
             call_id = _nonempty_string(
@@ -166,7 +206,45 @@ def _responses_input(messages: list[ChatMessage]) -> list[dict[str, Any]]:
         elif content or not message.tool_calls:
             items.append({"role": role, "content": content})
 
+        native_call_blocks = (
+            [
+                block
+                for block in (message.provider_content_blocks or [])
+                if isinstance(block, dict)
+                and block.get("type") == "openai_responses_local_call"
+            ]
+            if role == "assistant"
+            else []
+        )
+        native_call_ids: set[str] = set()
+        for block in native_call_blocks:
+            provider_item = block.get("provider_item")
+            canonical_calls = block.get("canonical_calls")
+            if not isinstance(provider_item, dict) or not isinstance(canonical_calls, list):
+                raise ResponsesAPIError("invalid_native_local_continuation")
+            for call in canonical_calls:
+                if not isinstance(call, dict) or not isinstance(call.get("id"), str):
+                    raise ResponsesAPIError("invalid_native_local_continuation")
+                native_call_ids.add(call["id"])
+            items.append(copy.deepcopy(provider_item))
+            provider_call_id = block.get("provider_call_id")
+            if not isinstance(provider_call_id, str) or not provider_call_id:
+                raise ResponsesAPIError("invalid_native_local_continuation")
+            if local_runtime is None or not hasattr(local_runtime, "build_provider_output"):
+                raise ResponsesAPIError("native_local_runtime_unavailable")
+            try:
+                items.append(
+                    local_runtime.build_provider_output(
+                        block,
+                        native_results.get(provider_call_id, []),
+                    )
+                )
+            except Exception as exc:
+                code = str(getattr(exc, "code", "invalid_native_local_continuation"))
+                raise ResponsesAPIError(code) from None
         for raw_call in message.tool_calls or []:
+            if isinstance(raw_call, dict) and raw_call.get("id") in native_call_ids:
+                continue
             items.append(_tool_call_from_chat(raw_call))
 
     if not items:
@@ -215,6 +293,7 @@ def build_responses_request(
     tools: list[dict[str, Any]] | None,
     stream: bool,
     reasoning_effort: str | None = None,
+    local_runtime: Any | None = None,
 ) -> dict[str, Any]:
     """Build a stateless Responses v1 request from the unified chat contract."""
 
@@ -239,7 +318,7 @@ def build_responses_request(
 
     body: dict[str, Any] = {
         "model": model_id,
-        "input": _responses_input(messages),
+        "input": _responses_input(messages, local_runtime=local_runtime),
         "temperature": float(temperature),
         "stream": bool(stream),
         "store": False,
@@ -248,6 +327,10 @@ def build_responses_request(
         body["max_output_tokens"] = max_output_tokens
     if tools:
         body["tools"] = _responses_tools(tools)
+    if local_runtime is not None:
+        native_tools = local_runtime.tool_definitions()
+        if native_tools:
+            body.setdefault("tools", []).extend(copy.deepcopy(native_tools))
     if reasoning_effort is not None:
         body["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
     return body
@@ -507,6 +590,11 @@ def _validate_web_search_item(item: dict[str, Any], binding: _OutputBinding) -> 
         raise ResponsesAPIError("server_tool_rebinding")
 
 
+def _validate_native_local_item(item: dict[str, Any], binding: _OutputBinding) -> None:
+    if binding.native_item is None or item != binding.native_item:
+        raise ResponsesAPIError("native_local_call_rebinding")
+
+
 def _validate_completed_output(
     response: dict[str, Any],
     bindings: dict[int, _OutputBinding],
@@ -528,10 +616,14 @@ def _validate_completed_output(
             _validate_function_item(item, binding)
         elif binding.item_type == "web_search_call":
             _validate_web_search_item(item, binding)
+        elif binding.item_type in {"computer_call", "shell_call"}:
+            _validate_native_local_item(item, binding)
 
 
 async def iter_responses_stream(
     lines: AsyncIterable[str],
+    *,
+    local_runtime: Any | None = None,
 ) -> AsyncIterator[ResponsesStreamDelta]:
     """Reduce Responses SSE lines with strict item and terminal lifecycle checks."""
 
@@ -539,6 +631,7 @@ async def iter_responses_stream(
     bindings: dict[int, _OutputBinding] = {}
     item_ids: set[str] = set()
     call_ids: set[str] = set()
+    native_provider_blocks: list[dict[str, Any]] = []
     next_tool_index = 0
     terminal = False
     transport_done = False
@@ -597,6 +690,8 @@ async def iter_responses_stream(
                 "reasoning",
                 "function_call",
                 "web_search_call",
+                "computer_call",
+                "shell_call",
             }:
                 raise ResponsesAPIError("unsupported_output_item")
             if index in bindings or item_id in item_ids:
@@ -605,6 +700,15 @@ async def iter_responses_stream(
                 raise ResponsesAPIError("invalid_server_tool_lifecycle")
             item_ids.add(item_id)
             binding = _OutputBinding(index, item_id, item_type)
+            if item_type in {"computer_call", "shell_call"}:
+                if local_runtime is None:
+                    raise ResponsesAPIError("native_local_runtime_unavailable")
+                # Current GA local items are self-contained in the added/done
+                # lifecycle.  Parse and project only when the item closes so no
+                # partial action can enter the canonical execution path.
+                binding.native_item = copy.deepcopy(item)
+                bindings[index] = binding
+                continue
             if item_type == "function_call":
                 binding.call_id = _nonempty_string(
                     item.get("call_id"),
@@ -781,6 +885,31 @@ async def iter_responses_stream(
                     yield ResponsesStreamDelta(content=suffix)
             elif done_binding.item_type == "web_search_call":
                 _validate_web_search_item(item, done_binding)
+            elif done_binding.item_type in {"computer_call", "shell_call"}:
+                if local_runtime is None or done_binding.native_item is None:
+                    raise ResponsesAPIError("native_local_runtime_unavailable")
+                # Providers may publish the completed status only on the done
+                # item.  The rest of the item must remain byte-for-byte stable.
+                initial = copy.deepcopy(done_binding.native_item)
+                initial_status = initial.pop("status", None)
+                completed = copy.deepcopy(item)
+                completed_status = completed.pop("status", None)
+                if initial != completed or initial_status not in {
+                    "in_progress",
+                    "completed",
+                } or completed_status not in {"completed", "in_progress"}:
+                    raise ResponsesAPIError("native_local_call_rebinding")
+                try:
+                    projection = local_runtime.project_provider_item(item)
+                except Exception as exc:
+                    code = str(getattr(exc, "code", "invalid_native_local_call"))
+                    raise ResponsesAPIError(code) from None
+                done_binding.native_item = copy.deepcopy(item)
+                native_provider_blocks.append(copy.deepcopy(projection.provider_block))
+                yield ResponsesStreamDelta(
+                    tool_calls=[copy.deepcopy(value) for value in projection.tool_calls],
+                    provider_content_blocks=copy.deepcopy(native_provider_blocks),
+                )
             done_binding.item_done = True
             continue
 
@@ -796,7 +925,10 @@ async def iter_responses_stream(
                 for binding in bindings.values()
             ):
                 raise ResponsesAPIError("incomplete_function_call")
-            has_tools = any(binding.item_type == "function_call" for binding in bindings.values())
+            has_tools = any(
+                binding.item_type in {"function_call", "computer_call", "shell_call"}
+                for binding in bindings.values()
+            )
             has_message_text = any(
                 binding.item_type == "message" and bool(binding.text)
                 for binding in bindings.values()

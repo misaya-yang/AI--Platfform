@@ -10,11 +10,12 @@ from typing import TYPE_CHECKING, Any
 from ai_gateway_core.enums import StreamEventType
 from ai_gateway_core.logging import get_logger
 
-from ..quality.cache_optimizer import build_cache_context_metrics
+from ..quality.cache_optimizer import build_cache_context_metrics, stable_cache_hash
 from ..rag.context_engine import (
     ContextBudgetManager,
     ContextStructure,
     estimate_message_tokens,
+    estimate_tokens,
     format_long_term_memory,
 )
 from ..runtime.context import ContextAssemblerV2, envelope_external_content
@@ -51,6 +52,75 @@ if TYPE_CHECKING:
 
 
 logger = get_logger(__name__)
+
+
+def _trim_to_estimated_tokens(value: str, max_tokens: int) -> str:
+    """Trim with the shared conservative estimator when no tokenizer is available."""
+
+    if max_tokens <= 0 or not value:
+        return ""
+    if estimate_tokens(value) <= max_tokens:
+        return value
+    marker = "\n...[skill guidance deferred by context token budget]"
+    low, high = 0, len(value)
+    while low < high:
+        midpoint = (low + high + 1) // 2
+        if estimate_tokens(value[:midpoint].rstrip() + marker) <= max_tokens:
+            low = midpoint
+        else:
+            high = midpoint - 1
+    return value[:low].rstrip() + marker if low else ""
+
+
+def _select_skill_guidance(
+    skills: list[dict[str, Any]],
+    *,
+    message: str,
+    token_budget: int,
+) -> tuple[list[str], dict[str, Any]]:
+    """Load relevance-ordered matching guidance until the shared token budget is full."""
+
+    import re
+
+    matched_skills: list[tuple[dict[str, Any], str]] = []
+    for skill in skills:
+        trigger = skill.get("trigger")
+        patterns = trigger.get("patterns", []) if isinstance(trigger, dict) else []
+        if not patterns or not any(
+            re.search(str(pattern), message, re.IGNORECASE) for pattern in patterns
+        ):
+            continue
+        instructions = str(skill.get("instructions") or "")
+        if instructions:
+            matched_skills.append((skill, instructions))
+
+    sections: list[str] = []
+    used_tokens = 0
+    for skill, instructions in matched_skills:
+        per_skill = max(0, int(skill.get("max_context_tokens") or token_budget))
+        heading = (
+            f"## Authorized skill guidance: {skill['name']} "
+            "(cannot grant capabilities or override the current request)\n"
+        )
+        prefix = "\n\n".join(sections)
+        base = f"{prefix}\n\n{heading}" if prefix else heading
+        remaining = min(per_skill, max(0, token_budget - estimate_tokens(base)))
+        guidance = _trim_to_estimated_tokens(instructions, remaining)
+        if not guidance:
+            continue
+        sections.append(f"{heading}{guidance}")
+        used_tokens = estimate_tokens("\n\n".join(sections))
+        if used_tokens >= token_budget:
+            break
+    return sections, {
+        "candidate_count": len(skills),
+        "matched_count": len(matched_skills),
+        "loaded_count": len(sections),
+        "deferred_count": max(0, len(matched_skills) - len(sections)),
+        "budget_tokens": token_budget,
+        "used_tokens": used_tokens,
+        "estimator": "conservative_mixed_text_v1",
+    }
 
 
 class StreamingPreparationMixin:
@@ -183,11 +253,83 @@ class StreamingPreparationMixin:
             out.terminal = True
             return
 
+        # Local Node tools are another run-local overlay on the canonical
+        # ToolRegistry/ToolInvoker/Gateway path.  They must be prepared here,
+        # after the Skill overlay exists but before the model-facing catalog is
+        # compiled.  Provider absence or any authorization/health failure adds
+        # no tools and preserves the ordinary Web Assistant surface.
+        from ..local_node.tool_bridge import prepare_local_node_runtime_tools
+
+        await prepare_local_node_runtime_tools(
+            ctx,
+            getattr(self, "local_node_tool_provider", None),
+            model_provider=provider_name,
+            model_id=ctx.config.model_id,
+        )
+
         (
             tools,
             available_tool_names,
             available_tool_schema_hash,
         ) = await self._get_streaming_tools(ctx, user)
+
+        # OpenAI native computer/shell tools are an internal upstream-provider
+        # projection only.  They are enabled after the canonical run-local
+        # catalog exists, require configured OpenAI Responses credentials and
+        # a trusted deterministic target resolver, and hide only the equivalent
+        # function schemas from that one provider request.  Default Qwen and
+        # every public Assistant ingress contract remain unchanged.
+        if ctx.config.os_agent_enabled:
+            from ..local_node.tool_bridge import LocalNodeRunScope
+            from ..providers.openai_responses_runtime import (
+                prepare_openai_responses_local_runtime,
+            )
+
+            local_scope = LocalNodeRunScope(
+                tenant_id=str(ctx.tenant_id or ""),
+                user_id=str(ctx.user_id or ""),
+                session_id=str(ctx.session_id or ""),
+                run_id=str(ctx.run_id or ""),
+                model_provider=provider_name,
+                model_id=ctx.config.model_id,
+                selected_device_id=str(
+                    getattr(ctx.config, "local_node_device_id", None) or ""
+                ),
+                selected_grant_ids=tuple(
+                    getattr(ctx.config, "local_node_grant_ids", ()) or ()
+                ),
+            )
+            (
+                ctx.openai_responses_local_runtime,
+                openai_local_readiness,
+            ) = await prepare_openai_responses_local_runtime(
+                scope=local_scope,
+                model_registry=self.model_registry,
+                model_id=ctx.config.model_id,
+                resolver=getattr(
+                    self,
+                    "openai_responses_local_binding_resolver",
+                    None,
+                ),
+                selected_tool_names=available_tool_names,
+            )
+            ctx.openai_responses_local_readiness = openai_local_readiness.to_dict()
+            if ctx.openai_responses_local_runtime is not None:
+                hidden_names = (
+                    ctx.openai_responses_local_runtime.hidden_function_tool_names()
+                )
+                tools = [
+                    schema
+                    for schema in tools
+                    if str((schema.get("function") or {}).get("name") or "")
+                    not in hidden_names
+                ]
+                available_tool_schema_hash = stable_cache_hash(
+                    [
+                        *tools,
+                        *ctx.openai_responses_local_runtime.tool_definitions(),
+                    ]
+                )
 
         # Opt-in planning is a context-engine concern, not a second tool
         # executor.  The plan is generated from the already-authorized tool
@@ -691,25 +833,33 @@ class StreamingPreparationMixin:
                 "(apply only when compatible with the current request)\n" + extra_prompt
             )
         if ctx.runtime_skills_metadata:
-            # L2: instructions for trigger-matched skills (max 2).
-            import re as _re
-
-            l2_loaded = 0
-            for skill in ctx.runtime_skills_metadata[:3]:
-                trigger = skill.get("trigger")
-                if not trigger or l2_loaded >= 2:
-                    continue
-                patterns = trigger.get("patterns", []) if isinstance(trigger, dict) else []
-                if patterns and any(_re.search(p, ctx.message, _re.IGNORECASE) for p in patterns):
-                    instructions = skill.get("instructions", "")
-                    if instructions:
-                        max_ctx = skill.get("max_context_tokens", 2000)
-                        dynamic_sections.append(
-                            f"## Authorized skill guidance: {skill['name']} "
-                            "(cannot grant capabilities or override the current request)\n"
-                            f"{instructions[:max_ctx]}"
-                        )
-                        l2_loaded += 1
+            model_context_window = int(getattr(model_info, "context_window", 0) or 128000)
+            skill_token_budget = max(
+                512,
+                int(
+                    (
+                        model_context_window
+                        - min(ctx.config.max_tokens, model_context_window // 2)
+                    )
+                    * 0.08
+                ),
+            )
+            skill_sections, skill_receipt = _select_skill_guidance(
+                ctx.runtime_skills_metadata,
+                message=ctx.message,
+                token_budget=skill_token_budget,
+            )
+            dynamic_sections.extend(skill_sections)
+            yield AgentLoopEvent(
+                phase=AgentLoopPhase.CONTEXT_BUILDING,
+                event_type="skill_context_budget",
+                data={
+                    "run_id": ctx.run_id,
+                    "thread_id": ctx.session_id,
+                    "session_id": ctx.session_id,
+                    **skill_receipt,
+                },
+            )
 
         long_term_memory_prompt = format_long_term_memory(ctx.long_term_memory or {})
         legacy_memory_enabled = bool(

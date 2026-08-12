@@ -90,8 +90,43 @@ async def test_projector_suppresses_aliases_and_preserves_one_canonical_lifecycl
     assert "tool_call_started" not in event_types
     assert "tool_call_completed" not in event_types
     assert FakeAgentLoop.last_config.persist_messages is False
-    assert FakeAgentLoop.last_config.run_budget_limits.max_model_turns == 7
-    assert FakeAgentLoop.last_config.run_budget_limits.max_tool_calls == 25
+    assert FakeAgentLoop.last_config.initial_tool_iterations == 8
+    assert FakeAgentLoop.last_config.max_tool_iterations == 32
+    assert FakeAgentLoop.last_config.run_budget_limits.max_model_turns == 96
+    assert FakeAgentLoop.last_config.run_budget_limits.max_tool_calls == 256
+    assert FakeAgentLoop.last_config.run_budget_limits.final_synthesis_headroom == 2
+
+
+@pytest.mark.asyncio
+async def test_parent_harness_operator_ceiling_and_initial_lease_are_separate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from assistant_service.core.agent import agent_loop as agent_loop_module
+
+    monkeypatch.setattr(agent_loop_module, "AgentLoop", FakeAgentLoop)
+    monkeypatch.setenv("ASSISTANT_PARENT_INITIAL_TOOL_ITERATIONS", "6")
+    monkeypatch.setenv("ASSISTANT_PARENT_HARD_TOOL_ITERATIONS", "24")
+    service = AssistantService(
+        model_registry=object(),  # type: ignore[arg-type]
+        tool_invoker=object(),  # type: ignore[arg-type]
+    )
+
+    _ = [
+        event
+        async for event in service._execute_agent_loop(
+            user=User(),  # type: ignore[arg-type]
+            session_id="session-budget-policy",
+            message="research, delegate, then synthesize",
+            config=AssistantConfig(model_id="test-model"),
+            history=[],
+            persist_messages=False,
+        )
+    ]
+
+    loop_config = FakeAgentLoop.last_config
+    assert loop_config.initial_tool_iterations == 6
+    assert loop_config.max_tool_iterations == 24
+    assert loop_config.run_budget_limits.max_model_turns >= 26
 
 
 def test_non_stream_route_preserves_blocked_turn_contract(

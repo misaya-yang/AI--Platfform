@@ -17,6 +17,7 @@ from assistant_service.core.agent.agent_loop import (
     AgentLoopPhase,
 )
 from assistant_service.core.models.model_failover import (
+    RequestedModelNotEligibleError,
     classify_failover_failure,
     parse_model_fallbacks,
     stream_with_failover,
@@ -207,6 +208,42 @@ async def test_candidate_must_satisfy_access_capability_and_context() -> None:
 
     assert registry.calls == ["primary", "eligible"]
     assert items[0].notice and items[0].notice.served_model == "eligible"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("access", [ModelAccessLevel.PREMIUM, ModelAccessLevel.ADMIN])
+async def test_requested_model_must_satisfy_caller_access_level(
+    access: ModelAccessLevel,
+) -> None:
+    registry = _Registry(
+        [_model("primary", access=access), _model("fallback")],
+        {
+            "primary": [StreamDelta(content="must-not-run")],
+            "fallback": [StreamDelta(content="must-not-run")],
+        },
+    )
+
+    with pytest.raises(RequestedModelNotEligibleError, match="requested_model_not_eligible"):
+        await _collect(registry)
+
+    assert registry.calls == []
+
+
+@pytest.mark.asyncio
+async def test_requested_premium_model_accepts_premium_caller() -> None:
+    registry = _Registry(
+        [_model("primary", access=ModelAccessLevel.PREMIUM)],
+        {"primary": [StreamDelta(content="ok", finish_reason="stop")]},
+    )
+
+    items = await _collect(
+        registry,
+        fallbacks={},
+        user=UserContext(user_id="u", tenant_id="t", user_tier="premium"),
+    )
+
+    assert registry.calls == ["primary"]
+    assert items[0].delta and items[0].delta.content == "ok"
 
 
 @pytest.mark.asyncio

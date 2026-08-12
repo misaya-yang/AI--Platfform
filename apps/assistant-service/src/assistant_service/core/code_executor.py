@@ -32,6 +32,15 @@ from ai_gateway_core.logging import get_logger
 
 logger = get_logger(__name__)
 
+# Host-owned result bounds. These are deliberately not caller/model configurable:
+# sandbox resource limits are ineffective if the host then materializes unbounded
+# logs or artifacts into the Assistant process.
+_MAX_STREAM_BYTES = 2_000_000
+_MAX_OUTPUT_FILE_BYTES = 8_000_000
+_MAX_OUTPUT_TOTAL_BYTES = 24_000_000
+_MAX_OUTPUT_FILES = 64
+_STREAM_TRUNCATION_MARKER = b"\n...[stream truncated]"
+
 
 def _validate_workspace_filename(filename: str) -> str:
     """Return a safe leaf filename for a sandbox workspace.
@@ -136,6 +145,12 @@ class OutputFile:
     content: bytes
     mime_type: str | None = None
     size_bytes: int = 0
+    captured_size_bytes: int | None = None
+    content_truncated: bool = False
+
+    def __post_init__(self) -> None:
+        if self.captured_size_bytes is None:
+            self.captured_size_bytes = len(self.content)
 
     def to_base64(self) -> str:
         """Convert content to base64 string."""
@@ -179,6 +194,7 @@ class CodeExecutionResult:
 
     # Resource usage
     memory_used_bytes: int | None = None
+    truncation_receipts: list[dict[str, Any]] = field(default_factory=list)
 
     def is_success(self) -> bool:
         """Check if execution was successful."""
@@ -197,6 +213,8 @@ class CodeExecutionResult:
                     "content_base64": f.to_base64(),
                     "mime_type": f.mime_type,
                     "size_bytes": f.size_bytes,
+                    "captured_size_bytes": f.captured_size_bytes,
+                    "content_truncated": f.content_truncated,
                 }
                 for f in self.output_files
             ],
@@ -206,6 +224,7 @@ class CodeExecutionResult:
             "error_message": self.error_message,
             "exit_code": self.exit_code,
             "memory_used_bytes": self.memory_used_bytes,
+            "truncation_receipts": list(self.truncation_receipts),
         }
 
 
@@ -529,16 +548,43 @@ class CodeExecutorService:
                 )
 
             # Collect output files
+            truncation_receipts: list[dict[str, Any]] = []
+            for stream_name, stream_value in (("stdout", stdout), ("stderr", stderr)):
+                if stream_value.endswith(_STREAM_TRUNCATION_MARKER.decode()):
+                    truncation_receipts.append(
+                        {
+                            "kind": "container_log",
+                            "stream": stream_name,
+                            "reason": "byte_limit",
+                            "truncated": True,
+                            "limit_bytes": _MAX_STREAM_BYTES,
+                        }
+                    )
             output_files = await self._collect_output_files(
                 workspace_dir=workspace_dir,
                 config=exec_config,
+                truncation_receipts=truncation_receipts,
             )
+            if truncation_receipts:
+                reason_counts: dict[str, int] = {}
+                for receipt in truncation_receipts:
+                    reason = str(receipt.get("reason") or "unspecified")
+                    reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                summary = ", ".join(
+                    f"{reason}={count}" for reason, count in sorted(reason_counts.items())
+                )
+                separator = "" if not stderr or stderr.endswith("\n") else "\n"
+                stderr += (
+                    f"{separator}[assistant] result capture truncated by host safety limits "
+                    f"({summary}); see truncation_receipts for structured details."
+                )
 
             # Set result
             result.stdout = stdout
             result.stderr = stderr
             result.exit_code = exit_code
             result.output_files = output_files
+            result.truncation_receipts = truncation_receipts
 
             if exit_code == 0:
                 result.status = ExecutionStatus.SUCCESS
@@ -647,6 +693,7 @@ class CodeExecutorService:
         """
         from docker.errors import APIError, ContainerError, ImageNotFound
         from docker.types import Mount
+        from requests.exceptions import Timeout as RequestsTimeout
 
         client = self.docker_client
 
@@ -732,6 +779,7 @@ class CodeExecutorService:
         stdout = ""
         stderr = ""
         exit_code = -1
+        handoff_container = False
 
         try:
             container = client.containers.run(**container_config)
@@ -749,51 +797,104 @@ class CodeExecutorService:
                 stdout = self._read_capture(stdout_capture)
                 stderr = self._read_capture(stderr_capture)
             else:
-                stdout = container.logs(stdout=True, stderr=False).decode(
-                    "utf-8",
-                    errors="replace",
+                stdout = self._read_container_logs(
+                    container,
+                    stdout=True,
+                    stderr=False,
                 )
-                stderr = container.logs(stdout=False, stderr=True).decode(
-                    "utf-8",
-                    errors="replace",
+                stderr = self._read_container_logs(
+                    container,
+                    stdout=False,
+                    stderr=True,
                 )
+            handoff_container = True
 
-        except asyncio.TimeoutError:
-            # Kill container on timeout
-            if container:
-                with contextlib.suppress(Exception):
-                    container.kill()
-            raise
+        except (asyncio.TimeoutError, RequestsTimeout) as exc:
+            # docker-py raises requests.ReadTimeout from its worker thread;
+            # normalize it so execute() reports TIMEOUT rather than ERROR.
+            raise asyncio.TimeoutError from exc
 
         except ContainerError as e:
             stderr = str(e)
             exit_code = e.exit_status
+            handoff_container = container is not None
 
         except APIError as e:
             stderr = f"Docker API error: {e}"
             exit_code = -1
+            handoff_container = container is not None
 
         finally:
             for capture in (stdout_capture, stderr_capture):
                 with contextlib.suppress(OSError):
                     capture.unlink()
+            # Tuple assignment in execute() cannot receive ``container`` when
+            # this method raises. Own cleanup here until responsibility has
+            # explicitly transferred to the caller.
+            if container is not None and not handoff_container:
+                await self._discard_container(container, kill=True)
 
         return container, stdout, stderr, exit_code
 
     @staticmethod
-    def _read_capture(path: Path, *, max_bytes: int = 2_000_000) -> str:
+    def _read_container_logs(
+        container: Any,
+        *,
+        stdout: bool,
+        stderr: bool,
+        max_bytes: int | None = None,
+    ) -> str:
+        """Stream a completed container's logs into a bounded host buffer."""
+
+        limit = _MAX_STREAM_BYTES if max_bytes is None else max(0, max_bytes)
+        chunks = container.logs(
+            stdout=stdout,
+            stderr=stderr,
+            stream=True,
+            follow=False,
+        )
+        if isinstance(chunks, (bytes, bytearray, memoryview, str)):
+            chunks = (chunks,)
+        payload = bytearray()
+        truncated = False
+        try:
+            for chunk in chunks:
+                if isinstance(chunk, str):
+                    chunk = chunk.encode()
+                elif not isinstance(chunk, (bytes, bytearray, memoryview)):
+                    chunk = str(chunk).encode()
+                remaining = limit - len(payload)
+                if remaining <= 0:
+                    truncated = True
+                    break
+                payload.extend(bytes(chunk)[:remaining])
+                if len(chunk) > remaining:
+                    truncated = True
+                    break
+        finally:
+            close = getattr(chunks, "close", None)
+            if callable(close):
+                with contextlib.suppress(Exception):
+                    close()
+        if truncated:
+            payload.extend(_STREAM_TRUNCATION_MARKER)
+        return bytes(payload).decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _read_capture(path: Path, *, max_bytes: int | None = None) -> str:
         """Read a sandbox stream capture without following a forged link."""
 
+        limit = _MAX_STREAM_BYTES if max_bytes is None else max(0, max_bytes)
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(path, flags)
         try:
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                 raise ValueError("sandbox stream capture is not a regular file")
-            payload = os.read(descriptor, max_bytes + 1)
+            payload = os.read(descriptor, limit + 1)
         finally:
             os.close(descriptor)
-        if len(payload) > max_bytes:
-            payload = payload[:max_bytes] + b"\n...[stream truncated]"
+        if len(payload) > limit:
+            payload = payload[:limit] + _STREAM_TRUNCATION_MARKER
         return payload.decode("utf-8", errors="replace")
 
     @staticmethod
@@ -874,7 +975,15 @@ class CodeExecutorService:
 
         recovered: list[Path] = []
         try:
-            root_entries = list(workspace_dir.iterdir())
+            root_entries = []
+            for index, entry in enumerate(workspace_dir.iterdir()):
+                if index >= _MAX_OUTPUT_FILES:
+                    logger.warning(
+                        "[code_executor] workspace artifact scan capped at %d entries",
+                        _MAX_OUTPUT_FILES,
+                    )
+                    break
+                root_entries.append(entry)
         except Exception as e:
             logger.warning(
                 "[code_executor] failed to scan workspace root %s for stray artifacts: %s",
@@ -933,6 +1042,8 @@ class CodeExecutorService:
         self,
         workspace_dir: Path,
         config: CodeExecutionConfig,
+        *,
+        truncation_receipts: list[dict[str, Any]] | None = None,
     ) -> list[OutputFile]:
         """
         Collect output files from the workspace.
@@ -943,6 +1054,7 @@ class CodeExecutorService:
         _ = config
         output_files = []
         output_dir = workspace_dir / "output"
+        receipts = truncation_receipts if truncation_receipts is not None else []
 
         # Fix A: sweep stray artifacts from the workspace root into
         # output/ before the normal collection pass. Catches code paths
@@ -965,16 +1077,34 @@ class CodeExecutorService:
             )
             return output_files
 
-        # Diagnostic listing — capture whatever landed there before we filter.
-        all_entries = list(output_dir.iterdir())
+        # Do not materialize an attacker-controlled directory without a count
+        # bound. One extra entry is enough to produce an explicit receipt.
+        all_entries: list[Path] = []
+        entries_truncated = False
+        for index, entry in enumerate(output_dir.iterdir()):
+            if index >= _MAX_OUTPUT_FILES:
+                entries_truncated = True
+                break
+            all_entries.append(entry)
+        all_entries.sort(key=lambda path: path.name)
+        if entries_truncated:
+            receipts.append(
+                {
+                    "kind": "output_files",
+                    "reason": "file_count_limit",
+                    "truncated": True,
+                    "limit_files": _MAX_OUTPUT_FILES,
+                }
+            )
         logger.info(
-            "[code_executor] output_dir=%s entries=%d [%s]",
+            "[code_executor] output_dir=%s entries=%s%d [%s]",
             output_dir,
+            ">=" if entries_truncated else "",
             len(all_entries),
             ", ".join(p.name for p in all_entries[:20]) or "<empty>",
         )
 
-        # Fix C: when output/ is empty, dump the full workspace listing
+        # Fix C: when output/ is empty, dump a bounded workspace listing
         # (minus reserved dirs) so next time we can tell whether the
         # model wrote files elsewhere, wrote nothing, or the container
         # couldn't write back. This is defense-in-depth after the
@@ -982,7 +1112,10 @@ class CodeExecutorService:
         if not all_entries:
             try:
                 root_listing = []
-                for p in workspace_dir.iterdir():
+                for index, p in enumerate(workspace_dir.iterdir()):
+                    if index >= 40:
+                        root_listing.append("...[listing truncated]")
+                        break
                     if p.name in self._RESERVED_ROOT_NAMES:
                         continue
                     kind = "l" if p.is_symlink() else "d" if p.is_dir() else "f"
@@ -1001,6 +1134,8 @@ class CodeExecutorService:
                     e,
                 )
 
+        captured_total = 0
+        aggregate_receipt_recorded = False
         for file_path in all_entries:
             if file_path.is_symlink():
                 logger.warning(
@@ -1010,7 +1145,16 @@ class CodeExecutorService:
                 continue
             if file_path.is_file():
                 try:
-                    content = file_path.read_bytes()
+                    original_size = file_path.stat().st_size
+                    remaining = max(0, _MAX_OUTPUT_TOTAL_BYTES - captured_total)
+                    capture_limit = min(_MAX_OUTPUT_FILE_BYTES, remaining)
+                    with file_path.open("rb") as output_handle:
+                        content = output_handle.read(capture_limit + 1)
+                    content_truncated = (
+                        len(content) > capture_limit or original_size > capture_limit
+                    )
+                    content = content[:capture_limit]
+                    captured_total += len(content)
                     mime_type = self._guess_mime_type(file_path.name)
 
                     output_files.append(
@@ -1018,9 +1162,33 @@ class CodeExecutorService:
                             filename=file_path.name,
                             content=content,
                             mime_type=mime_type,
-                            size_bytes=len(content),
+                            size_bytes=original_size,
+                            captured_size_bytes=len(content),
+                            content_truncated=content_truncated,
                         )
                     )
+                    if original_size > _MAX_OUTPUT_FILE_BYTES:
+                        receipts.append(
+                            {
+                                "kind": "output_file",
+                                "filename": file_path.name,
+                                "reason": "per_file_byte_limit",
+                                "truncated": True,
+                                "original_size_bytes": original_size,
+                                "captured_size_bytes": len(content),
+                                "limit_bytes": _MAX_OUTPUT_FILE_BYTES,
+                            }
+                        )
+                    if original_size > remaining and not aggregate_receipt_recorded:
+                        receipts.append(
+                            {
+                                "kind": "output_files",
+                                "reason": "aggregate_byte_limit",
+                                "truncated": True,
+                                "limit_bytes": _MAX_OUTPUT_TOTAL_BYTES,
+                            }
+                        )
+                        aggregate_receipt_recorded = True
 
                 except Exception as e:
                     logger.warning(f"Failed to read output file {file_path}: {e}")
@@ -1050,8 +1218,17 @@ class CodeExecutorService:
 
     async def _cleanup_container(self, container) -> None:
         """Remove the container."""
+        await self._discard_container(container, kill=False)
+
+    @staticmethod
+    async def _discard_container(container: Any, *, kill: bool) -> None:
+        """Best-effort kill/remove without blocking the event loop."""
+
+        if kill:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(container.kill)
         try:
-            container.remove(force=True)
+            await asyncio.to_thread(container.remove, force=True)
             logger.debug(f"Container {container.id[:12]} removed")
         except Exception as e:
             logger.warning(f"Failed to remove container: {e}")

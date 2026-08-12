@@ -463,6 +463,18 @@ class StreamingExecutionMixin(StreamingPreparationMixin, StreamingToolLoopMixin)
                     "[STREAMING-FIRST] Both forced synthesis passes returned empty; "
                     "emitting graceful fallback with run_error signal."
                 )
+                _fallback_text = _forced_synthesis_fallback(messages)
+                ctx.generated_content = _fallback_text
+                for _chunk in _split_text_for_stream(_fallback_text):
+                    yield AgentLoopEvent(
+                        phase=phase,
+                        event_type="text_delta",
+                        data=_chunk,
+                    )
+                # The failure boundary must be last. AgentLoop intentionally
+                # rejects every event after a terminal boundary, so emitting
+                # run_error first used to discard this actionable fallback and
+                # could leave the client with an apparently truncated stream.
                 yield AgentLoopEvent(
                     phase=phase,
                     event_type=StreamEventType.RUN_ERROR.value,
@@ -476,16 +488,9 @@ class StreamingExecutionMixin(StreamingPreparationMixin, StreamingToolLoopMixin)
                             "generate a final answer after two synthesis retries."
                         ),
                         "recoverable": True,
+                        "fallback_delivered": True,
                     },
                 )
-                _fallback_text = _forced_synthesis_fallback(messages)
-                ctx.generated_content = _fallback_text
-                for _chunk in _split_text_for_stream(_fallback_text):
-                    yield AgentLoopEvent(
-                        phase=phase,
-                        event_type="text_delta",
-                        data=_chunk,
-                    )
                 # The fallback is user-facing recovery text, not a successful
                 # model completion. The emitted run_error is terminal for this
                 # execution path, so do not persist/sync it as succeeded or emit

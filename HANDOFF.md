@@ -61,14 +61,22 @@ Important implementation entry points:
 
 ## Feature switches and promotion posture
 
-These optional capabilities remain off by default in `.env.example` and
-`docker-compose.yml`:
+Verified against `.env.example` and the in-code `_env_flag` defaults on
+2026-08-12. Two of these have been promoted since this list was first written,
+so do not treat "all optional capabilities are off" as still true:
 
-- `ASSISTANT_RUNTIME_FAILOVER_V2=false`
-- `ASSISTANT_TOOL_OUTPUT_SPILL_ENABLED=false`
-- `ASSISTANT_STAGED_COMPACTION_ENABLED=false`
-- `ASSISTANT_RUNTIME_SKILLS=false`
-- `ASSISTANT_SUBAGENTS_ENABLED=false`
+| Flag | `.env.example` | code default | note |
+| --- | --- | --- | --- |
+| `ASSISTANT_RUNTIME_FAILOVER_V2` | `false` | `False` | consistent |
+| `ASSISTANT_STAGED_COMPACTION_ENABLED` | `false` | `False` | consistent |
+| `ASSISTANT_SUBAGENTS_ENABLED` | `false` | `False` | consistent |
+| `ASSISTANT_TOOL_OUTPUT_SPILL_ENABLED` | `true` | `True` | **promoted — now on** |
+| `ASSISTANT_RUNTIME_SKILLS` | `true` | `False` | **drift: env enables, code default disables** |
+
+`ASSISTANT_RUNTIME_SKILLS` is the one real inconsistency: a deployment that
+copies `.env.example` runs with Skills on, while any code path that resolves
+the flag without the env var present runs with Skills off. Pick one and make
+the two agree before relying on Skills behaviour in evaluation.
 
 `ASSISTANT_MODEL_FALLBACKS_JSON={}` is an explicit server-side mapping, not a
 model-supplied policy. Do not enable Skills, subagents, or retrieval variants by

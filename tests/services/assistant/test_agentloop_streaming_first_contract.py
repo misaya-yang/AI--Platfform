@@ -390,6 +390,166 @@ async def test_run_budget_hard_stops_hidden_second_model_turn() -> None:
 
 
 @pytest.mark.asyncio
+async def test_parent_progress_lease_allows_three_delegations_then_synthesis() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.run_budget import RunBudgetLimits
+
+    calls = [
+        {
+            "id": f"child-{index}",
+            "function": {
+                "name": "lookup",
+                "arguments": json.dumps({"source": index}),
+            },
+        }
+        for index in range(3)
+    ]
+    model = FakeModelRegistry(
+        scripted=[
+            [{"tool_calls": calls, "finish_reason": "tool_calls"}],
+            [{"content": "Synthesized all three receipts.", "finish_reason": "stop"}],
+        ]
+    )
+    invoker = FakeToolInvoker({"lookup": {"result": "novel receipt"}})
+    loop = AgentLoop(model_registry=model, tool_invoker=invoker)
+    limits = RunBudgetLimits(
+        max_model_turns=4,
+        max_tool_calls=3,
+        max_parallel_tool_calls=3,
+        max_wall_time_seconds=10,
+        max_tool_result_bytes=1000,
+        final_synthesis_headroom=1,
+    )
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="parent-three-children",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="delegate three evidence checks and synthesize",
+            config=AgentLoopConfig(
+                model_id="test",
+                initial_tool_iterations=1,
+                max_tool_iterations=4,
+                max_concurrent_tools=3,
+                run_budget_limits=limits,
+                persist_messages=False,
+            ),
+            history=[],
+        )
+    ]
+
+    assert invoker.invocation_count == 3
+    assert model._call_index == 2
+    assert any(
+        event.event_type == "text_delta" and "Synthesized all three" in str(event.data)
+        for event in events
+    )
+    assert any(event.event_type == "run_finished" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_parent_work_limit_preserves_forced_synthesis_turn() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.run_budget import RunBudgetLimits
+
+    model = FakeModelRegistry(
+        scripted=[
+            [
+                {
+                    "tool_calls": [
+                        {
+                            "id": "evidence-1",
+                            "function": {"name": "lookup", "arguments": "{}"},
+                        }
+                    ],
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            [{"content": "Final synthesis used the reserve.", "finish_reason": "stop"}],
+        ]
+    )
+    loop = AgentLoop(
+        model_registry=model,
+        tool_invoker=FakeToolInvoker({"lookup": {"result": "evidence"}}),
+    )
+    limits = RunBudgetLimits(
+        max_model_turns=2,
+        max_tool_calls=1,
+        max_parallel_tool_calls=1,
+        max_wall_time_seconds=10,
+        max_tool_result_bytes=1000,
+        final_synthesis_headroom=1,
+    )
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="parent-reserved-synthesis",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="collect evidence and summarize",
+            config=AgentLoopConfig(
+                model_id="test",
+                initial_tool_iterations=2,
+                max_tool_iterations=4,
+                run_budget_limits=limits,
+                persist_messages=False,
+            ),
+            history=[],
+        )
+    ]
+
+    assert model._call_index == 2
+    assert not any(event.event_type == "run_budget_exceeded" for event in events)
+    assert any(
+        event.event_type == "text_delta" and "used the reserve" in str(event.data)
+        for event in events
+    )
+    assert any(event.event_type == "run_finished" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_parent_progress_lease_does_not_extend_on_repeated_failure() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    failed_call = {
+        "id": "failed-1",
+        "function": {"name": "lookup", "arguments": '{"source":"same"}'},
+    }
+    model = FakeModelRegistry(
+        scripted=[
+            [{"tool_calls": [failed_call], "finish_reason": "tool_calls"}],
+            [{"content": "Forced synthesis after failure.", "finish_reason": "stop"}],
+        ]
+    )
+    invoker = FakeToolInvoker({"lookup": {"success": False, "error": "source unavailable"}})
+    loop = AgentLoop(model_registry=model, tool_invoker=invoker)
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="parent-failed-lease",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="retry forever",
+            config=AgentLoopConfig(
+                model_id="test",
+                initial_tool_iterations=1,
+                max_tool_iterations=8,
+                persist_messages=False,
+            ),
+            history=[],
+        )
+    ]
+
+    assert invoker.invocation_count == 1
+    assert model._call_index == 2
+    assert any(
+        event.event_type == "text_delta" and "Forced synthesis" in str(event.data)
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
 async def test_run_budget_rejects_oversized_parallel_batch_with_final_results() -> None:
     from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
     from assistant_service.core.run_budget import RunBudgetLimits
@@ -1233,7 +1393,9 @@ async def test_failed_forced_synthesis_never_emits_internal_success() -> None:
     assert "first unsafe" not in text
     assert "second unsafe" not in text
     assert "working narrative" in text
-    assert any(event.event_type == "run_error" for event in events)
+    assert [event.event_type for event in events][-1] == "run_error"
+    assert events[-1].data["fallback_delivered"] is True
+    assert "I ran into trouble composing a final answer" in text
     assert all(event.event_type != "streaming_first_completed" for event in events)
     assert all(event.event_type != "run_finished" for event in events)
 
@@ -2529,8 +2691,10 @@ async def test_streaming_first_tool_artifact_semantic_events() -> None:
     assert start_payload["name"] == "generate_image"
     assert result_payload["tool_call_id"] == "tc_1"
     assert result_payload["status"] == "completed"
+    assert result_payload["side_effect_state"] == "write_unknown"
     assert end_payload["tool_call_id"] == "tc_1"
     assert end_payload["status"] == "completed"
+    assert end_payload["side_effect_state"] == "write_unknown"
 
     # Manus-style step lifecycle events
     assert "step_started" in got
@@ -3302,7 +3466,7 @@ async def test_approval_resume_rejects_incomplete_synthesis_without_capability_c
 
 
 @pytest.mark.asyncio
-async def test_approval_resume_cursor_failure_stops_before_trace_and_tool() -> None:
+async def test_approval_resume_cursor_failure_disables_trace_but_runs_approved_tool() -> None:
     from assistant_service.core.agent.agent_loop import AgentLoopConfig
     from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
 
@@ -3351,12 +3515,14 @@ async def test_approval_resume_cursor_failure_stops_before_trace_and_tool() -> N
     ):
         events.append(event)
 
-    assert [event.event_type for event in events] == ["run_error"]
-    assert events[0].data["run_id"] == run_id
-    assert "super-secret" not in json.dumps(events[0].data, default=str)
+    assert any(event.event_type == "run_finished" for event in events)
+    assert not any(event.event_type == "run_error" for event in events)
+    assert "super-secret" not in json.dumps([event.data for event in events], default=str)
     assert writer.operations == ["resume_sequence"]
     assert writer.started == []
-    assert invoker.invocation_count == 0
+    assert writer.events == []
+    assert writer.finished == []
+    assert invoker.invocation_count == 1
 
 
 @pytest.mark.asyncio
@@ -4095,6 +4261,131 @@ async def test_streaming_first_skips_duplicate_kb_calls_in_same_turn() -> None:
 
     assert tool_invoker.invocation_count == 1
     assert got.count("step_started") == 1
+
+
+@pytest.mark.asyncio
+async def test_streaming_first_dedups_successful_zero_hit_kb_query() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    repeated = {
+        "function": {
+            "name": "search_knowledge_base",
+            "arguments": '{"query":"no-match","dataset_ids":["d1"]}',
+        }
+    }
+    model = FakeModelRegistry(
+        scripted=[
+            [{"tool_calls": [{"id": "kb-empty-1", **repeated}]}],
+            [{"tool_calls": [{"id": "kb-empty-2", **repeated}]}],
+            [{"content": "No matching evidence was found.", "finish_reason": "stop"}],
+        ]
+    )
+    invoker = FakeToolInvoker(
+        {
+            "search_knowledge_base": {
+                "success": True,
+                "result": "No results found.",
+                "metadata": {"total_results": 0, "contexts": []},
+            }
+        }
+    )
+    loop = AgentLoop(model_registry=model, tool_invoker=invoker)
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="kb-empty-dedup",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="check the source",
+            config=AgentLoopConfig(model_id="test", max_tool_iterations=4),
+            history=[],
+        )
+    ]
+
+    assert invoker.invocation_count == 1
+    duplicate = next(
+        event
+        for event in events
+        if event.event_type == "tool_call_result" and event.data.get("synthetic")
+    )
+    assert duplicate.data["status"] == "deduplicated"
+    assert any(event.event_type == "run_finished" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_distinct_kb_queries_ignore_deprecated_per_kb_limit_until_run_budget() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.run_budget import RunBudgetLimits
+
+    scripted = [
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": f"kb_{index}",
+                        "function": {
+                            "name": "search_knowledge_base",
+                            "arguments": json.dumps(
+                                {"query": f"distinct-{index}", "dataset_ids": ["d1"]}
+                            ),
+                        },
+                    }
+                ],
+                "finish_reason": "tool_calls",
+            }
+        ]
+        for index in range(10)
+    ]
+    kb_ctx = {
+        "dataset_id": "d1",
+        "dataset_name": "D1",
+        "chunks": [{"content": "evidence", "score": 0.9}],
+        "query": "distinct",
+        "took_ms": 1.0,
+    }
+    model = FakeModelRegistry(scripted=scripted)
+    invoker = FakeToolInvoker(
+        {
+            "search_knowledge_base": {
+                "result": "evidence",
+                "metadata": {"total_results": 1, "contexts": [kb_ctx]},
+            }
+        }
+    )
+    loop = AgentLoop(model_registry=model, tool_invoker=invoker)
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="kb-global-budget",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="cross-check many distinct sources",
+            config=AgentLoopConfig(
+                model_id="test",
+                kb_max_queries=1,
+                initial_tool_iterations=2,
+                max_tool_iterations=12,
+                run_budget_limits=RunBudgetLimits(
+                    max_model_turns=13,
+                    max_tool_calls=9,
+                    max_parallel_tool_calls=1,
+                    max_wall_time_seconds=10,
+                    max_tool_result_bytes=10_000,
+                    final_synthesis_headroom=1,
+                ),
+                persist_messages=False,
+            ),
+            history=[],
+        )
+    ]
+
+    assert invoker.invocation_count == 9
+    assert [args["query"] for _, args in invoker.invocations] == [
+        f"distinct-{index}" for index in range(9)
+    ]
+    budget_event = next(event for event in events if event.event_type == "run_budget_exceeded")
+    assert budget_event.data["dimension"] == "tool_calls"
+    assert budget_event.data["limit"] == 9
 
 
 @pytest.mark.asyncio

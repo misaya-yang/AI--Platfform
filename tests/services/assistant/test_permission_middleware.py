@@ -1,16 +1,19 @@
 """
 Tests for PermissionMiddleware + chain.run_on_tool_call.
 
-Covers: default allow-all, deny/confirm verdicts, policy_from_sets helper,
-async policies, middleware ordering (first non-allow wins), forgiveness for
-buggy/misbehaving policies.
+Covers: explicit policies, deny/confirm verdicts, policy_from_sets helper,
+async policies, middleware ordering (first non-allow wins), and fail-closed
+handling for buggy/misbehaving permission policies.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
 
 from assistant_service.core.agent.middleware import (
     MiddlewareChain,
@@ -23,7 +26,6 @@ from assistant_service.core.agent.middlewares.permission import (
     policy_from_sets,
 )
 
-
 # ---------------------------------------------------------------------------
 # Default policy
 # ---------------------------------------------------------------------------
@@ -35,11 +37,9 @@ def test_allow_all_policy() -> None:
     assert verdict.kind is VerdictKind.ALLOW
 
 
-@pytest.mark.asyncio
-async def test_middleware_default_is_pass_through() -> None:
-    chain = MiddlewareChain([PermissionMiddleware()])
-    verdict = await chain.run_on_tool_call(None, "fs_write", {"path": "x"})  # type: ignore[arg-type]
-    assert verdict.is_allow
+def test_middleware_requires_an_explicit_policy() -> None:
+    with pytest.raises(TypeError, match="explicit callable policy"):
+        PermissionMiddleware(None)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -128,18 +128,31 @@ async def test_middleware_tags_source_when_policy_forgets() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Forgiving contract
+# Fail-closed permission contract
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_buggy_policy_falls_back_to_allow() -> None:
+async def test_buggy_policy_result_fails_closed() -> None:
     def bad_policy(_n: str, _a: dict[str, Any], _c: Any) -> Any:
         return "not a verdict"
 
     chain = MiddlewareChain([PermissionMiddleware(bad_policy)])
     verdict = await chain.run_on_tool_call(None, "x", {})  # type: ignore[arg-type]
-    assert verdict.is_allow
+    assert verdict.kind is VerdictKind.DENY
+    assert "invalid decision" in verdict.reason
+
+
+@pytest.mark.asyncio
+async def test_raising_policy_fails_closed() -> None:
+    def raising_policy(_n: str, _a: dict[str, Any], _c: Any) -> ToolVerdict:
+        raise RuntimeError("policy backend unavailable")
+
+    chain = MiddlewareChain([PermissionMiddleware(raising_policy)])
+    verdict = await chain.run_on_tool_call(None, "fs_write", {})  # type: ignore[arg-type]
+
+    assert verdict.kind is VerdictKind.DENY
+    assert verdict.reason == "permission policy failed closed"
 
 
 @pytest.mark.asyncio
@@ -149,7 +162,7 @@ async def test_missing_hook_is_skipped() -> None:
     class HalfMiddleware:
         name = "half"
 
-        async def before_call(self, ctx: Any, messages: list[Any]):
+        async def before_call(self, _ctx: Any, _messages: list[Any]) -> AsyncGenerator[Any, None]:
             return
             yield  # unreachable
 

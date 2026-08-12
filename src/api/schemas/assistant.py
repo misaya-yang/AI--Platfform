@@ -7,10 +7,13 @@ Phase 1: Unified session + message + streaming protocol.
 - Enhanced message with tool_calls/tool_results/citations/attachments
 """
 
+from __future__ import annotations
+
+import re
 from typing import Any, Literal
 
 from ai_gateway_core.style_presets import StylePreset, resolve_style_preset
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # =============================================================================
 # Tool Call Structures (for Agentic workflows)
@@ -168,8 +171,11 @@ class AssistantChatRequest(BaseModel):
     enable_task_planning: bool = Field(
         default=False, description="Enable task planning and tool orchestration"
     )
-    confirm_plan: bool = Field(
-        default=False, description="Confirm execution plan before running tools"
+    confirm_plan: Literal[False] = Field(
+        default=False,
+        description=(
+            "Reserved for durable plan approval and resume; true is rejected in this release"
+        ),
     )
 
     # Assistant gateway policy profile
@@ -181,6 +187,18 @@ class AssistantChatRequest(BaseModel):
     )
     os_agent_enabled: bool = Field(
         default=False, description="Enable OS-Agent Lite tools for this request"
+    )
+    local_node_device_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+        description="Selected Local Node; downstream verifies all authority",
+    )
+    local_node_grant_ids: list[str] = Field(
+        default_factory=list,
+        max_length=16,
+        description="Selected grant IDs; downstream verifies all authority",
     )
     runtime_mode: Literal["off", "compat", "full"] = Field(
         default="compat",
@@ -211,6 +229,20 @@ class AssistantChatRequest(BaseModel):
         description="Approved tool approval_id binding for resume execution",
     )
 
+    @model_validator(mode="after")
+    def _validate_local_node_selection(self) -> AssistantChatRequest:
+        grant_ids = self.local_node_grant_ids
+        if len(set(grant_ids)) != len(grant_ids) or any(
+            re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", grant_id) is None
+            for grant_id in grant_ids
+        ):
+            raise ValueError("Local Node grant selectors are invalid")
+        if bool(self.local_node_device_id) != bool(grant_ids):
+            raise ValueError(
+                "Local Node selectors require one device and at least one grant"
+            )
+        return self
+
     @field_validator("kb_dataset_ids")
     @classmethod
     def validate_kb_dataset_ids(cls, value: list[str]) -> list[str]:
@@ -225,6 +257,16 @@ class AssistantChatRequest(BaseModel):
     def reject_unreleased_kb_images(cls, value: bool) -> bool:
         if value:
             raise ValueError("Multimodal knowledge retrieval is not enabled in this release")
+        return value
+
+    @field_validator("confirm_plan", mode="before")
+    @classmethod
+    def reject_unsupported_plan_confirmation(cls, value: Any) -> Any:
+        if value is True:
+            raise ValueError(
+                "Plan confirmation is not supported until durable plan approval and resume "
+                "are available; omit confirm_plan or set it to false"
+            )
         return value
 
 
@@ -608,7 +650,9 @@ class ImageGenerationRequest(BaseModel):
             "possible — that path doesn't fetch a URL at all."
         ),
     )
-    add_watermark: bool = Field(default=True, description="Add AI-generated watermark to output images")
+    add_watermark: bool = Field(
+        default=True, description="Add AI-generated watermark to output images"
+    )
     app_user_id: str | None = None
     app_tenant_id: str | None = None
     parent_artifact_id: str | None = None
@@ -658,7 +702,9 @@ class ImageGenerationResponse(BaseModel):
     images: list[GeneratedImage] = Field(default_factory=list, description="Generated images")
     task_id: str | None = None
     status: str | None = None
-    provider: str | None = Field(default=None, description="Provider used for generation (dashscope/google)")
+    provider: str | None = Field(
+        default=None, description="Provider used for generation (dashscope/google)"
+    )
     duration_ms: float | None = Field(default=None, description="Generation time in milliseconds")
     error: str | None = Field(default=None, description="Error message if failed")
     error_code: str | None = None
@@ -695,7 +741,9 @@ class AsyncImageGenerationRequest(BaseModel):
     )
     size: str | None = Field(default="1024*1024", description="Image size")
     n: int = Field(default=1, ge=1, le=4, description="Number of images to generate")
-    session_id: str | None = Field(default=None, description="Session ID for stateful multi-turn editing")
+    session_id: str | None = Field(
+        default=None, description="Session ID for stateful multi-turn editing"
+    )
     reference_artifact_id: str | None = Field(
         default=None,
         description=(
@@ -723,7 +771,9 @@ class AsyncImageGenerationRequest(BaseModel):
             "private/loopback rejected; 8 MB streaming cap."
         ),
     )
-    add_watermark: bool = Field(default=True, description="Add AI-generated watermark to output images")
+    add_watermark: bool = Field(
+        default=True, description="Add AI-generated watermark to output images"
+    )
     app_user_id: str | None = None
     app_tenant_id: str | None = None
     parent_artifact_id: str | None = None
@@ -731,7 +781,9 @@ class AsyncImageGenerationRequest(BaseModel):
     client_request_id: str | None = Field(default=None, max_length=128)
     return_variants: list[str] | None = None
     allow_branch: bool = False
-    callback_url: str | None = Field(default=None, description="URL to POST results when generation completes")
+    callback_url: str | None = Field(
+        default=None, description="URL to POST results when generation completes"
+    )
 
     @field_validator("style", mode="before")
     @classmethod
@@ -766,7 +818,9 @@ class AsyncImageTaskStatusResponse(BaseModel):
     prompt: str = Field(..., description="Original prompt")
     model_id: str = Field(..., description="Model used")
     provider: str | None = Field(default=None, description="Provider used")
-    images: list[AsyncImageArtifact] = Field(default_factory=list, description="Generated images (when completed)")
+    images: list[AsyncImageArtifact] = Field(
+        default_factory=list, description="Generated images (when completed)"
+    )
     duration_ms: float | None = Field(default=None, description="Total duration when completed")
     error: str | None = Field(default=None, description="Error message if failed")
     error_code: str | None = None

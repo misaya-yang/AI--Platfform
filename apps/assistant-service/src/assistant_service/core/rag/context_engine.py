@@ -240,25 +240,31 @@ def _trim_history_preserving_tool_pairs(
             protected_index = unit_index
             break
 
-    selected_by_index: dict[int, list[dict[str, Any]]] = {}
-    for unit_index in range(len(units) - 1, -1, -1):
+    if protected_index is None:
+        selected: list[list[dict[str, Any]]] = []
+        oldest_candidate_index = len(units) - 1
+    else:
+        # Protecting an exchange also protects everything newer than it. This
+        # preserves chronology and lets the caller surface a typed overflow
+        # when that required suffix cannot fit.
+        selected = units[protected_index:]
+        oldest_candidate_index = protected_index - 1
+
+    for unit_index in range(oldest_candidate_index, -1, -1):
         unit = units[unit_index]
-        candidate = [
-            candidate_unit
-            for index, candidate_unit in sorted({**selected_by_index, unit_index: unit}.items())
-        ]
+        candidate = [unit, *selected]
         candidate_tokens = estimate_history_tokens(_flatten_history_units(candidate))
-        if unit_index == protected_index or candidate_tokens <= max(0, max_tokens):
-            selected_by_index[unit_index] = unit
+        if candidate_tokens <= max(0, max_tokens):
+            selected = candidate
             if (
                 protected_index is None
-                and sum(len(value) for value in selected_by_index.values())
-                >= max(1, min_recent_messages)
+                and sum(len(value) for value in selected) >= max(1, min_recent_messages)
                 and candidate_tokens >= max(0, max_tokens)
             ):
                 break
-
-    selected = [unit for _, unit in sorted(selected_by_index.items())]
+            continue
+        # A chronological suffix cannot resume before a skipped newer unit.
+        break
     selected_tokens = estimate_history_tokens(_flatten_history_units(selected))
 
     trimmed = _flatten_history_units(selected)

@@ -79,23 +79,24 @@ class StreamingToolLoopState:
     tools: list[dict[str, Any]]
     quiz_id_for_persistence: str | None
     turn_thinking_content: str
+    initial_iteration_lease: int
     max_iterations: int
-    kb_call_limit: int
     first_token_emitted: bool
     iteration: int = 0
-    kb_call_count: int = 0
     kb_dedup: KBDedupState = field(default_factory=KBDedupState)
     denied_tools: set[str] = field(default_factory=set)
     last_tool_failed: bool = False
     model_terminated_cleanly: bool = False
+    progress_fingerprints: set[str] = field(default_factory=set)
+    lease_extensions: int = 0
 
     @classmethod
     def from_preparation(
         cls,
         prepared: StreamingPreparationState,
         *,
+        initial_iteration_lease: int,
         max_iterations: int,
-        kb_call_limit: int,
         first_token_emitted: bool,
     ) -> StreamingToolLoopState:
         return cls(
@@ -115,8 +116,8 @@ class StreamingToolLoopState:
             tools=prepared.tools,
             quiz_id_for_persistence=prepared.quiz_id_for_persistence,
             turn_thinking_content=prepared.turn_thinking_content,
+            initial_iteration_lease=initial_iteration_lease,
             max_iterations=max_iterations,
-            kb_call_limit=kb_call_limit,
             first_token_emitted=first_token_emitted,
         )
 

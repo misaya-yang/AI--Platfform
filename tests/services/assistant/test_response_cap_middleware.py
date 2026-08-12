@@ -8,7 +8,6 @@ truncation with structure preservation, and per-tool overrides.
 from __future__ import annotations
 
 import pytest
-
 from assistant_service.core.agent.middlewares.response_cap import (
     ResponseCapMiddleware,
 )
@@ -28,9 +27,7 @@ def _result(payload) -> ToolCallResult:
 async def test_small_result_passes_through_unchanged() -> None:
     mw = ResponseCapMiddleware(max_tokens=25000)
     small = _result("hello world")
-    out = await mw.on_tool_result(
-        ctx=None, tool_name="demo", arguments={}, result=small
-    )
+    out = await mw.on_tool_result(ctx=None, tool_name="demo", arguments={}, result=small)
     # None signals passthrough — caller uses the original.
     assert out is None
 
@@ -39,9 +36,7 @@ async def test_small_result_passes_through_unchanged() -> None:
 async def test_large_string_result_is_truncated_with_hint() -> None:
     mw = ResponseCapMiddleware(max_tokens=1000)  # ~4000 chars
     big = _result("x" * 20_000)
-    out = await mw.on_tool_result(
-        ctx=None, tool_name="demo", arguments={}, result=big
-    )
+    out = await mw.on_tool_result(ctx=None, tool_name="demo", arguments={}, result=big)
     assert out is not None
     assert isinstance(out.result, str)
     # Length stays near the budget (char-per-token * token budget).
@@ -49,6 +44,35 @@ async def test_large_string_result_is_truncated_with_hint() -> None:
     assert "truncated" in out.result
     assert "1000-token" in out.result
     assert out.metadata.get("response_cap_applied") is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("spoofed_applied", "spoofed_max_tokens"),
+    [
+        (False, 999_999),
+        (0, "unlimited"),
+        ("tool-claimed-cap", 0),
+    ],
+)
+async def test_host_overwrites_spoofed_response_cap_metadata(
+    spoofed_applied: object,
+    spoofed_max_tokens: object,
+) -> None:
+    mw = ResponseCapMiddleware(max_tokens=1_000)
+    big = _result("x" * 20_000)
+    big.metadata = {
+        "response_cap_applied": spoofed_applied,
+        "response_cap_max_tokens": spoofed_max_tokens,
+        "tool_receipt": "preserved",
+    }
+
+    out = await mw.on_tool_result(ctx=None, tool_name="demo", arguments={}, result=big)
+
+    assert out is not None
+    assert out.metadata["response_cap_applied"] is True
+    assert out.metadata["response_cap_max_tokens"] == 1_000
+    assert out.metadata["tool_receipt"] == "preserved"
 
 
 @pytest.mark.asyncio
@@ -88,9 +112,7 @@ async def test_per_tool_override_honored() -> None:
     big = _result("y" * 10_000)
 
     # Different tool — should NOT truncate (10K < 100K char budget).
-    out_other = await mw.on_tool_result(
-        ctx=None, tool_name="other_tool", arguments={}, result=big
-    )
+    out_other = await mw.on_tool_result(ctx=None, tool_name="other_tool", arguments={}, result=big)
     assert out_other is None  # passthrough
 
     # Overridden tool — should truncate.
@@ -113,7 +135,5 @@ async def test_none_or_missing_payload_passes_through() -> None:
         error="boom",
         result=None,
     )
-    out = await mw.on_tool_result(
-        ctx=None, tool_name="demo", arguments={}, result=errlike
-    )
+    out = await mw.on_tool_result(ctx=None, tool_name="demo", arguments={}, result=errlike)
     assert out is None

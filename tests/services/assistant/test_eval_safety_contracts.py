@@ -126,7 +126,7 @@ async def test_tool_result_cap_has_neutral_non_retry_hint() -> None:
     assert "narrower" not in lower_result
 
 
-def test_kb_tool_result_for_model_keeps_ranked_bounded_summary() -> None:
+def test_kb_tool_result_for_model_keeps_ranked_token_aware_evidence() -> None:
     chunks = [
         {
             "dataset_name": f"dataset-{idx}",
@@ -149,11 +149,14 @@ def test_kb_tool_result_for_model_keeps_ranked_bounded_summary() -> None:
     lines = compact.splitlines()
     assert lines[0].startswith("RETRIEVAL_QUALITY: HIGH")
     assert "KB query: refund policy" in compact
-    assert "KB results: 8 total, using top 6 snippets." in compact
-    assert sum(1 for line in lines if line.startswith("[")) == 6
+    assert "KB results: 8 ranked snippets." in compact
+    assert "INLINE_EVIDENCE: complete_inline" in compact
+    # Eight content blocks plus eight manifest entries are retained.
+    assert sum(1 for line in lines if line.startswith("[")) == 16
     assert "dataset-0" in compact
-    assert "dataset-6" not in compact
-    assert len(compact) < 3_000
+    assert "dataset-7" in compact
+    assert len(compact) < 25_000
+    assert "stop searching" not in compact.lower()
 
 
 def test_core_guardrails_pin_privacy_refusal_and_prompt_boundary() -> None:

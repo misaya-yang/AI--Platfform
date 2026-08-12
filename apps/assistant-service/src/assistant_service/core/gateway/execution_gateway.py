@@ -824,21 +824,78 @@ class AssistantExecutionGateway(
 
         # Remove control-only args before tool call
         invoke_args = self._without_control_args(arguments)
+        local_node_definition = next(
+            (
+                definition
+                for definition in definitions
+                if str(getattr(definition, "name", "") or "") == tool_name
+                and dict(getattr(definition, "capability_metadata", None) or {}).get(
+                    "execution_surface"
+                )
+                == "local_node"
+            ),
+            None,
+        )
 
         async def _invoke() -> ToolCallResult:
-            context.metadata = {
-                **(context.metadata or {}),
+            # A JSON caller can spoof boolean metadata but cannot mint this
+            # process-local signed receipt.  Always discard a caller-supplied
+            # value, then issue a fresh receipt only after the Gateway's final
+            # command/approval dispatch fence above.
+            prior_metadata = dict(context.metadata or {})
+            invoke_metadata = {
+                **{
+                    key: value
+                    for key, value in prior_metadata.items()
+                    if key != "_local_node_gateway_receipt"
+                },
                 "execution_gateway_approved": True,
                 "gateway_policy_decision": decision_payload,
                 "sandbox_decision": sandbox_payload,
                 "approval_consumed": bool(approval_granted),
             }
-            return await self.tool_invoker.invoke(
-                tool_name=tool_name,
-                arguments=invoke_args,
-                context=context,
-                cancel_event=cancel_event,
-            )
+            if local_node_definition is not None and context.os_agent_enabled:
+                metadata = dict(getattr(local_node_definition, "capability_metadata", None) or {})
+                try:
+                    from ..local_node.gateway_receipt import (
+                        issue_local_node_gateway_receipt,
+                    )
+
+                    invoke_metadata["_local_node_gateway_receipt"] = (
+                        issue_local_node_gateway_receipt(
+                            tenant_id=context.tenant_id,
+                            user_id=context.user_id,
+                            session_id=context.session_id,
+                            run_id=str(context.run_id or ""),
+                            tool_name=tool_name,
+                            arguments=invoke_args,
+                            device_id=str(metadata.get("local_node_device_id") or ""),
+                            lease_id=str(metadata.get("local_node_lease_id") or ""),
+                            grant_revision=str(metadata.get("local_node_grant_revision") or ""),
+                            binding_sha256=str(metadata.get("local_node_binding_sha256") or ""),
+                            command_id=command_id,
+                            command_durability=command_durability,
+                            policy_decision=decision_payload,
+                            sandbox_decision=sandbox_payload,
+                            approval_consumed=bool(approval_granted),
+                            approval_id=str(approval_id or ""),
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001 - executor fails closed without it
+                    logger.warning(
+                        "Local Node gateway receipt issuance failed (exception_type=%s)",
+                        type(exc).__name__,
+                    )
+            context.metadata = invoke_metadata
+            try:
+                return await self.tool_invoker.invoke(
+                    tool_name=tool_name,
+                    arguments=invoke_args,
+                    context=context,
+                    cancel_event=cancel_event,
+                )
+            finally:
+                context.metadata = prior_metadata
 
         result = await self._lane_scheduler.run_in_lane(lane, _invoke)
         return await self._finalize_tool_invocation(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import hashlib
 import json
 import time
 from collections.abc import AsyncGenerator
@@ -59,7 +60,6 @@ class AgentModelTurnMixin:
         started_at: float,
         ttft_start: float,
         denied_tools: set[str],
-        kb_search_completed: bool,
         dataset_name_map: dict[str, str] | None,
         result: StreamingModelTurn,
     ) -> AsyncGenerator[AgentLoopEvent, None]:
@@ -73,18 +73,6 @@ class AgentModelTurnMixin:
             (llm_started_at - started_at) * 1000,
         )
         tools_for_call: list[dict[str, Any]] | None = tools or None
-        if tools_for_call and kb_search_completed:
-            filtered_tools = [
-                schema
-                for schema in tools_for_call
-                if _fmt_tool_schema_name(schema) != "search_knowledge_base"
-            ]
-            if len(filtered_tools) != len(tools_for_call):
-                tools_for_call = filtered_tools
-                logger.debug(
-                    "[STREAMING-FIRST] Removed search_knowledge_base from remaining "
-                    "toolset after first KB completion."
-                )
 
         model_info = self.model_registry.get_model(ctx.config.model_id)
         native_search_config: dict[str, Any] | None = None
@@ -180,6 +168,7 @@ class AgentModelTurnMixin:
             tools=tools_for_call,
             thinking_level=ctx.config.thinking_level,
             native_search_config=native_search_config,
+            openai_local_runtime=ctx.openai_responses_local_runtime,
         ):
             if isinstance(streamed, AgentLoopEvent):
                 yield streamed
@@ -311,7 +300,7 @@ class AgentModelTurnMixin:
         try:
             if ctx.run_budget is None:
                 raise RuntimeError("run_budget_not_initialized")
-            ctx.run_budget.consume_model_turn()
+            ctx.run_budget.consume_model_turn(purpose="synthesis")
             synthesis_messages = copy.deepcopy(messages)
             if synthesis_messages:
                 no_tools_system_prompt, _ = self._build_streaming_system_prompt(
@@ -356,6 +345,7 @@ class AgentModelTurnMixin:
                     min(ctx.config.max_tokens or 2048, 2048),
                 ),
                 tools=None,
+                budget_purpose="synthesis",
             ):
                 if isinstance(streamed, AgentLoopEvent):
                     yield streamed
@@ -431,11 +421,13 @@ class AgentModelTurnMixin:
                 },
             )
         except Exception as exc:
+            failure_site = f"{type(exc).__module__}.{type(exc).__qualname__}"
             logger.error(
                 "[STREAMING-FIRST] Forced synthesis (%s) raised; continuing to next fallback "
-                "(exception_type=%s)",
+                "(exception_type=%s failure_site_sha256=%s)",
                 attempt_label,
                 type(exc).__name__,
+                hashlib.sha256(failure_site.encode("utf-8")).hexdigest()[:16],
             )
         for key, value in forced_usage.items():
             ctx.usage[key] = int(value)

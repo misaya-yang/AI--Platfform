@@ -1,14 +1,110 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
+COMMUNITY_PLUGIN_SOURCE_COMMIT = "0a6e37e4e242c944380228fa29dbd14e64ac1b63"
 
 
 def _read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def test_bundled_community_agent_plugins_are_pinned_read_only_data() -> None:
+    expected_agents = {
+        "community-doublecheck": {"./agents/doublecheck.md"},
+        "community-engineering-reviewers": {
+            "./agents/security-reviewer.md",
+            "./agents/system-architecture-reviewer.md",
+            "./agents/technical-writer.md",
+        },
+    }
+    expected_files = {
+        plugin_name: {
+            "LICENSE",
+            "THIRD_PARTY_NOTICES.md",
+            "plugin.json",
+            *(agent_path.removeprefix("./") for agent_path in agent_paths),
+        }
+        for plugin_name, agent_paths in expected_agents.items()
+    }
+
+    for plugin_name, agent_paths in expected_agents.items():
+        plugin_root = ROOT / "agent-plugins" / plugin_name
+        manifest = json.loads((plugin_root / "plugin.json").read_text(encoding="utf-8"))
+        assert manifest["$schema"] == ("https://agent-plugins.org/schemas/1.0.0/plugin.schema.json")
+        assert manifest["name"] == plugin_name
+        assert manifest["license"] == "MIT"
+        extension = manifest["extensions"]["com.misaya.ai-gateway"]
+        assert set(extension) == {"agents"}
+        assert set(extension["agents"]) == agent_paths
+
+        bundled_files = {
+            str(path.relative_to(plugin_root)) for path in plugin_root.rglob("*") if path.is_file()
+        }
+        assert bundled_files == expected_files[plugin_name]
+        assert not (plugin_root / "mcp.json").exists()
+        assert not (plugin_root / "scripts").exists()
+        assert not (plugin_root / "hooks").exists()
+
+        notice = (plugin_root / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+        license_text = (plugin_root / "LICENSE").read_text(encoding="utf-8")
+        assert COMMUNITY_PLUGIN_SOURCE_COMMIT in notice
+        assert "https://github.com/github/awesome-copilot" in notice
+        assert license_text.startswith("MIT License\n\nCopyright GitHub, Inc.")
+
+        for agent_path in sorted(agent_paths):
+            resolved = (plugin_root / agent_path).resolve(strict=True)
+            assert resolved.is_relative_to(plugin_root.resolve())
+            text = resolved.read_text(encoding="utf-8")
+            _, frontmatter_text, instructions = text.split("---", 2)
+            frontmatter = yaml.safe_load(frontmatter_text)
+            assert set(frontmatter) == {
+                "id",
+                "name",
+                "description",
+                "base_type",
+                "allowed_tools",
+                "allowed_tool_categories",
+                "initial_max_turns",
+                "initial_max_tool_calls",
+                "recommended_max_tokens",
+                "initial_timeout_seconds",
+                "idle_timeout_seconds",
+            }
+            assert frontmatter["id"] == resolved.stem
+            assert frontmatter["base_type"] == "explore"
+            assert frontmatter["allowed_tools"] == []
+            assert frontmatter["allowed_tool_categories"] == ["retrieval", "utility"]
+            # Package values are an initial/recommended lease, never runtime
+            # authority; each stays within the explore host ceilings.
+            assert 1 <= frontmatter["initial_max_turns"] <= 16
+            assert 1 <= frontmatter["initial_max_tool_calls"] <= 32
+            assert frontmatter["recommended_max_tokens"] == 4096
+            assert frontmatter["initial_timeout_seconds"] == 120
+            assert frontmatter["idle_timeout_seconds"] == 120
+            assert "read-only" in instructions.lower()
+            for forbidden in (
+                "git commit",
+                "git push",
+                "pull request",
+                "installer",
+                "run a script",
+                "launch a process",
+            ):
+                assert forbidden not in instructions.lower()
+
+    env_example = _read(".env.example")
+    assert (
+        "ASSISTANT_AGENT_PLUGIN_PATHS=/opt/agent-plugins/ai-docgen:"
+        "/opt/agent-plugins/community-doublecheck:"
+        "/opt/agent-plugins/community-engineering-reviewers"
+    ) in env_example
+    assert "ASSISTANT_TRUSTED_AGENT_PLUGINS=ai-docgen@1.0.0" in env_example
+    assert "ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS=/opt/agent-plugins/ai-docgen" in env_example
 
 
 def test_compose_uses_gateway_bucket_fallback_and_named_volume_data_dir():
@@ -83,14 +179,28 @@ def test_compose_isolates_runtime_memory_and_wires_cleanup_provider():
         "${ASSISTANT_RUNTIME_SKILLS:-true}"
     )
     assert assistant_environment["ASSISTANT_AGENT_PLUGIN_PATHS"] == (
-        "${ASSISTANT_AGENT_PLUGIN_PATHS:-/opt/agent-plugins/ai-docgen}"
+        "${ASSISTANT_AGENT_PLUGIN_PATHS:-/opt/agent-plugins/ai-docgen:"
+        "/opt/agent-plugins/community-doublecheck:"
+        "/opt/agent-plugins/community-engineering-reviewers}"
     )
     assert assistant_environment["ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS"] == (
         "${ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS:-/opt/agent-plugins/ai-docgen}"
     )
+    assert assistant_environment["ASSISTANT_TRUSTED_AGENT_PLUGINS"] == (
+        "${ASSISTANT_TRUSTED_AGENT_PLUGINS:-ai-docgen@1.0.0}"
+    )
+    assert "community-" not in assistant_environment["ASSISTANT_TRUSTED_AGENT_PLUGINS"]
+    assert "community-" not in assistant_environment["ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS"]
     assert not any("/opt/agent-plugins" in str(volume) for volume in assistant_volumes)
     assistant_dockerfile = _read("apps/assistant-service/Dockerfile")
     assert "COPY agent-plugins/ai-docgen/ /opt/agent-plugins/ai-docgen/" in assistant_dockerfile
+    assert (
+        "COPY agent-plugins/community-doublecheck/ /opt/agent-plugins/community-doublecheck/"
+    ) in assistant_dockerfile
+    assert (
+        "COPY agent-plugins/community-engineering-reviewers/ "
+        "/opt/agent-plugins/community-engineering-reviewers/"
+    ) in assistant_dockerfile
     assert services["gateway"]["environment"]["ASSISTANT_ROUTE_SESSIONS_PROXIED"] == (
         "${ASSISTANT_ROUTE_SESSIONS_PROXIED:-true}"
     )

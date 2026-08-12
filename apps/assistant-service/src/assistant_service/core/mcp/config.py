@@ -211,11 +211,14 @@ def _plugin_data_dir(plugin_name: str) -> Path:
 
 
 def load_agent_plugin_mcp_config(raw_paths: str | None = None) -> list[MCPServerConfig]:
-    """Load operator-installed Streamable HTTP MCP components.
+    """Load operator-approved Agent Plugin MCP components.
 
-    A configured plugin path is the installation boundary. Portable URLs stay
-    subject to Agent Plugins URL rules; the AI Gateway extension may select an
-    operator-owned URL environment variable for container/service discovery.
+    A configured plugin path is only a discovery boundary. No HTTP or stdio
+    component becomes initializable unless the operator independently approves
+    both the self-declared plugin identity and its exact canonical root. After
+    that approval, portable URLs remain subject to Agent Plugins URL rules and
+    the AI Gateway extension may select an operator-owned URL environment
+    variable for container/service discovery.
     """
 
     configured = (
@@ -232,6 +235,20 @@ def load_agent_plugin_mcp_config(raw_paths: str | None = None) -> list[MCPServer
             package = load_agent_plugin(Path(raw_path).expanduser())
         except AgentPluginLoadError as exc:
             logger.warning("agent_plugin.mcp_rejected code=%s", exc.code)
+            continue
+
+        if not package.mcp_servers:
+            continue
+        plugin_id = f"{package.manifest.name}@{package.manifest.version}"
+        trusted_plugin = plugin_id in trusted_plugin_ids and package.root in trusted_plugin_roots
+        if not trusted_plugin:
+            if plugin_id in trusted_plugin_ids:
+                logger.warning("agent_plugin.trusted_root_mismatch plugin=%s", plugin_id)
+            else:
+                logger.warning("agent_plugin.mcp_untrusted plugin=%s", plugin_id)
+            # Installation/discovery never implies executable authority. Keep
+            # untrusted package extensions (including urlEnv) inert by rejecting
+            # the package before reading any execution-specific settings.
             continue
 
         raw_extension = package.manifest.extensions.get(
@@ -252,18 +269,6 @@ def load_agent_plugin_mcp_config(raw_paths: str | None = None) -> list[MCPServer
             if not isinstance(settings, dict) or set(settings) - _PLUGIN_MCP_EXTENSION_FIELDS:
                 logger.warning("agent_plugin.mcp_extension_invalid server=%s", server.name)
                 settings = {}
-
-            plugin_id = f"{package.manifest.name}@{package.manifest.version}"
-            trusted_plugin = (
-                plugin_id in trusted_plugin_ids and package.root in trusted_plugin_roots
-            )
-            if plugin_id in trusted_plugin_ids and package.root not in trusted_plugin_roots:
-                logger.warning("agent_plugin.trusted_root_mismatch server=%s", server.name)
-            if server.transport == "stdio" and not trusted_plugin:
-                # A stdio component is executable code. Parsing is portable,
-                # but only an operator-trusted plugin may cross this boundary.
-                logger.warning("agent_plugin.mcp_stdio_untrusted server=%s", server.name)
-                continue
 
             override_url: str | None = None
             url_env = settings.get("urlEnv")

@@ -3,9 +3,9 @@
 Phase 5d moved the canonical implementation to
 ``ai_gateway_core.working_memory`` so gateway's task queue (file
 processing) can pull it without a compile-time dep on
-``assistant_service``. Shim kept so AS-internal sites
-(tool_orchestrator, agent_loop, react_executor, todo_tools,
-assistant_service, tasks.task_manager) keep working unchanged.
+``assistant_service``. Shim kept so AS-internal sites (agent_loop,
+todo_tools, assistant_service, tasks.task_manager) keep working
+unchanged.
 """
 
 from __future__ import annotations

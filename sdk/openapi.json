@@ -14632,8 +14632,9 @@
           },
           "confirm_plan": {
             "type": "boolean",
+            "const": false,
             "title": "Confirm Plan",
-            "description": "Confirm execution plan before running tools",
+            "description": "Reserved for durable plan approval and resume; true is rejected in this release",
             "default": false
           },
           "execution_profile": {

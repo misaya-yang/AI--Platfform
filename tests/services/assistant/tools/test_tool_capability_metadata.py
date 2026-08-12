@@ -64,7 +64,6 @@ def test_repository_read_tools_declare_replay_safe_metadata(
         DOCUMENT_GENERATION_DEFINITION,
         PPTX_GENERATION_DEFINITION,
         QUIZ_GENERATION_DEFINITION,
-        SPAWN_SUBAGENT_DEFINITION,
         TODO_WRITE_DEFINITION,
     ],
 )
@@ -75,8 +74,16 @@ def test_repository_control_and_artifact_tools_declare_write_metadata(
 
 
 def test_external_write_boundaries_are_declared() -> None:
-    assert SPAWN_SUBAGENT_DEFINITION.capability_metadata["external_service"] is True
     assert QUIZ_GENERATION_DEFINITION.capability_metadata["external_service"] is True
+
+
+def test_subagent_dispatch_is_non_mutating_and_never_blindly_retried() -> None:
+    metadata = SPAWN_SUBAGENT_DEFINITION.capability_metadata
+
+    assert metadata["operation_kind"] == "read"
+    assert metadata["read_only"] is True
+    assert metadata["external_service"] is True
+    assert SPAWN_SUBAGENT_DEFINITION.max_retries == 0
 
 
 def test_document_tool_advertises_only_runtime_supported_formats() -> None:

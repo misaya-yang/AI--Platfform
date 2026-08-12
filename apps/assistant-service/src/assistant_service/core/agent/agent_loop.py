@@ -225,18 +225,10 @@ class AgentLoop(
     ExecutionLifecycleMixin,
     StreamingExecutionMixin,
 ):
-    """
-    Unified 8-step agent loop for enterprise AI assistant.
+    """Streaming-first assistant turn lifecycle.
 
-    Orchestrates:
-    1. Memory Loading (SessionMemory/WorkingMemory)
-    2. Scenario Analysis (ScenarioAnalyzer)
-    3. Task Planning (TaskPlanner)
-    4. RAG Retrieval (ScenarioAwareRetriever)
-    5. Context Building (ContextEngine)
-    6. Execution Loop (ReActExecutor / ToolOrchestrator)
-    7. Context Compression (ContextCompressor)
-    8. Content Generation & Storage
+    Context preparation, model/tool iteration, terminal synthesis, persistence,
+    and resume handling share one event-producing execution path.
     """
 
     def __init__(
@@ -307,6 +299,13 @@ class AgentLoop(
         self.database = database
         self.trace_writer = trace_writer
         self.assistant_runtime = runtime_adapter
+        # Optional trusted control-plane adapter.  Definitions are never
+        # registered globally; StreamingPreparation resolves a fresh run-local
+        # capability intersection before exposing any Local Node tool.
+        self.local_node_tool_provider: Any | None = None
+        # Optional trusted server resolver for OpenAI native computer/shell
+        # targets.  It is request scoped and absent by default.
+        self.openai_responses_local_binding_resolver: Any | None = None
         if (
             self.assistant_runtime is None
             and self.database is not None
@@ -361,6 +360,7 @@ class AgentLoop(
                 tool_registry=get_tool_registry(),
                 tool_invoker=self.tool_invoker,
                 execution_gateway=self.execution_gateway,
+                artifact_storage=self.artifact_storage,
             )
         return self._subagent_manager
 
@@ -402,6 +402,46 @@ class AgentLoop(
             return None
         if not isinstance(limitations, list) or len(limitations) > 20:
             return None
+        if result.get("schema_version") is not None:
+            if result.get("schema_version") != "assistant-subagent-result/v1":
+                return None
+            if not all(isinstance(item, str) for item in limitations):
+                return None
+            if any(
+                not isinstance(claim, dict)
+                or not isinstance(claim.get("text"), str)
+                or not isinstance(claim.get("evidence_ids"), list)
+                or any(not isinstance(value, str) for value in claim["evidence_ids"])
+                for claim in claims
+            ):
+                return None
+            if any(
+                not isinstance(item, dict) or not isinstance(item.get("evidence_id"), str)
+                for item in evidence
+            ):
+                return None
+            structured_payload = result.get("structured_payload")
+            if structured_payload is not None and not isinstance(structured_payload, dict):
+                return None
+            usage = result.get("usage")
+            if not isinstance(usage, dict) or set(usage) != {
+                "model_turns",
+                "tool_calls",
+                "output_characters",
+                "correction_rounds",
+                "duration_ms",
+            }:
+                return None
+            for name in (
+                "model_turns",
+                "tool_calls",
+                "output_characters",
+                "correction_rounds",
+                "duration_ms",
+            ):
+                value = usage[name]
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                    return None
         if status == "completed" and not claims:
             return None
         return result
@@ -1148,7 +1188,7 @@ class AgentLoop(
         synthesis_usage: dict[str, int] = {}
         synthesis_finish_reason: str | None = None
         try:
-            ctx.run_budget.consume_model_turn()
+            ctx.run_budget.consume_model_turn(purpose="synthesis")
             model_messages, packet_receipt = self._compile_auxiliary_context_packet(
                 ctx,
                 messages=synthesis_messages,
@@ -1187,6 +1227,7 @@ class AgentLoop(
                 # Qwen 3.7 enables thinking by default. This short, deterministic
                 # post-tool summary should not consume a second reasoning budget.
                 thinking_level="off",
+                budget_purpose="synthesis",
             ):
                 if isinstance(streamed, AgentLoopEvent):
                     yield streamed

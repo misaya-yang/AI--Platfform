@@ -11,7 +11,7 @@ import re
 import time
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal
 
 from ai_gateway_core.agents import (
     AgentRuntimeEnvelopeError,
@@ -26,7 +26,7 @@ from ai_gateway_core.proxy.sse_heartbeat import (
 )
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ...auth import UserContext, get_user_context
 from ..deps import get_assistant_service, get_model_registry
@@ -76,8 +76,15 @@ class ChatRequest(BaseModel):
     execution_profile: str | None = None
     memory_mode: str | None = None
     os_agent_enabled: bool | None = None
+    local_node_device_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
+    local_node_grant_ids: list[str] = Field(default_factory=list, max_length=16)
     enable_task_planning: bool = False
-    confirm_plan: bool = False
+    confirm_plan: Literal[False] = False
     runtime_mode: str | None = None
     queue_mode: str | None = None
     context_detail: bool = False
@@ -111,6 +118,36 @@ class ChatRequest(BaseModel):
                 raise ValueError("Invalid knowledge dataset scope")
             if value.get("kb_include_images") is True:
                 raise ValueError("Multimodal knowledge retrieval is not enabled")
+            grant_ids = value.get("local_node_grant_ids")
+            if grant_ids is not None and (
+                not isinstance(grant_ids, list)
+                or len(grant_ids) > 16
+                or len(set(grant_ids)) != len(grant_ids)
+                or any(
+                    not isinstance(grant_id, str)
+                    or not grant_id
+                    or len(grant_id) > 128
+                    or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", grant_id) is None
+                    for grant_id in grant_ids
+                )
+            ):
+                raise ValueError("Local Node grant selectors are invalid")
+            has_device = bool(value.get("local_node_device_id"))
+            has_grants = bool(grant_ids)
+            if has_device != has_grants:
+                raise ValueError(
+                    "Local Node selectors require one device and at least one grant"
+                )
+        return value
+
+    @field_validator("confirm_plan", mode="before")
+    @classmethod
+    def reject_unsupported_plan_confirmation(cls, value: Any) -> Any:
+        if value is True:
+            raise ValueError(
+                "Plan confirmation is not supported until durable plan approval and resume "
+                "are available; omit confirm_plan or set it to false"
+            )
         return value
 
 
@@ -251,6 +288,8 @@ def _build_config(
         execution_profile=body.execution_profile,
         memory_mode=body.memory_mode,
         os_agent_enabled=body.os_agent_enabled,
+        local_node_device_id=body.local_node_device_id,
+        local_node_grant_ids=list(body.local_node_grant_ids),
         runtime_mode=body.runtime_mode,
         queue_mode=body.queue_mode,
         context_detail=body.context_detail,
@@ -993,7 +1032,8 @@ def _public_agent_event_data(event_type: Any, value: Any) -> dict[str, Any] | No
     projected = {}
     dataset_name = _public_agent_label(data.get("dataset_name"))
     dataset_id = _public_agent_label(data.get("dataset_id"), max_length=128)
-    chunks = data.get("chunks") if isinstance(data.get("chunks"), list) else []
+    raw_chunks = data.get("chunks")
+    chunks: list[Any] = raw_chunks if isinstance(raw_chunks, list) else []
     if chunks and isinstance(chunks[0], dict):
         dataset_name = dataset_name or _public_agent_label(chunks[0].get("dataset_name"))
         dataset_id = dataset_id or _public_agent_label(chunks[0].get("dataset_id"), max_length=128)
@@ -1001,13 +1041,14 @@ def _public_agent_event_data(event_type: Any, value: Any) -> dict[str, Any] | No
         projected["dataset_name"] = dataset_name
     if dataset_id:
         projected["dataset_id"] = dataset_id
-    citations = data.get("citations") if isinstance(data.get("citations"), list) else []
+    raw_citations = data.get("citations")
+    citations: list[Any] = raw_citations if isinstance(raw_citations, list) else []
     citation_count = len(citations) if citations else len(chunks)
     if citation_count:
         projected["citation_count"] = min(citation_count, 10_000)
-    status = _public_agent_label(data.get("status"), max_length=32)
-    if status and status.lower() in _PUBLIC_TOOL_STATUSES:
-        projected["status"] = status.lower()
+    public_status = _public_agent_label(data.get("status"), max_length=32)
+    if public_status and public_status.lower() in _PUBLIC_TOOL_STATUSES:
+        projected["status"] = public_status.lower()
     return projected
 
 

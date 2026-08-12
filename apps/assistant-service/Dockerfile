@@ -93,6 +93,8 @@ ENV PATH="/opt/venv/bin:$PATH"
 # Copy assistant service only — no gateway src/ shim required.
 COPY apps/assistant-service/src/ ./apps/assistant-service/src/
 COPY agent-plugins/ai-docgen/ /opt/agent-plugins/ai-docgen/
+COPY agent-plugins/community-doublecheck/ /opt/agent-plugins/community-doublecheck/
+COPY agent-plugins/community-engineering-reviewers/ /opt/agent-plugins/community-engineering-reviewers/
 
 RUN useradd --uid 1000 --create-home appuser && \
     mkdir -p /app/logs /app/uploads /app/data/agent-plugins && \

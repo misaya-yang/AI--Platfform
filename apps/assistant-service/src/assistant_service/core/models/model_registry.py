@@ -391,6 +391,7 @@ class ModelRegistry(RegistryLifecycleMixin):
         thinking_level: str | None = None,
         tool_config: dict[str, Any] | None = None,
         native_search_config: dict[str, Any] | None = None,
+        openai_local_runtime: Any | None = None,
     ) -> dict[str, Any]:
         """Build request body for the provider's API."""
         if self._uses_responses_v1(provider):
@@ -408,6 +409,9 @@ class ModelRegistry(RegistryLifecycleMixin):
                 tools=tools,
                 stream=stream,
                 reasoning_effort=reasoning_effort,
+                local_runtime=(
+                    openai_local_runtime if provider == ModelProvider.OPENAI else None
+                ),
             )
             if provider == ModelProvider.DASHSCOPE:
                 qwen_thinking_enabled = _qwen_thinking_enabled(model_id, thinking_level)
@@ -1023,6 +1027,7 @@ class ModelRegistry(RegistryLifecycleMixin):
         tools: list[dict[str, Any]] | None = None,
         thinking_level: str | None = None,
         native_search_config: dict[str, Any] | None = None,
+        openai_local_runtime: Any | None = None,
     ) -> tuple[str, dict[str, int]]:
         """
         Non-streaming chat completion.
@@ -1051,6 +1056,7 @@ class ModelRegistry(RegistryLifecycleMixin):
             stream=False,
             thinking_level=thinking_level,
             native_search_config=native_search_config,
+            openai_local_runtime=openai_local_runtime,
         )
 
         if model.provider == ModelProvider.GOOGLE:
@@ -1133,6 +1139,7 @@ class ModelRegistry(RegistryLifecycleMixin):
         thinking_level: str | None = None,
         tool_config: dict[str, Any] | None = None,
         native_search_config: dict[str, Any] | None = None,
+        openai_local_runtime: Any | None = None,
     ) -> AsyncIterator[StreamDelta]:
         """
         Streaming chat completion.
@@ -1161,6 +1168,7 @@ class ModelRegistry(RegistryLifecycleMixin):
             thinking_level=thinking_level,
             tool_config=tool_config,
             native_search_config=native_search_config,
+            openai_local_runtime=openai_local_runtime,
         )
 
         try:
@@ -1179,13 +1187,21 @@ class ModelRegistry(RegistryLifecycleMixin):
             elif self._uses_responses_v1(model.provider):
                 endpoint = self._responses_endpoint(model.provider)
                 async with _safe_provider_stream(client, endpoint, body) as response:
-                    async for response_delta in iter_responses_stream(response.aiter_lines()):
+                    async for response_delta in iter_responses_stream(
+                        response.aiter_lines(),
+                        local_runtime=(
+                            openai_local_runtime
+                            if model.provider == ModelProvider.OPENAI
+                            else None
+                        ),
+                    ):
                         yield StreamDelta(
                             content=response_delta.content,
                             tool_calls=response_delta.tool_calls,
                             finish_reason=response_delta.finish_reason,
                             usage=response_delta.usage,
                             thinking_content=response_delta.thinking_content,
+                            provider_content_blocks=response_delta.provider_content_blocks,
                         )
             else:
                 endpoint = "/v1/chat/completions"

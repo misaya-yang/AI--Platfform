@@ -24,14 +24,15 @@ import hashlib
 import json
 import logging
 import uuid
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import urlsplit
 
 from ai_gateway_core.storage import get_artifact_storage
 from ai_gateway_core.style_presets import StylePreset  # noqa: F401 — pydantic schema uses it
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 from ...core.auth.user_resolver import UserContext
 from ..deps import get_user_context
@@ -280,6 +281,163 @@ class ResumeResponse(BaseModel):
     resume: dict
 
 
+class LocalNodePairingChallengeRequest(BaseModel):
+    """Browser-safe input for starting (but never completing) pairing."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    display_name_hint: str | None = Field(default=None, min_length=1, max_length=80)
+    ttl_seconds: int = Field(default=180, ge=30, le=600)
+
+
+class LocalNodeRevokeRequest(BaseModel):
+    """Browser-safe reason attached to an owner-initiated device revocation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = Field(default=None, max_length=240)
+
+
+LocalNodeOpaqueId = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    ),
+]
+
+
+async def _proxy_local_node_read(
+    request: Request,
+    user: UserContext,
+    *,
+    path: str,
+):
+    """Proxy one explicitly declared Local Node control-plane read.
+
+    This is intentionally not a catch-all route. Host action dispatch,
+    approval receipts, device event append, pairing completion, and grant
+    creation must use trusted internal/device channels instead of Web auth.
+    """
+
+    from ._assistant_proxy import proxy_to_assistant_service
+
+    upstream_path = "local-nodes" if not path else f"local-nodes/{path}"
+    return await proxy_to_assistant_service(request, user, path=upstream_path)
+
+
+@router.post("/local-nodes/pairing/challenges", status_code=201)
+async def create_local_node_pairing_challenge(
+    body: LocalNodePairingChallengeRequest,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+):
+    """Start owner-bound pairing; device proof must complete it out of band."""
+
+    from ._assistant_proxy import proxy_to_assistant_service
+
+    body_bytes = body.model_dump_json(exclude_none=True).encode("utf-8")
+    return await proxy_to_assistant_service(
+        request,
+        user,
+        path="local-nodes/pairing/challenges",
+        body=body_bytes,
+    )
+
+
+@router.get("/local-nodes")
+async def list_local_nodes(
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+):
+    return await _proxy_local_node_read(request, user, path="")
+
+
+@router.post("/local-nodes/{device_id}/revoke")
+async def revoke_local_node(
+    device_id: LocalNodeOpaqueId,
+    body: LocalNodeRevokeRequest,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+):
+    """Revoke an owner-bound device without exposing host action execution."""
+
+    from ._assistant_proxy import proxy_to_assistant_service
+
+    body_bytes = body.model_dump_json(exclude_none=True).encode("utf-8")
+    return await proxy_to_assistant_service(
+        request,
+        user,
+        path=f"local-nodes/{device_id}/revoke",
+        body=body_bytes,
+    )
+
+
+@router.get("/local-nodes/{device_id}/status")
+async def get_local_node_status(
+    device_id: LocalNodeOpaqueId,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+):
+    return await _proxy_local_node_read(request, user, path=f"{device_id}/status")
+
+
+@router.get("/local-nodes/{device_id}/capabilities")
+async def get_local_node_capabilities(
+    device_id: LocalNodeOpaqueId,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+):
+    return await _proxy_local_node_read(request, user, path=f"{device_id}/capabilities")
+
+
+@router.get("/local-nodes/{device_id}/doctor")
+async def get_local_node_doctor(
+    device_id: LocalNodeOpaqueId,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+):
+    return await _proxy_local_node_read(request, user, path=f"{device_id}/doctor")
+
+
+@router.get("/local-nodes/{device_id}/grants")
+async def list_local_node_grants(
+    device_id: LocalNodeOpaqueId,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+):
+    return await _proxy_local_node_read(request, user, path=f"{device_id}/grants")
+
+
+@router.delete("/local-nodes/{device_id}/grants/{grant_id}")
+async def revoke_local_node_grant(
+    device_id: LocalNodeOpaqueId,
+    grant_id: LocalNodeOpaqueId,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+):
+    """Remove a grant; new grants require the trusted device channel."""
+
+    from ._assistant_proxy import proxy_to_assistant_service
+
+    return await proxy_to_assistant_service(
+        request,
+        user,
+        path=f"local-nodes/{device_id}/grants/{grant_id}",
+    )
+
+
+@router.get("/local-nodes/{device_id}/events")
+async def list_local_node_events(
+    device_id: LocalNodeOpaqueId,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+):
+    return await _proxy_local_node_read(request, user, path=f"{device_id}/events")
+
+
 @router.get("/tools", response_model=ToolsListResponse)
 async def list_tools(
     request: Request,
@@ -472,6 +630,14 @@ async def chat_stream(
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
+    # Keep the streaming edge contract identical to the typed non-streaming
+    # route. In particular, fail before proxying fields that the downstream
+    # service deliberately reserves for a future durable implementation.
+    try:
+        validated_body = AssistantChatRequest.model_validate(body_json)
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
+
     from ._assistant_proxy import reject_client_agent_forgery
 
     reject_client_agent_forgery(
@@ -483,7 +649,7 @@ async def chat_stream(
     # 403 comes back without a proxy round-trip. DB-backed
     # ``GatewayModelMeta`` query (<1 ms) — the old in-memory
     # ModelRegistry lookup went away with Phase 5e's split.
-    model_id = body_json.get("model_id")
+    model_id = validated_body.model_id
     model_meta = getattr(request.app.state, "model_meta", None)
     if model_id and model_meta:
         await _check_model_permission(user, model_id, model_meta)
@@ -491,7 +657,7 @@ async def chat_stream(
     # Authz 2: session ownership. Users resuming a conversation must own
     # that session. assistant-service would also reject mismatches via
     # its own session manager, but defence-in-depth belongs at the edge.
-    session_id = body_json.get("session_id")
+    session_id = validated_body.session_id
     if session_id:
         await _validate_chat_session_access(request=request, user=user, session_id=session_id)
 

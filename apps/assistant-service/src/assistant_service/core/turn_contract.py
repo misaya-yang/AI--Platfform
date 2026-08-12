@@ -384,6 +384,36 @@ class TurnKernel:
     def snapshot(self) -> dict[str, Any]:
         return self._snapshot(self.state, self.sequence_no, list(self.transitions))
 
+    def stream_snapshot(self) -> dict[str, Any]:
+        """Return the per-event projection: identity and current state only.
+
+        Every SSE event carries a turn-state projection, including one per
+        text/thinking delta. ``snapshot()`` embeds the whole ``transitions``
+        audit trail, so using it here makes total stream bytes grow with
+        (event count x transition count) — a short turn measured 128 KB of
+        repeated turn-state, and the trail is identical on consecutive
+        deltas.
+
+        This projection keeps every field a consumer needs to correlate an
+        event (ids, state, terminal flag, sequence number) plus the single
+        most recent transition, and replaces the array with its length. The
+        full trail is unchanged on the terminal envelope and the context
+        snapshot, which is where auditors read it.
+
+        Because two shapes now travel under one ``schema_version``, both
+        carry an explicit ``projection`` discriminator so a consumer can tell
+        them apart without inferring it from which keys happen to be present.
+        """
+
+        # Built from _snapshot so any field added there is picked up here too;
+        # only the unbounded array is swapped for its summary.
+        payload = self._snapshot(self.state, self.sequence_no, [])
+        payload.pop("transitions", None)
+        payload["projection"] = "compact"
+        payload["transition_count"] = len(self.transitions)
+        payload["last_transition"] = dict(self.transitions[-1]) if self.transitions else None
+        return payload
+
     def _snapshot(
         self,
         state: TurnState,
@@ -392,6 +422,9 @@ class TurnKernel:
     ) -> dict[str, Any]:
         return {
             "schema_version": TURN_KERNEL_SCHEMA_VERSION,
+            # Paired with ``stream_snapshot``'s "compact": says whether
+            # ``transitions`` holds the full audit trail or was summarized.
+            "projection": "full",
             "run_id": self.run_id,
             "request_id": self.request_id,
             "attempt_id": self.attempt_id,

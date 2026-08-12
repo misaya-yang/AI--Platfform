@@ -5,6 +5,7 @@
  */
 
 import { useEffect, useState, useRef, useCallback, useMemo, Component, type ErrorInfo, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import {
@@ -15,6 +16,8 @@ import {
   AlertCircle,
   Share2,
   Sparkles,
+  MonitorCog,
+  Network,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -50,6 +53,8 @@ import { ShareDialog } from "./components/ShareDialog";
 import ConnectorsPanel from "./components/ConnectorsPanel";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { ActivityPanel } from "./components/ActivityPanel";
+import { SubAgentWorkspacePanel } from "./components/SubAgentWorkspacePanel";
+import { LocalOSPanel, useLocalOSControl } from "./local-os";
 import {
   RightPanelContext,
   type RightPanel,
@@ -220,6 +225,8 @@ export function AssistantPage() {
   const [showScrollButton, setShowScrollButton] = useState(false);
   const [showShareDialog, setShowShareDialog] = useState(false);
   const [showConnectors, setShowConnectors] = useState(false);
+  const [showLocalOS, setShowLocalOS] = useState(false);
+  const [subagentMessageId, setSubagentMessageId] = useState<string | null>(null);
   const [connectorCount, setConnectorCount] = useState(0);
   const [isMobile, setIsMobile] = useState(false);
   const shouldReduceMotion = useReducedMotion();
@@ -234,6 +241,7 @@ export function AssistantPage() {
   const [activityMessageId, setActivityMessageId] = useState<string | null>(null);
   
   // 4. Complex Logic Hooks
+  const localOSState = useLocalOSControl();
   const {
     sessions,
     setSessions,
@@ -257,12 +265,21 @@ export function AssistantPage() {
     workingMemory,
     showTaskPanel,
     codeExecution,
-  } = useChatSession();
+  } = useChatSession({
+    isOSAgentEligible: localOSState.isSessionOptInEffectiveNow,
+    getLocalNodeBinding: localOSState.getSessionBindingNow,
+  });
+  const {
+    disableSessionOptIn,
+    isSessionOptInEffectiveNow,
+  } = localOSState;
 
   // Mutex: opening Activity forces Artifacts closed, and vice-versa.
   const openActivity = useCallback(
     (messageId: string) => {
       setActivityMessageId(messageId);
+      setSubagentMessageId(null);
+      setShowLocalOS(false);
       if (showArtifacts) setShowArtifacts(false);
     },
     [showArtifacts, setShowArtifacts],
@@ -272,17 +289,38 @@ export function AssistantPage() {
     setActivityMessageId(null);
   }, []);
 
+  const openSubagents = useCallback(
+    (messageId: string) => {
+      setSubagentMessageId(messageId);
+      setActivityMessageId(null);
+      setShowLocalOS(false);
+      if (showArtifacts) setShowArtifacts(false);
+    },
+    [showArtifacts, setShowArtifacts],
+  );
+
+  const closeSubagents = useCallback(() => {
+    setSubagentMessageId(null);
+  }, []);
+
   // When something opens Artifacts (SSE delivery, user affordance),
-  // close Activity.
+  // close the other right-side panels.
   useEffect(() => {
-    if (!showArtifacts || !activityMessageId) return;
-    const timer = window.setTimeout(() => setActivityMessageId(null), 0);
+    if (!showArtifacts || (!activityMessageId && !subagentMessageId && !showLocalOS)) return;
+    const timer = window.setTimeout(() => {
+      setActivityMessageId(null);
+      setSubagentMessageId(null);
+      setShowLocalOS(false);
+    }, 0);
     return () => window.clearTimeout(timer);
-  }, [showArtifacts, activityMessageId]);
+  }, [showArtifacts, activityMessageId, subagentMessageId, showLocalOS]);
 
   // If the user switches sessions, drop any stale Activity selection.
   useEffect(() => {
-    const timer = window.setTimeout(() => setActivityMessageId(null), 0);
+    const timer = window.setTimeout(() => {
+      setActivityMessageId(null);
+      setSubagentMessageId(null);
+    }, 0);
     return () => window.clearTimeout(timer);
   }, [activeSessionId]);
 
@@ -296,11 +334,23 @@ export function AssistantPage() {
     }
   }, [messages, activityMessageId]);
 
-  const rightPanel: RightPanel = activityMessageId
-    ? "activity"
-    : showArtifacts
-      ? "artifacts"
-      : null;
+  useEffect(() => {
+    if (!subagentMessageId) return;
+    if (!messages.some((message) => message.id === subagentMessageId)) {
+      const timer = window.setTimeout(() => setSubagentMessageId(null), 0);
+      return () => window.clearTimeout(timer);
+    }
+  }, [messages, subagentMessageId]);
+
+  const rightPanel: RightPanel = showLocalOS
+    ? "local_os"
+    : subagentMessageId
+      ? "subagents"
+      : activityMessageId
+        ? "activity"
+        : showArtifacts
+          ? "artifacts"
+          : null;
   const mobilePanelWidth =
     isMobile && typeof window !== "undefined"
       ? Math.min(window.innerWidth, 430)
@@ -310,6 +360,28 @@ export function AssistantPage() {
     () => (activityMessageId ? messages.find((m) => m.id === activityMessageId) ?? null : null),
     [messages, activityMessageId],
   );
+
+  const activeSubagentMessage = useMemo(
+    () => (subagentMessageId
+      ? messages.find((message) => message.id === subagentMessageId) ?? null
+      : null),
+    [messages, subagentMessageId],
+  );
+
+  const latestSubagentMessageId = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message.role === "assistant" && (message.activeSubAgents?.length ?? 0) > 0) {
+        return message.id;
+      }
+    }
+    return null;
+  }, [messages]);
+
+  const latestSubagentCount = useMemo(() => {
+    if (!latestSubagentMessageId) return 0;
+    return messages.find((message) => message.id === latestSubagentMessageId)?.activeSubAgents?.length ?? 0;
+  }, [latestSubagentMessageId, messages]);
 
   // Most recent assistant message — the default target for the top-bar
   // Activity chip when the drawer is closed. We don't need step content
@@ -360,10 +432,21 @@ export function AssistantPage() {
     () => ({
       rightPanel,
       activityMessageId,
+      subagentMessageId,
       openActivity,
       closeActivity,
+      openSubagents,
+      closeSubagents,
     }),
-    [rightPanel, activityMessageId, openActivity, closeActivity],
+    [
+      rightPanel,
+      activityMessageId,
+      subagentMessageId,
+      openActivity,
+      closeActivity,
+      openSubagents,
+      closeSubagents,
+    ],
   );
 
   const {
@@ -486,6 +569,7 @@ export function AssistantPage() {
   // Sync settings when session changes
   const onSessionSelect = useCallback(async (sessionId: string) => {
     cancelImageMode(); // Reset image mode when switching sessions
+    disableSessionOptIn();
     if (isMobile) setShowLeftPanel(false);
     const sessionConfig = await handleSelectSession(sessionId);
     if (sessionConfig) {
@@ -497,18 +581,19 @@ export function AssistantPage() {
       if (typeof sessionConfig.temperature === "number") setTemperature(sessionConfig.temperature);
       if (sessionConfig.selected_style) setSelectedStyle(sessionConfig.selected_style);
     }
-  }, [handleSelectSession, models, cancelImageMode, isMobile, setShowLeftPanel]);
+  }, [handleSelectSession, models, cancelImageMode, isMobile, setShowLeftPanel, disableSessionOptIn]);
 
   // Handle new chat - reset all state including feature toggles
   const onNewChat = useCallback(() => {
     cancelImageMode(); // Reset image mode
+    disableSessionOptIn();
     handleNewChat();
     if (isMobile) setShowLeftPanel(false);
     // Reset feature toggles to defaults
     setSelectedDatasets([]);  // Clear selected knowledge bases
     setWebSearchEnabled(false);  // Disable web search
     // Keep model and temperature as user preferences
-  }, [handleNewChat, cancelImageMode, isMobile, setShowLeftPanel]);
+  }, [handleNewChat, cancelImageMode, isMobile, setShowLeftPanel, disableSessionOptIn]);
 
   useChatShortcuts({
     surface: "assistant",
@@ -568,7 +653,7 @@ export function AssistantPage() {
         selected_style: selectedStyle,
         execution_profile: "safe",
         memory_mode: "auto",
-        os_agent_enabled: false,
+        os_agent_enabled: isSessionOptInEffectiveNow(),
       },
       selectedDatasets,
       models,
@@ -577,7 +662,7 @@ export function AssistantPage() {
     
     setInput("");
     clearFiles();
-  }, [input, files, selectedModel, selectedDatasets, webSearchEnabled, temperature, selectedStyle, models, datasets, isStreaming, isUploading, isGeneratingImage, sendMessage, clearFiles, t, toast]);
+  }, [input, files, selectedModel, selectedDatasets, webSearchEnabled, temperature, selectedStyle, models, datasets, isStreaming, isUploading, isGeneratingImage, sendMessage, clearFiles, t, toast, isSessionOptInEffectiveNow]);
 
   // Handle Image Send
   const handleImageSend = useCallback(() => {
@@ -744,8 +829,45 @@ export function AssistantPage() {
               )}
               {/* Spacer pushes right-side chips to the far right of the top bar */}
               <div className="flex-1" />
-              {/* Right-panel chips: Activity + Artifacts. Mutex is enforced
-                  at the state level (rightPanel = "activity" | "artifacts" | null).
+              <RightPanelChip
+                icon={<Network className="h-3.5 w-3.5" />}
+                label="Agents"
+                count={latestSubagentCount}
+                active={rightPanel === "subagents"}
+                disabled={latestSubagentMessageId == null}
+                onClick={() => {
+                  if (!latestSubagentMessageId) return;
+                  if (rightPanel === "subagents") {
+                    closeSubagents();
+                  } else {
+                    openSubagents(latestSubagentMessageId);
+                  }
+                }}
+              />
+              <RightPanelChip
+                icon={<MonitorCog className="h-3.5 w-3.5" />}
+                label={
+                  localOSState.loadState === "loading"
+                    ? "Local files…"
+                    : localOSState.loadState === "online"
+                      ? "Local files"
+                      : "Local files offline"
+                }
+                count={localOSState.onlineDeviceCount}
+                active={rightPanel === "local_os"}
+                onClick={() => {
+                  if (rightPanel === "local_os") {
+                    setShowLocalOS(false);
+                  } else {
+                    setActivityMessageId(null);
+                    setSubagentMessageId(null);
+                    setShowArtifacts(false);
+                    setShowLocalOS(true);
+                  }
+                }}
+              />
+              {/* Activity and Artifacts share the same mutex as Local OS
+                  (rightPanel = "local_os" | "activity" | "artifacts" | null).
                   Each chip toggles its own panel; opening one auto-closes the
                   other via useEffect. A chip shows a subtle gold underline
                   stripe when its panel is open.
@@ -782,6 +904,8 @@ export function AssistantPage() {
                           setShowArtifacts(false);
                         } else {
                           setActivityMessageId(null);
+                          setSubagentMessageId(null);
+                          setShowLocalOS(false);
                           setShowArtifacts(true);
                         }
                       }}
@@ -983,6 +1107,24 @@ export function AssistantPage() {
           )}
 
           <AnimatePresence>
+            {!isMobile && rightPanel === "subagents" && activeSubagentMessage && (
+              <motion.aside
+                initial={shouldReduceMotion ? false : { width: 0, opacity: 0 }}
+                animate={{ width: 420, opacity: 1 }}
+                exit={shouldReduceMotion ? { opacity: 0 } : { width: 0, opacity: 0 }}
+                className="shrink-0 overflow-hidden"
+              >
+                <SubAgentWorkspacePanel
+                  open
+                  onClose={closeSubagents}
+                  message={activeSubagentMessage}
+                  width={420}
+                />
+              </motion.aside>
+            )}
+          </AnimatePresence>
+
+          <AnimatePresence>
             {isMobile && rightPanel === "activity" && activeActivityMessage && (
               <motion.div
                 initial={shouldReduceMotion ? false : { opacity: 0 }}
@@ -1014,6 +1156,42 @@ export function AssistantPage() {
               </motion.div>
             )}
           </AnimatePresence>
+
+          {typeof document !== "undefined" ? createPortal(
+            <AnimatePresence>
+              {isMobile && rightPanel === "subagents" && activeSubagentMessage && (
+              <motion.div
+                initial={shouldReduceMotion ? false : { opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 z-40 bg-black/45"
+                onClick={closeSubagents}
+                role="presentation"
+              >
+                <motion.div
+                  initial={shouldReduceMotion ? false : { y: "100%" }}
+                  animate={{ y: 0 }}
+                  exit={shouldReduceMotion ? { opacity: 0 } : { y: "100%" }}
+                  transition={shouldReduceMotion ? { duration: 0 } : { type: "spring", damping: 28, stiffness: 260 }}
+                  className="absolute inset-x-0 bottom-0 h-[88vh] overflow-hidden rounded-t-2xl"
+                  onClick={(event) => event.stopPropagation()}
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label="Sub-agent workbench"
+                >
+                  <SubAgentWorkspacePanel
+                    open
+                    onClose={closeSubagents}
+                    message={activeSubagentMessage}
+                    width={typeof window === "undefined" ? 430 : window.innerWidth}
+                    className="rounded-t-2xl"
+                  />
+                </motion.div>
+              </motion.div>
+              )}
+            </AnimatePresence>,
+            document.body,
+          ) : null}
 
           {/* Artifacts Panel — same 380px width as ActivityPanel so the
               right lane feels uniform when switching chips. */}
@@ -1067,6 +1245,61 @@ export function AssistantPage() {
                     executionTimeMs={codeExecution.executionTimeMs || undefined}
                     outputFiles={codeExecution.outputFiles}
                     className="h-full rounded-t-2xl"
+                  />
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          <AnimatePresence>
+            {!isMobile && rightPanel === "local_os" && (
+              <motion.aside
+                initial={shouldReduceMotion ? false : { width: 0, opacity: 0 }}
+                animate={{ width: 560, opacity: 1 }}
+                exit={shouldReduceMotion ? { opacity: 0 } : { width: 0, opacity: 0 }}
+                className="shrink-0 overflow-hidden"
+              >
+                <LocalOSPanel
+                  open
+                  onClose={() => setShowLocalOS(false)}
+                  state={localOSState}
+                  width={560}
+                />
+              </motion.aside>
+            )}
+          </AnimatePresence>
+
+          <AnimatePresence>
+            {isMobile && rightPanel === "local_os" && (
+              <motion.div
+                initial={shouldReduceMotion ? false : { opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 z-40 bg-black/45"
+                onClick={() => setShowLocalOS(false)}
+                role="presentation"
+              >
+                <motion.div
+                  initial={shouldReduceMotion ? false : { y: "100%" }}
+                  animate={{ y: 0 }}
+                  exit={shouldReduceMotion ? { opacity: 0 } : { y: "100%" }}
+                  transition={
+                    shouldReduceMotion
+                      ? { duration: 0 }
+                      : { type: "spring", damping: 28, stiffness: 260 }
+                  }
+                  className="absolute inset-x-0 bottom-0 h-[92vh] overflow-hidden rounded-t-2xl"
+                  onClick={(event) => event.stopPropagation()}
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label="Local files"
+                >
+                  <LocalOSPanel
+                    open
+                    onClose={() => setShowLocalOS(false)}
+                    state={localOSState}
+                    width={typeof window === "undefined" ? 430 : window.innerWidth}
+                    className="rounded-t-2xl"
                   />
                 </motion.div>
               </motion.div>

@@ -58,7 +58,7 @@ class ExecutionLifecycleMixin:
         context_type: type[AgentLoopContext],
     ) -> AsyncGenerator[AgentLoopEvent, None]:
         """
-        Execute the complete 8-step agent loop.
+        Execute one streaming-first assistant turn lifecycle.
 
         Args:
             session_id: Unique session identifier
@@ -212,14 +212,17 @@ class ExecutionLifecycleMixin:
                         self._trace_context(ctx)
                     )
             except Exception as exc:
-                yield self._canonical_terminal_error_event(
-                    ctx,
-                    error="trace_resume_sequence_failed",
-                    exit_reason="trace_resume_sequence_failed",
-                    run_id=requested_run_id,
-                    details={"reason": _redact_trace_text(exc)},
+                # Trace persistence is best-effort and must not prevent an
+                # already-approved business operation from resuming.  Disable
+                # capture for this attempt instead of guessing a cursor that
+                # could overwrite an earlier event in the same trace.
+                ctx.trace_capture_disabled = True
+                ctx.trace_sequence_no = 0
+                logger.error(
+                    "Assistant trace resume disabled for this attempt without changing "
+                    "business execution (exception_type=%s)",
+                    type(exc).__name__,
                 )
-                return
 
         # Initialize metrics builder for observability
         ctx.metrics_builder = ContextMetricsBuilder(

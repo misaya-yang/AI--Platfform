@@ -80,6 +80,29 @@ def test_run_budget_wall_time_is_active_and_hard() -> None:
     assert error.value.dimension is RunBudgetDimension.WALL_TIME
 
 
+def test_run_budget_reserves_terminal_synthesis_headroom() -> None:
+    budget = RunBudget(_limits(max_model_turns=4, final_synthesis_headroom=2))
+
+    assert budget.remaining_work_model_turns == 2
+    budget.consume_model_turn()
+    budget.consume_model_turn()
+    assert budget.remaining_work_model_turns == 0
+    with pytest.raises(RunBudgetExceeded) as error:
+        budget.consume_model_turn()
+    assert error.value.limit == 2
+
+    # The sticky exhausted signal is deliberate. A well-behaved loop checks
+    # headroom before crossing it; a fresh equivalent budget shows that only
+    # explicit synthesis may consume the reserved terminal turns.
+    synthesis_budget = RunBudget(_limits(max_model_turns=4, final_synthesis_headroom=2))
+    synthesis_budget.consume_model_turn()
+    synthesis_budget.consume_model_turn()
+    synthesis_budget.consume_model_turn(purpose="synthesis")
+    synthesis_budget.consume_model_turn(purpose="synthesis")
+    with pytest.raises(RunBudgetExceeded):
+        synthesis_budget.consume_model_turn(purpose="synthesis")
+
+
 def test_run_budget_restore_preserves_usage_and_cannot_expand_limits() -> None:
     first_clock = FakeClock()
     original = RunBudget(_limits(), clock=first_clock)
@@ -150,6 +173,10 @@ def test_run_budget_limits_reject_non_canonical_numbers(
         ("limit_nan", "max_wall_time_seconds must be positive and finite"),
         ("limit_boolean", "max_model_turns must be a positive integer"),
         ("limit_float", "max_tool_calls must be a positive integer"),
+        (
+            "headroom_reduction",
+            "persisted run budget limits exceed configured limits",
+        ),
         ("limit_escalation", "persisted run budget limits exceed configured limits"),
     ],
 )
@@ -192,6 +219,12 @@ def test_run_budget_restore_rejects_tampered_snapshots(
         limits["max_model_turns"] = True
     elif case == "limit_float":
         limits["max_tool_calls"] = 3.0
+    elif case == "headroom_reduction":
+        limits["final_synthesis_headroom"] = 1
+        configured = _limits(max_model_turns=4, final_synthesis_headroom=2)
+        with pytest.raises(ValueError, match=expected_message):
+            RunBudget.restore(configured_limits=configured, snapshot=snapshot)
+        return
     elif case == "limit_escalation":
         limits["max_model_turns"] = _limits().max_model_turns + 1
     else:  # pragma: no cover - keeps the case table exhaustive

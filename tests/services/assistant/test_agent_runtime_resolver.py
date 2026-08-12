@@ -196,11 +196,49 @@ def test_generic_assistant_schema_rejects_unbounded_or_multimodal_kb_scope(paylo
         ChatRequest.model_validate(payload)
 
 
+def test_generic_assistant_schema_rejects_unresumable_plan_confirmation() -> None:
+    with pytest.raises(ValidationError, match="durable plan approval"):
+        ChatRequest.model_validate({"message": "hello", "confirm_plan": True})
+
+
+def test_generic_assistant_schema_requires_bounded_local_node_selection() -> None:
+    assert ChatRequest.model_validate(
+        {"message": "hello", "os_agent_enabled": True}
+    ).local_node_device_id is None
+
+    with pytest.raises(ValidationError, match="selectors require one device"):
+        ChatRequest.model_validate(
+            {"message": "hello", "local_node_device_id": "device-a"}
+        )
+
+    request = ChatRequest.model_validate(
+        {
+            "message": "analyze my authorized files",
+            "os_agent_enabled": True,
+            "local_node_device_id": "device-a",
+            "local_node_grant_ids": ["grant-a"],
+        }
+    )
+    assert request.local_node_device_id == "device-a"
+    assert request.local_node_grant_ids == ["grant-a"]
+
+    with pytest.raises(ValidationError, match="grant selectors"):
+        ChatRequest.model_validate(
+            {
+                "message": "hello",
+                "os_agent_enabled": True,
+                "local_node_device_id": "device-a",
+                "local_node_grant_ids": ["grant-a", "grant-a"],
+            }
+        )
+
+
 @pytest.mark.asyncio
 async def test_production_composition_wires_current_resource_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ASSISTANT_APP__ALLOW_ANONYMOUS", "true")
+    monkeypatch.delenv("GATEWAY_ASSISTANT_SHARED_SECRET", raising=False)
     from assistant_service.main import _configure_agent_runtime_resource_policies
 
     capabilities = [

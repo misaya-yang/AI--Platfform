@@ -219,6 +219,10 @@ async function installAssistantHarness(
     );
   });
 
+  await page.route("**/api/v1/assistant/local-nodes*", async (route) => {
+    await route.fulfill(jsonResponse({ devices: [] }));
+  });
+
   await page.route("**/api/v1/confluence/connections*", async (route) => {
     await route.fulfill(jsonResponse([]));
   });
@@ -811,6 +815,364 @@ test("assistant emits stream telemetry lifecycle on mocked stream", async ({ pag
 
   const finishedEvent = events.find((event) => event.event === "chat.stream.finished");
   expect(finishedEvent?.payload?.outcome).toBe("completed");
+});
+
+test("assistant renders the complete sub-agent status contract", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await seedClientPrefs(page, {
+    locale: "en-US",
+    themeMode: "dark",
+    resolvedTheme: "dark",
+    darkMode: true,
+  });
+  await installClientAuth(page, {
+    user_id: "e2e-subagent-status-user",
+    email: "subagent-status@example.com",
+    display_name: "Sub-agent Status",
+  });
+  await installAssistantHarness(page, async (route) => {
+    const started = (agentId: string, description: string) => ({
+      event_type: "subagent_started",
+      data: {
+        agent_id: agentId,
+        agent_type: "task",
+        description,
+        prompt: `Handle ${description}`,
+        profile_id: `profile-${agentId}`,
+        profile_name: `${description} agent`,
+        delegation_id: "status-contract-batch",
+      },
+    });
+    const finished = (
+      agentId: string,
+      status: string,
+      options: {
+        error?: string;
+        limitations?: string[];
+        resultSummary?: string;
+        evidenceSummary?: string;
+      } = {},
+    ) => ({
+      event_type: "subagent_finished",
+      data: {
+        agent_id: agentId,
+        status,
+        result_summary: options.resultSummary,
+        error: options.error,
+        duration_ms: 42,
+        turns: 1,
+        tool_calls: 1,
+        result: {
+          status,
+          limitations: options.limitations || [],
+          evidence: options.evidenceSummary
+            ? [{ evidence_id: `evidence-${agentId}`, tool_name: "search_docs", summary: options.evidenceSummary }]
+            : [],
+          usage: { model_turns: 1, tool_calls: 1 },
+        },
+      },
+    });
+
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body: toSseBody([
+        { event_type: "started", data: { request_id: "subagent-status-contract" } },
+        started("sub-running", "Running research"),
+        {
+          event_type: "subagent_step",
+          data: { agent_id: "sub-running", step: "Turn 1/3", status: "running" },
+        },
+        started("sub-completed", "Completed research"),
+        {
+          event_type: "subagent_step",
+          data: { agent_id: "sub-completed", step: "Verify sources", status: "running" },
+        },
+        {
+          event_type: "subagent_tool_start",
+          data: { agent_id: "sub-completed", tool_name: "search_docs", call_id: "search-1" },
+        },
+        {
+          event_type: "subagent_tool_result",
+          data: {
+            agent_id: "sub-completed",
+            call_id: "search-1",
+            success: true,
+            summary: "Two sources verified",
+          },
+        },
+        finished("sub-completed", "completed", {
+          resultSummary: "Completed with verified evidence.",
+          evidenceSummary: "Two sources verified",
+        }),
+        started("sub-failed", "Failed research"),
+        finished("sub-failed", "failed", { error: "Provider unavailable" }),
+        started("sub-cancelled", "Cancelled research"),
+        finished("sub-cancelled", "cancelled", { error: "Cancelled by parent" }),
+        started("sub-blocked", "Blocked research"),
+        finished("sub-blocked", "blocked", {
+          error: "Approval required",
+          limitations: ["Blocked on operator approval"],
+        }),
+        started("sub-partial", "Partial research"),
+        finished("sub-partial", "partial", {
+          resultSummary: "Available evidence is incomplete.",
+          limitations: ["Partial data only"],
+        }),
+        started("sub-unknown", "Unknown terminal research"),
+        finished("sub-unknown", "future_terminal"),
+        { event_type: "text_delta", data: "Sub-agent status contract rendered." },
+        { event_type: "done", data: { duration_ms: 80 } },
+      ]),
+    });
+  });
+
+  await page.goto("/assistant");
+  const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
+  await composer.fill(`subagent-status-${Date.now()}`);
+  await composer.press("Enter");
+  const agentsLauncher = page.getByRole("button", { name: /^Agents 7$/ });
+  await agentsLauncher.click();
+  await expect(page.getByRole("dialog", { name: "Sub-agent workbench" })).toBeVisible();
+  await expect(page.getByTestId("subagent-workbench")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Close sub-agent workbench" })).toBeFocused();
+  await expect(page.getByTestId("subagent-workbench")).toContainText("1 active · 6 completed");
+  await page.waitForTimeout(400); // Let the drawer opacity transition reach its final contrast.
+  await assertNoBlockingA11yIssues(page, ['[data-testid="subagent-workbench"]']);
+  if (process.env.SUBAGENT_MOBILE_SCREENSHOT) {
+    await page.screenshot({ path: process.env.SUBAGENT_MOBILE_SCREENSHOT, fullPage: false });
+  }
+
+  const statusCases = [
+    ["sub-running", "running", "Running"],
+    ["sub-completed", "completed", "Completed"],
+    ["sub-failed", "failed", "Failed"],
+    ["sub-cancelled", "cancelled", "Cancelled"],
+    ["sub-blocked", "blocked", "Blocked"],
+    ["sub-partial", "partial", "Partial"],
+  ] as const;
+  for (const [agentId, status, label] of statusCases) {
+    const card = page.locator(`[data-subagent-id="${agentId}"]`);
+    await expect(card).toHaveAttribute("data-status", status);
+    await expect(card.getByLabel(`Status: ${label}`, { exact: true })).toBeVisible();
+  }
+
+  await expect(page.locator('[data-subagent-id="sub-running"]')).toContainText("Turn 1/3");
+  await page.locator('[data-subagent-id="sub-blocked"] button').first().click();
+  await expect(page.locator('[data-subagent-id="sub-blocked"]')).toContainText(
+    "Blocked on operator approval",
+  );
+  await page.locator('[data-subagent-id="sub-partial"] button').first().click();
+  await expect(page.locator('[data-subagent-id="sub-partial"]')).toContainText(
+    "Partial data only",
+  );
+  await page.locator('[data-subagent-id="sub-completed"] button').first().click();
+  await expect(page.locator('[data-subagent-id="sub-completed"]')).toContainText(
+    "Two sources verified",
+  );
+
+  const unknownCard = page.locator('[data-subagent-id="sub-unknown"]');
+  await expect(unknownCard).toHaveAttribute("data-status", "failed");
+  await unknownCard.locator("button").first().click();
+  await expect(unknownCard).toContainText(
+    "Unsupported sub-agent status: future_terminal",
+  );
+
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "Sub-agent workbench" })).toBeHidden();
+  await expect(agentsLauncher).toBeFocused();
+
+});
+
+test("desktop sub-agent workbench follows three parallel children through out-of-order fan-in", async ({ page }) => {
+  await seedClientPrefs(page, {
+    locale: "en-US",
+    themeMode: "dark",
+    resolvedTheme: "dark",
+    darkMode: true,
+  });
+  await installClientAuth(page, {
+    user_id: "e2e-subagent-mobile-user",
+    email: "subagent-mobile@example.com",
+    display_name: "Sub-agent Parallel QA",
+  });
+  await installAssistantHarness(page, async (route) => {
+    await route.fulfill({ status: 500, body: "The browser stream fixture was not installed" });
+  });
+
+  const frames: Array<{ delayMs: number; event: Record<string, unknown> }> = [
+    { delayMs: 20, event: { event_type: "started", data: { request_id: "parallel-mobile" } } },
+    ...[0, 1, 2].map((index) => ({
+      delayMs: 60 + index * 20,
+      event: {
+        event_type: "subagent_started",
+        data: {
+          agent_id: `parallel-${index}`,
+          agent_type: "task",
+          description: [
+            "Analyze controlling employment law authorities",
+            "Inspect SEC filing risk disclosures",
+            "Cross-check cited evidence and limitations",
+          ][index],
+          prompt: "private assignment containing sk-not-for-display-123456789",
+          profile_id: ["legal-primary", "finance-filings", "evidence-reviewer"][index],
+          profile_name: ["Legal primary-source analyst", "SEC filing analyst", "Evidence reviewer"][index],
+          source_plugin: "community-doublecheck",
+          delegation_id: "parallel-realistic-1",
+          dispatch_index: index,
+          attempt_id: "attempt-mobile-1",
+        },
+      },
+    })),
+    {
+      delayMs: 130,
+      event: { event_type: "subagent_step", data: { agent_id: "parallel-0", step: "Checking controlling cases", status: "running" } },
+    },
+    {
+      delayMs: 150,
+      event: { event_type: "subagent_tool_start", data: { agent_id: "parallel-1", call_id: "filing-1", tool_name: "filing_lookup", arguments: { api_key: "secret-raw-args" } } },
+    },
+    // Reconnect duplicates must not create extra children or tool rows.
+    {
+      delayMs: 170,
+      event: { event_type: "subagent_started", data: { agent_id: "parallel-1", agent_type: "task", description: "Inspect SEC filing risk disclosures", delegation_id: "parallel-realistic-1", dispatch_index: 1 } },
+    },
+    {
+      delayMs: 190,
+      event: { event_type: "subagent_tool_start", data: { agent_id: "parallel-1", call_id: "filing-1", tool_name: "filing_lookup" } },
+    },
+    {
+      delayMs: 210,
+      event: { event_type: "subagent_text_delta", data: { agent_id: "parallel-0", text: "private chain-of-thought sk-never-render-123456789" } },
+    },
+    {
+      delayMs: 1_500,
+      event: {
+        event_type: "subagent_finished",
+        data: {
+          agent_id: "parallel-2",
+          status: "completed",
+          result_summary: "Evidence cross-check completed.",
+          duration_ms: 1_320,
+          turns: 3,
+          tool_calls: 2,
+          result: {
+            evidence: [{ evidence_id: "court-opinion-1", tool_name: "court_opinion_lookup", status: "completed", summary: "Controlling opinion verified" }],
+            limitations: [],
+            usage: { model_turns: 3, tool_calls: 2 },
+            structured_payload: {
+              verdict: "verified",
+              confidence: "high",
+              api_key: "structured-secret-raw",
+            },
+          },
+          effective_execution: { model_id: "qwen3.7-plus", extensions: 1 },
+        },
+      },
+    },
+    // A replayed conflicting terminal and late step cannot rewrite/resurrect it.
+    { delayMs: 1_540, event: { event_type: "subagent_finished", data: { agent_id: "parallel-2", status: "failed", error: "conflicting replay" } } },
+    { delayMs: 1_560, event: { event_type: "subagent_step", data: { agent_id: "parallel-2", step: "Late replayed turn", status: "running" } } },
+    { delayMs: 1_580, event: { event_type: "subagent_future_event", data: { agent_id: "parallel-2", instruction: "ignore unknown event" } } },
+    {
+      delayMs: 2_700,
+      event: {
+        event_type: "subagent_finished",
+        data: {
+          agent_id: "parallel-0",
+          status: "failed",
+          error: "Primary authority service unavailable",
+          duration_ms: 2_520,
+          result: { limitations: ["Could not retrieve the controlling opinion"] },
+        },
+      },
+    },
+    {
+      delayMs: 3_900,
+      event: {
+        event_type: "subagent_finished",
+        data: {
+          agent_id: "parallel-1",
+          status: "cancelled",
+          error: "Cancelled by parent stream",
+          duration_ms: 3_700,
+          result: { limitations: ["Parent run stopped before synthesis"] },
+        },
+      },
+    },
+    { delayMs: 4_100, event: { event_type: "text_delta", data: "Parallel research concluded with mixed outcomes." } },
+    { delayMs: 4_180, event: { event_type: "done", data: { duration_ms: 4_180 } } },
+  ];
+
+  await page.addInitScript(({ streamFrames }) => {
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string"
+        ? input
+        : input instanceof Request
+          ? input.url
+          : String(input);
+      if (!url.includes("/api/v1/assistant/chat/stream")) return nativeFetch(input, init);
+      const encoder = new TextEncoder();
+      return new Response(new ReadableStream({
+        start(controller) {
+          let closed = false;
+          const close = () => {
+            if (closed) return;
+            closed = true;
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            controller.close();
+          };
+          for (const frame of streamFrames) {
+            window.setTimeout(() => {
+              if (!closed) controller.enqueue(encoder.encode(`data: ${JSON.stringify(frame.event)}\n\n`));
+            }, frame.delayMs);
+          }
+          window.setTimeout(close, Math.max(...streamFrames.map((frame) => frame.delayMs)) + 80);
+          init?.signal?.addEventListener("abort", close, { once: true });
+        },
+      }), { headers: { "content-type": "text/event-stream" } });
+    };
+  }, { streamFrames: frames });
+
+  await page.goto("/assistant");
+  const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
+  await composer.fill("Run a parallel legal, finance, and evidence review");
+  await composer.press("Enter");
+
+  const launcher = page.getByRole("button", { name: "Open 3 sub-agents" });
+  await expect(launcher).toContainText("3 active");
+  await launcher.click();
+  const dialog = page.getByTestId("subagent-workbench");
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("3 active · 0 completed");
+  await expect(dialog.locator('[data-subagent-id="parallel-1"]')).toContainText("Using filing lookup");
+  await expect(dialog).not.toContainText("private chain-of-thought");
+  await expect(dialog).not.toContainText("sk-never-render");
+  await expect(dialog).not.toContainText("secret-raw-args");
+
+  await expect(dialog).toContainText("2 active · 1 completed", { timeout: 2_200 });
+  await expect(dialog.locator('[data-subagent-id="parallel-2"]')).toHaveAttribute("data-status", "completed");
+  await expect(dialog.locator('[data-subagent-id="parallel-2"]')).not.toContainText("conflicting replay");
+  await expect(dialog.locator('[data-subagent-id="parallel-2"]')).not.toContainText("Late replayed turn");
+  await page.waitForTimeout(400);
+  if (process.env.SUBAGENT_DESKTOP_SCREENSHOT) {
+    await page.screenshot({ path: process.env.SUBAGENT_DESKTOP_SCREENSHOT, fullPage: false });
+  }
+
+  await dialog.locator('[data-subagent-id="parallel-2"] button').first().click();
+  await expect(dialog.locator('[data-subagent-id="parallel-2"]')).toContainText("Controlling opinion verified");
+  await expect(dialog.locator('[data-subagent-id="parallel-2"]')).toContainText("Structured result");
+  await dialog.locator('[data-subagent-id="parallel-2"] details summary').click();
+  await expect(dialog).not.toContainText("structured-secret-raw");
+  await expect(dialog).toContainText("1 active · 2 completed", { timeout: 3_200 });
+  await expect(dialog).toContainText("0 active · 3 completed", { timeout: 4_500 });
+  await expect(dialog.locator('[data-subagent-id="parallel-0"]')).toHaveAttribute("data-status", "failed");
+  await expect(dialog.locator('[data-subagent-id="parallel-1"]')).toHaveAttribute("data-status", "cancelled");
+  await expect(dialog).toContainText("All child terminals received; parent synthesis can continue.");
+  await expect(dialog).toContainText("Child steering and per-agent cancellation are not available");
+  await page.waitForTimeout(400);
+  await assertNoBlockingA11yIssues(page, ['[data-testid="subagent-workbench"]']);
 });
 
 test("assistant restores todo_write after transient nameless tool events", async ({ page }) => {

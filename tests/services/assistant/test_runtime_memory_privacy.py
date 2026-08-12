@@ -150,6 +150,7 @@ class ScopedMemoryDatabase:
             {
                 "source_id": self.source_id,
                 "chunk_id": chunk_id,
+                "content_hash": self.content_hash,
                 "metadata": dict(self.metadata),
             }
             for chunk_id in self.chunk_ids

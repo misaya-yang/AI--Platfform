@@ -8,6 +8,7 @@ import json
 import logging
 import mimetypes
 import os
+import sys
 import urllib.parse
 import uuid
 from pathlib import Path
@@ -129,9 +130,17 @@ class MCPStdioClient(MCPClient):
                 child_env[name] = os.environ[name]
         child_env.update(self.config.process_env)
 
+        command = self.config.command
+        if self.config.platform_managed and command == "python":
+            # The trusted package describes its runtime portably.  Resolve the
+            # platform-managed Python process to this service's interpreter so
+            # venvs and hosts that expose only ``python3`` work without adding
+            # an ambient PATH dependency.  Untrusted/external commands are not
+            # rewritten.
+            command = sys.executable
         try:
             self._process = await asyncio.create_subprocess_exec(
-                self.config.command,
+                command,
                 *self.config.args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,

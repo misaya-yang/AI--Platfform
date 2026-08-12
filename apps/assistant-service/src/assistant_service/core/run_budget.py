@@ -25,6 +25,7 @@ _LIMIT_KEYS = frozenset(
         "max_parallel_tool_calls",
         "max_wall_time_seconds",
         "max_tool_result_bytes",
+        "final_synthesis_headroom",
     }
 )
 _USAGE_KEYS = frozenset(
@@ -92,6 +93,9 @@ class RunBudgetLimits:
     max_parallel_tool_calls: int
     max_wall_time_seconds: float
     max_tool_result_bytes: int
+    # Ordinary model/tool work cannot consume these terminal turns.  They are
+    # reserved for an explicit no-tools synthesis path after evidence work.
+    final_synthesis_headroom: int = 0
 
     def __post_init__(self) -> None:
         integer_limits = {
@@ -103,6 +107,15 @@ class RunBudgetLimits:
         for name, value in integer_limits.items():
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
+        if (
+            isinstance(self.final_synthesis_headroom, bool)
+            or not isinstance(self.final_synthesis_headroom, int)
+            or self.final_synthesis_headroom < 0
+            or self.final_synthesis_headroom >= self.max_model_turns
+        ):
+            raise ValueError(
+                "final_synthesis_headroom must be a non-negative integer below max_model_turns"
+            )
         wall_time = self.max_wall_time_seconds
         if not _is_finite_number(wall_time) or wall_time <= 0:
             raise ValueError("max_wall_time_seconds must be positive and finite")
@@ -131,13 +144,21 @@ class RunBudgetLimits:
             # Existing per-result caps are much smaller.  This cumulative cap
             # remains a compatibility ceiling while making growth finite.
             max_tool_result_bytes=256_000,
+            final_synthesis_headroom=0,
         )
 
     def bounded_by(self, prior: RunBudgetLimits) -> RunBudgetLimits:
         """Return limits that can only stay equal or shrink on resume."""
 
+        max_model_turns = min(self.max_model_turns, prior.max_model_turns)
+        headroom = max(
+            self.final_synthesis_headroom,
+            prior.final_synthesis_headroom,
+        )
+        if headroom >= max_model_turns:
+            raise ValueError("bounded synthesis headroom consumes all model turns")
         return RunBudgetLimits(
-            max_model_turns=min(self.max_model_turns, prior.max_model_turns),
+            max_model_turns=max_model_turns,
             max_tool_calls=min(self.max_tool_calls, prior.max_tool_calls),
             max_parallel_tool_calls=min(
                 self.max_parallel_tool_calls,
@@ -151,6 +172,8 @@ class RunBudgetLimits:
                 self.max_tool_result_bytes,
                 prior.max_tool_result_bytes,
             ),
+            # A resume may reserve more of the prior total, never less.
+            final_synthesis_headroom=headroom,
         )
 
     def to_dict(self) -> dict[str, int | float]:
@@ -160,6 +183,7 @@ class RunBudgetLimits:
             "max_parallel_tool_calls": self.max_parallel_tool_calls,
             "max_wall_time_seconds": self.max_wall_time_seconds,
             "max_tool_result_bytes": self.max_tool_result_bytes,
+            "final_synthesis_headroom": self.final_synthesis_headroom,
         }
 
     @classmethod
@@ -173,6 +197,7 @@ class RunBudgetLimits:
             max_parallel_tool_calls=payload["max_parallel_tool_calls"],
             max_wall_time_seconds=payload["max_wall_time_seconds"],
             max_tool_result_bytes=payload["max_tool_result_bytes"],
+            final_synthesis_headroom=payload["final_synthesis_headroom"],
         )
 
 
@@ -250,13 +275,24 @@ class RunBudget:
         self.check_wall_time()
         return max(0.0, self.limits.max_wall_time_seconds - self.elapsed_seconds)
 
-    def consume_model_turn(self) -> None:
+    @property
+    def remaining_work_model_turns(self) -> int:
+        """Return ordinary turns without exposing terminal synthesis reserve."""
+
+        self.check_wall_time()
+        work_limit = self.limits.max_model_turns - self.limits.final_synthesis_headroom
+        return max(0, work_limit - self.model_turns)
+
+    def consume_model_turn(self, *, purpose: str = "work") -> None:
         self.check_wall_time()
         requested = self.model_turns + 1
-        if requested > self.limits.max_model_turns:
+        limit = self.limits.max_model_turns
+        if purpose != "synthesis":
+            limit = self.model_turns + self.remaining_work_model_turns
+        if requested > limit:
             self._raise_exhausted(
                 RunBudgetDimension.MODEL_TURNS,
-                limit=self.limits.max_model_turns,
+                limit=limit,
                 used=self.model_turns,
                 requested=requested,
             )
@@ -281,6 +317,19 @@ class RunBudget:
                 requested=requested,
             )
         self.tool_calls = requested
+
+    def check_parallel_width(self, count: int) -> None:
+        """Validate proposed parallelism without charging executable tool calls."""
+
+        self.check_wall_time()
+        count = _require_non_negative_int(count, "parallel width")
+        if count > self.limits.max_parallel_tool_calls:
+            self._raise_exhausted(
+                RunBudgetDimension.PARALLEL_TOOL_CALLS,
+                limit=self.limits.max_parallel_tool_calls,
+                used=0,
+                requested=count,
+            )
 
     def observe_tool_result(self, value: Any) -> int:
         self.check_wall_time()
@@ -377,9 +426,13 @@ class RunBudget:
         if not isinstance(remaining, dict):
             raise ValueError("run budget remaining must be an object")
         prior_limits = RunBudgetLimits.from_dict(prior_limits_raw)
+        ordinary_limit_fields = _LIMIT_KEYS - {"final_synthesis_headroom"}
         if any(
             getattr(prior_limits, field_name) > getattr(configured_limits, field_name)
-            for field_name in _LIMIT_KEYS
+            for field_name in ordinary_limit_fields
+        ) or (
+            prior_limits.final_synthesis_headroom
+            < configured_limits.final_synthesis_headroom
         ):
             raise ValueError("persisted run budget limits exceed configured limits")
         _require_exact_keys(usage, _USAGE_KEYS, "run budget usage")

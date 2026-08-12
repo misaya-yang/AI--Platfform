@@ -5,13 +5,10 @@ threshold behavior.
 
 from __future__ import annotations
 
-import pytest
-
 from assistant_service.core.agent.tool_result_formatter import (
     _retrieval_quality_label,
     compact_tool_result_for_model,
 )
-
 
 # ---------------------------------------------------------------------------
 # Threshold behavior
@@ -92,3 +89,57 @@ def test_signal_none_when_no_chunks() -> None:
     )
     # Empty contexts means no flat_chunks → top_score=0, count=0 → NONE
     assert result.startswith("RETRIEVAL_QUALITY: NONE")
+
+
+def test_non_kb_result_has_no_unconditional_3000_character_cutoff() -> None:
+    terminal_citation = "42 U.S.C. § 2000e-2(a)(1) — terminal authority"
+    evidence = "Title VII evidence\n" + ("fact and authority\n" * 300) + terminal_citation
+    assert len(evidence) > 3_000
+
+    result = compact_tool_result_for_model("read_statute", evidence, {})
+
+    assert result == evidence
+    assert result.endswith(terminal_citation)
+
+
+def test_kb_result_uses_token_budget_and_keeps_complete_tail_authority() -> None:
+    terminal_citation = "SEC Release No. 34-100000, page 147 — terminal citation"
+    content = ("liquidity disclosure evidence " * 180) + terminal_citation
+    metadata = {
+        "query": "material liquidity risk",
+        "contexts": [
+            {
+                "chunks": [
+                    {
+                        "content": content,
+                        "score": 0.91,
+                        "dataset_name": "10-K",
+                        "document_id": "filing-1",
+                        "segment_id": "item-1a",
+                    }
+                ]
+            }
+        ],
+    }
+
+    result = compact_tool_result_for_model("search_knowledge_base", "unused", metadata)
+
+    assert "INLINE_EVIDENCE: complete_inline" in result
+    assert terminal_citation in result
+    assert "stop searching" not in result.lower()
+
+
+def test_kb_oversized_raw_fallback_is_explicitly_partial_and_keeps_tail() -> None:
+    tail = "TAIL-AUTHORITY: 17 CFR 240.10b-5"
+    raw = ("unstructured evidence " * 6_000) + tail
+
+    result = compact_tool_result_for_model(
+        "search_knowledge_base",
+        raw,
+        {"query": "securities fraud", "contexts": []},
+    )
+
+    assert "INLINE_EVIDENCE: partial_inline" in result
+    assert "INLINE_TOOL_RESULT_STATUS: partial" in result
+    assert tail in result
+    assert len(result) < 100_000

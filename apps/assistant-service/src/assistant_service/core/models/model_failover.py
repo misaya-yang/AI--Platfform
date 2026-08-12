@@ -57,6 +57,10 @@ class ModelStreamItem:
     model_id: str | None = None
 
 
+class RequestedModelNotEligibleError(PermissionError):
+    """The requested model is outside the caller's effective capability set."""
+
+
 def parse_model_fallbacks(raw: str | None = None) -> dict[str, tuple[str, ...]]:
     """Parse an explicit ordered primary-to-candidates map, failing closed."""
 
@@ -122,6 +126,27 @@ def _caller_access_rank(user: Any | None) -> int:
     if tier in {"premium", "enterprise"}:
         return _ACCESS_RANK[ModelAccessLevel.PREMIUM]
     return _ACCESS_RANK[ModelAccessLevel.PUBLIC]
+
+
+def _model_access_allowed(model: ModelInfo | None, *, user: Any | None) -> bool:
+    """Apply only the caller/model authorization rule to a primary model.
+
+    Capability, context-window and output-size checks are routing concerns for
+    optional fallbacks.  Applying all of them to the caller-selected primary
+    would turn a defence-in-depth authorization fix into another harness
+    restriction.  Legacy registry adapters without access metadata remain
+    public; canonical ``ModelInfo`` instances always carry the field.
+    """
+
+    if model is None:
+        return False
+    access_level = getattr(model, "access_level", ModelAccessLevel.PUBLIC)
+    try:
+        normalized = ModelAccessLevel(access_level)
+    except (TypeError, ValueError):
+        return False
+    access_rank = _ACCESS_RANK.get(normalized)
+    return access_rank is not None and access_rank <= _caller_access_rank(user)
 
 
 def _model_is_eligible(
@@ -196,6 +221,8 @@ async def stream_with_failover(
     requires_tools = bool(stream_kwargs.get("tools"))
     requires_native_search = bool(stream_kwargs.get("native_search_config"))
     required_output_tokens = max(0, int(stream_kwargs.get("max_tokens") or 0))
+    if not _model_access_allowed(registry.get_model(requested_model), user=user):
+        raise RequestedModelNotEligibleError("requested_model_not_eligible")
     attempted: set[str] = set()
     provider_attempt = 0
 

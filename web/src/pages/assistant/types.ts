@@ -628,28 +628,84 @@ export interface ArtifactData {
 // Sub-Agent Types (ADR-003)
 // =============================================================================
 
+export const SUB_AGENT_TYPES = ["explore", "task", "plan"] as const;
+export type SubAgentType = (typeof SUB_AGENT_TYPES)[number];
+
+export const SUB_AGENT_STATUSES = [
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+  "blocked",
+  "partial",
+] as const;
+export type SubAgentStatus = (typeof SUB_AGENT_STATUSES)[number];
+
+export function isSubAgentType(value: unknown): value is SubAgentType {
+  return typeof value === "string" && SUB_AGENT_TYPES.some((agentType) => agentType === value);
+}
+
+export function isSubAgentStatus(value: unknown): value is SubAgentStatus {
+  return typeof value === "string" && SUB_AGENT_STATUSES.some((status) => status === value);
+}
+
 export interface SubAgentStep {
   toolName: string;
   callId: string;
-  status: "running" | "completed" | "failed";
+  status: SubAgentStatus;
   summary?: string;
   durationMs?: number;
 }
 
+export interface SubAgentEvidence {
+  evidenceId?: string;
+  toolName?: string;
+  callId?: string;
+  status?: string;
+  summary?: string;
+}
+
 export interface SubAgentState {
   agentId: string;
-  agentType: "explore" | "task" | "plan";
+  agentType: SubAgentType;
   description: string;
-  status: "running" | "completed" | "failed";
-  prompt?: string;
+  status: SubAgentStatus;
+  /** Host-selected profile identity. This is display metadata, not model reasoning. */
+  profileId?: string;
+  profileName?: string;
+  sourcePlugin?: string;
+  definitionSha256?: string;
+  delegationId?: string;
+  taskId?: string;
+  parentTaskId?: string;
+  dispatchIndex?: number;
+  attemptId?: string;
+  depth?: number;
+  lineage?: string[];
   currentStep?: string;
+  currentStepStatus?: SubAgentStatus;
   turnsCompleted?: number;
   toolCallsMade?: number;
   steps: SubAgentStep[];
-  streamingText?: string;
   resultSummary?: string;
+  evidence?: SubAgentEvidence[];
+  limitations?: string[];
+  usage?: Record<string, number>;
+  structuredResult?: unknown;
+  effectiveExecution?: {
+    modelId?: string;
+    toolNames?: string[];
+    toolCategories?: string[];
+    extensions?: number;
+    stopReason?: string;
+  };
   error?: string;
   durationMs?: number;
+  /** Client receipt timestamps used only for elapsed/completed UI labels. */
+  startedAtMs?: number;
+  finishedAtMs?: number;
+  startedMonotonicMs?: number;
+  finishedMonotonicMs?: number;
 }
 
 // =============================================================================

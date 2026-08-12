@@ -92,7 +92,10 @@ mcp_servers:
     assert write.read_back_tool == "get_record"
 
 
-def test_plugin_server_key_maps_to_stable_runtime_safe_name(tmp_path: Path) -> None:
+def test_plugin_server_key_maps_to_stable_runtime_safe_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     plugin_root = tmp_path / "portable-plugin"
     plugin_root.mkdir()
     (plugin_root / "plugin.json").write_text(
@@ -122,6 +125,8 @@ def test_plugin_server_key_maps_to_stable_runtime_safe_name(tmp_path: Path) -> N
         ),
         encoding="utf-8",
     )
+    monkeypatch.setenv("ASSISTANT_TRUSTED_AGENT_PLUGINS", "portable-plugin@1.0.0")
+    monkeypatch.setenv("ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS", str(plugin_root))
 
     first_names = [item.name for item in load_agent_plugin_mcp_config(str(plugin_root))]
     second_names = [item.name for item in load_agent_plugin_mcp_config(str(plugin_root))]

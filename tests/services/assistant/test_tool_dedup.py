@@ -9,7 +9,6 @@ The web-search dedup state was removed alongside; only KB dedup remains.
 from __future__ import annotations
 
 import pytest
-
 from assistant_service.core.agent.tool_dedup import (
     KB_REUSE_MESSAGE,
     KBDedupState,
@@ -23,15 +22,12 @@ def test_kb_dedup_first_call_not_skipped() -> None:
     assert reason is None
 
 
-def test_kb_dedup_second_call_short_circuits_as_already_completed() -> None:
+def test_kb_dedup_allows_different_followup_query_after_success() -> None:
     state = KBDedupState()
     state.mark_completed("q=x|intent=general|datasets=")
-    skip, reason = state.should_skip(
-        "search_knowledge_base", "q=y|intent=general|datasets="
-    )
-    assert skip is True
-    # KB caps at one call per turn regardless of fingerprint.
-    assert reason in {"already_completed", "duplicate_fingerprint"}
+    skip, reason = state.should_skip("search_knowledge_base", "q=y|intent=general|datasets=")
+    assert skip is False
+    assert reason is None
 
 
 def test_kb_dedup_ignores_non_kb_tools() -> None:
@@ -49,11 +45,13 @@ def test_kb_dedup_duplicate_fingerprint_caught() -> None:
     state.mark_completed(fp)
     skip, reason = state.should_skip("search_knowledge_base", fp)
     assert skip is True
-    assert reason in {"duplicate_fingerprint", "already_completed"}
+    assert reason == "duplicate_fingerprint"
 
 
 def test_kb_reuse_message_is_nonempty_string() -> None:
     assert isinstance(KB_REUSE_MESSAGE, str) and KB_REUSE_MESSAGE.strip()
+    assert "answer now" not in KB_REUSE_MESSAGE.lower()
+    assert "only call" not in KB_REUSE_MESSAGE.lower()
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -1,9 +1,11 @@
 /**
  * RightPanelContext — shared "which right sheet is open?" state.
  *
- * The assistant page has two mutually-exclusive right-side sheets:
+ * The assistant page has mutually-exclusive right-side sheets:
  *   - "artifacts"  — the generated files panel (ArtifactsPanel)
  *   - "activity"   — the Claude-design Activity drawer (ActivityPanel)
+ *   - "subagents"  — delegated-agent lifecycle and receipt workbench
+ *   - "local_os"   — paired Local Node status and read-only receipts
  *
  * Never both at once. This context lets deep descendants (e.g. the
  * ActivityPill inside a ChatMessage) request the panel change without
@@ -15,14 +17,18 @@
 
 import { createContext, useContext } from "react";
 
-export type RightPanel = "activity" | "artifacts" | null;
+export type RightPanel = "activity" | "artifacts" | "subagents" | "local_os" | null;
 
 export interface RightPanelState {
   rightPanel: RightPanel;
   /** Message ID whose activity is currently displayed (when rightPanel==="activity"). */
   activityMessageId: string | null;
+  /** Message ID whose child-agent workbench is displayed. */
+  subagentMessageId: string | null;
   openActivity: (messageId: string) => void;
   closeActivity: () => void;
+  openSubagents: (messageId: string) => void;
+  closeSubagents: () => void;
 }
 
 export const RightPanelContext = createContext<RightPanelState | null>(null);
@@ -35,8 +41,11 @@ export function useRightPanel(): RightPanelState {
     return {
       rightPanel: null,
       activityMessageId: null,
+      subagentMessageId: null,
       openActivity: () => {},
       closeActivity: () => {},
+      openSubagents: () => {},
+      closeSubagents: () => {},
     };
   }
   return ctx;

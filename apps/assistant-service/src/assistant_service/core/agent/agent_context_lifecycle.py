@@ -1391,11 +1391,32 @@ class AgentContextLifecycleMixin:
 
         selected_skills = runtime_skills.select_for_query(
             ctx.message,
-            max_skills=3,
+            # Keep the relevance order, then let the provider-aware context
+            # budget choose how many instruction bodies fit.  A fixed first-N
+            # cutoff made equally relevant installed skills unreachable.
+            max_skills=None,
             allowed_names=ctx.config.allowed_skill_ids,
             scope=skill_scope,
             allowed_versions=ctx.config.allowed_skill_versions,
         )
+        max_candidates = _env_int(
+            "ASSISTANT_SKILL_CANDIDATE_HARD_LIMIT",
+            default=64,
+            minimum=1,
+        )
+        if len(selected_skills) > max_candidates:
+            events.append(
+                AgentLoopEvent(
+                    phase=AgentLoopPhase.GENERATION_STORAGE,
+                    event_type="skill_selection_bounded",
+                    data={
+                        "candidate_count": len(selected_skills),
+                        "operator_limit": max_candidates,
+                        "deferred_count": len(selected_skills) - max_candidates,
+                    },
+                )
+            )
+            selected_skills = selected_skills[:max_candidates]
         if selected_skills:
             ctx.runtime_skills_metadata = [
                 selection.skill.to_dict() for selection in selected_skills

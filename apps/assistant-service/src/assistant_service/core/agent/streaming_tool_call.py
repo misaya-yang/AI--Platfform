@@ -36,6 +36,38 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def _bound_parent_tool_content(
+    *,
+    tool_name: str,
+    content: str,
+    tool_metadata: dict[str, Any] | None,
+) -> str:
+    """Reject silently incomplete evidence; the run budget owns size limits."""
+
+    metadata = tool_metadata or {}
+    structured_subagent_result = metadata.get("subagent_result")
+    if tool_name == "spawn_subagent" and isinstance(structured_subagent_result, dict):
+        return content
+    if tool_name != "spawn_subagent" and "subagent_result" in metadata:
+        # Only the host-generated delegation tool may bypass ordinary evidence
+        # handling with this structured contract.  Drop tool-spoofed metadata.
+        metadata = {key: value for key, value in metadata.items() if key != "subagent_result"}
+    artifact = metadata.get("tool_output_artifact")
+    verified_artifact = (
+        isinstance(artifact, dict)
+        and artifact.get("host_verified") is True
+        and artifact.get("complete_redacted") is True
+        and bool(artifact.get("artifact_id"))
+    )
+    if metadata.get("response_cap_applied") is True and not verified_artifact:
+        return (
+            "INCOMPLETE_TOOL_OUTPUT: the complete tool result exceeded the inline context "
+            f"budget for {tool_name}; no verified complete artifact receipt is available. "
+            "Do not treat omitted content as reviewed evidence."
+        )
+    return content
+
+
 class StreamingToolCallMixin(StreamingToolValidationMixin, StreamingToolExecutionMixin):
     """Validate, execute, persist, and ingest one model-proposed tool call."""
 
@@ -157,14 +189,6 @@ class StreamingToolCallMixin(StreamingToolValidationMixin, StreamingToolExecutio
             frame.kb_rag_score_threshold = ctx.config.kb_min_relevance
             frame.kb_rag_include_images = False
             frame.kb_rag_retrieval_configs: dict[str, dict[str, Any]] | None = None
-
-            # Guardrail: avoid repeated KB searches before producing any answer text.
-            # Keep at most `kb_max_queries` KB calls in a turn to avoid latency loops.
-            frame.short_circuit_kb = (
-                frame.tool_name == "search_knowledge_base"
-                and state.kb_call_count >= state.kb_call_limit
-                and bool(state.contexts_for_persistence)
-            )
 
             async for event in self._invoke_streaming_tool(
                 ctx,
@@ -354,15 +378,16 @@ class StreamingToolCallMixin(StreamingToolValidationMixin, StreamingToolExecutio
             )
             out.terminal = True
             return
-        # Mark KB completion only after successful evidence retrieval.
-        if (
-            frame.tool_name == "search_knowledge_base"
-            and frame.step_success is True
-            and state.contexts_for_persistence
-        ):
+        # A successful zero-hit search is still a completed search.  Mark its
+        # exact query+dataset fingerprint so the model cannot burn the run
+        # budget by repeating the same empty retrieval; distinct follow-up
+        # queries remain available.
+        if frame.tool_name == "search_knowledge_base" and frame.step_success is True:
             state.kb_dedup.mark_completed(frame.kb_query_fp)
 
-        # Keep larger model payloads for retrieval tools than actions.
+        # Keep complete middleware-formatted content.  The run-wide byte
+        # budget remains authoritative; capped content without a verified
+        # artifact becomes an explicit incomplete-evidence receipt below.
         _tool_content = (
             frame.tool_result_for_model
             if frame.tool_result_for_model is not None
@@ -372,21 +397,13 @@ class StreamingToolCallMixin(StreamingToolValidationMixin, StreamingToolExecutio
                 else frame.tool_result
             )
         ) or ""
-        _RETRIEVAL_TOOLS = {
-            "search_knowledge_base",
-            "confluence_read",
-            "fs_read",
-            "fs_glob",
-            "fs_grep",
-        }
-        _MAX_TOOL_RESULT_LEN = 10_000 if frame.tool_name in _RETRIEVAL_TOOLS else 2_000
-        if len(_tool_content) > _MAX_TOOL_RESULT_LEN:
-            _tool_content = (
-                _tool_content[:_MAX_TOOL_RESULT_LEN]
-                + f"\n...[truncated at {_MAX_TOOL_RESULT_LEN} chars; "
-                "call the underlying tool with a narrower query or "
-                "read_* for a specific item]"
-            )
+        # The run-wide byte budget below remains the authoritative ceiling and
+        # fails closed if a complete child receipt cannot fit.
+        _tool_content = _bound_parent_tool_content(
+            tool_name=frame.tool_name,
+            content=_tool_content,
+            tool_metadata=(frame.tool_metadata if isinstance(frame.tool_metadata, dict) else None),
+        )
 
         if ctx.run_budget is None:
             raise RuntimeError("run_budget_not_initialized")
@@ -397,14 +414,38 @@ class StreamingToolCallMixin(StreamingToolValidationMixin, StreamingToolExecutio
             tool_id=frame.tool_id,
         )
 
-        state.messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": frame.tool_id,
-                "name": frame.tool_name,
-                "content": _tool_content,
-            }
-        )
+        tool_message: dict[str, Any] = {
+            "role": "tool",
+            "tool_call_id": frame.tool_id,
+            "name": frame.tool_name,
+            "content": _tool_content,
+        }
+        local_runtime = ctx.openai_responses_local_runtime
+        if local_runtime is not None:
+            provider_blocks: list[dict[str, Any]] = []
+            for prior_message in reversed(state.messages):
+                if prior_message.get("role") != "assistant":
+                    continue
+                raw_blocks = prior_message.get("provider_content_blocks")
+                if isinstance(raw_blocks, list):
+                    provider_blocks = [block for block in raw_blocks if isinstance(block, dict)]
+                break
+            provider_result = local_runtime.result_block(
+                provider_blocks=provider_blocks,
+                call_id=frame.tool_id,
+                tool_name=frame.tool_name,
+                success=frame.tool_success,
+                result=(
+                    frame.result.result
+                    if frame.result is not None and hasattr(frame.result, "result")
+                    else frame.tool_result_text
+                ),
+                error=frame.tool_error,
+                metadata=frame.tool_metadata,
+            )
+            if provider_result is not None:
+                tool_message["provider_content_blocks"] = [provider_result]
+        state.messages.append(tool_message)
 
         # Apply context_compact metadata here; the tool never mutates messages.
         _compact_signal = (

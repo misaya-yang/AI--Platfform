@@ -55,7 +55,7 @@ class ArtifactInfo:
     updated_at: datetime | None = None
     # ---- First-class image variant fields (added by 001_image_session_artifacts) ----
     # All optional / nullable so non-image artifacts and pre-migration rows still load.
-    variant: str = "raw"               # 'raw' | 'display' | 'thumbnail'
+    variant: str = "raw"  # 'raw' | 'display' | 'thumbnail'
     parent_artifact_id: str | None = None  # For 'display'/'thumbnail' rows → raw.artifact_id
     turn_id: str | None = None
     owner_scope: str | None = None
@@ -168,6 +168,11 @@ class ArtifactStorageService:
             )
         else:
             return LocalStorageBackend(self.config.local_base_path, key_prefix=kp)
+
+    def supports_scoped_artifact_reads(self) -> bool:
+        """Return whether host-owned scope metadata can be revalidated."""
+
+        return bool(self.database and self.database._pool)
 
     @staticmethod
     def generate_artifact_id() -> str:
@@ -349,7 +354,8 @@ class ArtifactStorageService:
                     "Full artifact insert hit UndefinedColumnError (%s) — falling back to "
                     "legacy column list for artifact %s. Apply migration "
                     "assistant/001_image_session_artifacts.",
-                    exc, artifact.artifact_id,
+                    exc,
+                    artifact.artifact_id,
                 )
                 legacy_metadata = dict(artifact.metadata or {})
                 legacy_metadata["__owner_scope"] = artifact.owner_scope
@@ -411,10 +417,52 @@ class ArtifactStorageService:
             return None
 
         artifact = self._row_to_artifact(row)
-        if owner_scope is not None and artifact.owner_scope is not None:
-            if artifact.owner_scope != owner_scope:
-                return None
+        if (
+            owner_scope is not None
+            and artifact.owner_scope is not None
+            and artifact.owner_scope != owner_scope
+        ):
+            return None
         return artifact
+
+    async def read_artifact_scoped(
+        self,
+        artifact_id: str,
+        *,
+        tenant_id: str,
+        session_id: str,
+        user_id: str,
+        max_bytes: int,
+    ) -> tuple[ArtifactInfo, bytes] | None:
+        """Read one artifact only when every host-owned scope field matches."""
+
+        if not all((artifact_id, tenant_id, session_id, user_id)) or max_bytes <= 0:
+            return None
+        if not self.database or not self.database._pool:
+            return None
+        async with self.database._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT * FROM artifacts
+                WHERE artifact_id = $1 AND tenant_id = $2
+                  AND session_id = $3 AND user_id = $4
+                  AND source = 'tool_output_spill'
+                  AND turn_id IS NOT NULL
+                """,
+                artifact_id,
+                tenant_id,
+                session_id,
+                user_id,
+            )
+        if not row:
+            return None
+        artifact = self._row_to_artifact(row)
+        if artifact.size_bytes < 0 or artifact.size_bytes > max_bytes:
+            return None
+        content = await self._backend.download(artifact.storage_key)
+        if content is None or len(content) > max_bytes:
+            return None
+        return artifact, content
 
     async def find_variant(
         self,
@@ -453,7 +501,9 @@ class ArtifactStorageService:
             if isinstance(got_variant, str) and got_variant != variant:
                 logger.debug(
                     "find_variant fallback: artifact %s has variant %r, requested %r — refusing",
-                    parent_or_self_artifact_id, got_variant, variant,
+                    parent_or_self_artifact_id,
+                    got_variant,
+                    variant,
                 )
                 return None
             return got
@@ -518,7 +568,9 @@ class ArtifactStorageService:
             if isinstance(got_variant, str) and got_variant != variant:
                 logger.warning(
                     "find_variant DB-error fallback: artifact %s variant %r ≠ requested %r — refusing",
-                    parent_or_self_artifact_id, got_variant, variant,
+                    parent_or_self_artifact_id,
+                    got_variant,
+                    variant,
                 )
                 return None
             return got

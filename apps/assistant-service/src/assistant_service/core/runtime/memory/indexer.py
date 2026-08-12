@@ -249,6 +249,8 @@ class MemoryIndexer:
             persisted_vector_collections,
             persisted_vector_state,
             completed_absence_receipt,
+            persisted_content_hash,
+            persisted_source_generation,
         ) = await self._load_source_manifest(
             database=database,
             tenant_id=tenant_id,
@@ -262,6 +264,33 @@ class MemoryIndexer:
             raise MemorySourceDeletionPendingError("memory_source_deletion_pending")
         if existing_source_id:
             source_id = existing_source_id
+        content_sha256 = hashlib.sha256(content.encode()).hexdigest()
+        content_md5 = hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()
+        expected_chunks = len(chunk_markdown(content, self.chunk_config))
+        vector_generation_complete = (
+            persisted_vector_state == "not_configured"
+            and not persisted_vector_collections
+            and self.vector_store is None
+        ) or (
+            persisted_vector_state == "indexed"
+            and bool(persisted_vector_collections)
+            and self.vector_store is not None
+            and self.embedder is not None
+            and qmodels is not None
+        )
+        if (
+            existing_source_id
+            and not deletion_pending
+            and persisted_content_hash == content_md5
+            and persisted_source_generation == content_sha256
+            and expected_chunks == len(old_chunk_ids)
+            and vector_generation_complete
+        ):
+            return MemoryIndexResult(
+                source_id=source_id,
+                chunk_count=len(old_chunk_ids),
+                vector_indexed=(len(old_chunk_ids) if persisted_vector_state == "indexed" else 0),
+            )
         no_vector_write_proven = self._manifest_proves_no_vector_write(
             vector_state=persisted_vector_state,
             vector_collections=persisted_vector_collections,
@@ -301,7 +330,7 @@ class MemoryIndexer:
         ):
             source_metadata.pop(reserved_key, None)
         source_metadata["indexing_token"] = indexing_token
-        source_metadata["source_generation"] = hashlib.sha256(content.encode()).hexdigest()
+        source_metadata["source_generation"] = content_sha256
         source_metadata["vector_state"] = "not_configured"
         source_metadata["vector_collections"] = []
 
@@ -768,6 +797,8 @@ class MemoryIndexer:
                 _,
                 _,
                 _,
+                _,
+                _,
             ) = await self._load_source_manifest(
                 database=database,
                 tenant_id=tenant_id,
@@ -907,6 +938,8 @@ class MemoryIndexer:
                 persisted_vector_collections,
                 persisted_vector_state,
                 _,
+                _,
+                _,
             ) = await self._load_source_manifest(
                 database=database,
                 tenant_id=tenant_id,
@@ -1004,6 +1037,8 @@ class MemoryIndexer:
                 remaining_tombstone,
                 _,
                 remaining_indexing_token,
+                _,
+                _,
                 _,
                 _,
                 _,
@@ -1155,6 +1190,8 @@ class MemoryIndexer:
             (
                 remaining_source_id,
                 remaining_chunks,
+                _,
+                _,
                 _,
                 _,
                 _,
@@ -1572,11 +1609,13 @@ class MemoryIndexer:
         list[str],
         str | None,
         bool,
+        str | None,
+        str | None,
     ]:
         db = database or self.database
         rows = await db.fetch(
             """
-            SELECT s.source_id, c.chunk_id, s.metadata
+            SELECT s.source_id, c.chunk_id, s.content_hash, s.metadata
             FROM assistant_memory_sources s
             LEFT JOIN assistant_memory_chunks c
               ON c.source_id = s.source_id
@@ -1598,6 +1637,8 @@ class MemoryIndexer:
         vector_collections: list[str] = []
         vector_state: str | None = None
         completed_absence_receipt = False
+        content_hash: str | None = None
+        source_generation: str | None = None
         for row in rows or []:
             raw_source_id = _row_value(row, "source_id")
             if raw_source_id:
@@ -1605,6 +1646,9 @@ class MemoryIndexer:
             raw_chunk_id = _row_value(row, "chunk_id")
             if raw_chunk_id:
                 chunk_ids.append(str(raw_chunk_id))
+            raw_content_hash = str(_row_value(row, "content_hash") or "").strip()
+            if raw_content_hash:
+                content_hash = raw_content_hash.lower()
             metadata = _row_value(row, "metadata", {}) or {}
             if isinstance(metadata, str):
                 try:
@@ -1630,6 +1674,9 @@ class MemoryIndexer:
                 raw_vector_state = str(metadata.get("vector_state") or "").strip()
                 if raw_vector_state:
                     vector_state = raw_vector_state.lower()
+                raw_source_generation = str(metadata.get("source_generation") or "").strip()
+                if raw_source_generation:
+                    source_generation = raw_source_generation.lower()
                 completed_absence_receipt = completed_absence_receipt or bool(
                     metadata.get("deletion_pending") is True
                     and metadata.get("deletion_completed") is True
@@ -1651,6 +1698,8 @@ class MemoryIndexer:
             list(dict.fromkeys(vector_collections)),
             vector_state,
             completed_absence_receipt and not chunk_ids and not vector_collections,
+            content_hash,
+            source_generation,
         )
 
     @staticmethod

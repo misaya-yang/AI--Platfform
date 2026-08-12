@@ -19,11 +19,47 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import dotenv
 import jwt
 import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
+
+
+# ---------------------------------------------------------------------------
+# Keep the suite hermetic against the developer's local .env
+#
+# `src/main.py` calls `load_dotenv(_env_file, override=False)` at import time.
+# The first test module that transitively imports it therefore injects the real
+# .env into os.environ for the rest of the session, which made outcomes depend
+# on test order *and* on whichever .env the machine happens to have. Observed
+# before this guard, all passing when run alone and failing in a full run:
+#
+#   - test_agent_plugin_catalog / test_agent_runtime_resolver inherited a real
+#     GATEWAY_ASSISTANT_SHARED_SECRET and broke their anonymous-mode setup
+#   - test_open_source_container_distribution read KB_EMBEDDING_MODEL as
+#     'gemini-embedding-2-preview' instead of the declared default
+#   - test_validate_env_quickstart saw POSTGRES_PASSWORD already set and
+#     asserted on the wrong missing-variable message
+#
+# Neutralizing the loader is the narrowest fix that covers the whole class:
+# `src/main.py` binds the name at import (`from dotenv import load_dotenv`), so
+# replacing the attribute here — before any test module is imported — makes
+# that call a no-op while leaving `dotenv_values` (used by a few tests to read
+# .env deliberately) untouched. Tests needing a value still set it explicitly
+# via monkeypatch.
+#
+# This must stay at conftest module level: test modules import application code
+# during collection, before any fixture — even a session-scoped autouse one —
+# gets a chance to run.
+# ---------------------------------------------------------------------------
+def _no_dotenv_during_tests(*_args: Any, **_kwargs: Any) -> bool:
+    """Stand in for dotenv.load_dotenv so the suite ignores a local .env."""
+    return False
+
+
+dotenv.load_dotenv = _no_dotenv_during_tests
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 KNOWLEDGE_SERVICE_SRC = REPO_ROOT / "apps" / "knowledge-service" / "src"

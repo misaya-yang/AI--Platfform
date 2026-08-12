@@ -155,6 +155,43 @@ for line in sys.stdin:
     assert caught.value.stable_code == "MCP_RESOURCE_PATH_BLOCKED"
 
 
+@pytest.mark.asyncio
+async def test_platform_managed_python_command_uses_service_interpreter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin_root = tmp_path / "plugin"
+    plugin_data = tmp_path / "data"
+    plugin_root.mkdir()
+    plugin_data.mkdir()
+    launched: dict[str, object] = {}
+
+    async def fake_subprocess(command: str, *args: str, **kwargs: object):
+        launched.update(command=command, args=args, kwargs=kwargs)
+        raise OSError("synthetic stop after executable resolution")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+    client = MCPStdioClient(
+        MCPServerConfig(
+            name="fake",
+            transport="stdio",
+            platform_managed=True,
+            command="python",
+            args=("-m", "fake_server"),
+            cwd=str(plugin_data),
+            plugin_root=str(plugin_root),
+            plugin_data_dir=str(plugin_data),
+        )
+    )
+
+    with pytest.raises(MCPError, match="could not start") as caught:
+        await client.initialize()
+
+    assert caught.value.stable_code == "MCP_STDIO_START_FAILED"
+    assert launched["command"] == sys.executable
+    assert launched["args"] == ("-m", "fake_server")
+
+
 @pytest.mark.skipif(os.name == "nt", reason="symlink creation may require Windows privileges")
 @pytest.mark.asyncio
 async def test_stdio_client_rejects_symlinked_cwd_escape(tmp_path: Path) -> None:

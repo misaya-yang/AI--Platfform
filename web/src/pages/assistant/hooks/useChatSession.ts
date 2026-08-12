@@ -36,6 +36,7 @@ import {
   reduceLegacyStreamChunk,
   type StreamTurnState,
 } from "@/features/chat/stream";
+import { reduceSubAgentEvent } from "../subagentEventReducer";
 import type {
   ChatMessage as ChatMessageType,
   RetrievedContext,
@@ -58,7 +59,6 @@ import type {
   // Working memory and code execution state types
   WorkingMemory,
   CodeExecutionState,
-  SubAgentState,
 } from "../types";
 import { getQuiz } from "@/api/quiz";
 import { getStyleSystemPrompt } from "../styles";
@@ -637,8 +637,18 @@ function finalizeProcessSummary(
   };
 }
 
-export function useChatSession() {
+export interface UseChatSessionOptions {
+  /** Fail-closed, current Local Node eligibility gate for initial and resumed streams. */
+  isOSAgentEligible?: () => boolean;
+  getLocalNodeBinding?: () => { deviceId: string; grantIds: string[] } | undefined;
+}
+
+export function useChatSession(options: UseChatSessionOptions = {}) {
   const { t } = useTranslation();
+  const osAgentEligibilityRef = useRef(options.isOSAgentEligible);
+  osAgentEligibilityRef.current = options.isOSAgentEligible;
+  const localNodeBindingRef = useRef(options.getLocalNodeBinding);
+  localNodeBindingRef.current = options.getLocalNodeBinding;
 
   // 使用全局状态存储的 AI助手 专用会话 ID（与 Playground 完全分离）
   const {
@@ -1173,13 +1183,6 @@ export function useChatSession() {
       );
     };
 
-    const updateSubAgent = (agentId: string, updater: (sa: SubAgentState) => SubAgentState) => {
-      updateAssistantMessage(m => {
-        if (!m.activeSubAgents) return m;
-        return { ...m, activeSubAgents: m.activeSubAgents.map(sa => sa.agentId === agentId ? updater(sa) : sa) };
-      });
-    };
-
     // RAF-batched sync: buffer turn state updates and flush once per frame
     // to avoid ~60 setState calls/s during token streaming.
     let pendingSyncTurnState = false;
@@ -1233,6 +1236,11 @@ export function useChatSession() {
       const styleSystemPrompt = getStyleSystemPrompt(config.selected_style || "default");
       const history: AssistantMessage[] = messages.map((m) => ({ role: m.role, content: m.content }));
 
+      const localNodeBinding = localNodeBindingRef.current?.();
+      const localNodeEnabled =
+        config.os_agent_enabled === true &&
+        (osAgentEligibilityRef.current?.() ?? false) &&
+        Boolean(localNodeBinding);
       const stream = chatStream({
         message: messageContent,
         session_id: sessionId || undefined,
@@ -1249,7 +1257,9 @@ export function useChatSession() {
         file_paths: filePaths.length > 0 ? filePaths : undefined,
         execution_profile: config.execution_profile || "safe",
         memory_mode: config.memory_mode || "auto",
-        os_agent_enabled: config.os_agent_enabled ?? false,
+        os_agent_enabled: localNodeEnabled,
+        local_node_device_id: localNodeEnabled ? localNodeBinding?.deviceId : undefined,
+        local_node_grant_ids: localNodeEnabled ? localNodeBinding?.grantIds : undefined,
         resume_run_id: resumeRunId,
         resume_approval_id: resumeApprovalId,
       }, abortControllerRef.current.signal);
@@ -1386,58 +1396,22 @@ export function useChatSession() {
           }
 
           // ADR-003: Sub-Agent events
-          case SSEEventType.SUBAGENT_STARTED: {
-            const sa = event.data as { agent_id: string; agent_type: string; description: string; prompt?: string };
-            updateAssistantMessage(m => ({
-              ...m,
-              activeSubAgents: [...(m.activeSubAgents || []), {
-                agentId: sa.agent_id,
-                agentType: sa.agent_type as "explore" | "task" | "plan",
-                description: sa.description,
-                prompt: sa.prompt,
-                status: "running",
-                steps: [],
-              }],
-            }));
-            break;
-          }
-          case SSEEventType.SUBAGENT_TEXT_DELTA: {
-            const { agent_id, text } = event.data as { agent_id: string; text: string };
-            updateSubAgent(agent_id, sa => ({ ...sa, streamingText: (sa.streamingText || "") + text }));
-            break;
-          }
-          case SSEEventType.SUBAGENT_TOOL_START: {
-            const { agent_id, tool_name, call_id } = event.data as { agent_id: string; tool_name: string; call_id: string };
-            updateSubAgent(agent_id, sa => ({
-              ...sa,
-              steps: [...sa.steps, { toolName: tool_name, callId: call_id, status: "running" as const }],
-              toolCallsMade: (sa.toolCallsMade || 0) + 1,
-            }));
-            break;
-          }
-          case SSEEventType.SUBAGENT_TOOL_RESULT: {
-            const { agent_id, call_id, success, duration_ms, summary } = event.data as { agent_id: string; call_id: string; success: boolean; duration_ms?: number; summary?: string };
-            updateSubAgent(agent_id, sa => ({
-              ...sa,
-              steps: sa.steps.map(s =>
-                s.callId === call_id
-                  ? { ...s, status: (success ? "completed" : "failed") as "completed" | "failed", summary, durationMs: duration_ms }
-                  : s
+          case SSEEventType.SUBAGENT_STARTED:
+          case SSEEventType.SUBAGENT_STEP:
+          case SSEEventType.SUBAGENT_TEXT_DELTA:
+          case SSEEventType.SUBAGENT_TOOL_START:
+          case SSEEventType.SUBAGENT_TOOL_RESULT:
+          case SSEEventType.SUBAGENT_FINISHED:
+            updateAssistantMessage((message) => ({
+              ...message,
+              activeSubAgents: reduceSubAgentEvent(
+                message.activeSubAgents ?? [],
+                event.event_type,
+                event.data,
+                now,
               ),
             }));
             break;
-          }
-          case SSEEventType.SUBAGENT_FINISHED: {
-            const { agent_id, status, result_summary, duration_ms, error } = event.data as { agent_id: string; status: string; result_summary?: string; duration_ms?: number; error?: string };
-            updateSubAgent(agent_id, sa => ({
-              ...sa,
-              status: status as "completed" | "failed",
-              resultSummary: result_summary,
-              durationMs: duration_ms,
-              error,
-            }));
-            break;
-          }
 
           case SSEEventType.STATUS:
             // 状态事件不计入 TTFT - TTFT 只测量真正的文本内容出现时间

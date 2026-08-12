@@ -19,6 +19,7 @@ from assistant_service.core.tool_invoker import (
     RegistryToolInvoker,
     ToolInvocationContext,
 )
+from assistant_service.core.tools.code_executor_tool import CODE_EXECUTOR_TOOL
 from assistant_service.core.tools.confluence_tool import CONFLUENCE_WRITE_DEFINITION
 from assistant_service.core.tools.tool_registry import (
     ToolCallRequest,
@@ -97,6 +98,82 @@ async def test_direct_registry_denies_high_risk_without_gateway() -> None:
 
     assert result.success is False
     assert result.metadata["direct_registry_denied"] is True
+    assert executor.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_real_confluence_write_definition_denies_direct_execution() -> None:
+    """Gateway-disabled fallback still honors the definition approval boundary."""
+
+    registry = ToolRegistry()
+    executor = _RecordingExecutor()
+    registry.register(copy.deepcopy(CONFLUENCE_WRITE_DEFINITION), executor)
+
+    result = await registry.execute(
+        ToolCallRequest(
+            call_id="call-confluence-direct",
+            tool_name="confluence_write",
+            arguments={"action": "comment", "page_id": "123", "body": "hello"},
+        )
+    )
+
+    assert result.success is False
+    assert result.metadata["direct_registry_denied"] is True
+    assert result.metadata["requires_confirmation"] is True
+    assert executor.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_real_code_executor_direct_fallback_keeps_sandbox_contract() -> None:
+    """Unattended code is an explicit medium-risk, restricted-sandbox contract."""
+
+    registry = ToolRegistry()
+    executor = _RecordingExecutor()
+    registry.register(copy.deepcopy(CODE_EXECUTOR_TOOL), executor)
+
+    result = await registry.execute(
+        ToolCallRequest(
+            call_id="call-code-direct",
+            tool_name="execute_python_code",
+            arguments={"code": "print(1)"},
+        )
+    )
+
+    assert result.success is True
+    assert CODE_EXECUTOR_TOOL.risk_level is ToolRiskLevel.MEDIUM
+    assert CODE_EXECUTOR_TOOL.requires_confirmation is False
+    assert CODE_EXECUTOR_TOOL.sandbox_profile == "docker-gvisor-no-network"
+    assert executor.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_gateway_safe_profile_requires_approval_for_real_code_executor() -> None:
+    """Document the current Gateway-on policy delta instead of hiding it in name lists."""
+
+    registry = ToolRegistry()
+    executor = _RecordingExecutor()
+    registry.register(copy.deepcopy(CODE_EXECUTOR_TOOL), executor)
+    gateway = AssistantExecutionGateway(
+        tool_invoker=RegistryToolInvoker(registry),
+        database=None,
+    )
+
+    result = await gateway.invoke_tool(
+        "execute_python_code",
+        {"code": "print(1)"},
+        ToolInvocationContext(
+            session_id="session-code",
+            user_id="user-code",
+            tenant_id="tenant-code",
+            request_id="request-code",
+            run_id="11111111-1111-4111-8111-111111111111",
+            policy_profile="safe",
+        ),
+    )
+
+    assert result.success is False
+    assert result.error == "APPROVAL_REQUIRED"
+    assert result.metadata["sandbox_decision"]["sandbox"] == "docker_restricted"
     assert executor.calls == 0
 
 

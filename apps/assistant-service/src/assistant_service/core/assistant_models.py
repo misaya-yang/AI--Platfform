@@ -146,6 +146,10 @@ class AssistantConfig:
     execution_profile: str = "safe"
     memory_mode: str = "auto"
     os_agent_enabled: bool = False
+    # Selectors are not authority. The Local Node provider rechecks ownership,
+    # session scope, device health, and every cited grant before exposing tools.
+    local_node_device_id: str | None = None
+    local_node_grant_ids: list[str] = field(default_factory=list)
     runtime_mode: str = "compat"
     queue_mode: str = "collect"
     context_detail: bool = False

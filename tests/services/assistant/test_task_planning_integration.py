@@ -11,6 +11,7 @@ This covers:
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from ai_gateway_core.enums import ModelAccessLevel
 from assistant_service.core.assistant_service import (
     AssistantConfig,
     AssistantService,
@@ -30,6 +31,7 @@ def mock_model_registry():
     """Create a mock model registry."""
     registry = MagicMock()
     registry.get_model.return_value = MagicMock(
+        access_level=ModelAccessLevel.PUBLIC,
         context_window=128000,
         supports_vision=True,
         supports_tools=True,
@@ -79,10 +81,14 @@ def assistant_service(mock_model_registry, mock_context_manager):
     """Create an AssistantService instance for testing."""
     with patch("assistant_service.core.assistant_service.get_context_manager") as mock_get_ctx:
         mock_get_ctx.return_value = mock_context_manager
-        with patch("assistant_service.core.assistant_service.get_rag_evaluator"), patch(
-            "assistant_service.core.assistant_service.get_artifact_storage",
-            create=True,
-        ), patch("assistant_service.core.assistant_service.create_file_processor"):
+        with (
+            patch("assistant_service.core.assistant_service.get_rag_evaluator"),
+            patch(
+                "assistant_service.core.assistant_service.get_artifact_storage",
+                create=True,
+            ),
+            patch("assistant_service.core.assistant_service.create_file_processor"),
+        ):
             service = AssistantService(
                 model_registry=mock_model_registry,
                 kb_service=None,
@@ -172,6 +178,7 @@ class TestAssistantServiceProperties:
 
         assert service._task_planner is custom_planner
         assert service.task_planner is custom_planner
+
 
 # =============================================================================
 # Integration with chat_stream Tests

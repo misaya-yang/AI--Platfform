@@ -10,9 +10,13 @@ Start: uvicorn assistant_service.main:app --host 0.0.0.0 --port 8093
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
+from collections.abc import Iterable
 from contextlib import asynccontextmanager, suppress
+from typing import Any
 
 from ai_gateway_core.logging import configure_structured_logging
 from fastapi import FastAPI
@@ -46,15 +50,77 @@ def _env_truthy(name: str, *, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _register_subagent_tool_if_enabled() -> bool:
+def _resolved_runtime_feature_contract() -> dict[str, Any]:
+    """Return the host-resolved Assistant capability switches and their digest.
+
+    The digest is safe to expose in readiness receipts, while the explicit
+    booleans in the startup log make stale Compose environments diagnosable.
+    Keep defaults aligned with the production composition root.
+    """
+
+    features = {
+        "gateway": _env_truthy("ASSISTANT_GATEWAY_ENABLED", default=True),
+        "runtime_context_v2": _env_truthy("ASSISTANT_RUNTIME_CONTEXT_V2", default=True),
+        "runtime_memory_v2": _env_truthy("ASSISTANT_RUNTIME_MEMORY_V2", default=True),
+        "runtime_skills": _env_truthy("ASSISTANT_RUNTIME_SKILLS", default=True),
+        "staged_compaction": _env_truthy("ASSISTANT_STAGED_COMPACTION_ENABLED"),
+        "subagents": _env_truthy("ASSISTANT_SUBAGENTS_ENABLED"),
+        "tool_output_spill": _env_truthy(
+            "ASSISTANT_TOOL_OUTPUT_SPILL_ENABLED",
+            default=True,
+        ),
+    }
+    encoded = json.dumps(features, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {
+        "schema_version": "assistant-runtime-features/v1",
+        "features": features,
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def _register_subagent_tool_if_enabled(
+    agent_definitions: Iterable[Any] = (),
+) -> bool:
     """Register delegation only when the rollout flag explicitly enables it."""
 
     if not _env_truthy("ASSISTANT_SUBAGENTS_ENABLED"):
         return False
     from .core.tools.subagent_tool import register_subagent_tool
 
-    register_subagent_tool()
+    definitions = tuple(agent_definitions)
+    if definitions:
+        register_subagent_tool(agent_definitions=definitions)
+    else:
+        register_subagent_tool()
     return True
+
+
+def _initialize_agent_plugin_catalog(app: FastAPI):
+    """Discover inert plugin agents without depending on DB/runtime memory."""
+
+    from .core.agent.plugin_catalog import AgentPluginCatalog
+
+    catalog = AgentPluginCatalog.from_env()
+    app.state.agent_plugin_catalog = catalog
+    app.state.agent_plugin_catalog_status = catalog.status
+    logger.info(
+        "Agent Plugin catalog initialized enabled=%s agents=%s",
+        catalog.enabled,
+        len(catalog.agents),
+    )
+    return catalog
+
+
+def _register_catalog_subagent_tool(catalog) -> bool:
+    """Publish validated profiles through the composition-root tool seam."""
+
+    registered = _register_subagent_tool_if_enabled(catalog.agents)
+    if registered:
+        logger.info(
+            "Sub-agent delegation enabled (plugin_agents=%s)",
+            len(catalog.agents),
+        )
+    return registered
 
 
 def _configure_agent_runtime_resource_policies(app: FastAPI, database):
@@ -201,6 +267,14 @@ async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
     logger.info("Assistant Service starting...")
     app.state.settings = settings
+    runtime_features = _resolved_runtime_feature_contract()
+    app.state.runtime_feature_contract = runtime_features
+    logger.info(
+        "Assistant runtime features resolved sha256=%s features=%s",
+        runtime_features["sha256"],
+        runtime_features["features"],
+    )
+    agent_plugin_catalog = _initialize_agent_plugin_catalog(app)
 
     # ── OpenTelemetry SDK bootstrap — must run BEFORE database init below
     # so AsyncPGInstrumentor patches asyncpg before any pool is created.
@@ -237,6 +311,7 @@ async def lifespan(app: FastAPI):
         app.state.database = database
         logger.info("Database connected")
     except Exception as e:
+        database = None
         if require_db:
             logger.error("Database init failed (ASSISTANT_REQUIRE_DB=true): %s", e)
             raise RuntimeError(
@@ -361,7 +436,10 @@ async def lifespan(app: FastAPI):
         try:
             from .core.runtime.compat.runtime_adapter import AssistantRuntimeAdapter
 
-            assistant_runtime_adapter = AssistantRuntimeAdapter.from_env(database=database)
+            assistant_runtime_adapter = AssistantRuntimeAdapter.from_env(
+                database=database,
+                agent_plugin_catalog=agent_plugin_catalog,
+            )
             logger.info("Assistant runtime adapter initialized")
         except Exception as exc:
             assistant_runtime_adapter_unavailable = True
@@ -460,8 +538,7 @@ async def lifespan(app: FastAPI):
 
     register_tool_discovery_tools()
 
-    if _register_subagent_tool_if_enabled():
-        logger.info("Sub-agent delegation enabled")
+    _register_catalog_subagent_tool(agent_plugin_catalog)
 
     # ── Primitive tools (Phase 4) — env-gated opt-in ──
     # Exposes fs_read/fs_write/fs_glob/fs_grep to the model. Requires a writable
@@ -511,6 +588,10 @@ async def lifespan(app: FastAPI):
             logger.warning(f"Artifact storage init failed: {e}")
 
     artifact_storage = get_artifact_storage()
+    from .core.tools.tool_artifact_reader import register_tool_artifact_reader
+
+    if register_tool_artifact_reader(artifact_storage):
+        logger.info("Scoped tool-output artifact reader registered")
     try:
         file_storage = get_file_storage()
     except RuntimeError:
@@ -848,6 +929,9 @@ async def health_ready():
             "status": "ready" if ready else "not_ready",
             "service": "assistant",
             "checks": checks,
+            "runtime_feature_fingerprint": dict(
+                getattr(app.state, "runtime_feature_contract", {})
+            ).get("sha256"),
         },
     )
 

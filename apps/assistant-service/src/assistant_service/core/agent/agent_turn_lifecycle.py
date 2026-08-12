@@ -94,10 +94,18 @@ class AgentTurnLifecycleMixin:
 
     @staticmethod
     def _configured_run_budget(config: AgentLoopConfig) -> RunBudget:
-        limits = config.run_budget_limits or RunBudgetLimits.from_legacy(
-            max_tool_iterations=config.max_tool_iterations,
-            max_concurrent_tools=config.max_concurrent_tools,
-        )
+        limits = config.run_budget_limits
+        if limits is None:
+            legacy = RunBudgetLimits.from_legacy(
+                max_tool_iterations=config.max_tool_iterations,
+                max_concurrent_tools=config.max_concurrent_tools,
+            )
+            limits = RunBudgetLimits(
+                **{
+                    **legacy.to_dict(),
+                    "final_synthesis_headroom": config.final_synthesis_headroom,
+                }
+            )
         return RunBudget(limits)
 
     @staticmethod
@@ -345,7 +353,23 @@ class AgentTurnLifecycleMixin:
         data = dict(event.data)
         data["attempt_id"] = ctx.attempt_id
         data["attempt_number"] = ctx.attempt_number
-        data["turn_state"] = ctx.turn_kernel.snapshot() if ctx.turn_kernel is not None else {}
+        # Any event that also carries a terminal_envelope must repeat the
+        # envelope's own turn_state verbatim — `turn_event_collector` compares
+        # the two and rejects a mismatch. Every other event (including one per
+        # text/thinking delta) gets the compact projection, since repeating the
+        # full transition trail once per token is what dominates the stream.
+        carries_envelope = event.event_type in {
+            StreamEventType.RUN_FINISHED.value,
+            StreamEventType.RUN_ERROR.value,
+            "approval_required",
+            "side_effect_unknown",
+        }
+        if ctx.turn_kernel is None:
+            data["turn_state"] = {}
+        elif carries_envelope:
+            data["turn_state"] = ctx.turn_kernel.snapshot()
+        else:
+            data["turn_state"] = ctx.turn_kernel.stream_snapshot()
         if event.event_type in {
             StreamEventType.RUN_FINISHED.value,
             StreamEventType.RUN_ERROR.value,
@@ -476,6 +500,8 @@ class AgentTurnLifecycleMixin:
         tools: list[dict[str, Any]] | None,
         thinking_level: str | None = None,
         native_search_config: dict[str, Any] | None = None,
+        budget_purpose: str = "work",
+        openai_local_runtime: Any | None = None,
     ) -> AsyncGenerator[Any, None]:
         """Yield model deltas plus optional pre-delta ``gateway_decision`` events."""
 
@@ -501,6 +527,7 @@ class AgentTurnLifecycleMixin:
             "tools": tools,
             "thinking_level": thinking_level,
             "native_search_config": native_search_config,
+            "openai_local_runtime": openai_local_runtime,
         }
         async for item in stream_with_failover(
             registry=self.model_registry,
@@ -515,7 +542,7 @@ class AgentTurnLifecycleMixin:
             if item.notice is not None:
                 if ctx.run_budget is None:
                     raise RuntimeError("run_budget_not_initialized")
-                ctx.run_budget.consume_model_turn()
+                ctx.run_budget.consume_model_turn(purpose=budget_purpose)
                 receipt = item.notice.to_dict()
                 ctx.served_model_id = item.notice.served_model
                 ctx.model_failover_receipts.append(receipt)
@@ -707,12 +734,12 @@ class AgentTurnLifecycleMixin:
         return ctx.terminal_envelope
 
     def _capture_trace_start(self, ctx: AgentLoopContext) -> None:
-        if not self.trace_writer:
+        if not self.trace_writer or ctx.trace_capture_disabled:
             return
         self.trace_writer.start_trace(self._trace_context(ctx))
 
     def _capture_trace_event(self, ctx: AgentLoopContext, event: AgentLoopEvent) -> None:
-        if not self.trace_writer:
+        if not self.trace_writer or ctx.trace_capture_disabled:
             return
         phase = event.phase.value if hasattr(event.phase, "value") else str(event.phase)
         self.trace_writer.record_event(
@@ -758,7 +785,7 @@ class AgentTurnLifecycleMixin:
         event_type: str,
         payload: dict[str, Any],
     ) -> None:
-        if not self.trace_writer:
+        if not self.trace_writer or ctx.trace_capture_disabled:
             return
         self.trace_writer.record_event(
             ctx=self._trace_context(ctx),
@@ -776,7 +803,7 @@ class AgentTurnLifecycleMixin:
         error: Any = None,
         terminal_event_type: str | None = None,
     ) -> None:
-        if not self.trace_writer:
+        if not self.trace_writer or ctx.trace_capture_disabled:
             return
         self.trace_writer.finish_trace(
             ctx=self._trace_context(ctx),

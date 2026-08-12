@@ -208,6 +208,8 @@ if [ "$UPDATE_DOCGEN" = true ]; then
     copy_dir "packages/mcp-docgen-server/src/docgen" "$assistant" "$assistant_site/docgen" "appuser:appuser"
     copy_dir "packages/mcp-docgen-server/src/mcp_docgen_server" "$assistant" "$assistant_site/mcp_docgen_server" "appuser:appuser"
     copy_dir "agent-plugins/ai-docgen" "$assistant" "/opt/agent-plugins/ai-docgen"
+    copy_dir "agent-plugins/community-doublecheck" "$assistant" "/opt/agent-plugins/community-doublecheck"
+    copy_dir "agent-plugins/community-engineering-reviewers" "$assistant" "/opt/agent-plugins/community-engineering-reviewers"
     if [ "$UPDATE_ASSISTANT" != true ]; then
         restart_services+=("assistant-service")
     fi
