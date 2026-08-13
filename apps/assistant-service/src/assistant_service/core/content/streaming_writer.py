@@ -35,7 +35,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 if TYPE_CHECKING:
     from ai_gateway_core.auth import UserContextLike
@@ -338,7 +338,11 @@ class StreamingWriter:
                                 )
 
                             except Exception as e:
-                                logger.warning(f"KB search failed: {e}")
+                                record_internal_exception(
+                                    __name__,
+                                    "assistant.core.content.streaming_writer.internal_failure",
+                                    e,
+                                )
                                 yield StreamChunk(
                                     type="error",
                                     content=f"Search failed: {str(e)}",
@@ -373,7 +377,9 @@ class StreamingWriter:
             )
 
         except Exception as e:
-            logger.error(f"StreamingWriter error: {e}", exc_info=True)
+            record_internal_exception(
+                __name__, "assistant.core.content.streaming_writer.internal_failure", e
+            )
             yield StreamChunk(
                 type="error",
                 content=f"Generation failed: {str(e)}",
@@ -644,7 +650,7 @@ class StreamingWriter:
                 if delta.content:
                     yield delta.content
         except Exception as e:
-            logger.error(f"Text generation failed: {e}", exc_info=True)
+            record_internal_exception(__name__, "assistant.content.text_generation_failed", e)
             raise
 
     async def _search_kb(
@@ -693,7 +699,9 @@ class StreamingWriter:
                         }
                     )
             except Exception as e:
-                logger.warning(f"KB search failed for dataset {dataset_id}: {e}")
+                record_internal_exception(
+                    __name__, "assistant.core.content.streaming_writer.internal_failure", e
+                )
                 continue
 
         # Sort by score and limit to top_k

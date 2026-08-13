@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import inspect
 import json
+import logging
 import os
 import re
 import time
 from collections.abc import Callable
 from typing import Any, Protocol
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 from ai_gateway_core.persistence.repositories.mcp_repository import (
     MCPAuthorizationError,
 )
@@ -197,12 +197,19 @@ class MCPDiscoveryService:
             await client.initialize()
             tools = await client.list_tools()
         except MCPError as exc:
-            with contextlib.suppress(Exception):
+            try:
                 await repository.record_runtime_result(
                     tenant_id=tenant_id,
                     server_id=server_id,
                     success=False,
                     error_code=exc.stable_code,
+                )
+            except Exception as exc:
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.mcp.runtime.suppressed_failure",
+                    exc,
+                    level=logging.DEBUG,
                 )
             raise
         finally:
@@ -269,23 +276,43 @@ class MCPRuntimeService:
         )
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=0.05)
-        except TimeoutError:
+        except TimeoutError as exc:
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            try:
                 await task
-            logger.warning("Timed out recording MCP runtime telemetry")
+            except asyncio.CancelledError:
+                pass
+            except Exception as cleanup_exc:
+                record_internal_exception(
+                    __name__,
+                    "mcp.runtime.telemetry_cancel_cleanup_failed",
+                    cleanup_exc,
+                    level=logging.DEBUG,
+                )
+            record_internal_exception(
+                __name__,
+                "mcp.runtime.telemetry_record_timeout",
+                exc,
+                level=logging.WARNING,
+            )
         except asyncio.CancelledError:
             # Upstream already produced an authoritative result. A caller
             # cancellation while optional telemetry is pending must not turn a
             # known success into an ambiguous write outcome.
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            try:
                 await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as cleanup_exc:
+                record_internal_exception(
+                    __name__,
+                    "mcp.runtime.telemetry_cancel_cleanup_failed",
+                    cleanup_exc,
+                    level=logging.DEBUG,
+                )
         except Exception as exc:
-            logger.error(
-                "mcp.runtime.telemetry_record_failed (exception_type=%s)",
-                type(exc).__name__,
-            )
+            record_internal_exception(__name__, "mcp.runtime.telemetry_record_failed", exc)
 
     def _connection_semaphore(
         self,
@@ -570,9 +597,8 @@ class MCPRuntimeService:
             except (MCPAuthorizationError, MCPSecretUnavailable):
                 continue
             except Exception as exc:
-                logger.error(
-                    "mcp.runtime.authorization_catalog_failed_closed (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "mcp.runtime.authorization_catalog_failed_closed", exc
                 )
                 continue
             definitions.append(self._definition(item))
@@ -606,9 +632,8 @@ class MCPRuntimeService:
             except MCPAuthorizationError:
                 raise
             except Exception as exc:
-                logger.error(
-                    "mcp.runtime.invocation_authorization_failed_closed (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "mcp.runtime.invocation_authorization_failed_closed", exc
                 )
                 failure = decide_mcp_failure(
                     "MCP_AUTHORIZATION_UNAVAILABLE",
@@ -767,9 +792,8 @@ class MCPRuntimeService:
                         try:
                             await client.close()
                         except Exception as exc:
-                            logger.error(
-                                "mcp.runtime.client_close_failed (exception_type=%s)",
-                                type(exc).__name__,
+                            record_internal_exception(
+                                __name__, "mcp.runtime.client_close_failed", exc
                             )
                 await breaker.record_success(lease)
                 circuit_recorded = True
@@ -841,7 +865,10 @@ class MCPRuntimeService:
                 deadline_scope = "host"
         except asyncio.CancelledError:
             error_code = "MCP_CANCELLED_AFTER_DISPATCH" if operation_started else "MCP_CANCELLED"
-        except Exception:
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.mcp.runtime.internal_failure", exc
+            )
             error_code = "MCP_UPSTREAM_UNAVAILABLE"
         failure = decide_mcp_failure(
             error_code,

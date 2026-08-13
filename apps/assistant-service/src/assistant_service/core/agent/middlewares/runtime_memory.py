@@ -14,12 +14,12 @@ to the pre-refactor inline code so the SSE golden tests stay green.
 
 from __future__ import annotations
 
-import contextlib
+import logging
 import re
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from ...runtime.memory.lifecycle import memory_policy_enabled
 
@@ -186,13 +186,14 @@ class RuntimeMemoryMiddleware:
                 },
             )
         except Exception as exc:
-            logger.error(
-                "assistant memory retrieval failed (exception_type=%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__,
+                "assistant.core.agent.middlewares.runtime_memory.internal_failure",
+                exc,
             )
 
         # Reflection scheduling is best-effort and independent of retrieval.
-        with contextlib.suppress(Exception):
+        try:
             scheduled_job_id = await self._runtime.schedule_daily_reflection(
                 tenant_id=ctx.tenant_id,
                 user_id=memory_user_id,
@@ -204,3 +205,10 @@ class RuntimeMemoryMiddleware:
                     event_type="memory_reflection_scheduled",
                     data={"job_id": scheduled_job_id},
                 )
+        except Exception as exc:
+            record_internal_exception(
+                __name__,
+                "assistant.core.agent.middlewares.runtime_memory.suppressed_failure",
+                exc,
+                level=logging.DEBUG,
+            )

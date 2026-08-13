@@ -18,7 +18,7 @@ import re
 import time
 from pathlib import Path
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from .tool_registry import (
     ToolCallRequest,
@@ -142,7 +142,9 @@ class FsReadExecutor(ToolExecutor):
         except WorkspaceEscapeError as exc:
             return _err(request, str(exc), start)
         except Exception as exc:  # pragma: no cover — unexpected I/O errors
-            logger.exception("fs_read failed")
+            record_internal_exception(
+                __name__, "assistant.core.tools.primitives.internal_failure", exc
+            )
             return _err(request, f"{type(exc).__name__}: {exc}", start)
 
 
@@ -208,7 +210,9 @@ class FsWriteExecutor(ToolExecutor):
         except WorkspaceEscapeError as exc:
             return _err(request, str(exc), start)
         except Exception as exc:  # pragma: no cover
-            logger.exception("fs_write failed")
+            record_internal_exception(
+                __name__, "assistant.core.tools.primitives.internal_failure", exc
+            )
             return _err(request, f"{type(exc).__name__}: {exc}", start)
 
 
@@ -274,7 +278,9 @@ class FsGlobExecutor(ToolExecutor):
         except WorkspaceEscapeError as exc:
             return _err(request, str(exc), start)
         except Exception as exc:  # pragma: no cover
-            logger.exception("fs_glob failed")
+            record_internal_exception(
+                __name__, "assistant.core.tools.primitives.internal_failure", exc
+            )
             return _err(request, f"{type(exc).__name__}: {exc}", start)
 
 
@@ -411,7 +417,9 @@ class FsGrepExecutor(ToolExecutor):
         except WorkspaceEscapeError as exc:
             return _err(request, str(exc), start)
         except Exception as exc:  # pragma: no cover
-            logger.exception("fs_grep failed")
+            record_internal_exception(
+                __name__, "assistant.core.tools.primitives.internal_failure", exc
+            )
             return _err(request, f"{type(exc).__name__}: {exc}", start)
 
 

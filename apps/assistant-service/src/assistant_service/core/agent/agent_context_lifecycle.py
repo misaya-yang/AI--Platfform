@@ -9,7 +9,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.enums import StreamEventType
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from ..memory.compressor import (
     ContextCompressor,
@@ -85,9 +85,8 @@ class AgentContextLifecycleMixin:
         try:
             durable_session = await self.session_manager.get(session_id)
         except Exception as exc:
-            logger.error(
-                "Durable session owner proof failed (exception_type=%s)",
-                _redact_trace_text(type(exc).__name__, limit=80),
+            record_internal_exception(
+                __name__, "assistant.core.agent.agent_context_lifecycle.internal_failure", exc
             )
             return False
         if durable_session is None:
@@ -133,11 +132,12 @@ class AgentContextLifecycleMixin:
                         legacy_owner_verified=legacy_owner_verified,
                     )
                 except Exception as exc:
-                    ctx.working_memory_restore_failed = True
-                    logger.error(
-                        "Scoped working memory restore failed (exception_type=%s)",
-                        _redact_trace_text(type(exc).__name__, limit=80),
+                    record_internal_exception(
+                        __name__,
+                        "assistant.core.agent.agent_context_lifecycle.internal_failure",
+                        exc,
                     )
+                    ctx.working_memory_restore_failed = True
                 else:
                     if restored is not None:
                         session.working_memory = restored
@@ -186,9 +186,10 @@ class AgentContextLifecycleMixin:
                     write_legacy_compat=ctx.working_memory_legacy_owner_verified,
                 )
             except Exception as exc:
-                logger.error(
-                    "Scoped working memory persistence failed (exception_type=%s)",
-                    _redact_trace_text(type(exc).__name__, limit=80),
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.agent.agent_context_lifecycle.internal_failure",
+                    exc,
                 )
                 return False
             if persisted:
@@ -613,9 +614,8 @@ class AgentContextLifecycleMixin:
         except RunBudgetExceeded:
             raise
         except Exception as exc:
-            logger.error(
-                "context_compact: summary preparation failed (exception_type=%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.agent.agent_context_lifecycle.internal_failure", exc
             )
             return self._compaction_noop_stats(
                 messages,
@@ -673,9 +673,10 @@ class AgentContextLifecycleMixin:
                     )
                 )
             except Exception as exc:
-                logger.error(
-                    "context_compact: protected plan serialization failed (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.agent.agent_context_lifecycle.internal_failure",
+                    exc,
                 )
                 return self._compaction_noop_stats(
                     messages,
@@ -763,9 +764,8 @@ class AgentContextLifecycleMixin:
                 messages_summarized=len(old_messages),
             )
         except Exception as exc:
-            logger.error(
-                "context_compact: lineage preparation failed (exception_type=%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.agent.agent_context_lifecycle.internal_failure", exc
             )
             return self._compaction_noop_stats(
                 messages,
@@ -856,9 +856,10 @@ class AgentContextLifecycleMixin:
                     reason=reason,
                 )
             except Exception as exc:
-                logger.error(
-                    "context_compact: pre-compaction flush raised (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.agent.agent_context_lifecycle.internal_failure",
+                    exc,
                 )
                 pre_compaction_flush = {
                     "status": "failed",
@@ -922,9 +923,10 @@ class AgentContextLifecycleMixin:
             try:
                 protected_plan["execution_plan"] = execution_plan.to_dict()
             except Exception as exc:
-                logger.error(
-                    "context_compact: execution plan snapshot failed (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.agent.agent_context_lifecycle.internal_failure",
+                    exc,
                 )
                 return (
                     self._compaction_noop_stats(
@@ -961,9 +963,10 @@ class AgentContextLifecycleMixin:
                         "tasks": unresolved_tasks,
                     }
             except Exception as exc:
-                logger.error(
-                    "context_compact: working memory snapshot failed (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.agent.agent_context_lifecycle.internal_failure",
+                    exc,
                 )
                 return (
                     self._compaction_noop_stats(
@@ -997,9 +1000,8 @@ class AgentContextLifecycleMixin:
         except RunBudgetExceeded:
             raise
         except Exception as exc:
-            logger.error(
-                "context_compact: child preparation failed (exception_type=%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.agent.agent_context_lifecycle.internal_failure", exc
             )
             stats = self._compaction_noop_stats(
                 messages,
@@ -1067,9 +1069,8 @@ class AgentContextLifecycleMixin:
             return response.content if response else None
 
         except Exception as exc:
-            logger.error(
-                "Summarization failed (exception_type=%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.agent.agent_context_lifecycle.internal_failure", exc
             )
             return None
 
@@ -1106,7 +1107,10 @@ class AgentContextLifecycleMixin:
                 json.dumps(detail.get("tokens_by_category") or {}),
                 json.dumps((detail.get("contributors") or [])[:20]),
             )
-        except Exception:
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.agent.agent_context_lifecycle.internal_failure", exc
+            )
             try:
                 await self.database.execute(
                     """
@@ -1128,9 +1132,10 @@ class AgentContextLifecycleMixin:
                     json.dumps(detail),
                 )
             except Exception as exc:
-                logger.debug(
-                    "Failed to persist context detail (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.agent.agent_context_lifecycle.internal_failure",
+                    exc,
                 )
 
     async def _persist_streaming_user_message(
@@ -1146,18 +1151,18 @@ class AgentContextLifecycleMixin:
                 metadata=metadata,
             )
         except Exception as exc:
-            logger.error(
-                "[CRITICAL] User message persistence failed (exception_type=%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.agent.agent_context_lifecycle.internal_failure", exc
             )
 
     def _on_user_message_persist_done(self, task: asyncio.Task) -> None:
         self._background_tasks.discard(task)
         task_error = None if task.cancelled() else task.exception()
         if task_error is not None:
-            logger.error(
-                "User message persist failed (exception_type=%s)",
-                type(task_error).__name__,
+            record_internal_exception(
+                __name__,
+                "assistant.agent.user_message.background_persistence_failed",
+                task_error,
             )
 
     def _schedule_streaming_user_message_persistence(self, ctx: AgentLoopContext) -> None:
@@ -1181,9 +1186,10 @@ class AgentContextLifecycleMixin:
             self._background_tasks.add(task)
             task.add_done_callback(self._on_user_message_persist_done)
         except (RuntimeError, TypeError) as exc:
-            logger.error(
-                "Failed to schedule user message persistence (exception_type=%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__,
+                "assistant.user_message.persistence_schedule_failed",
+                exc,
             )
 
     async def _get_streaming_tools(
@@ -1224,10 +1230,8 @@ class AgentContextLifecycleMixin:
                         tool_defs.append(connector_tool)
                         seen.add(connector_tool.name)
         except Exception as exc:
-            logger.error(
-                "Connector-registry tool merge failed; continuing without connectors "
-                "(exception_type=%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.agent.agent_context_lifecycle.internal_failure", exc
             )
 
         # ConnectorRegistry is a secondary catalog source. Re-run both the
@@ -1344,16 +1348,11 @@ class AgentContextLifecycleMixin:
                     allowed_names=ctx.config.allowed_skill_ids,
                 )
         except Exception as exc:  # noqa: BLE001 - exact Agent Skills fail closed
-            if exact_versions:
-                logger.warning(
-                    "Exact Agent Skill version load failed (exception_type=%s)",
-                    type(exc).__name__,
-                )
-                return [unavailable()], False
-            logger.debug(
-                "Legacy Skill catalog load skipped (exception_type=%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.agent.agent_context_lifecycle.internal_failure", exc
             )
+            if exact_versions:
+                return [unavailable()], False
             loaded = 0
 
         if loaded > 0:
@@ -1399,7 +1398,7 @@ class AgentContextLifecycleMixin:
             scope=skill_scope,
             allowed_versions=ctx.config.allowed_skill_versions,
         )
-        max_candidates = _env_int(
+        max_candidates = self.skill_candidate_hard_limit or _env_int(
             "ASSISTANT_SKILL_CANDIDATE_HARD_LIMIT",
             default=64,
             minimum=1,
@@ -1518,9 +1517,8 @@ class AgentContextLifecycleMixin:
             }
             return names or None, revision_hash
         except Exception as exc:
-            logger.debug(
-                "Failed to load dataset name map (exception_type=%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.agent.agent_context_lifecycle.internal_failure", exc
             )
             revision_hash = stable_cache_hash(
                 {"dataset_ids": dataset_ids, "catalog": "unavailable"}

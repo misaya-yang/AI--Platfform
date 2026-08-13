@@ -15,6 +15,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from ai_gateway_core.logging import record_internal_exception
 from openpyxl import load_workbook
 
 from .types import CriticReport, Issue, IssueCategory, IssueSeverity
@@ -32,18 +33,29 @@ class XlsxFormulaVerifier:
             ok = self._recalc(path)
             recalc_note = "recalc_ok" if ok else "recalc_failed"
             if not ok:
-                issues.append(Issue(
-                    category=IssueCategory.FORMULA_ERROR,
-                    severity=IssueSeverity.WARNING,
-                    message="LibreOffice recalc returned non-zero; continuing with stale cache",
-                ))
+                issues.append(
+                    Issue(
+                        category=IssueCategory.FORMULA_ERROR,
+                        severity=IssueSeverity.WARNING,
+                        message="LibreOffice recalc returned non-zero; continuing with stale cache",
+                    )
+                )
 
         try:
             wb = load_workbook(str(path), data_only=True)
         except Exception as e:
+            record_internal_exception(
+                __name__, "assistant.core.docgen.quality.xlsx_verifier.internal_failure", e
+            )
             return CriticReport(
                 passed=False,
-                issues=[Issue(category=IssueCategory.OPEN_ERROR, severity=IssueSeverity.CRITICAL, message=f"cannot open xlsx: {e}")],
+                issues=[
+                    Issue(
+                        category=IssueCategory.OPEN_ERROR,
+                        severity=IssueSeverity.CRITICAL,
+                        message=f"cannot open xlsx: {e}",
+                    )
+                ],
                 backend="xlsx_formula",
                 note=recalc_note,
             )
@@ -58,12 +70,14 @@ class XlsxFormulaVerifier:
                         error_cells.append(f"{coord}={v}")
 
         for c in error_cells:
-            issues.append(Issue(
-                category=IssueCategory.FORMULA_ERROR,
-                severity=IssueSeverity.CRITICAL,
-                message=f"formula error at {c}",
-                hint="fix reference / check denominator",
-            ))
+            issues.append(
+                Issue(
+                    category=IssueCategory.FORMULA_ERROR,
+                    severity=IssueSeverity.CRITICAL,
+                    message=f"formula error at {c}",
+                    hint="fix reference / check denominator",
+                )
+            )
 
         passed = not any(i.severity == IssueSeverity.CRITICAL for i in issues)
         return CriticReport(passed=passed, issues=issues, backend="xlsx_formula", note=recalc_note)
@@ -72,10 +86,22 @@ class XlsxFormulaVerifier:
         bin_name = "soffice" if shutil.which("soffice") else "libreoffice"
         try:
             proc = subprocess.run(
-                [bin_name, "--headless", "--calc", "--convert-to", "xlsx", "--outdir", str(path.parent), str(path)],
+                [
+                    bin_name,
+                    "--headless",
+                    "--calc",
+                    "--convert-to",
+                    "xlsx",
+                    "--outdir",
+                    str(path.parent),
+                    str(path),
+                ],
                 timeout=45,
                 capture_output=True,
             )
             return proc.returncode == 0
-        except Exception:
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.docgen.quality.xlsx_verifier.internal_failure", exc
+            )
             return False

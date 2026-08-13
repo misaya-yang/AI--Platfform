@@ -16,7 +16,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 from ai_gateway_core.security import redact_trace_text
 
 from .stream_helpers import merge_stream_tool_calls
@@ -86,6 +86,7 @@ class SubAgentManager:
         execution_gateway: AssistantExecutionGateway | None = None,
         artifact_storage: Any | None = None,
         tool_output_spill_enabled: bool | None = None,
+        tool_output_spill_threshold_chars: int | None = None,
         monotonic: Any | None = None,
     ) -> None:
         from ..tool_invoker import create_tool_invoker
@@ -99,6 +100,7 @@ class SubAgentManager:
             artifact_storage=artifact_storage,
             definition_resolver=self._tool_definition_for_context,
             enabled=tool_output_spill_enabled,
+            threshold_chars=tool_output_spill_threshold_chars,
         )
         self._response_cap_middleware = ResponseCapMiddleware()
         self._active: dict[str, SubAgentState] = {}
@@ -347,10 +349,8 @@ class SubAgentManager:
                 attempt_id=attempt_id,
             )
         except Exception as e:
-            logger.error(
-                "SubAgent %s failed (exception_type=%s)",
-                agent_id,
-                type(e).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.agent.subagent_manager.internal_failure", e
             )
             yield self._terminal_event(
                 state,
@@ -440,6 +440,9 @@ class SubAgentManager:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                record_internal_exception(
+                    __name__, "assistant.core.agent.subagent_manager.internal_failure", exc
+                )
                 await queue.put({"__parallel_error__": exc})
             finally:
                 await queue.put({"__parallel_done__": cfg.dispatch_index})
@@ -1209,12 +1212,12 @@ class SubAgentManager:
             except (RunBudgetExceeded, _ParentCancelled, asyncio.TimeoutError):
                 raise
             except Exception as e:
-                logger.error(
-                    "SubAgent %s LLM call failed (exception_type=%s)",
-                    agent_id,
-                    type(e).__name__,
+                record_internal_exception(
+                    __name__,
+                    "assistant.subagent.model_call_failed",
+                    e,
                 )
-                state.error = str(e)
+                state.error = "subagent_model_call_failed"
                 raise
 
             tool_calls = [tool_calls_accumulated[k] for k in tool_call_order]
@@ -1367,6 +1370,9 @@ class SubAgentManager:
                 except (RunBudgetExceeded, _ParentCancelled, asyncio.TimeoutError):
                     raise
                 except Exception as e:
+                    record_internal_exception(
+                        __name__, "assistant.core.agent.subagent_manager.internal_failure", e
+                    )
                     result = ToolCallResult(
                         call_id=call_id,
                         tool_name=tool_name,

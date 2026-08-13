@@ -19,6 +19,8 @@ from starlette.requests import Request
 from src.api.schemas.agent_runtime import (
     AgentPreviewChatRequest,
     AgentPublishedChatRequest,
+    AgentVersionPreviewChatRequest,
+    InternalAgentRuntimeChatRequest,
 )
 from src.api.v1._assistant_proxy import reject_client_agent_forgery
 from src.api.v1.agent_runtime import (
@@ -340,6 +342,60 @@ def test_external_runtime_schemas_forbid_trusted_agent_overrides(forged_field: s
     payload.pop("draft_revision")
     with pytest.raises(ValidationError):
         AgentPublishedChatRequest.model_validate(payload)
+
+
+def test_version_preview_resume_identity_is_paired_and_part_of_internal_verification_body() -> None:
+    for partial in (
+        {"resume_run_id": "run-a"},
+        {"resume_approval_id": "approval-a"},
+    ):
+        with pytest.raises(ValidationError, match="resume_run_id.*resume_approval_id"):
+            AgentVersionPreviewChatRequest.model_validate(
+                {"message": "continue", "session_id": "session-a", **partial}
+            )
+
+    preview = AgentVersionPreviewChatRequest.model_validate(
+        {
+            "message": "continue",
+            "session_id": "session-a",
+            "resume_run_id": "run-a",
+            "resume_approval_id": "approval-a",
+        }
+    )
+    assert preview.resume_run_id == "run-a"
+    assert preview.resume_approval_id == "approval-a"
+
+    with pytest.raises(ValidationError, match="resume_run_id.*resume_approval_id"):
+        InternalAgentRuntimeChatRequest.model_validate(
+            {
+                "message": "continue",
+                "session_id": "session-a",
+                "history": None,
+                "attachments": [],
+                "resume_run_id": "run-a",
+                "runtime_envelope": {},
+            }
+        )
+
+    internal = InternalAgentRuntimeChatRequest.model_validate(
+        {
+            "message": "continue",
+            "session_id": "session-a",
+            "history": None,
+            "attachments": [],
+            "resume_run_id": "run-a",
+            "resume_approval_id": "approval-a",
+            "runtime_envelope": {"signature": "signed"},
+        }
+    )
+    assert internal.verification_body() == {
+        "message": "continue",
+        "session_id": "session-a",
+        "history": None,
+        "attachments": [],
+        "resume_run_id": "run-a",
+        "resume_approval_id": "approval-a",
+    }
 
 
 def test_generic_gateway_rejects_agent_runtime_headers_and_body_fields() -> None:
@@ -752,6 +808,90 @@ def test_preview_and_published_envelope_identity_shapes_cannot_be_mixed() -> Non
             resolved_snapshot=runtime_snapshot(),
             request_body=request_body(),
             spec_hash="sha256:spec",
+        )
+
+
+def test_preview_envelope_requires_exactly_one_signed_draft_or_version_pin() -> None:
+    signer = AgentRuntimeSigner(
+        secret="a" * 32,
+        issuer="gateway-test",
+        replay_store=InMemoryReplayStore(),
+    )
+    version_preview = runtime_snapshot()
+    version_preview["publication"] = {
+        "id": None,
+        "channel": "preview",
+        "auth_mode": "private",
+    }
+    version_id = str(version_preview["agent_version_id"])
+
+    signed_version = signer.sign(
+        tenant_id="tenant-a",
+        caller_principal="user-a",
+        agent_id=version_preview["agent_id"],
+        agent_version_id=version_id,
+        draft_revision=None,
+        publication_id=None,
+        channel="preview",
+        session_id="session-version",
+        resolved_snapshot=version_preview,
+        request_body=request_body(),
+        spec_hash="sha256:spec",
+    )
+    assert signed_version["agent_version_id"] == version_id
+    assert signed_version["draft_revision"] is None
+
+    for agent_version_id, draft_revision in ((None, None), (version_id, 3)):
+        with pytest.raises(AgentRuntimeEnvelopeError, match="AGENT_RUNTIME_ENVELOPE_INVALID"):
+            signer.sign(
+                tenant_id="tenant-a",
+                caller_principal="user-a",
+                agent_id=version_preview["agent_id"],
+                agent_version_id=agent_version_id,
+                draft_revision=draft_revision,
+                publication_id=None,
+                channel="preview",
+                session_id="session-invalid",
+                resolved_snapshot=version_preview,
+                request_body=request_body(),
+                spec_hash="sha256:spec",
+            )
+
+    forged_version = copy.deepcopy(signed_version)
+    forged_version["agent_version_id"] = "99999999-9999-4999-8999-999999999999"
+    with pytest.raises(AgentRuntimeEnvelopeError, match="AGENT_RUNTIME_SIGNATURE_INVALID"):
+        signer.verify(
+            forged_version,
+            request_body=request_body(),
+            expected_tenant_id="tenant-a",
+            expected_caller_principal="user-a",
+            expected_session_id="session-version",
+        )
+
+    draft_preview = copy.deepcopy(version_preview)
+    draft_preview["agent_version_id"] = None
+    signed_draft = signer.sign(
+        tenant_id="tenant-a",
+        caller_principal="user-a",
+        agent_id=draft_preview["agent_id"],
+        agent_version_id=None,
+        draft_revision=3,
+        publication_id=None,
+        channel="preview",
+        session_id="session-draft",
+        resolved_snapshot=draft_preview,
+        request_body=request_body(),
+        spec_hash="sha256:spec",
+    )
+    forged_draft = copy.deepcopy(signed_draft)
+    forged_draft["draft_revision"] = 4
+    with pytest.raises(AgentRuntimeEnvelopeError, match="AGENT_RUNTIME_SIGNATURE_INVALID"):
+        signer.verify(
+            forged_draft,
+            request_body=request_body(),
+            expected_tenant_id="tenant-a",
+            expected_caller_principal="user-a",
+            expected_session_id="session-draft",
         )
 
 

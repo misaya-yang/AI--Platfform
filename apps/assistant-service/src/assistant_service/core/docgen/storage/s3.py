@@ -7,11 +7,13 @@ tests and LocalArtifactStore users don't need it installed.
 
 from __future__ import annotations
 
-import contextlib
 import json
+import logging
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
+
+from ai_gateway_core.logging import record_internal_exception
 
 from .base import Artifact, ArtifactStore, ArtifactStoreError, compute_sha256
 
@@ -85,7 +87,9 @@ class S3ArtifactStore(ArtifactStore):
         )
         key = self._key(artifact)
         with open(path, "rb") as fh:
-            self._s3.upload_fileobj(fh, self._bucket, key, ExtraArgs={"ContentType": "application/octet-stream"})
+            self._s3.upload_fileobj(
+                fh, self._bucket, key, ExtraArgs={"ContentType": "application/octet-stream"}
+            )
 
         # Thumbnails
         thumb_keys: list[str] = []
@@ -94,7 +98,9 @@ class S3ArtifactStore(ArtifactStore):
                 continue
             tk = f"{self._prefix}/{tenant_id}/{session_id}/{turn_id}/thumbs/{thumb.name}"
             with open(thumb, "rb") as fh:
-                self._s3.upload_fileobj(fh, self._bucket, tk, ExtraArgs={"ContentType": "image/jpeg"})
+                self._s3.upload_fileobj(
+                    fh, self._bucket, tk, ExtraArgs={"ContentType": "image/jpeg"}
+                )
             thumb_keys.append(tk)
         artifact.thumbnails = thumb_keys
 
@@ -129,7 +135,9 @@ class S3ArtifactStore(ArtifactStore):
         for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
             for obj in page.get("Contents", []) or []:
                 if obj["Key"].endswith(".meta.json"):
-                    data = json.loads(self._s3.get_object(Bucket=self._bucket, Key=obj["Key"])["Body"].read())
+                    data = json.loads(
+                        self._s3.get_object(Bucket=self._bucket, Key=obj["Key"])["Body"].read()
+                    )
                     artifacts.append(self._artifact_from_dict(data))
         artifacts.sort(key=lambda a: a.created_at)
         return artifacts
@@ -141,11 +149,20 @@ class S3ArtifactStore(ArtifactStore):
         for key in (self._key(art), self._key(art, suffix=".meta.json")):
             self._s3.delete_object(Bucket=self._bucket, Key=key)
         for tk in art.thumbnails:
-            with contextlib.suppress(Exception):
+            try:
                 self._s3.delete_object(Bucket=self._bucket, Key=tk)
+            except Exception as exc:
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.docgen.storage.s3.suppressed_failure",
+                    exc,
+                    level=logging.DEBUG,
+                )
         return True
 
-    async def download_url(self, artifact_id: str, *, tenant_id: str, ttl_seconds: int = 3600) -> str:
+    async def download_url(
+        self, artifact_id: str, *, tenant_id: str, ttl_seconds: int = 3600
+    ) -> str:
         art = await self.get(artifact_id, tenant_id=tenant_id)
         if art is None:
             raise ArtifactStoreError(f"unknown artifact_id: {artifact_id}")

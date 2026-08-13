@@ -7,7 +7,7 @@ from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.enums import StreamEventType
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from ..run_budget import RunBudgetExceeded
 from ..trace_payloads import build_rag_trace_payload
@@ -216,6 +216,9 @@ class StreamingToolCallMixin(StreamingToolValidationMixin, StreamingToolExecutio
         except RunBudgetExceeded:
             raise
         except Exception as e:
+            record_internal_exception(
+                __name__, "assistant.core.agent.streaming_tool_call.internal_failure", e
+            )
             safe_error = _redact_trace_text(e)
             if frame.tool_name == "search_knowledge_base" and frame.kb_rag_started_at is not None:
                 self._capture_rag_retrieval_trace(
@@ -234,11 +237,6 @@ class StreamingToolCallMixin(StreamingToolValidationMixin, StreamingToolExecutio
                         retrieval_configs=frame.kb_rag_retrieval_configs,
                     ),
                 )
-            logger.error(
-                "[STREAMING-FIRST] Tool %s failed (exception_type=%s)",
-                frame.tool_log_name,
-                type(e).__name__,
-            )
             state.last_tool_failed = True
             ctx.tool_error_seen = True
             frame.tool_result = f"Error executing {frame.tool_name}: {safe_error}"
@@ -481,10 +479,8 @@ class StreamingToolCallMixin(StreamingToolValidationMixin, StreamingToolExecutio
                     },
                 )
             except Exception as exc:
-                logger.error(
-                    "context_compact signal handling failed; continuing without "
-                    "compaction (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.agent.streaming_tool_call.internal_failure", exc
                 )
             # Skip the tool-result-trim block below — if we
             # compacted, the whole history including old tool

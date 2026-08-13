@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from types import SimpleNamespace
 from typing import Any
@@ -17,6 +18,7 @@ from assistant_service.api.routes.chat import (
     _agent_runtime_tenant_policy,
     _build_agent_runtime_config,
     _public_agent_event_data,
+    _validate_agent_runtime_native_capabilities,
     _verified_agent_runtime_attachment_paths,
     _verify_agent_runtime_request,
 )
@@ -27,7 +29,13 @@ from assistant_service.core.tool_invoker import RegistryToolInvoker, ToolInvocat
 from assistant_service.core.tools.tenant_tool_policy import (
     AgentRuntimeResourcePolicyService,
 )
-from assistant_service.core.tools.tool_registry import ToolRegistry
+from assistant_service.core.tools.tool_registry import (
+    ToolCallResult,
+    ToolDefinition,
+    ToolExecutor,
+    ToolRegistry,
+    ToolRiskLevel,
+)
 from pydantic import ValidationError
 
 
@@ -35,6 +43,7 @@ def snapshot(
     *,
     capabilities: list[dict[str, Any]] | None = None,
     knowledge: dict[str, Any] | None = None,
+    model_provider: str = "dashscope",
 ) -> dict[str, Any]:
     capabilities = capabilities if capabilities is not None else []
     return {
@@ -49,7 +58,7 @@ def snapshot(
         },
         "model": {
             "id": "qwen3.7-plus",
-            "provider": "dashscope",
+            "provider": model_provider,
             "parameters": {"temperature": 0.2, "max_tokens": 1024},
         },
         "instructions": {
@@ -81,6 +90,9 @@ def signed_request(
     *,
     capabilities: list[dict[str, Any]] | None = None,
     knowledge: dict[str, Any] | None = None,
+    resume_run_id: str | None = None,
+    resume_approval_id: str | None = None,
+    model_provider: str = "dashscope",
 ) -> tuple[AgentRuntimeSigner, AgentRuntimeChatRequest]:
     signer = AgentRuntimeSigner(
         secret="b" * 32,
@@ -93,7 +105,18 @@ def signed_request(
         "history": None,
         "attachments": [],
     }
-    resolved = snapshot(capabilities=capabilities, knowledge=knowledge)
+    if resume_run_id is not None or resume_approval_id is not None:
+        request_body.update(
+            {
+                "resume_run_id": resume_run_id,
+                "resume_approval_id": resume_approval_id,
+            }
+        )
+    resolved = snapshot(
+        capabilities=capabilities,
+        knowledge=knowledge,
+        model_provider=model_provider,
+    )
     envelope = signer.sign(
         tenant_id="tenant-a",
         caller_principal="user-a",
@@ -115,6 +138,281 @@ def signed_request(
 
 def user() -> UserContext:
     return UserContext(user_id="user-a", tenant_id="tenant-a")
+
+
+def test_signed_agent_runtime_preserves_exact_control_plane_provider_pin() -> None:
+    signer, body = signed_request(
+        knowledge={"datasets": [], "retrieval": {"mode": "off"}},
+        model_provider="dashscope-intl",
+    )
+    verified = _verify_agent_runtime_request(body, user(), signer)
+
+    config = _build_agent_runtime_config(verified, tenant_policy=None)
+
+    assert config.model_provider_id == "dashscope-intl"
+
+
+class _RecordingNativeExecutor(ToolExecutor):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def execute(self, request):
+        self.calls += 1
+        return ToolCallResult(
+            call_id=request.call_id,
+            tool_name=request.tool_name,
+            success=True,
+            result={"ok": True},
+        )
+
+
+def _native_definition(
+    name: str = "native_lookup",
+    *,
+    risk: ToolRiskLevel = ToolRiskLevel.LOW,
+) -> ToolDefinition:
+    return ToolDefinition(
+        name=name,
+        description="Read one frozen benchmark record.",
+        parameters=[],
+        risk_level=risk,
+        argument_schema={
+            "type": "object",
+            "properties": {"record_id": {"type": "string"}},
+            "required": ["record_id"],
+            "additionalProperties": False,
+        },
+    )
+
+
+def _native_schema_hash(definition: ToolDefinition) -> str:
+    canonical = json.dumps(
+        definition.json_argument_schema(),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _verified_native_binding(
+    definition: ToolDefinition,
+    *,
+    capability_id: str | None = None,
+    schema_hash: str | None = None,
+    risk: str | None = None,
+):
+    capabilities = [
+        {
+            "type": "platform",
+            "id": capability_id or definition.name,
+            "version": None,
+            "schema_hash": schema_hash or _native_schema_hash(definition),
+            "risk": risk or definition.risk_level.value,
+            "config": {},
+        }
+    ]
+    signer, body = signed_request(
+        capabilities=capabilities,
+        knowledge={"datasets": [], "retrieval": {"mode": "off"}},
+    )
+    return _verify_agent_runtime_request(body, user(), signer)
+
+
+def test_native_binding_readiness_accepts_only_the_exact_registered_id() -> None:
+    definition = _native_definition()
+    registry = ToolRegistry()
+    registry.register(definition, _RecordingNativeExecutor())
+    invoker = RegistryToolInvoker(tool_registry=registry)
+
+    _validate_agent_runtime_native_capabilities(
+        _verified_native_binding(definition),
+        invoker,
+    )
+
+    prefix_only = _verified_native_binding(
+        definition,
+        capability_id=f"{definition.name}_extra",
+    )
+    with pytest.raises(
+        AgentRuntimeEnvelopeError,
+        match="AGENT_RUNTIME_CAPABILITY_UNAVAILABLE",
+    ):
+        _validate_agent_runtime_native_capabilities(prefix_only, invoker)
+
+
+def test_native_binding_readiness_rejects_missing_registry_definition() -> None:
+    definition = _native_definition()
+    invoker = RegistryToolInvoker(tool_registry=ToolRegistry())
+
+    with pytest.raises(AgentRuntimeEnvelopeError) as error:
+        _validate_agent_runtime_native_capabilities(
+            _verified_native_binding(definition),
+            invoker,
+        )
+
+    assert error.value.code == "AGENT_RUNTIME_CAPABILITY_UNAVAILABLE"
+
+
+def test_native_binding_readiness_rejects_route_before_model_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from assistant_service.api.routes import chat as chat_route
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("AGENT_STUDIO_RUNTIME_ENABLED", "true")
+    definition = _native_definition()
+    signer, body = signed_request(
+        capabilities=[
+            {
+                "type": "platform",
+                "id": definition.name,
+                "version": None,
+                "schema_hash": _native_schema_hash(definition),
+                "risk": "low",
+                "config": {},
+            }
+        ],
+        knowledge={"datasets": [], "retrieval": {"mode": "off"}},
+    )
+
+    class FakeAssistantService:
+        calls = 0
+
+        async def chat_stream(self, **_kwargs):
+            self.calls += 1
+            if False:
+                yield None
+
+    assistant = FakeAssistantService()
+    app = FastAPI()
+    app.include_router(chat_route.router)
+    app.state.agent_runtime_verifier = signer
+    app.state.assistant_service = assistant
+    app.state.tool_invoker = RegistryToolInvoker(tool_registry=ToolRegistry())
+    app.dependency_overrides[chat_route.get_user_context] = user
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent-runtime/chat/stream",
+            json=body.model_dump(mode="json"),
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "AGENT_RUNTIME_CAPABILITY_UNAVAILABLE"
+    assert assistant.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("schema_hash", "risk"),
+    [
+        ("sha256:" + "0" * 64, "low"),
+        (None, "medium"),
+    ],
+)
+def test_native_binding_readiness_rejects_schema_or_risk_drift(
+    schema_hash: str | None,
+    risk: str,
+) -> None:
+    definition = _native_definition()
+    registry = ToolRegistry()
+    registry.register(definition, _RecordingNativeExecutor())
+
+    with pytest.raises(AgentRuntimeEnvelopeError) as error:
+        _validate_agent_runtime_native_capabilities(
+            _verified_native_binding(
+                definition,
+                schema_hash=schema_hash,
+                risk=risk,
+            ),
+            RegistryToolInvoker(tool_registry=registry),
+        )
+
+    assert error.value.code == "AGENT_RUNTIME_CAPABILITY_UNAVAILABLE"
+
+
+def test_native_binding_readiness_rejects_confirmation_downgrade() -> None:
+    definition = _native_definition()
+    definition.risk_level = ToolRiskLevel.HIGH
+    definition.requires_confirmation = True
+    registry = ToolRegistry()
+    registry.register(definition, _RecordingNativeExecutor())
+    signer, body = signed_request(
+        capabilities=[
+            {
+                "type": "platform",
+                "id": definition.name,
+                "version": None,
+                "schema_hash": _native_schema_hash(definition),
+                "risk": "high",
+                "config": {"requires_confirmation": False},
+            }
+        ],
+        knowledge={"datasets": [], "retrieval": {"mode": "off"}},
+    )
+    verified = _verify_agent_runtime_request(body, user(), signer)
+
+    with pytest.raises(AgentRuntimeEnvelopeError) as error:
+        _validate_agent_runtime_native_capabilities(
+            verified,
+            RegistryToolInvoker(tool_registry=registry),
+        )
+
+    assert error.value.code == "AGENT_RUNTIME_CAPABILITY_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_tenant_policy_revocation_keeps_native_executor_at_zero_calls() -> None:
+    definition = _native_definition()
+    executor = _RecordingNativeExecutor()
+    registry = ToolRegistry()
+    registry.register(definition, executor)
+
+    class LivePolicy:
+        revoked = False
+
+        async def get_policy(self, _tenant_id: str):
+            return SimpleNamespace(
+                allowed_tools={definition.name},
+                blocked_tools={definition.name} if self.revoked else set(),
+                allowed_categories=set(),
+            )
+
+        async def get_policy_fresh(self, tenant_id: str):
+            return await self.get_policy(tenant_id)
+
+    live_policy = LivePolicy()
+    invoker = RegistryToolInvoker(
+        tool_registry=registry,
+        tenant_tool_policy=live_policy,
+    )
+    verified = _verified_native_binding(definition)
+    _validate_agent_runtime_native_capabilities(verified, invoker)
+
+    class RuntimePolicy:
+        def allowed_tool_names(self, **_kwargs):
+            return {definition.name}
+
+    config = _build_agent_runtime_config(verified, tenant_policy=RuntimePolicy())
+    context = ToolInvocationContext(
+        session_id="session-a",
+        user_id="user-a",
+        tenant_id="tenant-a",
+        request_id="request-a",
+        capability_allowlist=config.capability_allowlist,
+    )
+    definitions = await invoker.get_tool_definitions_filtered(context)
+    live_policy.revoked = True
+    result = await invoker.invoke(
+        definition.name,
+        {"record_id": "record-a"},
+        context,
+    )
+
+    assert [item.name for item in definitions] == [definition.name]
+    assert result.success is False
+    assert executor.calls == 0
 
 
 class _PolicyConnection:
@@ -175,6 +473,7 @@ def test_generic_assistant_schema_rejects_reserved_agent_runtime_fields() -> Non
         "publication_id",
         "resolved_snapshot",
         "runtime_envelope",
+        "model_provider_id",
     ):
         with pytest.raises(ValidationError):
             ChatRequest.model_validate({"message": "hello", field: "forged"})
@@ -310,6 +609,47 @@ def test_bound_knowledge_fails_closed_without_runtime_resource_policy() -> None:
         _build_agent_runtime_config(verified, tenant_policy=None)
 
     assert error.value.code == "AGENT_RUNTIME_KNOWLEDGE_UNAVAILABLE"
+
+
+def test_signed_agent_runtime_resume_pair_is_verified_and_injected_without_policy_expansion() -> None:
+    with pytest.raises(ValidationError, match="resume_run_id.*resume_approval_id"):
+        AgentRuntimeChatRequest.model_validate(
+            {
+                "message": "continue",
+                "session_id": "session-a",
+                "history": None,
+                "attachments": [],
+                "resume_run_id": "run-a",
+                "runtime_envelope": {},
+            }
+        )
+
+    signer, body = signed_request(
+        capabilities=[],
+        knowledge={"datasets": [], "retrieval": {"mode": "off"}},
+        resume_run_id="run-a",
+        resume_approval_id="approval-a",
+    )
+    verified = _verify_agent_runtime_request(body, user(), signer)
+    config = _build_agent_runtime_config(
+        verified,
+        tenant_policy=None,
+        resume_run_id=body.resume_run_id,
+        resume_approval_id=body.resume_approval_id,
+    )
+
+    assert config.resume_run_id == "run-a"
+    assert config.resume_approval_id == "approval-a"
+    assert config.agent_runtime is not None
+    assert config.agent_runtime.agent_id == snapshot()["agent_id"]
+    assert config.agent_runtime.agent_version_id == snapshot()["agent_version_id"]
+    assert config.capability_allowlist is not None
+    assert config.capability_allowlist.tool_names == frozenset()
+
+    forged = body.model_copy(update={"resume_approval_id": "approval-forged"})
+    with pytest.raises(AgentRuntimeEnvelopeError) as error:
+        _verify_agent_runtime_request(forged, user(), signer)
+    assert error.value.code == "AGENT_RUNTIME_BODY_HASH_MISMATCH"
 
 
 def test_signed_runtime_attachment_becomes_agent_file_path_and_rejects_arbitrary_path() -> None:
@@ -635,9 +975,92 @@ def test_agent_runtime_event_projection_is_closed_by_event_type() -> None:
     assert _public_agent_event_data("text_delta", malicious) == {"content": ""}
     assert _public_agent_event_data("internal_snapshot", malicious) is None
     assert _public_agent_event_data(
+        "run_started",
+        {
+            "run_id": "run-a",
+            "thread_id": "private-thread-alias",
+            "session_id": "session-a",
+            "request_id": "request-a",
+            "attempt_id": "attempt-a",
+            "context_snapshot": {"secret": "synthetic-private-context"},
+        },
+    ) == {
+        "run_id": "run-a",
+        "session_id": "session-a",
+        "request_id": "request-a",
+        "attempt_id": "attempt-a",
+        "status": "running",
+    }
+    assert _public_agent_event_data(
+        "approval_required",
+        {
+            "run_id": "run-a",
+            "session_id": "session-a",
+            "request_id": "request-a",
+            "tool_id": "tool-a",
+            "approval_id": "approval-a",
+            "checkpoint_id": "checkpoint-a",
+            "attempt_id": "attempt-a",
+            "status": "pending",
+            "reason": "Bearer synthetic-private-value",
+            "arguments": {"password": "synthetic-private-value"},
+            "terminal_envelope": {
+                "run_id": "run-a",
+                "session_id": "session-a",
+                "request_id": "request-a",
+                "approval_id": "approval-a",
+                "checkpoint_id": "checkpoint-a",
+                "attempt_id": "attempt-a",
+                "status": "blocked",
+                "exit_reason": "approval_pending",
+                "context_snapshot": {"secret": "synthetic-private-context"},
+            },
+        },
+    ) == {
+        "run_id": "run-a",
+        "session_id": "session-a",
+        "request_id": "request-a",
+        "tool_id": "tool-a",
+        "approval_id": "approval-a",
+        "checkpoint_id": "checkpoint-a",
+        "attempt_id": "attempt-a",
+        "status": "pending",
+    }
+    terminal = _public_agent_event_data(
+        "run_finished",
+        {
+            "run_id": "run-a",
+            "session_id": "session-a",
+            "request_id": "request-a",
+            "attempt_id": "attempt-a",
+            "result": {"password": "synthetic-private-value"},
+            "terminal_envelope": {
+                "run_id": "run-a",
+                "session_id": "session-a",
+                "request_id": "request-a",
+                "attempt_id": "attempt-a",
+                "status": "succeeded",
+                "exit_reason": "Bearer synthetic-private-exit",
+                "context_snapshot": {"secret": "synthetic-private-context"},
+            },
+        },
+    )
+    assert terminal is not None
+    assert terminal == {
+        "run_id": "run-a",
+        "session_id": "session-a",
+        "request_id": "request-a",
+        "attempt_id": "attempt-a",
+        "status": "succeeded",
+        "exit": "succeeded",
+        "exit_hash": terminal["exit_hash"],
+    }
+    assert str(terminal["exit_hash"]).startswith("sha256:")
+    assert "synthetic-private" not in json.dumps(terminal)
+    assert _public_agent_event_data(
         "run_error",
         {"message": "Bearer synthetic-private-value", "traceback": "private"},
-    ) == {"message": "Agent runtime could not complete this request. Please try again."}
+    ) == {"status": "failed", "exit": "failed"}
 
 
 def test_agent_runtime_raw_sse_excludes_arbitrary_tool_context_and_error_payloads(
@@ -651,16 +1074,59 @@ def test_agent_runtime_raw_sse_excludes_arbitrary_tool_context_and_error_payload
     signer, body = signed_request(
         capabilities=[],
         knowledge={"datasets": [], "retrieval": {"mode": "off"}},
+        resume_run_id="run-a",
+        resume_approval_id="approval-a",
     )
+    captured_configs: list[Any] = []
 
     class FakeAssistantService:
         tenant_tool_policy = None
 
-        async def chat_stream(self, **_kwargs: Any):
+        async def chat_stream(self, **kwargs: Any):
+            captured_configs.append(kwargs["config"])
             yield SimpleNamespace(
                 event_type="internal_snapshot",
                 data={"runtime_envelope": "synthetic-private-envelope"},
                 timestamp="Bearer synthetic-private-timestamp",
+            )
+            yield SimpleNamespace(
+                event_type="run_started",
+                data={
+                    "run_id": "run-a",
+                    "session_id": "session-a",
+                    "request_id": "request-a",
+                    "attempt_id": "attempt-a",
+                    "arguments": {"password": "synthetic-private-value"},
+                    "context_snapshot": {"content": "synthetic-private-context"},
+                },
+                timestamp=0.5,
+            )
+            yield SimpleNamespace(
+                event_type="approval_required",
+                data={
+                    "run_id": "run-a",
+                    "session_id": "session-a",
+                    "request_id": "request-a",
+                    "tool_id": "tool-a",
+                    "approval_id": "approval-a",
+                    "checkpoint_id": "checkpoint-a",
+                    "attempt_id": "attempt-a",
+                    "status": "pending",
+                    "reason": "Bearer synthetic-private-reason",
+                    "arguments": {"password": "synthetic-private-value"},
+                    "terminal_envelope": {
+                        "run_id": "run-a",
+                        "session_id": "session-a",
+                        "request_id": "request-a",
+                        "approval_id": "approval-a",
+                        "checkpoint_id": "checkpoint-a",
+                        "attempt_id": "attempt-a",
+                        "status": "blocked",
+                        "exit_reason": "approval_pending",
+                        "context_snapshot": {"content": "synthetic-private-context"},
+                    },
+                },
+                timestamp=0.75,
             )
             yield SimpleNamespace(
                 event_type="tool_call_completed",
@@ -701,8 +1167,21 @@ def test_agent_runtime_raw_sse_excludes_arbitrary_tool_context_and_error_payload
             yield SimpleNamespace(
                 event_type="run_error",
                 data={
+                    "run_id": "run-a",
+                    "session_id": "session-a",
+                    "request_id": "request-a",
+                    "attempt_id": "attempt-a",
                     "message": "Bearer synthetic-private-error",
                     "traceback": "synthetic-private-traceback",
+                    "terminal_envelope": {
+                        "run_id": "run-a",
+                        "session_id": "session-a",
+                        "request_id": "request-a",
+                        "attempt_id": "attempt-a",
+                        "status": "failed",
+                        "exit_reason": "Bearer synthetic-private-exit",
+                        "context_snapshot": {"content": "synthetic-private-context"},
+                    },
                 },
                 timestamp=4.0,
             )
@@ -728,26 +1207,58 @@ def test_agent_runtime_raw_sse_excludes_arbitrary_tool_context_and_error_payload
         if line.startswith("data: ")
     ]
     assert [payload["event_type"] for payload in payloads] == [
+        "run_started",
+        "approval_required",
         "tool_call_completed",
         "context_retrieved",
         "text_delta",
         "run_error",
     ]
+    for payload in (payloads[0], payloads[1], payloads[5]):
+        assert set(payload) == {"event_type", "data"}
     assert payloads[0]["data"] == {
+        "run_id": "run-a",
+        "session_id": "session-a",
+        "request_id": "request-a",
+        "attempt_id": "attempt-a",
+        "status": "running",
+    }
+    assert payloads[1]["data"] == {
+        "run_id": "run-a",
+        "session_id": "session-a",
+        "request_id": "request-a",
+        "tool_id": "tool-a",
+        "approval_id": "approval-a",
+        "checkpoint_id": "checkpoint-a",
+        "attempt_id": "attempt-a",
+        "status": "pending",
+    }
+    assert payloads[2]["data"] == {
         "tool_name": "lookup_account",
         "status": "completed",
         "success": True,
         "duration_ms": 8,
     }
-    assert payloads[1]["data"] == {
+    assert payloads[3]["data"] == {
         "dataset_name": "Refund policy",
         "dataset_id": "dataset-a",
         "citation_count": 1,
     }
-    assert payloads[2]["data"] == {"content": "Safe model answer."}
-    assert payloads[3]["data"] == {
-        "message": "Agent runtime could not complete this request. Please try again."
+    assert payloads[4]["data"] == {"content": "Safe model answer."}
+    assert payloads[5]["data"] == {
+        "run_id": "run-a",
+        "session_id": "session-a",
+        "request_id": "request-a",
+        "attempt_id": "attempt-a",
+        "status": "failed",
+        "exit": "failed",
+        "exit_hash": payloads[5]["data"]["exit_hash"],
     }
+    assert str(payloads[5]["data"]["exit_hash"]).startswith("sha256:")
+    assert captured_configs[0].resume_run_id == "run-a"
+    assert captured_configs[0].resume_approval_id == "approval-a"
+    assert captured_configs[0].agent_runtime.agent_id == snapshot()["agent_id"]
+    assert captured_configs[0].agent_runtime.agent_version_id == snapshot()["agent_version_id"]
     rendered = json.dumps(payloads, sort_keys=True)
     for forbidden in (
         "authorization",
@@ -759,6 +1270,8 @@ def test_agent_runtime_raw_sse_excludes_arbitrary_tool_context_and_error_payload
         "metadata",
         "arguments",
         "output_files",
+        "reason",
+        "traceback",
         "Bearer",
         "synthetic-private",
     ):

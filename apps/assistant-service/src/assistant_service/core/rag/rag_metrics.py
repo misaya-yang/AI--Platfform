@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 logger = get_logger(__name__)
 
@@ -742,7 +742,9 @@ class RAGMetricsCollector:
                 json.dumps(record["data"]),
             )
         except Exception as e:
-            logger.error(f"Failed to persist RAG metrics: {e}")
+            record_internal_exception(
+                __name__, "assistant.core.rag.rag_metrics.internal_failure", e
+            )
             # Buffer the record for retry
             self._buffer.append(record)
 
@@ -791,7 +793,9 @@ class RAGMetricsCollector:
             rows = await self.database.fetch(query, *params)
             return [dict(row) for row in rows]
         except Exception as e:
-            logger.error(f"Failed to fetch RAG metrics: {e}")
+            record_internal_exception(
+                __name__, "assistant.core.rag.rag_metrics.internal_failure", e
+            )
             return []
 
     async def get_aggregate_stats(
@@ -828,7 +832,9 @@ class RAGMetricsCollector:
             rows = await self.database.fetch(query, tenant_id, hours)
             return {row["metric_type"]: dict(row) for row in rows}
         except Exception as e:
-            logger.error(f"Failed to fetch aggregate stats: {e}")
+            record_internal_exception(
+                __name__, "assistant.core.rag.rag_metrics.internal_failure", e
+            )
             return {}
 
     def _compute_buffer_stats(self, tenant_id: str) -> dict[str, Any]:

@@ -141,6 +141,46 @@ async def test_tenant_tool_policy_disconnected_pool_is_not_a_missing_row() -> No
 
 
 @pytest.mark.asyncio
+async def test_tenant_tool_policy_loads_session_limit_and_missing_row_defaults_to_100() -> None:
+    configured = TenantToolPolicyService(
+        database=_MutablePolicyDatabase(
+            {
+                "allowed_tools": [],
+                "blocked_tools": [],
+                "allowed_categories": [],
+                "max_calls_per_session": 7,
+                "max_calls_per_minute": 20,
+            }
+        )
+    )
+    missing = TenantToolPolicyService(database=_MissingRowDatabase())
+
+    configured_policy = await configured.get_policy("tenant-configured")
+    missing_policy = await missing.get_policy("tenant-missing")
+
+    assert configured_policy.max_calls_per_session == 7
+    assert missing_policy.max_calls_per_session == 100
+
+
+@pytest.mark.asyncio
+async def test_tenant_tool_policy_rejects_invalid_session_limit() -> None:
+    service = TenantToolPolicyService(
+        database=_MutablePolicyDatabase(
+            {
+                "allowed_tools": [],
+                "blocked_tools": [],
+                "allowed_categories": [],
+                "max_calls_per_session": 0,
+                "max_calls_per_minute": 20,
+            }
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="session limit is invalid"):
+        await service.get_policy("tenant-invalid")
+
+
+@pytest.mark.asyncio
 async def test_invocation_bypasses_cached_tool_policy_for_fresh_outage_check() -> None:
     database = _MutablePolicyDatabase(
         {

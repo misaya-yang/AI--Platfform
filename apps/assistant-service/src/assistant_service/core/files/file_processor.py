@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.auth import UserContext
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from .document_parser import DocumentParseError, DocumentParser
 from .file_strategy import (
@@ -299,7 +299,9 @@ The description should be detailed enough for someone who hasn't seen the image 
                     return json.loads(data)
                 return data
         except Exception as e:
-            logger.warning(f"[FileProcessor] Cache read failed: {e}")
+            record_internal_exception(
+                __name__, "assistant.core.files.file_processor.internal_failure", e
+            )
         return None
 
     async def _cache_result(self, cache_key: str, result: dict[str, Any], ttl: int = 86400):
@@ -316,7 +318,9 @@ The description should be detailed enough for someone who hasn't seen the image 
                 # Native redis client
                 await self.redis.setex(cache_key, ttl, json_data)
         except Exception as e:
-            logger.warning(f"[FileProcessor] Cache write failed: {e}")
+            record_internal_exception(
+                __name__, "assistant.core.files.file_processor.internal_failure", e
+            )
 
     async def preprocess_file(
         self,
@@ -432,7 +436,9 @@ The description should be detailed enough for someone who hasn't seen the image 
             logger.info(f"[FileProcessor] Finished preprocessing: {file_path}")
 
         except Exception as e:
-            logger.error(f"[FileProcessor] Preprocessing failed for {file_path}: {e}")
+            record_internal_exception(
+                __name__, "assistant.core.files.file_processor.internal_failure", e
+            )
 
     def cleanup(self) -> None:
         """Clean up temporary resources."""
@@ -440,7 +446,9 @@ The description should be detailed enough for someone who hasn't seen the image 
             try:
                 self._temp_dir.cleanup()
             except Exception as e:
-                logger.warning(f"[FileProcessor] Failed to cleanup temp dir: {e}")
+                record_internal_exception(
+                    __name__, "assistant.core.files.file_processor.internal_failure", e
+                )
             finally:
                 self._temp_dir = None
 
@@ -516,10 +524,8 @@ The description should be detailed enough for someone who hasn't seen the image 
             return temp_path
 
         except Exception as e:
-            logger.error(
-                f"[FileProcessor] Failed to download from remote: "
-                f"storage_key={storage_key}, error={type(e).__name__}: {e}",
-                exc_info=True,
+            record_internal_exception(
+                __name__, "assistant.core.files.file_processor.internal_failure", e
             )
             return None
 
@@ -790,7 +796,9 @@ The description should be detailed enough for someone who hasn't seen the image 
                         f"tokens={result.tokens_used}"
                     )
                 except Exception as e:
-                    logger.warning(f"[FileProcessor] Failed to generate image description: {e}")
+                    record_internal_exception(
+                        __name__, "assistant.core.files.file_processor.internal_failure", e
+                    )
                     description = f"[Image: {file_path.name}] (description unavailable)"
                     metadata["vlm_error"] = str(e)
             else:
@@ -848,8 +856,8 @@ The description should be detailed enough for someone who hasn't seen the image 
                 return "", True, metadata
 
         except DocumentParseError as e:
-            logger.error(f"[FileProcessor] Document parse error: {e}")
-            metadata["parse_error"] = str(e)
+            record_internal_exception(logger, "file_processor.document_parse_failed", e)
+            metadata["parse_error"] = "Document parsing failed"
             return "", False, metadata
 
     def _extract_pdf_text_with_pypdf(
@@ -890,6 +898,9 @@ The description should be detailed enough for someone who hasn't seen the image 
             metadata["truncated_preview"] = text[:1000] + "..."
             return "", True, metadata
         except Exception as e:
+            record_internal_exception(
+                __name__, "assistant.core.files.file_processor.internal_failure", e
+            )
             metadata["parse_error"] = f"pypdf fallback failed: {e}"
             return "", False, metadata
 
@@ -997,9 +1008,7 @@ The description should be detailed enough for someone who hasn't seen the image 
                 structure.has_tables = True
 
             # Check for code blocks
-            if not structure.has_code_blocks and (
-                line.startswith("```") or line.startswith("~~~")
-            ):
+            if not structure.has_code_blocks and (line.startswith("```") or line.startswith("~~~")):
                 structure.has_code_blocks = True
 
         # Estimate reading time (assuming 250 words/min for English, 400 chars/min for Chinese)
@@ -1098,16 +1107,15 @@ The description should be detailed enough for someone who hasn't seen the image 
             return pdf_pages, metadata
 
         except PDFConversionError as e:
-            logger.error(f"[FileProcessor] PDF conversion error: {e}")
-            metadata["conversion_error"] = str(e)
+            record_internal_exception(logger, "file_processor.pdf_conversion_failed", e)
+            metadata["conversion_error"] = "PDF conversion failed"
             return [], metadata
 
         except Exception as e:
-            logger.error(
-                f"[FileProcessor] Unexpected PDF error: {api_path}: {e}",
-                exc_info=True,
+            record_internal_exception(
+                __name__, "assistant.core.files.file_processor.internal_failure", e
             )
-            metadata["conversion_error"] = f"Unexpected error: {str(e)}"
+            metadata["conversion_error"] = "Unexpected PDF conversion failure"
             return [], metadata
 
     async def process_files(
@@ -1279,20 +1287,22 @@ The description should be detailed enough for someone who hasn't seen the image 
                     )
 
             except FileProcessError as e:
-                logger.error(f"[FileProcessor] Error processing file: {e}")
+                record_internal_exception(logger, "file_processor.file_processing_failed", e)
                 file_name = Path(api_path).name
                 result.file_metadata.append(
                     {
                         "file_path": api_path,
                         "file_name": file_name,
-                        "error": str(e),
+                        "error": "File processing failed",
                     }
                 )
                 # Add error as text content so model can explain to user
-                error_text = f"[文件处理失败: {file_name}]\n错误: {str(e)}"
+                error_text = f"[文件处理失败: {file_name}]"
                 text_parts.append(error_text)
             except Exception as e:
-                logger.exception(f"[FileProcessor] Unexpected error: {api_path}")
+                record_internal_exception(
+                    __name__, "assistant.core.files.file_processor.internal_failure", e
+                )
                 file_name = Path(api_path).name
                 result.file_metadata.append(
                     {
@@ -1315,7 +1325,9 @@ The description should be detailed enough for someone who hasn't seen the image 
             try:
                 result.document_structure = self._analyze_document_structure(result.text_content)
             except Exception as e:
-                logger.warning(f"[FileProcessor] Document structure analysis failed: {e}")
+                record_internal_exception(
+                    __name__, "assistant.core.files.file_processor.internal_failure", e
+                )
 
         if result.requires_rag and session_kb_documents:
             result.session_kb_id = await self.create_session_kb(
@@ -1474,7 +1486,9 @@ The description should be detailed enough for someone who hasn't seen the image 
             if inspect.isawaitable(created):
                 created = await created
         except Exception as exc:
-            logger.warning(f"[FileProcessor] Failed to create session KB: {exc}")
+            record_internal_exception(
+                __name__, "assistant.core.files.file_processor.internal_failure", exc
+            )
             return None
 
         return self._extract_session_kb_id(created)

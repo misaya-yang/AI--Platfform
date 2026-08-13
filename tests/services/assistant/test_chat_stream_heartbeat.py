@@ -10,12 +10,12 @@ SSE comment lines while the producer is silent.
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 
 import pytest
-from starlette.testclient import TestClient
-
 from assistant_service.api.routes import chat as chat_route
+from starlette.testclient import TestClient
 
 
 class _Event(SimpleNamespace):
@@ -61,8 +61,7 @@ def _build_app(assistant_service, *, heartbeat_interval: float = 0.05):
 def _consume_sse(client, body):
     with client.stream("POST", "/chat/stream", json=body) as r:
         assert r.status_code == 200, f"unexpected status {r.status_code}"
-        for raw in r.iter_lines():
-            yield raw
+        yield from r.iter_lines()
 
 
 # --------------------------------------------------------------------------- #
@@ -84,8 +83,8 @@ def test_heartbeat_emits_when_producer_idle():
     with TestClient(app) as client:
         lines = list(_consume_sse(client, {"message": "hi"}))
 
-    heartbeats = [l for l in lines if l.startswith(":")]
-    data_lines = [l for l in lines if l.startswith("data:")]
+    heartbeats = [line for line in lines if line.startswith(":")]
+    data_lines = [line for line in lines if line.startswith("data:")]
 
     assert len(heartbeats) >= 2, f"expected ≥2 heartbeats, got {heartbeats}"
     assert len(data_lines) == 1, f"expected 1 data event, got {data_lines}"
@@ -106,30 +105,42 @@ def test_heartbeat_skipped_when_events_flow_fast():
     with TestClient(app) as client:
         lines = list(_consume_sse(client, {"message": "hi"}))
 
-    data_lines = [l for l in lines if l.startswith("data:")]
-    heartbeats = [l for l in lines if l.startswith(":")]
+    data_lines = [line for line in lines if line.startswith("data:")]
+    heartbeats = [line for line in lines if line.startswith(":")]
 
     assert len(data_lines) == 5
     # Producer finishes well before the 0.5s heartbeat — none should fire.
     assert heartbeats == [], f"unexpected heartbeats: {heartbeats}"
 
 
-def test_producer_exception_yields_error_event_and_terminates():
+def test_producer_exception_yields_error_event_and_terminates(
+    caplog: pytest.LogCaptureFixture,
+):
     """Producer raising mid-stream → single error data event, generator ends."""
 
     async def broken_gen():
         yield _Event(event_type="text_delta", data={"chunk": "before"}, timestamp=1.0)
-        raise RuntimeError("synthetic boom")
+        raise RuntimeError("private-chat-stream-exception-message")
 
     svc = _FakeAssistantService(broken_gen)
     app = _build_app(svc, heartbeat_interval=0.5)
 
-    with TestClient(app) as client:
+    with caplog.at_level(logging.ERROR, logger=chat_route.__name__), TestClient(app) as client:
         lines = list(_consume_sse(client, {"message": "hi"}))
 
-    data_lines = [l for l in lines if l.startswith("data:")]
+    data_lines = [line for line in lines if line.startswith("data:")]
     assert len(data_lines) == 2
     assert "text_delta" in data_lines[0]
     assert '"event_type": "error"' in data_lines[1] or '"event_type":"error"' in data_lines[1]
     # Generic message — no internal exception details leaked.
-    assert "synthetic boom" not in data_lines[1]
+    assert "private-chat-stream-exception-message" not in data_lines[1]
+    records = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("assistant.chat_stream.failed")
+    ]
+    assert len(records) == 1
+    assert records[0].exc_info is None
+    assert records[0].internal_exception["exception_type"] == "RuntimeError"
+    assert records[0].internal_exception["frames"]
+    assert "private-chat-stream-exception-message" not in caplog.text

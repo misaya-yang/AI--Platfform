@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from ai_gateway_core.logging import record_internal_exception
+
 from .scope import scoped_collection_candidates, scoped_collection_name
 
 
@@ -101,7 +103,10 @@ class HybridMemoryRetriever:
                     query=query,
                     limit=candidate_size,
                 )
-            except Exception:
+            except Exception as exc:
+                record_internal_exception(
+                    __name__, "assistant.core.runtime.memory.retriever.internal_failure", exc
+                )
                 vector_hits = {}
 
         merged: dict[str, dict[str, float]] = {}
@@ -266,7 +271,10 @@ class HybridMemoryRetriever:
                 for row in rows or []
                 if _row_value(row, "collection_name")
             ]
-        except Exception:
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.runtime.memory.retriever.internal_failure", exc
+            )
             persisted_collections = []
 
         for collection_name in scoped_collection_candidates(
@@ -292,7 +300,10 @@ class HybridMemoryRetriever:
                 }
             try:
                 results = await search_method(**kwargs)
-            except Exception:
+            except Exception as exc:
+                record_internal_exception(
+                    __name__, "assistant.core.runtime.memory.retriever.internal_failure", exc
+                )
                 continue
 
             for hit in results or []:

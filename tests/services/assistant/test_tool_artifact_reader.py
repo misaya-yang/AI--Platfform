@@ -341,7 +341,13 @@ async def test_storage_rechecks_all_scopes_in_one_query_before_download() -> Non
     assert all(
         field in query for field in ("tenant_id", "session_id", "user_id", "source", "turn_id")
     )
-    assert args == ("art_12345678", "tenant-a", "session-a", "user-a")
+    assert args == (
+        "art_12345678",
+        "tenant-a",
+        "session-a",
+        "user-a",
+        "tool_output_spill",
+    )
     assert backend.downloaded == ["host/verified/key"]
 
 
@@ -364,3 +370,39 @@ async def test_storage_rejects_oversized_metadata_before_backend_download() -> N
 
     assert result is None
     assert backend.downloaded == []
+
+
+@pytest.mark.asyncio
+async def test_storage_scoped_reader_requires_exact_allowlisted_source() -> None:
+    row = {"storage_key": "host/verified/sse", "size_bytes": 12}
+    connection = _Connection(row)
+    backend = _Backend(b"safe content")
+    service = ArtifactStorageService.__new__(ArtifactStorageService)
+    service.database = SimpleNamespace(_pool=_Pool(connection))
+    service._backend = backend
+    service._row_to_artifact = lambda value: SimpleNamespace(**value)
+
+    result = await service.read_artifact_scoped(
+        "art_12345678",
+        tenant_id="tenant-a",
+        session_id="session-a",
+        user_id="user-a",
+        max_bytes=2_000_000,
+        expected_source="sse_event_spill",
+    )
+
+    assert result is not None
+    _query, args = connection.calls[0]
+    assert args[-1] == "sse_event_spill"
+    assert (
+        await service.read_artifact_scoped(
+            "art_12345678",
+            tenant_id="tenant-a",
+            session_id="session-a",
+            user_id="user-a",
+            max_bytes=2_000_000,
+            expected_source="untrusted_source",
+        )
+        is None
+    )
+    assert len(connection.calls) == 1

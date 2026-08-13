@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
 import httpx
+from ai_gateway_core.logging import record_internal_exception
 
 from .client import DNSResolver, MCPClient
 
@@ -198,6 +199,9 @@ class MCPOAuthCoordinator:
         try:
             return MCPClient._validate_url(url, resolver=self._dns_resolver)
         except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.mcp.oauth.internal_failure", exc
+            )
             raise MCPOAuthError("MCP_OAUTH_ENDPOINT_DENIED") from exc
 
     async def _request_json(

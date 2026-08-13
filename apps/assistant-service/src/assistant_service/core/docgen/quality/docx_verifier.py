@@ -19,11 +19,14 @@ import subprocess
 import zipfile
 from pathlib import Path
 
+from ai_gateway_core.logging import record_internal_exception
 from lxml import etree
 
 from .types import CriticReport, Issue, IssueCategory, IssueSeverity
 
-_PLACEHOLDER_RE = re.compile(r"\b(xxxx|lorem ipsum|lorem|ipsum|todo|fixme|placeholder|\[\[|<<)\b", re.IGNORECASE)
+_PLACEHOLDER_RE = re.compile(
+    r"\b(xxxx|lorem ipsum|lorem|ipsum|todo|fixme|placeholder|\[\[|<<)\b", re.IGNORECASE
+)
 
 
 class DocxXmlVerifier:
@@ -33,30 +36,52 @@ class DocxXmlVerifier:
         issues: list[Issue] = []
         backend_note = "zip+xml"
         if not path.is_file():
-            issues.append(Issue(category=IssueCategory.OPEN_ERROR, severity=IssueSeverity.CRITICAL, message=f"missing file: {path}"))
-            return CriticReport(passed=False, issues=issues, backend="docx_xml", note="file missing")
+            issues.append(
+                Issue(
+                    category=IssueCategory.OPEN_ERROR,
+                    severity=IssueSeverity.CRITICAL,
+                    message=f"missing file: {path}",
+                )
+            )
+            return CriticReport(
+                passed=False, issues=issues, backend="docx_xml", note="file missing"
+            )
 
         # Zip structure
         try:
             with zipfile.ZipFile(path) as z:
                 names = set(z.namelist())
                 if "word/document.xml" not in names:
-                    issues.append(Issue(
-                        category=IssueCategory.SCHEMA_ERROR,
-                        severity=IssueSeverity.CRITICAL,
-                        message="missing word/document.xml",
-                    ))
+                    issues.append(
+                        Issue(
+                            category=IssueCategory.SCHEMA_ERROR,
+                            severity=IssueSeverity.CRITICAL,
+                            message="missing word/document.xml",
+                        )
+                    )
                     return CriticReport(passed=False, issues=issues, backend="docx_xml")
                 document_xml = z.read("word/document.xml")
         except zipfile.BadZipFile:
-            issues.append(Issue(category=IssueCategory.SCHEMA_ERROR, severity=IssueSeverity.CRITICAL, message="corrupt zip archive"))
+            issues.append(
+                Issue(
+                    category=IssueCategory.SCHEMA_ERROR,
+                    severity=IssueSeverity.CRITICAL,
+                    message="corrupt zip archive",
+                )
+            )
             return CriticReport(passed=False, issues=issues, backend="docx_xml")
 
         # Well-formed XML
         try:
             root = etree.fromstring(document_xml)
         except etree.XMLSyntaxError as e:
-            issues.append(Issue(category=IssueCategory.SCHEMA_ERROR, severity=IssueSeverity.CRITICAL, message=f"invalid XML: {e}"))
+            issues.append(
+                Issue(
+                    category=IssueCategory.SCHEMA_ERROR,
+                    severity=IssueSeverity.CRITICAL,
+                    message=f"invalid XML: {e}",
+                )
+            )
             return CriticReport(passed=False, issues=issues, backend="docx_xml")
 
         # Collect all text runs to grep for placeholders
@@ -64,21 +89,25 @@ class DocxXmlVerifier:
         texts = root.xpath("//w:t/text()", namespaces=namespaces)
         doc_text = "\n".join(texts)
         for match in _PLACEHOLDER_RE.finditer(doc_text):
-            issues.append(Issue(
-                category=IssueCategory.PLACEHOLDER,
-                severity=IssueSeverity.WARNING,
-                message=f"placeholder detected: {match.group(0)!r}",
-                hint="replace with concrete content",
-            ))
+            issues.append(
+                Issue(
+                    category=IssueCategory.PLACEHOLDER,
+                    severity=IssueSeverity.WARNING,
+                    message=f"placeholder detected: {match.group(0)!r}",
+                    hint="replace with concrete content",
+                )
+            )
 
         # Optional sanity-open via soffice.
         sanity_open_ok = self._soffice_sanity_open(path)
         if sanity_open_ok is False:
-            issues.append(Issue(
-                category=IssueCategory.OPEN_ERROR,
-                severity=IssueSeverity.CRITICAL,
-                message="LibreOffice could not open the .docx",
-            ))
+            issues.append(
+                Issue(
+                    category=IssueCategory.OPEN_ERROR,
+                    severity=IssueSeverity.CRITICAL,
+                    message="LibreOffice could not open the .docx",
+                )
+            )
             backend_note = "zip+xml+soffice_open_failed"
         elif sanity_open_ok is True:
             backend_note = "zip+xml+soffice_open_ok"
@@ -92,7 +121,15 @@ class DocxXmlVerifier:
         bin_name = "soffice" if shutil.which("soffice") else "libreoffice"
         try:
             proc = subprocess.run(
-                [bin_name, "--headless", "--convert-to", "pdf", "--outdir", str(path.parent), str(path)],
+                [
+                    bin_name,
+                    "--headless",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    str(path.parent),
+                    str(path),
+                ],
                 timeout=30,
                 capture_output=True,
             )
@@ -100,5 +137,8 @@ class DocxXmlVerifier:
                 return False
             out = path.with_suffix(".pdf")
             return out.exists()
-        except Exception:
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.docgen.quality.docx_verifier.internal_failure", exc
+            )
             return False

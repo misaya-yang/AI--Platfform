@@ -8,10 +8,11 @@ redaction, and payload shaping happens inside those background tasks.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import json
+import logging
 import time
+import urllib.parse
 import uuid
 from collections.abc import Coroutine
 from dataclasses import dataclass, field
@@ -19,9 +20,15 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ai_gateway_core.billing.pricing_catalog import calculate_token_cost_cents
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, log_internal_exception
 from ai_gateway_core.security import SENSITIVE_KEY_RE as _SENSITIVE_KEY_RE
 from ai_gateway_core.security import redact_trace_text as _redact_trace_text_impl
+
+from ..config.startup_fingerprint import (
+    StartupConfigSnapshot,
+    fingerprinted_runtime_names,
+    fingerprinted_secret_names,
+)
 
 logger = get_logger(__name__)
 
@@ -44,7 +51,13 @@ def _trace_uuid(value: str | None) -> str:
     raw = str(value or uuid.uuid4())
     try:
         return str(uuid.UUID(raw))
-    except Exception:
+    except Exception as exc:
+        log_internal_exception(
+            logger,
+            "assistant.trace.uuid_projection_failed",
+            exc,
+            level=logging.DEBUG,
+        )
         return str(uuid.uuid5(_TRACE_NAMESPACE, raw))
 
 
@@ -178,6 +191,150 @@ def _sanitize_payload(value: Any, *, depth: int = 0) -> Any:
             clean_items.append({"__truncated_items__": len(value) - _MAX_LIST_ITEMS})
         return clean_items
     return _redact_trace_text(value, limit=1000)
+
+
+def _validated_startup_config_summary(value: Any) -> dict[str, Any] | None:
+    """Project only the closed, non-secret startup-config/v1 trace schema."""
+
+    if not isinstance(value, dict) or value.get("schema_version") != "assistant-startup-config/v1":
+        return None
+    digest = str(value.get("sha256") or "")
+    if not digest.startswith("sha256:") or len(digest) > 96:
+        return None
+
+    projected: dict[str, Any] = {
+        "schema_version": "assistant-startup-config/v1",
+        "sha256": digest,
+    }
+    raw_settings = value.get("settings")
+    if isinstance(raw_settings, dict):
+        settings: dict[str, Any] = {}
+        for name, item in raw_settings.items():
+            if (
+                not isinstance(name, str)
+                or not name.startswith(("ASSISTANT_", "AGENT_STUDIO_", "DASHSCOPE_", "OPENAI_"))
+                or not isinstance(item, dict)
+            ):
+                continue
+            raw_value = item.get("value")
+            if isinstance(raw_value, dict):
+                raw_value = {
+                    "entry_count": max(0, int(raw_value.get("entry_count") or 0)),
+                    "structure_sha256": str(raw_value.get("structure_sha256") or "")[:96],
+                }
+            elif not isinstance(raw_value, bool | int | str):
+                continue
+            settings[name[:120]] = {
+                "value": raw_value,
+                "source": str(item.get("source") or "")[:32],
+                "parser": str(item.get("parser") or "")[:160],
+                "valid": bool(item.get("valid")),
+            }
+        projected["settings"] = settings
+
+    raw_runtime = value.get("runtime")
+    if isinstance(raw_runtime, dict):
+        runtime: dict[str, Any] = {}
+        for name in sorted(fingerprinted_runtime_names()):
+            item = raw_runtime.get(name)
+            if not isinstance(item, dict):
+                continue
+            raw_value = item.get("value")
+            if isinstance(raw_value, dict):
+                raw_value = {
+                    "configured": bool(raw_value.get("configured")),
+                    "entry_count": max(0, int(raw_value.get("entry_count") or 0)),
+                    "structure_sha256": str(
+                        raw_value.get("structure_sha256") or ""
+                    )[:96],
+                }
+            elif not isinstance(raw_value, bool | int | float | str) and raw_value is not None:
+                continue
+            runtime_item = {
+                "value": raw_value,
+                "source": str(item.get("source") or "")[:128],
+                "parser": str(item.get("parser") or "")[:160],
+                "valid": bool(item.get("valid")),
+            }
+            if item.get("scope") == "test_only":
+                runtime_item["scope"] = "test_only"
+            runtime[name] = runtime_item
+        projected["runtime"] = runtime
+
+    raw_providers = value.get("providers")
+    if isinstance(raw_providers, dict):
+        providers: dict[str, Any] = {}
+        for name in ("openai", "anthropic", "deepseek", "dashscope", "google", "google-vertex"):
+            item = raw_providers.get(name)
+            if not isinstance(item, dict):
+                continue
+            provider = {
+                "configured": bool(item.get("configured")),
+                "credential_source": str(item.get("credential_source") or "unset")[:80],
+                "endpoint_source": str(item.get("endpoint_source") or "code_default")[:80],
+            }
+            raw_endpoint = str(item.get("endpoint") or "")
+            try:
+                parsed_endpoint = urllib.parse.urlsplit(raw_endpoint)
+                hostname = parsed_endpoint.hostname
+                port = parsed_endpoint.port
+            except ValueError:
+                hostname = None
+                port = None
+            if hostname and parsed_endpoint.scheme:
+                host = (
+                    f"[{hostname}]"
+                    if ":" in hostname and not hostname.startswith("[")
+                    else hostname
+                )
+                netloc = f"{host}:{port}" if port is not None else host
+                provider["endpoint"] = urllib.parse.urlunsplit(
+                    (parsed_endpoint.scheme, netloc, parsed_endpoint.path, "", "")
+                )[:512]
+            elif raw_endpoint == "":
+                provider["endpoint"] = ""
+            else:
+                provider["endpoint"] = "<invalid>"
+            provider["endpoint_valid"] = bool(item.get("endpoint_valid"))
+            for field_name in ("backend", "backend_source", "wire_protocol"):
+                if isinstance(item.get(field_name), str):
+                    provider[field_name] = str(item[field_name])[:64]
+            if "backend_valid" in item:
+                provider["backend_valid"] = bool(item.get("backend_valid"))
+            providers[name] = provider
+        projected["providers"] = providers
+
+    raw_secrets = value.get("secrets")
+    if isinstance(raw_secrets, dict):
+        secrets: dict[str, Any] = {}
+        for name in sorted(fingerprinted_secret_names()):
+            item = raw_secrets.get(name)
+            if isinstance(item, dict):
+                secrets[name] = {"configured": bool(item.get("configured"))}
+        projected["secrets"] = secrets
+
+    raw_model = value.get("model")
+    if isinstance(raw_model, dict) and isinstance(raw_model.get("default"), dict):
+        model_default = raw_model["default"]
+        projected["model"] = {
+            "default": {
+                "value": str(model_default.get("value") or "")[:120],
+                "source": str(model_default.get("source") or "")[:32],
+            }
+        }
+
+    raw_build = value.get("build")
+    if isinstance(raw_build, dict):
+        build: dict[str, Any] = {}
+        for name in ("package_version", "image_version", "vcs_revision", "image_ref"):
+            item = raw_build.get(name)
+            if isinstance(item, dict):
+                build[name] = {
+                    "value": str(item.get("value") or "unknown")[:256],
+                    "source": str(item.get("source") or "code_default")[:32],
+                }
+        projected["build"] = build
+    return projected
 
 
 def _bounded_context_retrieved_payload(payload: Any) -> Any:
@@ -423,10 +580,22 @@ class AssistantTraceWriter:
         *,
         max_pending: int = 256,
         write_timeout_s: float = 1.0,
+        startup_config: StartupConfigSnapshot | None = None,
     ) -> None:
         self.database = database
         self.max_pending = max_pending
         self.write_timeout_s = write_timeout_s
+        # Defense in depth: accept only the closed startup-config/v1 projection.
+        # Unknown keys are dropped even when a future caller accidentally passes
+        # a Settings/model dump containing credentials.
+        self.startup_config_summary = (
+            _validated_startup_config_summary(startup_config.safe_summary())
+            if isinstance(startup_config, StartupConfigSnapshot)
+            else None
+        )
+        self.startup_config_fingerprint = str(
+            (self.startup_config_summary or {}).get("sha256") or ""
+        )
         self._pending: set[asyncio.Task[str]] = set()
         self._submission_generation = 0
         self._pending_submissions: dict[asyncio.Task[str], tuple[int, str]] = {}
@@ -665,7 +834,12 @@ class AssistantTraceWriter:
         else:
             try:
                 outcome = task.result()
-            except Exception:  # noqa: BLE001 - persist only a generic failed outcome.
+            except Exception as exc:  # noqa: BLE001 - persist only a generic failed outcome.
+                log_internal_exception(
+                    logger,
+                    "assistant.trace.background_task_failed",
+                    exc,
+                )
                 outcome = "failed"
         if outcome != "succeeded":
             self._record_failed_outcome(
@@ -695,12 +869,24 @@ class AssistantTraceWriter:
             return "timed_out"
         except Exception as exc:  # noqa: BLE001 - trace writes are best-effort.
             self.failed_writes += 1
-            logger.warning("Assistant trace write failed: %s", _redact_trace_text(exc))
+            log_internal_exception(
+                logger,
+                "assistant.trace.write_failed",
+                exc,
+                level=logging.WARNING,
+            )
             return "failed"
 
     def _close_coro(self, coro: Coroutine[Any, Any, None]) -> None:
-        with contextlib.suppress(Exception):
+        try:
             coro.close()
+        except Exception as exc:
+            log_internal_exception(
+                logger,
+                "assistant.trace.coroutine_close_failed",
+                exc,
+                level=logging.WARNING,
+            )
 
     async def _start_trace(self, ctx: AssistantTraceContext) -> None:
         await self._upsert_trace_root(ctx)
@@ -858,6 +1044,9 @@ class AssistantTraceWriter:
                 redaction_state=redaction_state,
             ),
         }
+        if self.startup_config_summary:
+            metadata["startup_config_fingerprint"] = self.startup_config_fingerprint
+            metadata["startup_config"] = self.startup_config_summary
         if ctx.transcript_locator:
             metadata["transcript_locator"] = _sanitize_payload(ctx.transcript_locator)
         if terminal_envelope:
@@ -944,9 +1133,12 @@ class AssistantTraceWriter:
                 payload,
                 ctx.trace_id,
             )
-        except Exception:
-            logger.debug(
-                "trace.ingested enqueue skipped for trace_id=%s", ctx.trace_id, exc_info=True
+        except Exception as exc:
+            log_internal_exception(
+                logger,
+                "assistant.trace.outbox_enqueue_failed",
+                exc,
+                level=logging.DEBUG,
             )
 
     async def _upsert_trace_root(self, ctx: AssistantTraceContext) -> None:
@@ -959,6 +1151,9 @@ class AssistantTraceWriter:
             "trace_writer": "assistant-service",
             "schema_version": "ate-02",
         }
+        if self.startup_config_summary:
+            metadata["startup_config_fingerprint"] = self.startup_config_fingerprint
+            metadata["startup_config"] = self.startup_config_summary
         if ctx.transcript_locator:
             metadata["transcript_locator"] = _sanitize_payload(ctx.transcript_locator)
         await self.database.execute(

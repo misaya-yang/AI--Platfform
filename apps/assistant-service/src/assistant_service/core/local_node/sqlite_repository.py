@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import os
 import sqlite3
@@ -21,6 +22,8 @@ from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, NoReturn, cast
+
+from ai_gateway_core.logging import record_internal_exception
 
 from ...api.routes.local_nodes import LocalNodeServiceFault
 from .control_plane import (
@@ -545,8 +548,15 @@ class SQLiteLocalNodeRepository:
             self._connection.execute("PRAGMA foreign_keys=ON")
             self._initialize_schema()
         except BaseException:
-            with suppress(Exception):
+            try:
                 self._connection.close()
+            except Exception as exc:
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.local_node.sqlite_repository.suppressed_failure",
+                    exc,
+                    level=logging.DEBUG,
+                )
             raise
         self.durable_dispatch_fence = True
 

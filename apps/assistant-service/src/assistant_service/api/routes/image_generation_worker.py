@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 from ai_gateway_core.image import new_turn_id, parse_image_size, resolve_image_routing
+from ai_gateway_core.logging import record_internal_exception
 from ai_gateway_core.style_presets import (
     compose_styled_prompt,
     resolve_dashscope_style_tag,
@@ -77,8 +77,15 @@ async def run_image_generation_task(
     raw_anchor: str | None = None
 
     # Mark turn as running for parallel observers
-    with suppress(Exception):
+    try:
         await bindings.update_turn_status(pool, turn_id=turn_id, status="running")
+    except Exception as exc:
+        record_internal_exception(
+            __name__,
+            "assistant.api.routes.image_generation_worker.suppressed_failure",
+            exc,
+            level=logging.DEBUG,
+        )
 
     try:
         model_info = model_registry.get_model(body.model_id) if model_registry else None
@@ -125,7 +132,11 @@ async def run_image_generation_task(
                 try:
                     await bindings.send_image_callback(body.callback_url, task)
                 except Exception as e:
-                    logger.warning("Callback to %s failed: %s", body.callback_url, e)
+                    record_internal_exception(
+                        __name__,
+                        "assistant.api.routes.image_generation_worker.internal_failure",
+                        e,
+                    )
             return
 
         # Style lock resolution
@@ -165,8 +176,15 @@ async def run_image_generation_task(
                     error_code="reference_not_found",
                 )
                 if body.callback_url:
-                    with suppress(Exception):
+                    try:
                         await bindings.send_image_callback(body.callback_url, task)
+                    except Exception as exc:
+                        record_internal_exception(
+                            __name__,
+                            "assistant.api.routes.image_generation_worker.suppressed_failure",
+                            exc,
+                            level=logging.DEBUG,
+                        )
                 return
 
         res = None
@@ -191,8 +209,15 @@ async def run_image_generation_task(
                     error_code="provider_unavailable",
                 )
                 if body.callback_url:
-                    with suppress(Exception):
+                    try:
                         await bindings.send_image_callback(body.callback_url, task)
+                    except Exception as exc:
+                        record_internal_exception(
+                            __name__,
+                            "assistant.api.routes.image_generation_worker.suppressed_failure",
+                            exc,
+                            level=logging.DEBUG,
+                        )
                 return
             async with bindings.bounded(
                 bindings.provider_semaphore,
@@ -234,8 +259,15 @@ async def run_image_generation_task(
                     error_code="provider_unavailable",
                 )
                 if body.callback_url:
-                    with suppress(Exception):
+                    try:
                         await bindings.send_image_callback(body.callback_url, task)
+                    except Exception as exc:
+                        record_internal_exception(
+                            __name__,
+                            "assistant.api.routes.image_generation_worker.suppressed_failure",
+                            exc,
+                            level=logging.DEBUG,
+                        )
                 return
             if res and res.success and res.images:
                 raw_anchor, generated_list = await bindings.persist_multi_turn_result(
@@ -305,8 +337,15 @@ async def run_image_generation_task(
                 error_code=error_code,
             )
             if body.callback_url:
-                with suppress(Exception):
+                try:
                     await bindings.send_image_callback(body.callback_url, task)
+                except Exception as exc:
+                    record_internal_exception(
+                        __name__,
+                        "assistant.api.routes.image_generation_worker.suppressed_failure",
+                        exc,
+                        level=logging.DEBUG,
+                    )
             return
 
         task["progress"] = 70
@@ -382,7 +421,7 @@ async def run_image_generation_task(
         task["progress"] = 100
         task["duration_ms"] = (time.time() - start_time) * 1000
         task["completed_at"] = datetime.now(timezone.utc).isoformat()
-        with suppress(Exception):
+        try:
             await bindings.update_turn_status(
                 pool,
                 turn_id=turn_id,
@@ -390,21 +429,37 @@ async def run_image_generation_task(
                 error=task["error"],
                 error_code=task["error_code"],
             )
+        except Exception as exc:
+            record_internal_exception(
+                __name__,
+                "assistant.api.routes.image_generation_worker.suppressed_failure",
+                exc,
+                level=logging.DEBUG,
+            )
     except Exception as e:
-        logger.exception("Async image generation task %s failed", task_id)
+        record_internal_exception(
+            __name__, "assistant.api.routes.image_generation_worker.internal_failure", e
+        )
         task["status"] = "failed"
         task["error"] = str(e)
         task["error_code"] = "internal_error"
         task["progress"] = 100
         task["duration_ms"] = (time.time() - start_time) * 1000
         task["completed_at"] = datetime.now(timezone.utc).isoformat()
-        with suppress(Exception):
+        try:
             await bindings.update_turn_status(
                 pool,
                 turn_id=turn_id,
                 status="failed",
                 error=str(e),
                 error_code="internal_error",
+            )
+        except Exception as exc:
+            record_internal_exception(
+                __name__,
+                "assistant.api.routes.image_generation_worker.suppressed_failure",
+                exc,
+                level=logging.DEBUG,
             )
 
     await bindings.store_task(redis, task_id, task, pool=pool)
@@ -413,4 +468,6 @@ async def run_image_generation_task(
         try:
             await bindings.send_image_callback(body.callback_url, task)
         except Exception as e:
-            logger.warning("Callback to %s failed: %s", body.callback_url, e)
+            record_internal_exception(
+                __name__, "assistant.api.routes.image_generation_worker.internal_failure", e
+            )

@@ -6,12 +6,10 @@ via `socket.getaddrinfo` and HTTP via `httpx.AsyncClient.get`.
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
-
 from assistant_service.core.tools.tool_registry import ToolCallRequest
 from assistant_service.core.tools.web_fetch import (
     SSRFError,
@@ -19,7 +17,6 @@ from assistant_service.core.tools.web_fetch import (
     _validate_url,
     web_fetch,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -105,12 +102,14 @@ def test_validate_url_accepts_public_ip_literal() -> None:
 
 
 def test_validate_url_rejects_hostname_resolving_to_private_ip() -> None:
-    with patch(
-        "assistant_service.core.tools.web_fetch.socket.getaddrinfo",
-        side_effect=_fake_getaddrinfo_factory("10.0.0.7"),
+    with (
+        patch(
+            "assistant_service.core.tools.web_fetch.socket.getaddrinfo",
+            side_effect=_fake_getaddrinfo_factory("10.0.0.7"),
+        ),
+        pytest.raises(SSRFError, match="blocked IP"),
     ):
-        with pytest.raises(SSRFError, match="blocked IP"):
-            _validate_url("https://internal.corp.example/")
+        _validate_url("https://internal.corp.example/")
 
 
 def test_validate_url_accepts_hostname_resolving_to_public_ip() -> None:
@@ -199,7 +198,8 @@ async def test_executor_returns_clean_error_on_timeout() -> None:
         )
 
     assert result.success is False
-    assert "timed out" in (result.error or "").lower()
+    assert result.error == "URL fetch failed or was rejected by outbound request policy"
+    assert "timed out boom" not in result.error
     # Ensure we didn't leak a stack trace through .error
     assert "Traceback" not in (result.error or "")
 

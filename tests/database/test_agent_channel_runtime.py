@@ -22,6 +22,9 @@ pytest_plugins = ("tests.database.test_agent_publication_atomicity",)
 ROOT = Path(__file__).resolve().parents[2]
 CHANNEL_MIGRATION = ROOT / "database" / "migrations" / "079_agent_channel_runtime.sql"
 HARDENING_MIGRATION = ROOT / "database" / "migrations" / "080_agent_channel_delivery_hardening.sql"
+OPERATIONS_MIGRATION = (
+    ROOT / "database" / "migrations" / "081_agent_studio_operations_governance.sql"
+)
 
 
 @pytest.mark.asyncio
@@ -200,6 +203,30 @@ async def test_real_postgres_idempotency_is_atomic_and_replays_terminal_result(
     async with release_pool.acquire() as conn:
         await conn.execute(CHANNEL_MIGRATION.read_text(encoding="utf-8"))
         await conn.execute(HARDENING_MIGRATION.read_text(encoding="utf-8"))
+        # Migration 081 also indexes pre-existing runtime/audit tables. Keep
+        # those dependencies in this isolated schema so the unqualified
+        # migration can never fall through to public during the test.
+        await conn.execute(
+            """
+            ALTER TABLE audit_logs
+                ADD COLUMN IF NOT EXISTS response_summary JSONB;
+            CREATE TABLE agent_traces (
+                tenant_id VARCHAR(255), agent_id UUID, agent_version_id UUID,
+                publication_id UUID, channel VARCHAR(16), created_at TIMESTAMPTZ
+            );
+            CREATE TABLE sessions (
+                tenant_id VARCHAR(255), agent_id UUID, user_id VARCHAR(255),
+                created_at TIMESTAMPTZ
+            );
+            CREATE TABLE assistant_runs (
+                tenant_id VARCHAR(255), agent_id UUID, user_id VARCHAR(255),
+                created_at TIMESTAMPTZ
+            );
+            """
+        )
+        operations_sql = OPERATIONS_MIGRATION.read_text(encoding="utf-8")
+        await conn.execute(operations_sql)
+        await conn.execute(operations_sql)
     repository, tenant_id, user_id, agent_id = await _create_agent(
         release_pool,
         suffix="channel-idempotency",

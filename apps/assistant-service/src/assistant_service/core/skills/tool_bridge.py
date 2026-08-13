@@ -13,6 +13,8 @@ import logging
 import re
 from typing import Any
 
+from ai_gateway_core.logging import record_internal_exception
+
 from ..runtime.skills.models import SkillManifest
 from ..runtime.skills.registry import SkillRegistry
 from ..tools.tool_registry import (
@@ -121,7 +123,9 @@ class SkillToolBridge:
                 )
                 count += 1
             except Exception as e:
-                logger.warning(f"Failed to register skill '{skill.name}' as tool: {e}")
+                record_internal_exception(
+                    __name__, "assistant.core.skills.tool_bridge.internal_failure", e
+                )
         return count
 
     def _build_params(self, skill: SkillManifest) -> list[ToolParameter]:

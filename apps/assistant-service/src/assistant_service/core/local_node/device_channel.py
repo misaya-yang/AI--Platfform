@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
+from ai_gateway_core.logging import record_internal_exception
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -446,7 +447,10 @@ class SQLiteDeviceChannelBroker:
                 user_id=principal.user_id,
                 device_id=principal.device_id,
             )
-        except Exception:
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.local_node.device_channel.internal_failure", exc
+            )
             await self.revoke_device(
                 tenant_id=principal.tenant_id,
                 user_id=principal.user_id,

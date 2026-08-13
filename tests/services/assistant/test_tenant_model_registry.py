@@ -57,6 +57,41 @@ async def test_ui_provider_secret_builds_isolated_runtime_registry():
     await registry.close()
 
 
+async def test_agent_runtime_provider_pin_adds_exact_sql_filter():
+    encryption_key = "e" * 64
+    database = _Database(
+        _row(api_key_encrypted=encrypt_value("provider-secret", encryption_key))
+    )
+
+    registry = await TenantModelRegistryResolver(
+        database,
+        encryption_key=encryption_key,
+    ).resolve("tenant-a", "qwen3.7-plus", provider_id="dashscope-intl")
+
+    assert registry is not None
+    query, args = database.calls[0]
+    assert "AND m.provider_id = $3" in query
+    assert args == ("tenant-a", "qwen3.7-plus", "dashscope-intl")
+    await registry.close()
+
+
+async def test_agent_runtime_provider_pin_rejects_mismatched_database_row():
+    encryption_key = "e" * 64
+    database = _Database(
+        _row(
+            provider_id="dashscope-cn",
+            api_key_encrypted=encrypt_value("wrong-provider-secret", encryption_key),
+        )
+    )
+
+    registry = await TenantModelRegistryResolver(
+        database,
+        encryption_key=encryption_key,
+    ).resolve("tenant-a", "qwen3.7-plus", provider_id="dashscope-intl")
+
+    assert registry is None
+
+
 async def test_env_config_remains_the_fallback_when_db_has_no_secret():
     registry = await TenantModelRegistryResolver(_Database(_row())).resolve(
         "tenant-a",

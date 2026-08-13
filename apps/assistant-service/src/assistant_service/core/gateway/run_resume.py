@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from .execution_records import RunCheckpointRecord
 
@@ -44,10 +44,8 @@ class RunResumeMixin:
                     user_id,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "get_run_checkpoint DB query failed, checkpoint unavailable "
-                    "(exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.gateway.run_resume.internal_failure", exc
                 )
                 return None
             else:
@@ -69,9 +67,8 @@ class RunResumeMixin:
             try:
                 run = await self._fetch_run_from_db(run_id, tenant_id, user_id)
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "prepare_run_resume DB run query failed, resume blocked (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.gateway.run_resume.internal_failure", exc
                 )
                 return {
                     "run_id": run_id,
@@ -627,10 +624,8 @@ class RunResumeMixin:
                     max(1, int(limit)),
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "_list_checkpoints DB query failed, checkpoints unavailable "
-                    "(exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.gateway.run_resume.internal_failure", exc
                 )
                 return []
             else:
@@ -666,9 +661,8 @@ class RunResumeMixin:
                     user_id,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "get_tool_approval DB query failed, approval unavailable (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.gateway.run_resume.internal_failure", exc
                 )
                 return None
             else:
@@ -727,10 +721,8 @@ class RunResumeMixin:
                     user_id,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "_fetch_approval_status DB query failed, denying approval status "
-                    "(exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.gateway.run_resume.internal_failure", exc
                 )
                 return None
             else:
@@ -789,7 +781,10 @@ class RunResumeMixin:
             elif isinstance(value, str):
                 try:
                     decoded = json.loads(value)
-                except Exception:
+                except Exception as exc:
+                    record_internal_exception(
+                        __name__, "assistant.core.gateway.run_resume.internal_failure", exc
+                    )
                     return {}
             else:
                 return {}

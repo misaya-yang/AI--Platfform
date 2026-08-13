@@ -28,7 +28,7 @@ import hashlib
 import time
 from typing import Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 from ai_gateway_core.security import redact_trace_text
 
 from ..turn_contract import FailureClass, SideEffectState, decide_failure
@@ -60,7 +60,10 @@ def _bounded_reason(value: Any) -> str:
 
     try:
         text = " ".join(redact_trace_text(value).split())
-    except Exception:
+    except Exception as exc:
+        record_internal_exception(
+            __name__, "assistant.core.tools.context_tools.internal_failure", exc
+        )
         return ""
     if len(text) <= _MAX_REASON_CHARS:
         return text
@@ -72,7 +75,10 @@ def _log_digest(value: Any, *, prefix: str) -> str:
 
     try:
         digest = hashlib.sha256(str(value).encode("utf-8", errors="replace")).hexdigest()
-    except Exception:
+    except Exception as exc:
+        record_internal_exception(
+            __name__, "assistant.core.tools.context_tools.internal_failure", exc
+        )
         return f"{prefix}_sha256=unavailable"
     return f"{prefix}_sha256={digest[:16]}"
 

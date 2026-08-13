@@ -19,6 +19,8 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+from ai_gateway_core.logging import record_internal_exception
+
 from ..middleware import ToolVerdict, VerdictKind
 
 logger = logging.getLogger(__name__)
@@ -62,8 +64,10 @@ class PermissionMiddleware:
             result = self._policy(tool_name, arguments, ctx)
             if inspect.isawaitable(result):
                 result = await result
-        except Exception:  # noqa: BLE001 - policy failures must deny, not escape to chain
-            logger.exception("permission policy failed for tool %s; denying", tool_name)
+        except Exception as exc:  # noqa: BLE001 - policy failures must deny, not escape to chain
+            record_internal_exception(
+                __name__, "assistant.core.agent.middlewares.permission.internal_failure", exc
+            )
             return ToolVerdict.deny(
                 reason="permission policy failed closed",
                 source="permission",

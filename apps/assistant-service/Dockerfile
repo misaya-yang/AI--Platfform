@@ -66,6 +66,8 @@ LABEL org.opencontainers.image.title="AI Gateway Assistant Service" \
       org.opencontainers.image.source="https://github.com/misaya-yang/AI--Platfform" \
       org.opencontainers.image.version="$APP_VERSION" \
       org.opencontainers.image.revision="$VCS_REF"
+ENV ASSISTANT_BUILD_VERSION="$APP_VERSION" \
+    ASSISTANT_BUILD_REVISION="$VCS_REF"
 
 WORKDIR /app
 

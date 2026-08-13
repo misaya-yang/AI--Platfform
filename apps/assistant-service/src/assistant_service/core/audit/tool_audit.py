@@ -9,11 +9,12 @@ queries against the audit table.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, log_internal_exception, record_internal_exception
 from ai_gateway_core.security import SENSITIVE_KEY_RE, redact_trace_text
 
 logger = get_logger(__name__)
@@ -29,7 +30,10 @@ def _bounded_redacted_text(value: Any, *, limit: int = _AUDIT_TEXT_LIMIT) -> str
         return ""
     try:
         text = redact_trace_text(value)
-    except Exception:
+    except Exception as exc:
+        record_internal_exception(
+            __name__, "assistant.core.audit.tool_audit.internal_failure", exc
+        )
         return "[redacted]"[:limit]
     if len(text) <= limit:
         return text
@@ -99,9 +103,11 @@ class ToolAuditService:
                 entry.latency_ms,
             )
         except Exception as exc:
-            logger.warning(
-                "tool_audit.write_failed (exception_type=%s)",
-                type(exc).__name__,
+            log_internal_exception(
+                logger,
+                "tool_audit.write_failed",
+                exc,
+                level=logging.WARNING,
             )
 
     # ------------------------------------------------------------------
@@ -131,9 +137,11 @@ class ToolAuditService:
             count = row["cnt"] if row else 0
             return count < limit_per_minute
         except Exception as exc:
-            logger.warning(
-                "tool_audit.rate_limit_check_failed (exception_type=%s)",
-                type(exc).__name__,
+            log_internal_exception(
+                logger,
+                "tool_audit.rate_limit_check_failed",
+                exc,
+                level=logging.WARNING,
             )
             return True  # Fail open
 
@@ -158,7 +166,10 @@ class ToolAuditService:
         safe_arguments = ToolAuditService._redact_arguments(arguments)
         try:
             text = json.dumps(safe_arguments, ensure_ascii=False, default=str)
-        except Exception:
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.audit.tool_audit.internal_failure", exc
+            )
             text = str(safe_arguments)
         return _bounded_redacted_text(text, limit=max_len)
 

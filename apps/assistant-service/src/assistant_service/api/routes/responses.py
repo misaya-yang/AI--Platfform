@@ -11,7 +11,6 @@ semantics.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import copy
 import inspect
 import json
@@ -22,6 +21,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+from ai_gateway_core.logging import get_logger, log_internal_exception
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -31,6 +31,7 @@ from ...core.tool_invoker import CapabilityAllowlist
 from ..deps import get_assistant_service, get_model_registry
 
 router = APIRouter()
+logger = get_logger(__name__)
 
 _ALLOWED_REQUEST_FIELDS = frozenset(
     {
@@ -815,8 +816,14 @@ def _sse(event: dict[str, Any]) -> str:
 async def _close_async_iterator(iterator: Any) -> None:
     close = getattr(iterator, "aclose", None)
     if callable(close):
-        with contextlib.suppress(Exception):
+        try:
             await close()
+        except Exception as exc:
+            log_internal_exception(
+                logger,
+                "assistant.responses.stream_close_failed",
+                exc,
+            )
 
 
 async def _iter_response_events(
@@ -854,7 +861,12 @@ async def _iter_response_events(
             source_exhausted = True
         except (asyncio.CancelledError, GeneratorExit):
             raise
-        except Exception:
+        except Exception as exc:
+            log_internal_exception(
+                logger,
+                "assistant.responses.stream.startup_failed",
+                exc,
+            )
             startup_failed = True
 
         if first is not None:
@@ -909,7 +921,12 @@ async def _iter_response_events(
                     yield event
     except (asyncio.CancelledError, GeneratorExit):
         raise
-    except Exception:
+    except Exception as exc:
+        log_internal_exception(
+            logger,
+            "assistant.responses.stream.failed",
+            exc,
+        )
         if not projector.terminal:
             for event in projector.fail(code="server_error"):
                 yield event
@@ -917,7 +934,7 @@ async def _iter_response_events(
         await _close_async_iterator(source)
         clear = getattr(assistant, "clear_session_runtime_state", None)
         if callable(clear):
-            with contextlib.suppress(Exception):
+            try:
                 cleared = clear(
                     tenant_id=user.tenant_id,
                     user_id=user.user_id,
@@ -925,6 +942,12 @@ async def _iter_response_events(
                 )
                 if inspect.isawaitable(cleared):
                     await cleared
+            except Exception as exc:
+                log_internal_exception(
+                    logger,
+                    "assistant.responses.runtime_state_cleanup_failed",
+                    exc,
+                )
 
 
 async def iter_responses_sse(
@@ -1018,7 +1041,8 @@ async def create_response(
         )
     try:
         model_info = get_model(parsed.model_id)
-    except Exception:
+    except Exception as exc:
+        log_internal_exception(logger, "assistant.responses.model_lookup_failed", exc)
         return _error_response(
             ResponsesIngressError(
                 "model_registry_unavailable",
@@ -1033,7 +1057,12 @@ async def create_response(
         )
     try:
         provider_configured = configured(model_info.provider)
-    except Exception:
+    except Exception as exc:
+        log_internal_exception(
+            logger,
+            "assistant.responses.provider_readiness_failed",
+            exc,
+        )
         provider_configured = False
     if not provider_configured:
         return _error_response(

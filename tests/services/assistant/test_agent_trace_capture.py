@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -313,6 +314,46 @@ async def test_trace_writer_persists_root_span_events_and_terminal_conflict() ->
     assert runtime["trace_writer_health"]["redacted_writes"] == 1
     assert runtime["redaction_state"]["payloads"] == "redacted_truncated"
     assert writer.telemetry_snapshot()["pending_writes"] == 0
+
+
+@pytest.mark.asyncio
+async def test_trace_writer_persists_safe_startup_config_fingerprint_only_in_metadata() -> None:
+    from assistant_service.config.startup_fingerprint import resolve_startup_config
+
+    db = RecordingDB()
+    unknown_secret = "unknown-secret-must-not-persist"
+    startup_config = resolve_startup_config(
+        {"DASHSCOPE_CHAT_API_KEY": unknown_secret}
+    )
+    writer = AssistantTraceWriter(
+        db,
+        write_timeout_s=1.0,
+        startup_config=startup_config,
+    )
+    ctx = _trace_ctx()
+
+    assert writer.start_trace(ctx)
+    await writer.drain(timeout_s=1.0)
+
+    metadata = _json_args_containing(db, "startup_config_fingerprint")
+    persisted = next(doc for doc in metadata if "startup_config_fingerprint" in doc)
+    assert persisted["startup_config_fingerprint"] == startup_config.sha256
+    assert persisted["startup_config"]["schema_version"] == "assistant-startup-config/v1"
+    assert persisted["startup_config"]["settings"] == startup_config.safe_summary()["settings"]
+    assert "unknown" not in persisted["startup_config"]
+    assert unknown_secret not in db.serialized_calls()
+    event_payloads = [
+        args
+        for query, args in db.calls
+        if "INSERT INTO agent_trace_events" in query
+    ]
+    assert "startup_config" not in json.dumps(event_payloads, default=str)
+
+    rejected = AssistantTraceWriter(
+        db,
+        startup_config={"schema_version": "assistant-startup-config/v1", "api_key": unknown_secret},  # type: ignore[arg-type]
+    )
+    assert rejected.startup_config_summary is None
 
 
 @pytest.mark.asyncio
@@ -1070,19 +1111,34 @@ async def test_trace_writer_records_tool_safety_attributes_for_eval_detail() -> 
 
 
 @pytest.mark.asyncio
-async def test_trace_writer_persistence_failure_is_tolerated() -> None:
+async def test_trace_writer_persistence_failure_is_tolerated(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     writer = AssistantTraceWriter(FailingDB(), write_timeout_s=1.0)
 
-    assert writer.record_event(
-        ctx=_trace_ctx(),
-        event_type="run_started",
-        sequence_no=1,
-        payload={"password": "super-secret"},
-        phase="memory_loading",
-    )
-    await writer.drain(timeout_s=1.0)
+    with caplog.at_level(
+        logging.WARNING,
+        logger="assistant_service.core.trace_writer",
+    ):
+        assert writer.record_event(
+            ctx=_trace_ctx(),
+            event_type="run_started",
+            sequence_no=1,
+            payload={"password": "super-secret"},
+            phase="memory_loading",
+        )
+        await writer.drain(timeout_s=1.0)
 
     assert writer.failed_writes >= 1
+    records = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("assistant.trace.write_failed")
+    ]
+    assert records
+    assert all(record.exc_info is None for record in records)
+    assert all(record.internal_exception["frames"] for record in records)
+    assert "super-secret" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1132,6 +1188,7 @@ async def test_non_stream_final_response_does_not_wait_for_trace_persistence() -
 @pytest.mark.asyncio
 async def test_non_stream_pre_model_failure_finishes_failed_trace(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     db = RecordingDB()
     writer = AssistantTraceWriter(db, write_timeout_s=1.0)
@@ -1145,7 +1202,10 @@ async def test_non_stream_pre_model_failure_finishes_failed_trace(
 
     monkeypatch.setattr(service, "_ensure_session_exists", fail_ensure_session)
 
-    with pytest.raises(RuntimeError, match="session"):
+    with caplog.at_level(
+        logging.ERROR,
+        logger="assistant_service.core.assistant_service",
+    ), pytest.raises(RuntimeError, match="session"):
         await service.chat(
             user=MockUserContext(),  # type: ignore[arg-type]
             session_id="session-a",
@@ -1160,6 +1220,15 @@ async def test_non_stream_pre_model_failure_finishes_failed_trace(
     assert "failed" in serialized
     assert "super-secret" not in serialized
     assert "password=[redacted]" in serialized
+    records = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("assistant.turn.preflight_failed")
+    ]
+    assert len(records) == 1
+    assert records[0].exc_info is None
+    assert records[0].internal_exception["frames"]
+    assert "super-secret" not in caplog.text
 
 
 @pytest.mark.asyncio

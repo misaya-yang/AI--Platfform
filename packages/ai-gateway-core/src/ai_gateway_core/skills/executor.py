@@ -11,6 +11,8 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from ai_gateway_core.logging import record_internal_exception
+
 from .models import SkillManifest
 
 logger = logging.getLogger(__name__)
@@ -54,8 +56,12 @@ class SkillExecutor:
                 }
             try:
                 return await handler(args, skill)
-            except Exception as e:
-                logger.error(f"Builtin skill '{handler_name}' failed: {e}", exc_info=True)
+            except Exception as exc:
+                record_internal_exception(
+                    logger,
+                    "assistant.skill_builtin.internal_failure",
+                    exc,
+                )
                 return {"success": False, "error": f"Skill execution failed: {handler_name}"}
 
         elif entrypoint.startswith("md://") or entrypoint.startswith("db://"):

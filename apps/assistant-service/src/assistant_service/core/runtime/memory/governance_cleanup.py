@@ -22,8 +22,9 @@ from ai_gateway_core.agents import (
     validate_runtime_cleanup_inventory,
     validate_runtime_cleanup_plan,
 )
+from ai_gateway_core.logging import record_internal_exception
 
-from ..compat.runtime_adapter import AssistantRuntimeAdapter
+from ..compat.runtime_adapter import AssistantRuntimeAdapter, AssistantRuntimeFeatures
 from .scope import public_source_label, scoped_collection_names
 
 _MAX_PRINCIPALS = 10_000
@@ -74,6 +75,19 @@ class RuntimeMemoryQdrantCleanupClient:
             timeout_seconds=max(1.0, min(timeout, 60.0)),
         )
 
+    @classmethod
+    def from_startup_config(cls, startup_config) -> RuntimeMemoryQdrantCleanupClient | None:
+        base_url = str(startup_config.runtime_value("ASSISTANT_RUNTIME_QDRANT_URL"))
+        if not base_url:
+            return None
+        return cls(
+            base_url=base_url,
+            api_key=startup_config.secret_value("ASSISTANT_RUNTIME_QDRANT_API_KEY") or None,
+            timeout_seconds=float(
+                startup_config.runtime_value("ASSISTANT_RUNTIME_QDRANT_TIMEOUT_SECONDS")
+            ),
+        )
+
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
         if self._api_key:
@@ -116,6 +130,11 @@ class RuntimeMemoryQdrantCleanupClient:
                 return
             response.raise_for_status()
         except Exception as exc:
+            record_internal_exception(
+                __name__,
+                "assistant.core.runtime.memory.governance_cleanup.internal_failure",
+                exc,
+            )
             raise RuntimeMemoryCleanupError("memory_vector_delete_failed") from exc
 
     async def retrieve_vectors(
@@ -149,6 +168,11 @@ class RuntimeMemoryQdrantCleanupClient:
         except RuntimeMemoryCleanupError:
             raise
         except Exception as exc:
+            record_internal_exception(
+                __name__,
+                "assistant.core.runtime.memory.governance_cleanup.internal_failure",
+                exc,
+            )
             raise RuntimeMemoryCleanupError("memory_vector_readback_failed") from exc
         records = body.get("result") if isinstance(body, Mapping) else None
         if isinstance(records, Mapping):
@@ -200,6 +224,11 @@ class RuntimeMemoryQdrantCleanupClient:
                 response.raise_for_status()
                 body = response.json()
             except Exception as exc:
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.runtime.memory.governance_cleanup.internal_failure",
+                    exc,
+                )
                 raise RuntimeMemoryCleanupError("memory_vector_inventory_unavailable") from exc
             result = body.get("result") if isinstance(body, Mapping) else None
             if not isinstance(result, Mapping):
@@ -238,6 +267,11 @@ class RuntimeMemoryQdrantCleanupClient:
             response.raise_for_status()
             body = response.json()
         except Exception as exc:
+            record_internal_exception(
+                __name__,
+                "assistant.core.runtime.memory.governance_cleanup.internal_failure",
+                exc,
+            )
             raise RuntimeMemoryCleanupError(
                 "memory_vector_collection_inventory_unavailable"
             ) from exc
@@ -314,6 +348,41 @@ class AgentRuntimeMemoryCleanupService:
         runtime = AssistantRuntimeAdapter.from_env(
             database=database,
             vector_store=vector_store,
+        )
+        return cls(database=database, runtime=runtime)
+
+    @classmethod
+    def from_startup_config(
+        cls,
+        *,
+        database: Any,
+        startup_config,
+    ) -> AgentRuntimeMemoryCleanupService:
+        vector_store = RuntimeMemoryQdrantCleanupClient.from_startup_config(startup_config)
+        runtime = AssistantRuntimeAdapter.from_env(
+            database=database,
+            vector_store=vector_store,
+            base_memory_dir=str(
+                startup_config.runtime_value("ASSISTANT_RUNTIME_MEMORY_DIR")
+            )
+            or None,
+            legacy_memory_dir=str(
+                startup_config.runtime_value("ASSISTANT_RUNTIME_LEGACY_MEMORY_DIR")
+            )
+            or None,
+            memory_max_source_bytes=int(
+                startup_config.runtime_value("ASSISTANT_RUNTIME_MEMORY_MAX_SOURCE_BYTES")
+            ),
+            features=AssistantRuntimeFeatures(
+                memory_v2=startup_config.bool_value("ASSISTANT_RUNTIME_MEMORY_V2"),
+                context_v2=startup_config.bool_value("ASSISTANT_RUNTIME_CONTEXT_V2"),
+                tool_policy_v2=startup_config.bool_value(
+                    "ASSISTANT_RUNTIME_TOOL_POLICY_V2"
+                ),
+                skills=startup_config.bool_value("ASSISTANT_RUNTIME_SKILLS"),
+                scheduler=startup_config.bool_value("ASSISTANT_RUNTIME_SCHEDULER"),
+                failover_v2=startup_config.bool_value("ASSISTANT_RUNTIME_FAILOVER_V2"),
+            ),
         )
         return cls(database=database, runtime=runtime)
 
@@ -614,7 +683,12 @@ class AgentRuntimeMemoryCleanupService:
                         collection_name=collection_name,
                         point_ids=point_ids,
                     )
-                except Exception:
+                except Exception as exc:
+                    record_internal_exception(
+                        __name__,
+                        "assistant.core.runtime.memory.governance_cleanup.internal_failure",
+                        exc,
+                    )
                     errors.append("memory_vector_delete_failed")
                     continue
                 if remaining_vectors:
@@ -690,6 +764,11 @@ class AgentRuntimeMemoryCleanupService:
                 principal_id,
             )
         except Exception as exc:
+            record_internal_exception(
+                __name__,
+                "assistant.core.runtime.memory.governance_cleanup.internal_failure",
+                exc,
+            )
             raise RuntimeMemoryCleanupError("memory_cleanup_manifest_unavailable") from exc
 
         database_sources: dict[str, dict[str, Any]] = {}
@@ -771,6 +850,11 @@ class AgentRuntimeMemoryCleanupService:
                     user_id=principal_id,
                 )
             except Exception as exc:
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.runtime.memory.governance_cleanup.internal_failure",
+                    exc,
+                )
                 raise RuntimeMemoryCleanupError("memory_cleanup_inventory_unavailable") from exc
             if not isinstance(records_value, list):
                 raise RuntimeMemoryCleanupError("memory_cleanup_inventory_invalid")
@@ -1040,6 +1124,11 @@ class AgentRuntimeMemoryCleanupService:
                 user_id=principal_id,
             )
         except Exception as exc:
+            record_internal_exception(
+                __name__,
+                "assistant.core.runtime.memory.governance_cleanup.internal_failure",
+                exc,
+            )
             raise RuntimeMemoryCleanupError("memory_cleanup_inventory_unavailable") from exc
         if not isinstance(inventory, Mapping) or inventory.get("status") != "ok":
             raise RuntimeMemoryCleanupError("memory_cleanup_inventory_unavailable")
@@ -1161,6 +1250,11 @@ class AgentRuntimeMemoryCleanupService:
         except RuntimeMemoryCleanupError:
             raise
         except Exception as exc:
+            record_internal_exception(
+                __name__,
+                "assistant.core.runtime.memory.governance_cleanup.internal_failure",
+                exc,
+            )
             raise RuntimeMemoryCleanupError(
                 "memory_vector_collection_inventory_unavailable"
             ) from exc
@@ -1241,6 +1335,11 @@ class AgentRuntimeMemoryCleanupService:
             except RuntimeMemoryCleanupError:
                 raise
             except Exception as exc:
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.runtime.memory.governance_cleanup.internal_failure",
+                    exc,
+                )
                 raise RuntimeMemoryCleanupError("memory_vector_inventory_unavailable") from exc
             if not isinstance(points, Mapping):
                 raise RuntimeMemoryCleanupError("memory_vector_inventory_invalid")

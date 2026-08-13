@@ -136,6 +136,7 @@ EXPECTED_ASSISTANT_CONFIG_FIELDS: frozenset[str] = frozenset(
         # Model
         "model_provider",
         "model_id",
+        "model_provider_id",
         "temperature",
         "max_tokens",
         # KB
@@ -224,6 +225,7 @@ def test_assistant_config_fields_are_frozen() -> None:
 EXPECTED_AGENT_LOOP_CONFIG_FIELDS: frozenset[str] = frozenset(
     {
         "model_id",
+        "model_provider_id",
         "temperature",
         "max_tokens",
         "enable_task_planning",
@@ -248,6 +250,8 @@ EXPECTED_AGENT_LOOP_CONFIG_FIELDS: frozenset[str] = frozenset(
         "final_synthesis_headroom",
         "max_concurrent_tools",
         "run_budget_limits",
+        "reliability_limits",
+        "reliability_profile_limits",
         "persist_messages",
         "compress_threshold",
         "min_recent_messages",
@@ -307,6 +311,14 @@ def test_agent_loop_config_fields_are_frozen() -> None:
     assert not added, (
         f"AgentLoopConfig added {sorted(added)} — update this snapshot if intentional."
     )
+
+
+def test_public_assistant_config_cannot_override_internal_reliability_limits() -> None:
+    from assistant_service.core.assistant_service import AssistantConfig
+
+    fields = AssistantConfig.__dataclass_fields__
+    assert "reliability_limits" not in fields
+    assert "reliability_profile_limits" not in fields
 
 
 def test_agent_loop_config_to_dict_includes_resume_fields() -> None:

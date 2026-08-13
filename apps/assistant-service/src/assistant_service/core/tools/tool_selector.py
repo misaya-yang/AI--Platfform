@@ -12,7 +12,7 @@ import json
 import re
 from typing import TYPE_CHECKING, Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from .constants import ToolName
 from .tool_discovery import DISCOVERY_TOOL_NAMES
@@ -125,7 +125,10 @@ def _estimate_tool_tokens(tool_def: ToolDefinition, compact: bool = True) -> int
     try:
         schema = tool_def.to_openai_schema(compact=compact)
         return max(1, len(json.dumps(schema, ensure_ascii=False, default=str)) // 4)
-    except Exception:
+    except Exception as exc:
+        record_internal_exception(
+            __name__, "assistant.core.tools.tool_selector.internal_failure", exc
+        )
         return 80
 
 
@@ -141,7 +144,10 @@ def _metadata_values(tool_def: ToolDefinition) -> list[str]:
     try:
         properties = tool_def.model_argument_schema().get("properties") or {}
         values.extend(str(name) for name in properties)
-    except Exception:
+    except Exception as exc:
+        record_internal_exception(
+            __name__, "assistant.core.tools.tool_selector.internal_failure", exc
+        )
         pass
     return [str(value).lower() for value in values if value]
 

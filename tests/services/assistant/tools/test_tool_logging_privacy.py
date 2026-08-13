@@ -72,8 +72,13 @@ async def test_audit_failure_logs_exclude_exception_and_scope_payloads(
     assert allowed is True
     assert "tool_audit.write_failed" in caplog.text
     assert "tool_audit.rate_limit_check_failed" in caplog.text
-    assert "exception_type=RuntimeError" in caplog.text
-    assert "exception_type=ValueError" in caplog.text
+    diagnostics = [record.internal_exception for record in caplog.records]
+    assert [item["exception_type"] for item in diagnostics] == [
+        "RuntimeError",
+        "ValueError",
+    ]
+    assert all(len(item["fingerprint"]) == 16 for item in diagnostics)
+    assert all(item["frames"] for item in diagnostics)
     for sentinel in (
         "private-audit-exception",
         "private-audit-secret",
@@ -85,6 +90,11 @@ async def test_audit_failure_logs_exclude_exception_and_scope_payloads(
     ):
         assert sentinel not in caplog.text
     assert all(record.exc_info is None for record in caplog.records)
+    assert not any(
+        isinstance(value, BaseException)
+        for record in caplog.records
+        for value in vars(record).values()
+    )
 
 
 @pytest.mark.asyncio

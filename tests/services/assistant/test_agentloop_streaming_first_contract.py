@@ -11,6 +11,7 @@ import base64
 import copy
 import json
 import logging
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
@@ -72,6 +73,8 @@ class FakeModelRegistry:
         self.tools_history: list[list[dict[str, Any]] | None] = []
         self.native_search_history: list[dict[str, Any] | None] = []
         self.thinking_history: list[str | None] = []
+        self.temperature_history: list[float | None] = []
+        self.max_tokens_history: list[int | None] = []
 
     def get_model(self, _model_id: str) -> Any:
         return FakeModelInfo()
@@ -86,6 +89,8 @@ class FakeModelRegistry:
         self.tools_history.append(self.last_tools)
         self.native_search_history.append(kwargs.get("native_search_config"))
         self.thinking_history.append(kwargs.get("thinking_level"))
+        self.temperature_history.append(kwargs.get("temperature"))
+        self.max_tokens_history.append(kwargs.get("max_tokens"))
 
         idx = self._call_index
         self._call_index += 1
@@ -190,6 +195,45 @@ class FakeToolInvoker:
             duration_ms=float(payload.get("duration_ms", 12.3)),
             metadata=payload.get("metadata", {}) or {},
             output_files=payload.get("output_files", []) or [],
+        )
+
+
+class ScriptedToolInvoker(FakeToolInvoker):
+    def __init__(self, results_by_name: dict[str, list[dict[str, Any]]]):
+        super().__init__({name: {} for name in results_by_name})
+        self._scripted_results = {
+            name: [copy.deepcopy(item) for item in items]
+            for name, items in results_by_name.items()
+        }
+
+    async def invoke(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        context: Any,
+        cancel_event: Any = None,
+    ) -> Any:
+        from assistant_service.core.tools.tool_registry import ToolCallResult
+
+        del cancel_event
+        self.invocation_count += 1
+        self.invocations.append((tool_name, copy.deepcopy(arguments)))
+        queue = self._scripted_results.get(tool_name) or []
+        if not queue:
+            raise AssertionError(f"unexpected or duplicate tool invocation: {tool_name}")
+        payload = queue.pop(0)
+        factory = payload.get("factory")
+        if callable(factory):
+            return factory(tool_name, arguments, context)
+        return ToolCallResult(
+            call_id=str(payload.get("call_id") or "internal"),
+            tool_name=tool_name,
+            success=bool(payload.get("success", True)),
+            result=payload.get("result", "ok"),
+            error=payload.get("error"),
+            duration_ms=float(payload.get("duration_ms", 12.3)),
+            metadata=copy.deepcopy(payload.get("metadata", {}) or {}),
+            output_files=copy.deepcopy(payload.get("output_files", []) or []),
         )
 
 
@@ -387,6 +431,66 @@ async def test_run_budget_hard_stops_hidden_second_model_turn() -> None:
     assert event_types.count("tool_call_end") == 1
     assert event_types.count("run_error") == 1
     assert "run_finished" not in event_types
+
+
+@pytest.mark.asyncio
+async def test_default_loop_detection_denies_fourth_identical_tool_dispatch() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.run_budget import RunBudgetLimits
+
+    repeated_turns = [
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": f"repeat-{index}",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    }
+                ],
+                "finish_reason": "tool_calls",
+            }
+        ]
+        for index in range(1, 5)
+    ]
+    model = FakeModelRegistry(
+        scripted=[*repeated_turns, [{"content": "done", "finish_reason": "stop"}]]
+    )
+    invoker = FakeToolInvoker({"lookup": {"result": "same evidence"}})
+    loop = AgentLoop(model_registry=model, tool_invoker=invoker)
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="default-loop-detection",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="repeat lookup",
+            config=AgentLoopConfig(
+                model_id="test",
+                max_tool_iterations=6,
+                run_budget_limits=RunBudgetLimits(
+                    max_model_turns=7,
+                    max_tool_calls=6,
+                    max_parallel_tool_calls=1,
+                    max_wall_time_seconds=10,
+                    max_tool_result_bytes=10_000,
+                ),
+                persist_messages=False,
+            ),
+            history=[],
+        )
+    ]
+
+    denied = [
+        event
+        for event in events
+        if event.event_type == "tool_call_result" and event.data.get("status") == "denied"
+    ]
+    assert invoker.invocation_count == 3
+    assert [tool_name for tool_name, _arguments in invoker.invocations] == ["lookup"] * 3
+    assert len(denied) == 1
+    assert denied[0].data["tool_call_id"] == "repeat-4"
+    assert denied[0].data["error"] == "repeated tool call detected for lookup"
+    assert any(event.event_type == "run_finished" for event in events)
 
 
 @pytest.mark.asyncio
@@ -2836,6 +2940,7 @@ async def test_streaming_first_approval_required_event_is_traceable() -> None:
     assert approval_payload["thread_id"] == "s1"
     assert approval_payload["tool_id"] == "tc_approval"
     assert approval_payload["tool_name"] == "generate_image"
+    assert re.fullmatch(r"[0-9a-f]{64}", approval_payload["arguments_hash"])
     assert approval_payload["status"] == "pending"
     assert approval_payload["checkpoint_id"]
     assert approval_payload["terminal_envelope"]["exit_reason"] == "approval_pending"
@@ -2852,9 +2957,71 @@ async def test_streaming_first_approval_required_event_is_traceable() -> None:
         for checkpoint in gateway._checkpoints[run_id]
         if checkpoint.phase == "approval_pending"
     )
+    assert approval_payload["arguments_hash"] == approval_checkpoint.pending_tool["arguments_hash"]
     checkpoint_budget = approval_checkpoint.resume_payload["run_budget"]
     assert checkpoint_budget["usage"]["model_turns"] == 1
     assert checkpoint_budget["usage"]["tool_calls"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments_hash", [None, "not-a-sha256"])
+async def test_streaming_first_invalid_approval_arguments_hash_fails_closed(
+    arguments_hash: str | None,
+) -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.agent.middlewares.permission import (
+        PermissionMiddleware,
+        policy_from_sets,
+    )
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+
+    tool_calls = [
+        {
+            "id": "tc_bad_approval_hash",
+            "function": {"name": "generate_image", "arguments": '{"prompt":"cat"}'},
+        }
+    ]
+    invoker = FakeToolInvoker(results_by_name={"generate_image": {"success": True}})
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
+    loop = AgentLoop(
+        model_registry=FakeModelRegistry(scripted=[[{"tool_calls": tool_calls}]]),
+        tool_invoker=invoker,
+        execution_gateway=gateway,
+    )
+    loop.middleware_chain.add(PermissionMiddleware(policy_from_sets(confirm={"generate_image"})))
+    original_save_checkpoint = loop._save_checkpoint
+
+    async def corrupt_approval_checkpoint(*args: Any, **kwargs: Any) -> dict[str, Any] | None:
+        checkpoint = await original_save_checkpoint(*args, **kwargs)
+        if kwargs.get("phase") != "approval_pending" or checkpoint is None:
+            return checkpoint
+        corrupted = copy.deepcopy(checkpoint)
+        corrupted["pending_tool"]["arguments_hash"] = arguments_hash
+        return corrupted
+
+    loop._save_checkpoint = corrupt_approval_checkpoint  # type: ignore[method-assign]
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="s-bad-approval-hash",
+            user=MockUserContext(user_id="u1"),  # type: ignore[arg-type]
+            message="generate",
+            config=AgentLoopConfig(model_id="test", max_tool_iterations=1),
+            history=[],
+        )
+    ]
+
+    failure = next(
+        event.data
+        for event in events
+        if event.event_type == "run_error"
+        and event.data.get("error") == "checkpoint_persistence_failed"
+    )
+    assert failure["recoverable"] is False
+    assert failure["terminal_envelope"]["resume_ready"] is False
+    assert all(event.event_type != "approval_required" for event in events)
+    assert invoker.invocation_count == 0
 
 
 @pytest.mark.parametrize(
@@ -3342,6 +3509,7 @@ async def test_approval_resume_acks_recorded_result_after_artifact_is_durable() 
 async def test_approval_resume_without_trace_writer_keeps_db_less_contract() -> None:
     from assistant_service.core.agent.agent_loop import AgentLoopConfig
     from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+    from assistant_service.core.turn_event_collector import TurnEventCollector
 
     invoker = FakeToolInvoker(results_by_name={"generate_image": {"success": True}})
     gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
@@ -3390,11 +3558,193 @@ async def test_approval_resume_without_trace_writer_keeps_db_less_contract() -> 
     )
     assert "run_finished" in event_types
     assert invoker.invocation_count == 1
-    assert loop.model_registry.thinking_history == ["off"]
+    assert loop.model_registry.thinking_history == [None]
+    collector = TurnEventCollector()
+    for event in events:
+        collector.accept(event)
+    assert collector.finalize().status == "succeeded"
 
 
 @pytest.mark.asyncio
-async def test_approval_resume_rejects_incomplete_synthesis_without_capability_claims() -> None:
+async def test_approval_resume_reenters_canonical_loop_with_frozen_profile_and_tools() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.agent.middlewares.permission import (
+        PermissionMiddleware,
+        policy_from_sets,
+    )
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+    from assistant_service.core.tool_invoker import CapabilityAllowlist
+    from assistant_service.core.turn_event_collector import TurnEventCollector
+
+    first_tool = "commit_change"
+    second_tool = "propose_followup"
+    invoker = FakeToolInvoker(
+        results_by_name={
+            first_tool: {"success": True, "result": {"version": 1}},
+            second_tool: {"success": True, "result": {"proposal": "ready"}},
+        }
+    )
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
+    permission_policy = policy_from_sets(confirm={first_tool, second_tool})
+    capability_allowlist = CapabilityAllowlist(frozenset({first_tool, second_tool}))
+    user = MockUserContext(user_id="u1")
+
+    initial_model = FakeModelRegistry(
+        scripted=[
+            [
+                {
+                    "tool_calls": [
+                        {
+                            "id": "tc_first_commit",
+                            "function": {
+                                "name": first_tool,
+                                "arguments": '{"version":1}',
+                            },
+                        }
+                    ],
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        ]
+    )
+    initial_loop = AgentLoop(
+        model_registry=initial_model,
+        tool_invoker=invoker,
+        execution_gateway=gateway,
+    )
+    initial_loop.middleware_chain.add(PermissionMiddleware(permission_policy))
+    initial_events = [
+        event
+        async for event in initial_loop.execute(
+            session_id="s1",
+            user=user,  # type: ignore[arg-type]
+            message="Apply the approved rollout, then prepare the follow-up.",
+            config=AgentLoopConfig(
+                model_id="test",
+                temperature=0.0,
+                max_tokens=4096,
+                thinking_level="enabled",
+                max_tool_iterations=4,
+                persist_messages=False,
+                capability_allowlist=capability_allowlist,
+            ),
+            history=[],
+        )
+    ]
+    run_id = next(
+        event.data["run_id"] for event in initial_events if event.event_type == "run_started"
+    )
+    first_approval_id = next(
+        event.data["approval_id"]
+        for event in initial_events
+        if event.event_type == "approval_required"
+    )
+    await gateway.approve(
+        approval_id=first_approval_id,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        approved=True,
+        approver_user_id=user.user_id,
+    )
+
+    resume_model = FakeModelRegistry(
+        scripted=[
+            [
+                {
+                    "tool_calls": [
+                        {
+                            "id": "tc_second_proposal",
+                            "function": {
+                                "name": second_tool,
+                                "arguments": '{"version":2}',
+                            },
+                        }
+                    ],
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        ]
+    )
+    resume_loop = AgentLoop(
+        model_registry=resume_model,
+        tool_invoker=invoker,
+        execution_gateway=gateway,
+    )
+    resume_loop.middleware_chain.add(PermissionMiddleware(permission_policy))
+    resume_events = [
+        event
+        async for event in resume_loop.execute(
+            session_id="s1",
+            user=user,  # type: ignore[arg-type]
+            message="Continue the same approved workflow.",
+            config=AgentLoopConfig(
+                model_id="test",
+                temperature=0.0,
+                max_tokens=4096,
+                thinking_level="enabled",
+                max_tool_iterations=4,
+                persist_messages=False,
+                capability_allowlist=capability_allowlist,
+                resume_run_id=run_id,
+                resume_approval_id=first_approval_id,
+            ),
+            history=[
+                {
+                    "role": "user",
+                    "content": "Apply the approved rollout, then prepare the follow-up.",
+                }
+            ],
+        )
+    ]
+
+    assert invoker.invocations == [(first_tool, {"version": 1})]
+    assert resume_model.temperature_history == [0.0]
+    assert resume_model.max_tokens_history == [4096]
+    assert resume_model.thinking_history == ["enabled"]
+    assert resume_model.tools_history[0] == initial_model.tools_history[0]
+    assert [
+        str((tool.get("function") or {}).get("name") or "")
+        for tool in (resume_model.tools_history[0] or [])
+    ] == [first_tool, second_tool]
+    model_messages = resume_model.messages_history[0]
+    first_call_index = next(
+        index
+        for index, message in enumerate(model_messages)
+        if any(
+            str(call.get("id") or "") == "tc_first_commit"
+            for call in (message.get("tool_calls") or [])
+        )
+    )
+    assert model_messages[first_call_index]["role"] == "assistant"
+    assert model_messages[first_call_index + 1]["role"] == "tool"
+    assert model_messages[first_call_index + 1]["tool_call_id"] == "tc_first_commit"
+    assert "version" in str(model_messages[first_call_index + 1]["content"])
+
+    approval_events = [
+        event for event in resume_events if event.event_type == "approval_required"
+    ]
+    assert len(approval_events) == 1
+    assert approval_events[0].data["tool_id"] == "tc_second_proposal"
+    assert approval_events[0].data["approval_id"] != first_approval_id
+    second_checkpoint = next(
+        checkpoint
+        for checkpoint in reversed(gateway._checkpoints[run_id])
+        if checkpoint.phase == "approval_pending"
+        and checkpoint.approval_id == approval_events[0].data["approval_id"]
+    )
+    resumed_budget = second_checkpoint.resume_payload["run_budget"]
+    assert resumed_budget["usage"]["model_turns"] == 2
+    assert resumed_budget["usage"]["tool_calls"] == 2
+    assert all(
+        event.event_type not in {"run_finished", "run_error"} for event in resume_events
+    )
+    collector = TurnEventCollector()
+    for event in resume_events:
+        collector.accept(event)
+    assert collector.finalize().status == "blocked"
+
+
+async def test_approval_resume_incomplete_continuation_has_no_success_terminal() -> None:
     from assistant_service.core.agent.agent_loop import AgentLoopConfig
     from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
 
@@ -3446,20 +3796,12 @@ async def test_approval_resume_rejects_incomplete_synthesis_without_capability_c
         )
     ]
 
-    prompt = str(model.messages_history[0][0].get("content") or "")
-    assert "search_knowledge_base" not in prompt
-    assert "## Web Search" not in prompt
-    assert "## Local OS Agent" not in prompt
-    assert "## Available Tools" not in prompt
-    assert model.tools_history == [None]
-    assert all(
-        not (event.event_type == "text_delta" and "unsafe approval partial" in str(event.data))
-        for event in events
-    )
+    assert [
+        str((tool.get("function") or {}).get("name") or "")
+        for tool in (model.tools_history[0] or [])
+    ] == ["generate_image"]
     assert any(
         event.event_type == "run_error"
-        and isinstance(event.data, dict)
-        and event.data.get("error") == "resume_synthesis_failed"
         for event in events
     )
     assert all(event.event_type != "run_finished" for event in events)
@@ -4133,6 +4475,47 @@ async def test_streaming_first_run_error_event_is_traceable_and_redacted() -> No
     }
     assert sum(ev.event_type == "run_error" for ev in events) == 1
     assert "super-secret-value" not in serialized_events
+
+
+@pytest.mark.asyncio
+async def test_streaming_first_internal_failure_log_is_safe_and_diagnostic(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    raw_exception_message = "private-streaming-first-exception-message"
+    loop = AgentLoop(model_registry=FakeFailingModelRegistry(raw_exception_message))
+
+    with caplog.at_level(
+        logging.ERROR,
+        logger="assistant_service.core.agent.streaming_execution",
+    ):
+        events = [
+            event
+            async for event in loop.execute(
+                session_id="s-safe-internal-log",
+                user=MockUserContext(user_id="u1"),  # type: ignore[arg-type]
+                message="Hi",
+                config=AgentLoopConfig(model_id="test", max_tool_iterations=1),
+                history=[],
+            )
+        ]
+
+    records = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("assistant.streaming_first.failed")
+    ]
+    assert len(records) == 1
+    record = records[0]
+    assert record.exc_info is None
+    assert record.internal_exception["exception_type"] == "RuntimeError"
+    assert record.internal_exception["frames"]
+    assert raw_exception_message not in caplog.text
+    assert raw_exception_message not in json.dumps(
+        [event.to_dict() for event in events],
+        default=str,
+    )
 
 
 @pytest.mark.asyncio

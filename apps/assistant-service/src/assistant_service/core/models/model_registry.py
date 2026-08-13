@@ -22,7 +22,7 @@ from typing import Any
 
 import httpx
 from ai_gateway_core.enums import ModelAccessLevel, ModelProvider
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 from ai_gateway_core.models import ChatMessage
 from ai_gateway_core.models import normalize_chat_message as _normalize_message
 
@@ -259,6 +259,13 @@ def _validate_openai_tool_call_deltas(
 # "is the smoother introducing artificial latency?" and nothing else — in
 # production the smoother is always on.
 _SMOOTHER_DISABLED = os.environ.get("GEMINI_SMOOTHER_DISABLED", "").lower() in {"1", "true", "yes"}
+
+
+def configure_stream_smoother(*, disabled: bool) -> None:
+    """Freeze the process smoother switch from the startup snapshot."""
+
+    global _SMOOTHER_DISABLED
+    _SMOOTHER_DISABLED = bool(disabled)
 _SMOOTHER_CHARS_PER_CHUNK = 4
 _SMOOTHER_DELAY_SECONDS = 0.020
 _SMOOTHER_MIN_TEXT_LEN = 12  # chunks smaller than this don't benefit from splitting
@@ -409,9 +416,7 @@ class ModelRegistry(RegistryLifecycleMixin):
                 tools=tools,
                 stream=stream,
                 reasoning_effort=reasoning_effort,
-                local_runtime=(
-                    openai_local_runtime if provider == ModelProvider.OPENAI else None
-                ),
+                local_runtime=(openai_local_runtime if provider == ModelProvider.OPENAI else None),
             )
             if provider == ModelProvider.DASHSCOPE:
                 qwen_thinking_enabled = _qwen_thinking_enabled(model_id, thinking_level)
@@ -1083,7 +1088,10 @@ class ModelRegistry(RegistryLifecycleMixin):
             invalid_response = False
             try:
                 data = response.json()
-            except Exception:
+            except Exception as exc:
+                record_internal_exception(
+                    __name__, "assistant.core.models.model_registry.internal_failure", exc
+                )
                 invalid_response = True
                 data = None
             if invalid_response or not isinstance(data, dict):
@@ -1190,9 +1198,7 @@ class ModelRegistry(RegistryLifecycleMixin):
                     async for response_delta in iter_responses_stream(
                         response.aiter_lines(),
                         local_runtime=(
-                            openai_local_runtime
-                            if model.provider == ModelProvider.OPENAI
-                            else None
+                            openai_local_runtime if model.provider == ModelProvider.OPENAI else None
                         ),
                     ):
                         yield StreamDelta(
@@ -1690,7 +1696,10 @@ class ModelRegistry(RegistryLifecycleMixin):
             from urllib.parse import urlparse as _urlparse
 
             _host = _urlparse(endpoint).hostname or "unknown"
-        except Exception:
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.models.model_registry.internal_failure", exc
+            )
             pass
         logger.info(f"[GEMINI] HTTP POST → host={_host}")
 

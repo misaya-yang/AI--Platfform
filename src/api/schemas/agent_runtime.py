@@ -5,11 +5,24 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class _ClosedRuntimeModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class _ResumeApprovalRuntimeModel(_ClosedRuntimeModel):
+    resume_run_id: str | None = Field(default=None, min_length=1, max_length=255)
+    resume_approval_id: str | None = Field(default=None, min_length=1, max_length=255)
+
+    @model_validator(mode="after")
+    def require_complete_resume_identity(self) -> _ResumeApprovalRuntimeModel:
+        if (self.resume_run_id is None) != (self.resume_approval_id is None):
+            raise ValueError(
+                "resume_run_id and resume_approval_id must be provided together"
+            )
+        return self
 
 
 class AgentRuntimeAttachment(_ClosedRuntimeModel):
@@ -35,6 +48,13 @@ class AgentVersionPreviewSessionRequest(_ClosedRuntimeModel):
     """Create an isolated Preview session pinned to one immutable Version."""
 
 
+class AgentRuntimeEffectiveCapability(_ClosedRuntimeModel):
+    name: str
+    schema_hash: str
+    risk: Literal["low", "medium", "high", "critical"]
+    requires_confirmation: bool
+
+
 class AgentRuntimeSessionResponse(_ClosedRuntimeModel):
     session_id: str
     agent_id: str
@@ -43,6 +63,10 @@ class AgentRuntimeSessionResponse(_ClosedRuntimeModel):
     publication_id: str | None = None
     channel: str
     runtime_fingerprint: str
+    effective_capabilities: list[AgentRuntimeEffectiveCapability] = Field(
+        default_factory=list,
+        max_length=128,
+    )
     request_id: str
 
 
@@ -53,7 +77,7 @@ class AgentPreviewChatRequest(_ClosedRuntimeModel):
     attachments: list[AgentRuntimeAttachment] = Field(default_factory=list, max_length=20)
 
 
-class AgentVersionPreviewChatRequest(_ClosedRuntimeModel):
+class AgentVersionPreviewChatRequest(_ResumeApprovalRuntimeModel):
     message: str = Field(min_length=1, max_length=200_000)
     session_id: str | None = Field(default=None, min_length=1, max_length=255)
     attachments: list[AgentRuntimeAttachment] = Field(default_factory=list, max_length=20)
@@ -149,7 +173,7 @@ class AgentRuntimeFeedbackResponse(_ClosedRuntimeModel):
     request_id: str
 
 
-class InternalAgentRuntimeChatRequest(_ClosedRuntimeModel):
+class InternalAgentRuntimeChatRequest(_ResumeApprovalRuntimeModel):
     """Gateway-authored body accepted only by the Assistant internal route."""
 
     message: str = Field(min_length=1, max_length=200_000)
@@ -159,9 +183,17 @@ class InternalAgentRuntimeChatRequest(_ClosedRuntimeModel):
     runtime_envelope: dict[str, Any]
 
     def verification_body(self) -> dict[str, Any]:
-        return {
+        body = {
             "message": self.message,
             "session_id": self.session_id,
             "history": self.history,
             "attachments": self.attachments,
         }
+        if self.resume_run_id is not None:
+            body.update(
+                {
+                    "resume_run_id": self.resume_run_id,
+                    "resume_approval_id": self.resume_approval_id,
+                }
+            )
+        return body

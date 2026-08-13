@@ -8,6 +8,7 @@ import logging
 from datetime import datetime, timezone
 
 from ai_gateway_core.image import update_image_task
+from ai_gateway_core.logging import record_internal_exception
 
 logger = logging.getLogger("assistant_service.api.routes.images")
 
@@ -62,7 +63,9 @@ async def _store_task(redis, task_id: str, task: dict, *, pool=None) -> None:
             await _persist_task_state(pool, task)
             return
         except Exception as exc:
-            logger.warning("Redis task store write failed (%s); falling back to dict", exc)
+            record_internal_exception(
+                __name__, "assistant.api.routes.image_task_store.internal_failure", exc
+            )
     _image_tasks[task_id] = task
     await _persist_task_state(pool, task)
 
@@ -81,7 +84,9 @@ async def _load_task(redis, task_id: str) -> dict | None:
             if raw:
                 redis_task = json.loads(raw)
         except Exception as exc:
-            logger.warning("Redis task store read failed (%s); falling back to dict", exc)
+            record_internal_exception(
+                __name__, "assistant.api.routes.image_task_store.internal_failure", exc
+            )
     # Fallback dict wins when present — it's only populated on Redis write
     # failure so it's authoritative over a possibly-stale Redis value.
     if task_id in _image_tasks:
@@ -105,4 +110,6 @@ async def _persist_task_state(pool, task: dict, *, lock_seconds: int | None = No
             locked_seconds=lock_seconds,
         )
     except Exception as exc:
-        logger.warning("image task DB state update failed task=%s: %s", task.get("task_id"), exc)
+        record_internal_exception(
+            __name__, "assistant.api.routes.image_task_store.internal_failure", exc
+        )

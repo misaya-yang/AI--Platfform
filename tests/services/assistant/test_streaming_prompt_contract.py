@@ -12,6 +12,18 @@ def test_tool_prompt_is_direct_without_progress_preamble() -> None:
     )
 
     assert "Address the current request directly" in prompt
+    assert "explicit output schemas" in prompt
+    assert "machine-readable artifacts" in prompt
+    assert "one exact allowed value" in prompt
+    assert "decision rules" in prompt
+    assert "field by field" in prompt
+    assert "singular field by punctuation" in prompt
+    assert "<FINAL_JSON>...</FINAL_JSON>" in prompt
+    assert "never substitute Markdown code fences" in prompt
+    assert "Recompute every requested metric" in prompt
+    assert "verify units" in prompt
+    assert "every decisive ID" in prompt
+    assert "do not silently upgrade or downgrade them" in prompt
     assert "## Knowledge bases" in prompt
     assert "dataset-a" in prompt
     assert "## Available tools" not in prompt

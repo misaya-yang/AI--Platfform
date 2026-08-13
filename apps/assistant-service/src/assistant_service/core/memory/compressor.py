@@ -36,6 +36,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from ai_gateway_core.logging import record_internal_exception
 from ai_gateway_core.security import redact_trace_text
 
 # =============================================================================
@@ -485,8 +486,11 @@ Summary:"""
                 max_tokens=budget_tokens or self.max_summary_tokens,
             )
             return summary.strip()
-        except Exception:
+        except Exception as exc:
             # Fallback to simple summary if LLM fails
+            record_internal_exception(
+                __name__, "assistant.core.memory.compressor.internal_failure", exc
+            )
             message_count = len(messages)
             return f"Previous conversation context ({message_count} messages compressed)."
 
@@ -639,8 +643,7 @@ class ModelRegistryLLMService:
             )
             return content or ""
         except Exception as exc:
-            _compressor_logger.error(
-                "ModelRegistryLLMService.complete failed (exception_type=%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.memory.compressor.internal_failure", exc
             )
             return ""

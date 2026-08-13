@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 logger = get_logger(__name__)
 
@@ -32,10 +32,15 @@ class DoubaoImageResult:
 class DoubaoImageGenerator:
     """Image generator using Volcengine ARK (Doubao SeedReam)."""
 
-    def __init__(self, api_key: str | None = None, model: str | None = None):
-        self.api_key = api_key or os.getenv("ARK_API_KEY")
-        self.model = model or os.getenv("DOUBAO_IMAGE_MODEL", _DEFAULT_MODEL)
-        self.base_url = os.getenv("ARK_BASE_URL", _ARK_BASE_URL)
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+    ):
+        self.api_key = api_key if api_key is not None else os.getenv("ARK_API_KEY")
+        self.model = model if model is not None else os.getenv("DOUBAO_IMAGE_MODEL", _DEFAULT_MODEL)
+        self.base_url = base_url if base_url is not None else os.getenv("ARK_BASE_URL", _ARK_BASE_URL)
         self._client: httpx.AsyncClient | None = None
 
     @property
@@ -78,7 +83,10 @@ class DoubaoImageGenerator:
                 if w * h < 3686400:
                     scale = (3686400 / (w * h)) ** 0.5
                     normalized_size = f"{int(w * scale)}x{int(h * scale)}"
-            except Exception:
+            except Exception as exc:
+                record_internal_exception(
+                    __name__, "assistant.core.tools.doubao_image_tool.internal_failure", exc
+                )
                 normalized_size = "2048x2048"
 
         try:
@@ -108,9 +116,18 @@ class DoubaoImageGenerator:
                 logger.error("Doubao image API error: %s - %s", response.status_code, error_text)
                 try:
                     error_msg = response.json().get("error", {}).get("message", error_text[:200])
-                except Exception:
+                except Exception as exc:
+                    record_internal_exception(
+                        __name__,
+                        "assistant.core.tools.doubao_image_tool.internal_failure",
+                        exc,
+                    )
                     error_msg = error_text[:200]
-                return DoubaoImageResult(success=False, error=f"API error: {response.status_code} - {error_msg}", duration_ms=duration_ms)
+                return DoubaoImageResult(
+                    success=False,
+                    error=f"API error: {response.status_code} - {error_msg}",
+                    duration_ms=duration_ms,
+                )
 
             result = response.json()
             images = []
@@ -129,30 +146,41 @@ class DoubaoImageGenerator:
                             if dl.status_code == 200:
                                 b64_data = base64.b64encode(dl.content).decode("utf-8")
                         except Exception as e:
-                            logger.warning("Failed to download Doubao image %d: %s", i, e)
+                            record_internal_exception(
+                                __name__,
+                                "assistant.core.tools.doubao_image_tool.internal_failure",
+                                e,
+                            )
                             continue
 
                 if b64_data:
                     # Base64 → byte count: (len * 3) // 4 minus padding chars.
                     padding = b64_data.count("=", -2)
                     size_bytes = (len(b64_data) * 3) // 4 - padding
-                    images.append({
-                        "filename": f"doubao_image_{i + 1}.png",
-                        "content_base64": b64_data,
-                        "mime_type": "image/png",
-                        "size_bytes": size_bytes,
-                    })
+                    images.append(
+                        {
+                            "filename": f"doubao_image_{i + 1}.png",
+                            "content_base64": b64_data,
+                            "mime_type": "image/png",
+                            "size_bytes": size_bytes,
+                        }
+                    )
 
             if not images:
-                return DoubaoImageResult(success=False, error="No images returned", duration_ms=duration_ms)
+                return DoubaoImageResult(
+                    success=False, error="No images returned", duration_ms=duration_ms
+                )
 
             logger.info("Doubao generated %d image(s) in %.0fms", len(images), duration_ms)
             return DoubaoImageResult(success=True, images=images, duration_ms=duration_ms)
 
         except Exception as e:
-            logger.error("Doubao image generation failed: %s", e)
+            record_internal_exception(
+                __name__, "assistant.core.tools.doubao_image_tool.internal_failure", e
+            )
             return DoubaoImageResult(
-                success=False, error=str(e),
+                success=False,
+                error=str(e),
                 duration_ms=(time.time() - start) * 1000,
             )
 
@@ -163,6 +191,22 @@ class DoubaoImageGenerator:
 
 
 _doubao_generator: DoubaoImageGenerator | None = None
+
+
+def configure_doubao_image_generator(
+    *,
+    api_key: str,
+    model: str,
+    base_url: str,
+) -> None:
+    """Freeze the Doubao provider resolved by the production startup snapshot."""
+
+    global _doubao_generator
+    _doubao_generator = DoubaoImageGenerator(
+        api_key=api_key,
+        model=model,
+        base_url=base_url,
+    )
 
 
 def get_doubao_image_generator() -> DoubaoImageGenerator:

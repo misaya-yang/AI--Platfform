@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import time
 import uuid
@@ -35,7 +36,11 @@ from typing import TYPE_CHECKING, Any
 from ai_gateway_core.auth import UserContext
 from ai_gateway_core.enums import RAGMode
 from ai_gateway_core.exceptions import PermissionDeniedError
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import (
+    get_logger,
+    log_internal_exception,
+    record_internal_exception,
+)
 from ai_gateway_core.metrics import (
     NoOpRealtimeMetrics,
     NoOpUsageRecorder,
@@ -109,6 +114,7 @@ from .rag.scenario_analyzer import (
     create_scenario_analyzer,
 )
 from .runtime.context.assembler import ContextAssemblerV2
+from .sse_event_transport import bound_sse_event
 from .tasks.task_planner import TaskPlanner
 from .tool_invoker import ToolInvoker
 from .tools.code_executor_tool import CODE_EXECUTOR_TOOL, CodeExecutorToolExecutor
@@ -128,6 +134,7 @@ if TYPE_CHECKING:
     from ai_gateway_core.knowledge import KnowledgeClientLike
     from ai_gateway_core.session import SessionManagerLike
 
+    from ..config.startup_fingerprint import StartupConfigSnapshot
     from .memory_service import MemoryService
     from .runtime.compat.runtime_adapter import AssistantRuntimeAdapter
 
@@ -299,6 +306,7 @@ Workflow:
         realtime_metrics: RealtimeMetricsLike = _DEFAULT_NOOP_REALTIME_METRICS,
         artifact_storage: ArtifactStorageLike = _DEFAULT_NOOP_ARTIFACT_STORAGE,
         file_storage: FileStorageLike = _DEFAULT_NOOP_FILE_STORAGE,
+        startup_config: StartupConfigSnapshot | None = None,
         runtime_adapter: AssistantRuntimeAdapter | None = None,
         tool_invoker: ToolInvoker | None = None,
         runtime_adapter_unavailable: bool = False,
@@ -319,14 +327,17 @@ Workflow:
         self.tenant_tool_policy = tenant_tool_policy
         self.tenant_mcp_config = tenant_mcp_config
         self.mcp_runtime = mcp_runtime
-        self.tool_audit = tool_audit
         self.session_manager = session_manager
         self.context_manager = get_context_manager()
         self.context_config = context_config or ContextConfig()
         self.db = db  # Database storage for MemoryManager
         self.redis = redis_client
         self.memory_service = memory_service
-        self.trace_writer = trace_writer or AssistantTraceWriter(database=db)
+        self.startup_config = startup_config
+        self.trace_writer = trace_writer or AssistantTraceWriter(
+            database=db,
+            startup_config=startup_config,
+        )
 
         # Process-scoped runtime dependencies. ``AgentLoop`` remains a cheap
         # per-turn coordinator, but its memory/index/skill adapter and tool
@@ -345,7 +356,13 @@ Workflow:
                 from .runtime.compat.runtime_adapter import AssistantRuntimeAdapter
 
                 self.runtime_adapter = AssistantRuntimeAdapter.from_env(database=db)
-            except Exception:
+            except Exception as exc:
+                log_internal_exception(
+                    logger,
+                    "assistant.runtime_adapter.initialization_failed",
+                    exc,
+                    level=logging.WARNING,
+                )
                 self.runtime_adapter_unavailable = True
 
         # Background task registry — keeps fire-and-forget tasks alive.
@@ -433,7 +450,10 @@ Workflow:
 
         # Built-in domain policy is disabled by default for generic assistant behavior.
         self.builtin_domain_policy_enabled = (
-            os.getenv("ASSISTANT_BUILTIN_DOMAIN_POLICY_ENABLED", "false").strip().lower() == "true"
+            startup_config.bool_value("ASSISTANT_BUILTIN_DOMAIN_POLICY_ENABLED")
+            if startup_config is not None
+            else os.getenv("ASSISTANT_BUILTIN_DOMAIN_POLICY_ENABLED", "false").strip().lower()
+            == "true"
         )
         self.domain_policy_resolver = (
             DomainPolicyResolver() if self.builtin_domain_policy_enabled else None
@@ -445,28 +465,65 @@ Workflow:
 
         # Assistant Gateway (policy routing + queue/approval/run lifecycle)
         # Keep this configurable to avoid hard-coded behavior.
-        from .gateway import AssistantExecutionGateway, AssistantRequestRouter
-        from .tool_invoker import create_tool_invoker
+        from .audit.composition import create_audited_tool_invoker
+        from .gateway import (
+            AssistantExecutionGateway,
+            AssistantPolicyEngine,
+            AssistantRequestRouter,
+        )
 
-        gateway_enabled = True
-        with contextlib.suppress(Exception):
-            gateway_enabled = (
-                os.getenv("ASSISTANT_GATEWAY_ENABLED", "true").strip().lower() == "true"
+        if startup_config is not None:
+            gateway_enabled = startup_config.bool_value("ASSISTANT_GATEWAY_ENABLED")
+            startup_policy_engine = AssistantPolicyEngine(
+                os_agent_default_enabled=startup_config.bool_value("ASSISTANT_OS_AGENT_LITE"),
+                default_execution_profile=startup_config.str_value(
+                    "ASSISTANT_DEFAULT_EXECUTION_PROFILE"
+                ),
+                default_memory_mode=startup_config.str_value("ASSISTANT_DEFAULT_MEMORY_MODE"),
             )
+        else:
+            gateway_enabled = True
+            try:
+                gateway_enabled = (
+                    os.getenv("ASSISTANT_GATEWAY_ENABLED", "true").strip().lower() == "true"
+                )
+            except Exception as exc:
+                log_internal_exception(
+                    __name__,
+                    "assistant.core.assistant_service.suppressed_failure",
+                    exc,
+                    level=logging.DEBUG,
+                )
+            startup_policy_engine = None
 
         self.tool_invoker = tool_invoker
         if self.tool_invoker is None:
-            self.tool_invoker = create_tool_invoker(
+            self.tool_invoker = create_audited_tool_invoker(
+                database=db,
                 tenant_tool_policy=self.tenant_tool_policy,
                 tenant_mcp_config=self.tenant_mcp_config,
                 mcp_runtime=self.mcp_runtime,
-                tool_audit=self.tool_audit,
+                tool_audit=tool_audit,
             )
-        self.request_router = request_router or AssistantRequestRouter()
+        self.tool_audit = getattr(self.tool_invoker, "tool_audit", tool_audit)
+        self.request_router = request_router or AssistantRequestRouter(
+            policy_engine=startup_policy_engine
+        )
         self.execution_gateway = execution_gateway or AssistantExecutionGateway(
             tool_invoker=self.tool_invoker,
             database=db,
             enabled=gateway_enabled,
+            policy_engine=startup_policy_engine,
+            require_db=(
+                startup_config.bool_value("ASSISTANT_REQUIRE_DB")
+                if startup_config is not None
+                else None
+            ),
+            tool_policy_v2_enabled=(
+                startup_config.bool_value("ASSISTANT_RUNTIME_TOOL_POLICY_V2")
+                if startup_config is not None
+                else None
+            ),
         )
         configure_tool_discovery = getattr(
             self.tool_invoker,
@@ -546,7 +603,12 @@ Workflow:
             try:
                 return await self.kb_service.require_dataset_access(user, ds_id, required="viewer")
             except Exception as exc:
-                logger.warning(f"Failed to load dataset {ds_id} for policy resolution: {exc}")
+                log_internal_exception(
+                    logger,
+                    "assistant.domain_policy.dataset_load_failed",
+                    exc,
+                    level=logging.WARNING,
+                )
                 return None
 
         results = await asyncio.gather(
@@ -679,7 +741,10 @@ Workflow:
                 service_id="__builtin_assistant__",
                 session_id=session_id,
             )
-        except Exception:
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.session.concurrent_create_failed", exc
+            )
             # Handle concurrent creates for the same session_id.
             existing = await self.session_manager.get(session_id)
             if not existing:
@@ -704,7 +769,11 @@ Workflow:
 
         run_id = str(uuid.uuid4())
         request_id = str(uuid.uuid4())
-        provider = getattr(config.model_provider, "value", str(config.model_provider))
+        provider = config.model_provider_id or getattr(
+            config.model_provider,
+            "value",
+            str(config.model_provider),
+        )
         kernel = TurnKernel(run_id=run_id, request_id=request_id)
         kernel.transition(TurnState.PREPARING, reason="request_accepted")
         kernel.finish(TurnState.FAILED, reason="preflight_failed")
@@ -812,7 +881,8 @@ Workflow:
             effective_config = replace(config)
             domain_policy, _ = await self._resolve_domain_policy(user, config.kb_dataset_ids)
         except Exception as exc:
-            yield self._preflight_failure_event(
+            log_internal_exception(logger, "assistant.turn.preflight_failed", exc)
+            preflight_event = self._preflight_failure_event(
                 user=user,
                 session_id=session_id,
                 message=message,
@@ -820,6 +890,13 @@ Workflow:
                 history=history,
                 error=exc,
                 started_at=started_at,
+            )
+            yield await bound_sse_event(
+                preflight_event,
+                artifact_storage=self.artifact_storage,
+                tenant_id=user.tenant_id,
+                user_id=user.user_id,
+                session_id=session_id,
             )
             return
         if domain_policy:
@@ -852,7 +929,13 @@ Workflow:
             history=history,
             persist_messages=persist_messages,
         ):
-            yield event
+            yield await bound_sse_event(
+                event,
+                artifact_storage=self.artifact_storage,
+                tenant_id=user.tenant_id,
+                user_id=user.user_id,
+                session_id=session_id,
+            )
 
     async def _collect_turn(
         self,
@@ -940,12 +1023,22 @@ Workflow:
                     },
                 )
             except Exception as exc:
-                logger.warning("Failed to record collected turn usage: %s", exc)
+                log_internal_exception(
+                    logger,
+                    "assistant.usage.recording_failed",
+                    exc,
+                    level=logging.WARNING,
+                )
             try:
                 if input_tokens > 0 or output_tokens > 0:
                     await self.realtime_metrics.record_token_usage(input_tokens, output_tokens)
             except Exception as exc:
-                logger.warning("Failed to update collected turn metrics: %s", exc)
+                log_internal_exception(
+                    logger,
+                    "assistant.metrics.update_failed",
+                    exc,
+                    level=logging.WARNING,
+                )
 
         return {
             "content": turn.content,
@@ -1098,7 +1191,7 @@ Workflow:
                 return None
 
             except Exception as e:
-                logger.error(f"Failed to retrieve from dataset {dataset_id}: {e}", exc_info=True)
+                log_internal_exception(logger, "assistant.kb.retrieval_failed", e)
                 return None
 
         # PARALLEL retrieval using asyncio.gather - significant latency improvement
@@ -1143,6 +1236,7 @@ Workflow:
             AssistantStreamEvent objects
         """
         from .agent.agent_loop import AgentLoop, AgentLoopConfig
+        from .agent.agent_loop_models import AgentReliabilityLimits
         from .run_budget import RunBudgetLimits
 
         # Create AgentLoop configuration. Streaming-first is the only path
@@ -1156,52 +1250,108 @@ Workflow:
             scope=context_cache_scope,
             model_id=config.model_id,
         )
-        hard_tool_iterations = _operator_int(
-            "ASSISTANT_PARENT_HARD_TOOL_ITERATIONS",
-            default=32,
-            minimum=4,
-            maximum=128,
-        )
-        initial_tool_iterations = min(
-            hard_tool_iterations,
-            _operator_int(
-                "ASSISTANT_PARENT_INITIAL_TOOL_ITERATIONS",
-                default=8,
-                minimum=2,
-                maximum=32,
-            ),
-        )
+        if self.startup_config is not None:
+            hard_tool_iterations = self.startup_config.int_value(
+                "ASSISTANT_PARENT_HARD_TOOL_ITERATIONS"
+            )
+            initial_tool_iterations = self.startup_config.int_value(
+                "ASSISTANT_PARENT_INITIAL_TOOL_ITERATIONS"
+            )
+        else:
+            hard_tool_iterations = _operator_int(
+                "ASSISTANT_PARENT_HARD_TOOL_ITERATIONS",
+                default=32,
+                minimum=4,
+                maximum=128,
+            )
+            initial_tool_iterations = min(
+                hard_tool_iterations,
+                _operator_int(
+                    "ASSISTANT_PARENT_INITIAL_TOOL_ITERATIONS",
+                    default=8,
+                    minimum=2,
+                    maximum=32,
+                ),
+            )
         final_synthesis_headroom = 2
-        operator_budget = RunBudgetLimits(
-            max_model_turns=_operator_int(
-                "ASSISTANT_RUN_MAX_MODEL_TURNS",
-                default=96,
-                minimum=hard_tool_iterations + final_synthesis_headroom,
-                maximum=512,
-            ),
-            max_tool_calls=_operator_int(
+        operator_max_tool_calls = (
+            self.startup_config.int_value("ASSISTANT_RUN_MAX_TOOL_CALLS")
+            if self.startup_config is not None
+            else _operator_int(
                 "ASSISTANT_RUN_MAX_TOOL_CALLS",
                 default=256,
                 minimum=hard_tool_iterations,
                 maximum=2048,
+            )
+        )
+        effective_max_tool_calls = operator_max_tool_calls
+        if self.tenant_tool_policy is not None:
+            get_policy = getattr(self.tenant_tool_policy, "get_policy_fresh", None)
+            if not callable(get_policy):
+                get_policy = getattr(self.tenant_tool_policy, "get_policy", None)
+            if not callable(get_policy):
+                raise RuntimeError("Tenant tool policy is unavailable")
+            tenant_policy = await get_policy(str(user.tenant_id))
+            if str(getattr(tenant_policy, "tenant_id", "")) != str(user.tenant_id):
+                raise RuntimeError("Tenant tool policy scope mismatch")
+            tenant_max_tool_calls = getattr(tenant_policy, "max_calls_per_session", None)
+            if (
+                isinstance(tenant_max_tool_calls, bool)
+                or not isinstance(tenant_max_tool_calls, int)
+                or tenant_max_tool_calls <= 0
+            ):
+                raise RuntimeError("Tenant tool policy session limit is invalid")
+            effective_max_tool_calls = min(
+                effective_max_tool_calls,
+                tenant_max_tool_calls,
+            )
+        operator_budget = RunBudgetLimits(
+            max_model_turns=(
+                self.startup_config.int_value("ASSISTANT_RUN_MAX_MODEL_TURNS")
+                if self.startup_config is not None
+                else _operator_int(
+                    "ASSISTANT_RUN_MAX_MODEL_TURNS",
+                    default=96,
+                    minimum=hard_tool_iterations + final_synthesis_headroom,
+                    maximum=512,
+                )
             ),
+            max_tool_calls=effective_max_tool_calls,
             max_parallel_tool_calls=max(1, config.max_parallel_tools),
             max_wall_time_seconds=float(
-                _operator_int(
+                self.startup_config.int_value("ASSISTANT_RUN_MAX_WALL_TIME_SECONDS")
+                if self.startup_config is not None
+                else _operator_int(
                     "ASSISTANT_RUN_MAX_WALL_TIME_SECONDS",
                     default=1800,
                     minimum=60,
                     maximum=7200,
                 )
             ),
-            max_tool_result_bytes=_operator_int(
-                "ASSISTANT_RUN_MAX_TOOL_RESULT_BYTES",
-                default=8_000_000,
-                minimum=256_000,
-                maximum=64_000_000,
+            max_tool_result_bytes=(
+                self.startup_config.int_value("ASSISTANT_RUN_MAX_TOOL_RESULT_BYTES")
+                if self.startup_config is not None
+                else _operator_int(
+                    "ASSISTANT_RUN_MAX_TOOL_RESULT_BYTES",
+                    default=8_000_000,
+                    minimum=256_000,
+                    maximum=64_000_000,
+                )
             ),
             final_synthesis_headroom=final_synthesis_headroom,
         )
+        reliability_profile_limits = {
+            profile: AgentReliabilityLimits(
+                max_tool_calls=operator_budget.max_tool_calls,
+                max_identical_tool_calls=max_identical_tool_calls,
+                max_wall_time_seconds=operator_budget.max_wall_time_seconds,
+            )
+            for profile, max_identical_tool_calls in {
+                "safe": 2,
+                "balanced": 3,
+                "power": 3,
+            }.items()
+        }
         kb_retrieval_configs = {
             str(dataset_id): dict(dataset_config)
             for dataset_id, dataset_config in config.kb_retrieval_configs.items()
@@ -1219,6 +1369,7 @@ Workflow:
                 )
         loop_config = AgentLoopConfig(
             model_id=config.model_id,
+            model_provider_id=config.model_provider_id,
             temperature=config.temperature,
             max_tokens=config.max_tokens or 4096,
             system_prompt=config.system_prompt,
@@ -1253,6 +1404,10 @@ Workflow:
             final_synthesis_headroom=final_synthesis_headroom,
             max_concurrent_tools=config.max_parallel_tools,
             run_budget_limits=operator_budget,
+            reliability_limits=AgentReliabilityLimits(
+                max_tool_calls=effective_max_tool_calls,
+            ),
+            reliability_profile_limits=reliability_profile_limits,
             persist_messages=persist_messages,
             execution_profile=config.execution_profile,
             memory_mode=config.memory_mode,
@@ -1262,9 +1417,30 @@ Workflow:
             runtime_mode=config.runtime_mode,
             queue_mode=config.queue_mode,
             context_detail=config.context_detail,
-            use_context_engine=_runtime_context_v2_enabled(config.use_context_engine),
+            use_context_engine=(
+                config.use_context_engine
+                and self.startup_config.bool_value("ASSISTANT_RUNTIME_CONTEXT_V2")
+                if self.startup_config is not None
+                else _runtime_context_v2_enabled(config.use_context_engine)
+            ),
             skills_enabled=config.skills_enabled,
             memory_profile=config.memory_profile,
+            enable_staged_compaction=(
+                self.startup_config.bool_value("ASSISTANT_STAGED_COMPACTION_ENABLED")
+                if self.startup_config is not None
+                else os.getenv("ASSISTANT_STAGED_COMPACTION_ENABLED", "").strip().lower()
+                in {"1", "true", "yes", "on"}
+            ),
+            staged_compaction_min_source_tokens=(
+                self.startup_config.int_value("ASSISTANT_STAGED_COMPACTION_MIN_SOURCE_TOKENS")
+                if self.startup_config is not None
+                else _operator_int(
+                    "ASSISTANT_STAGED_COMPACTION_MIN_SOURCE_TOKENS",
+                    default=4_000,
+                    minimum=1_000,
+                    maximum=2_147_483_647,
+                )
+            ),
             # Thinking display: enable for thinking-capable models
             thinking_level=(
                 "enabled"
@@ -1281,7 +1457,20 @@ Workflow:
         logger.info(f"[AGENT LOOP] streaming-first model={loop_config.model_id}")
 
         request_registry = None
-        if self.tenant_model_registry_resolver is not None:
+        if config.agent_runtime is not None:
+            provider_id = str(config.model_provider_id or "")
+            if not provider_id:
+                raise PermissionDeniedError("Agent runtime model provider pin is missing")
+            if self.tenant_model_registry_resolver is None:
+                raise PermissionDeniedError("Agent runtime model provider is unavailable")
+            request_registry = await self.tenant_model_registry_resolver.resolve(
+                user.tenant_id or "default",
+                config.model_id,
+                provider_id=provider_id,
+            )
+            if request_registry is None:
+                raise PermissionDeniedError("Agent runtime model provider is unavailable")
+        elif self.tenant_model_registry_resolver is not None:
             request_registry = await self.tenant_model_registry_resolver.resolve(
                 user.tenant_id or "default",
                 config.model_id,
@@ -1305,6 +1494,7 @@ Workflow:
             tool_invoker=self.tool_invoker,
             task_planner=self.task_planner,
             runtime_adapter_unavailable=self.runtime_adapter_unavailable,
+            startup_config=self.startup_config,
         )
         agent_loop.local_node_tool_provider = self.local_node_tool_provider
         agent_loop.openai_responses_local_binding_resolver = (
@@ -1320,7 +1510,12 @@ Workflow:
                 else:
                     history = []
             except Exception as e:
-                logger.warning(f"Failed to load session history: {e}")
+                log_internal_exception(
+                    logger,
+                    "assistant.session_history.load_failed",
+                    e,
+                    level=logging.WARNING,
+                )
                 history = []
 
         # Execute the agent loop. A DB-backed registry owns provider clients

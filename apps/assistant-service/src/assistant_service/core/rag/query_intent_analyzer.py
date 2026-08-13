@@ -21,13 +21,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 if TYPE_CHECKING:
     pass
@@ -40,9 +41,7 @@ logger = get_logger(__name__)
 
 # L02: Precompiled regex patterns (avoid re-compiling on every call)
 _SLASH_COMMAND_RE = re.compile(r"^/([a-z][a-z0-9\-_]{1,48})\b")
-_USE_SKILL_RE = re.compile(
-    r"(?:use|用|调用|启用)\s*(?:skill|技能)\s*[:\s]*([a-z][a-z0-9\-_]+)"
-)
+_USE_SKILL_RE = re.compile(r"(?:use|用|调用|启用)\s*(?:skill|技能)\s*[:\s]*([a-z][a-z0-9\-_]+)")
 
 
 class QueryType(str, Enum):
@@ -270,7 +269,9 @@ class QueryIntentAnalyzer:
 
         # 1.5 Simple/short queries - no KB needed
         # Queries under 10 chars are almost always greetings, thanks, or simple commands
-        if query_len <= 10 and not any(k in query_lower for k in ["搜索", "查询", "查找", "查一下", "找"]):
+        if query_len <= 10 and not any(
+            k in query_lower for k in ["搜索", "查询", "查找", "查一下", "找"]
+        ):
             return QueryIntent(
                 requires_kb_search=False,
                 decision=RetrievalDecision.SKIP,
@@ -285,17 +286,55 @@ class QueryIntentAnalyzer:
 
         # 1.6 Common conversational patterns - no KB
         # Guard: skip this rule if enterprise keywords are present (need KB)
-        enterprise_guard = ["公司", "产品", "客户", "流程", "政策", "内部", "审批", "员工", "部门", "报表"]
+        enterprise_guard = [
+            "公司",
+            "产品",
+            "客户",
+            "流程",
+            "政策",
+            "内部",
+            "审批",
+            "员工",
+            "部门",
+            "报表",
+        ]
         has_enterprise_kw = any(kw in query_lower for kw in enterprise_guard)
 
         conversational_patterns = [
-            "谢谢", "感谢", "好的", "明白", "了解", "知道了", "收到",
-            "没问题", "可以", "不用了", "算了", "再见", "拜拜",
-            "thank", "thanks", "ok", "okay", "got it", "sure", "yes", "no",
-            "帮我写", "帮我翻译", "翻译一下", "总结一下", "帮我改",
-            "写一个", "写一段", "生成一个", "创建一个",
+            "谢谢",
+            "感谢",
+            "好的",
+            "明白",
+            "了解",
+            "知道了",
+            "收到",
+            "没问题",
+            "可以",
+            "不用了",
+            "算了",
+            "再见",
+            "拜拜",
+            "thank",
+            "thanks",
+            "ok",
+            "okay",
+            "got it",
+            "sure",
+            "yes",
+            "no",
+            "帮我写",
+            "帮我翻译",
+            "翻译一下",
+            "总结一下",
+            "帮我改",
+            "写一个",
+            "写一段",
+            "生成一个",
+            "创建一个",
         ]
-        if not has_enterprise_kw and any(query_lower.startswith(p) or query_lower == p for p in conversational_patterns):
+        if not has_enterprise_kw and any(
+            query_lower.startswith(p) or query_lower == p for p in conversational_patterns
+        ):
             return QueryIntent(
                 requires_kb_search=False,
                 decision=RetrievalDecision.SKIP,
@@ -309,8 +348,22 @@ class QueryIntentAnalyzer:
             )
 
         # 1.7 Code-related queries - rarely need KB (also guarded by enterprise keywords)
-        code_patterns = ["代码", "bug", "报错", "error", "debug", "修复", "重构", "refactor", "实现"]
-        if not has_enterprise_kw and any(p in query_lower for p in code_patterns) and not any(k in query_lower for k in ["文档", "知识库"]):
+        code_patterns = [
+            "代码",
+            "bug",
+            "报错",
+            "error",
+            "debug",
+            "修复",
+            "重构",
+            "refactor",
+            "实现",
+        ]
+        if (
+            not has_enterprise_kw
+            and any(p in query_lower for p in code_patterns)
+            and not any(k in query_lower for k in ["文档", "知识库"])
+        ):
             return QueryIntent(
                 requires_kb_search=False,
                 decision=RetrievalDecision.SKIP,
@@ -502,7 +555,9 @@ class QueryIntentAnalyzer:
             return result
 
         except Exception as e:
-            logger.warning(f"LLM intent analysis failed: {e}")
+            record_internal_exception(
+                __name__, "assistant.core.rag.query_intent_analyzer.internal_failure", e
+            )
             return None
 
     def _get_from_cache(self, cache_key: str) -> QueryIntent | None:
@@ -629,7 +684,9 @@ JSON 格式:
                 )
 
         except (json.JSONDecodeError, KeyError, ValueError) as e:
-            logger.warning(f"Failed to parse LLM response: {e}")
+            record_internal_exception(
+                logger, "query_intent_analyzer.response_parse_failed", e, level=logging.WARNING
+            )
 
         # Default on parse failure
         return self._default_decision(query)

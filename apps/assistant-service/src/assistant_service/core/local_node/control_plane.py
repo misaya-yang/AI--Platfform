@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Protocol
 
+from ai_gateway_core.logging import record_internal_exception
+
 from ...api.routes.local_nodes import LocalNodeServiceFault
 from .protocol import LOCAL_NODE_PROTOCOL_VERSION
 
@@ -586,6 +588,9 @@ class LocalNodeControlPlaneService:
                     challenge=result["challenge"],
                 )
             except Exception as exc:
+                record_internal_exception(
+                    __name__, "assistant.core.local_node.control_plane.internal_failure", exc
+                )
                 async with self._repository.transaction() as state:
                     state.challenges.pop(challenge_id, None)
                 raise _fault(503, "LOCAL_NODE_PAIRING_CHANNEL_UNAVAILABLE") from exc
@@ -715,9 +720,7 @@ class LocalNodeControlPlaneService:
                     "last_seen_at": device.last_seen_at,
                     "active_action_id": active,
                     "active_lease_expires_at": None,
-                    "protocol_compatible": (
-                        device.protocol_version == LOCAL_NODE_PROTOCOL_VERSION
-                    ),
+                    "protocol_compatible": (device.protocol_version == LOCAL_NODE_PROTOCOL_VERSION),
                 }
             }
 
@@ -1009,6 +1012,9 @@ class LocalNodeControlPlaneService:
                 envelope=envelope,
             )
         except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.local_node.control_plane.internal_failure", exc
+            )
             raise _fault(503, "LOCAL_NODE_ACTION_DELIVERY_UNAVAILABLE") from exc
         if not isinstance(delivery_ref, str) or not delivery_ref:
             raise _fault(503, "LOCAL_NODE_ACTION_DELIVERY_INVALID")
@@ -1220,6 +1226,11 @@ class LocalNodeControlPlaneService:
                             action_id=action_id,
                         )
                     except Exception as exc:
+                        record_internal_exception(
+                            __name__,
+                            "assistant.core.local_node.control_plane.internal_failure",
+                            exc,
+                        )
                         raise _fault(503, "LOCAL_NODE_ACTION_CANCEL_UNAVAILABLE") from exc
                 action.status = "cancelled"
                 action.updated_at = now

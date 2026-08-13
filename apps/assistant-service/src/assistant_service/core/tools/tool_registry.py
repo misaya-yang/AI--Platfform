@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 from ai_gateway_core.security import redact_trace_text
 from jsonschema import Draft202012Validator
 
@@ -34,6 +34,16 @@ if TYPE_CHECKING:
     from ai_gateway_core.auth import UserContextLike
 
 logger = get_logger(__name__)
+_TEST_ONLY_DIRECT_REGISTRY_BYPASS: bool | None = None
+
+
+def configure_test_only_direct_registry_bypass(enabled: bool) -> None:
+    """Freeze pytest-only direct execution; production composition calls this."""
+
+    global _TEST_ONLY_DIRECT_REGISTRY_BYPASS
+    _TEST_ONLY_DIRECT_REGISTRY_BYPASS = bool(enabled)
+    if _registry is not None:
+        _registry._test_only_direct_registry_bypass = bool(enabled)
 
 _MAX_PUBLIC_ERROR_CHARS = 200
 _TRUNCATION_SUFFIX = "...[truncated]"
@@ -50,7 +60,10 @@ def _tool_log_label(tool_name: Any) -> str:
 
     try:
         digest = hashlib.sha256(str(tool_name).encode("utf-8", errors="replace")).hexdigest()
-    except Exception:
+    except Exception as exc:
+        record_internal_exception(
+            __name__, "assistant.core.tools.tool_registry.internal_failure", exc
+        )
         return "tool_sha256=unavailable"
     return f"tool_sha256={digest[:16]}"
 
@@ -60,7 +73,10 @@ def _safe_public_error(value: Any, *, fallback: str = "Tool execution failed") -
 
     try:
         text = redact_trace_text(value)
-    except Exception:
+    except Exception as exc:
+        record_internal_exception(
+            __name__, "assistant.core.tools.tool_registry.internal_failure", exc
+        )
         text = fallback
     if not text:
         text = fallback
@@ -275,7 +291,10 @@ def _schema_is_locally_safe(schema: dict[str, Any]) -> bool:
 
     try:
         encoded = json.dumps(schema, sort_keys=True, separators=(",", ":"), default=str)
-    except Exception:
+    except Exception as exc:
+        record_internal_exception(
+            __name__, "assistant.core.tools.tool_registry.internal_failure", exc
+        )
         return False
     if len(encoded.encode("utf-8")) > 65_536:
         return False
@@ -370,7 +389,10 @@ def validate_tool_arguments(
             Draft202012Validator(schema).iter_errors(arguments),
             key=lambda error: (list(error.absolute_path), str(error.validator or "")),
         )
-    except Exception:
+    except Exception as exc:
+        record_internal_exception(
+            __name__, "assistant.core.tools.tool_registry.internal_failure", exc
+        )
         return {
             **base,
             "valid": False,
@@ -521,6 +543,7 @@ class ToolRegistry:
     def __init__(self):
         self._tools: dict[str, ToolDefinition] = {}
         self._executors: dict[str, ToolExecutor] = {}
+        self._test_only_direct_registry_bypass = bool(os.getenv("PYTEST_CURRENT_TEST"))
         # Reentrant threading lock — register() is sync and may be called from
         # both sync startup code and async tool-activation paths; a threading
         # lock works in both contexts (asyncio.Lock would force all callers to
@@ -806,12 +829,8 @@ class ToolRegistry:
             return result
 
         except Exception as exc:
+            record_internal_exception(__name__, "tool_registry.execution_failed", exc)
             duration_ms = (time.time() - start_time) * 1000
-            logger.error(
-                "tool_registry.execution_failed (tool_label=%s, exception_type=%s)",
-                _tool_log_label(request.tool_name),
-                type(exc).__name__,
-            )
 
             return ToolCallResult(
                 call_id=request.call_id,
@@ -833,13 +852,13 @@ class ToolRegistry:
             or definition.risk_level is ToolRiskLevel.HIGH
         )
 
-    @staticmethod
-    def _direct_execution_allowed(request: ToolCallRequest) -> bool:
+    def _direct_execution_allowed(self, request: ToolCallRequest) -> bool:
         metadata = request.metadata or {}
         if metadata.get("execution_gateway_approved") is True:
             return True
-        return metadata.get("direct_registry_bypass") == "test_only" and os.getenv(
-            "PYTEST_CURRENT_TEST"
+        return (
+            metadata.get("direct_registry_bypass") == "test_only"
+            and self._test_only_direct_registry_bypass
         )
 
 
@@ -890,6 +909,10 @@ def get_tool_registry() -> ToolRegistry:
     global _registry
     if _registry is None:
         _registry = ToolRegistry()
+        if _TEST_ONLY_DIRECT_REGISTRY_BYPASS is not None:
+            _registry._test_only_direct_registry_bypass = (
+                _TEST_ONLY_DIRECT_REGISTRY_BYPASS
+            )
     return _registry
 
 

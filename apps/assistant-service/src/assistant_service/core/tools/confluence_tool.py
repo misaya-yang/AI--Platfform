@@ -21,7 +21,7 @@ import time
 from typing import Any
 
 import httpx
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from .confluence_client import ConfluenceAPIClient
 from .confluence_format import (
@@ -710,10 +710,9 @@ class _TenantClientResolver:
                 rows = await self._database.list_confluence_connections(
                     tenant_id=tenant_id, status="active", limit=1
                 )
-            except Exception:
-                logger.exception(
-                    "confluence: DB lookup failed for tenant %s — falling back",
-                    tenant_id,
+            except Exception as exc:
+                record_internal_exception(
+                    __name__, "assistant.core.tools.confluence_tool.internal_failure", exc
                 )
                 rows = []
             if rows:
@@ -986,14 +985,12 @@ class ConfluenceReadExecutor(ToolExecutor):
             # Expected validation errors — surface to model cleanly.
             return _err(request, str(e) + _ANTI_HALLUCINATION_NOTE, start)
         except httpx.HTTPStatusError as e:
-            logger.error(
-                "confluence_read action=%s HTTP %s",
-                action,
-                e.response.status_code,
-            )
+            record_internal_exception(logger, "confluence_read.http_failed", e)
             return _err(request, _classify_http_error(e.response.status_code, action), start)
-        except Exception:
-            logger.exception("confluence_read action=%s failed", action)
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.tools.confluence_tool.internal_failure", exc
+            )
             return _err(
                 request,
                 "confluence_read failed: upstream unavailable" + _ANTI_HALLUCINATION_NOTE,
@@ -1184,14 +1181,12 @@ class ConfluenceWriteExecutor(ToolExecutor):
             # Still attach the hallucination guard.
             return _err(request, str(e) + _ANTI_HALLUCINATION_NOTE, start)
         except httpx.HTTPStatusError as e:
-            logger.error(
-                "confluence_write action=%s HTTP %s",
-                action,
-                e.response.status_code,
-            )
+            record_internal_exception(logger, "confluence_write.http_failed", e)
             return _err(request, _classify_http_error(e.response.status_code, action), start)
-        except Exception:
-            logger.exception("confluence_write action=%s failed", action)
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.tools.confluence_tool.internal_failure", exc
+            )
             return _err(
                 request,
                 "confluence_write failed: upstream unavailable" + _ANTI_HALLUCINATION_NOTE,
@@ -1238,10 +1233,9 @@ def _confluence_has_active_connection_factory(
             rows = await database.list_confluence_connections(
                 tenant_id=tenant_id, status="active", limit=1
             )
-        except Exception:
-            logger.exception(
-                "confluence connector predicate: DB lookup failed for tenant %s",
-                tenant_id,
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.tools.confluence_tool.internal_failure", exc
             )
             return False
         return bool(rows)

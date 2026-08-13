@@ -92,8 +92,15 @@ async def get_user_context(request: Request) -> UserContext:
         )
 
     # Allow anonymous in dev/internal calls
-    settings = request.app.state.settings
-    if settings.app.allow_anonymous:
+    startup_config = getattr(request.app.state, "startup_config", None)
+    if startup_config is not None:
+        allow_anonymous = startup_config.bool_value("ASSISTANT_APP__ALLOW_ANONYMOUS")
+    else:
+        # Compatibility for isolated route tests that do not build the
+        # production application composition root.
+        settings = request.app.state.settings
+        allow_anonymous = settings.app.allow_anonymous
+    if allow_anonymous:
         return ANONYMOUS_CONTEXT
 
     raise HTTPException(

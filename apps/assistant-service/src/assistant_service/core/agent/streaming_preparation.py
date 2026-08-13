@@ -8,7 +8,7 @@ from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.enums import StreamEventType
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from ..quality.cache_optimizer import build_cache_context_metrics, stable_cache_hash
 from ..rag.context_engine import (
@@ -232,9 +232,10 @@ class StreamingPreparationMixin:
                     },
                 )
             except Exception as exc:
-                logger.error(
-                    "File processing failed (streaming-first, exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.agent.streaming_preparation.internal_failure",
+                    exc,
                 )
                 yield AgentLoopEvent(
                     phase=phase,
@@ -292,12 +293,8 @@ class StreamingPreparationMixin:
                 run_id=str(ctx.run_id or ""),
                 model_provider=provider_name,
                 model_id=ctx.config.model_id,
-                selected_device_id=str(
-                    getattr(ctx.config, "local_node_device_id", None) or ""
-                ),
-                selected_grant_ids=tuple(
-                    getattr(ctx.config, "local_node_grant_ids", ()) or ()
-                ),
+                selected_device_id=str(getattr(ctx.config, "local_node_device_id", None) or ""),
+                selected_grant_ids=tuple(getattr(ctx.config, "local_node_grant_ids", ()) or ()),
             )
             (
                 ctx.openai_responses_local_runtime,
@@ -315,14 +312,11 @@ class StreamingPreparationMixin:
             )
             ctx.openai_responses_local_readiness = openai_local_readiness.to_dict()
             if ctx.openai_responses_local_runtime is not None:
-                hidden_names = (
-                    ctx.openai_responses_local_runtime.hidden_function_tool_names()
-                )
+                hidden_names = ctx.openai_responses_local_runtime.hidden_function_tool_names()
                 tools = [
                     schema
                     for schema in tools
-                    if str((schema.get("function") or {}).get("name") or "")
-                    not in hidden_names
+                    if str((schema.get("function") or {}).get("name") or "") not in hidden_names
                 ]
                 available_tool_schema_hash = stable_cache_hash(
                     [
@@ -364,9 +358,10 @@ class StreamingPreparationMixin:
                     use_llm=False,
                 )
             except Exception as exc:
-                logger.error(
-                    "Canonical task planning failed (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.agent.streaming_preparation.internal_failure",
+                    exc,
                 )
                 yield AgentLoopEvent(
                     phase=AgentLoopPhase.TASK_PLANNING,
@@ -751,9 +746,10 @@ class StreamingPreparationMixin:
                     },
                 )
             except Exception as exc:
-                logger.error(
-                    "Failed to load long-term memory in streaming-first mode (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.agent.streaming_preparation.internal_failure",
+                    exc,
                 )
 
         out.auto_knowledge_context = auto_knowledge_context
@@ -837,10 +833,7 @@ class StreamingPreparationMixin:
             skill_token_budget = max(
                 512,
                 int(
-                    (
-                        model_context_window
-                        - min(ctx.config.max_tokens, model_context_window // 2)
-                    )
+                    (model_context_window - min(ctx.config.max_tokens, model_context_window // 2))
                     * 0.08
                 ),
             )
@@ -942,9 +935,10 @@ class StreamingPreparationMixin:
                             }
                         )
             except Exception as exc:
-                logger.error(
-                    "Failed to inject processed files into prompt (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.agent.streaming_preparation.internal_failure",
+                    exc,
                 )
 
         if ctx.config.use_context_engine:

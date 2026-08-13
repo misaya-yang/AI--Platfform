@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterable, Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 from ai_gateway_core.enums import ModelAccessLevel, ModelProvider
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from .model_catalog import DEFAULT_MODELS, ModelConfig, ModelInfo
 from .responses_api import (
@@ -39,11 +38,21 @@ class RegistryLifecycleMixin:
     #: enum value routes to two completely different hosts depending on backend.
     VERTEX_BASE_URL = "https://aiplatform.googleapis.com"
 
-    def __init__(self, use_default_models: bool = True):
+    def __init__(
+        self,
+        use_default_models: bool = True,
+        *,
+        vertex_models: Iterable[str] | None = None,
+        vertex_api_key_override: str = "",
+        startup_config_frozen: bool = False,
+    ):
         self._configs: dict[ModelProvider, ModelConfig] = {}
         self._models: dict[str, ModelInfo] = {}
         self._clients: dict[ModelProvider, httpx.AsyncClient] = {}
         self._db_models_loaded: bool = False
+        self._vertex_models = frozenset(vertex_models or ())
+        self._vertex_api_key_override = vertex_api_key_override
+        self._startup_config_frozen = startup_config_frozen
 
         # Initialize default model catalog (fallback)
         if use_default_models:
@@ -79,9 +88,8 @@ class RegistryLifecycleMixin:
             return loaded_count
 
         except Exception as exc:
-            logger.warning(
-                "Failed to load models from database (exception_type=%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.models.registry_lifecycle.internal_failure", exc
             )
             return 0
 
@@ -118,9 +126,8 @@ class RegistryLifecycleMixin:
                     access_level=access_level,
                 )
             except Exception as exc:
-                logger.warning(
-                    "Skipping invalid database model row (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.models.registry_lifecycle.internal_failure", exc
                 )
                 continue
 
@@ -210,10 +217,16 @@ class RegistryLifecycleMixin:
              startup from ``GOOGLE_API_BACKEND`` in ``main.py``.
           3. Default: ``ai_studio``.
         """
-        vertex_models_env = os.environ.get("GOOGLE_VERTEX_MODELS", "").strip()
-        if vertex_models_env and model_id in {
-            m.strip() for m in vertex_models_env.split(",") if m.strip()
-        }:
+        vertex_models = self._vertex_models
+        if not self._startup_config_frozen:
+            import os
+
+            vertex_models = frozenset(
+                item.strip()
+                for item in os.environ.get("GOOGLE_VERTEX_MODELS", "").split(",")
+                if item.strip()
+            )
+        if model_id in vertex_models:
             return "vertex"
         cfg = self._configs.get(ModelProvider.GOOGLE)
         return cfg.backend if cfg else "ai_studio"
@@ -288,6 +301,10 @@ class RegistryLifecycleMixin:
             and model_id
             and self._google_backend_for_model(model_id) == "vertex"
         ):
+            if self._startup_config_frozen:
+                return self._vertex_api_key_override or configured_key
+            import os
+
             return os.environ.get("VERTEX_API_KEY", "").strip() or configured_key
         return configured_key
 

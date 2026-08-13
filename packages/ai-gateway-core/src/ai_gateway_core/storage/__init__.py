@@ -72,6 +72,7 @@ class ArtifactStorageLike(Protocol):
         session_id: str,
         user_id: str,
         max_bytes: int,
+        expected_source: str = "tool_output_spill",
     ) -> tuple[Any, bytes] | None: ...
 
 
@@ -132,8 +133,9 @@ class NoOpArtifactStorage:
         session_id: str,
         user_id: str,
         max_bytes: int,
+        expected_source: str = "tool_output_spill",
     ) -> tuple[Any, bytes] | None:
-        del artifact_id, tenant_id, session_id, user_id, max_bytes
+        del artifact_id, tenant_id, session_id, user_id, max_bytes, expected_source
         return None
 
 

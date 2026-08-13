@@ -30,6 +30,8 @@ import logging
 import threading
 from dataclasses import dataclass
 
+from ai_gateway_core.logging import record_internal_exception
+
 # ---------------------------------------------------------------------------
 # colour helpers
 
@@ -96,15 +98,15 @@ class TypeScale:
     """
 
     eyebrow_pt: float = 11.0
-    eyebrow_tracking_pct: float = 0.12     # ~120/1000em
-    display_pt: float = 56.0                # hero title
-    h1_pt: float = 36.0                     # slide title
-    h2_pt: float = 24.0                     # section header inside slide
-    lead_pt: float = 20.0                    # intro paragraph / deck
+    eyebrow_tracking_pct: float = 0.12  # ~120/1000em
+    display_pt: float = 56.0  # hero title
+    h1_pt: float = 36.0  # slide title
+    h2_pt: float = 24.0  # section header inside slide
+    lead_pt: float = 20.0  # intro paragraph / deck
     body_pt: float = 16.0
     caption_pt: float = 12.0
-    section_numeral_pt: float = 180.0        # oversized 01/08 decoration
-    stat_numeral_pt: float = 176.0           # hero stat
+    section_numeral_pt: float = 180.0  # oversized 01/08 decoration
+    stat_numeral_pt: float = 176.0  # hero stat
 
     # Weights (python-pptx only cares about bold t/f but we keep the
     # semantic flag for future OOXML work).
@@ -156,11 +158,11 @@ class ColorTokens:
 
 @dataclass(frozen=True)
 class ShapeTokens:
-    radius_sm: float = 0.08          # Inches, for chips
-    radius_md: float = 0.12          # for cards
-    shadow_blur_emu: int = 40_000    # elevation
+    radius_sm: float = 0.08  # Inches, for chips
+    radius_md: float = 0.12  # for cards
+    shadow_blur_emu: int = 40_000  # elevation
     shadow_dist_emu: int = 23_000
-    shadow_dir_deg: int = 90         # shadow points down
+    shadow_dir_deg: int = 90  # shadow points down
     shadow_alpha_per_mille: int = 18_000  # 0..100000
 
 
@@ -371,7 +373,9 @@ def _claude() -> DesignSystem:
             section_numeral_pt=280.0,
             stat_numeral_pt=220.0,
         ),
-        shapes=ShapeTokens(radius_sm=0.03, radius_md=0.06, shadow_blur_emu=50_000, shadow_alpha_per_mille=10_000),
+        shapes=ShapeTokens(
+            radius_sm=0.03, radius_md=0.06, shadow_blur_emu=50_000, shadow_alpha_per_mille=10_000
+        ),
         font_display="Georgia",
         font_body="Helvetica Neue",
     )
@@ -441,13 +445,16 @@ def _probe_installed_fonts() -> set[str]:
 
         import shutil
         import subprocess
+
         if not shutil.which("fc-list"):
             _PROBED_FONTS = set()
             return _PROBED_FONTS
         try:
             out = subprocess.run(
                 ["fc-list", ":", "family"],
-                capture_output=True, text=True, timeout=2,
+                capture_output=True,
+                text=True,
+                timeout=2,
             )
             families: set[str] = set()
             for line in out.stdout.splitlines():
@@ -458,19 +465,31 @@ def _probe_installed_fonts() -> set[str]:
             _log.warning("fc-list timed out after 2s; caching empty font set")
             _PROBED_FONTS = set()
         except Exception as e:
-            _log.warning("fc-list probe failed (%s); caching empty font set", e)
+            record_internal_exception(
+                __name__, "docgen.font_probe_failed", e, level=logging.WARNING
+            )
             _PROBED_FONTS = set()
         return _PROBED_FONTS
 
 
 # Preferred → ordered fallback chain. First font found on this machine wins.
 _SERIF_CHAIN = (
-    "Tiempos Headline", "Georgia", "Charter", "Noto Serif",
-    "DejaVu Serif", "Liberation Serif", "Times New Roman",
+    "Tiempos Headline",
+    "Georgia",
+    "Charter",
+    "Noto Serif",
+    "DejaVu Serif",
+    "Liberation Serif",
+    "Times New Roman",
 )
 _SANS_CHAIN = (
-    "Inter", "Helvetica Neue", "Helvetica", "Arial",
-    "Noto Sans", "DejaVu Sans", "Liberation Sans",
+    "Inter",
+    "Helvetica Neue",
+    "Helvetica",
+    "Arial",
+    "Noto Sans",
+    "DejaVu Sans",
+    "Liberation Sans",
 )
 
 
@@ -496,8 +515,14 @@ def _with_font_fallback(ds: DesignSystem) -> DesignSystem:
     for the declared display/body fonts.
     """
     # Heuristic: classify as serif if the stated family is a known serif.
-    serif_names = {"georgia", "tiempos headline", "charter", "noto serif",
-                   "times", "times new roman"}
+    serif_names = {
+        "georgia",
+        "tiempos headline",
+        "charter",
+        "noto serif",
+        "times",
+        "times new roman",
+    }
     display_is_serif = ds.font_display.lower() in serif_names
     body_is_serif = ds.font_body.lower() in serif_names
     new_display = _pick_font(
@@ -512,6 +537,7 @@ def _with_font_fallback(ds: DesignSystem) -> DesignSystem:
         return ds
     # Frozen dataclass — use dataclasses.replace
     from dataclasses import replace
+
     return replace(ds, font_display=new_display, font_body=new_body)
 
 
@@ -554,12 +580,14 @@ def design_system_from_palette(palette_hex: list[str]) -> DesignSystem:
         accent_on=text_on(primary),
         accent_secondary=accent,
     )
-    return _with_font_fallback(DesignSystem(
-        name="custom",
-        description="Ad-hoc system built from a 5-colour palette.",
-        colors=c,
-        type_scale=TypeScale(),
-        shapes=ShapeTokens(),
-        font_display="Helvetica Neue",
-        font_body="Helvetica Neue",
-    ))
+    return _with_font_fallback(
+        DesignSystem(
+            name="custom",
+            description="Ad-hoc system built from a 5-colour palette.",
+            colors=c,
+            type_scale=TypeScale(),
+            shapes=ShapeTokens(),
+            font_display="Helvetica Neue",
+            font_body="Helvetica Neue",
+        )
+    )

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.enums import StreamEventType
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from .agent_loop_helpers import (
     _apply_tool_schema_correction_limit,
@@ -199,9 +200,10 @@ class StreamingToolValidationMixin:
                         run_id=ctx.run_id,
                     )
                 except Exception as exc:
-                    logger.error(
-                        "Failed to validate middleware approval (exception_type=%s)",
-                        type(exc).__name__,
+                    record_internal_exception(
+                        __name__,
+                        "assistant.core.agent.streaming_tool_validation.internal_failure",
+                        exc,
                     )
                     approval_granted = False
                 if approval_granted:
@@ -231,10 +233,10 @@ class StreamingToolValidationMixin:
                             reason=_verdict.reason or "Approval required by middleware policy",
                         )
                     except Exception as exc:
-                        logger.error(
-                            "Failed to persist middleware approval for %s (exception_type=%s)",
-                            frame.tool_log_name,
-                            type(exc).__name__,
+                        record_internal_exception(
+                            __name__,
+                            "assistant.core.agent.streaming_tool_validation.internal_failure",
+                            exc,
                         )
                 if not pending_approval_id:
                     logger.error(
@@ -287,7 +289,24 @@ class StreamingToolValidationMixin:
                     status="blocked",
                     resume_payload=approval_resume_payload,
                 )
-                if frame.approval_checkpoint is None:
+                checkpoint_pending_tool = (
+                    frame.approval_checkpoint.get("pending_tool")
+                    if isinstance(frame.approval_checkpoint, dict)
+                    else None
+                )
+                checkpoint_arguments_hash = (
+                    checkpoint_pending_tool.get("arguments_hash")
+                    if isinstance(checkpoint_pending_tool, dict)
+                    else None
+                )
+                checkpoint_identity_valid = bool(
+                    isinstance(checkpoint_pending_tool, dict)
+                    and checkpoint_pending_tool.get("tool_id") == frame.tool_id
+                    and checkpoint_pending_tool.get("tool_name") == frame.tool_name
+                    and isinstance(checkpoint_arguments_hash, str)
+                    and re.fullmatch(r"[0-9a-f]{64}", checkpoint_arguments_hash)
+                )
+                if frame.approval_checkpoint is None or not checkpoint_identity_valid:
                     ctx.terminal_exit_reason = "checkpoint_persistence_failed"
                     for rejected_index, rejected_call in enumerate(
                         frame.tool_calls_batch[frame.tool_index - 1 :]
@@ -349,6 +368,7 @@ class StreamingToolValidationMixin:
                         "session_id": ctx.session_id,
                         "tool_id": frame.tool_id,
                         "tool_name": frame.tool_name,
+                        "arguments_hash": checkpoint_arguments_hash,
                         "approval_id": pending_approval_id,
                         "reason": _redact_trace_text(_verdict.reason),
                         "source": _verdict.source,

@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from ai_gateway_core.logging import record_internal_exception
+
 from .chunker import ChunkConfig, chunk_markdown
 from .scope import (
     public_source_label,
@@ -24,7 +26,10 @@ from .scope import (
 
 try:
     from qdrant_client.http import models as qmodels
-except Exception:  # pragma: no cover - optional dependency
+except Exception as exc:  # pragma: no cover - optional dependency
+    record_internal_exception(
+        __name__, "assistant.core.runtime.memory.indexer.internal_failure", exc
+    )
     qmodels = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
@@ -629,11 +634,10 @@ class MemoryIndexer:
                             indexing_token,
                         )
             except Exception as exc:  # pragma: no cover - fallback path
-                fallback_reason = "vector_indexing_failed"
-                logger.warning(
-                    "Runtime memory vector indexing failed (%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.runtime.memory.indexer.internal_failure", exc
                 )
+                fallback_reason = "vector_indexing_failed"
 
         try:
             await self._assert_source_indexable(
@@ -806,9 +810,8 @@ class MemoryIndexer:
                 source_path=source_path,
             )
         except Exception as exc:
-            logger.warning(
-                "Runtime memory deletion manifest lookup failed (%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.runtime.memory.indexer.internal_failure", exc
             )
             return MemoryIndexDeleteResult(
                 status="partial",
@@ -909,9 +912,8 @@ class MemoryIndexer:
                 raise RuntimeError("memory_delete_tombstone_not_persisted")
             source_id = str(_row_value(tombstone_row, "source_id"))
         except Exception as exc:
-            logger.warning(
-                "Runtime memory deletion tombstone failed (%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.runtime.memory.indexer.internal_failure", exc
             )
             return MemoryIndexDeleteResult(
                 status="partial",
@@ -947,9 +949,8 @@ class MemoryIndexer:
                 source_path=source_path,
             )
         except Exception as exc:
-            logger.warning(
-                "Runtime memory deletion manifest read-back failed (%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.runtime.memory.indexer.internal_failure", exc
             )
             return MemoryIndexDeleteResult(
                 status="partial",
@@ -1022,9 +1023,8 @@ class MemoryIndexer:
                     user_id,
                 )
             except Exception as exc:
-                logger.warning(
-                    "Runtime memory SQL deletion failed (%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.runtime.memory.indexer.internal_failure", exc
                 )
                 errors.append("memory_sql_delete_failed")
 
@@ -1053,9 +1053,8 @@ class MemoryIndexer:
             tombstoned = tombstoned or remaining_tombstone
             indexing_active = indexing_active or bool(remaining_indexing_token)
         except Exception as exc:
-            logger.warning(
-                "Runtime memory SQL delete read-back failed (%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.runtime.memory.indexer.internal_failure", exc
             )
             errors.append("memory_sql_delete_readback_failed")
 
@@ -1178,9 +1177,8 @@ class MemoryIndexer:
                 if not receipt_persisted:
                     errors.append("memory_delete_receipt_not_persisted")
             except Exception as exc:
-                logger.warning(
-                    "Runtime memory SQL deletion finalization failed (%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.runtime.memory.indexer.internal_failure", exc
                 )
                 errors.append("memory_sql_delete_finalize_failed")
 
@@ -1217,9 +1215,8 @@ class MemoryIndexer:
             sql_chunks_absent = not remaining_chunks
             receipt_persisted = receipt_persisted or bool(completed_receipt)
         except Exception as exc:
-            logger.warning(
-                "Runtime memory SQL finalization read-back failed (%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.runtime.memory.indexer.internal_failure", exc
             )
             errors.append("memory_sql_finalize_readback_failed")
 
@@ -1759,9 +1756,8 @@ class MemoryIndexer:
                 if inspect.isawaitable(result):
                     await result
             except Exception as exc:
-                logger.warning(
-                    "Runtime memory vector deletion failed (%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.runtime.memory.indexer.internal_failure", exc
                 )
                 receipts[collection_name] = {
                     "status": "failed",
@@ -1782,9 +1778,8 @@ class MemoryIndexer:
                     "points_remaining": remaining_count,
                 }
             except Exception as exc:
-                logger.warning(
-                    "Runtime memory vector delete read-back failed (%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.runtime.memory.indexer.internal_failure", exc
                 )
                 receipts[collection_name] = {
                     "status": "readback_failed",
@@ -1840,9 +1835,8 @@ class MemoryIndexer:
                     ):
                         discovered.append(name)
             except Exception as exc:
-                logger.warning(
-                    "Runtime memory vector collection inventory failed (%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.runtime.memory.indexer.internal_failure", exc
                 )
                 inventory_verified = False
         return tuple(dict.fromkeys(discovered)), inventory_verified

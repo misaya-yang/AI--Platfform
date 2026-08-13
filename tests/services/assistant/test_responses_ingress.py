@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -656,6 +657,64 @@ async def test_sse_generator_propagates_client_close_to_canonical_stream() -> No
     assert first["type"] == "response.created"
     await stream.aclose()
     await asyncio.wait_for(closed.wait(), timeout=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fail_after_first", "expected_log_event"),
+    [
+        (False, "assistant.responses.stream.startup_failed"),
+        (True, "assistant.responses.stream.failed"),
+    ],
+)
+async def test_responses_stream_internal_failure_is_diagnostic_but_publicly_generic(
+    fail_after_first: bool,
+    expected_log_event: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    raw_exception_message = "private-responses-exception-message"
+
+    class FailingAssistant:
+        async def chat_stream(self, **_kwargs: Any):
+            if fail_after_first:
+                yield AssistantStreamEvent("run_started", {"run_id": "run-1"})
+                yield AssistantStreamEvent("text_delta", "partial")
+            raise RuntimeError(raw_exception_message)
+
+        def clear_session_runtime_state(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"cleared": True}
+
+    parsed = parse_responses_request(
+        {"model": "qwen3.7-plus", "input": "hello", "stream": True}
+    )
+    with caplog.at_level(
+        logging.ERROR,
+        logger="assistant_service.api.routes.responses",
+    ):
+        frames = [
+            _sse_payload(frame)
+            async for frame in iter_responses_sse(
+                assistant=FailingAssistant(),
+                parsed=parsed,
+                user=_User(),
+                response_id="resp_test",
+                session_id="session-test",
+            )
+        ]
+
+    assert frames[-1]["type"] == "response.failed"
+    assert frames[-1]["response"]["error"]["message"] == (
+        "The response could not be completed."
+    )
+    assert raw_exception_message not in json.dumps(frames)
+    records = [record for record in caplog.records if record.getMessage().startswith(expected_log_event)]
+    assert len(records) == 1
+    record = records[0]
+    assert record.exc_info is None
+    diagnostic = record.internal_exception
+    assert diagnostic["exception_type"] == "RuntimeError"
+    assert diagnostic["frames"]
+    assert raw_exception_message not in caplog.text
 
 
 @pytest.mark.asyncio

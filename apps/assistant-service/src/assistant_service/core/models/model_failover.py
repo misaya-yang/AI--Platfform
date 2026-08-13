@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 from ai_gateway_core.enums import ModelAccessLevel
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from .model_registry import ModelInfo, ProviderStreamError, StreamDelta
 
@@ -258,6 +258,9 @@ async def stream_with_failover(
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.models.model_failover.internal_failure", exc
+            )
             failure_class = classify_failover_failure(exc)
             if semantic_delta_seen or failure_class is None:
                 raise

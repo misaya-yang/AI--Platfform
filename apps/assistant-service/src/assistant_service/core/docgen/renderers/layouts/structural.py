@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 
+from ai_gateway_core.logging import record_internal_exception
 from pptx.util import Inches
 
 from ...design_system import shade, text_on, tint
@@ -269,7 +270,9 @@ def draw_halfbleed_image(prs, slide, ir: PptxIR, s: PptxSlide, ctx, index: int, 
             slide.shapes.add_picture(s.visual.source.path, Inches(half_w), Inches(0), height=Inches(SLIDE_H))
             placed = True
         except (FileNotFoundError, OSError, ValueError) as exc:
-            logger.warning("halfbleed image %r failed to embed: %s", s.visual.source.path, exc)
+            record_internal_exception(
+                logger, "docgen.structural.image_embed_failed", exc, level=logging.WARNING
+            )
             placed = False
     if not placed:
         prims.rect(slide, left=half_w, top=0, width=SLIDE_W - half_w, height=SLIDE_H, hex_fill=c.surface_inverted)

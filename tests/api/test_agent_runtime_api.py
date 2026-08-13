@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from ai_gateway_core.agents import AgentRuntimeSigner, InMemoryReplayStore
 from ai_gateway_core.exceptions import PermissionDeniedError
 from ai_gateway_core.persistence.repositories.agent_repository import (
     AgentRuntimeUnavailableError,
@@ -21,11 +22,13 @@ from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 
 from src.api.deps import get_user_context
+from src.api.v1 import _assistant_proxy as assistant_proxy_module
 from src.api.v1 import agent_runtime as runtime_module
 from src.api.v1.agent_public import document_router
 from src.api.v1.agent_public import router as public_router
 from src.api.v1.agent_runtime import router as runtime_router
 from src.api.v1.agents import publication_router
+from src.api.v1.assistant import router as assistant_router
 from src.core.auth.user_resolver import UserContext
 
 PUBLICATION_ID = "33333333-3333-4333-8333-333333333333"
@@ -186,6 +189,7 @@ class _Repository:
             "publication_requests_per_day": 10_000,
         }
         self.governance_unavailable = False
+        self.version_resolution_calls: list[dict[str, Any]] = []
 
     async def get_runtime_governance_usage(self, **_kwargs: Any) -> dict[str, Any]:
         if self.governance_unavailable:
@@ -226,6 +230,30 @@ class _Repository:
             result["publication"]["policy"] = copy.deepcopy(self.policy)
         result["publication"]["auth_mode"] = self.public_auth_mode
         result["version"]["agent_version_id"] = kwargs.get("pinned_version_id") or self.version_id
+        return result
+
+    async def resolve_version_runtime(self, **kwargs: Any) -> dict[str, Any]:
+        self.version_resolution_calls.append(copy.deepcopy(kwargs))
+        assert kwargs["tenant_id"] == "tenant-a"
+        assert kwargs["agent_id"] == AGENT_ID
+        assert kwargs["agent_version_id"] == VERSION_ID
+        assert kwargs["user_id"] == "owner-a"
+        result = _resolution("preview")
+        result["publication"] = {
+            "tenant_id": "tenant-a",
+            "agent_id": AGENT_ID,
+            "publication_id": None,
+            "channel": "preview",
+            "auth_mode": "private",
+            "policy": copy.deepcopy(
+                self.policy
+                or {
+                    "attachments": True,
+                    "high_risk_tools": True,
+                    "allowed_origins": [],
+                }
+            ),
+        }
         return result
 
     async def get_publication_channel(self, **kwargs: Any) -> dict[str, Any]:
@@ -434,6 +462,177 @@ def runtime_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, _Reposi
     app.include_router(document_router)
     app.dependency_overrides[get_user_context] = lambda: _user(authenticated=False)
     return TestClient(app), repository, captured
+
+
+@pytest.fixture
+def version_resume_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[TestClient, _Repository, list[dict[str, Any]], list[tuple[str, str, str]]]:
+    monkeypatch.setenv("ASSISTANT_E2E_STUB_LLM", "true")
+    monkeypatch.setenv("GATEWAY_ASSISTANT_SHARED_SECRET", "test-shared-secret-value")
+    captured: list[dict[str, Any]] = []
+    approval_scopes: list[tuple[str, str, str]] = []
+    approved = False
+
+    async def _proxy(_request: Any, user: UserContext, **kwargs: Any) -> Any:
+        nonlocal approved
+        path = str(kwargs["path"])
+        if path.startswith("approvals/"):
+            approval_id = path.removeprefix("approvals/")
+            assert json.loads(kwargs["body"]) == {"approved": True}
+            approval_scopes.append((user.tenant_id, user.user_id, approval_id))
+            approved = True
+            return {"approval": {"approval_id": approval_id, "status": "approved"}}
+
+        assert path == "agent-runtime/chat/stream"
+        body = json.loads(kwargs["body"])
+        captured.append(body)
+
+        async def _events():
+            if body.get("resume_run_id"):
+                assert approved is True
+                yield (
+                    'data: {"event_type":"run_started","data":{"run_id":"run-a",'
+                    '"session_id":"version-session","status":"running"}}\n\n'
+                )
+                yield (
+                    'data: {"event_type":"run_finished","data":{"run_id":"run-a",'
+                    '"session_id":"version-session","status":"succeeded"}}\n\n'
+                )
+            else:
+                yield (
+                    'data: {"event_type":"approval_required","data":{"run_id":"run-a",'
+                    '"session_id":"version-session","approval_id":"approval-a",'
+                    '"checkpoint_id":"checkpoint-a","status":"pending"}}\n\n'
+                )
+
+        return StreamingResponse(_events(), media_type="text/event-stream")
+
+    monkeypatch.setattr(runtime_module, "proxy_to_assistant_service", _proxy)
+    monkeypatch.setattr(assistant_proxy_module, "proxy_to_assistant_service", _proxy)
+    app = FastAPI()
+    repository = _Repository()
+    app.state.agent_repository = repository
+    app.state.session_manager = _Sessions()
+    app.state.agent_runtime_capability_resolver = _Resolver()
+    app.state.agent_runtime_knowledge_resolver = _Resolver()
+    app.include_router(runtime_router, prefix="/api/v1")
+    app.include_router(assistant_router, prefix="/api/v1")
+    app.dependency_overrides[get_user_context] = lambda: _user(authenticated=True)
+    return TestClient(app), repository, captured, approval_scopes
+
+
+def test_version_preview_approval_resume_re_resolves_and_re_signs_same_pinned_version(
+    version_resume_client: tuple[
+        TestClient,
+        _Repository,
+        list[dict[str, Any]],
+        list[tuple[str, str, str]],
+    ],
+) -> None:
+    client, repository, captured, approval_scopes = version_resume_client
+    route = f"/api/v1/agents/{AGENT_ID}/versions/{VERSION_ID}/preview/chat/stream"
+    first = client.post(
+        route,
+        json={"message": "perform the approved action", "session_id": "version-session"},
+    )
+    assert first.status_code == 200, first.text
+    assert "approval_required" in first.text
+
+    approval = client.post(
+        "/api/v1/assistant/approvals/approval-a",
+        json={"approved": True},
+    )
+    assert approval.status_code == 200, approval.text
+    assert approval_scopes == [("tenant-a", "owner-a", "approval-a")]
+
+    resumed = client.post(
+        route,
+        json={
+            "message": "continue",
+            "session_id": "version-session",
+            "resume_run_id": "run-a",
+            "resume_approval_id": "approval-a",
+        },
+    )
+    assert resumed.status_code == 200, resumed.text
+    assert "run_finished" in resumed.text
+    assert len(repository.version_resolution_calls) == 2
+    assert len(captured) == 2
+
+    initial, resume = captured
+    assert resume["resume_run_id"] == "run-a"
+    assert resume["resume_approval_id"] == "approval-a"
+    signed_resume_body = {key: value for key, value in resume.items() if key != "runtime_envelope"}
+    assert resume["runtime_envelope"]["request_body_hash"] == runtime_module.runtime_sha256(
+        signed_resume_body
+    )
+    verified_resume = AgentRuntimeSigner(
+        secret="test-shared-secret-value",
+        issuer="ai-gateway",
+        replay_store=InMemoryReplayStore(),
+    ).verify(
+        resume["runtime_envelope"],
+        request_body=signed_resume_body,
+        expected_tenant_id="tenant-a",
+        expected_caller_principal="owner-a",
+        expected_session_id="version-session",
+    )
+    assert verified_resume.agent_id == AGENT_ID
+    assert verified_resume.agent_version_id == VERSION_ID
+    assert verified_resume.resolved_snapshot == resume["runtime_envelope"]["resolved_snapshot"]
+    assert initial["runtime_envelope"]["resolved_snapshot"] == resume["runtime_envelope"][
+        "resolved_snapshot"
+    ]
+    snapshot = resume["runtime_envelope"]["resolved_snapshot"]
+    assert snapshot["agent_id"] == AGENT_ID
+    assert snapshot["agent_version_id"] == VERSION_ID
+    assert snapshot["channel_policy"]["high_risk_tools"] is True
+
+    cross_version = client.post(
+        f"/api/v1/agents/{AGENT_ID}/versions/99999999-9999-4999-8999-999999999999/preview/chat/stream",
+        json={
+            "message": "continue",
+            "session_id": "version-session",
+            "resume_run_id": "run-a",
+            "resume_approval_id": "approval-a",
+        },
+    )
+    assert cross_version.status_code == 404
+    assert len(repository.version_resolution_calls) == 2
+    assert len(captured) == 2
+
+    cross_agent = client.post(
+        f"/api/v1/agents/88888888-8888-4888-8888-888888888888/versions/{VERSION_ID}/preview/chat/stream",
+        json={
+            "message": "continue",
+            "session_id": "version-session",
+            "resume_run_id": "run-a",
+            "resume_approval_id": "approval-a",
+        },
+    )
+    assert cross_agent.status_code == 404
+    assert len(repository.version_resolution_calls) == 2
+    assert len(captured) == 2
+
+    repository.policy = {
+        "attachments": True,
+        "high_risk_tools": False,
+        "allowed_origins": [],
+    }
+    changed_policy = client.post(
+        route,
+        json={
+            "message": "continue",
+            "session_id": "version-session",
+            "resume_run_id": "run-a",
+            "resume_approval_id": "approval-a",
+        },
+    )
+    assert changed_policy.status_code == 404
+    assert changed_policy.json()["detail"]["code"] == "AGENT_RUNTIME_SESSION_NOT_FOUND"
+    assert len(repository.version_resolution_calls) == 3
+    assert len(captured) == 2
 
 
 def test_runtime_api_requires_scoped_token_and_creates_isolated_session(

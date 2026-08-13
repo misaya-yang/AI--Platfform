@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.agent_plugins import AgentPluginLoadError, load_agent_plugin
+from ai_gateway_core.logging import record_internal_exception
 
 from ..context.assembler import ContextAssemblerV2
 from ..memory.indexer import MemoryIndexer
@@ -168,7 +169,9 @@ class AssistantRuntimeAdapter:
                 package = load_agent_plugin(resolved)
             except AgentPluginLoadError as exc:
                 self.agent_plugin_status.append({"status": "rejected", "code": exc.code})
-                logger.warning("agent_plugin.rejected code=%s", exc.code)
+                record_internal_exception(
+                    logger, "agent_plugin.runtime_load_rejected", exc, level=logging.WARNING
+                )
                 continue
 
             registered: list[str] = []
@@ -211,10 +214,13 @@ class AssistantRuntimeAdapter:
         vector_store: Any | None = None,
         embedder: Any | None = None,
         base_memory_dir: str | None = None,
+        legacy_memory_dir: str | None = None,
+        memory_max_source_bytes: int | None = None,
         agent_plugin_catalog: AgentPluginCatalog | None = None,
+        features: AssistantRuntimeFeatures | None = None,
     ) -> AssistantRuntimeAdapter:
         """Build runtime adapter with env-driven feature flags."""
-        features = AssistantRuntimeFeatures(
+        resolved_features = features or AssistantRuntimeFeatures(
             memory_v2=_env_flag("ASSISTANT_RUNTIME_MEMORY_V2", True),
             context_v2=_env_flag("ASSISTANT_RUNTIME_CONTEXT_V2", True),
             tool_policy_v2=_env_flag("ASSISTANT_RUNTIME_TOOL_POLICY_V2", False),
@@ -228,9 +234,13 @@ class AssistantRuntimeAdapter:
             if base_memory_dir is not None
             else os.getenv("ASSISTANT_RUNTIME_MEMORY_DIR")
         )
-        memory_store = MemorySourceStore(configured_memory_dir)
+        memory_store = MemorySourceStore(
+            configured_memory_dir,
+            legacy_base_dir=legacy_memory_dir,
+            max_source_bytes=memory_max_source_bytes,
+        )
         adapter = cls(
-            features=features,
+            features=resolved_features,
             memory_store=memory_store,
             memory_indexer=MemoryIndexer(
                 database,
@@ -318,7 +328,12 @@ class AssistantRuntimeAdapter:
                     updated_at=doc.updated_at,
                 )
                 loaded_sources += 1
-            except Exception:
+            except Exception as exc:
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.runtime.compat.runtime_adapter.internal_failure",
+                    exc,
+                )
                 continue
 
         # Old releases used a lossy tenant/user directory sanitizer.  Never
@@ -333,9 +348,10 @@ class AssistantRuntimeAdapter:
                     user_id=user_id,
                 )
             except Exception as exc:
-                logger.warning(
-                    "Runtime legacy memory owner-proof lookup failed (%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.runtime.compat.runtime_adapter.internal_failure",
+                    exc,
                 )
         for record in legacy_records:
             try:
@@ -360,7 +376,12 @@ class AssistantRuntimeAdapter:
                     updated_at=document.updated_at,
                 )
                 loaded_sources += 1
-            except Exception:
+            except Exception as exc:
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.runtime.compat.runtime_adapter.internal_failure",
+                    exc,
+                )
                 continue
 
         fallback_used = False
@@ -379,9 +400,8 @@ class AssistantRuntimeAdapter:
                 max_results=max_results,
             )
         except Exception as exc:
-            logger.warning(
-                "Runtime memory retrieval failed (%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.runtime.compat.runtime_adapter.internal_failure", exc
             )
             snippets = []
             fallback_used = True
@@ -524,9 +544,10 @@ class AssistantRuntimeAdapter:
                     legacy_owner_proven=legacy_owner_proven,
                 )
             except Exception as exc:
-                logger.warning(
-                    "Runtime memory source staging failed (%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.runtime.compat.runtime_adapter.internal_failure",
+                    exc,
                 )
                 stage_status = "failed"
             staged_by_this_call = bool(
@@ -596,9 +617,8 @@ class AssistantRuntimeAdapter:
             prepare_receipt = prepare_result.to_dict()
             errors.extend(prepare_result.errors)
         except Exception as exc:
-            logger.warning(
-                "Runtime memory derived-index deletion failed (%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.runtime.compat.runtime_adapter.internal_failure", exc
             )
             prepare_result = None
             prepare_receipt = {
@@ -626,9 +646,10 @@ class AssistantRuntimeAdapter:
                         legacy_owner_proven=legacy_owner_proven,
                     )
                 except Exception as exc:
-                    logger.warning(
-                        "Runtime memory staged source restoration failed (%s)",
-                        type(exc).__name__,
+                    record_internal_exception(
+                        __name__,
+                        "assistant.core.runtime.compat.runtime_adapter.internal_failure",
+                        exc,
                     )
                     restore_status = "failed"
                 restored_after_conflict = restore_status == "restored"
@@ -671,9 +692,10 @@ class AssistantRuntimeAdapter:
                     legacy_owner_proven=legacy_owner_proven,
                 )
             except Exception as exc:
-                logger.warning(
-                    "Runtime memory source file deletion failed (%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.runtime.compat.runtime_adapter.internal_failure",
+                    exc,
                 )
                 file_status = "failed"
 
@@ -719,9 +741,8 @@ class AssistantRuntimeAdapter:
             finalize_receipt = finalize_result.to_dict()
             errors.extend(finalize_result.errors)
         except Exception as exc:
-            logger.warning(
-                "Runtime memory deletion finalization failed (%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.runtime.compat.runtime_adapter.internal_failure", exc
             )
             finalize_result = None
             finalize_receipt = {
@@ -743,9 +764,10 @@ class AssistantRuntimeAdapter:
                     legacy_owner_proven=legacy_owner_proven,
                 )
             except Exception as exc:
-                logger.warning(
-                    "Runtime memory deletion marker cleanup failed (%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.runtime.compat.runtime_adapter.internal_failure",
+                    exc,
                 )
                 errors.append("memory_source_marker_cleanup_failed")
             marker_remaining = self.memory_store.deletion_marker_exists(
@@ -809,9 +831,10 @@ class AssistantRuntimeAdapter:
                     for source in legacy_sources
                 )
             except Exception as exc:
-                logger.warning(
-                    "Runtime legacy memory inspection failed (%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.runtime.compat.runtime_adapter.internal_failure",
+                    exc,
                 )
                 legacy_quarantined += 1
 
@@ -894,9 +917,8 @@ class AssistantRuntimeAdapter:
                 user_id=user_id,
             )
         except Exception as exc:
-            logger.warning(
-                "Runtime memory pending deletion inspection failed (%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.runtime.compat.runtime_adapter.internal_failure", exc
             )
             inventory["status"] = "partial"
             inventory["errors"] = ["memory_pending_deletion_inspect_failed"]
@@ -986,9 +1008,10 @@ class AssistantRuntimeAdapter:
                         scoped_records,
                     )
                 except Exception as exc:
-                    logger.warning(
-                        "Runtime legacy memory handle lookup failed (%s)",
-                        type(exc).__name__,
+                    record_internal_exception(
+                        __name__,
+                        "assistant.core.runtime.compat.runtime_adapter.internal_failure",
+                        exc,
                     )
 
         if local_record is None:
@@ -1005,9 +1028,10 @@ class AssistantRuntimeAdapter:
                         source_handle=source_id,
                     )
                 except Exception as exc:
-                    logger.warning(
-                        "Runtime SQL-only memory handle lookup failed (%s)",
-                        type(exc).__name__,
+                    record_internal_exception(
+                        __name__,
+                        "assistant.core.runtime.compat.runtime_adapter.internal_failure",
+                        exc,
                     )
                     database_record = None
                 if database_record is not None and database_record.get("owner_proven") is True:
@@ -1045,9 +1069,10 @@ class AssistantRuntimeAdapter:
                     source_handle=source_id,
                 )
             except Exception as exc:
-                logger.warning(
-                    "Runtime memory pending deletion lookup failed (%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.runtime.compat.runtime_adapter.internal_failure",
+                    exc,
                 )
             try:
                 completed_receipt = await self.memory_indexer.resolve_completed_source_deletion(
@@ -1056,9 +1081,10 @@ class AssistantRuntimeAdapter:
                     source_handle=source_id,
                 )
             except Exception as exc:
-                logger.warning(
-                    "Runtime memory completed deletion lookup failed (%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.runtime.compat.runtime_adapter.internal_failure",
+                    exc,
                 )
 
         def resolve_persisted_path(
@@ -1120,9 +1146,10 @@ class AssistantRuntimeAdapter:
                     legacy_owner_proven=completed_is_legacy,
                 )
             except Exception as exc:
-                logger.warning(
-                    "Runtime completed memory marker cleanup failed (%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.runtime.compat.runtime_adapter.internal_failure",
+                    exc,
                 )
                 return unresolved("memory_source_marker_cleanup_failed")
             if self.memory_store.deletion_marker_exists(
@@ -1226,9 +1253,10 @@ class AssistantRuntimeAdapter:
                 "flush": flush_result,
             }
         except Exception as exc:
-            logger.warning(
-                "Runtime memory pre-compact flush failed (%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__,
+                "assistant.core.runtime.compat.runtime_adapter.internal_failure",
+                exc,
             )
             return {
                 "status": "failed",

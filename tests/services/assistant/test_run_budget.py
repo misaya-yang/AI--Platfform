@@ -135,6 +135,19 @@ def test_run_budget_restore_preserves_usage_and_cannot_expand_limits() -> None:
     assert restored.elapsed_seconds == pytest.approx(5.0)
 
 
+def test_run_budget_restore_rejects_tighter_limit_without_refunding_usage() -> None:
+    original = RunBudget(_limits(max_tool_calls=10, max_parallel_tool_calls=3))
+    original.reserve_tool_batch(3)
+    snapshot = original.snapshot()
+
+    with pytest.raises(ValueError, match="limits exceed configured limits"):
+        RunBudget.restore(
+            configured_limits=_limits(max_tool_calls=5, max_parallel_tool_calls=3),
+            snapshot=snapshot,
+        )
+    assert snapshot["usage"]["tool_calls"] == 3
+
+
 @pytest.mark.parametrize(
     ("field_name", "invalid_value"),
     [

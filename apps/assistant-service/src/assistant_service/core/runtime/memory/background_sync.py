@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable, Hashable
 from dataclasses import dataclass, field
 from typing import Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 logger = get_logger(__name__)
 
@@ -116,12 +116,11 @@ class OrderedBackgroundSync:
             receipt.error_code = "memory_background_sync_cancelled"
             raise
         except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.runtime.memory.background_sync.internal_failure", exc
+            )
             receipt.status = "failed"
             receipt.error_code = "memory_background_sync_failed"
-            logger.warning(
-                "Runtime memory background sync failed (exception_type=%s)",
-                type(exc).__name__,
-            )
         finally:
             receipt.finished_at = time.time()
 

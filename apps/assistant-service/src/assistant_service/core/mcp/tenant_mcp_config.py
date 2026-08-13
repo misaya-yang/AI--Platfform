@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 logger = get_logger(__name__)
 
@@ -92,7 +92,9 @@ class TenantMCPConfigService:
                 tenant_id,
             )
         except Exception as e:
-            logger.warning(f"Failed to load MCP config for {tenant_id}: {e}")
+            record_internal_exception(
+                __name__, "assistant.core.mcp.tenant_mcp_config.internal_failure", e
+            )
             return TenantMCPConfig(
                 tenant_id=tenant_id,
                 allowed_servers=set(),

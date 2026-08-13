@@ -15,7 +15,7 @@ from __future__ import annotations
 import ast
 from typing import TYPE_CHECKING, Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from .tool_registry import (
     ToolCallRequest,
@@ -38,32 +38,34 @@ logger = get_logger(__name__)
 # AST-level denylist: modules that suggest sandbox-escape intent.
 # Docker + gVisor are the primary defense; this is defense-in-depth to
 # reject obvious escape attempts BEFORE they reach the sandbox.
-_DENIED_IMPORTS = frozenset({
-    "ctypes",           # direct memory / syscalls
-    "ctypes.util",
-    "mmap",             # memory mapping
-    "resource",         # ulimit manipulation
-    "pty",              # terminal allocation
-    "fcntl",            # file descriptor control
-    "termios",
-    "tty",
-    "multiprocessing",  # process spawning
-    "subprocess",       # shell out
-    "sh",
-    "pexpect",
-    "os.exec",
-    # Networking — code executor has no network by design; any import is suspicious
-    "socket",
-    "_socket",
-    "ssl",
-    "urllib.request",
-    "urllib2",
-    "http.client",
-    "httplib",
-    # Low-level process/signal
-    "signal",
-    "syslog",
-})
+_DENIED_IMPORTS = frozenset(
+    {
+        "ctypes",  # direct memory / syscalls
+        "ctypes.util",
+        "mmap",  # memory mapping
+        "resource",  # ulimit manipulation
+        "pty",  # terminal allocation
+        "fcntl",  # file descriptor control
+        "termios",
+        "tty",
+        "multiprocessing",  # process spawning
+        "subprocess",  # shell out
+        "sh",
+        "pexpect",
+        "os.exec",
+        # Networking — code executor has no network by design; any import is suspicious
+        "socket",
+        "_socket",
+        "ssl",
+        "urllib.request",
+        "urllib2",
+        "http.client",
+        "httplib",
+        # Low-level process/signal
+        "signal",
+        "syslog",
+    }
+)
 
 
 def _scan_code_for_denied_imports(code: str) -> str | None:
@@ -422,7 +424,9 @@ class CodeExecutorToolExecutor(ToolExecutor):
             )
 
         except Exception as e:
-            logger.error(f"Code execution failed: {e}", exc_info=True)
+            record_internal_exception(
+                __name__, "assistant.core.tools.code_executor_tool.internal_failure", e
+            )
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,

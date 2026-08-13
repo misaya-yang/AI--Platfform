@@ -31,16 +31,17 @@ The chain calls `getattr(mw, hook, None)` and skips missing hooks.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from ai_gateway_core.logging import get_logger, log_internal_exception
+
 if TYPE_CHECKING:  # avoid runtime import cycle; AgentLoopContext imports this
     from .agent_loop import AgentLoopContext, AgentLoopEvent
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class VerdictKind(str, Enum):
@@ -134,10 +135,11 @@ class MiddlewareChain:
             try:
                 async for event in hook(ctx, messages):
                     yield event
-            except Exception:
-                logger.exception(
-                    "middleware %r before_call raised; skipping",
-                    getattr(mw, "name", type(mw).__name__),
+            except Exception as exc:
+                log_internal_exception(
+                    logger,
+                    "assistant.middleware.before_call.failed",
+                    exc,
                 )
 
     async def run_on_tool_result(
@@ -159,10 +161,11 @@ class MiddlewareChain:
                 continue
             try:
                 replacement = await hook(ctx, tool_name, arguments, current)
-            except Exception:
-                logger.exception(
-                    "middleware %r on_tool_result raised; leaving result unchanged",
-                    getattr(mw, "name", type(mw).__name__),
+            except Exception as exc:
+                log_internal_exception(
+                    logger,
+                    "assistant.middleware.on_tool_result.failed",
+                    exc,
                 )
                 continue
             if replacement is not None:
@@ -187,10 +190,11 @@ class MiddlewareChain:
                 continue
             try:
                 replacement = await hook(ctx, current)
-            except Exception:
-                logger.exception(
-                    "middleware %r on_stream_event raised; leaving event unchanged",
-                    getattr(mw, "name", type(mw).__name__),
+            except Exception as exc:
+                log_internal_exception(
+                    logger,
+                    "assistant.middleware.on_stream_event.failed",
+                    exc,
                 )
                 continue
             if replacement is not None:
@@ -211,10 +215,11 @@ class MiddlewareChain:
             try:
                 async for event in hook(ctx, error, phase):
                     yield event
-            except Exception:
-                logger.exception(
-                    "middleware %r on_error raised; skipping",
-                    getattr(mw, "name", type(mw).__name__),
+            except Exception as exc:
+                log_internal_exception(
+                    logger,
+                    "assistant.middleware.on_error.failed",
+                    exc,
                 )
 
     async def run_on_tool_call(
@@ -234,10 +239,11 @@ class MiddlewareChain:
                 continue
             try:
                 verdict = await hook(ctx, tool_name, arguments)
-            except Exception:
-                logger.exception(
-                    "middleware %r on_tool_call raised; treating as allow",
-                    getattr(mw, "name", type(mw).__name__),
+            except Exception as exc:
+                log_internal_exception(
+                    logger,
+                    "assistant.middleware.on_tool_call.failed",
+                    exc,
                 )
                 continue
             if not isinstance(verdict, ToolVerdict):

@@ -14,11 +14,12 @@ sandbox client in Phase 2.
 
 from __future__ import annotations
 
-import contextlib
+import logging
 import re
 import time
 from pathlib import Path
 
+from ai_gateway_core.logging import record_internal_exception
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Cm, Pt, RGBColor
@@ -56,7 +57,10 @@ class DocxRenderer(BaseRenderer):
             style = doc.styles["Normal"]
             style.font.name = ir.theme.font_primary.family
             style.font.size = Pt(ir.theme.font_primary.size_pt)
-        except Exception:
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.docgen.renderers.docx_renderer.internal_failure", exc
+            )
             pass
 
     def _render_paragraph(self, doc: Document, block: ParagraphBlock) -> None:
@@ -130,8 +134,15 @@ class DocxRenderer(BaseRenderer):
         width = Cm(block.width_pt / 28.35) if block.width_pt else Cm(14)
         doc.add_picture(str(src), width=width)
         # Alt text: python-docx needs to patch the XML directly to set descr=
-        with contextlib.suppress(Exception):
+        try:
             self._set_image_alt(doc, block.alt_text)
+        except Exception as exc:
+            record_internal_exception(
+                __name__,
+                "assistant.core.docgen.renderers.docx_renderer.suppressed_failure",
+                exc,
+                level=logging.DEBUG,
+            )
 
     def _set_image_alt(self, doc: Document, alt: str) -> None:
         # Iterate the last inline picture and set descr/title on the <wp:docPr>.

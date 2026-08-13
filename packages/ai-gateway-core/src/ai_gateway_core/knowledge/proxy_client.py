@@ -96,11 +96,15 @@ class KBProxyClient:
         timeout: httpx.Timeout | float | None = None,
         limits: httpx.Limits | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        retry_policy: RetryPolicy | None = None,
+        gateway_secret: GatewaySecret | None = None,
     ) -> None:
         self.base_url = (base_url or KB_SERVICE_URL).rstrip("/")
         self.timeout = _coerce_timeout(timeout) if timeout is not None else _timeout_from_env()
         self.limits = limits or _limits_from_env()
         self.transport = transport
+        self.retry_policy = retry_policy
+        self.gateway_secret = gateway_secret
         self._client: httpx.AsyncClient | None = None
         self._service_client: InternalServiceClient | None = None
 
@@ -139,7 +143,8 @@ class KBProxyClient:
                     base_url=self.base_url,
                     timeout=self.timeout,
                     limits=self.limits,
-                    retry_policy=RetryPolicy(
+                    retry_policy=self.retry_policy
+                    or RetryPolicy(
                         max_attempts=_get_int_env(
                             "KB_PROXY_RETRY_MAX_ATTEMPTS",
                             _get_int_env("SERVICE_RETRY_MAX_ATTEMPTS", 2),
@@ -147,7 +152,7 @@ class KBProxyClient:
                         base_delay_ms=_get_int_env("SERVICE_RETRY_BASE_DELAY_MS", 50),
                         max_delay_ms=_get_int_env("SERVICE_RETRY_MAX_DELAY_MS", 500),
                     ),
-                    gateway_secret=_get_signer(),
+                    gateway_secret=self.gateway_secret or _get_signer(),
                 ),
                 transport=self.transport,
             )

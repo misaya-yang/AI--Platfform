@@ -23,9 +23,23 @@ import tempfile
 import threading
 from pathlib import Path
 
+_SOFFICE_BOOTSTRAP_ENV = (
+    "HOME",
+    "LANG",
+    "LANGUAGE",
+    "LC_ALL",
+    "PATH",
+    "TMPDIR",
+    "TZ",
+)
+
 
 def get_soffice_env() -> dict:
-    env = os.environ.copy()
+    env = {
+        name: value
+        for name in _SOFFICE_BOOTSTRAP_ENV
+        if (value := os.getenv(name)) is not None
+    }
     env["SAL_USE_VCLPLUGIN"] = "svp"
 
     if _needs_shim():

@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from ..tool_invoker import ToolInvocationContext
 from ..tools.tool_registry import ToolCallResult
@@ -384,7 +384,12 @@ class CommandLifecycleMixin:
                         if isinstance(stored_receipt, str):
                             try:
                                 stored_receipt = json.loads(stored_receipt)
-                            except Exception:
+                            except Exception as exc:
+                                record_internal_exception(
+                                    __name__,
+                                    "assistant.core.gateway.command_lifecycle.internal_failure",
+                                    exc,
+                                )
                                 stored_receipt = {}
                         if not isinstance(stored_receipt, dict):
                             stored_receipt = {}
@@ -399,7 +404,12 @@ class CommandLifecycleMixin:
                         if isinstance(stored_result, str):
                             try:
                                 stored_result = json.loads(stored_result)
-                            except Exception:
+                            except Exception as exc:
+                                record_internal_exception(
+                                    __name__,
+                                    "assistant.core.gateway.command_lifecycle.internal_failure",
+                                    exc,
+                                )
                                 stored_result = None
                         recovered_success = existing_status in {
                             "result_recorded_succeeded",
@@ -518,6 +528,9 @@ class CommandLifecycleMixin:
                         raise RuntimeError("expired command reclaim was not confirmed")
                 await _insert_new_command()
         except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.gateway.command_lifecycle.internal_failure", exc
+            )
             raise RuntimeError("durable command claim failed") from exc
         return command_id, True, "created", None
 
@@ -596,6 +609,9 @@ class CommandLifecycleMixin:
             self._commands[command_id] = command_record
             return True
         except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.gateway.command_lifecycle.internal_failure", exc
+            )
             legacy_query = """
                 INSERT INTO assistant_command_queue (
                     command_id, tenant_id, user_id, session_id, run_id,
@@ -622,10 +638,9 @@ class CommandLifecycleMixin:
                     return False
                 self._commands[command_id] = command_record
                 return True
-            except Exception:
-                logger.warning(
-                    "Failed to persist command queue item (exception_type=%s)",
-                    type(exc).__name__,
+            except Exception as exc:
+                record_internal_exception(
+                    __name__, "assistant.core.gateway.command_lifecycle.internal_failure", exc
                 )
                 return False
 
@@ -684,9 +699,8 @@ class CommandLifecycleMixin:
                 json.dumps(receipt_metadata or {}),
             )
         except Exception as exc:
-            logger.warning(
-                "Failed to update command queue item (exception_type=%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.gateway.command_lifecycle.internal_failure", exc
             )
             return False
         if not self._write_affected_one(receipt):
@@ -747,9 +761,8 @@ class CommandLifecycleMixin:
                 datetime.now(timezone.utc) + timedelta(seconds=45),
             )
         except Exception as exc:
-            logger.warning(
-                "Failed to authorize command dispatch (exception_type=%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.gateway.command_lifecycle.internal_failure", exc
             )
             return False
         if not row or str(row.get("command_id") or "") != command_id:

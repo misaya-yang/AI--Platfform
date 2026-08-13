@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, log_internal_exception
 
 if TYPE_CHECKING:
     from .tool_registry import ToolDefinition
@@ -31,6 +31,7 @@ class TenantToolPolicy:
     allowed_tools: set[str] = field(default_factory=set)  # whitelist (empty = allow all)
     blocked_tools: set[str] = field(default_factory=set)  # blacklist (precedence over whitelist)
     allowed_categories: set[str] = field(default_factory=set)  # e.g. {"retrieval", "generation"}
+    max_calls_per_session: int = 100
     max_calls_per_minute: int = 20
 
 
@@ -183,21 +184,33 @@ class TenantToolPolicyService:
                 "SELECT * FROM tenant_tool_policies WHERE tenant_id = $1",
                 tenant_id,
             )
-        except Exception as e:
-            logger.warning(f"Failed to load tool policy for {tenant_id}: {e}")
+        except Exception as exc:
+            log_internal_exception(
+                __name__,
+                "assistant.tenant_tool_policy.load_failed",
+                exc,
+            )
             # A storage outage is not evidence of an allow-all policy. Let the
             # canonical catalog/invocation boundary convert this uncertainty
             # into a scoped deny decision.
-            raise RuntimeError("Tenant tool policy is unavailable") from e
+            raise RuntimeError("Tenant tool policy is unavailable") from exc
 
         if not row:
             return TenantToolPolicy(tenant_id=tenant_id)
 
+        max_calls_per_session = row.get("max_calls_per_session", 100)
+        if (
+            isinstance(max_calls_per_session, bool)
+            or not isinstance(max_calls_per_session, int)
+            or max_calls_per_session <= 0
+        ):
+            raise RuntimeError("Tenant tool policy session limit is invalid")
         return TenantToolPolicy(
             tenant_id=tenant_id,
             allowed_tools=set(row["allowed_tools"] or []),
             blocked_tools=set(row["blocked_tools"] or []),
             allowed_categories=set(row["allowed_categories"] or []),
+            max_calls_per_session=max_calls_per_session,
             max_calls_per_minute=row.get("max_calls_per_minute", 20),
         )
 

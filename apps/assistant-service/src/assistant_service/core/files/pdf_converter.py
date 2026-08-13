@@ -18,7 +18,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 
 def import_pymupdf():
@@ -29,9 +29,11 @@ def import_pymupdf():
     """
     try:
         import pymupdf as fitz  # type: ignore
+
         return fitz
     except ImportError:
         import fitz  # type: ignore
+
         return fitz
 
 
@@ -295,7 +297,7 @@ class PDFConverter:
             return result
 
         except ImportError as e:
-            logger.error(f"[PDFConverter] PyMuPDF not installed: {e}")
+            record_internal_exception(logger, "pdf_converter.dependency_missing", e)
             raise PDFConversionError(
                 "PDF conversion requires PyMuPDF. Install with: pip install pymupdf",
                 file_path=file_path,
@@ -303,9 +305,8 @@ class PDFConverter:
             )
 
         except Exception as e:
-            logger.error(
-                f"[PDFConverter] Failed to convert {file_path}: {e}",
-                exc_info=True,
+            record_internal_exception(
+                __name__, "assistant.core.files.pdf_converter.internal_failure", e
             )
             raise PDFConversionError(
                 f"Failed to convert PDF: {str(e)}",

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 from ai_gateway_core.security import redact_trace_text
 
 from ..memory.memory_manager import (
@@ -283,9 +283,8 @@ class UpdateMemoryExecutor(ToolExecutor):
                 metadata={"error_code": MEMORY_POLICY_DENIED},
             )
         except Exception as exc:
-            logger.error(
-                "Memory tool operation failed (exception_type=%s)",
-                redact_trace_text(type(exc).__name__, limit=80),
+            record_internal_exception(
+                __name__, "assistant.core.tools.memory_tool.internal_failure", exc
             )
             return ToolCallResult(
                 call_id=request.call_id,

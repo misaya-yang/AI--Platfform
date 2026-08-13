@@ -6,7 +6,10 @@ import hashlib
 import os
 import re
 import time
+from dataclasses import replace
 from typing import Any
+
+from ai_gateway_core.logging import record_internal_exception
 
 from ..rag.context_engine import estimate_tokens
 from .tool_registry import (
@@ -91,8 +94,18 @@ READ_TOOL_ARTIFACT_DEFINITION = ToolDefinition(
 
 
 class ReadToolArtifactExecutor(ToolExecutor):
-    def __init__(self, artifact_storage: Any) -> None:
+    def __init__(
+        self,
+        artifact_storage: Any,
+        *,
+        max_limit_tokens: int = _MAX_LIMIT_TOKENS,
+    ) -> None:
         self.artifact_storage = artifact_storage
+        self.max_limit_tokens = min(
+            _ABSOLUTE_MAX_LIMIT_TOKENS,
+            max(256, int(max_limit_tokens)),
+        )
+        self.default_limit_tokens = min(4_000, self.max_limit_tokens)
 
     async def execute(self, request: ToolCallRequest) -> ToolCallResult:
         started = time.monotonic()
@@ -102,7 +115,7 @@ class ReadToolArtifactExecutor(ToolExecutor):
             for key in ("tenant_id", "session_id", "user_id")
         }
         offset = request.arguments.get("offset", 0)
-        limit = request.arguments.get("limit", _DEFAULT_LIMIT_TOKENS)
+        limit = request.arguments.get("limit", self.default_limit_tokens)
         invalid = (
             _ARTIFACT_ID_RE.fullmatch(artifact_id) is None
             or not all(scope.values())
@@ -111,7 +124,7 @@ class ReadToolArtifactExecutor(ToolExecutor):
             or not 0 <= offset <= _MAX_ARTIFACT_BYTES
             or isinstance(limit, bool)
             or not isinstance(limit, int)
-            or not 1 <= limit <= _MAX_LIMIT_TOKENS
+            or not 1 <= limit <= self.max_limit_tokens
         )
         if invalid:
             return self._error(request, "ARTIFACT_READ_INVALID", started)
@@ -125,7 +138,10 @@ class ReadToolArtifactExecutor(ToolExecutor):
                 max_bytes=_MAX_ARTIFACT_BYTES,
                 **scope,
             )
-        except Exception:
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.tools.tool_artifact_reader.internal_failure", exc
+            )
             return self._error(request, "ARTIFACT_READ_UNAVAILABLE", started)
         if scoped is None:
             return self._error(request, "ARTIFACT_NOT_FOUND", started)
@@ -206,7 +222,11 @@ class ReadToolArtifactExecutor(ToolExecutor):
         )
 
 
-def register_tool_artifact_reader(artifact_storage: Any) -> bool:
+def register_tool_artifact_reader(
+    artifact_storage: Any,
+    *,
+    max_limit_tokens: int = _MAX_LIMIT_TOKENS,
+) -> bool:
     if not artifact_storage or not callable(
         getattr(artifact_storage, "read_artifact_scoped", None)
     ):
@@ -214,11 +234,32 @@ def register_tool_artifact_reader(artifact_storage: Any) -> bool:
     scope_gate = getattr(artifact_storage, "supports_scoped_artifact_reads", None)
     try:
         scope_is_safe = callable(scope_gate) and bool(scope_gate())
-    except Exception:
+    except Exception as exc:
+        record_internal_exception(
+            __name__, "assistant.core.tools.tool_artifact_reader.internal_failure", exc
+        )
         return False
     if not scope_is_safe:
         return False
-    register_tool(READ_TOOL_ARTIFACT_DEFINITION, ReadToolArtifactExecutor(artifact_storage))
+    resolved_max = min(_ABSOLUTE_MAX_LIMIT_TOKENS, max(256, int(max_limit_tokens)))
+    parameters = [replace(parameter) for parameter in READ_TOOL_ARTIFACT_DEFINITION.parameters]
+    for parameter in parameters:
+        if parameter.name != "limit":
+            continue
+        parameter.default = min(4_000, resolved_max)
+        parameter.description = (
+            f"Approximate token budget for this slice (1-{resolved_max}); "
+            f"default {parameter.default}."
+        )
+        parameter.schema_constraints = {"minimum": 1, "maximum": resolved_max}
+    definition = replace(READ_TOOL_ARTIFACT_DEFINITION, parameters=parameters)
+    register_tool(
+        definition,
+        ReadToolArtifactExecutor(
+            artifact_storage,
+            max_limit_tokens=resolved_max,
+        ),
+    )
     return True
 
 

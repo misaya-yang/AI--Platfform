@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from ..tool_invoker import ToolInvocationContext
 from .execution_records import ApprovalRecord
@@ -148,9 +148,8 @@ class ApprovalLifecycleMixin:
                     reason,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "approve DB update failed, approval remains unchanged (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.gateway.approval_lifecycle.internal_failure", exc
                 )
                 return None
 
@@ -159,7 +158,12 @@ class ApprovalLifecycleMixin:
                 if isinstance(args, str):
                     try:
                         args = json.loads(args)
-                    except Exception:
+                    except Exception as exc:
+                        record_internal_exception(
+                            __name__,
+                            "assistant.core.gateway.approval_lifecycle.internal_failure",
+                            exc,
+                        )
                         args = {}
                 if not isinstance(args, dict):
                     args = {}
@@ -406,9 +410,8 @@ class ApprovalLifecycleMixin:
                 channel,
             )
         except Exception as exc:
-            logger.error(
-                "Failed to persist Agent tool policy audit (exception_type=%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.gateway.approval_lifecycle.internal_failure", exc
             )
             return False
         return True
@@ -461,9 +464,8 @@ class ApprovalLifecycleMixin:
                 expires_at,
             )
         except Exception as exc:
-            logger.warning(
-                "Failed to persist approval (exception_type=%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.gateway.approval_lifecycle.internal_failure", exc
             )
             raise RuntimeError("tool approval was not persisted") from exc
         if not row or str(row.get("approval_id") or "") != approval_id:
@@ -597,9 +599,8 @@ class ApprovalLifecycleMixin:
                     *params,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Failed to atomically claim approval, denying (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.gateway.approval_lifecycle.internal_failure", exc
                 )
                 return False
             if not row:
@@ -680,9 +681,8 @@ class ApprovalLifecycleMixin:
                     self._safe_uuid(normalized_run_id),
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "_approval_granted DB query failed, denying approval (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.gateway.approval_lifecycle.internal_failure", exc
                 )
                 return False
             if not row:
@@ -769,10 +769,8 @@ class ApprovalLifecycleMixin:
                     self._safe_uuid(self._approval_scope_run_id(run_id)),
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "_approval_granted_for_checkpoint DB query failed, denying approval "
-                    "(exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.gateway.approval_lifecycle.internal_failure", exc
                 )
                 return False
             else:
@@ -827,7 +825,10 @@ class ApprovalLifecycleMixin:
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)
-            except Exception:
+            except Exception as exc:
+                record_internal_exception(
+                    __name__, "assistant.core.gateway.approval_lifecycle.internal_failure", exc
+                )
                 arguments = {}
         if not isinstance(arguments, dict):
             arguments = {}
@@ -900,7 +901,10 @@ class ApprovalLifecycleMixin:
         if isinstance(stored_arguments, str):
             try:
                 stored_arguments = json.loads(stored_arguments)
-            except Exception:
+            except Exception as exc:
+                record_internal_exception(
+                    __name__, "assistant.core.gateway.approval_lifecycle.internal_failure", exc
+                )
                 return False
         if not isinstance(stored_arguments, dict):
             stored_arguments = {}
@@ -959,10 +963,8 @@ class ApprovalLifecycleMixin:
                     return str(row["command_id"]), False
                 return None, False
             except Exception as exc:  # noqa: BLE001 — read-only compatibility path
-                logger.warning(
-                    "_find_active_command DB query failed; only explicitly read-only "
-                    "callers may use the process fallback (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.gateway.approval_lifecycle.internal_failure", exc
                 )
         # In-memory fallback — tests and DB-less dev only.
         for (

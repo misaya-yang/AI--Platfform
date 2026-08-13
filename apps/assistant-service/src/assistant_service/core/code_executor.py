@@ -15,6 +15,7 @@ import ast
 import asyncio
 import base64
 import contextlib
+import logging
 import os
 import re
 import shutil
@@ -28,7 +29,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 logger = get_logger(__name__)
 
@@ -324,6 +325,9 @@ class CodeExecutorService:
     def __init__(
         self,
         config: CodeExecutionConfig | None = None,
+        *,
+        allow_runc_code_executor: bool | None = None,
+        startup_config: Any | None = None,
     ):
         """
         Initialize the code executor service.
@@ -332,46 +336,82 @@ class CodeExecutorService:
             config: Execution configuration. Uses defaults if not provided.
         """
         self.config = config or CodeExecutionConfig()
-        backend = os.environ.get("ASSISTANT_CODE_EXECUTOR_BACKEND", "").strip().lower()
-        if backend:
-            if backend not in {"docker", "sbx"}:
-                raise ValueError("ASSISTANT_CODE_EXECUTOR_BACKEND must be docker or sbx")
-            self.config.sandbox_backend = backend
-        # Allow env var override: SANDBOX_RUNTIME=runsc|runc|""
-        env_runtime = os.environ.get("SANDBOX_RUNTIME")
-        if env_runtime is not None:
-            self.config.sandbox_runtime = env_runtime or None
-            self.config.allow_default_runtime_fallback = env_runtime == ""
+        if startup_config is not None:
+            self.config.sandbox_backend = str(
+                startup_config.runtime_value("ASSISTANT_CODE_EXECUTOR_BACKEND")
+            )
+            self.config.sandbox_runtime = startup_config.runtime_value("SANDBOX_RUNTIME")
+            self.config.image = str(
+                startup_config.runtime_value("ASSISTANT_CODE_EXECUTOR_IMAGE")
+            )
+            self.config.python_executable = str(
+                startup_config.runtime_value("ASSISTANT_CODE_EXECUTOR_PYTHON")
+            )
+        else:
+            backend = os.environ.get("ASSISTANT_CODE_EXECUTOR_BACKEND", "").strip().lower()
+            if backend:
+                if backend not in {"docker", "sbx"}:
+                    raise ValueError("ASSISTANT_CODE_EXECUTOR_BACKEND must be docker or sbx")
+                self.config.sandbox_backend = backend
+            # Allow env var override: SANDBOX_RUNTIME=runsc|runc|""
+            env_runtime = os.environ.get("SANDBOX_RUNTIME")
+            if env_runtime is not None:
+                self.config.sandbox_runtime = env_runtime or None
+                self.config.allow_default_runtime_fallback = env_runtime == ""
         if self.config.sandbox_backend == "sbx":
             # Docker Sandboxes exposes a Docker-compatible endpoint backed by
             # one nerdbox microVM per child container. It is a backend, not a
             # Docker Engine runtime name such as runsc.
             self.config.sandbox_runtime = None
             self.config.allow_default_runtime_fallback = False
-        if os.environ.get("ASSISTANT_ALLOW_RUNC_CODE_EXECUTOR", "").lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }:
+        resolved_allow_runc = (
+            os.environ.get("ASSISTANT_ALLOW_RUNC_CODE_EXECUTOR", "").lower()
+            in {"1", "true", "yes", "on"}
+            if allow_runc_code_executor is None
+            else bool(allow_runc_code_executor)
+        )
+        if resolved_allow_runc:
             self.config.allow_default_runtime_fallback = True
-        image = os.environ.get("ASSISTANT_CODE_EXECUTOR_IMAGE", "").strip()
-        if image:
-            self.config.image = image
-        python_executable = os.environ.get(
-            "ASSISTANT_CODE_EXECUTOR_PYTHON",
-            "",
-        ).strip()
-        if python_executable:
-            if not re.fullmatch(r"[A-Za-z0-9_./-]+", python_executable):
-                raise ValueError("ASSISTANT_CODE_EXECUTOR_PYTHON is invalid")
-            self.config.python_executable = python_executable
-        self._sbx_api_version = os.environ.get(
-            "ASSISTANT_SBX_DOCKER_API_VERSION",
-            "1.51",
-        ).strip()
+        if startup_config is None:
+            image = os.environ.get("ASSISTANT_CODE_EXECUTOR_IMAGE", "").strip()
+            if image:
+                self.config.image = image
+            python_executable = os.environ.get(
+                "ASSISTANT_CODE_EXECUTOR_PYTHON",
+                "",
+            ).strip()
+            if python_executable:
+                if not re.fullmatch(r"[A-Za-z0-9_./-]+", python_executable):
+                    raise ValueError("ASSISTANT_CODE_EXECUTOR_PYTHON is invalid")
+                self.config.python_executable = python_executable
+        self._sbx_api_version = (
+            str(startup_config.runtime_value("ASSISTANT_SBX_DOCKER_API_VERSION"))
+            if startup_config is not None
+            else os.environ.get("ASSISTANT_SBX_DOCKER_API_VERSION", "1.51").strip()
+        )
         if not re.fullmatch(r"\d+\.\d+", self._sbx_api_version):
             raise ValueError("ASSISTANT_SBX_DOCKER_API_VERSION is invalid")
+        self._sandbox_workspace = (
+            str(startup_config.runtime_value("SANDBOX_WORKSPACE"))
+            if startup_config is not None
+            else os.environ.get("SANDBOX_WORKSPACE", "/opt/deploy/sandbox-workspace")
+        )
+        self._sandbox_workspace_host = (
+            str(startup_config.runtime_value("SANDBOX_WORKSPACE_HOST"))
+            if startup_config is not None
+            else os.environ.get("SANDBOX_WORKSPACE_HOST", "").strip()
+        )
+        self._docker_environment = None
+        if startup_config is not None:
+            self._docker_environment = {
+                "DOCKER_HOST": str(startup_config.runtime_value("DOCKER_HOST")),
+                "DOCKER_TLS_VERIFY": (
+                    "1" if startup_config.runtime_value("DOCKER_TLS_VERIFY") else ""
+                ),
+                "DOCKER_CERT_PATH": str(
+                    startup_config.runtime_value("DOCKER_CERT_PATH")
+                ),
+            }
         self._docker_client = None
         self._docker_available: bool | None = None
 
@@ -409,12 +449,16 @@ class CodeExecutorService:
                     if self.config.sandbox_backend == "sbx"
                     else {}
                 )
+                if self._docker_environment is not None:
+                    client_options["environment"] = self._docker_environment
                 self._docker_client = docker.from_env(**client_options)
                 # Test connection
                 self._docker_client.ping()
                 logger.info("Docker client initialized successfully")
             except Exception as e:
-                logger.warning(f"Failed to initialize Docker client: {e}")
+                record_internal_exception(
+                    __name__, "assistant.core.code_executor.internal_failure", e
+                )
                 self._docker_client = None
         return self._docker_client
 
@@ -463,7 +507,9 @@ class CodeExecutorService:
             else:
                 self._docker_available = False
         except Exception as e:
-            logger.warning(f"Docker is not available: {e}")
+            record_internal_exception(
+                __name__, "assistant.core.code_executor.internal_failure", e
+            )
             self._docker_available = False
 
         return self._docker_available
@@ -600,9 +646,11 @@ class CodeExecutorService:
             logger.warning(f"Execution {execution_id} timed out")
 
         except Exception as e:
+            record_internal_exception(
+                __name__, "assistant.core.code_executor.internal_failure", e
+            )
             result.status = ExecutionStatus.ERROR
             result.error_message = str(e)
-            logger.error(f"Execution {execution_id} failed: {e}", exc_info=True)
 
         finally:
             # Cleanup
@@ -643,7 +691,7 @@ class CodeExecutorService:
         # the gateway container and sibling sandbox containers via Docker socket).
         # Without this, Docker-in-Docker volume mounts fail because the host
         # daemon can't see files inside the gateway container's /tmp.
-        shared_base = os.environ.get("SANDBOX_WORKSPACE", "/opt/deploy/sandbox-workspace")
+        shared_base = self._sandbox_workspace
         os.makedirs(shared_base, exist_ok=True)
         workspace_dir = Path(tempfile.mkdtemp(prefix="code_exec_", dir=shared_base))
 
@@ -704,7 +752,11 @@ class CodeExecutorService:
             logger.info(f"Pulling Docker image: {config.image}")
             client.images.pull(config.image)
 
-        workspace_mount_source = self._workspace_mount_source(workspace_dir)
+        workspace_mount_source = self._workspace_mount_source(
+            workspace_dir,
+            container_root_value=self._sandbox_workspace,
+            host_root_value=self._sandbox_workspace_host,
+        )
         stdout_capture = workspace_dir / ".assistant-stdout"
         stderr_capture = workspace_dir / ".assistant-stderr"
 
@@ -874,8 +926,15 @@ class CodeExecutorService:
         finally:
             close = getattr(chunks, "close", None)
             if callable(close):
-                with contextlib.suppress(Exception):
+                try:
                     close()
+                except Exception as exc:
+                    record_internal_exception(
+                        __name__,
+                        "assistant.core.code_executor.suppressed_failure",
+                        exc,
+                        level=logging.DEBUG,
+                    )
         if truncated:
             payload.extend(_STREAM_TRUNCATION_MARKER)
         return bytes(payload).decode("utf-8", errors="replace")
@@ -898,7 +957,12 @@ class CodeExecutorService:
         return payload.decode("utf-8", errors="replace")
 
     @staticmethod
-    def _workspace_mount_source(workspace_dir: Path) -> Path:
+    def _workspace_mount_source(
+        workspace_dir: Path,
+        *,
+        container_root_value: str | None = None,
+        host_root_value: str | None = None,
+    ) -> Path:
         """Translate the in-container workspace to the Docker host path.
 
         A host Docker daemon cannot resolve a path that only exists inside the
@@ -907,7 +971,8 @@ class CodeExecutorService:
         """
 
         container_root = Path(
-            os.environ.get("SANDBOX_WORKSPACE", "/opt/deploy/sandbox-workspace")
+            container_root_value
+            or os.environ.get("SANDBOX_WORKSPACE", "/opt/deploy/sandbox-workspace")
         ).resolve()
         resolved_workspace = workspace_dir.resolve()
         try:
@@ -915,7 +980,11 @@ class CodeExecutorService:
         except ValueError as exc:
             raise ValueError("sandbox workspace escaped its configured root") from exc
 
-        host_root_value = os.environ.get("SANDBOX_WORKSPACE_HOST", "").strip()
+        host_root_value = (
+            host_root_value
+            if host_root_value is not None
+            else os.environ.get("SANDBOX_WORKSPACE_HOST", "").strip()
+        )
         if not host_root_value:
             return resolved_workspace
         host_root = Path(host_root_value)
@@ -985,10 +1054,8 @@ class CodeExecutorService:
                     break
                 root_entries.append(entry)
         except Exception as e:
-            logger.warning(
-                "[code_executor] failed to scan workspace root %s for stray artifacts: %s",
-                workspace_dir,
-                e,
+            record_internal_exception(
+                __name__, "assistant.core.code_executor.internal_failure", e
             )
             return recovered
 
@@ -1029,11 +1096,8 @@ class CodeExecutorService:
                 shutil.move(str(entry), str(target))
                 recovered.append(target)
             except Exception as e:
-                logger.warning(
-                    "[code_executor] failed to move stray artifact %s -> %s: %s",
-                    entry,
-                    target,
-                    e,
+                record_internal_exception(
+                    __name__, "assistant.core.code_executor.internal_failure", e
                 )
 
         return recovered
@@ -1121,7 +1185,10 @@ class CodeExecutorService:
                     kind = "l" if p.is_symlink() else "d" if p.is_dir() else "f"
                     try:
                         size = p.stat().st_size if p.is_file() else -1
-                    except Exception:
+                    except Exception as exc:
+                        record_internal_exception(
+                            __name__, "assistant.core.code_executor.internal_failure", exc
+                        )
                         size = -1
                     root_listing.append(f"{kind}:{p.name}:{size}")
                 logger.warning(
@@ -1129,9 +1196,8 @@ class CodeExecutorService:
                     ", ".join(root_listing[:40]) or "<empty>",
                 )
             except Exception as e:
-                logger.warning(
-                    "[code_executor] failed to enumerate workspace root for diagnostics: %s",
-                    e,
+                record_internal_exception(
+                    __name__, "assistant.core.code_executor.internal_failure", e
                 )
 
         captured_total = 0
@@ -1191,7 +1257,9 @@ class CodeExecutorService:
                         aggregate_receipt_recorded = True
 
                 except Exception as e:
-                    logger.warning(f"Failed to read output file {file_path}: {e}")
+                    record_internal_exception(
+                        __name__, "assistant.core.code_executor.internal_failure", e
+                    )
 
         logger.info("[code_executor] collected %d output file(s)", len(output_files))
         return output_files
@@ -1225,13 +1293,22 @@ class CodeExecutorService:
         """Best-effort kill/remove without blocking the event loop."""
 
         if kill:
-            with contextlib.suppress(Exception):
+            try:
                 await asyncio.to_thread(container.kill)
+            except Exception as exc:
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.code_executor.suppressed_failure",
+                    exc,
+                    level=logging.DEBUG,
+                )
         try:
             await asyncio.to_thread(container.remove, force=True)
             logger.debug(f"Container {container.id[:12]} removed")
         except Exception as e:
-            logger.warning(f"Failed to remove container: {e}")
+            record_internal_exception(
+                __name__, "assistant.core.code_executor.internal_failure", e
+            )
 
     async def _cleanup_workspace(self, workspace_dir: Path) -> None:
         """Remove the temporary workspace directory."""
@@ -1239,7 +1316,9 @@ class CodeExecutorService:
             shutil.rmtree(workspace_dir)
             logger.debug(f"Workspace {workspace_dir} removed")
         except Exception as e:
-            logger.warning(f"Failed to remove workspace {workspace_dir}: {e}")
+            record_internal_exception(
+                __name__, "assistant.core.code_executor.internal_failure", e
+            )
 
     async def cleanup_all(self) -> None:
         """
@@ -1264,13 +1343,17 @@ class CodeExecutorService:
                         container.remove(force=True)
                         removed_count += 1
                 except Exception as e:
-                    logger.warning(f"Failed to remove orphaned container: {e}")
+                    record_internal_exception(
+                        __name__, "assistant.core.code_executor.internal_failure", e
+                    )
 
             if removed_count > 0:
                 logger.info(f"Cleaned up {removed_count} orphaned containers")
 
         except Exception as e:
-            logger.warning(f"Failed to cleanup orphaned containers: {e}")
+            record_internal_exception(
+                __name__, "assistant.core.code_executor.internal_failure", e
+            )
 
     def close(self) -> None:
         """Close the Docker client connection."""
@@ -1280,7 +1363,9 @@ class CodeExecutorService:
                 self._docker_client = None
                 logger.info("Docker client closed")
             except Exception as e:
-                logger.warning(f"Failed to close Docker client: {e}")
+                record_internal_exception(
+                    __name__, "assistant.core.code_executor.internal_failure", e
+                )
 
 
 # =============================================================================
@@ -1291,7 +1376,12 @@ class CodeExecutorService:
 _code_executor: CodeExecutorService | None = None
 
 
-def get_code_executor(config: CodeExecutionConfig | None = None) -> CodeExecutorService:
+def get_code_executor(
+    config: CodeExecutionConfig | None = None,
+    *,
+    allow_runc_code_executor: bool | None = None,
+    startup_config: Any | None = None,
+) -> CodeExecutorService:
     """
     Get the global CodeExecutorService instance.
 
@@ -1304,6 +1394,10 @@ def get_code_executor(config: CodeExecutionConfig | None = None) -> CodeExecutor
     global _code_executor
 
     if _code_executor is None:
-        _code_executor = CodeExecutorService(config=config)
+        _code_executor = CodeExecutorService(
+            config=config,
+            allow_runc_code_executor=allow_runc_code_executor,
+            startup_config=startup_config,
+        )
 
     return _code_executor

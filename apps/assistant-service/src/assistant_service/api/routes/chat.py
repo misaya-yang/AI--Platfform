@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import logging
@@ -20,6 +21,7 @@ from ai_gateway_core.agents import (
     RedisReplayStore,
     VerifiedAgentRuntime,
 )
+from ai_gateway_core.logging import get_logger, log_internal_exception
 from ai_gateway_core.proxy.sse_heartbeat import (
     DEFAULT_HEARTBEAT_INTERVAL_S,
     with_sse_heartbeat,
@@ -35,7 +37,7 @@ from ..deps import get_assistant_service, get_model_registry
 # don't inline the constant.
 _SSE_HEARTBEAT_INTERVAL_S = DEFAULT_HEARTBEAT_INTERVAL_S
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = APIRouter()
 _E2E_MEMORY_BY_USER: dict[str, dict[str, str]] = {}
@@ -51,6 +53,7 @@ _RESERVED_AGENT_RUNTIME_FIELDS = frozenset(
         "snapshot_hash",
         "spec_hash",
         "runtime_fingerprint",
+        "model_provider_id",
     }
 )
 
@@ -160,28 +163,62 @@ class AgentRuntimeChatRequest(BaseModel):
     session_id: str = Field(min_length=1, max_length=255)
     history: list[dict[str, Any]] | None = Field(default=None, max_length=200)
     attachments: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
+    resume_run_id: str | None = Field(default=None, min_length=1, max_length=255)
+    resume_approval_id: str | None = Field(default=None, min_length=1, max_length=255)
     runtime_envelope: dict[str, Any]
 
+    @model_validator(mode="after")
+    def require_complete_resume_identity(self) -> AgentRuntimeChatRequest:
+        if (self.resume_run_id is None) != (self.resume_approval_id is None):
+            raise ValueError(
+                "resume_run_id and resume_approval_id must be provided together"
+            )
+        return self
+
     def verification_body(self) -> dict[str, Any]:
-        return {
+        body = {
             "message": self.message,
             "session_id": self.session_id,
             "history": self.history,
             "attachments": self.attachments,
         }
+        if self.resume_run_id is not None:
+            body.update(
+                {
+                    "resume_run_id": self.resume_run_id,
+                    "resume_approval_id": self.resume_approval_id,
+                }
+            )
+        return body
 
 
 def _env_truthy(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _startup_flag(request: Request, name: str, *, default: bool = False) -> bool:
+    snapshot = getattr(request.app.state, "startup_config", None)
+    if snapshot is not None:
+        try:
+            return bool(snapshot.bool_value(name))
+        except (KeyError, TypeError):
+            pass
+    raw = os.getenv(name)
+    return default if raw is None else _env_truthy(name)
+
+
 def _user_memory_key(user: UserContext) -> str:
     return f"{user.tenant_id}:{user.user_id}"
 
 
-def _build_e2e_memory_stub_response(body: ChatRequest, user: UserContext) -> str | None:
+def _build_e2e_memory_stub_response(
+    body: ChatRequest,
+    user: UserContext,
+    *,
+    enabled: bool | None = None,
+) -> str | None:
     """Deterministic local-E2E memory path when no live model key is available."""
-    if not _env_truthy("ASSISTANT_E2E_STUB_LLM"):
+    if not (_env_truthy("ASSISTANT_E2E_STUB_LLM") if enabled is None else enabled):
         return None
 
     message = body.message.strip()
@@ -307,7 +344,12 @@ def _get_agent_runtime_verifier(request: Request) -> AgentRuntimeSigner:
     if verifier is not None:
         return verifier
 
-    secret = os.getenv("GATEWAY_ASSISTANT_SHARED_SECRET", "").strip()
+    startup_config = getattr(request.app.state, "startup_config", None)
+    secret = (
+        startup_config.secret_value("GATEWAY_ASSISTANT_SHARED_SECRET")
+        if startup_config is not None
+        else os.getenv("GATEWAY_ASSISTANT_SHARED_SECRET", "")
+    ).strip()
     if not secret:
         raise HTTPException(
             status_code=503,
@@ -317,10 +359,21 @@ def _get_agent_runtime_verifier(request: Request) -> AgentRuntimeSigner:
             },
         )
 
-    backend = os.getenv("INTERNAL_COMM_STATE_BACKEND", "memory").strip().lower()
+    backend = (
+        str(startup_config.runtime_value("INTERNAL_COMM_STATE_BACKEND"))
+        if startup_config is not None
+        else os.getenv("INTERNAL_COMM_STATE_BACKEND", "memory").strip().lower()
+    )
+    if startup_config is not None and not startup_config.runtime[
+        "INTERNAL_COMM_STATE_BACKEND"
+    ].valid:
+        backend = "invalid"
     if backend == "redis":
         redis_url = (
-            os.getenv("INTERNAL_COMM_REDIS_URL", "").strip() or os.getenv("REDIS_URL", "").strip()
+            str(startup_config.runtime_value("INTERNAL_COMM_REDIS_URL"))
+            if startup_config is not None
+            else os.getenv("INTERNAL_COMM_REDIS_URL", "").strip()
+            or os.getenv("REDIS_URL", "").strip()
         )
         if not redis_url:
             raise HTTPException(
@@ -411,11 +464,80 @@ def _verified_agent_runtime_attachment_paths(
     return paths
 
 
+def _validate_agent_runtime_native_capabilities(
+    verified: VerifiedAgentRuntime,
+    tool_invoker: Any,
+) -> None:
+    """Bind signed native capabilities to this process's exact tool definitions."""
+
+    capabilities = verified.resolved_snapshot.get("capabilities")
+    native_bindings = [
+        item
+        for item in capabilities or []
+        if isinstance(item, dict) and item.get("type") == "platform"
+    ]
+    if not native_bindings:
+        return
+
+    registry = getattr(tool_invoker, "tool_registry", None)
+    get_tool = getattr(registry, "get_tool", None)
+    if not callable(get_tool):
+        raise AgentRuntimeEnvelopeError("AGENT_RUNTIME_CAPABILITY_UNAVAILABLE")
+
+    for binding in native_bindings:
+        capability_id = str(binding.get("id") or "")
+        expected_schema_hash = str(binding.get("schema_hash") or "")
+        expected_risk = str(binding.get("risk") or "")
+        definition = get_tool(capability_id)
+        if definition is None or str(getattr(definition, "name", "")) != capability_id:
+            raise AgentRuntimeEnvelopeError("AGENT_RUNTIME_CAPABILITY_UNAVAILABLE")
+
+        try:
+            canonical_schema = json.dumps(
+                definition.json_argument_schema(),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise AgentRuntimeEnvelopeError("AGENT_RUNTIME_CAPABILITY_UNAVAILABLE") from exc
+        actual_schema_hash = (
+            "sha256:" + hashlib.sha256(canonical_schema.encode("utf-8")).hexdigest()
+        )
+        actual_risk = str(getattr(getattr(definition, "risk_level", None), "value", ""))
+        binding_config = binding.get("config")
+        binding_config = binding_config if isinstance(binding_config, dict) else {}
+        expected_confirmation = binding_config.get("requires_confirmation")
+        actual_confirmation = bool(getattr(definition, "requires_confirmation", False))
+        if (
+            expected_schema_hash != actual_schema_hash
+            or expected_risk != actual_risk
+            or (
+                expected_risk in {"high", "critical"}
+                and (
+                    expected_confirmation is not True
+                    or actual_confirmation is not True
+                )
+            )
+            or (
+                "requires_confirmation" in binding_config
+                and (
+                    not isinstance(expected_confirmation, bool)
+                    or expected_confirmation != actual_confirmation
+                )
+            )
+        ):
+            raise AgentRuntimeEnvelopeError("AGENT_RUNTIME_CAPABILITY_UNAVAILABLE")
+
+
 def _build_agent_runtime_config(
     verified: VerifiedAgentRuntime,
     tenant_policy: Any | None,
     *,
     file_paths: list[str] | None = None,
+    skills_runtime_enabled: bool | None = None,
+    resume_run_id: str | None = None,
+    resume_approval_id: str | None = None,
 ):
     """Map only the verified Snapshot into an Agent-only AssistantConfig."""
 
@@ -429,7 +551,32 @@ def _build_agent_runtime_config(
     model = snapshot["model"]
     parameters = model["parameters"]
     try:
-        provider = ModelProvider(str(model["provider"]))
+        provider_id = str(model["provider"])
+        if (
+            not provider_id
+            or provider_id != provider_id.strip()
+            or len(provider_id) > 128
+        ):
+            raise ValueError("invalid provider id")
+        normalized_provider_id = provider_id.lower()
+        try:
+            provider = ModelProvider(normalized_provider_id)
+        except ValueError:
+            # The control plane permits named provider instances such as
+            # ``dashscope-intl``. This enum remains a compatibility protocol
+            # hint only; execution is authorized by the exact provider_id pin.
+            if normalized_provider_id.startswith(("dashscope", "aliyun")):
+                provider = ModelProvider.DASHSCOPE
+            elif normalized_provider_id.startswith("google-vertex"):
+                provider = ModelProvider.GOOGLE_VERTEX
+            elif normalized_provider_id.startswith(("google", "gemini")):
+                provider = ModelProvider.GOOGLE
+            elif "anthropic" in normalized_provider_id:
+                provider = ModelProvider.ANTHROPIC
+            elif "deepseek" in normalized_provider_id:
+                provider = ModelProvider.DEEPSEEK
+            else:
+                provider = ModelProvider.OPENAI
         temperature = float(parameters.get("temperature", 0.7))
         max_tokens_raw = parameters.get("max_tokens")
         max_tokens = int(max_tokens_raw) if max_tokens_raw is not None else None
@@ -541,7 +688,13 @@ def _build_agent_runtime_config(
                 allowed_tools = frozenset(
                     str(name) for name in policy_result if str(name) in policy_tool_names
                 )
-        except Exception:  # noqa: BLE001 - policy uncertainty is a hard deny
+        except Exception as exc:  # noqa: BLE001 - policy uncertainty is a hard deny
+            log_internal_exception(
+                logger,
+                "assistant.agent_runtime.tool_policy_resolution_failed",
+                exc,
+                level=logging.WARNING,
+            )
             allowed_tools = frozenset()
     dataset_policy_method = getattr(tenant_policy, "allowed_dataset_ids", None)
     if callable(dataset_policy_method):
@@ -556,7 +709,13 @@ def _build_agent_runtime_config(
                     for dataset_id in dataset_result
                     if str(dataset_id) in snapshot_datasets
                 )
-        except Exception:  # noqa: BLE001 - policy uncertainty is a hard deny
+        except Exception as exc:  # noqa: BLE001 - policy uncertainty is a hard deny
+            log_internal_exception(
+                logger,
+                "assistant.agent_runtime.dataset_policy_resolution_failed",
+                exc,
+                level=logging.WARNING,
+            )
             allowed_datasets = frozenset()
 
     if allowed_datasets != snapshot_datasets:
@@ -626,6 +785,7 @@ def _build_agent_runtime_config(
     return AssistantConfig(
         model_provider=provider,
         model_id=str(model["id"]),
+        model_provider_id=provider_id,
         temperature=temperature,
         max_tokens=max_tokens,
         kb_dataset_ids=runtime_dataset_ids,
@@ -653,9 +813,15 @@ def _build_agent_runtime_config(
         memory_mode=memory_mode,
         skills_enabled=(
             bool(allowed_skill_ids)
-            and os.getenv("AGENT_STUDIO_SKILLS_ENABLED", "true").strip().lower()
-            in {"1", "true", "yes", "on"}
+            and (
+                os.getenv("AGENT_STUDIO_SKILLS_ENABLED", "true").strip().lower()
+                in {"1", "true", "yes", "on"}
+                if skills_runtime_enabled is None
+                else skills_runtime_enabled
+            )
         ),
+        resume_run_id=resume_run_id,
+        resume_approval_id=resume_approval_id,
     )
 
 
@@ -740,7 +906,13 @@ async def _agent_runtime_tenant_policy(
                 getattr(resolved, "allowed_dataset_ids", None)
             ):
                 return resolved
-        except Exception:  # noqa: BLE001 - unavailable policy is deny-all
+        except Exception as exc:  # noqa: BLE001 - unavailable policy is deny-all
+            log_internal_exception(
+                logger,
+                "assistant.agent_runtime.policy_resolver_failed",
+                exc,
+                level=logging.WARNING,
+            )
             return None
     if callable(getattr(policy_service, "allowed_tool_names", None)):
         return policy_service
@@ -762,7 +934,13 @@ async def _agent_runtime_tenant_policy(
             allowed_datasets=set(),
             deny_all=deny_all,
         )
-    except Exception:  # noqa: BLE001 - unavailable policy is deny-all
+    except Exception as exc:  # noqa: BLE001 - unavailable policy is deny-all
+        log_internal_exception(
+            logger,
+            "assistant.agent_runtime.policy_load_failed",
+            exc,
+            level=logging.WARNING,
+        )
         return None
 
 
@@ -787,7 +965,11 @@ async def chat(
     """Non-streaming chat completion."""
     _validate_eval_prompt_override(body, user)
     session_id = body.session_id or str(uuid.uuid4())
-    stub_text = _build_e2e_memory_stub_response(body, user)
+    stub_text = _build_e2e_memory_stub_response(
+        body,
+        user,
+        enabled=_startup_flag(request, "ASSISTANT_E2E_STUB_LLM"),
+    )
     if stub_text is not None:
         return {
             "content": stub_text,
@@ -834,11 +1016,9 @@ async def chat(
             "context_snapshot": result.get("context_snapshot"),
             "run_budget": result.get("run_budget"),
         }
-    except Exception as e:
-        import logging
-
-        logging.getLogger("assistant-service").error(f"Chat failed: {e}", exc_info=True)
-        raise HTTPException(500, "Chat request failed. Please try again.")
+    except Exception as exc:
+        log_internal_exception(logger, "assistant.chat.failed", exc)
+        raise HTTPException(500, "Chat request failed. Please try again.") from None
 
 
 @router.post("/chat/stream")
@@ -850,7 +1030,11 @@ async def chat_stream(
     """SSE streaming chat completion."""
     _validate_eval_prompt_override(body, user)
     session_id = body.session_id or str(uuid.uuid4())
-    stub_text = _build_e2e_memory_stub_response(body, user)
+    stub_text = _build_e2e_memory_stub_response(
+        body,
+        user,
+        enabled=_startup_flag(request, "ASSISTANT_E2E_STUB_LLM"),
+    )
     if stub_text is not None:
 
         def stub_event_generator():
@@ -887,7 +1071,7 @@ async def chat_stream(
     async def _agent_lines():
         """Format the agent loop's events as SSE ``data:`` lines.
 
-        Catches generator-side exceptions, logs them with full context,
+        Catches generator-side exceptions, logs a bounded safe diagnostic,
         and yields a generic error event so the FE can render a sensible
         message without leaking internal details.
         """
@@ -905,11 +1089,8 @@ async def chat_stream(
                     "timestamp": event.timestamp,
                 }
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-        except Exception:
-            logger.exception(
-                "chat_stream_failed",
-                extra={"session_id": session_id, "user_id": user.user_id},
-            )
+        except Exception as exc:
+            log_internal_exception(logger, "assistant.chat_stream.failed", exc)
             error_payload = {
                 "event_type": "error",
                 "data": {"message": "Chat stream failed. Please try again."},
@@ -956,15 +1137,35 @@ _PUBLIC_AGENT_TOOL_EVENTS = frozenset(
 _PUBLIC_AGENT_KNOWLEDGE_EVENTS = frozenset(
     {"context_retrieved", "knowledge_retrieved", "citation", "citations"}
 )
-_PUBLIC_AGENT_ERROR_EVENTS = frozenset({"error", "run_error"})
+_PUBLIC_AGENT_LIFECYCLE_EVENTS = frozenset(
+    {"run_started", "approval_required", "run_finished", "run_error"}
+)
+_PUBLIC_AGENT_ERROR_EVENTS = frozenset({"error"})
 _PUBLIC_AGENT_EVENT_TYPES = (
     _PUBLIC_AGENT_TEXT_EVENTS
     | _PUBLIC_AGENT_TOOL_EVENTS
     | _PUBLIC_AGENT_KNOWLEDGE_EVENTS
+    | _PUBLIC_AGENT_LIFECYCLE_EVENTS
     | _PUBLIC_AGENT_ERROR_EVENTS
 )
 _PUBLIC_TOOL_STATUSES = frozenset(
     {"started", "running", "allowed", "completed", "succeeded", "error", "failed", "cancelled"}
+)
+_PUBLIC_AGENT_LIFECYCLE_ID_FIELDS = (
+    "run_id",
+    "session_id",
+    "request_id",
+    "tool_id",
+    "tool_call_id",
+    "approval_id",
+    "checkpoint_id",
+    "attempt_id",
+)
+_PUBLIC_AGENT_LIFECYCLE_HASH_FIELDS = (
+    "snapshot_hash",
+    "terminal_hash",
+    "output_hash",
+    "spec_hash",
 )
 
 
@@ -978,6 +1179,72 @@ def _public_agent_label(value: Any, *, max_length: int = 255) -> str | None:
         return None
     normalized = " ".join(value.split()).strip()
     return normalized[:max_length] if normalized else None
+
+
+def _public_agent_identifier(value: Any) -> str | None:
+    if not isinstance(value, str) or not 1 <= len(value) <= 255:
+        return None
+    return value if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", value) else None
+
+
+def _public_agent_lifecycle_data(event_type: str, value: Any) -> dict[str, Any]:
+    data = value if isinstance(value, dict) else {}
+    raw_envelope = data.get("terminal_envelope")
+    envelope = raw_envelope if isinstance(raw_envelope, dict) else {}
+    projected: dict[str, Any] = {}
+
+    for key in _PUBLIC_AGENT_LIFECYCLE_ID_FIELDS:
+        values = [
+            identifier
+            for source in (data, envelope)
+            if (identifier := _public_agent_identifier(source.get(key))) is not None
+        ]
+        if len(set(values)) > 1:
+            raise ValueError(f"Agent lifecycle {key} is inconsistent")
+        if values:
+            projected[key] = values[0]
+
+    for key in _PUBLIC_AGENT_LIFECYCLE_HASH_FIELDS:
+        values = [
+            hash_value
+            for source in (data, envelope)
+            if (hash_value := _public_agent_identifier(source.get(key))) is not None
+        ]
+        if len(set(values)) > 1:
+            raise ValueError(f"Agent lifecycle {key} is inconsistent")
+        if values:
+            projected[key] = values[0]
+
+    if event_type == "run_started":
+        projected["status"] = "running"
+    elif event_type == "approval_required":
+        tool_name = _public_agent_label(data.get("tool_name"), max_length=128)
+        arguments_hash = data.get("arguments_hash")
+        if (
+            tool_name is not None
+            and re.fullmatch(r"[A-Za-z0-9_.:-]+", tool_name) is not None
+            and isinstance(arguments_hash, str)
+            and re.fullmatch(r"[a-f0-9]{64}", arguments_hash) is not None
+        ):
+            projected["tool_name"] = tool_name
+            projected["arguments_hash"] = arguments_hash
+        projected["status"] = "pending"
+    else:
+        raw_status = envelope.get("status", data.get("status"))
+        status = str(raw_status or "").strip().lower()
+        allowed = {"succeeded"} if event_type == "run_finished" else {"failed", "cancelled"}
+        if status and status not in allowed:
+            raise ValueError("Agent terminal status is inconsistent")
+        resolved_status = status or ("succeeded" if event_type == "run_finished" else "failed")
+        projected["status"] = resolved_status
+        projected["exit"] = resolved_status
+        exit_reason = envelope.get("exit_reason")
+        if isinstance(exit_reason, str) and exit_reason:
+            projected["exit_hash"] = "sha256:" + hashlib.sha256(
+                exit_reason.encode("utf-8", errors="replace")
+            ).hexdigest()
+
+    return projected
 
 
 def _public_agent_event_data(event_type: Any, value: Any) -> dict[str, Any] | None:
@@ -998,6 +1265,9 @@ def _public_agent_event_data(event_type: Any, value: Any) -> dict[str, Any] | No
                 return {"content": content}
         return {"content": ""}
 
+    if public_type in _PUBLIC_AGENT_LIFECYCLE_EVENTS:
+        return _public_agent_lifecycle_data(public_type, value)
+
     if public_type in _PUBLIC_AGENT_ERROR_EVENTS:
         return {"message": "Agent runtime could not complete this request. Please try again."}
 
@@ -1007,6 +1277,15 @@ def _public_agent_event_data(event_type: Any, value: Any) -> dict[str, Any] | No
         tool_name = _public_agent_label(data.get("tool_name") or data.get("name"), max_length=128)
         if tool_name and re.fullmatch(r"[A-Za-z0-9_.:-]+", tool_name):
             projected["tool_name"] = tool_name
+        identifiers = {
+            key: identifier
+            for key in ("tool_id", "tool_call_id")
+            if (identifier := _public_agent_identifier(data.get(key))) is not None
+        }
+        if len(set(identifiers.values())) > 1:
+            raise ValueError("Tool call identity is inconsistent")
+        if identifiers:
+            projected.update(identifiers)
         raw_status = _public_agent_label(data.get("status"), max_length=32)
         status = raw_status.lower() if raw_status else ""
         if status not in _PUBLIC_TOOL_STATUSES:
@@ -1060,10 +1339,7 @@ async def agent_runtime_chat_stream(
 ):
     """Verify a Gateway-authored Agent Envelope before any model execution."""
 
-    if (
-        not _env_truthy("AGENT_STUDIO_RUNTIME_ENABLED")
-        and os.getenv("AGENT_STUDIO_RUNTIME_ENABLED") is not None
-    ):
+    if not _startup_flag(request, "AGENT_STUDIO_RUNTIME_ENABLED", default=True):
         raise HTTPException(
             status_code=503,
             detail={"code": "AGENT_RUNTIME_DISABLED", "message": "Agent runtime is disabled"},
@@ -1089,6 +1365,17 @@ async def agent_runtime_chat_stream(
         ) from exc
 
     try:
+        _validate_agent_runtime_native_capabilities(
+            verified,
+            getattr(request.app.state, "tool_invoker", None),
+        )
+    except AgentRuntimeEnvelopeError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": exc.code, "message": "Agent capability is unavailable"},
+        ) from exc
+
+    try:
         file_paths = _verified_agent_runtime_attachment_paths(body, verified)
     except AgentRuntimeEnvelopeError as exc:
         raise HTTPException(
@@ -1098,7 +1385,18 @@ async def agent_runtime_chat_stream(
 
     tenant_policy = await _agent_runtime_tenant_policy(request, verified, user)
     try:
-        config = _build_agent_runtime_config(verified, tenant_policy, file_paths=file_paths)
+        config = _build_agent_runtime_config(
+            verified,
+            tenant_policy,
+            file_paths=file_paths,
+            skills_runtime_enabled=_startup_flag(
+                request,
+                "AGENT_STUDIO_SKILLS_ENABLED",
+                default=True,
+            ),
+            resume_run_id=body.resume_run_id,
+            resume_approval_id=body.resume_approval_id,
+        )
     except AgentRuntimeEnvelopeError as exc:
         raise HTTPException(
             status_code=422,
@@ -1107,7 +1405,7 @@ async def agent_runtime_chat_stream(
     traceparent = _request_traceparent(request)
     config.traceparent = traceparent
     config.otel_trace_id = _otel_trace_id_from_traceparent(traceparent)
-    if _env_truthy("ASSISTANT_E2E_STUB_LLM"):
+    if _startup_flag(request, "ASSISTANT_E2E_STUB_LLM"):
 
         def stub_agent_event_generator():
             return with_sse_heartbeat(
@@ -1150,16 +1448,18 @@ async def agent_runtime_chat_stream(
                     and math.isfinite(float(raw_timestamp))
                     else time.time()
                 )
-                payload = {
+                payload: dict[str, Any] = {
                     "event_type": public_event_type,
                     "data": public_event_data,
-                    "timestamp": timestamp,
                 }
+                if public_event_type not in _PUBLIC_AGENT_LIFECYCLE_EVENTS:
+                    payload["timestamp"] = timestamp
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-        except Exception:
-            logger.exception(
-                "agent_runtime_chat_stream_failed",
-                extra={"session_id": body.session_id, "user_id": user.user_id},
+        except Exception as exc:
+            log_internal_exception(
+                logger,
+                "assistant.agent_runtime.chat_stream.failed",
+                exc,
             )
             error_payload = {
                 "event_type": "error",

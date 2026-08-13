@@ -30,7 +30,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from .tool_registry import ToolCallRequest, ToolDefinition
 
@@ -145,11 +145,11 @@ class ConnectorRegistry:
         for entry in entries:
             try:
                 active = await self._evaluate(entry, request)
-            except Exception:
+            except Exception as exc:
                 # Predicate blew up — log but don't break the whole request.
                 # Safer to hide the connector than to crash the chat turn.
-                logger.exception(
-                    f"Connector predicate failed: {entry.connector_id} — hiding tools"
+                record_internal_exception(
+                    __name__, "assistant.core.tools.connector_registry.internal_failure", exc
                 )
                 continue
             if active:
@@ -164,8 +164,10 @@ class ConnectorRegistry:
             return False
         try:
             return await self._evaluate(entry, request)
-        except Exception:
-            logger.exception(f"Connector predicate failed: {connector_id}")
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.tools.connector_registry.internal_failure", exc
+            )
             return False
 
     def invalidate(self, connector_id: str | None = None, tenant_id: str | None = None) -> None:

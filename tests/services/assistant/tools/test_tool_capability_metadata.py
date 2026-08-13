@@ -189,5 +189,5 @@ async def test_web_fetch_ssrf_rejection_remains_original_read_failure(
     )
 
     assert result.success is False
-    assert result.error == "URL rejected: private address blocked"
+    assert result.error == "URL fetch failed or was rejected by outbound request policy"
     assert result.metadata.get("side_effect_unknown") is not True

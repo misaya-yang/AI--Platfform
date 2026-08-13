@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from ..tools.tool_registry import (
     ToolCallRequest,
@@ -487,7 +487,7 @@ _TOOL_SPECS = (
                         "properties": {
                             "type": {
                                 "type": "string",
-                            "enum": [
+                                "enum": [
                                     "click",
                                     "double_click",
                                     "scroll",
@@ -608,7 +608,10 @@ class _LocalNodeExecutor(ToolExecutor):
 
         try:
             fresh = await self._provider.resolve_capabilities(self._scope)
-        except Exception:  # noqa: BLE001 - authorization outages fail closed
+        except Exception as exc:  # noqa: BLE001 - authorization outages fail closed
+            record_internal_exception(
+                __name__, "assistant.core.local_node.tool_bridge.internal_failure", exc
+            )
             return self._denied(request, "LOCAL_NODE_AUTHORIZATION_UNAVAILABLE")
         if not _snapshot_is_effective(fresh, self._scope):
             return self._denied(request, "LOCAL_NODE_UNAVAILABLE")
@@ -642,7 +645,10 @@ class _LocalNodeExecutor(ToolExecutor):
         )
         try:
             result = await self._provider.dispatch(envelope)
-        except Exception:  # noqa: BLE001 - a write transport failure has unknown outcome
+        except Exception as exc:  # noqa: BLE001 - a write transport failure has unknown outcome
+            record_internal_exception(
+                __name__, "assistant.core.local_node.tool_bridge.internal_failure", exc
+            )
             if self._spec.operation_kind != "read":
                 return ToolCallResult(
                     call_id=request.call_id,
@@ -759,24 +765,22 @@ async def prepare_local_node_runtime_tools(
         session_id=str(ctx.session_id or ""),
         run_id=str(ctx.run_id or ""),
         model_provider=str(
-            model_provider
-            if model_provider is not None
-            else getattr(ctx, "model_provider", "")
+            model_provider if model_provider is not None else getattr(ctx, "model_provider", "")
         ),
         model_id=str(model_id if model_id is not None else getattr(ctx, "model_id", "")),
-        selected_device_id=str(
-            getattr(ctx.config, "local_node_device_id", "") or ""
-        ),
+        selected_device_id=str(getattr(ctx.config, "local_node_device_id", "") or ""),
         selected_grant_ids=tuple(
-            str(value)
-            for value in (getattr(ctx.config, "local_node_grant_ids", ()) or ())
+            str(value) for value in (getattr(ctx.config, "local_node_grant_ids", ()) or ())
         ),
     )
     if any(not value for value in (scope.tenant_id, scope.user_id, scope.session_id, scope.run_id)):
         return 0
     try:
         snapshot = await provider.resolve_capabilities(scope)
-    except Exception:  # noqa: BLE001 - resolver outages hide the entire surface
+    except Exception as exc:  # noqa: BLE001 - resolver outages hide the entire surface
+        record_internal_exception(
+            __name__, "assistant.core.local_node.tool_bridge.internal_failure", exc
+        )
         logger.warning("Local Node capability resolution failed; tools remain unavailable")
         return 0
     if not _snapshot_is_effective(snapshot, scope):
@@ -791,7 +795,10 @@ async def prepare_local_node_runtime_tools(
                 scope,
                 spec.required_capabilities,
             )
-        except Exception:  # noqa: BLE001 - compound-grant ambiguity hides the tool
+        except Exception as exc:  # noqa: BLE001 - compound-grant ambiguity hides the tool
+            record_internal_exception(
+                __name__, "assistant.core.local_node.tool_bridge.internal_failure", exc
+            )
             supported = False
         if supported is True:
             selected_specs.append(spec)

@@ -8,7 +8,7 @@ from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.enums import StreamEventType
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, log_internal_exception
 
 from ..run_budget import RunBudgetExceeded
 from ..runtime.memory.lifecycle import memory_policy_enabled, should_sync_turn_to_memory
@@ -23,7 +23,11 @@ from .agent_loop_models import (
     AgentLoopPhase,
 )
 from .streaming_preparation import StreamingPreparationMixin
-from .streaming_state import StreamingLoopResult, StreamingPreparationState
+from .streaming_state import (
+    StreamingApprovalContinuation,
+    StreamingLoopResult,
+    StreamingPreparationState,
+)
 from .streaming_tool_loop import StreamingToolLoopMixin
 
 if TYPE_CHECKING:
@@ -35,6 +39,77 @@ logger = get_logger(__name__)
 
 class StreamingExecutionMixin(StreamingPreparationMixin, StreamingToolLoopMixin):
     """Persist streaming output and run the model-directed tool loop."""
+
+    @staticmethod
+    def _attach_approval_continuation(
+        ctx: AgentLoopContext,
+        prepared: StreamingPreparationState,
+        continuation: StreamingApprovalContinuation,
+    ) -> None:
+        """Append one host-trusted tool exchange to the active-turn suffix.
+
+        Approval requests are durable as hashes plus an exact approval record,
+        not as restorable prompt text.  After the approved action executes, the
+        runtime reconstructs only that trusted assistant/tool pair and lets the
+        ordinary streaming loop consume it.  The caller-supplied resume message
+        remains the current user request; no historical tool message is trusted
+        as proof that the action ran.
+        """
+
+        tool_call_id = str(continuation.tool_call_id or "").strip()
+        tool_name = str(continuation.tool_name or "").strip()
+        if not tool_call_id or not tool_name:
+            raise RuntimeError("approval_continuation_identity_missing")
+        arguments = json.dumps(
+            continuation.arguments,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        assistant_message = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": arguments,
+                    },
+                }
+            ],
+        }
+        tool_message = {
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "name": tool_name,
+            "content": str(continuation.result_content),
+        }
+        prepared.messages.extend((assistant_message, tool_message))
+        prepared.turn_tool_calls.append(
+            {
+                "id": tool_call_id,
+                "name": tool_name,
+                "arguments": dict(continuation.arguments),
+                "status": "completed" if continuation.success else "error",
+            }
+        )
+        prepared.turn_tool_results.append(
+            {
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+                "result": continuation.result_preview,
+                "error": continuation.error,
+                "duration_ms": continuation.duration_ms,
+            }
+        )
+        for artifact_id in continuation.artifact_ids:
+            normalized_id = str(artifact_id or "").strip()
+            if normalized_id and normalized_id not in prepared.created_artifact_ids:
+                prepared.created_artifact_ids.append(normalized_id)
+        ctx.messages = list(prepared.messages)
 
     async def _persist_streaming_assistant_message(
         self,
@@ -108,9 +183,10 @@ class StreamingExecutionMixin(StreamingPreparationMixin, StreamingToolLoopMixin)
                 metadata=metadata,
             )
         except Exception as exc:
-            logger.error(
-                "Failed to persist assistant message (streaming-first, exception_type=%s)",
-                type(exc).__name__,
+            log_internal_exception(
+                logger,
+                "assistant.message.persistence_failed",
+                exc,
             )
 
     async def _sync_streaming_memory(
@@ -213,9 +289,10 @@ class StreamingExecutionMixin(StreamingPreparationMixin, StreamingToolLoopMixin)
                         "reason": "no_structured_updates",
                     }
             except Exception as exc:
-                logger.error(
-                    "Structured memory sync failed (exception_type=%s)",
-                    _redact_trace_text(type(exc).__name__, limit=80),
+                log_internal_exception(
+                    logger,
+                    "assistant.memory.structured_sync_failed",
+                    exc,
                 )
                 structured_result = {
                     "attempted": True,
@@ -264,9 +341,10 @@ class StreamingExecutionMixin(StreamingPreparationMixin, StreamingToolLoopMixin)
                     "attempted": True,
                 }
             except Exception as exc:
-                logger.error(
-                    "Runtime daily memory sync failed (exception_type=%s)",
-                    _redact_trace_text(type(exc).__name__, limit=80),
+                log_internal_exception(
+                    logger,
+                    "assistant.memory.runtime_sync_failed",
+                    exc,
                 )
                 runtime_result = {
                     "attempted": True,
@@ -304,6 +382,7 @@ class StreamingExecutionMixin(StreamingPreparationMixin, StreamingToolLoopMixin)
         user: UserContextLike,
         history: list[dict[str, Any]],
         task_ctx: Any | None = None,
+        approval_continuation: StreamingApprovalContinuation | None = None,
     ) -> AsyncGenerator[AgentLoopEvent, None]:
         """
         Streaming-First execution mode (Manus-style architecture).
@@ -354,6 +433,13 @@ class StreamingExecutionMixin(StreamingPreparationMixin, StreamingToolLoopMixin)
                 yield event
             if prepared.terminal:
                 return
+
+            if approval_continuation is not None:
+                self._attach_approval_continuation(
+                    ctx,
+                    prepared,
+                    approval_continuation,
+                )
 
             loop_result = StreamingLoopResult()
             async for event in self._run_streaming_tool_loop(
@@ -541,12 +627,11 @@ class StreamingExecutionMixin(StreamingPreparationMixin, StreamingToolLoopMixin)
         except RunBudgetExceeded:
             raise
         except Exception as e:
-            safe_error = _redact_trace_text(e)
+            # The exception itself is retained for in-process error middleware,
+            # while public events carry only a stable redacted summary.
+            safe_error = "Assistant execution failed; details [redacted]"
             ctx.model_error_seen = True
-            logger.error(
-                "[STREAMING-FIRST] Error (exception_type=%s)",
-                type(e).__name__,
-            )
+            log_internal_exception(logger, "assistant.streaming_first.failed", e)
             async for error_event in self.middleware_chain.run_on_error(ctx, e, phase):
                 yield error_event
             yield AgentLoopEvent(

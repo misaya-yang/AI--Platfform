@@ -24,7 +24,7 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from .scenario_analyzer import ScenarioDetectionResult, ScenarioType
 
@@ -106,9 +106,7 @@ class ScenarioRetrievalContext:
             "session_id": scope.get("session_id") or metadata.get("session_id"),
         }
         return [
-            f"{key}: {cls._bounded_metadata_value(value)}"
-            for key, value in values.items()
-            if value
+            f"{key}: {cls._bounded_metadata_value(value)}" for key, value in values.items() if value
         ]
 
     @staticmethod
@@ -332,7 +330,9 @@ class ScenarioAwareRetriever:
         ).hexdigest()
         if cache_key in self._cache:
             cached = self._cache[cache_key]
-            logger.info(f"[SCENARIO RETRIEVE] Cache HIT for '{user_query[:50]}' ({len(cached.results)} results)")
+            logger.info(
+                f"[SCENARIO RETRIEVE] Cache HIT for '{user_query[:50]}' ({len(cached.results)} results)"
+            )
             return cached
 
         # Step 1: Expand queries based on scenario
@@ -466,7 +466,9 @@ class ScenarioAwareRetriever:
                         )
                 return dataset_results
             except Exception as e:
-                logger.error(f"[SCENARIO RETRIEVE] Dataset {dataset_id} query failed: {e}")
+                record_internal_exception(
+                    __name__, "assistant.core.rag.scenario_aware_retriever.internal_failure", e
+                )
                 return []
 
         # Parallel retrieval from all datasets (major TTFT optimization)

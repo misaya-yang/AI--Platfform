@@ -19,7 +19,7 @@ from typing import Any
 
 import httpx
 from ai_gateway_core.config import resolve_google
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 logger = get_logger(__name__)
 
@@ -54,10 +54,21 @@ class GeminiImageGenerator:
 
     DEFAULT_MODEL = "gemini-3.1-flash-image-preview"
 
-    def __init__(self, api_key: str | None = None, model: str | None = None):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        *,
+        base_url: str | None = None,
+        backend: str | None = None,
+    ):
         # Resolve via helper when no explicit key is passed — picks up
         # GOOGLE_IMAGE_BACKEND / VERTEX_IMAGE_API_KEY / shared fallbacks.
-        if api_key:
+        if base_url is not None and backend is not None:
+            self.api_key = api_key or ""
+            self.base_url = base_url
+            self.backend = backend
+        elif api_key:
             self.api_key = api_key
             self.base_url = "https://generativelanguage.googleapis.com"
             self.backend = "ai_studio"
@@ -251,9 +262,8 @@ class GeminiImageGenerator:
             )
 
         except Exception as exc:
-            logger.error(
-                "Gemini image generation failed: error_type=%s",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.tools.gemini_image_tool.internal_failure", exc
             )
             return GeminiImageResult(
                 success=False,
@@ -280,7 +290,12 @@ class GeminiImageGenerator:
                     if data:
                         try:
                             size_bytes = len(base64.b64decode(data))
-                        except Exception:
+                        except Exception as exc:
+                            record_internal_exception(
+                                __name__,
+                                "assistant.core.tools.gemini_image_tool.internal_failure",
+                                exc,
+                            )
                             size_bytes = len(data) * 3 // 4
                         img_entry: dict[str, Any] = {
                             "filename": f"gemini_image_{i + 1}.png",
@@ -312,6 +327,22 @@ class GeminiImageGenerator:
 
 
 _gemini_generator: GeminiImageGenerator | None = None
+
+
+def configure_gemini_image_generator(
+    *,
+    api_key: str,
+    base_url: str,
+    backend: str,
+) -> None:
+    """Freeze the image provider resolved by the production startup snapshot."""
+
+    global _gemini_generator
+    _gemini_generator = GeminiImageGenerator(
+        api_key=api_key,
+        base_url=base_url,
+        backend=backend,
+    )
 
 
 def get_gemini_image_generator() -> GeminiImageGenerator:

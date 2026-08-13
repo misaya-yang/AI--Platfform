@@ -38,7 +38,7 @@ import logging
 import os
 import time
 import uuid
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -74,6 +74,7 @@ from ai_gateway_core.image import (
 from ai_gateway_core.image import (
     set_locked_style as _set_locked_style,
 )
+from ai_gateway_core.logging import record_internal_exception
 from ai_gateway_core.security import SafeFetchError, safe_fetch
 from ai_gateway_core.style_presets import (
     compose_styled_prompt,
@@ -758,7 +759,10 @@ def _task_from_db_row(row: dict | None) -> dict | None:
     if isinstance(result, str):
         try:
             result = json.loads(result)
-        except Exception:
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.api.routes.images.internal_failure", exc
+            )
             result = None
     if isinstance(result, dict):
         return result
@@ -1258,9 +1262,9 @@ async def generate_image(
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("Image generation failed: %s", e)
+        record_internal_exception(__name__, "assistant.api.routes.images.internal_failure", e)
         # Best-effort failure-record so callers can audit via /image-sessions
-        with suppress(Exception):
+        try:
             await _record_turn(
                 pool,
                 turn_id=turn_id,
@@ -1274,6 +1278,13 @@ async def generate_image(
                 error=str(e),
                 error_code="internal_error",
                 request_hash=None,
+            )
+        except Exception as exc:
+            record_internal_exception(
+                __name__,
+                "assistant.api.routes.images.suppressed_failure",
+                exc,
+                level=logging.DEBUG,
             )
         return ImageGenerationResponse(
             success=False,
@@ -1319,12 +1330,16 @@ async def _post_generation_bookkeeping(
             try:
                 await _set_locked_style(pool, session_id, new_locked_style)
             except Exception as exc:
-                logger.warning("set_locked_style failed: %s", exc)
+                record_internal_exception(
+                    __name__, "assistant.api.routes.images.internal_failure", exc
+                )
         elif clear_lock:
             try:
                 await _set_locked_style(pool, session_id, None)
             except Exception as exc:
-                logger.warning("clear_locked_style failed: %s", exc)
+                record_internal_exception(
+                    __name__, "assistant.api.routes.images.internal_failure", exc
+                )
 
     # CAS advance
     latest_advanced = True  # default for no-session / allow_branch cases
@@ -1343,7 +1358,9 @@ async def _post_generation_bookkeeping(
                     resolved_parent,
                 )
         except Exception as exc:
-            logger.warning("advance_latest_artifact_cas failed: %s", exc)
+            record_internal_exception(
+                __name__, "assistant.api.routes.images.internal_failure", exc
+            )
             latest_advanced = False
     elif session_id and body.allow_branch:
         # Caller explicitly asked for a branch — don't advance, don't claim.
@@ -1368,7 +1385,9 @@ async def _post_generation_bookkeeping(
             state="completed",
         )
     except Exception as exc:
-        logger.warning("record_turn failed: %s", exc)
+        record_internal_exception(
+            __name__, "assistant.api.routes.images.internal_failure", exc
+        )
 
     # NOTE: idempotency claim was made BEFORE generation in the route
     # handlers (sync + async paths). Bookkeeping no longer claims —
@@ -1600,6 +1619,9 @@ async def submit_image_generation(
             request_hash=request_hash,
         )
     except Exception as exc:
+        record_internal_exception(
+            __name__, "assistant.api.routes.images.internal_failure", exc
+        )
         raise HTTPException(
             status_code=503,
             detail={
@@ -1637,7 +1659,9 @@ async def submit_image_generation(
             body.session_id,
         )
     except Exception as exc:
-        logger.warning("insert pending turn failed (task_id=%s): %s", task_id, exc)
+        record_internal_exception(
+            __name__, "assistant.api.routes.images.internal_failure", exc
+        )
 
     session_mgr = get_session_manager(request)
     worker = asyncio.create_task(
@@ -1701,7 +1725,12 @@ async def get_image_task_status(
                                     "display",
                                     owner_scope=turn.get("owner_scope"),
                                 )
-                            except Exception:
+                            except Exception as exc:
+                                record_internal_exception(
+                                    __name__,
+                                    "assistant.api.routes.images.internal_failure",
+                                    exc,
+                                )
                                 url, actual = None, None
                             if url:
                                 public_id = output_id
@@ -1713,7 +1742,12 @@ async def get_image_task_status(
                                         public_id = getattr(
                                             public_artifact, "artifact_id", output_id
                                         )
-                                    except Exception:
+                                    except Exception as exc:
+                                        record_internal_exception(
+                                            __name__,
+                                            "assistant.api.routes.images.internal_failure",
+                                            exc,
+                                        )
                                         public_id = output_id
                                 images = [
                                     AsyncImageArtifact(
@@ -1923,7 +1957,9 @@ async def get_image_session_view(
                 )
                 output_url = url
             except Exception as exc:
-                logger.warning("turn output URL resolve failed: %s", exc)
+                record_internal_exception(
+                    __name__, "assistant.api.routes.images.internal_failure", exc
+                )
         created_at = row.get("created_at")
         completed_at = row.get("completed_at")
         turns_out.append(

@@ -21,6 +21,7 @@ from ai_gateway_core.agent_plugins import (
     LoadedAgentPlugin,
     load_agent_plugin,
 )
+from ai_gateway_core.logging import record_internal_exception
 
 logger = logging.getLogger(__name__)
 
@@ -105,18 +106,22 @@ class AgentPluginCatalog:
                 package = load_agent_plugin(resolved)
             except AgentPluginLoadError as exc:
                 outcomes.append(AgentPluginCatalogEntry(status="rejected", code=exc.code))
-                logger.warning("agent_plugin_catalog.rejected code=%s", exc.code)
+                record_internal_exception(
+                    logger,
+                    "agent_plugin_catalog.load_rejected",
+                    exc,
+                    level=logging.WARNING,
+                )
                 continue
             except Exception as exc:
+                record_internal_exception(
+                    __name__, "assistant.core.agent.plugin_catalog.internal_failure", exc
+                )
                 outcomes.append(
                     AgentPluginCatalogEntry(
                         status="rejected",
                         code="AGENT_PLUGIN_LOAD_FAILED",
                     )
-                )
-                logger.warning(
-                    "agent_plugin_catalog.rejected code=AGENT_PLUGIN_LOAD_FAILED exception_type=%s",
-                    type(exc).__name__,
                 )
                 continue
             outcomes.append(package)

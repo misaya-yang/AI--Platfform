@@ -433,10 +433,16 @@ class ArtifactStorageService:
         session_id: str,
         user_id: str,
         max_bytes: int,
+        expected_source: str = "tool_output_spill",
     ) -> tuple[ArtifactInfo, bytes] | None:
         """Read one artifact only when every host-owned scope field matches."""
 
-        if not all((artifact_id, tenant_id, session_id, user_id)) or max_bytes <= 0:
+        allowed_sources = {"tool_output_spill", "sse_event_spill"}
+        if (
+            not all((artifact_id, tenant_id, session_id, user_id))
+            or max_bytes <= 0
+            or expected_source not in allowed_sources
+        ):
             return None
         if not self.database or not self.database._pool:
             return None
@@ -446,13 +452,14 @@ class ArtifactStorageService:
                 SELECT * FROM artifacts
                 WHERE artifact_id = $1 AND tenant_id = $2
                   AND session_id = $3 AND user_id = $4
-                  AND source = 'tool_output_spill'
+                  AND source = $5
                   AND turn_id IS NOT NULL
                 """,
                 artifact_id,
                 tenant_id,
                 session_id,
                 user_id,
+                expected_source,
             )
         if not row:
             return None

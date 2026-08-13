@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from .execution_records import RunCheckpointRecord, RunRecord
 
@@ -148,12 +148,11 @@ class RunLifecycleMixin:
                 )
             self._runs[run_id] = record
         except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.gateway.run_lifecycle.internal_failure", exc
+            )
             if isinstance(exc, PermissionError):
                 raise
-            logger.warning(
-                "Failed to persist assistant run start (exception_type=%s)",
-                type(exc).__name__,
-            )
             raise RuntimeError("assistant run start was not persisted") from exc
 
     async def start_approval_resume(
@@ -467,9 +466,8 @@ class RunLifecycleMixin:
                 resume_lease_expires_at,
             )
         except Exception as exc:
-            logger.warning(
-                "Failed to persist approval resume start (exception_type=%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.gateway.run_lifecycle.internal_failure", exc
             )
             raise RuntimeError("approval resume start was not persisted") from exc
         if not row or str(row.get("checkpoint_id") or "") != normalized_checkpoint_id:
@@ -748,9 +746,8 @@ class RunLifecycleMixin:
         try:
             receipt = await self.database.execute(query, *params)
         except Exception as exc:
-            logger.warning(
-                "Failed to persist assistant run finish (exception_type=%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.gateway.run_lifecycle.internal_failure", exc
             )
             raise RuntimeError("assistant run finish was not persisted") from exc
         if not self._write_affected_one(receipt):
@@ -761,9 +758,8 @@ class RunLifecycleMixin:
                     user_id=user_id,
                 )
             except Exception as exc:
-                logger.warning(
-                    "Failed to resolve assistant approval resume fence (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.gateway.run_lifecycle.internal_failure", exc
                 )
                 active_resume = None
             if active_resume:
@@ -786,9 +782,8 @@ class RunLifecycleMixin:
                     user_id=user_id,
                 )
             except Exception as exc:
-                logger.warning(
-                    "Failed to resolve assistant pre-dispatch command fence (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.gateway.run_lifecycle.internal_failure", exc
                 )
                 active_command = None
             if active_command:
@@ -808,9 +803,8 @@ class RunLifecycleMixin:
                     user_id=user_id,
                 )
             except Exception as exc:
-                logger.warning(
-                    "Failed to resolve assistant run completion fence (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.gateway.run_lifecycle.internal_failure", exc
                 )
                 authoritative_terminal = None
             if authoritative_terminal:
@@ -866,9 +860,8 @@ class RunLifecycleMixin:
                     )
                 return run
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "get_run DB query failed, falling back to in-memory mirror (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.gateway.run_lifecycle.internal_failure", exc
                 )
         run = self._get_run_from_memory(run_id, tenant_id, user_id)
         if run:
@@ -922,7 +915,10 @@ class RunLifecycleMixin:
         if isinstance(usage, str):
             try:
                 usage = json.loads(usage)
-            except Exception:
+            except Exception as exc:
+                record_internal_exception(
+                    __name__, "assistant.core.gateway.run_lifecycle.internal_failure", exc
+                )
                 usage = {}
 
         return {
@@ -980,6 +976,9 @@ class RunLifecycleMixin:
                         user_id,
                     )
                 except Exception as exc:
+                    record_internal_exception(
+                        __name__, "assistant.core.gateway.run_lifecycle.internal_failure", exc
+                    )
                     raise RuntimeError("terminal checkpoint run state was unavailable") from exc
                 if (
                     not authoritative_run
@@ -1184,9 +1183,8 @@ class RunLifecycleMixin:
                     record.created_at,
                 )
             except Exception as exc:
-                logger.warning(
-                    "Failed to persist assistant run checkpoint (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.gateway.run_lifecycle.internal_failure", exc
                 )
                 raise RuntimeError("assistant run checkpoint was not persisted") from exc
             if not row or str(row.get("checkpoint_id") or "") != checkpoint_id:
@@ -1346,9 +1344,8 @@ class RunLifecycleMixin:
                 session_id,
             )
         except Exception as exc:
-            logger.warning(
-                "Failed to acknowledge durable command result (exception_type=%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.gateway.run_lifecycle.internal_failure", exc
             )
             row = None
         return {

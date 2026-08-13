@@ -10,7 +10,7 @@ from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.enums import StreamEventType
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from ..trace_payloads import build_rag_trace_payload
 from .agent_loop_helpers import (
@@ -390,10 +390,10 @@ class StreamingToolExecutionMixin:
                     ctx, frame.tool_name, frame.tool_args, frame.result
                 )
             except Exception as exc:
-                logger.error(
-                    "on_tool_result chain raised for %s; using raw result (exception_type=%s)",
-                    frame.tool_log_name,
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.agent.streaming_tool_execution.internal_failure",
+                    exc,
                 )
             frame.tool_success = bool(frame.result.success)
             frame.tool_error = frame.result.error
@@ -1157,7 +1157,6 @@ class StreamingToolExecutionMixin:
             )
 
         side_effect_state = self._tool_side_effect_state(ctx, frame)
-
         # Emit tool_call_completed event (frontend tool cards + search status)
         yield AgentLoopEvent(
             phase=phase,

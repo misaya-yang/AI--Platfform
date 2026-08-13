@@ -54,12 +54,48 @@ def test_soffice_shim_is_compiled_in_a_private_process_directory(monkeypatch):
 
 
 def test_all_office_shims_avoid_the_shared_predictable_path():
+    sources = []
     for skill in ("docx", "xlsx", "pptx"):
         source = (
             SKILLS_ROOT / skill / "scripts" / "office" / "soffice.py"
         ).read_text()
+        sources.append(source)
         assert 'Path(tempfile.gettempdir()) / "lo_socket_shim.so"' not in source
         assert 'tempfile.mkdtemp(prefix="lo_socket_shim_")' in source
+    assert len(set(sources)) == 1
+
+
+def test_all_soffice_launchers_use_a_closed_bootstrap_environment(monkeypatch):
+    source_environment = {
+        "HOME": "/tmp/office-home",
+        "LANG": "C.UTF-8",
+        "LANGUAGE": "en_US:en",
+        "LC_ALL": "C.UTF-8",
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "TMPDIR": "/tmp",
+        "TZ": "UTC",
+        "OPENAI_API_KEY": "provider-secret-must-not-reach-soffice",
+        "GATEWAY_ASSISTANT_SHARED_SECRET": "gateway-secret-must-not-reach-soffice",
+        "TENANT_ID": "tenant-context-must-not-reach-soffice",
+        "ASSISTANT_DEFAULT_MEMORY_MODE": "platform-config-must-not-reach-soffice",
+        "LD_PRELOAD": "/tmp/untrusted-preload.so",
+        "PYTHONPATH": "/tmp/untrusted-pythonpath",
+    }
+    expected = {
+        name: source_environment[name]
+        for name in ("HOME", "LANG", "LANGUAGE", "LC_ALL", "PATH", "TMPDIR", "TZ")
+    }
+    expected["SAL_USE_VCLPLUGIN"] = "svp"
+
+    for skill in ("docx", "pptx", "xlsx"):
+        module = _load_module(
+            f"test_{skill}_soffice_environment",
+            SKILLS_ROOT / skill / "scripts" / "office" / "soffice.py",
+        )
+        monkeypatch.setattr(module.os, "environ", source_environment)
+        monkeypatch.setattr(module, "_needs_shim", lambda: False)
+
+        assert module.get_soffice_env() == expected
 
 
 def test_accept_changes_reports_timeout_and_uses_ephemeral_profile(

@@ -17,6 +17,7 @@ from hashlib import sha256
 from typing import Any
 from urllib.parse import urlsplit
 
+from ai_gateway_core.logging import record_internal_exception
 from ai_gateway_core.models import ChatMessage
 from ai_gateway_core.models import normalize_chat_message as _normalize_message
 
@@ -210,8 +211,7 @@ def _responses_input(
             [
                 block
                 for block in (message.provider_content_blocks or [])
-                if isinstance(block, dict)
-                and block.get("type") == "openai_responses_local_call"
+                if isinstance(block, dict) and block.get("type") == "openai_responses_local_call"
             ]
             if role == "assistant"
             else []
@@ -240,6 +240,9 @@ def _responses_input(
                     )
                 )
             except Exception as exc:
+                record_internal_exception(
+                    __name__, "assistant.core.models.responses_api.internal_failure", exc
+                )
                 code = str(getattr(exc, "code", "invalid_native_local_continuation"))
                 raise ResponsesAPIError(code) from None
         for raw_call in message.tool_calls or []:
@@ -894,14 +897,22 @@ async def iter_responses_stream(
                 initial_status = initial.pop("status", None)
                 completed = copy.deepcopy(item)
                 completed_status = completed.pop("status", None)
-                if initial != completed or initial_status not in {
-                    "in_progress",
-                    "completed",
-                } or completed_status not in {"completed", "in_progress"}:
+                if (
+                    initial != completed
+                    or initial_status
+                    not in {
+                        "in_progress",
+                        "completed",
+                    }
+                    or completed_status not in {"completed", "in_progress"}
+                ):
                     raise ResponsesAPIError("native_local_call_rebinding")
                 try:
                     projection = local_runtime.project_provider_item(item)
                 except Exception as exc:
+                    record_internal_exception(
+                        __name__, "assistant.core.models.responses_api.internal_failure", exc
+                    )
                     code = str(getattr(exc, "code", "invalid_native_local_call"))
                     raise ResponsesAPIError(code) from None
                 done_binding.native_item = copy.deepcopy(item)

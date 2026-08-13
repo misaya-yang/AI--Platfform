@@ -8,6 +8,7 @@ the chain is standalone and unit-testable.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any
@@ -77,7 +78,7 @@ class _RaisingStreamMiddleware:
 
     async def on_stream_event(self, ctx: Any, event: _FakeEvent) -> _FakeEvent:
         del ctx, event
-        raise RuntimeError("stream hook failed")
+        raise RuntimeError("private-middleware-exception-message")
 
 
 class _ErrorMiddleware:
@@ -182,7 +183,9 @@ async def test_chain_threads_stream_events_in_registration_order() -> None:
 
 
 @pytest.mark.asyncio
-async def test_chain_isolates_stream_event_hook_errors() -> None:
+async def test_chain_isolates_stream_event_hook_errors(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     from assistant_service.core.agent.middleware import MiddlewareChain
 
     seen: list[str] = []
@@ -190,13 +193,27 @@ async def test_chain_isolates_stream_event_hook_errors() -> None:
         [_RaisingStreamMiddleware(), _StreamMiddleware("after", seen)]
     )
 
-    event = await chain.run_on_stream_event(
-        ctx=None,  # type: ignore[arg-type]
-        event=_FakeEvent(phase="test", event_type="started", data={}),  # type: ignore[arg-type]
-    )
+    with caplog.at_level(
+        logging.ERROR,
+        logger="assistant_service.core.agent.middleware",
+    ):
+        event = await chain.run_on_stream_event(
+            ctx=None,  # type: ignore[arg-type]
+            event=_FakeEvent(phase="test", event_type="started", data={}),  # type: ignore[arg-type]
+        )
 
     assert seen == ["after:started"]
     assert event.event_type == "started_after"
+    records = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("assistant.middleware.on_stream_event.failed")
+    ]
+    assert len(records) == 1
+    assert records[0].exc_info is None
+    assert records[0].internal_exception["exception_type"] == "RuntimeError"
+    assert records[0].internal_exception["frames"]
+    assert "private-middleware-exception-message" not in caplog.text
 
 
 @pytest.mark.asyncio

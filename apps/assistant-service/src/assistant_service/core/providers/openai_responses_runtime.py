@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, cast, runtime_checkable
 
 from ai_gateway_core.enums import ModelProvider
+from ai_gateway_core.logging import record_internal_exception
 
 from ..local_node.tool_bridge import LocalNodeRunScope
 from .openai_responses_tools import (
@@ -309,10 +310,7 @@ class OpenAIResponsesLocalRuntime:
             computer_definition: dict[str, Any] = {"type": "computer"}
             validate_openai_local_tool_definition(computer_definition)
             definitions.append(computer_definition)
-        if (
-            self.bindings.shell is not None
-            and "local_process_run" in self.enabled_tool_names
-        ):
+        if self.bindings.shell is not None and "local_process_run" in self.enabled_tool_names:
             shell_definition: dict[str, Any] = {
                 "type": "shell",
                 "environment": {"type": "local"},
@@ -402,9 +400,7 @@ class OpenAIResponsesLocalRuntime:
             "provider_call_id": plan.provider_call_id,
             "provider_item": copy.deepcopy(dict(item)),
             "kind": "computer",
-            "canonical_calls": [
-                {"id": canonical_id, "tool_name": tool_name, "command_index": 0}
-            ],
+            "canonical_calls": [{"id": canonical_id, "tool_name": tool_name, "command_index": 0}],
         }
         return OpenAIResponsesToolProjection(
             provider_block=block,
@@ -446,9 +442,7 @@ class OpenAIResponsesLocalRuntime:
                 "cwd": cwd,
                 "timeout_ms": request.timeout_ms,
                 "network_policy": (
-                    "deny"
-                    if request.network_policy.mode == "deny"
-                    else "allow_granted_domains"
+                    "deny" if request.network_policy.mode == "deny" else "allow_granted_domains"
                 ),
             }
             calls.append(
@@ -612,9 +606,7 @@ class OpenAIResponsesLocalRuntime:
             if computer_plan.approval_requirements:
                 if canonical_result.get("approval_consumed") is not True:
                     raise OpenAIResponsesRuntimeError("provider_safety_approval_required")
-                approved_ids = [
-                    item.check_id for item in computer_plan.approval_requirements
-                ]
+                approved_ids = [item.check_id for item in computer_plan.approval_requirements]
             try:
                 return cast(
                     dict[str, Any],
@@ -691,7 +683,10 @@ async def prepare_openai_responses_local_runtime(
         return None, OpenAIResponsesLocalReadiness("not_run", "no_selected_local_tools")
     try:
         bindings = await resolver.resolve(scope, required_tool_names=native_candidates)
-    except Exception:
+    except Exception as exc:
+        record_internal_exception(
+            __name__, "assistant.core.providers.openai_responses_runtime.internal_failure", exc
+        )
         return None, OpenAIResponsesLocalReadiness("not_run", "trusted_binding_unavailable")
     if not isinstance(bindings, OpenAIResponsesLocalBindings) or bindings.scope != scope:
         return None, OpenAIResponsesLocalReadiness("not_run", "trusted_binding_unavailable")

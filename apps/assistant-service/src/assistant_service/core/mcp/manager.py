@@ -12,9 +12,10 @@ import base64
 import logging
 import math
 import re
-from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
+
+from ai_gateway_core.logging import record_internal_exception
 
 from ..tools.tool_registry import (
     ToolCategory,
@@ -79,22 +80,31 @@ class MCPManager:
                 self._clients[config.name] = client
                 self._registrations[config.name] = registrations
                 if previous_client is not None and previous_client is not client:
-                    with suppress(Exception):
+                    try:
                         await previous_client.close()
+                    except Exception as exc:
+                        record_internal_exception(
+                            __name__,
+                            "assistant.core.mcp.manager.suppressed_failure",
+                            exc,
+                            level=logging.DEBUG,
+                        )
                 logger.info(f"MCP '{config.name}': {len(tools)} tools registered")
                 return config.name, len(tools)
             except Exception as exc:
+                record_internal_exception(
+                    __name__, "assistant.core.mcp.manager.internal_failure", exc
+                )
                 if client is not None:
-                    with suppress(Exception):
+                    try:
                         await client.close()
-                stable_code = (
-                    exc.stable_code if isinstance(exc, MCPError) else "MCP_INITIALIZATION_FAILED"
-                )
-                logger.warning(
-                    "Static MCP initialization failed (exception_type=%s code=%s)",
-                    type(exc).__name__,
-                    stable_code,
-                )
+                    except Exception as exc:
+                        record_internal_exception(
+                            __name__,
+                            "assistant.core.mcp.manager.suppressed_failure",
+                            exc,
+                            level=logging.DEBUG,
+                        )
                 return config.name, -1
 
         init_results = await asyncio.gather(
@@ -251,11 +261,11 @@ class MCPManager:
                         try:
                             resource_bytes, fetched_mime = await client.download_resource_link(uri)
                         except MCPError as exc:
-                            logger.warning(
-                                "MCP resource import failed: server=%s tool=%s code=%s",
-                                mcp_tool.server_name,
-                                mcp_tool.name,
-                                exc.stable_code,
+                            record_internal_exception(
+                                logger,
+                                "mcp.manager.resource_import_failed",
+                                exc,
+                                level=logging.WARNING,
                             )
                             return ToolCallResult(
                                 call_id=getattr(request, "call_id", ""),
@@ -392,9 +402,8 @@ class MCPManager:
                 self._registrations[name] = replacements
                 results[name] = len(tools)
             except Exception as exc:
-                logger.warning(
-                    "Static MCP refresh failed (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.mcp.manager.internal_failure", exc
                 )
                 results[name] = -1
         return results
@@ -402,8 +411,15 @@ class MCPManager:
     async def shutdown(self) -> None:
         """Close all MCP connections."""
         for client in self._clients.values():
-            with suppress(Exception):
+            try:
                 await client.close()
+            except Exception as exc:
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.mcp.manager.suppressed_failure",
+                    exc,
+                    level=logging.DEBUG,
+                )
         self._clients.clear()
         self._registrations.clear()
 

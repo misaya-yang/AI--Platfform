@@ -14,16 +14,29 @@ image with LibreOffice / Node / etc.
 from __future__ import annotations
 
 import asyncio
-import contextlib
+import logging
 import shutil
 import tempfile
 import time
 from collections.abc import Iterable
 from pathlib import Path
 
+from ai_gateway_core.logging import record_internal_exception
+
 from .client import SandboxClient, SandboxResult, SandboxTimeout
 
-_DEFAULT_KEEP_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "PWD", "SHELL", "USER", "PYTHONUNBUFFERED")
+_DEFAULT_KEEP_ENV = (
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TMPDIR",
+    "PWD",
+    "SHELL",
+    "USER",
+    "PYTHONUNBUFFERED",
+)
 
 
 class LocalSubprocessSandbox(SandboxClient):
@@ -104,8 +117,15 @@ class LocalSubprocessSandbox(SandboxClient):
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
-            with contextlib.suppress(Exception):
+            try:
                 await proc.wait()
+            except Exception as exc:
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.docgen.sandbox.local.suppressed_failure",
+                    exc,
+                    level=logging.DEBUG,
+                )
             raise SandboxTimeout(f"sandbox job exceeded {timeout}s (workdir={workdir})") from None
         duration_ms = int((time.perf_counter() - started) * 1000)
         return SandboxResult(

@@ -15,24 +15,12 @@ import json
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from ai_gateway_core.logging import get_logger
-from ai_gateway_core.security import redact_trace_text
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 if TYPE_CHECKING:
     from ai_gateway_core.persistence import DatabaseStorageLike
 
 logger = get_logger(__name__)
-
-
-def _log_memory_failure(operation: str, exc: BaseException) -> None:
-    """Log a stable operation and exception type without identity or payload data."""
-
-    exception_type = redact_trace_text(type(exc).__name__, limit=80)
-    logger.error(
-        "Memory service operation failed (operation=%s, exception_type=%s)",
-        operation,
-        exception_type,
-    )
 
 
 class MemoryService:
@@ -134,7 +122,7 @@ class MemoryService:
             )
             return True
         except Exception as exc:
-            _log_memory_failure("set_user_memory", exc)
+            record_internal_exception(logger, "assistant.memory.set_user.internal_failure", exc)
             return False
 
     async def get_user_memory(
@@ -232,7 +220,7 @@ class MemoryService:
             await self.database.execute(query, tenant_id, user_id, key)
             return True
         except Exception as exc:
-            _log_memory_failure("delete_user_memory", exc)
+            record_internal_exception(logger, "assistant.memory.delete_user.internal_failure", exc)
             return False
 
     # =========================================================================
@@ -292,7 +280,7 @@ class MemoryService:
             )
             return True
         except Exception as exc:
-            _log_memory_failure("set_session_memory", exc)
+            record_internal_exception(logger, "assistant.memory.set_session.internal_failure", exc)
             return False
 
     async def get_session_memory(self, tenant_id: str, session_id: str, key: str) -> Any | None:
@@ -366,7 +354,7 @@ class MemoryService:
             await self.database.execute(query, tenant_id, session_id, key)
             return True
         except Exception as exc:
-            _log_memory_failure("delete_session_memory", exc)
+            record_internal_exception(logger, "assistant.memory.delete_session.internal_failure", exc)
             return False
 
     async def delete_all_session_memories(self, tenant_id: str, session_id: str) -> bool:
@@ -383,7 +371,11 @@ class MemoryService:
             )
             return remaining is None
         except Exception as exc:
-            _log_memory_failure("delete_all_session_memories", exc)
+            record_internal_exception(
+                logger,
+                "assistant.memory.delete_all_sessions.internal_failure",
+                exc,
+            )
             return False
 
     async def get_session_context(

@@ -11,6 +11,8 @@ import json
 import time
 from typing import Protocol
 
+from ai_gateway_core.logging import record_internal_exception
+
 from ..ir import (
     DocxContent,
     DocxIR,
@@ -77,15 +79,20 @@ class DocxPlanner(BasePlanner):
                 ir = await self._plan_with_llm(brief)
                 used_llm = True
             except Exception as exc:  # noqa: BLE001
-                import logging
-                logging.getLogger(__name__).warning(
-                    "DocxPlanner LLM path failed (%s: %s); falling back to deterministic",
-                    type(exc).__name__, exc, exc_info=True,
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.docgen.planners.docx_planner.internal_failure",
+                    exc,
                 )
         if ir is None:
             ir = self._plan_deterministic(brief)
         outline = self._outline(ir)
-        return PlannerResult(ir=ir, plan_text=outline, used_llm=used_llm, duration_ms=int((time.perf_counter() - started) * 1000))
+        return PlannerResult(
+            ir=ir,
+            plan_text=outline,
+            used_llm=used_llm,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+        )
 
     # ------------------------------------------------------------------ LLM
 

@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-import contextlib
 import copy
 import hashlib
 import json
+import logging
 import time
 from collections.abc import AsyncGenerator
 from typing import Any
 
 from ai_gateway_core.enums import StreamEventType
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, log_internal_exception
 
 from ..models.model_failover import stream_with_failover
 from ..quality.cache_optimizer import (
@@ -44,6 +44,7 @@ from .agent_loop_models import (
     AgentLoopContext,
     AgentLoopEvent,
     AgentLoopPhase,
+    AgentReliabilityLimits,
 )
 
 logger = get_logger(__name__)
@@ -104,6 +105,42 @@ class AgentTurnLifecycleMixin:
                 **{
                     **legacy.to_dict(),
                     "final_synthesis_headroom": config.final_synthesis_headroom,
+                }
+            )
+        reliability_limits = config.reliability_limits
+        if not isinstance(reliability_limits, AgentReliabilityLimits):
+            raise ValueError("reliability_limits must be AgentReliabilityLimits")
+        reliability_sources = [reliability_limits]
+        profile_limits = config.reliability_profile_limits
+        if not isinstance(profile_limits, dict):
+            raise ValueError("reliability_profile_limits must be a mapping")
+        active_profile = str(config.execution_profile or "").strip().casefold()
+        for profile, candidate in profile_limits.items():
+            if str(profile).strip().casefold() != active_profile:
+                continue
+            if not isinstance(candidate, AgentReliabilityLimits):
+                raise ValueError("profile reliability limit is invalid")
+            reliability_sources.append(candidate)
+            break
+        max_tool_calls = limits.max_tool_calls
+        max_wall_time_seconds = limits.max_wall_time_seconds
+        for source in reliability_sources:
+            if source.max_tool_calls is not None:
+                max_tool_calls = min(max_tool_calls, source.max_tool_calls)
+            if source.max_wall_time_seconds is not None:
+                max_wall_time_seconds = min(
+                    max_wall_time_seconds,
+                    source.max_wall_time_seconds,
+                )
+        if (
+            max_tool_calls != limits.max_tool_calls
+            or max_wall_time_seconds != limits.max_wall_time_seconds
+        ):
+            limits = RunBudgetLimits(
+                **{
+                    **limits.to_dict(),
+                    "max_tool_calls": max_tool_calls,
+                    "max_wall_time_seconds": max_wall_time_seconds,
                 }
             )
         return RunBudget(limits)
@@ -465,7 +502,7 @@ class AgentTurnLifecycleMixin:
         return AssistantTraceContext.from_agent_context(ctx)
 
     def _model_provider_snapshot(self, ctx: AgentLoopContext) -> Any:
-        with contextlib.suppress(Exception):
+        try:
             model_info = (
                 self.model_registry.get_model(ctx.served_model_id or ctx.config.model_id)
                 if self.model_registry
@@ -473,6 +510,13 @@ class AgentTurnLifecycleMixin:
             )
             provider = getattr(model_info, "provider", None)
             return getattr(provider, "value", provider)
+        except Exception as exc:
+            log_internal_exception(
+                logger,
+                "assistant.model_provider.snapshot_failed",
+                exc,
+                level=logging.WARNING,
+            )
         return None
 
     @staticmethod
@@ -578,6 +622,9 @@ class AgentTurnLifecycleMixin:
             snapshot_bootstrap["history_compaction"] = copy.deepcopy(ctx.history_compaction_receipt)
         if ctx.run_budget is not None:
             snapshot_bootstrap["run_budget"] = ctx.run_budget.snapshot()
+        startup_config = getattr(self, "startup_config", None)
+        if startup_config is not None:
+            snapshot_bootstrap["startup_config_fingerprint"] = startup_config.sha256
         ctx.context_snapshot = build_context_snapshot(
             run_id=ctx.run_id,
             request_id=ctx.request_id,
@@ -771,10 +818,10 @@ class AgentTurnLifecycleMixin:
         try:
             self._capture_trace_event(ctx, prepared)
         except Exception as exc:
-            logger.error(
-                "Assistant trace event capture failed without changing the public turn "
-                "(exception_type=%s)",
-                type(exc).__name__,
+            log_internal_exception(
+                logger,
+                "assistant.trace.capture_failed",
+                exc,
             )
         return prepared
 
@@ -953,9 +1000,10 @@ class AgentTurnLifecycleMixin:
                         ctx.last_approval_id = approval_id
             return checkpoint if isinstance(checkpoint, dict) else None
         except Exception as exc:
-            logger.error(
-                "Failed to persist assistant run checkpoint (exception_type=%s)",
-                type(exc).__name__,
+            log_internal_exception(
+                logger,
+                "assistant.checkpoint.persistence_failed",
+                exc,
             )
         return None
 
@@ -992,9 +1040,10 @@ class AgentTurnLifecycleMixin:
                 session_id=ctx.session_id,
             )
         except Exception as exc:
-            logger.error(
-                "Failed to acknowledge durable command result (exception_type=%s)",
-                type(exc).__name__,
+            log_internal_exception(
+                logger,
+                "assistant.command.acknowledgement_failed",
+                exc,
             )
             return False
         committed = bool(isinstance(receipt, dict) and receipt.get("committed") is True)

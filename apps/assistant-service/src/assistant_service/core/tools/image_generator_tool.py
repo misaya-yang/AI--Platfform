@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from .tool_registry import (
     ToolCallRequest,
@@ -155,10 +155,18 @@ class DashScopeImageGenerator:
     _SUBMIT_PATH = "/services/aigc/text2image/image-synthesis"
     _TASK_PATH_TPL = "/tasks/{task_id}"
 
-    def __init__(self, api_key: str | None = None, model: str | None = None):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+    ):
         from ai_gateway_core.config import resolve_dashscope
 
-        if api_key:
+        if base_url is not None:
+            self.api_key = api_key or None
+            self.base_url = base_url.rstrip("/")
+        elif api_key:
             self.api_key = api_key
             self.base_url = "https://dashscope.aliyuncs.com/api/v1"
         else:
@@ -262,7 +270,9 @@ class DashScopeImageGenerator:
             )
 
         except Exception as e:
-            logger.error(f"Image generation failed: {e}")
+            record_internal_exception(
+                __name__, "assistant.core.tools.image_generator_tool.internal_failure", e
+            )
             return ImageGenerationResult(
                 success=False,
                 error=str(e),
@@ -349,7 +359,9 @@ class DashScopeImageGenerator:
                         }
                     )
             except Exception as e:
-                logger.warning(f"Failed to download image {i}: {e}")
+                record_internal_exception(
+                    __name__, "assistant.core.tools.image_generator_tool.internal_failure", e
+                )
 
         return images
 
@@ -381,7 +393,10 @@ class ImageGeneratorExecutor(ToolExecutor):
             if w <= 0 or h <= 0:
                 return "1:1"
             ratio = w / h
-        except Exception:
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.tools.image_generator_tool.internal_failure", exc
+            )
             return "1:1"
 
         candidates = {
@@ -435,11 +450,15 @@ class ImageGeneratorExecutor(ToolExecutor):
                 info = registry.get_model(model_id)
                 if info:
                     selected_provider = info.provider.value
-            except Exception:
+            except Exception as exc:
+                record_internal_exception(
+                    __name__, "assistant.core.tools.image_generator_tool.internal_failure", exc
+                )
                 selected_provider = None
 
         prefer_gemini, prefer_doubao, dashscope_model = resolve_image_routing(
-            model_id, selected_provider,
+            model_id,
+            selected_provider,
         )
 
         router = get_smart_image_generator()
@@ -508,9 +527,50 @@ def get_image_generator() -> DashScopeImageGenerator:
     return _image_generator
 
 
-def register_image_generation_tool() -> bool:
+def register_image_generation_tool(*, startup_config=None) -> bool:
     """Register image generation tool with the global registry."""
-    from .gemini_image_tool import get_gemini_image_generator
+    global _image_generator
+
+    from .doubao_image_tool import configure_doubao_image_generator
+    from .gemini_image_tool import (
+        configure_gemini_image_generator,
+        get_gemini_image_generator,
+    )
+
+    if startup_config is not None:
+        dash_key = startup_config.secret_value("DASHSCOPE_IMAGE_API_KEY") or (
+            startup_config.secret_value("DASHSCOPE_API_KEY")
+        )
+        _image_generator = DashScopeImageGenerator(
+            api_key=dash_key,
+            model=str(startup_config.runtime_value("DASHSCOPE_IMAGE_MODEL")),
+            base_url=str(startup_config.runtime_value("DASHSCOPE_IMAGE_BASE_URL")),
+        )
+        google_backend = str(startup_config.runtime_value("GOOGLE_IMAGE_BACKEND"))
+        google_key = (
+            startup_config.secret_value("VERTEX_IMAGE_API_KEY")
+            or startup_config.secret_value("VERTEX_API_KEY")
+            or startup_config.secret_value("GEMINI_API_KEY")
+            or startup_config.secret_value("GOOGLE_API_KEY")
+            if google_backend == "vertex"
+            else startup_config.secret_value("GEMINI_API_KEY")
+            or startup_config.secret_value("GOOGLE_API_KEY")
+        )
+        google_base = (
+            "https://aiplatform.googleapis.com"
+            if google_backend == "vertex"
+            else "https://generativelanguage.googleapis.com"
+        )
+        configure_gemini_image_generator(
+            api_key=google_key,
+            base_url=google_base,
+            backend=google_backend,
+        )
+        configure_doubao_image_generator(
+            api_key=startup_config.secret_value("ARK_API_KEY"),
+            model=str(startup_config.runtime_value("DOUBAO_IMAGE_MODEL")),
+            base_url=str(startup_config.runtime_value("ARK_BASE_URL")),
+        )
 
     dash = get_image_generator()
     gemini = get_gemini_image_generator()

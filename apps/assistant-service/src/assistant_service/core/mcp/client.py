@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 import httpx
+from ai_gateway_core.logging import record_internal_exception
 
 from .resilience import (
     MCPCircuitBreaker,
@@ -837,12 +838,11 @@ class MCPClient:
                 else:
                     await circuit_breaker.record_success(lease)
                 exc.circuit = await circuit_breaker.snapshot()
-            logger.warning(
-                "MCP tool failed: server=%s tool=%s code=%s duration_ms=%.0f",
-                self.config.name,
-                self._sanitize_name(tool_name),
-                exc.stable_code,
-                (time.monotonic() - started) * 1000,
+            record_internal_exception(
+                logger,
+                "mcp.client.tool_failed",
+                exc,
+                level=logging.WARNING,
             )
             raise
 

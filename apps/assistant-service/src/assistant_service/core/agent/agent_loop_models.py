@@ -168,6 +168,56 @@ class StreamingModelTurn:
     provider_content_blocks: list[dict[str, Any]] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class AgentReliabilityLimits:
+    """Trusted runtime-only ceilings for reliability middleware.
+
+    Tool-call and wall-time limits default to ``None`` because ``RunBudget``
+    owns those two canonical limits.  Operator/profile values may only tighten
+    that budget; they cannot expand it.
+    """
+
+    max_tool_calls: int | None = None
+    max_identical_tool_calls: int = 3
+    max_wall_time_seconds: float | None = None
+    max_trace_events: int = 256
+    max_trace_errors: int = 64
+
+    def __post_init__(self) -> None:
+        optional_integer_limits = {"max_tool_calls": self.max_tool_calls}
+        integer_limits = {
+            "max_identical_tool_calls": self.max_identical_tool_calls,
+            "max_trace_events": self.max_trace_events,
+            "max_trace_errors": self.max_trace_errors,
+        }
+        for name, value in optional_integer_limits.items():
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            ):
+                raise ValueError(f"{name} must be a positive integer or None")
+        for name, value in integer_limits.items():
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        wall_time = self.max_wall_time_seconds
+        if wall_time is not None and (
+            isinstance(wall_time, bool)
+            or not isinstance(wall_time, (int, float))
+            or wall_time <= 0
+            or wall_time != wall_time
+            or wall_time in {float("inf"), float("-inf")}
+        ):
+            raise ValueError("max_wall_time_seconds must be positive and finite or None")
+
+    def to_dict(self) -> dict[str, int | float | None]:
+        return {
+            "max_tool_calls": self.max_tool_calls,
+            "max_identical_tool_calls": self.max_identical_tool_calls,
+            "max_wall_time_seconds": self.max_wall_time_seconds,
+            "max_trace_events": self.max_trace_events,
+            "max_trace_errors": self.max_trace_errors,
+        }
+
+
 @dataclass
 class AgentLoopConfig:
     """
@@ -178,6 +228,8 @@ class AgentLoopConfig:
 
     # Model configuration
     model_id: str = "qwen3.7-plus"
+    # Trusted internal provider pin copied only from a verified Agent Snapshot.
+    model_provider_id: str | None = field(default=None, repr=False)
     temperature: float = 0.5  # Lower for more deterministic answers (was 0.7)
     max_tokens: int = 4096
 
@@ -233,6 +285,17 @@ class AgentLoopConfig:
     # Optional hard limits for tests and internal callers.  ``None`` maps the
     # two legacy knobs above into a finite compatibility budget.
     run_budget_limits: RunBudgetLimits | None = field(default=None, repr=False)
+    # Trusted internal policy only: the public Assistant request does not map
+    # these fields.  Active profile limits are intersected with operator limits
+    # and the canonical RunBudget, so a profile can only tighten execution.
+    reliability_limits: AgentReliabilityLimits = field(
+        default_factory=AgentReliabilityLimits,
+        repr=False,
+    )
+    reliability_profile_limits: dict[str, AgentReliabilityLimits] = field(
+        default_factory=dict,
+        repr=False,
+    )
     persist_messages: bool = True
 
     # Context compression parameters
@@ -358,6 +421,11 @@ class AgentLoopConfig:
             "run_budget_limits": (
                 self.run_budget_limits.to_dict() if self.run_budget_limits is not None else None
             ),
+            "reliability_limits": self.reliability_limits.to_dict(),
+            "reliability_profile_limits": {
+                profile: limits.to_dict()
+                for profile, limits in sorted(self.reliability_profile_limits.items())
+            },
             "persist_messages": self.persist_messages,
         }
 

@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json
 import os
+import re
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -43,7 +44,6 @@ from ._assistant_proxy import (
 from .files import MAX_FILE_SIZE_BYTES, _stream_upload_file, get_mime_type, validate_file_extension
 
 router = APIRouter(tags=["Agent Studio Runtime"])
-
 
 class RedisAgentChannelLimiter:
     """One atomic Redis decision across principal, IP and Publication buckets."""
@@ -480,6 +480,34 @@ def _channel_policy(resolution: dict[str, Any], *, channel: str) -> dict[str, An
     }
 
 
+def _public_effective_native_capabilities(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    projected: list[dict[str, Any]] = []
+    for raw in snapshot.get("capabilities") or []:
+        if not isinstance(raw, dict) or raw.get("type") != "platform":
+            continue
+        name = str(raw.get("id") or "")
+        schema_hash = str(raw.get("schema_hash") or "")
+        risk = str(raw.get("risk") or "")
+        config = raw.get("config") if isinstance(raw.get("config"), dict) else {}
+        requires_confirmation = config.get("requires_confirmation")
+        if (
+            re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}", name) is None
+            or re.fullmatch(r"sha256:[a-f0-9]{64}", schema_hash) is None
+            or risk not in {"low", "medium", "high", "critical"}
+            or not isinstance(requires_confirmation, bool)
+        ):
+            continue
+        projected.append(
+            {
+                "name": name,
+                "schema_hash": schema_hash,
+                "risk": risk,
+                "requires_confirmation": requires_confirmation,
+            }
+        )
+    return sorted(projected, key=lambda item: item["name"])
+
+
 def _bounded_policy_int(policy: dict[str, Any], key: str, default: int, maximum: int) -> int:
     value = policy.get(key, default)
     if isinstance(value, bool) or not isinstance(value, int):
@@ -847,13 +875,23 @@ def _runtime_body(
     message: str,
     session_id: str,
     attachments: list[dict[str, Any]],
+    resume_run_id: str | None = None,
+    resume_approval_id: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    body = {
         "message": message,
         "session_id": session_id,
         "history": None,
         "attachments": attachments,
     }
+    if resume_run_id is not None:
+        body.update(
+            {
+                "resume_run_id": resume_run_id,
+                "resume_approval_id": resume_approval_id,
+            }
+        )
+    return body
 
 
 def _file_storage(request: Request) -> Any:
@@ -1357,6 +1395,7 @@ async def create_version_preview_session(
         publication_id=None,
         channel="preview",
         runtime_fingerprint=runtime_sha256(snapshot),
+        effective_capabilities=_public_effective_native_capabilities(snapshot),
         request_id=_request_id(request),
     )
 
@@ -1409,6 +1448,8 @@ async def version_preview_chat_stream(
         message=payload.message,
         session_id=session_id,
         attachments=[item.model_dump(mode="python") for item in payload.attachments],
+        resume_run_id=payload.resume_run_id,
+        resume_approval_id=payload.resume_approval_id,
     )
     return await _proxy_runtime_stream(
         request,

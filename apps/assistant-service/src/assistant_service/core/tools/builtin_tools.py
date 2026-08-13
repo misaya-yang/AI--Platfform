@@ -16,7 +16,7 @@ import asyncio
 import time
 from typing import TYPE_CHECKING, Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 from ai_gateway_core.security import redact_trace_text
 
 from .tool_registry import (
@@ -52,7 +52,10 @@ def _safe_kb_public_error(value: Any) -> str:
 
     try:
         text = redact_trace_text(str(value)) or "Knowledge base search failed"
-    except Exception:
+    except Exception as exc:
+        record_internal_exception(
+            __name__, "assistant.core.tools.builtin_tools.internal_failure", exc
+        )
         return "Knowledge base search failed"
     if len(text) <= _MAX_KB_PUBLIC_ERROR_CHARS:
         return text
@@ -185,11 +188,7 @@ class KBSearchExecutor(ToolExecutor):
                 error="dataset_ids must contain at most 8 unique, non-empty IDs",
                 duration_ms=(time.time() - start_time) * 1000,
             )
-        if (
-            isinstance(top_k, bool)
-            or not isinstance(top_k, int)
-            or not 1 <= top_k <= _MAX_KB_TOP_K
-        ):
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= _MAX_KB_TOP_K:
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
@@ -325,9 +324,8 @@ class KBSearchExecutor(ToolExecutor):
                         "error": None,
                     }
                 except Exception as exc:
-                    logger.warning(
-                        "assistant.kb_dataset_search_failed (exception_type=%s)",
-                        type(exc).__name__,
+                    record_internal_exception(
+                        __name__, "assistant.kb_dataset_search_failed", exc
                     )
                     return {
                         "dataset_id": dataset_id,
@@ -500,10 +498,7 @@ class KBSearchExecutor(ToolExecutor):
             )
 
         except Exception as exc:
-            logger.error(
-                "assistant.kb_search_failed (exception_type=%s)",
-                type(exc).__name__,
-            )
+            record_internal_exception(__name__, "assistant.kb_search_failed", exc)
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
@@ -586,9 +581,8 @@ def register_builtin_tools(
 
                 resolved_runtime_adapter = AssistantRuntimeAdapter.from_env(database=database)
             except Exception as exc:
-                logger.error(
-                    "assistant.runtime_memory_adapter_init_failed (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.runtime_memory_adapter_init_failed", exc
                 )
         register_tool(
             UPDATE_MEMORY_DEFINITION,
@@ -605,10 +599,7 @@ def register_builtin_tools(
 
         register_web_fetch_tool()
     except Exception as exc:
-        logger.error(
-            "assistant.web_fetch_registration_failed (exception_type=%s)",
-            type(exc).__name__,
-        )
+        record_internal_exception(__name__, "assistant.web_fetch_registration_failed", exc)
 
     # Confluence tools are registered dynamically via MCP when user connects.
     # See: ConnectorMCPService.start_confluence_mcp()

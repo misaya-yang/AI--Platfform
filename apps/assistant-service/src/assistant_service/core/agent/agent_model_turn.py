@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import contextlib
 import copy
-import hashlib
 import json
+import logging
 import time
 from collections.abc import AsyncGenerator
 from typing import Any
 
 from ai_gateway_core.enums import StreamEventType
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from ..models.model_registry import should_use_native_search
 from ..quality.cache_optimizer import (
@@ -238,8 +237,15 @@ class AgentModelTurnMixin:
                     if isinstance(value, (int, float)):
                         call_usage[key] = max(call_usage.get(key, 0), int(value))
                     elif value is not None:
-                        with contextlib.suppress(Exception):
+                        try:
                             call_usage[key] = int(value)
+                        except Exception as exc:
+                            record_internal_exception(
+                                __name__,
+                                "assistant.core.agent.agent_model_turn.suppressed_failure",
+                                exc,
+                                level=logging.DEBUG,
+                            )
 
         for key, value in call_usage.items():
             ctx.usage[key] = int(value)
@@ -365,8 +371,15 @@ class AgentModelTurnMixin:
                         if isinstance(value, (int, float)):
                             forced_usage[key] = max(forced_usage.get(key, 0), int(value))
                         elif value is not None:
-                            with contextlib.suppress(Exception):
+                            try:
                                 forced_usage[key] = int(value)
+                            except Exception as exc:
+                                record_internal_exception(
+                                    __name__,
+                                    "assistant.core.agent.agent_model_turn.suppressed_failure",
+                                    exc,
+                                    level=logging.DEBUG,
+                                )
             if not _model_turn_finish_is_successful(
                 forced_finish_reason,
                 has_tool_calls=False,
@@ -397,9 +410,11 @@ class AgentModelTurnMixin:
         except RunBudgetExceeded:
             raise
         except ContextPacketOverflowError as exc:
-            logger.warning(
-                "[STREAMING-FIRST] Forced synthesis context overflow: overflow_tokens=%s",
-                exc.overflow_tokens,
+            record_internal_exception(
+                logger,
+                "assistant.agent_model_turn.forced_synthesis_context_overflow",
+                exc,
+                level=logging.WARNING,
             )
             # A single synthesis attempt is recoverable: the caller retries
             # with a compact packet. Keep this diagnostic non-terminal so a
@@ -421,13 +436,8 @@ class AgentModelTurnMixin:
                 },
             )
         except Exception as exc:
-            failure_site = f"{type(exc).__module__}.{type(exc).__qualname__}"
-            logger.error(
-                "[STREAMING-FIRST] Forced synthesis (%s) raised; continuing to next fallback "
-                "(exception_type=%s failure_site_sha256=%s)",
-                attempt_label,
-                type(exc).__name__,
-                hashlib.sha256(failure_site.encode("utf-8")).hexdigest()[:16],
+            record_internal_exception(
+                __name__, "assistant.core.agent.agent_model_turn.internal_failure", exc
             )
         for key, value in forced_usage.items():
             ctx.usage[key] = int(value)

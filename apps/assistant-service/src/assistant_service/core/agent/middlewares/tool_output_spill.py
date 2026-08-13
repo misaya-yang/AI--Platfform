@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
 import logging
@@ -12,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import is_dataclass, replace
 from typing import TYPE_CHECKING, Any
 
+from ai_gateway_core.logging import record_internal_exception
 from ai_gateway_core.security import redact_trace_text
 
 logger = logging.getLogger(__name__)
@@ -99,8 +99,12 @@ class ToolOutputSpillMiddleware:
         scope_gate = getattr(self.artifact_storage, "supports_scoped_artifact_reads", None)
         try:
             scope_is_safe = callable(scope_gate) and bool(scope_gate())
-        except Exception:
-            logger.exception("Scoped artifact storage gate failed")
+        except Exception as exc:
+            record_internal_exception(
+                __name__,
+                "assistant.core.agent.middlewares.tool_output_spill.internal_failure",
+                exc,
+            )
             return sanitized_result
         if not callable(scoped_reader) or not scope_is_safe:
             return sanitized_result
@@ -112,8 +116,12 @@ class ToolOutputSpillMiddleware:
 
         try:
             definition = self.definition_resolver(ctx, tool_name)
-        except Exception:
-            logger.exception("Tool definition resolution failed before output spill")
+        except Exception as exc:
+            record_internal_exception(
+                __name__,
+                "assistant.core.agent.middlewares.tool_output_spill.internal_failure",
+                exc,
+            )
             return sanitized_result
         metadata = dict(getattr(definition, "capability_metadata", None) or {})
         risk = str(getattr(getattr(definition, "risk_level", None), "value", "unknown"))
@@ -229,11 +237,22 @@ class ToolOutputSpillMiddleware:
                 metadata=new_metadata,
                 output_files=output_files,
             )
-        except Exception:
-            logger.exception("Failed to persist safe oversized tool output")
+        except Exception as exc:
+            record_internal_exception(
+                __name__,
+                "assistant.core.agent.middlewares.tool_output_spill.internal_failure",
+                exc,
+            )
             if artifact is not None:
-                with contextlib.suppress(Exception):
+                try:
                     await self.artifact_storage.delete_artifact(str(artifact.artifact_id))
+                except Exception as exc:
+                    record_internal_exception(
+                        __name__,
+                        "assistant.core.agent.middlewares.tool_output_spill.suppressed_failure",
+                        exc,
+                        level=logging.DEBUG,
+                    )
             return sanitized_result
 
     @staticmethod

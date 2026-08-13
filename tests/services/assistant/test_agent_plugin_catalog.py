@@ -82,6 +82,7 @@ def test_catalog_loads_bundled_agents_without_database_or_runtime_adapter(
 
     from assistant_service import main
 
+    monkeypatch.setattr(main, "_STARTUP_CONFIG", main.resolve_startup_config(dict(os.environ)))
     app = SimpleNamespace(state=SimpleNamespace())
     catalog = main._initialize_agent_plugin_catalog(app)
 
@@ -208,6 +209,10 @@ async def test_db_less_lifespan_registers_catalog_profiles(
         def from_env(cls, **_kwargs: object) -> None:
             return None
 
+        @classmethod
+        def from_startup_config(cls, **_kwargs: object) -> None:
+            return None
+
     async def fake_shutdown(**_kwargs: object) -> None:
         return None
 
@@ -221,6 +226,17 @@ async def test_db_less_lifespan_registers_catalog_profiles(
     monkeypatch.setattr(tracing, "init_tracing", lambda _service: None)
     monkeypatch.setattr(drain, "install_signal_handlers", lambda _loop: None)
     monkeypatch.setattr(main, "_initialize_model_registry", fake_model_registry)
+    monkeypatch.setattr(
+        main,
+        "_STARTUP_CONFIG",
+        main.resolve_startup_config(
+            {
+                "ASSISTANT_REQUIRE_DB": "false",
+                "ASSISTANT_SUBAGENTS_ENABLED": "true",
+                "ASSISTANT_AGENT_PLUGIN_PATHS": paths,
+            }
+        ),
+    )
     monkeypatch.setattr(main, "_shutdown_assistant_service", fake_shutdown)
     monkeypatch.setattr(knowledge, "KBProxyClient", lambda **_kwargs: None)
     monkeypatch.setattr(metrics, "get_realtime_metrics", object)
@@ -241,11 +257,19 @@ async def test_db_less_lifespan_registers_catalog_profiles(
         "AgentRuntimeMemoryCleanupService",
         FakeCleanupService,
     )
-    monkeypatch.setattr(mcp_config, "load_agent_plugin_mcp_config", lambda: [])
+    monkeypatch.setattr(
+        mcp_config,
+        "load_agent_plugin_mcp_config",
+        lambda **_kwargs: [],
+    )
     monkeypatch.setattr(tools_module, "register_builtin_tools", lambda **_kwargs: None)
     monkeypatch.setattr(tools_module, "register_document_generation_tool", lambda: False)
     monkeypatch.setattr(tools_module, "register_pptx_generation_tool", lambda: False)
-    monkeypatch.setattr(image_generator_tool, "register_image_generation_tool", lambda: False)
+    monkeypatch.setattr(
+        image_generator_tool,
+        "register_image_generation_tool",
+        lambda **_kwargs: False,
+    )
     monkeypatch.setattr(todo_tools, "register_todo_tools", lambda: None)
     monkeypatch.setattr(context_tools, "register_context_tools", lambda: None)
     monkeypatch.setattr(tool_discovery, "register_tool_discovery_tools", lambda: None)

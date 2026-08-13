@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 try:
     from unstructured.partition.auto import partition as unstructured_partition
@@ -210,7 +210,7 @@ class DocumentParser:
             return result
 
         except ImportError as e:
-            logger.error(f"[DocumentParser] unstructured library not installed: {e}")
+            record_internal_exception(logger, "document_parser.dependency_missing", e)
             raise DocumentParseError(
                 "Document parsing requires the 'unstructured' library. "
                 "Install with: pip install unstructured[all-docs]",
@@ -219,9 +219,8 @@ class DocumentParser:
             )
 
         except Exception as e:
-            logger.error(
-                f"[DocumentParser] Failed to parse {file_path}: {e}",
-                exc_info=True,
+            record_internal_exception(
+                __name__, "assistant.core.files.document_parser.internal_failure", e
             )
             raise DocumentParseError(
                 f"Failed to parse document: {str(e)}",

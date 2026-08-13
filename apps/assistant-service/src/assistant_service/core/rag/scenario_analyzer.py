@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from ..prompts.scenario_analysis_prompts import (
     SCENARIO_TYPES,
@@ -223,7 +223,9 @@ class ScenarioAnalyzer:
             return result
 
         except Exception as e:
-            logger.error(f"LLM scenario detection failed: {e}, falling back to fast detection")
+            record_internal_exception(
+                __name__, "assistant.core.rag.scenario_analyzer.internal_failure", e
+            )
             return self.detect_scenario_fast(query)
 
     def _should_require_kb_search(self, query: str, scenario_type: str | None) -> bool:

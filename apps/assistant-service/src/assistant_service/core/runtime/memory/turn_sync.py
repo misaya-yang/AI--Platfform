@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 from ai_gateway_core.security.redaction import redact_trace_text
 
 from .background_sync import OrderedBackgroundSync
@@ -136,9 +136,8 @@ class CompletedTurnMemorySync:
                     write=write.to_dict(),
                 )
             except Exception as exc:
-                logger.warning(
-                    "Runtime memory write notification failed (%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.runtime.memory.turn_sync.internal_failure", exc
                 )
                 errors.append("memory_write_notification_pending")
 
@@ -155,9 +154,8 @@ class CompletedTurnMemorySync:
                 if getattr(index_result, "fallback_reason", None):
                     errors.append("memory_vector_index_pending")
             except Exception as exc:
-                logger.warning(
-                    "Runtime memory derivative index failed (%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.runtime.memory.turn_sync.internal_failure", exc
                 )
                 errors.append("memory_index_pending")
 
@@ -170,9 +168,8 @@ class CompletedTurnMemorySync:
                     write=write.to_dict(),
                 )
             except Exception as exc:
-                logger.warning(
-                    "Runtime memory provider sync notification failed (%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.runtime.memory.turn_sync.internal_failure", exc
                 )
                 errors.append("memory_provider_sync_pending")
 

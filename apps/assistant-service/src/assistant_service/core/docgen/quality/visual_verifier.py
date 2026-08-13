@@ -21,6 +21,8 @@ import subprocess
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from ai_gateway_core.logging import record_internal_exception
+
 from .types import CriticReport, Issue, IssueCategory, IssueSeverity
 
 
@@ -71,14 +73,16 @@ class FreshContextVisionCritic(VisionCritic):
         for idx, img in enumerate(images):
             blocks.append({"type": "text", "text": f"\nPage/slide {idx + 1}:"})
             with open(img, "rb") as fh:
-                blocks.append({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/jpeg",
-                        "data": base64.b64encode(fh.read()).decode("ascii"),
-                    },
-                })
+                blocks.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": base64.b64encode(fh.read()).decode("ascii"),
+                        },
+                    }
+                )
 
         try:
             resp = client.messages.create(
@@ -90,7 +94,16 @@ class FreshContextVisionCritic(VisionCritic):
             raw = resp.content[0].text
             parsed = self._parse_json_array(raw)
         except Exception as e:
-            return [Issue(category=IssueCategory.OTHER, severity=IssueSeverity.INFO, message=f"critic invocation failed: {e}")]
+            record_internal_exception(
+                __name__, "assistant.core.docgen.quality.visual_verifier.internal_failure", e
+            )
+            return [
+                Issue(
+                    category=IssueCategory.OTHER,
+                    severity=IssueSeverity.INFO,
+                    message=f"critic invocation failed: {e}",
+                )
+            ]
 
         return [self._issue_from_dict(d) for d in parsed]
 
@@ -165,6 +178,7 @@ class StructuralVisionCritic(VisionCritic):
 
     def _review_pptx(self, ctx: dict) -> list[Issue]:
         from pptx import Presentation
+
         out: list[Issue] = []
         path = ctx.get("artifact_path")
         if not path:
@@ -180,28 +194,39 @@ class StructuralVisionCritic(VisionCritic):
                     continue
                 for p in tf.paragraphs:
                     from pptx.enum.text import PP_ALIGN
+
                     if p.alignment == PP_ALIGN.CENTER and len(tf.text) > 120:
-                        out.append(Issue(
-                            category=IssueCategory.AI_TELL,
-                            severity=IssueSeverity.WARNING,
-                            message=f"slide {idx+1}: long body text centred",
-                            target=idx,
-                            hint="set alignment=left",
-                        ))
+                        out.append(
+                            Issue(
+                                category=IssueCategory.AI_TELL,
+                                severity=IssueSeverity.WARNING,
+                                message=f"slide {idx + 1}: long body text centred",
+                                target=idx,
+                                hint="set alignment=left",
+                            )
+                        )
                         break
             # placeholder grep
-            all_text = "\n".join(shape.text_frame.text for shape in slide.shapes if shape.has_text_frame)
-            if any(marker in all_text.lower() for marker in ("lorem", "ipsum", "xxxx", "todo", "placeholder")):
-                out.append(Issue(
-                    category=IssueCategory.PLACEHOLDER,
-                    severity=IssueSeverity.CRITICAL,
-                    message=f"slide {idx+1}: placeholder text present",
-                    target=idx,
-                ))
+            all_text = "\n".join(
+                shape.text_frame.text for shape in slide.shapes if shape.has_text_frame
+            )
+            if any(
+                marker in all_text.lower()
+                for marker in ("lorem", "ipsum", "xxxx", "todo", "placeholder")
+            ):
+                out.append(
+                    Issue(
+                        category=IssueCategory.PLACEHOLDER,
+                        severity=IssueSeverity.CRITICAL,
+                        message=f"slide {idx + 1}: placeholder text present",
+                        target=idx,
+                    )
+                )
         return out
 
     def _review_pdf(self, ctx: dict) -> list[Issue]:
         import pypdf
+
         out: list[Issue] = []
         path = ctx.get("artifact_path")
         if not path:
@@ -209,16 +234,27 @@ class StructuralVisionCritic(VisionCritic):
         try:
             reader = pypdf.PdfReader(str(path))
         except Exception as e:
-            return [Issue(category=IssueCategory.OPEN_ERROR, severity=IssueSeverity.CRITICAL, message=str(e))]
+            record_internal_exception(
+                __name__, "assistant.core.docgen.quality.visual_verifier.internal_failure", e
+            )
+            return [
+                Issue(
+                    category=IssueCategory.OPEN_ERROR,
+                    severity=IssueSeverity.CRITICAL,
+                    message=str(e),
+                )
+            ]
         for idx, page in enumerate(reader.pages):
             text = (page.extract_text() or "").lower()
             if any(marker in text for marker in ("lorem", "ipsum", "xxxx", "todo", "placeholder")):
-                out.append(Issue(
-                    category=IssueCategory.PLACEHOLDER,
-                    severity=IssueSeverity.CRITICAL,
-                    message=f"page {idx+1}: placeholder text",
-                    target=idx,
-                ))
+                out.append(
+                    Issue(
+                        category=IssueCategory.PLACEHOLDER,
+                        severity=IssueSeverity.CRITICAL,
+                        message=f"page {idx + 1}: placeholder text",
+                        target=idx,
+                    )
+                )
         return out
 
 
@@ -245,9 +281,13 @@ class PptxPdfVisualVerifier:
             images = self._pdf_to_images(path)
             backend = "pdftoppm" if images else "structural_only"
         else:
-            return CriticReport(passed=True, backend="n/a", note=f"no visual verifier for {doc_type}")
+            return CriticReport(
+                passed=True, backend="n/a", note=f"no visual verifier for {doc_type}"
+            )
 
-        issues = self._critic.review(doc_type, images, {"artifact_path": str(path), "images": [str(i) for i in images]})
+        issues = self._critic.review(
+            doc_type, images, {"artifact_path": str(path), "images": [str(i) for i in images]}
+        )
         critical = [i for i in issues if i.severity == IssueSeverity.CRITICAL]
         rerender_targets = sorted({i.target for i in critical if i.target is not None})
         return CriticReport(
@@ -266,7 +306,15 @@ class PptxPdfVisualVerifier:
         bin_name = "soffice" if shutil.which("soffice") else "libreoffice"
         try:
             proc = subprocess.run(
-                [bin_name, "--headless", "--convert-to", "pdf", "--outdir", str(path.parent), str(path)],
+                [
+                    bin_name,
+                    "--headless",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    str(path.parent),
+                    str(path),
+                ],
                 timeout=60,
                 capture_output=True,
             )
@@ -274,7 +322,10 @@ class PptxPdfVisualVerifier:
                 return None
             candidate = path.with_suffix(".pdf")
             return candidate if candidate.exists() else None
-        except Exception:
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.docgen.quality.visual_verifier.internal_failure", exc
+            )
             return None
 
     def _pdf_to_images(self, pdf_path: Path) -> list[Path]:
@@ -293,7 +344,10 @@ class PptxPdfVisualVerifier:
             if proc.returncode != 0:
                 return []
             return sorted(pdf_path.parent.glob(f"{pdf_path.stem}_page-*.jpg"))
-        except Exception:
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.docgen.quality.visual_verifier.internal_failure", exc
+            )
             return []
 
     def _pypdfium2(self, pdf_path: Path) -> list[Path]:
@@ -306,9 +360,12 @@ class PptxPdfVisualVerifier:
             out: list[Path] = []
             for i, page in enumerate(pdf):
                 img = page.render(scale=2.0).to_pil()
-                out_path = pdf_path.parent / f"{pdf_path.stem}_page-{i+1:03d}.jpg"
+                out_path = pdf_path.parent / f"{pdf_path.stem}_page-{i + 1:03d}.jpg"
                 img.save(str(out_path), "JPEG", quality=80)
                 out.append(out_path)
             return out
-        except Exception:
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.docgen.quality.visual_verifier.internal_failure", exc
+            )
             return []

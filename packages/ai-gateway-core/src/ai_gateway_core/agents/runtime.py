@@ -477,9 +477,10 @@ class AgentRuntimeSigner:
         ):
             raise AgentRuntimeEnvelopeError("AGENT_RUNTIME_ENVELOPE_INVALID")
         if envelope["channel"] == "preview":
+            has_draft_pin = draft_revision is not None
+            has_version_pin = envelope["agent_version_id"] is not None
             if (
-                draft_revision is None
-                or envelope["agent_version_id"] is not None
+                has_draft_pin == has_version_pin
                 or envelope["publication_id"] is not None
             ):
                 raise AgentRuntimeEnvelopeError("AGENT_RUNTIME_ENVELOPE_INVALID")

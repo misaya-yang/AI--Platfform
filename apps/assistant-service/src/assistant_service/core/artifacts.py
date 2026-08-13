@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ai_gateway_core.auth import UserContext
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 logger = get_logger(__name__)
 
@@ -83,15 +83,9 @@ async def persist_output_files(
         # emission fires, and pass the existing URL through. This branch is
         # independent of storage availability.
         existing_url = file_info.get("download_url") or ""
-        if (
-            file_info.get("externally_hosted")
-            or (existing_url and not content_base64)
-        ):
+        if file_info.get("externally_hosted") or (existing_url and not content_base64):
             inferred = _infer_type_and_format(filename=filename, mime_type=mime_type)
-            synthetic_id = (
-                file_info.get("artifact_id")
-                or f"ext-{uuid.uuid4().hex[:16]}"
-            )
+            synthetic_id = file_info.get("artifact_id") or f"ext-{uuid.uuid4().hex[:16]}"
             persisted.append(
                 {
                     **file_info,
@@ -110,7 +104,10 @@ async def persist_output_files(
 
         try:
             content = base64.b64decode(content_base64)
-        except Exception:
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.artifacts.internal_failure", exc
+            )
             logger.warning("Failed to decode artifact base64 for %s (source=%s)", filename, source)
             persisted.append(file_info)
             continue
@@ -143,7 +140,7 @@ async def persist_output_files(
                 }
             )
         except Exception as e:
-            logger.warning("Failed to persist artifact %s (source=%s): %s", filename, source, e)
+            record_internal_exception(__name__, "assistant.core.artifacts.internal_failure", e)
             persisted.append(file_info)
 
     return persisted

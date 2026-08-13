@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import re
 import socket  # kept for test patching of `socket.getaddrinfo`
 import time
@@ -38,7 +39,7 @@ from typing import Any
 from urllib.parse import urlparse, urlunparse
 
 import httpx  # kept for `httpx.TimeoutException` / `httpx.HTTPError` in executor's except clauses
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 from ai_gateway_core.security import (
     SafeFetchError,
     safe_fetch_with_response,
@@ -229,13 +230,19 @@ def _html_to_markdown(html: str) -> str:
         h.body_width = 0
         h.ignore_images = True
         return _clean_whitespace(h.handle(html))
-    except Exception:
+    except Exception as exc:
+        record_internal_exception(
+            __name__, "assistant.core.tools.web_fetch.internal_failure", exc
+        )
         pass
     try:  # pragma: no cover — optional dep
         from markdownify import markdownify as _md  # type: ignore
 
         return _clean_whitespace(_md(html, heading_style="ATX"))
-    except Exception:
+    except Exception as exc:
+        record_internal_exception(
+            __name__, "assistant.core.tools.web_fetch.internal_failure", exc
+        )
         pass
 
     # bs4 fallback — already installed in prod, handles tables & encoding
@@ -275,7 +282,10 @@ def _html_to_markdown(html: str) -> str:
 
         text = soup.get_text("\n", strip=False)
         return _clean_whitespace(text)
-    except Exception:
+    except Exception as exc:
+        record_internal_exception(
+            __name__, "assistant.core.tools.web_fetch.internal_failure", exc
+        )
         pass
 
     # Regex stdlib — last resort.
@@ -512,12 +522,14 @@ class WebFetchExecutor(ToolExecutor):
         try:
             payload = await web_fetch(url=url, max_chars=max_chars, extract=extract)
         except SSRFError as exc:
-            logger.warning("web_fetch rejected URL %r: %s", url, exc)
+            record_internal_exception(
+                logger, "web_fetch.outbound_policy_rejected", exc, level=logging.WARNING
+            )
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=False,
-                error=f"URL rejected: {exc}",
+                error="URL fetch failed or was rejected by outbound request policy",
                 duration_ms=(time.time() - start) * 1000,
             )
         except httpx.TimeoutException:
@@ -539,7 +551,9 @@ class WebFetchExecutor(ToolExecutor):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.exception("web_fetch failed for %r", url)
+            record_internal_exception(
+                __name__, "assistant.core.tools.web_fetch.internal_failure", exc
+            )
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,

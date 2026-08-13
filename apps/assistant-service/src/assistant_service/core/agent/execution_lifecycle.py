@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.enums import StreamEventType
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, log_internal_exception
 
 from ..rag.context_metrics import ContextMetricsBuilder
 from ..run_budget import RunBudget, RunBudgetExceeded
@@ -135,6 +135,11 @@ class ExecutionLifecycleMixin:
                     ),
                 )
             except Exception as exc:
+                log_internal_exception(
+                    logger,
+                    "assistant.approval_resume.preflight_failed",
+                    exc,
+                )
                 yield self._canonical_terminal_error_event(
                     ctx,
                     error="approval_resume_preflight_failed",
@@ -218,10 +223,10 @@ class ExecutionLifecycleMixin:
                 # could overwrite an earlier event in the same trace.
                 ctx.trace_capture_disabled = True
                 ctx.trace_sequence_no = 0
-                logger.error(
-                    "Assistant trace resume disabled for this attempt without changing "
-                    "business execution (exception_type=%s)",
-                    type(exc).__name__,
+                log_internal_exception(
+                    logger,
+                    "assistant.trace.resume_failed",
+                    exc,
                 )
 
         # Initialize metrics builder for observability
@@ -351,9 +356,10 @@ class ExecutionLifecycleMixin:
             if not receipt["finish_committed"]:
                 raise RuntimeError("run finish returned no committed receipt")
         except Exception as exc:
-            logger.error(
-                "Failed to persist run completion before terminal event (exception_type=%s)",
-                type(exc).__name__,
+            log_internal_exception(
+                logger,
+                "assistant.execution.run_persistence_failed",
+                exc,
             )
             unknown_error = "terminal_persistence_unknown"
             unknown_checkpoint = await self._save_checkpoint(
@@ -983,9 +989,10 @@ class ExecutionLifecycleMixin:
                     ):
                         raise RuntimeError("run pause returned no committed receipt")
                 except Exception as exc:
-                    logger.error(
-                        "Failed to persist paused run state (exception_type=%s)",
-                        type(exc).__name__,
+                    log_internal_exception(
+                        logger,
+                        "assistant.execution.pause_persistence_failed",
+                        exc,
                     )
                     try:
                         await self._save_checkpoint(
@@ -1000,10 +1007,10 @@ class ExecutionLifecycleMixin:
                             error="terminal_persistence_unknown",
                         )
                     except Exception as checkpoint_error:
-                        logger.error(
-                            "Blocked-run persistence fallback failed after the public "
-                            "boundary (exception_type=%s)",
-                            type(checkpoint_error).__name__,
+                        log_internal_exception(
+                            logger,
+                            "assistant.execution.pause_fallback_persistence_failed",
+                            checkpoint_error,
                         )
             else:
                 (
@@ -1025,10 +1032,10 @@ class ExecutionLifecycleMixin:
                         trace_id=self._trace_context(ctx).trace_id,
                     )
                 except Exception as exc:
-                    logger.error(
-                        "Assistant trace barrier failed after a durable blocked event; "
-                        "preserving the public blocked boundary (exception_type=%s)",
-                        type(exc).__name__,
+                    log_internal_exception(
+                        logger,
+                        "assistant.trace.blocked_barrier_failed",
+                        exc,
                     )
         else:
             terminal_event_type = None
@@ -1046,10 +1053,10 @@ class ExecutionLifecycleMixin:
                     terminal_event_type=terminal_event_type,
                 )
             except Exception as exc:
-                logger.error(
-                    "Assistant trace finalization failed after the public terminal; "
-                    "preserving that terminal (exception_type=%s)",
-                    type(exc).__name__,
+                log_internal_exception(
+                    logger,
+                    "assistant.trace.finalization_failed",
+                    exc,
                 )
 
         # Persist the shared owner-bound object while holding the same
@@ -1061,10 +1068,10 @@ class ExecutionLifecycleMixin:
                     session=session,
                 )
             except Exception as exc:
-                logger.error(
-                    "Working-memory finalization failed after the public turn boundary "
-                    "(exception_type=%s)",
-                    type(exc).__name__,
+                log_internal_exception(
+                    logger,
+                    "assistant.working_memory.finalization_failed",
+                    exc,
                 )
 
         # Complete task registration
@@ -1072,9 +1079,10 @@ class ExecutionLifecycleMixin:
             try:
                 await self.task_manager.complete_task(session_id, state.task_id)
             except Exception as exc:
-                logger.error(
-                    "Task cleanup failed after the public turn boundary (exception_type=%s)",
-                    type(exc).__name__,
+                log_internal_exception(
+                    logger,
+                    "assistant.task.cleanup_failed",
+                    exc,
                 )
 
     async def _execute_session_core(
@@ -1135,14 +1143,19 @@ class ExecutionLifecycleMixin:
                 state.run_error = state.run_error or "client_disconnected"
             raise
         except Exception as loop_error:
+            log_internal_exception(
+                logger,
+                (
+                    "assistant.execution.cleanup_after_terminal_failed"
+                    if state.blocked_event_recorded or state.terminal_event_recorded
+                    else "assistant.execution.failed"
+                ),
+                loop_error,
+            )
             state.run_status = "failed"
             state.run_error = _redact_trace_text(loop_error)
             if state.blocked_event_recorded or state.terminal_event_recorded:
-                logger.error(
-                    "Assistant cleanup failed after the public turn boundary; preserving "
-                    "the existing terminal (exception_type=%s)",
-                    type(loop_error).__name__,
-                )
+                pass
             else:
                 # A pause flag is authoritative only after its blocked event
                 # crossed the public boundary. Before that, an exception is
@@ -1172,10 +1185,10 @@ class ExecutionLifecycleMixin:
                         )
                         yield error_event
                 except Exception as middleware_error:
-                    logger.error(
-                        "Assistant error middleware failed; continuing to canonical terminal "
-                        "projection (exception_type=%s)",
-                        type(middleware_error).__name__,
+                    log_internal_exception(
+                        logger,
+                        "assistant.error_middleware.failed",
+                        middleware_error,
                     )
                 candidate = AgentLoopEvent(
                     phase=AgentLoopPhase.GENERATION_STORAGE,
@@ -1202,10 +1215,10 @@ class ExecutionLifecycleMixin:
                         state.run_error,
                     )
                 except Exception as terminal_error:
-                    logger.error(
-                        "Full terminal finalization failed; using the side-effect-free "
-                        "canonical projector (exception_type=%s)",
-                        type(terminal_error).__name__,
+                    log_internal_exception(
+                        logger,
+                        "assistant.terminal_finalization.failed",
+                        terminal_error,
                     )
                     terminal_event = self._canonical_terminal_error_event(
                         ctx,

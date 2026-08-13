@@ -28,6 +28,8 @@ import logging
 from dataclasses import is_dataclass, replace
 from typing import TYPE_CHECKING, Any
 
+from ai_gateway_core.logging import record_internal_exception
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -163,7 +165,10 @@ class ResponseCapMiddleware:
             result.result = capped
             result.metadata = new_metadata
             return result
-        except Exception:  # pragma: no cover — defensive
+        except Exception as exc:  # pragma: no cover — defensive
+            record_internal_exception(
+                __name__, "assistant.core.agent.middlewares.response_cap.internal_failure", exc
+            )
             logger.warning(
                 "ResponseCapMiddleware: could not mutate %r; leaving unchanged",
                 type(result).__name__,

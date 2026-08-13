@@ -17,6 +17,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from ai_gateway_core.logging import record_internal_exception
+
 from .tool_registry import (
     ToolCallRequest,
     ToolCallResult,
@@ -724,7 +726,9 @@ class QuizGeneratorExecutor(ToolExecutor):
             )
 
         except Exception as e:
-            logger.error(f"Quiz persist failed: {e}", exc_info=True)
+            record_internal_exception(
+                __name__, "assistant.core.tools.quiz_tool.internal_failure", e
+            )
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,

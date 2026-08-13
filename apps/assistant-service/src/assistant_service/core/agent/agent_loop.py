@@ -57,13 +57,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.enums import StreamEventType
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, log_internal_exception
 
 from ..gateway import AssistantExecutionGateway, AssistantRequestRouter
 from ..models.model_failover import parse_model_fallbacks
-from ..quality.cache_optimizer import (
-    normalize_provider_cache_usage,
-)
 from ..rag.context_engine import (
     ContextBudgetManager,
     ContextEngine,
@@ -79,13 +76,7 @@ from ..rag.rag_metrics import (
 )
 from ..rag.scenario_analyzer import ScenarioAnalyzer
 from ..rag.scenario_aware_retriever import ScenarioAwareRetriever
-from ..run_budget import (
-    RunBudgetExceeded,
-)
 from ..runtime.compat.runtime_adapter import AssistantRuntimeAdapter
-from ..runtime.context import (
-    ContextPacketOverflowError,
-)
 from ..runtime.memory.lifecycle import build_compaction_lineage
 from ..tasks.task_manager import TaskManager, get_task_manager
 from ..tasks.task_planner import TaskPlanner
@@ -105,7 +96,6 @@ from .agent_loop_helpers import (
     _effective_packet_output_tokens,
     _envelope_tool_result,
     _forced_synthesis_fallback,
-    _model_turn_finish_is_successful,
     _parse_model_tool_arguments,
     _redact_trace_text,
     _streaming_tool_step_info,
@@ -133,23 +123,29 @@ from .artifact_persister import (
 )
 from .execution_lifecycle import ExecutionLifecycleMixin
 from .middleware import MiddlewareChain, ToolVerdict, VerdictKind
+from .middlewares.harness import (
+    CallLimitMiddleware,
+    LoopDetectionMiddleware,
+    PreCompletionChecklistMiddleware,
+    TimeBudgetMiddleware,
+    TraceSensorMiddleware,
+)
 from .middlewares.response_cap import ResponseCapMiddleware
 from .middlewares.runtime_memory import RuntimeMemoryMiddleware
 from .middlewares.tool_output_spill import ToolOutputSpillMiddleware
 from .streaming_execution import StreamingExecutionMixin
+from .streaming_state import StreamingApprovalContinuation
 from .subagent_manager import SubAgentManager
 from .subagent_types import SubAgentConfig, SubAgentType
 from .tool_result_formatter import (
     compact_tool_result_for_model as _fmt_compact_tool_result_for_model,
-)
-from .tool_result_formatter import (
-    split_text_for_stream as _fmt_split_text_for_stream,
 )
 
 if TYPE_CHECKING:
     from ai_gateway_core.auth import UserContextLike
     from ai_gateway_core.knowledge import KnowledgeClientLike
 
+    from ...config.startup_fingerprint import StartupConfigSnapshot
     from ..memory_service import MemoryService
     from ..models.model_registry import ModelRegistry
 
@@ -258,6 +254,7 @@ class AgentLoop(
         artifact_storage: Any | None = None,
         file_processor: Any | None = None,
         runtime_adapter_unavailable: bool = False,
+        startup_config: StartupConfigSnapshot | None = None,
     ):
         """
         Initialize the AgentLoop.
@@ -298,6 +295,12 @@ class AgentLoop(
         self.context_budget_manager = ContextBudgetManager()
         self.database = database
         self.trace_writer = trace_writer
+        self.startup_config = startup_config
+        self.skill_candidate_hard_limit = (
+            startup_config.int_value("ASSISTANT_SKILL_CANDIDATE_HARD_LIMIT")
+            if startup_config is not None
+            else None
+        )
         self.assistant_runtime = runtime_adapter
         # Optional trusted control-plane adapter.  Definitions are never
         # registered globally; StreamingPreparation resolves a fresh run-local
@@ -311,15 +314,25 @@ class AgentLoop(
             and self.database is not None
             and not runtime_adapter_unavailable
         ):
-            with contextlib.suppress(Exception):
+            try:
                 self.assistant_runtime = AssistantRuntimeAdapter.from_env(database=self.database)
+            except Exception as exc:
+                log_internal_exception(
+                    __name__,
+                    "assistant.runtime_adapter.initialization_failed",
+                    exc,
+                )
 
         self.system_prompt = system_prompt
 
         self.session_manager = session_manager
         self.artifact_storage = artifact_storage
         self.file_processor = file_processor
-        self.model_fallbacks = parse_model_fallbacks()
+        self.model_fallbacks = parse_model_fallbacks(
+            startup_config.str_value("ASSISTANT_MODEL_FALLBACKS_JSON")
+            if startup_config is not None
+            else None
+        )
 
         # ADR-003: Lazy-initialized sub-agent manager (reused across tool calls)
         self._subagent_manager: SubAgentManager | None = None
@@ -332,6 +345,13 @@ class AgentLoop(
     def _build_default_middleware_chain(self) -> MiddlewareChain:
         """Register middleware concerns that were previously inlined in the loop."""
         chain = MiddlewareChain()
+        startup_config = getattr(self, "startup_config", None)
+        # Reject expired work before mutating any proposal counters.  Call/time
+        # ceilings intersect trusted internal policy with the canonical
+        # RunBudget, while loop state stays request-local on the shared chain.
+        chain.add(TimeBudgetMiddleware())
+        chain.add(CallLimitMiddleware())
+        chain.add(LoopDetectionMiddleware())
         chain.add(
             RuntimeMemoryMiddleware(
                 runtime=self.assistant_runtime,
@@ -342,12 +362,26 @@ class AgentLoop(
             ToolOutputSpillMiddleware(
                 artifact_storage=self.artifact_storage,
                 definition_resolver=self._tool_definition_for_context,
+                enabled=(
+                    startup_config.bool_value("ASSISTANT_TOOL_OUTPUT_SPILL_ENABLED")
+                    if startup_config is not None
+                    else None
+                ),
+                threshold_chars=(
+                    startup_config.int_value("ASSISTANT_TOOL_OUTPUT_SPILL_THRESHOLD_CHARS")
+                    if startup_config is not None
+                    else None
+                ),
             )
         )
         # ResponseCapMiddleware: uniform ~25K-token cap on every tool result,
         # with per-tool overrides available at construction. Sits last so
         # earlier middlewares see the untruncated payload.
         chain.add(ResponseCapMiddleware())
+        # Validate the terminal event before the sensor observes it, so the
+        # trace records the event that callers actually receive.
+        chain.add(PreCompletionChecklistMiddleware())
+        chain.add(TraceSensorMiddleware())
         return chain
 
     def _get_subagent_manager(self) -> SubAgentManager:
@@ -361,6 +395,16 @@ class AgentLoop(
                 tool_invoker=self.tool_invoker,
                 execution_gateway=self.execution_gateway,
                 artifact_storage=self.artifact_storage,
+                tool_output_spill_enabled=(
+                    self.startup_config.bool_value("ASSISTANT_TOOL_OUTPUT_SPILL_ENABLED")
+                    if self.startup_config is not None
+                    else None
+                ),
+                tool_output_spill_threshold_chars=(
+                    self.startup_config.int_value("ASSISTANT_TOOL_OUTPUT_SPILL_THRESHOLD_CHARS")
+                    if self.startup_config is not None
+                    else None
+                ),
             )
         return self._subagent_manager
 
@@ -638,8 +682,7 @@ class AgentLoop(
         history: list[dict[str, Any]] | None,
         task_ctx: Any,
     ) -> AsyncGenerator[AgentLoopEvent, None]:
-        """Execute an approved pending tool and synthesize the final answer."""
-        del task_ctx
+        """Execute an approved pending tool and resume the canonical model/tool loop."""
         state = _ApprovalResumeState()
 
         async for event in self._prepare_approval_resume(ctx, history, state=state):
@@ -652,7 +695,13 @@ class AgentLoop(
         if state.terminal:
             return
 
-        async for event in self._synthesize_approval_response(ctx, history, state=state):
+        async for event in self._continue_approval_resume(
+            ctx,
+            user,
+            history,
+            task_ctx=task_ctx,
+            state=state,
+        ):
             yield event
 
     async def _prepare_approval_resume(
@@ -779,9 +828,10 @@ class AgentLoop(
                         run_id=ctx.run_id,
                     )
                 except Exception as exc:
-                    logger.error(
-                        "Failed to validate resume approval (exception_type=%s)",
-                        type(exc).__name__,
+                    log_internal_exception(
+                        __name__,
+                        "assistant.approval_resume.validation_failed",
+                        exc,
                     )
                     approval_granted = False
                 if approval_granted:
@@ -1124,11 +1174,13 @@ class AgentLoop(
         state.tool_result_for_model = tool_result_for_model
         state.tool_result_preview = tool_result_preview
 
-    async def _synthesize_approval_response(
+    async def _continue_approval_resume(
         self,
         ctx: AgentLoopContext,
+        user: UserContextLike,
         history: list[dict[str, Any]] | None,
         *,
+        task_ctx: Any,
         state: _ApprovalResumeState,
     ) -> AsyncGenerator[AgentLoopEvent, None]:
         phase = AgentLoopPhase.EXECUTION
@@ -1147,205 +1199,6 @@ class AgentLoop(
         tool_status = state.tool_status
         tool_result_for_model = state.tool_result_for_model
         tool_result_preview = state.tool_result_preview
-        synthesis_messages: list[dict[str, Any]] = []
-        trusted_synthesis_prompt, _ = self._build_streaming_system_prompt(
-            ctx,
-            available_tool_names=[],
-            dataset_name_map={},
-            capabilities_enabled=False,
-        )
-        synthesis_messages.append(
-            {
-                "role": "system",
-                "content": trusted_synthesis_prompt,
-            }
-        )
-        for item in history or []:
-            role = str(item.get("role") or "")
-            content = str(item.get("content") or "")
-            if role in {"user", "assistant"} and content:
-                synthesis_messages.append({"role": role, "content": content})
-        response_guidance = (
-            f"\n\nRequested response guidance:\n{str(ctx.config.system_prompt)[:500]}"
-            if ctx.config.system_prompt
-            else ""
-        )
-        synthesis_query = (
-            f"{ctx.message}{response_guidance}\n\n"
-            "The approved tool completed. Give the user a direct, helpful answer "
-            "using the attached untrusted tool-result source."
-        )
-
-        provider_name = ""
-        try:
-            model_info = self.model_registry.get_model(ctx.config.model_id)
-            if model_info:
-                provider_name = str(getattr(model_info.provider, "value", model_info.provider))
-        except Exception:
-            provider_name = ""
-
-        synthesis_chunks: list[str] = []
-        synthesis_usage: dict[str, int] = {}
-        synthesis_finish_reason: str | None = None
-        try:
-            ctx.run_budget.consume_model_turn(purpose="synthesis")
-            model_messages, packet_receipt = self._compile_auxiliary_context_packet(
-                ctx,
-                messages=synthesis_messages,
-                purpose="approval_resume_synthesis",
-                fresh=True,
-                current_query=synthesis_query,
-                tool_result_summaries=[
-                    {
-                        "name": str(tool_name),
-                        "summary": tool_result_for_model[:4000],
-                    }
-                ],
-            )
-            if packet_receipt is not None:
-                yield AgentLoopEvent(
-                    phase=phase,
-                    event_type=StreamEventType.CONTEXT_BUDGET.value,
-                    data={
-                        "run_id": ctx.run_id,
-                        "thread_id": ctx.session_id,
-                        "session_id": ctx.session_id,
-                        "mode": "approval_resume_synthesis",
-                        "context_packet": packet_receipt,
-                    },
-                )
-            async for streamed in self._stream_chat_with_failover(
-                ctx,
-                phase=phase,
-                messages=model_messages,
-                temperature=min(ctx.config.temperature, 0.3),
-                max_tokens=_effective_packet_output_tokens(
-                    ctx.context_packet,
-                    min(ctx.config.max_tokens or 512, 512),
-                ),
-                tools=None,
-                # Qwen 3.7 enables thinking by default. This short, deterministic
-                # post-tool summary should not consume a second reasoning budget.
-                thinking_level="off",
-                budget_purpose="synthesis",
-            ):
-                if isinstance(streamed, AgentLoopEvent):
-                    yield streamed
-                    continue
-                delta = streamed
-                if delta.tool_calls:
-                    raise RuntimeError("provider_synthesis_returned_tool_calls")
-                if delta.finish_reason is not None:
-                    synthesis_finish_reason = str(delta.finish_reason)
-                if delta.content:
-                    synthesis_chunks.extend(_fmt_split_text_for_stream(delta.content))
-                if delta.usage:
-                    for key, value in normalize_provider_cache_usage(
-                        delta.usage,
-                        provider_name,
-                    ).items():
-                        if isinstance(value, (int, float)):
-                            synthesis_usage[key] = max(synthesis_usage.get(key, 0), int(value))
-            if not _model_turn_finish_is_successful(
-                synthesis_finish_reason,
-                has_tool_calls=False,
-            ):
-                raise RuntimeError("provider_turn_incomplete")
-            if not synthesis_chunks:
-                raise RuntimeError("provider_synthesis_returned_no_text")
-            for text_chunk in synthesis_chunks:
-                ctx.generated_content += text_chunk
-                yield AgentLoopEvent(
-                    phase=phase,
-                    event_type="text_delta",
-                    data=text_chunk,
-                )
-            for key, value in synthesis_usage.items():
-                ctx.usage[key] = max(ctx.usage.get(key, 0), int(value))
-        except RunBudgetExceeded:
-            raise
-        except ContextPacketOverflowError as exc:
-            logger.warning(
-                "Approval resume synthesis context overflow for run %s: %s tokens",
-                ctx.run_id,
-                exc.overflow_tokens,
-            )
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type=StreamEventType.RUN_ERROR.value,
-                data={
-                    "run_id": ctx.run_id,
-                    "thread_id": ctx.session_id,
-                    "session_id": ctx.session_id,
-                    "error": "protected_context_exceeds_model_window",
-                    "overflow_tokens": exc.overflow_tokens,
-                },
-            )
-        except Exception as exc:
-            logger.error(
-                "Approval resume synthesis failed (exception_type=%s)",
-                type(exc).__name__,
-            )
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type=StreamEventType.RUN_ERROR.value,
-                data={
-                    "run_id": ctx.run_id,
-                    "thread_id": ctx.session_id,
-                    "session_id": ctx.session_id,
-                    "error": "resume_synthesis_failed",
-                },
-            )
-
-        if ctx.config.persist_messages and self.session_manager and ctx.generated_content:
-            try:
-                from datetime import datetime
-
-                usage_in = int((ctx.usage or {}).get("input_tokens", 0) or 0)
-                usage_out = int((ctx.usage or {}).get("output_tokens", 0) or 0)
-                usage_payload = {
-                    **(ctx.usage or {}),
-                    "prompt_tokens": usage_in,
-                    "completion_tokens": usage_out,
-                }
-                await self.session_manager.add_message(
-                    session_id=ctx.session_id,
-                    role="assistant",
-                    content=ctx.generated_content,
-                    metadata={
-                        "timestamp": datetime.utcnow().isoformat(),
-                        "model_id": ctx.config.model_id,
-                        "usage": usage_payload,
-                        "engine": "agent_loop",
-                        "mode": "approval_resume",
-                        "approval_id": approval_id,
-                        "tool_calls": [
-                            {
-                                "id": tool_id,
-                                "name": tool_name,
-                                "arguments": persisted_tool_args,
-                            }
-                        ],
-                        "tool_results": [
-                            {
-                                "tool_call_id": tool_id,
-                                "name": tool_name,
-                                "status": tool_status,
-                                "success": tool_success,
-                                "result_preview": tool_result_preview,
-                                "error": tool_error_for_event,
-                                "duration_ms": tool_duration_ms,
-                            }
-                        ],
-                    },
-                )
-            except Exception as exc:
-                logger.error(
-                    "Failed to persist assistant message during approval resume "
-                    "(exception_type=%s)",
-                    type(exc).__name__,
-                )
-
         command_id = str(tool_metadata.get("command_id") or "") or None
         output_artifact_ids = [
             str(file_info.get("artifact_id") or "")
@@ -1393,6 +1246,21 @@ class AgentLoop(
             },
             error=tool_error_for_event,
         )
+        if completion_checkpoint is None:
+            ctx.terminal_exit_reason = "checkpoint_persistence_failed"
+            yield AgentLoopEvent(
+                phase=phase,
+                event_type=StreamEventType.RUN_ERROR.value,
+                data={
+                    "run_id": ctx.run_id,
+                    "thread_id": ctx.session_id,
+                    "session_id": ctx.session_id,
+                    "error": "checkpoint_persistence_failed",
+                    "approval_id": approval_id,
+                    "recoverable": False,
+                },
+            )
+            return
         if (
             command_result_acknowledgeable
             and tool_metadata.get("result_acknowledgement_required") is True
@@ -1402,6 +1270,26 @@ class AgentLoop(
                 checkpoint=completion_checkpoint,
                 command_id=command_id,
             )
+
+        continuation = StreamingApprovalContinuation(
+            tool_call_id=tool_id,
+            tool_name=tool_name,
+            arguments=dict(persisted_tool_args),
+            result_content=tool_result_for_model,
+            success=tool_success,
+            result_preview=tool_result_preview,
+            error=tool_error_for_event,
+            duration_ms=tool_duration_ms,
+            artifact_ids=tuple(output_artifact_ids),
+        )
+        async for event in self._execute_streaming_first(
+            ctx=ctx,
+            user=user,
+            history=list(history or []),
+            task_ctx=task_ctx,
+            approval_continuation=continuation,
+        ):
+            yield event
 
     async def execute(
         self,
@@ -1445,13 +1333,8 @@ class AgentLoop(
                 if current_task is not None and current_task.cancelling():
                     raise
                 exc = RuntimeError("assistant_operation_cancelled")
+            log_internal_exception(__name__, "assistant.execution.boundary_failed", exc)
             if public_boundary is not None:
-                logger.error(
-                    "Assistant execution failed after public turn boundary %s; preserving it "
-                    "(exception_type=%s)",
-                    public_boundary,
-                    type(exc).__name__,
-                )
                 return
             resolved_traceparent = str(traceparent or "") or None
             resolved_otel_trace_id: str | None = None
@@ -1479,7 +1362,6 @@ class AgentLoop(
                 error=safe_error,
                 exit_reason="failed",
                 phase=AgentLoopPhase.GENERATION_STORAGE,
-                details={"exception_type": type(exc).__name__},
             )
 
     async def _execute_impl(

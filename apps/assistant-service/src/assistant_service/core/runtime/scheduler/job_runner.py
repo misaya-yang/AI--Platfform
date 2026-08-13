@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from ai_gateway_core.logging import record_internal_exception
+
 
 @dataclass
 class ScheduledJob:
@@ -117,7 +119,12 @@ class SchedulerJobRunner:
             if isinstance(payload, str):
                 try:
                     payload = json.loads(payload)
-                except Exception:
+                except Exception as exc:
+                    record_internal_exception(
+                        __name__,
+                        "assistant.core.runtime.scheduler.job_runner.internal_failure",
+                        exc,
+                    )
                     payload = {}
             jobs.append(
                 ScheduledJob(

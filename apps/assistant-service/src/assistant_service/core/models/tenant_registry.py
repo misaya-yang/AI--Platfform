@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from ai_gateway_core.enums import ModelProvider
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 from ai_gateway_core.security import decrypt_value, is_encrypted
 
 from .model_registry import ModelRegistry
@@ -63,13 +63,23 @@ class TenantModelRegistryResolver:
         self.database = database
         self.encryption_key = encryption_key
 
-    async def resolve(self, tenant_id: str, model_id: str) -> ModelRegistry | None:
+    async def resolve(
+        self,
+        tenant_id: str,
+        model_id: str,
+        provider_id: str | None = None,
+    ) -> ModelRegistry | None:
         if self.database is None:
             return None
 
+        exact_provider_id = None
+        if provider_id is not None:
+            exact_provider_id = str(provider_id)
+            if not exact_provider_id or exact_provider_id != exact_provider_id.strip():
+                return None
+
         try:
-            row = await self.database.fetchrow(
-                """
+            query = """
                 SELECT m.model_id, m.display_name, m.context_window,
                        m.max_output_tokens, m.supports_vision, m.supports_tools,
                        m.input_price_per_1k, m.output_price_per_1k, m.access_level,
@@ -85,20 +95,31 @@ class TenantModelRegistryResolver:
                   AND p.is_enabled = true
                 ORDER BY m.sort_order ASC, p.provider_id ASC
                 LIMIT 1
-                """,
-                tenant_id or "default",
-                model_id,
+                """
+            arguments: tuple[str, ...] = (tenant_id or "default", model_id)
+            if exact_provider_id is not None:
+                query = query.replace(
+                    "                  AND m.is_enabled = true",
+                    "                  AND m.provider_id = $3\n"
+                    "                  AND m.is_enabled = true",
+                )
+                arguments = (*arguments, exact_provider_id)
+            row = await self.database.fetchrow(
+                query,
+                *arguments,
             )
         except Exception as exc:
-            logger.warning(
-                "Tenant model registry lookup failed (exception_type=%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__, "assistant.core.models.tenant_registry.internal_failure", exc
             )
             return None
 
         if not row:
             return None
         data = dict(row)
+        if exact_provider_id is not None and str(data.get("provider_id") or "") != exact_provider_id:
+            logger.warning("Pinned Agent provider resolution returned a mismatched row")
+            return None
         stored_secret = str(data.get("api_key_encrypted") or "")
         if not stored_secret:
             # This is the normal env/CLI configuration path.
@@ -135,9 +156,10 @@ class TenantModelRegistryResolver:
                 wire_protocol=wire_protocol,
             )
         except (TypeError, ValueError) as exc:
-            logger.warning(
-                "Tenant provider configuration is invalid (exception_type=%s)",
-                type(exc).__name__,
+            record_internal_exception(
+                __name__,
+                "assistant.tenant_model.provider_configuration_invalid",
+                exc,
             )
         return registry
 

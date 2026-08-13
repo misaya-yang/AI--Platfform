@@ -36,13 +36,14 @@ References:
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 logger = get_logger(__name__)
 
@@ -1185,7 +1186,9 @@ class TaskPlanner:
                 )
 
         except Exception as e:
-            logger.error(f"LLM planning failed: {e}")
+            record_internal_exception(
+                __name__, "assistant.core.tasks.task_planner.internal_failure", e
+            )
             # Fall back to rule-based planning
             # Extract tool names for rule-based logic
             available_tool_names = []
@@ -1370,7 +1373,9 @@ Rules:
                 tasks.append(task)
 
         except (json.JSONDecodeError, KeyError, ValueError) as e:
-            logger.warning(f"Failed to parse LLM response: {e}")
+            record_internal_exception(
+                logger, "task_planner.response_parse_failed", e, level=logging.WARNING
+            )
 
         return tasks
 

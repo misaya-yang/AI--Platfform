@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from ai_gateway_core.logging import get_logger
-from ai_gateway_core.security import redact_trace_text
+from ai_gateway_core.logging import get_logger, record_internal_exception
 from ai_gateway_core.tasks.task_manager import SessionDeletionBusyError
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
@@ -15,14 +14,6 @@ from ..deps import get_session_manager
 
 router = APIRouter()
 logger = get_logger(__name__)
-
-
-def _log_session_delete_failure(operation: str, exc: BaseException) -> None:
-    logger.error(
-        "Session deletion failed (operation=%s, exception_type=%s)",
-        operation,
-        redact_trace_text(type(exc).__name__, limit=80),
-    )
 
 
 @router.post("/sessions")
@@ -117,7 +108,9 @@ async def delete_session(
     try:
         session = await sm.get(session_id)
     except Exception as exc:
-        _log_session_delete_failure("verify_session_owner", exc)
+        record_internal_exception(
+            __name__, "assistant.api.routes.sessions.internal_failure", exc
+        )
         raise HTTPException(503, "Session deletion storage is unavailable") from None
     if not session or session.user_id != user.user_id or session.tenant_id != user.tenant_id:
         raise HTTPException(404, "Session not found")
@@ -143,7 +136,9 @@ async def delete_session(
                     session_id=session_id,
                 )
             except Exception as exc:
-                _log_session_delete_failure("delete_session_memory", exc)
+                record_internal_exception(
+                    __name__, "assistant.api.routes.sessions.internal_failure", exc
+                )
                 memories_deleted = False
             if memories_deleted is not True:
                 raise HTTPException(503, "Session deletion was not completed")
@@ -164,7 +159,9 @@ async def delete_session(
                         session_id=session_id,
                     )
                 except Exception as exc:
-                    _log_session_delete_failure("clear_session_runtime_state", exc)
+                    record_internal_exception(
+                        __name__, "assistant.api.routes.sessions.internal_failure", exc
+                    )
                     raise HTTPException(503, "Session deletion was not completed") from None
                 if (
                     not isinstance(runtime_clearance, dict)
@@ -175,7 +172,9 @@ async def delete_session(
             try:
                 durable_deleted = await sm.delete(session_id)
             except Exception as exc:
-                _log_session_delete_failure("delete_session", exc)
+                record_internal_exception(
+                    __name__, "assistant.api.routes.sessions.internal_failure", exc
+                )
                 durable_deleted = False
             if durable_deleted is not True:
                 raise HTTPException(503, "Session deletion was not completed")
@@ -186,7 +185,9 @@ async def delete_session(
     except PermissionError:
         raise HTTPException(409, "Session has conflicting live ownership") from None
     except Exception as exc:
-        _log_session_delete_failure("coordinate_session_delete", exc)
+        record_internal_exception(
+            __name__, "assistant.api.routes.sessions.internal_failure", exc
+        )
         raise HTTPException(503, "Session deletion was not completed") from None
 
     return {"status": "deleted", "session_id": session_id}

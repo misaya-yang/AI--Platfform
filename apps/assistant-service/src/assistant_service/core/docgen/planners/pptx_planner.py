@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import time
 
+from ai_gateway_core.logging import record_internal_exception
+
 from ..ir import (
     BulletBlock,
     ChartSpec,
@@ -102,31 +104,35 @@ class PptxPlanner(BasePlanner):
                 #   * Timeouts (asyncio.TimeoutError)
                 # We never want a hard 500 in front of the user — fall through
                 # to the deterministic path and log with stack trace for debug.
-                import logging
-                logging.getLogger(__name__).warning(
-                    "PptxPlanner LLM path failed (%s: %s); falling back to deterministic",
-                    type(exc).__name__, exc, exc_info=True,
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.docgen.planners.pptx_planner.internal_failure",
+                    exc,
                 )
         if ir is None:
             ir = self._plan_deterministic(brief)
         outline = self._outline(ir)
-        return PlannerResult(ir=ir, plan_text=outline, used_llm=used_llm, duration_ms=int((time.perf_counter() - started) * 1000))
+        return PlannerResult(
+            ir=ir,
+            plan_text=outline,
+            used_llm=used_llm,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+        )
 
     # ------------------------------------------------------------------ LLM
 
     async def _plan_with_llm(self, brief: Brief) -> PptxIR:
-        user = (
-            f"Title: {brief.title}\n"
-            f"Brief: {brief.goal}\n"
-            f"Locale: {brief.locale}\n"
-        )
+        user = f"Title: {brief.title}\nBrief: {brief.goal}\nLocale: {brief.locale}\n"
         if brief.body_markdown:
             user += f"\nSeed content:\n{brief.body_markdown}\n"
         if brief.style_hints:
             user += f"\nStyle hints: {json.dumps(brief.style_hints)}\n"
         data = await self._llm.generate_json(system=SYSTEM_PROMPT, user=user, max_tokens=6000)
         data.setdefault("doc_type", "pptx")
-        data.setdefault("metadata", {"title": brief.title, "page_size": "Widescreen16x9", "locale": brief.locale})
+        data.setdefault(
+            "metadata",
+            {"title": brief.title, "page_size": "Widescreen16x9", "locale": brief.locale},
+        )
         # Respect caller-supplied design_system hint (propagate from brief.style_hints).
         if brief.style_hints.get("design_system"):
             data["metadata"].setdefault("design_system", brief.style_hints["design_system"])
@@ -166,11 +172,13 @@ class PptxPlanner(BasePlanner):
             PptxSlide(layout="title", title=brief.title, subtitle=brief.goal[:120]),
         ]
         if not sections:
-            slides.append(PptxSlide(
-                layout="title_content",
-                title="Overview",
-                body=[ParagraphBlock(text=brief.goal)],
-            ))
+            slides.append(
+                PptxSlide(
+                    layout="title_content",
+                    title="Overview",
+                    body=[ParagraphBlock(text=brief.goal)],
+                )
+            )
         else:
             for _idx, (title, blocks) in enumerate(sections):
                 slide = self._pick_slide_for_section(title, blocks)
@@ -180,11 +188,13 @@ class PptxPlanner(BasePlanner):
         if brief.style_hints.get("chart") or "chart" in brief.goal.lower():
             slides.append(self._default_chart_slide(brief))
 
-        slides.append(PptxSlide(
-            layout="quote",
-            title="Thanks",
-            body=[QuoteBlock(text=f"Questions? — {brief.title}", author=None)],
-        ))
+        slides.append(
+            PptxSlide(
+                layout="quote",
+                title="Thanks",
+                body=[QuoteBlock(text=f"Questions? — {brief.title}", author=None)],
+            )
+        )
 
         # Deterministic path only needs variety + eyebrow (no LLM drift to fix,
         # no Layer-1/Maturity boundary story, no dark-card interleave desired
@@ -229,11 +239,20 @@ class PptxPlanner(BasePlanner):
 
         # A single bullet list is the most common content case.
         bullets = [b for b in blocks if isinstance(b, BulletBlock)]
-        if len(blocks) == 1 and bullets and len(bullets[0].items) == 4 and all(len(it) < 80 for it in bullets[0].items):
+        if (
+            len(blocks) == 1
+            and bullets
+            and len(bullets[0].items) == 4
+            and all(len(it) < 80 for it in bullets[0].items)
+        ):
             return PptxSlide(layout="grid_2x2", title=title, body=blocks)
-        if len(blocks) == 1 and bullets and 3 <= len(bullets[0].items) <= 4 and any(
-            " via " in it or " — " in it or ": " in it for it in bullets[0].items
-        ) and all(len(it) < 90 for it in bullets[0].items):
+        if (
+            len(blocks) == 1
+            and bullets
+            and 3 <= len(bullets[0].items) <= 4
+            and any(" via " in it or " — " in it or ": " in it for it in bullets[0].items)
+            and all(len(it) < 90 for it in bullets[0].items)
+        ):
             return PptxSlide(layout="icon_row", title=title, body=blocks)
 
         # 2 paragraphs → two_col

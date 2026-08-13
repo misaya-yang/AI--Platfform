@@ -19,7 +19,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 if TYPE_CHECKING:
     from .models.model_registry import ModelRegistry
@@ -165,7 +165,9 @@ class TextExtractionStrategy(FileProcessingStrategy):
                 await on_progress(1, 1, "Text extraction complete")
 
         except Exception as e:
-            logger.error(f"[TextExtraction] Failed to extract text from {file_path}: {e}")
+            record_internal_exception(
+                __name__, "assistant.core.files.file_strategy.internal_failure", e
+            )
             result.error = str(e)
 
         result.processing_time_ms = (time.time() - start_time) * 1000
@@ -265,7 +267,9 @@ class VisionModelStrategy(FileProcessingStrategy):
             )
 
         except Exception as e:
-            logger.error(f"[VisionStrategy] Failed to process {file_path}: {e}")
+            record_internal_exception(
+                __name__, "assistant.core.files.file_strategy.internal_failure", e
+            )
             result.error = str(e)
 
         result.processing_time_ms = (time.time() - start_time) * 1000
@@ -386,7 +390,9 @@ class GeminiFileStrategy(FileProcessingStrategy):
             )
 
         except Exception as e:
-            logger.error(f"[GeminiStrategy] Failed to process {file_path}: {e}")
+            record_internal_exception(
+                __name__, "assistant.core.files.file_strategy.internal_failure", e
+            )
             result.error = str(e)
 
         result.processing_time_ms = (time.time() - start_time) * 1000

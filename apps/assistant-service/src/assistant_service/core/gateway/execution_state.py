@@ -7,6 +7,7 @@ import json
 import uuid
 from typing import Any
 
+from ai_gateway_core.logging import record_internal_exception
 from ai_gateway_core.security import redact_trace_text
 
 
@@ -19,7 +20,10 @@ class GatewayStateMixin:
             return None
         try:
             return str(uuid.UUID(str(value)))
-        except Exception:
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.gateway.execution_state.internal_failure", exc
+            )
             return None
 
     @staticmethod

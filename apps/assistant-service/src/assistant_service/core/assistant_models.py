@@ -98,6 +98,9 @@ class AssistantConfig:
 
     model_provider: ModelProvider = ModelProvider.DASHSCOPE
     model_id: str = "qwen3.7-plus"
+    # Verified Agent Runtime only. This is the exact control-plane provider
+    # identity; ``model_provider`` is merely the runtime protocol family.
+    model_provider_id: str | None = field(default=None, repr=False)
     temperature: float = 0.7
     max_tokens: int | None = None
 

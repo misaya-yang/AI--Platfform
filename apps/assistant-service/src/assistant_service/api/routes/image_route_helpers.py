@@ -21,6 +21,7 @@ from ai_gateway_core.image import (
     make_thumbnail,
 )
 from ai_gateway_core.image import compute_owner_scope as _compute_owner_scope
+from ai_gateway_core.logging import record_internal_exception
 from ai_gateway_core.security import SafeFetchError
 from ai_gateway_core.style_presets import compose_styled_prompt, resolve_style_preset
 from fastapi import HTTPException, Request
@@ -43,7 +44,10 @@ def _get_artifact_storage():
         from ai_gateway_core.storage import get_artifact_storage
 
         return get_artifact_storage()
-    except Exception:
+    except Exception as exc:
+        record_internal_exception(
+            __name__, "assistant.api.routes.image_route_helpers.internal_failure", exc
+        )
         return None
 
 
@@ -103,6 +107,9 @@ def _normalize_reference_image_b64(value: str) -> tuple[str, bytes, str]:
     try:
         decoded = _b64.b64decode(raw, validate=True)
     except Exception as exc:
+        record_internal_exception(
+            __name__, "assistant.api.routes.image_route_helpers.internal_failure", exc
+        )
         raise HTTPException(
             status_code=422,
             detail={"error_code": "validation_error", "message": "reference_image must be base64"},
@@ -333,7 +340,9 @@ async def _persist_and_get_url_impl(
         raw_artifact_id = raw_artifact.artifact_id
         raw_url = await artifact_storage.get_presigned_download_url(raw_artifact)
     except Exception as e:
-        logger.warning("Failed to save raw image artifact: %s", e)
+        record_internal_exception(
+            __name__, "assistant.api.routes.image_route_helpers.internal_failure", e
+        )
         # Fall back to data URL as response, no artifact.
         if add_watermark:
             cb64, mt = await asyncio.to_thread(watermark_fn, raw_b64)
@@ -372,7 +381,9 @@ async def _persist_and_get_url_impl(
                     prompt=prompt,
                 )
         except Exception as exc:
-            logger.warning("Thumbnail persist failed: %s", exc)
+            record_internal_exception(
+                __name__, "assistant.api.routes.image_route_helpers.internal_failure", exc
+            )
 
     if not add_watermark:
         # Single-artifact happy path.
@@ -411,7 +422,9 @@ async def _persist_and_get_url_impl(
         public_artifact_id = wm_artifact.artifact_id
         public_url = await artifact_storage.get_presigned_download_url(wm_artifact)
     except Exception as e:
-        logger.warning("Watermarked artifact persist failed (%s); returning raw URL", e)
+        record_internal_exception(
+            __name__, "assistant.api.routes.image_route_helpers.internal_failure", e
+        )
         # Degrade: return raw URL but still keep raw_artifact_id for history.
         return raw_artifact_id, GeneratedImage(
             url=raw_url or f"data:{raw_mt};base64,{raw_b64}",
@@ -468,15 +481,15 @@ async def _load_artifact_bytes_owner_scoped(
         # Storage doesn't expose ``find_variant`` (legacy / mocked storage in
         # tests) or the call blew up. Fall back to the simpler get_artifact
         # path so legacy callers and unit-test mocks keep working.
-        logger.debug(
-            "find_variant unavailable on artifact %s (%s) — falling back to get_artifact",
-            artifact_id,
-            exc,
+        record_internal_exception(
+            __name__, "assistant.api.routes.image_route_helpers.internal_failure", exc
         )
         try:
             raw = await artifact_storage.get_artifact(artifact_id)
         except Exception as exc2:
-            logger.warning("artifact lookup failed for %s: %s", artifact_id, exc2)
+            record_internal_exception(
+                __name__, "assistant.api.routes.image_route_helpers.internal_failure", exc2
+            )
             raise HTTPException(
                 status_code=404,
                 detail=f"artifact {artifact_id!r} not found",
@@ -503,7 +516,9 @@ async def _load_artifact_bytes_owner_scoped(
     try:
         content = await artifact_storage.download_artifact(raw.artifact_id)
     except Exception as exc:
-        logger.warning("artifact download failed for %s: %s", raw.artifact_id, exc)
+        record_internal_exception(
+            __name__, "assistant.api.routes.image_route_helpers.internal_failure", exc
+        )
         raise HTTPException(
             status_code=404,
             detail=f"artifact {artifact_id!r} not found",
@@ -596,7 +611,9 @@ async def _resolve_reference_bytes_impl(
         try:
             row = await get_image_session_fn(db_pool, body.session_id)
         except Exception as exc:
-            logger.warning("image_session lookup failed: %s", exc)
+            record_internal_exception(
+                __name__, "assistant.api.routes.image_route_helpers.internal_failure", exc
+            )
             row = None
         if row and row.get("latest_artifact_id"):
             latest_id = row["latest_artifact_id"]
@@ -635,9 +652,11 @@ async def _resolve_reference_bytes_impl(
                 if persistent_task_store_required():
                     raise
             except Exception as exc:
+                record_internal_exception(
+                    __name__, "assistant.api.routes.image_route_helpers.internal_failure", exc
+                )
                 if persistent_task_store_required():
                     raise
-                logger.debug("reference_image blob persist skipped: %s", exc)
         return ref_b64, None
 
     # 6. reference_image_url
@@ -675,9 +694,11 @@ async def _resolve_reference_bytes_impl(
                 if persistent_task_store_required():
                     raise
             except Exception as exc:
+                record_internal_exception(
+                    __name__, "assistant.api.routes.image_route_helpers.internal_failure", exc
+                )
                 if persistent_task_store_required():
                     raise
-                logger.debug("reference_image_url blob persist skipped: %s", exc)
         return _b64.b64encode(content).decode(), None
     except SafeFetchError as exc:
         raise HTTPException(
@@ -685,7 +706,9 @@ async def _resolve_reference_bytes_impl(
             detail=f"reference_image_url: {exc}",
         ) from exc
     except Exception as exc:
-        logger.warning("reference_image_url fetch failed: %s", exc)
+        record_internal_exception(
+            __name__, "assistant.api.routes.image_route_helpers.internal_failure", exc
+        )
         raise HTTPException(
             status_code=400,
             detail=f"Failed to fetch reference_image_url: {exc}",
@@ -701,7 +724,9 @@ async def _download_artifact_bytes(artifact_storage, artifact_id: str) -> bytes 
     try:
         return await artifact_storage.download_artifact(artifact_id)
     except Exception as exc:
-        logger.warning("Artifact download failed for %s: %s", artifact_id, exc)
+        record_internal_exception(
+            __name__, "assistant.api.routes.image_route_helpers.internal_failure", exc
+        )
         return None
 
 
@@ -864,8 +889,8 @@ async def _persist_multi_turn_result_impl(
         try:
             await session_manager.update_metadata(body.session_id, meta)
         except Exception as exc:
-            logger.warning(
-                "Legacy image_chat_history write failed for %s: %s", body.session_id, exc
+            record_internal_exception(
+                __name__, "assistant.api.routes.image_route_helpers.internal_failure", exc
             )
 
     return canonical_artifact_id, generated_list
@@ -1156,7 +1181,9 @@ async def _build_variants_response(
                 owner_scope=owner_scope,
             )
         except Exception as exc:
-            logger.warning("variant resolve failed for %s/%s: %s", raw_artifact_id, v, exc)
+            record_internal_exception(
+                __name__, "assistant.api.routes.image_route_helpers.internal_failure", exc
+            )
             continue
         if url and actual:
             out[v] = url

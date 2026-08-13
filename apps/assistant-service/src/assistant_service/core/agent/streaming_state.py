@@ -8,6 +8,21 @@ from typing import Any
 from .tool_dedup import KBDedupState
 
 
+@dataclass(frozen=True, slots=True)
+class StreamingApprovalContinuation:
+    """Trusted approved-tool exchange appended before the next canonical model turn."""
+
+    tool_call_id: str
+    tool_name: str
+    arguments: dict[str, Any]
+    result_content: str
+    success: bool
+    result_preview: str
+    error: str | None
+    duration_ms: float
+    artifact_ids: tuple[str, ...] = ()
+
+
 @dataclass(slots=True)
 class StreamingPreparationState:
     """Context and accumulators produced before the model/tool loop."""

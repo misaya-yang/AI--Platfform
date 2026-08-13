@@ -11,6 +11,7 @@ from pathlib import Path
 
 import yaml
 from ai_gateway_core.agent_plugins import AgentPluginLoadError, load_agent_plugin
+from ai_gateway_core.logging import record_internal_exception
 
 from .client import MCPServerConfig, MCPStaticToolCapability
 
@@ -149,11 +150,16 @@ def _plugin_endpoint(
     return origin, endpoint_path
 
 
-def _trusted_plugin_ids() -> set[str]:
+def _trusted_plugin_ids(configured: str | None = None) -> set[str]:
     """Return operator-approved built-in plugin identities from process config."""
 
     trusted: set[str] = set()
-    for raw_id in os.getenv("ASSISTANT_TRUSTED_AGENT_PLUGINS", "").split(","):
+    raw_config = (
+        os.getenv("ASSISTANT_TRUSTED_AGENT_PLUGINS", "")
+        if configured is None
+        else configured
+    )
+    for raw_id in raw_config.split(","):
         plugin_id = raw_id.strip()
         if not plugin_id:
             continue
@@ -164,7 +170,7 @@ def _trusted_plugin_ids() -> set[str]:
     return trusted
 
 
-def _trusted_plugin_roots() -> set[Path]:
+def _trusted_plugin_roots(configured: str | None = None) -> set[Path]:
     """Resolve operator-owned plugin roots that may launch local code.
 
     Identity metadata is self-declared, so it is never sufficient to cross the
@@ -174,8 +180,12 @@ def _trusted_plugin_roots() -> set[Path]:
     """
 
     trusted: set[Path] = set()
-    configured = os.getenv("ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS", "")
-    for raw_path in configured.split(os.pathsep):
+    raw_config = (
+        os.getenv("ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS", "")
+        if configured is None
+        else configured
+    )
+    for raw_path in raw_config.split(os.pathsep):
         value = raw_path.strip()
         if not value:
             continue
@@ -202,15 +212,23 @@ def _expand_plugin_placeholders(value: str, *, plugin_root: Path, plugin_data: P
     )
 
 
-def _plugin_data_dir(plugin_name: str) -> Path:
-    raw_root = os.getenv("ASSISTANT_AGENT_PLUGIN_DATA_ROOT", "/app/data/agent-plugins")
+def _plugin_data_dir(plugin_name: str, *, configured_root: str | None = None) -> Path:
+    raw_root = (
+        os.getenv("ASSISTANT_AGENT_PLUGIN_DATA_ROOT", "/app/data/agent-plugins")
+        if configured_root is None
+        else configured_root
+    )
     base = Path(raw_root).expanduser()
     if not base.is_absolute():
         raise ValueError("ASSISTANT_AGENT_PLUGIN_DATA_ROOT must be absolute")
     return base.resolve(strict=False) / plugin_name
 
 
-def load_agent_plugin_mcp_config(raw_paths: str | None = None) -> list[MCPServerConfig]:
+def load_agent_plugin_mcp_config(
+    raw_paths: str | None = None,
+    *,
+    startup_config=None,
+) -> list[MCPServerConfig]:
     """Load operator-approved Agent Plugin MCP components.
 
     A configured plugin path is only a discovery boundary. No HTTP or stdio
@@ -221,20 +239,34 @@ def load_agent_plugin_mcp_config(raw_paths: str | None = None) -> list[MCPServer
     variable for container/service discovery.
     """
 
-    configured = (
-        raw_paths if raw_paths is not None else os.getenv("ASSISTANT_AGENT_PLUGIN_PATHS", "")
-    )
+    configured = raw_paths
+    if configured is None:
+        configured = (
+            str(startup_config.runtime_value("ASSISTANT_AGENT_PLUGIN_PATHS"))
+            if startup_config is not None
+            else os.getenv("ASSISTANT_AGENT_PLUGIN_PATHS", "")
+        )
     configs: list[MCPServerConfig] = []
     seen_names: set[str] = set()
-    trusted_plugin_ids = _trusted_plugin_ids()
-    trusted_plugin_roots = _trusted_plugin_roots()
+    trusted_plugin_ids = _trusted_plugin_ids(
+        str(startup_config.runtime_value("ASSISTANT_TRUSTED_AGENT_PLUGINS"))
+        if startup_config is not None
+        else None
+    )
+    trusted_plugin_roots = _trusted_plugin_roots(
+        str(startup_config.runtime_value("ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS"))
+        if startup_config is not None
+        else None
+    )
     for raw_path in configured.split(os.pathsep):
         if not raw_path.strip():
             continue
         try:
             package = load_agent_plugin(Path(raw_path).expanduser())
         except AgentPluginLoadError as exc:
-            logger.warning("agent_plugin.mcp_rejected code=%s", exc.code)
+            record_internal_exception(
+                logger, "agent_plugin.mcp_load_rejected", exc, level=logging.WARNING
+            )
             continue
 
         if not package.mcp_servers:
@@ -279,7 +311,11 @@ def load_agent_plugin_mcp_config(raw_paths: str | None = None) -> list[MCPServer
                 if not isinstance(url_env, str) or not _URL_ENV_RE.fullmatch(url_env):
                     logger.warning("agent_plugin.mcp_url_env_invalid server=%s", server.name)
                     continue
-                override_url = os.getenv(url_env, "").strip() or None
+                override_url = (
+                    startup_config.dynamic_endpoint_value(url_env).strip()
+                    if startup_config is not None
+                    else os.getenv(url_env, "").strip()
+                ) or None
 
             timeout = settings.get("timeoutSeconds", 30.0)
             max_concurrent = settings.get("maxConcurrent", 10)
@@ -304,7 +340,18 @@ def load_agent_plugin_mcp_config(raw_paths: str | None = None) -> list[MCPServer
                 else {}
             )
             if server.transport == "stdio":
-                plugin_data = _plugin_data_dir(package.manifest.name)
+                plugin_data = _plugin_data_dir(
+                    package.manifest.name,
+                    configured_root=(
+                        str(
+                            startup_config.runtime_value(
+                                "ASSISTANT_AGENT_PLUGIN_DATA_ROOT"
+                            )
+                        )
+                        if startup_config is not None
+                        else None
+                    ),
+                )
                 command = server.command
                 if command.startswith("./"):
                     command = str((package.root / command.removeprefix("./")).resolve(strict=True))
@@ -324,6 +371,23 @@ def load_agent_plugin_mcp_config(raw_paths: str | None = None) -> list[MCPServer
                     )
                     for key, value in server.env.items()
                 }
+                inherited_names = _BUILTIN_PLUGIN_PROCESS_ENV.get(
+                    (plugin_id, server.name),
+                    (),
+                )
+                if startup_config is not None:
+                    dashscope_key = startup_config.providers["dashscope"].api_key
+                    frozen_env = {
+                        "DASHSCOPE_CHAT_API_KEY": dashscope_key,
+                        "DASHSCOPE_API_KEY": dashscope_key,
+                    }
+                    for name in inherited_names:
+                        if name in startup_config.runtime:
+                            frozen_env[name] = str(startup_config.runtime_value(name))
+                    process_env.update(
+                        {name: value for name, value in frozen_env.items() if value}
+                    )
+                    inherited_names = ()
                 raw_cwd = server.cwd or "${PLUGIN_ROOT}"
                 cwd = _expand_plugin_placeholders(
                     raw_cwd,
@@ -343,10 +407,7 @@ def load_agent_plugin_mcp_config(raw_paths: str | None = None) -> list[MCPServer
                         command=command,
                         args=args,
                         process_env=process_env,
-                        inherited_env_names=_BUILTIN_PLUGIN_PROCESS_ENV.get(
-                            (plugin_id, server.name),
-                            (),
-                        ),
+                        inherited_env_names=inherited_names,
                         cwd=cwd,
                         plugin_root=str(package.root),
                         plugin_data_dir=str(plugin_data),

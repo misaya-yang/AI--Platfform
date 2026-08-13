@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import tiktoken
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 logger = get_logger(__name__)
 
@@ -77,7 +77,10 @@ class ContextManager:
         # Try to load tiktoken for accurate token counting
         try:
             self._encoder = tiktoken.get_encoding("cl100k_base")  # GPT-4 encoding
-        except Exception:
+        except Exception as exc:
+            record_internal_exception(
+                __name__, "assistant.core.rag.context_manager.internal_failure", exc
+            )
             self._encoder = None
             logger.warning("tiktoken not available, using approximate token counting")
 

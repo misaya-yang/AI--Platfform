@@ -779,10 +779,12 @@ def serialize_tools_deterministic(tools: list[dict[str, Any]]) -> str:
     if not tools:
         return ""
 
-    # Sort tools by name for consistent ordering
+    # Sort tools by name for consistent ordering.
     sorted_tools = sorted(
         tools,
-        key=lambda tool: str(tool.get("name") or (tool.get("function") or {}).get("name") or ""),
+        key=lambda tool: str(
+            tool.get("name") or (tool.get("function") or {}).get("name") or ""
+        ),
     )
 
     # Remove variable fields and sort keys

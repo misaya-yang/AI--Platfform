@@ -12,6 +12,7 @@ from ._core import (
     get_logger,
     set_log_context,
 )
+from ._exceptions import log_internal_exception, record_internal_exception
 
 __all__ = [
     "ContextFilter",
@@ -23,5 +24,7 @@ __all__ = [
     "configure_structured_logging",
     "get_log_context",
     "get_logger",
+    "log_internal_exception",
+    "record_internal_exception",
     "set_log_context",
 ]

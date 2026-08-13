@@ -17,6 +17,7 @@ import re
 from pathlib import Path
 
 DEFAULT_WORKSPACE_ROOT = "/tmp/ai-gateway-workspace"
+_CONFIGURED_WORKSPACE_ROOT: str | None = None
 
 # Strict charset for opaque IDs coming from auth headers — alphanumerics,
 # dash, underscore, dot (but not `..`), up to 128 chars. Rejects NULL bytes,
@@ -29,9 +30,20 @@ class WorkspaceEscapeError(ValueError):
     """Raised when a requested path resolves outside the tenant workspace."""
 
 
+def configure_workspace_root(root: str) -> None:
+    """Freeze the composition-root workspace path for production primitives."""
+
+    global _CONFIGURED_WORKSPACE_ROOT
+    _CONFIGURED_WORKSPACE_ROOT = root or DEFAULT_WORKSPACE_ROOT
+
+
 def workspace_root() -> Path:
     """Root of all tenant workspaces, honoring ASSISTANT_WORKSPACE_ROOT."""
-    root = os.environ.get("ASSISTANT_WORKSPACE_ROOT") or DEFAULT_WORKSPACE_ROOT
+    root = (
+        _CONFIGURED_WORKSPACE_ROOT
+        or os.environ.get("ASSISTANT_WORKSPACE_ROOT")
+        or DEFAULT_WORKSPACE_ROOT
+    )
     return Path(root).resolve()
 
 

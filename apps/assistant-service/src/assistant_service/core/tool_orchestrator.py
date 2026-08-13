@@ -42,7 +42,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 from ai_gateway_core.security import redact_trace_text
 
 from .tasks.task_planner import ExecutionPlan, PlannedTask
@@ -64,7 +64,10 @@ def _safe_error_text(value: Any) -> str:
     try:
         text = str(value) if isinstance(value, BaseException) else value
         return redact_trace_text(text, limit=_MAX_ERROR_TEXT_CHARS)
-    except Exception:
+    except Exception as exc:
+        record_internal_exception(
+            __name__, "assistant.core.tool_orchestrator.internal_failure", exc
+        )
         return "Tool execution failed"
 
 
@@ -395,6 +398,9 @@ class ToolOrchestrator:
                 # Note: as_completed may wrap the original task, so we need
                 # to find by matching. Since exceptions are rare and the dict
                 # is typically small, this is acceptable.
+                record_internal_exception(
+                    __name__, "assistant.tool_orchestrator.parallel_task_failed", exc
+                )
                 planned_task = async_tasks.get(coro)
 
                 # Fallback to linear search if direct lookup fails
@@ -412,10 +418,6 @@ class ToolOrchestrator:
                 task_id = planned_task.id if planned_task else "unknown"
                 tool_name = planned_task.tool if planned_task else "unknown"
 
-                logger.error(
-                    "Unexpected tool task failure (exception_type=%s)",
-                    type(exc).__name__,
-                )
                 yield ToolExecutionResult(
                     task_id=task_id,
                     tool=tool_name,
@@ -496,11 +498,8 @@ class ToolOrchestrator:
                 return result
 
             except Exception as exc:
+                record_internal_exception(__name__, "assistant.tool_orchestrator.task_failed", exc)
                 duration_ms = (time.time() - start_time) * 1000
-                logger.error(
-                    "Tool task execution failed (exception_type=%s)",
-                    type(exc).__name__,
-                )
 
                 return ToolExecutionResult(
                     task_id=task.id,
@@ -509,6 +508,7 @@ class ToolOrchestrator:
                     error=_safe_error_text(exc),
                     duration_ms=duration_ms,
                 )
+
     def _resolve_params(
         self,
         params: dict[str, Any],

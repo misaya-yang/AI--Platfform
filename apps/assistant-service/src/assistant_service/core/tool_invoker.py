@@ -41,12 +41,13 @@ import asyncio
 import contextlib
 import hashlib
 import json as _json
+import logging
 import time
 import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 from ai_gateway_core.security import redact_trace_text
 
 from .tool_invocation_contracts import (
@@ -83,7 +84,8 @@ def _safe_public_error(value: Any) -> str:
     try:
         text = str(value) if isinstance(value, BaseException) else value
         return redact_trace_text(text, limit=_MAX_PUBLIC_ERROR_CHARS)
-    except Exception:
+    except Exception as exc:
+        record_internal_exception(__name__, "assistant.core.tool_invoker.internal_failure", exc)
         return "Tool execution failed"
 
 
@@ -92,7 +94,8 @@ def _tool_log_label(tool_name: Any) -> str:
 
     try:
         digest = hashlib.sha256(str(tool_name).encode("utf-8", errors="replace")).hexdigest()
-    except Exception:
+    except Exception as exc:
+        record_internal_exception(__name__, "assistant.core.tool_invoker.internal_failure", exc)
         return "tool_sha256=unavailable"
     return f"tool_sha256={digest[:16]}"
 
@@ -105,17 +108,16 @@ def _log_audit_task_completion(task: asyncio.Task[Any], tool_label: str) -> None
     try:
         error = task.exception()
     except Exception as exc:
-        logger.debug(
-            "Tool audit callback inspection failed (tool_label=%s, exception_type=%s)",
-            tool_label,
-            type(exc).__name__,
+        record_internal_exception(
+            __name__, "assistant.core.tool_invoker.internal_failure", exc
         )
         return
     if error is not None:
-        logger.debug(
-            "Async tool audit failed (tool_label=%s, exception_type=%s)",
-            tool_label,
-            type(error).__name__,
+        record_internal_exception(
+            __name__,
+            "assistant.tool_audit.background_task_failed",
+            error,
+            level=logging.DEBUG,
         )
 
 
@@ -277,9 +279,10 @@ class RegistryToolInvoker(ToolInvoker):
                 blocked_tools = frozenset(str(item) for item in policy.blocked_tools)
                 allowed_categories = frozenset(str(item) for item in policy.allowed_categories)
             except Exception as exc:
-                logger.warning(
-                    "Tenant tool policy snapshot failed closed (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__,
+                    f"assistant.tool_policy.catalog_failed.{_tool_log_label('catalog')}",
+                    exc,
                 )
                 tool_policy_resolved = False
 
@@ -297,9 +300,10 @@ class RegistryToolInvoker(ToolInvoker):
                     getattr(mcp_config, "policy_source", "configured") or "configured"
                 )
             except Exception as exc:
-                logger.warning(
-                    "Tenant MCP policy snapshot failed closed (exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__,
+                    f"assistant.mcp_policy.catalog_failed.{_tool_log_label('mcp_catalog')}",
+                    exc,
                 )
                 mcp_policy_resolved = False
                 mcp_policy_source = "unavailable"
@@ -507,7 +511,6 @@ class RegistryToolInvoker(ToolInvoker):
 
         duration_ms = (time.time() - start_time) * 1000
         safe_error = _safe_public_error(error)
-        tool_label = _tool_log_label(tool_name)
         if self.tool_audit:
             try:
                 from .audit.tool_audit import ToolAuditEntry
@@ -527,10 +530,10 @@ class RegistryToolInvoker(ToolInvoker):
                     )
                 )
             except Exception as exc:
-                logger.debug(
-                    "Denied tool audit failed (tool_label=%s, exception_type=%s)",
-                    tool_label,
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__,
+                    f"assistant.tool_audit.denied_failed.{_tool_log_label(tool_name)}",
+                    exc,
                 )
 
         return ToolCallResult(
@@ -598,10 +601,8 @@ class RegistryToolInvoker(ToolInvoker):
                     lambda finished: _log_audit_task_completion(finished, tool_label)
                 )
             except Exception as exc:
-                logger.debug(
-                    "Cached tool audit setup failed (tool_label=%s, exception_type=%s)",
-                    tool_label,
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.tool_invoker.internal_failure", exc
                 )
         return cached_copy
 
@@ -629,10 +630,8 @@ class RegistryToolInvoker(ToolInvoker):
             try:
                 self.metrics_collector(tool_name, duration_ms, result.success)
             except Exception as exc:
-                logger.error(
-                    "Tool metrics collection failed (tool_label=%s, exception_type=%s)",
-                    tool_label,
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, f"assistant.tool_metrics.failed.{tool_label}", exc
                 )
 
         if self.tool_audit:
@@ -656,10 +655,8 @@ class RegistryToolInvoker(ToolInvoker):
                     lambda finished: _log_audit_task_completion(finished, tool_label)
                 )
             except Exception as exc:
-                logger.debug(
-                    "Tool audit setup failed (tool_label=%s, exception_type=%s)",
-                    tool_label,
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, f"assistant.tool_audit.schedule_failed.{tool_label}", exc
                 )
 
         if cache_key and result.success:
@@ -802,7 +799,10 @@ class RegistryToolInvoker(ToolInvoker):
                     bindings={tool_name: capability_binding},
                     tool_names={tool_name},
                 )
-            except Exception:
+            except Exception as exc:
+                record_internal_exception(
+                    __name__, "assistant.core.tool_invoker.internal_failure", exc
+                )
                 dynamic_definitions = []
             tool_definition = next(
                 (
@@ -839,7 +839,10 @@ class RegistryToolInvoker(ToolInvoker):
                     binding=capability_binding,
                     context=context,
                 )
-            except Exception:
+            except Exception as exc:
+                record_internal_exception(
+                    __name__, "assistant.core.tool_invoker.internal_failure", exc
+                )
                 return await self._deny_tool_call(
                     call_id=call_id,
                     tool_name=tool_name,
@@ -1394,15 +1397,12 @@ class RegistryToolInvoker(ToolInvoker):
                 )
 
             except Exception as exc:
-                last_error = _safe_public_error(exc)
-                logger.warning(
-                    "Tool execution attempt failed "
-                    "(tool_label=%s, attempt=%s, max_attempts=%s, exception_type=%s)",
-                    _tool_log_label(request.tool_name),
-                    attempt + 1,
-                    max_attempts,
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__,
+                    f"assistant.tool_retry.failed.{_tool_log_label(request.tool_name)}",
+                    exc,
                 )
+                last_error = _safe_public_error(exc)
                 if execution_policy.may_have_external_side_effect and not (
                     execution_policy.replay_safe and attempt + 1 < max_attempts
                 ):
@@ -1514,10 +1514,10 @@ class RegistryToolInvoker(ToolInvoker):
             if isinstance(item, Exception):
                 # Should not happen with return_exceptions=True
                 tool_name = requests[completed_index].get("tool_name", "unknown")
-                logger.error(
-                    "Unexpected tool batch exception (tool_label=%s, exception_type=%s)",
-                    _tool_log_label(tool_name),
-                    type(item).__name__,
+                record_internal_exception(
+                    __name__,
+                    f"assistant.tool_batch.failed.{_tool_log_label(tool_name)}",
+                    item,
                 )
                 continue
             idx, result = item
@@ -1630,7 +1630,10 @@ class RegistryToolInvoker(ToolInvoker):
                         binding=binding,
                         context=context,
                     )
-                except Exception:
+                except Exception as exc:
+                    record_internal_exception(
+                        __name__, "assistant.core.tool_invoker.internal_failure", exc
+                    )
                     denied_connectors.add(name)
             if denied_connectors:
                 tools = [tool for tool in tools if tool.name not in denied_connectors]

@@ -5,8 +5,10 @@ Response shapes match the gateway's ``ModelsListResponse`` /
 (see ``src/api/schemas/assistant.py``) so these routes are a true
 drop-in replacement for the in-process handlers during Phase 5b.
 """
+
 from __future__ import annotations
 
+from ai_gateway_core.logging import record_internal_exception
 from fastapi import APIRouter, Depends, Request
 
 from ...auth import UserContext, get_user_context
@@ -82,11 +84,10 @@ async def get_config(request: Request, user: UserContext = Depends(get_user_cont
     available_providers: list[str] = []
     visible_models = []
     if mr:
-        available_providers = [
-            p.value for p in ModelProvider if mr.is_provider_configured(p)
-        ]
+        available_providers = [p.value for p in ModelProvider if mr.is_provider_configured(p)]
         visible_models = [
-            m for m in mr.get_available_models()
+            m
+            for m in mr.get_available_models()
             if _user_can_access_model(user, m.access_level.value)
         ]
 
@@ -98,7 +99,10 @@ async def get_config(request: Request, user: UserContext = Depends(get_user_cont
     try:
         tr = get_tool_registry()
         tools_available = [t.name for t in tr.list_tools()]
-    except Exception:
+    except Exception as exc:
+        record_internal_exception(
+            __name__, "assistant.api.routes.models.internal_failure", exc
+        )
         pass
 
     # web_search_enabled stays True post-PR-2: capable models do their own
@@ -107,12 +111,15 @@ async def get_config(request: Request, user: UserContext = Depends(get_user_cont
     # URL-fetch fallback. Frontend can keep its toggle as a model-pref hint.
     preferred = next(
         (
-            m for m in visible_models
+            m
+            for m in visible_models
             if m.provider == ModelProvider.DASHSCOPE and m.id == "qwen3.7-plus"
         ),
         None,
     )
-    default_model_id = preferred.id if preferred else (visible_models[0].id if visible_models else "")
+    default_model_id = (
+        preferred.id if preferred else (visible_models[0].id if visible_models else "")
+    )
 
     return {
         "default_model_id": default_model_id,
@@ -137,7 +144,10 @@ async def list_datasets(request: Request, user: UserContext = Depends(get_user_c
 
     try:
         raw = await kb_proxy.list_datasets(user=user)
-    except Exception:
+    except Exception as exc:
+        record_internal_exception(
+            __name__, "assistant.api.routes.models.internal_failure", exc
+        )
         return {"datasets": []}
 
     # Small frozen set duplicated from gateway-side

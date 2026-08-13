@@ -11,6 +11,7 @@ import logging
 import re
 from pathlib import Path
 
+from ai_gateway_core.logging import record_internal_exception
 from pptx.chart.data import CategoryChartData
 from pptx.enum.chart import XL_CHART_TYPE
 from pptx.enum.text import MSO_AUTO_SIZE, PP_ALIGN
@@ -261,7 +262,9 @@ def draw_blocks(slide, blocks, *, left, top, width, height, ctx, prims):
                 try:
                     slide.shapes.add_picture(b.source_path, Inches(left), Inches(cursor), height=Inches(h))
                 except (FileNotFoundError, OSError, ValueError) as exc:
-                    logger.warning("block image %r failed to embed: %s", b.source_path, exc)
+                    record_internal_exception(
+                        logger, "docgen.blocks.image_embed_failed", exc, level=logging.WARNING
+                    )
                     h = 0.4
                     prims.text(slide, f"[image: {b.alt_text}]", left=left, top=cursor,
                                width=width, height=h, size_pt=13, italic=True,
@@ -282,7 +285,9 @@ def draw_blocks(slide, blocks, *, left, top, width, height, ctx, prims):
                                       Inches(left), Inches(cursor), Inches(width), Inches(h),
                                       chart_data)
             except (KeyError, ValueError, TypeError) as exc:
-                logger.warning("chart block render failed: %s", exc)
+                record_internal_exception(
+                    logger, "docgen.blocks.chart_render_failed", exc, level=logging.WARNING
+                )
                 prims.text(slide, f"[chart: {b.alt_text}]", left=left, top=cursor,
                            width=width, height=0.4, size_pt=13,
                            rgb_hex=c.ink_muted, font=ctx.ds.font_body)
@@ -333,7 +338,9 @@ def draw_blocks_dark(slide, blocks, *, left, top, width, height, ctx, prims):
             try:
                 tf.auto_size = MSO_AUTO_SIZE.NONE
             except (AttributeError, ValueError) as exc:
-                logger.debug("auto_size=NONE unavailable on dark bullet: %s", exc)
+                record_internal_exception(
+                    logger, "docgen.blocks.auto_size_unavailable", exc, level=logging.DEBUG
+                )
             for i, item in enumerate(b.items):
                 p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
                 p.line_spacing = 1.4

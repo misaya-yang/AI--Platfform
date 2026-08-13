@@ -40,6 +40,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
+from ._exceptions import _coerce_internal_exception_diagnostic
+
 # 上下文变量，用于在请求生命周期内传递日志上下文
 _log_context: ContextVar[LogContext | None] = ContextVar("log_context", default=None)
 
@@ -277,6 +279,12 @@ class StructuredFormatter(logging.Formatter):
         if context:
             log_data.update(context.to_dict())
 
+        internal_exception = _coerce_internal_exception_diagnostic(
+            getattr(record, "internal_exception", None)
+        )
+        if internal_exception is not None:
+            log_data["internal_exception"] = internal_exception
+
         # 添加 record 中的额外字段
         extra_fields = {}
         for key, value in record.__dict__.items():
@@ -306,6 +314,8 @@ class StructuredFormatter(logging.Formatter):
                 # Bridged fields are already top-level above; don't duplicate
                 # them under ``extra``.
                 *_BRIDGED_FIELDS,
+                # Validated and promoted to a controlled top-level shape.
+                "internal_exception",
             }:
                 extra_fields[key] = value
 
@@ -371,6 +381,16 @@ class SimpleFormatter(logging.Formatter):
 
         # 组合输出
         output = f"{timestamp} {level_str} {record.name}{context_str} - {message}"
+
+        internal_exception = _coerce_internal_exception_diagnostic(
+            getattr(record, "internal_exception", None)
+        )
+        if internal_exception is not None:
+            output += " internal_exception=" + json.dumps(
+                internal_exception,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
 
         # 异常信息
         if record.exc_info:

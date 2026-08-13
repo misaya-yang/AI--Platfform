@@ -20,6 +20,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
 from typing import Any, Protocol, runtime_checkable
 
+from ai_gateway_core.logging import record_internal_exception
+
 from ..tools.tool_registry import ToolCallResult
 from .control_plane import (
     LocalNodeControlPlaneService,
@@ -652,9 +654,7 @@ def validate_file_result(
         for raw in matches:
             match = _result_object(
                 raw,
-                exact_keys=frozenset(
-                    {"relative_path", "line", "column", "preview", "file_sha256"}
-                ),
+                exact_keys=frozenset({"relative_path", "line", "column", "preview", "file_sha256"}),
             )
             relative_path = _result_relative_path(match["relative_path"])
             if not _path_is_within(relative_path, arguments.get("path")):
@@ -668,9 +668,7 @@ def validate_file_result(
                     "relative_path": relative_path,
                     "line": line,
                     "column": column,
-                    "preview": _result_string(
-                        match["preview"], maximum=300, allow_empty=True
-                    ),
+                    "preview": _result_string(match["preview"], maximum=300, allow_empty=True),
                     "file_sha256": _result_sha256(match["file_sha256"]),
                 }
             )
@@ -847,10 +845,7 @@ class ControlPlaneLocalNodeToolProvider(LocalNodeToolProvider):
                 and grant.revoked_at is None
                 and (grant.expires_at is None or grant.expires_at > now)
                 and (grant.session_id is None or grant.session_id == scope.session_id)
-                and (
-                    not binding.selected_grant_ids
-                    or grant.grant_id in binding.selected_grant_ids
-                )
+                and (not binding.selected_grant_ids or grant.grant_id in binding.selected_grant_ids)
             ]
             if not grants:
                 return None
@@ -871,8 +866,7 @@ class ControlPlaneLocalNodeToolProvider(LocalNodeToolProvider):
                 capabilities = frozenset(
                     capability
                     for capability in capabilities
-                    if capability
-                    not in {"file.list", "file.read", "file.search", "file.watch"}
+                    if capability not in {"file.list", "file.read", "file.search", "file.watch"}
                 )
             if not capabilities:
                 return None
@@ -914,8 +908,7 @@ class ControlPlaneLocalNodeToolProvider(LocalNodeToolProvider):
             or not capabilities
             or (
                 self._result_waiter is None
-                and capabilities
-                & {"file.list", "file.read", "file.search", "file.watch"}
+                and capabilities & {"file.list", "file.read", "file.search", "file.watch"}
             )
         ):
             return False
@@ -929,10 +922,7 @@ class ControlPlaneLocalNodeToolProvider(LocalNodeToolProvider):
                 and grant.revoked_at is None
                 and (grant.expires_at is None or grant.expires_at > now)
                 and (grant.session_id is None or grant.session_id == scope.session_id)
-                and (
-                    not binding.selected_grant_ids
-                    or grant.grant_id in binding.selected_grant_ids
-                )
+                and (not binding.selected_grant_ids or grant.grant_id in binding.selected_grant_ids)
                 and capabilities.issubset(grant.capabilities)
                 for grant in state.grants.values()
             )
@@ -1099,7 +1089,12 @@ class ControlPlaneLocalNodeToolProvider(LocalNodeToolProvider):
                     signed_action=_companion_action_to_wire(action),
                     normalized_arguments=device_arguments,
                 )
-            except Exception:
+            except Exception as exc:
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.local_node.provider_adapter.internal_failure",
+                    exc,
+                )
                 return self._denied(envelope, "LOCAL_NODE_APPROVAL_CHANNEL_UNAVAILABLE")
         if envelope.action_operation in _FILE_RESULT_OPERATIONS:
             waiter = self._result_waiter
@@ -1118,7 +1113,12 @@ class ControlPlaneLocalNodeToolProvider(LocalNodeToolProvider):
                     action_id=action_id,
                     timeout_seconds=self._result_timeout_seconds,
                 )
-            except Exception:
+            except Exception as exc:
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.local_node.provider_adapter.internal_failure",
+                    exc,
+                )
                 raw_result = None
             if raw_result is None:
                 return self._result_denied(
@@ -1311,15 +1311,9 @@ class ControlPlaneLocalNodeToolProvider(LocalNodeToolProvider):
             approval_id=_required_receipt_string(receipt, "approval_id"),
             action_id=_required_receipt_string(receipt, "action_id"),
             device_id=_required_receipt_string(receipt, "device_id"),
-            arguments_digest=_required_receipt_string(
-                receipt, "device_arguments_digest"
-            ),
-            target_snapshot_digest=_required_receipt_string(
-                receipt, "target_snapshot_digest"
-            ),
-            policy_snapshot_digest=_required_receipt_string(
-                receipt, "policy_snapshot_digest"
-            ),
+            arguments_digest=_required_receipt_string(receipt, "device_arguments_digest"),
+            target_snapshot_digest=_required_receipt_string(receipt, "target_snapshot_digest"),
+            policy_snapshot_digest=_required_receipt_string(receipt, "policy_snapshot_digest"),
             nonce=_required_receipt_string(receipt, "decision_nonce"),
             expires_at=_receipt_timestamp(receipt.get("expires_at")),
             local_signature=_required_receipt_string(receipt, "local_signature"),

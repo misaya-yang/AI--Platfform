@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 
+from ai_gateway_core.logging import record_internal_exception
 from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import MSO_ANCHOR, MSO_AUTO_SIZE, PP_ALIGN
@@ -62,7 +63,12 @@ class Primitives:
             try:
                 shp.adjustments[0] = 0.05
             except (IndexError, AttributeError) as exc:
-                logger.debug("rounded-rect adjustments unavailable: %s", exc)
+                record_internal_exception(
+                    logger,
+                    "docgen.primitives.rounded_rect_adjustment_failed",
+                    exc,
+                    level=logging.DEBUG,
+                )
         if shadow:
             add_outer_shadow(shp, blur_emu=40_000, dist_emu=23_000, alpha_per_mille=18_000)
         return shp
@@ -119,7 +125,9 @@ class Primitives:
         try:
             tf.auto_size = MSO_AUTO_SIZE.NONE
         except (AttributeError, ValueError) as exc:
-            logger.debug("auto_size=NONE not available on this textframe: %s", exc)
+            record_internal_exception(
+                logger, "docgen.primitives.auto_size_unavailable", exc, level=logging.DEBUG
+            )
         tf.vertical_anchor = {
             "top": MSO_ANCHOR.TOP,
             "middle": MSO_ANCHOR.MIDDLE,
@@ -150,7 +158,9 @@ class Primitives:
                     spc_units = int(tracking_pct * 1000)  # ~em thousandths
                     rpr.set("spc", str(spc_units))
             except (AttributeError, ValueError) as exc:
-                logger.debug("letter-tracking XML injection failed: %s", exc)
+                record_internal_exception(
+                    logger, "docgen.primitives.letter_tracking_failed", exc, level=logging.DEBUG
+                )
         return box
 
     # ----------------------------------------------------------- chrome

@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from .tool_registry import (
     ToolCallRequest,
@@ -541,7 +541,9 @@ class PPTXGeneratorExecutor(ToolExecutor):
             )
 
         except Exception as e:
-            logger.error(f"PPTX generation failed: {e}")
+            record_internal_exception(
+                __name__, "assistant.core.tools.pptx_generator_tool.internal_failure", e
+            )
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,

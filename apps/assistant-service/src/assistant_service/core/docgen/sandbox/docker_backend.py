@@ -12,12 +12,14 @@ care which backend is wired up.
 from __future__ import annotations
 
 import asyncio
-import contextlib
+import logging
 import shutil
 import tempfile
 import time
 from collections.abc import Iterable
 from pathlib import Path
+
+from ai_gateway_core.logging import record_internal_exception
 
 from .client import SandboxClient, SandboxError, SandboxResult, SandboxTimeout
 
@@ -91,8 +93,15 @@ class DockerSandbox(SandboxClient):
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
-            with contextlib.suppress(Exception):
+            try:
                 await proc.wait()
+            except Exception as exc:
+                record_internal_exception(
+                    __name__,
+                    "assistant.core.docgen.sandbox.docker_backend.suppressed_failure",
+                    exc,
+                    level=logging.DEBUG,
+                )
             raise SandboxTimeout(f"docker job exceeded {timeout}s (workdir={workdir})") from None
         duration_ms = int((time.perf_counter() - started) * 1000)
 

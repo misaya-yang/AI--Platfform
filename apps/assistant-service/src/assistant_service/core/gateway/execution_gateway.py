@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 from ai_gateway_core.security import redact_trace_text
 
 from ..runtime.security.sandbox_resolver import SandboxResolver
@@ -99,6 +99,8 @@ class AssistantExecutionGateway(
         policy_engine: AssistantPolicyEngine | None = None,
         database: Any | None = None,
         enabled: bool = True,
+        require_db: bool | None = None,
+        tool_policy_v2_enabled: bool | None = None,
     ) -> None:
         self.tool_invoker = tool_invoker
         self.policy_engine = policy_engine or AssistantPolicyEngine.from_env()
@@ -111,7 +113,10 @@ class AssistantExecutionGateway(
         # it so the in-memory split-brain is impossible. Default OFF
         # so dev + test + one-off scripts that construct the gateway
         # without a DB keep working during the transition.
-        if database is None and _env_truthy("ASSISTANT_REQUIRE_DB"):
+        resolved_require_db = (
+            _env_truthy("ASSISTANT_REQUIRE_DB") if require_db is None else bool(require_db)
+        )
+        if database is None and resolved_require_db:
             raise RuntimeError(
                 "ASSISTANT_REQUIRE_DB=true but AssistantExecutionGateway was "
                 "constructed without a database — refusing to run with an "
@@ -128,6 +133,8 @@ class AssistantExecutionGateway(
         self._sandbox_resolver = SandboxResolver()
         self._tool_policy_v2_enabled = (
             os.getenv("ASSISTANT_RUNTIME_TOOL_POLICY_V2", "false").lower() == "true"
+            if tool_policy_v2_enabled is None
+            else bool(tool_policy_v2_enabled)
         )
 
     # ---------------------------------------------------------------------
@@ -473,10 +480,8 @@ class AssistantExecutionGateway(
                     steer_payload=command_steer_payload,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Side-effect command durable claim failed; dispatch blocked "
-                    "(exception_type=%s)",
-                    type(exc).__name__,
+                record_internal_exception(
+                    __name__, "assistant.core.gateway.execution_gateway.internal_failure", exc
                 )
                 return ToolCallResult(
                     call_id=str(uuid.uuid4()),
@@ -882,9 +887,10 @@ class AssistantExecutionGateway(
                         )
                     )
                 except Exception as exc:  # noqa: BLE001 - executor fails closed without it
-                    logger.warning(
-                        "Local Node gateway receipt issuance failed (exception_type=%s)",
-                        type(exc).__name__,
+                    record_internal_exception(
+                        __name__,
+                        "assistant.core.gateway.execution_gateway.internal_failure",
+                        exc,
                     )
             context.metadata = invoke_metadata
             try:
