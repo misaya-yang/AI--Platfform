@@ -366,6 +366,33 @@ class WorkingMemory:
         }
         return indicators.get(status, "[ ]")
 
+    _UNRESOLVED = frozenset(
+        {TaskStatus.PENDING, TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED}
+    )
+    _SETTLED = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED})
+
+    def has_active_job(self) -> bool:
+        """Return whether this session still has live work to carry forward."""
+
+        if any(task.status in self._UNRESOLVED for task in self.tasks):
+            return True
+        return bool(self.goal) and not self.tasks
+
+    def archive_if_settled(self) -> bool:
+        """Clear finished work so later turns do not inherit a stale job.
+
+        Only task status is inspected. User text is not classified.
+        """
+
+        if not self.tasks:
+            return False
+        if any(task.status in self._UNRESOLVED for task in self.tasks):
+            return False
+        if all(task.status in self._SETTLED for task in self.tasks):
+            self.clear()
+            return True
+        return False
+
     def get_progress(self) -> dict[str, Any]:
         """
         Get task completion progress statistics.

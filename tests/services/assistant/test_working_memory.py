@@ -79,6 +79,34 @@ def test_persisted_working_memory_restores_only_for_expected_session():
     )
 
     assert restored.to_dict() == memory.to_dict()
+
+
+def test_settled_working_memory_is_hidden_and_can_be_archived() -> None:
+    memory = WorkingMemory(session_id="session-a")
+    memory.set_goal("finish the report")
+    memory.add_task("task-1", "collect evidence")
+    assert memory.has_active_job() is True
+    assert bounded_working_memory_context(memory) is not None
+
+    memory.update_task("task-1", TaskStatus.COMPLETED, result="done")
+    assert memory.has_active_job() is False
+    assert bounded_working_memory_context(memory) is None
+    assert memory.archive_if_settled() is True
+    assert memory.goal is None
+    assert memory.tasks == []
+
+
+def test_goal_only_working_memory_stays_active() -> None:
+    memory = WorkingMemory(session_id="session-a")
+    memory.set_goal("keep reviewing the contract")
+    assert memory.has_active_job() is True
+    assert memory.archive_if_settled() is False
+    assert memory.goal == "keep reviewing the contract"
+
+
+def test_persisted_working_memory_rejects_wrong_session_after_restore_helper() -> None:
+    memory = WorkingMemory(session_id="session-a")
+    memory.set_goal("finish the report")
     with pytest.raises(ValueError, match="session mismatch"):
         WorkingMemory.from_persisted_dict(
             memory.to_dict(),

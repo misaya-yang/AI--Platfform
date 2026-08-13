@@ -168,6 +168,6 @@ def bounded_working_memory_context(
 ) -> str | None:
     """Render Working Memory as lower-priority, bounded task-state data."""
 
-    if memory is None or not (memory.goal or memory.tasks or memory.collected_info or memory.notes):
+    if memory is None or not memory.has_active_job():
         return None
     return memory.to_markdown()[: max(0, max_chars)] or None

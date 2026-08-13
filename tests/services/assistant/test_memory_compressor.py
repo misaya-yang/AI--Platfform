@@ -45,6 +45,9 @@ async def test_compressor_redacts_secrets_and_preserves_non_sensitive_identifier
     assert "kb.internal.example.com" in result.preserved_identifiers
     assert "CASE-1042" in result.preserved_identifiers
     assert all("top-secret-value" not in item for item in result.preserved_identifiers)
+    assert "## Goal" in llm.prompts[0]
+    assert "## Artifacts" in llm.prompts[0]
+    assert "## Open tasks" in llm.prompts[0]
 
 
 @pytest.mark.asyncio

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from assistant_service.core.agent.streaming_preparation import (
     _select_skill_guidance,
+    _uploaded_file_catalog,
 )
 
 
@@ -48,3 +51,23 @@ def test_skill_guidance_defers_when_catalog_exceeds_budget() -> None:
     assert receipt["used_tokens"] <= 80
     assert receipt["deferred_count"] > 0
     assert "SECRET" not in "".join(sections)
+
+
+def test_uploaded_file_catalog_lists_metadata_without_full_body() -> None:
+    processed = SimpleNamespace(
+        session_kb_id="session-kb-1",
+        file_metadata=[
+            {
+                "file_name": "contract.pdf",
+                "file_type": "document",
+                "size_bytes": 20_000_000,
+                "requires_rag": True,
+                "truncated_preview": "WHEREAS the parties " + ("x" * 400),
+            }
+        ],
+    )
+    catalog = _uploaded_file_catalog(processed)
+    assert "contract.pdf" in catalog
+    assert "indexed" in catalog
+    assert "session-kb-1" not in catalog or "indexed" in catalog
+    assert "x" * 400 not in catalog

@@ -470,15 +470,20 @@ class ContextCompressor:
         if len(conversation_text) > max_input_chars:
             conversation_text = conversation_text[:max_input_chars] + "\n[truncated]"
 
-        prompt = f"""Summarize this conversation in 2-3 sentences. Focus on:
-- Tasks attempted
-- Results obtained
-- Decisions made
+        prompt = f"""Summarize the older conversation into this exact structure.
+Use "none" for empty sections. Keep artifact ids and filenames verbatim.
+The latest user message is not in this text and must not be invented.
+
+## Goal
+## Conclusions
+## Open tasks
+## Artifacts
+## Open questions
 
 Conversation:
 {conversation_text}
 
-Summary:"""
+Structured summary:"""
 
         try:
             summary = await self.llm_service.complete(

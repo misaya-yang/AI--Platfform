@@ -116,6 +116,38 @@ def _select_skill_guidance(
     }
 
 
+def _uploaded_file_catalog(processed_files: Any) -> str:
+    """Describe uploaded files by metadata only. Long bodies stay in session KB."""
+
+    metadata = list(getattr(processed_files, "file_metadata", None) or [])
+    if not metadata:
+        return ""
+    lines = ["## Uploaded files"]
+    if getattr(processed_files, "session_kb_id", None):
+        lines.append(
+            "Long files were indexed for retrieval. Search them; do not invent unread content."
+        )
+    for item in metadata[:40]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("file_name") or item.get("file_path") or "file")
+        kind = str(item.get("file_type") or "unknown")
+        size = item.get("size_bytes")
+        preview = str(item.get("truncated_preview") or "").strip()
+        needs_rag = bool(item.get("requires_rag"))
+        error = str(item.get("error") or "").strip()
+        detail = f"- {name} ({kind}"
+        if size not in (None, ""):
+            detail += f", {size} bytes"
+        detail += ", indexed)" if needs_rag else ")"
+        if error:
+            detail += f" error={error}"
+        lines.append(detail)
+        if preview and needs_rag:
+            lines.append(f"  preview: {preview[:240]}")
+    return "\n".join(lines)
+
+
 class StreamingPreparationMixin:
     """Prepare files, tools, memory, prompt, and context-budget receipts."""
 
@@ -207,6 +239,11 @@ class StreamingPreparationMixin:
                     model_supports_vision=model_supports_vision,
                 )
 
+                session_kb_id = getattr(processed_files, "session_kb_id", None)
+                if session_kb_id:
+                    bound = list(ctx.config.kb_dataset_ids or [])
+                    if str(session_kb_id) not in bound:
+                        ctx.config.kb_dataset_ids = [*bound, str(session_kb_id)]
                 yield AgentLoopEvent(
                     phase=phase,
                     # NOTE: The Assistant UI consumes this event to show
@@ -222,6 +259,7 @@ class StreamingPreparationMixin:
                         "requires_rag": bool(getattr(processed_files, "requires_rag", False)),
                         "file_count": len(getattr(processed_files, "file_metadata", []) or []),
                         "file_metadata": getattr(processed_files, "file_metadata", []) or [],
+                        "session_kb_id": session_kb_id,
                     },
                 )
             except Exception as exc:
@@ -813,6 +851,12 @@ class StreamingPreparationMixin:
 
         if auto_knowledge_context:
             dynamic_sections.append("## Retrieved knowledge\n" + auto_knowledge_context)
+        file_catalog = _uploaded_file_catalog(processed_files)
+        if file_catalog:
+            dynamic_sections.append(file_catalog)
+        job_state = bounded_working_memory_context(ctx.working_memory)
+        if job_state and not ctx.config.use_context_engine:
+            dynamic_sections.append("## Current job state\n" + job_state)
 
         # Client-supplied extra prompt rides on the user turn (NOT system message)
         # so it cannot override system-level instructions via prompt injection.
