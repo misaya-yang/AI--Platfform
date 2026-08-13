@@ -377,11 +377,12 @@ def load_agent_plugin_mcp_config(
                 )
                 if startup_config is not None:
                     dashscope_key = startup_config.providers["dashscope"].api_key
-                    frozen_env = {
-                        "DASHSCOPE_CHAT_API_KEY": dashscope_key,
-                        "DASHSCOPE_API_KEY": dashscope_key,
-                    }
+                    frozen_env: dict[str, str] = {}
                     for name in inherited_names:
+                        if name in {"DASHSCOPE_CHAT_API_KEY", "DASHSCOPE_API_KEY"}:
+                            if dashscope_key:
+                                frozen_env[name] = dashscope_key
+                            continue
                         if name in startup_config.runtime:
                             frozen_env[name] = str(startup_config.runtime_value(name))
                     process_env.update(

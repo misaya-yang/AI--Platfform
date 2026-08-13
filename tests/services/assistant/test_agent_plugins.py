@@ -382,6 +382,63 @@ def test_bundled_docgen_plugin_maps_to_trusted_stdio_runtime_config(
     assert capability.requires_confirmation is False
 
 
+def test_startup_config_freezes_dashscope_keys_only_for_allowlisted_stdio_plugins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from assistant_service.config.startup_fingerprint import resolve_startup_config
+
+    sentinel = "dashscope-secret-must-not-leak-to-other-plugins"
+    docgen_root = ROOT / "agent-plugins" / "ai-docgen"
+    other_root = _plugin(tmp_path, name="other-plugin")
+    (other_root / "mcp.json").write_text(
+        json.dumps(
+            {
+                "$schema": MCP_SCHEMA_V1,
+                "mcpServers": {
+                    "local-process": {
+                        "type": "stdio",
+                        "command": "python",
+                        "args": ["-m", "portable_server"],
+                        "env": {"DATA_DIR": "${PLUGIN_DATA}/items"},
+                        "cwd": "${PLUGIN_DATA}",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ASSISTANT_AGENT_PLUGIN_DATA_ROOT", str(tmp_path / "plugin-data"))
+    monkeypatch.setenv(
+        "ASSISTANT_TRUSTED_AGENT_PLUGINS",
+        "ai-docgen@1.0.0,other-plugin@1.2.3",
+    )
+    monkeypatch.setenv(
+        "ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS",
+        os.pathsep.join((str(docgen_root), str(other_root))),
+    )
+    snapshot = resolve_startup_config(
+        {
+            "DASHSCOPE_CHAT_API_KEY": sentinel,
+            "ASSISTANT_AGENT_PLUGIN_DATA_ROOT": str(tmp_path / "plugin-data"),
+            "ASSISTANT_TRUSTED_AGENT_PLUGINS": "ai-docgen@1.0.0,other-plugin@1.2.3",
+            "ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS": os.pathsep.join(
+                (str(docgen_root), str(other_root))
+            ),
+        }
+    )
+
+    (docgen,) = load_agent_plugin_mcp_config(str(docgen_root), startup_config=snapshot)
+    (other,) = load_agent_plugin_mcp_config(str(other_root), startup_config=snapshot)
+
+    assert docgen.process_env["DASHSCOPE_CHAT_API_KEY"] == sentinel
+    assert docgen.process_env["DASHSCOPE_API_KEY"] == sentinel
+    assert docgen.inherited_env_names == ()
+    assert "DASHSCOPE_CHAT_API_KEY" not in other.process_env
+    assert "DASHSCOPE_API_KEY" not in other.process_env
+    assert other.inherited_env_names == ()
+
+
 @pytest.mark.asyncio
 async def test_bundled_docgen_plugin_completes_real_stdio_handshake(
     tmp_path: Path,

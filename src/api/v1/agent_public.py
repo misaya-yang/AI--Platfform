@@ -441,6 +441,8 @@ async def public_agent_chat_stream(
             message=payload.message,
             session_id=session_id,
             attachments=resolved_attachments,
+            resume_run_id=payload.resume_run_id,
+            resume_approval_id=payload.resume_approval_id,
         ),
         snapshot=snapshot,
         draft_revision=None,

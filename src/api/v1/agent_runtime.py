@@ -473,7 +473,7 @@ def _channel_policy(resolution: dict[str, Any], *, channel: str) -> dict[str, An
     allowed_origins = raw.get("allowed_origins")
     return {
         "attachments": bool(raw.get("attachments", channel == "preview")),
-        "high_risk_tools": bool(raw.get("high_risk_tools", False)),
+        "high_risk_tools": bool(raw.get("high_risk_tools", channel == "preview")),
         "allowed_origins": [
             str(origin) for origin in (allowed_origins or []) if isinstance(origin, str)
         ],
@@ -584,7 +584,7 @@ async def _build_snapshot(
             continue
         schema_hash = binding.get("schema_hash")
         binding_config = binding.get("config")
-        binding_config = binding_config if isinstance(binding_config, dict) else {}
+        binding_config = dict(binding_config) if isinstance(binding_config, dict) else {}
         risk = str(
             binding.get("risk")
             or binding_config.get("risk")
@@ -594,6 +594,12 @@ async def _build_snapshot(
             continue
         if risk in {"high", "critical"} and not policy["high_risk_tools"]:
             continue
+        if (
+            runtime_type == "platform"
+            and risk in {"high", "critical"}
+            and "requires_confirmation" not in binding_config
+        ):
+            binding_config["requires_confirmation"] = True
         if not user.is_authenticated and channel in {"hosted", "embed"}:
             mutating = bool(
                 binding_config.get("write")
@@ -1344,6 +1350,8 @@ async def preview_chat_stream(
         message=payload.message,
         session_id=session_id,
         attachments=[item.model_dump(mode="python") for item in payload.attachments],
+        resume_run_id=payload.resume_run_id,
+        resume_approval_id=payload.resume_approval_id,
     )
     return await _proxy_runtime_stream(
         request,
@@ -1657,6 +1665,8 @@ async def published_chat_stream(
             message=payload.message,
             session_id=session_id,
             attachments=resolved_attachments,
+            resume_run_id=payload.resume_run_id,
+            resume_approval_id=payload.resume_approval_id,
         )
         response = await _proxy_runtime_stream(
             request,

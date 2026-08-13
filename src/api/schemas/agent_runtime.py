@@ -70,7 +70,7 @@ class AgentRuntimeSessionResponse(_ClosedRuntimeModel):
     request_id: str
 
 
-class AgentPreviewChatRequest(_ClosedRuntimeModel):
+class AgentPreviewChatRequest(_ResumeApprovalRuntimeModel):
     message: str = Field(min_length=1, max_length=200_000)
     session_id: str | None = Field(default=None, min_length=1, max_length=255)
     draft_revision: int = Field(ge=1)
@@ -83,7 +83,7 @@ class AgentVersionPreviewChatRequest(_ResumeApprovalRuntimeModel):
     attachments: list[AgentRuntimeAttachment] = Field(default_factory=list, max_length=20)
 
 
-class AgentPublishedChatRequest(_ClosedRuntimeModel):
+class AgentPublishedChatRequest(_ResumeApprovalRuntimeModel):
     message: str = Field(min_length=1, max_length=200_000)
     session_id: str | None = Field(default=None, min_length=1, max_length=255)
     attachments: list[AgentRuntimeAttachment] = Field(default_factory=list, max_length=20)

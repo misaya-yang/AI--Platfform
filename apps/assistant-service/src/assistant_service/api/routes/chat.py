@@ -509,18 +509,17 @@ def _validate_agent_runtime_native_capabilities(
         binding_config = binding_config if isinstance(binding_config, dict) else {}
         expected_confirmation = binding_config.get("requires_confirmation")
         actual_confirmation = bool(getattr(definition, "requires_confirmation", False))
+        confirmation_pinned = "requires_confirmation" in binding_config
+        # Missing schema_hash is an unsealed Studio binding: pin to this process.
         if (
-            expected_schema_hash != actual_schema_hash
+            (expected_schema_hash and expected_schema_hash != actual_schema_hash)
             or expected_risk != actual_risk
             or (
                 expected_risk in {"high", "critical"}
-                and (
-                    expected_confirmation is not True
-                    or actual_confirmation is not True
-                )
+                and actual_confirmation is not True
             )
             or (
-                "requires_confirmation" in binding_config
+                confirmation_pinned
                 and (
                     not isinstance(expected_confirmation, bool)
                     or expected_confirmation != actual_confirmation

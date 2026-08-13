@@ -365,6 +365,34 @@ def test_version_preview_resume_identity_is_paired_and_part_of_internal_verifica
     assert preview.resume_run_id == "run-a"
     assert preview.resume_approval_id == "approval-a"
 
+    published = AgentPublishedChatRequest.model_validate(
+        {
+            "message": "continue",
+            "session_id": "session-a",
+            "resume_run_id": "run-a",
+            "resume_approval_id": "approval-a",
+        }
+    )
+    assert published.resume_run_id == "run-a"
+    assert published.resume_approval_id == "approval-a"
+
+    draft = AgentPreviewChatRequest.model_validate(
+        {
+            "message": "continue",
+            "session_id": "session-a",
+            "draft_revision": 1,
+            "resume_run_id": "run-a",
+            "resume_approval_id": "approval-a",
+        }
+    )
+    assert draft.resume_run_id == "run-a"
+    assert draft.resume_approval_id == "approval-a"
+
+    with pytest.raises(ValidationError, match="resume_run_id.*resume_approval_id"):
+        AgentPublishedChatRequest.model_validate(
+            {"message": "continue", "session_id": "session-a", "resume_run_id": "run-a"}
+        )
+
     with pytest.raises(ValidationError, match="resume_run_id.*resume_approval_id"):
         InternalAgentRuntimeChatRequest.model_validate(
             {
@@ -613,6 +641,51 @@ async def test_gateway_capability_resolver_cannot_mutate_bound_metadata() -> Non
             "schema_hash": "sha256:bound-search-schema",
             "risk": "low",
             "config": {"scope": "read"},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_preview_snapshot_enables_high_risk_tools_and_stamps_confirmation() -> None:
+    class ModelResolver:
+        def resolve(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"id": "qwen3.7-plus", "provider": "dashscope"}
+
+    resolution = runtime_resolution()
+    resolution["publication"] = None
+    resolution["capabilities"] = [
+        {
+            "capability_type": "native",
+            "resource_id": "dangerous-native",
+            "risk": "high",
+            "config": {},
+        }
+    ]
+
+    snapshot = await _build_snapshot(
+        gateway_request(
+            agent_runtime_model_resolver=ModelResolver(),
+            agent_runtime_capability_resolver=_AuthorizedKnowledgeResolver(),
+            agent_runtime_knowledge_resolver=_AuthorizedKnowledgeResolver(),
+        ),
+        resolution,
+        UserContext(
+            user_id="user-a",
+            tenant_id="tenant-a",
+            is_authenticated=True,
+        ),
+        channel="preview",
+    )
+
+    assert snapshot["channel_policy"]["high_risk_tools"] is True
+    assert snapshot["capabilities"] == [
+        {
+            "type": "platform",
+            "id": "dangerous-native",
+            "version": None,
+            "schema_hash": None,
+            "risk": "high",
+            "config": {"requires_confirmation": True},
         }
     ]
 

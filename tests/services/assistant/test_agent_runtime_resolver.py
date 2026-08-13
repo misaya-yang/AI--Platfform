@@ -332,6 +332,44 @@ def test_native_binding_readiness_rejects_schema_or_risk_drift(
     assert error.value.code == "AGENT_RUNTIME_CAPABILITY_UNAVAILABLE"
 
 
+def test_native_binding_readiness_accepts_unpinned_matching_definition() -> None:
+    definition = _native_definition()
+    registry = ToolRegistry()
+    registry.register(definition, _RecordingNativeExecutor())
+
+    _validate_agent_runtime_native_capabilities(
+        _verified_native_binding(definition, schema_hash=None),
+        RegistryToolInvoker(tool_registry=registry),
+    )
+
+
+def test_native_binding_readiness_accepts_unpinned_high_risk_when_tool_requires_confirmation() -> None:
+    definition = _native_definition(risk=ToolRiskLevel.HIGH)
+    definition.requires_confirmation = True
+    registry = ToolRegistry()
+    registry.register(definition, _RecordingNativeExecutor())
+
+    _validate_agent_runtime_native_capabilities(
+        _verified_native_binding(definition, schema_hash=None, risk="high"),
+        RegistryToolInvoker(tool_registry=registry),
+    )
+
+
+def test_native_binding_readiness_rejects_unpinned_high_risk_without_confirmation() -> None:
+    definition = _native_definition(risk=ToolRiskLevel.HIGH)
+    definition.requires_confirmation = False
+    registry = ToolRegistry()
+    registry.register(definition, _RecordingNativeExecutor())
+
+    with pytest.raises(AgentRuntimeEnvelopeError) as error:
+        _validate_agent_runtime_native_capabilities(
+            _verified_native_binding(definition, schema_hash=None, risk="high"),
+            RegistryToolInvoker(tool_registry=registry),
+        )
+
+    assert error.value.code == "AGENT_RUNTIME_CAPABILITY_UNAVAILABLE"
+
+
 def test_native_binding_readiness_rejects_confirmation_downgrade() -> None:
     definition = _native_definition()
     definition.risk_level = ToolRiskLevel.HIGH

@@ -239,21 +239,7 @@ class _Repository:
         assert kwargs["agent_version_id"] == VERSION_ID
         assert kwargs["user_id"] == "owner-a"
         result = _resolution("preview")
-        result["publication"] = {
-            "tenant_id": "tenant-a",
-            "agent_id": AGENT_ID,
-            "publication_id": None,
-            "channel": "preview",
-            "auth_mode": "private",
-            "policy": copy.deepcopy(
-                self.policy
-                or {
-                    "attachments": True,
-                    "high_risk_tools": True,
-                    "allowed_origins": [],
-                }
-            ),
-        }
+        result["publication"] = None
         return result
 
     async def get_publication_channel(self, **kwargs: Any) -> dict[str, Any]:
@@ -588,6 +574,8 @@ def test_version_preview_approval_resume_re_resolves_and_re_signs_same_pinned_ve
     assert snapshot["agent_id"] == AGENT_ID
     assert snapshot["agent_version_id"] == VERSION_ID
     assert snapshot["channel_policy"]["high_risk_tools"] is True
+    assert snapshot["publication"]["id"] is None
+    assert snapshot["publication"]["channel"] == "preview"
 
     cross_version = client.post(
         f"/api/v1/agents/{AGENT_ID}/versions/99999999-9999-4999-8999-999999999999/preview/chat/stream",
@@ -615,24 +603,58 @@ def test_version_preview_approval_resume_re_resolves_and_re_signs_same_pinned_ve
     assert len(repository.version_resolution_calls) == 2
     assert len(captured) == 2
 
+
+def test_published_runtime_resume_is_signed_into_downstream_body(
+    runtime_client: tuple[TestClient, _Repository, list[dict[str, Any]]],
+) -> None:
+    client, repository, captured = runtime_client
+    headers = {"Authorization": "Bearer agt_valid"}
+    session_id = client.post(
+        f"/api/v1/agent-runtime/{PUBLICATION_ID}/sessions",
+        headers=headers,
+    ).json()["session_id"]
+
+    resumed = client.post(
+        f"/api/v1/agent-runtime/{PUBLICATION_ID}/chat/stream",
+        headers=headers,
+        json={
+            "message": "continue",
+            "session_id": session_id,
+            "resume_run_id": "run-a",
+            "resume_approval_id": "approval-a",
+        },
+    )
+    assert resumed.status_code == 200, resumed.text
+    body = captured[-1]
+    assert body["resume_run_id"] == "run-a"
+    assert body["resume_approval_id"] == "approval-a"
+    signed_body = {key: value for key, value in body.items() if key != "runtime_envelope"}
+    assert body["runtime_envelope"]["request_body_hash"] == runtime_module.runtime_sha256(
+        signed_body
+    )
+    assert body["runtime_envelope"]["resolved_snapshot"]["channel_policy"][
+        "high_risk_tools"
+    ] is True
+
     repository.policy = {
         "attachments": True,
         "high_risk_tools": False,
-        "allowed_origins": [],
+        "allowed_origins": ["https://allowed.example"],
+        "requests_per_minute": 30,
+        "requests_per_day": 1000,
     }
     changed_policy = client.post(
-        route,
+        f"/api/v1/agent-runtime/{PUBLICATION_ID}/chat/stream",
+        headers=headers,
         json={
             "message": "continue",
-            "session_id": "version-session",
+            "session_id": session_id,
             "resume_run_id": "run-a",
             "resume_approval_id": "approval-a",
         },
     )
     assert changed_policy.status_code == 404
     assert changed_policy.json()["detail"]["code"] == "AGENT_RUNTIME_SESSION_NOT_FOUND"
-    assert len(repository.version_resolution_calls) == 3
-    assert len(captured) == 2
 
 
 def test_runtime_api_requires_scoped_token_and_creates_isolated_session(
