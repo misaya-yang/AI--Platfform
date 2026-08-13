@@ -133,6 +133,38 @@ async def test_agent_allowlist_is_applied_before_relevance_selection(
 
 
 @pytest.mark.asyncio
+async def test_legacy_selector_without_signature_keeps_two_argument_seam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop, _calls = _loop_with_tools(_tool("alpha"))
+    selector_calls: list[tuple[list[str], str]] = []
+
+    def legacy_selector(tools: list[ToolDefinition], query: str) -> list[ToolDefinition]:
+        selector_calls.append(([tool.name for tool in tools], query))
+        return tools
+
+    def signature_unavailable(_selector: Any) -> None:
+        raise ValueError("signature unavailable")
+
+    monkeypatch.setattr(
+        "assistant_service.core.agent.agent_loop.select_tools",
+        legacy_selector,
+    )
+    monkeypatch.setattr(
+        "assistant_service.core.agent.agent_context_lifecycle.inspect.signature",
+        signature_unavailable,
+    )
+
+    _schemas, names, _schema_hash = await loop._get_streaming_tools(
+        _context(None),
+        _User(),  # type: ignore[arg-type]
+    )
+
+    assert selector_calls == [(["alpha"], "use a capability")]
+    assert names == ["alpha"]
+
+
+@pytest.mark.asyncio
 async def test_visible_connector_cannot_expand_agent_allowlist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

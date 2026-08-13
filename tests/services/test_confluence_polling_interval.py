@@ -9,7 +9,7 @@ Ensures that:
 
 from datetime import datetime, timedelta
 
-from src.services.knowledge.confluence.scheduler import PagePollingTask
+from knowledge_service.services.knowledge.confluence.scheduler import PagePollingTask
 
 
 class TestPagePollingTask:

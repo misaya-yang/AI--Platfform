@@ -145,6 +145,7 @@ class AssistantConfig:
     enable_rag_metrics: bool = False
     enable_memory_loading: bool = False
     enable_react_loop: bool = False
+    thinking_level: str | None = None
 
     execution_profile: str = "safe"
     memory_mode: str = "auto"

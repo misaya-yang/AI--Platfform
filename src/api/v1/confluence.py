@@ -15,13 +15,10 @@ import logging
 from typing import Any
 
 from ai_gateway_core.exceptions import PermissionDeniedError, ValidationFailedError
+from ai_gateway_core.knowledge import ConfluenceAccessDeniedError, ConfluenceSyncError
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from ...core.auth.user_resolver import UserContext
-from ...services.knowledge.confluence.sync_service import (
-    ConfluenceAccessDeniedError,
-    ConfluenceSyncError,
-)
 from ..deps import get_knowledge_service, get_user_context
 from ..schemas.confluence import (
     ConfluenceBatchSyncRequestSchema,

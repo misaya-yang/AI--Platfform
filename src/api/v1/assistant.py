@@ -123,17 +123,6 @@ class SessionHistoryResponse(BaseModel):
     total: int
 
 
-def get_model_meta(request: Request):
-    """Get the DB-backed GatewayModelMeta (built in main.py lifespan)."""
-    meta = getattr(request.app.state, "model_meta", None)
-    if meta is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Model metadata service is not initialized.",
-        )
-    return meta
-
-
 def _user_can_access_model(user: UserContext, access_level: str) -> bool:
     """
     Check if a user can access a model based on access level.

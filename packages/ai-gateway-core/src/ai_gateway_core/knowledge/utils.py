@@ -1,8 +1,8 @@
 """Shared pure-utility helpers for knowledge-base callers.
 
-These live in ``ai_gateway_core`` so the gateway can ask "is this model
-multimodal?" without reaching into ``src.services.knowledge.embedding``
-or making an HTTP call to the kb-service for a static lookup.
+These live in ``ai_gateway_core`` so gateway and knowledge-service callers can
+ask "is this model multimodal?" without duplicating the registry or making an
+HTTP call for a static lookup.
 
 The kb-service's ``services/knowledge/embedding.py`` re-exports the same
 symbols for backward compatibility.

@@ -24,7 +24,7 @@ class ChatRequest:
     history: list[dict[str, str]] | None = None
     """Optional explicit message history (list of ``{role, content}``)."""
 
-    model_id: str = "qwen3.6-plus"
+    model_id: str = "qwen3.7-plus"
     """LLM model identifier. Gateway default — override per request for
     other registered models."""
 

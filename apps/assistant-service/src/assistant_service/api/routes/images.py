@@ -146,7 +146,6 @@ from .image_route_helpers import (
     _check_idempotency_impl,
     _ensure_image_session_impl,
     _persist_and_get_url_bounded_impl,
-    _persist_and_get_url_impl,
     _persist_multi_turn_result_impl,
     _record_turn_impl,
     _resolve_reference_bytes_impl,
@@ -303,28 +302,6 @@ def _cap_result_images(result: Any, requested_n: int | None) -> None:
             limit,
         )
         result.images = images[:limit]
-
-
-# Keep route-local monkeypatch seams live after helper extraction.
-async def _persist_and_get_url(
-    img: dict,
-    *,
-    artifact_storage,
-    session_id: str | None,
-    user: UserContext,
-    prompt: str,
-    add_watermark: bool,
-    width: int,
-    height: int,
-    index: int,
-    owner_scope: str | None = None,
-    turn_id: str | None = None,
-    parent_artifact_id: str | None = None,
-    provider: str | None = None,
-    model_id: str | None = None,
-    return_variants: list[str] | None = None,
-) -> tuple[str | None, GeneratedImage]:
-    return await _persist_and_get_url_impl(**locals(), watermark_fn=apply_watermark_b64)
 
 
 async def _persist_and_get_url_bounded(*args, **kwargs) -> tuple[str | None, GeneratedImage]:
@@ -1317,13 +1294,6 @@ async def _post_generation_bookkeeping(
     iff the CAS lost a race to a concurrent racer — caller MUST surface
     this to the response (``latest_advanced=False``) so the client knows
     its output is a branch, not the new latest."""
-    """Centralized post-success state writes:
-
-    * CAS-advance latest_artifact_id (skipped when allow_branch=True or no session)
-    * Set locked_style if the caller pinned a new one (or clear it on explicit reset)
-    * Insert image_turns row with status=completed
-    * Claim idempotency record (if client_request_id set)
-    """
     # Style lock write
     if session_id and pool is not None:
         if new_locked_style:

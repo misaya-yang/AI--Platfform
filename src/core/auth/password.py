@@ -38,7 +38,6 @@ DEFAULT_PASSWORD = os.environ.get("DEFAULT_USER_PASSWORD", "ChangeMe-Admin-2026!
 MIN_PASSWORD_LENGTH = 8
 BCRYPT_COST_FACTOR = 12
 MAX_LOGIN_ATTEMPTS = 5
-LOCKOUT_DURATION_MINUTES = 30
 
 
 # ============================================================
@@ -125,19 +124,6 @@ def validate_password_strength(password: str) -> list[str]:
         errors.append("Password must contain at least one special character")
 
     return errors
-
-
-def is_password_valid(password: str) -> bool:
-    """
-    Check if password meets strength requirements.
-
-    Args:
-        password: Password to check
-
-    Returns:
-        True if password is valid, False otherwise
-    """
-    return len(validate_password_strength(password)) == 0
 
 
 # ============================================================
@@ -340,16 +326,6 @@ def is_account_locked(locked_until: datetime | str | None) -> bool:
     if locked_until.tzinfo is not None:
         locked_until = locked_until.astimezone(timezone.utc).replace(tzinfo=None)
     return locked_until > datetime.utcnow()
-
-
-def get_lockout_end_time() -> datetime:
-    """
-    Calculate lockout end time from now.
-
-    Returns:
-        Datetime when lockout will expire
-    """
-    return datetime.utcnow() + timedelta(minutes=LOCKOUT_DURATION_MINUTES)
 
 
 def should_lock_account(login_attempts: int) -> bool:

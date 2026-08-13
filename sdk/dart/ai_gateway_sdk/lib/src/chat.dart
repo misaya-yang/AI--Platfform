@@ -49,7 +49,7 @@ class ChatClient {
   Future<ChatResponse> send(
     String message, {
     String? sessionId,
-    String modelId = 'qwen3.6-plus',
+    String modelId = 'qwen3.7-plus',
     double temperature = 0.7,
     int? maxTokens,
     String? systemPrompt,
@@ -91,7 +91,7 @@ class ChatClient {
   Stream<StreamEvent> stream(
     String message, {
     String? sessionId,
-    String modelId = 'qwen3.6-plus',
+    String modelId = 'qwen3.7-plus',
     double temperature = 0.7,
     int? maxTokens,
     String? systemPrompt,

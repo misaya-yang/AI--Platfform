@@ -227,6 +227,23 @@ def _sha256(path: str | Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def _source_bundle_sha256(
+    paths: tuple[Path, ...],
+    *,
+    root: Path,
+) -> tuple[str, dict[str, str]]:
+    components = {
+        path.relative_to(root).as_posix(): _sha256(path)
+        for path in sorted(paths, key=lambda item: item.relative_to(root).as_posix())
+    }
+    canonical_components = json.dumps(
+        components,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical_components).hexdigest(), components
+
+
 def _suite_scope(path: str | Path, cases: list[dict[str, Any]]) -> str:
     """Classify suites without granting canonical trust from a filename alone."""
 
@@ -244,7 +261,15 @@ def _offline_provenance(
     observations: dict[str, dict[str, Any]] | None,
 ) -> dict[str, Any]:
     observation_rows = list((observations or {}).values())
-    grader_path = Path(__file__).resolve().parents[1] / "src/services/eval/golden.py"
+    repo_root = Path(__file__).resolve().parents[1]
+    grader_sha256, grader_components = _source_bundle_sha256(
+        (
+            repo_root / "src/services/eval/golden.py",
+            repo_root / "src/services/eval/golden_gate.py",
+            repo_root / "src/services/eval/golden_validation.py",
+        ),
+        root=repo_root,
+    )
     numeric_thresholds = [
         {
             "case_id": case.get("case_id"),
@@ -303,7 +328,8 @@ def _offline_provenance(
         "grader": {
             "id": "assistant_deterministic_contract",
             "version": "v1",
-            "sha256": _sha256(grader_path),
+            "sha256": grader_sha256,
+            "components": grader_components,
         },
         "trial": {
             "id": f"offline-{(observation_hash or _sha256(args.path))[:16]}",

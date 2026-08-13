@@ -1,5 +1,5 @@
 import { expect, test, type APIRequestContext } from "@playwright/test";
-import { buildAuthHeaders, ensureAuthenticatedPage } from "./support/helpers";
+import { buildAuthHeaders, loginThroughApi } from "./support/helpers";
 
 function sessionButtonName(title: string): RegExp {
   return new RegExp(`^${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s·|$)`);
@@ -37,10 +37,45 @@ async function seedAssistantSession(request: APIRequestContext) {
   return { sessionId, title };
 }
 
+async function installApiSession(page: import("@playwright/test").Page, request: APIRequestContext) {
+  const { token, user } = await loginThroughApi(request);
+  await page.addInitScript(
+    ({ authPayload }) => {
+      localStorage.setItem("agent-gateway-auth", JSON.stringify(authPayload));
+      sessionStorage.removeItem("agent-gateway-auth");
+    },
+    {
+      authPayload: {
+        state: {
+          token,
+          user,
+          isAuthenticated: true,
+          forcePasswordChange: false,
+          rememberMe: true,
+        },
+        version: 0,
+      },
+    }
+  );
+  await page.route(/\/api\/v1\//, async (route) => {
+    const requestUrl = new URL(route.request().url());
+    const response = await request.fetch(`${process.env.E2E_API_URL}${requestUrl.pathname}${requestUrl.search}`, {
+      headers: {
+        ...route.request().headers(),
+        authorization: `Bearer ${token}`,
+      },
+      method: route.request().method(),
+      data: route.request().postDataBuffer(),
+    });
+    await route.fulfill({ response });
+  });
+}
+
 test("assistant restores seeded history and keeps sidebar toggle functional", async ({ page, request }) => {
   const { title } = await seedAssistantSession(request);
 
-  await ensureAuthenticatedPage(page, "/assistant");
+  await installApiSession(page, request);
+  await page.goto("/assistant");
   const sessionButton = page.getByRole("button", { name: sessionButtonName(title) });
   if (!(await sessionButton.isVisible())) {
     await historyToggle(page, "show").click();
@@ -63,7 +98,8 @@ test("assistant restores seeded history in the mobile history sheet", async ({ p
   await page.setViewportSize({ width: 390, height: 844 });
   const { title } = await seedAssistantSession(request);
 
-  await ensureAuthenticatedPage(page, "/assistant");
+  await installApiSession(page, request);
+  await page.goto("/assistant");
   await historyToggle(page, "show").click();
   const historySheet = page.getByRole("dialog", { name: /history|历史/i });
   await expect(historySheet).toBeVisible();

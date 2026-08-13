@@ -87,6 +87,7 @@ class ChatRequest(BaseModel):
     )
     local_node_grant_ids: list[str] = Field(default_factory=list, max_length=16)
     enable_task_planning: bool = False
+    thinking_level: str | None = None
     confirm_plan: Literal[False] = False
     runtime_mode: str | None = None
     queue_mode: str | None = None
@@ -321,6 +322,7 @@ def _build_config(
         system_prompt=body.system_prompt,
         eval_system_prompt_override=body.eval_system_prompt_override,
         enable_task_planning=body.enable_task_planning,
+        thinking_level=body.thinking_level,
         confirm_plan=body.confirm_plan,
         execution_profile=body.execution_profile,
         memory_mode=body.memory_mode,

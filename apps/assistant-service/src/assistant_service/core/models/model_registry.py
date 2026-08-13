@@ -40,12 +40,27 @@ from .model_catalog import (
     ModelInfo as ModelInfo,
 )
 from .model_catalog import (
-    _qwen_thinking_enabled,
-)
-from .model_catalog import (
     should_use_native_search as should_use_native_search,
 )
+from .provider_errors import (
+    _SAFE_ANTHROPIC_ERROR_TYPES,
+    _SAFE_ANTHROPIC_STOP_REASONS,
+    _SAFE_GOOGLE_BLOCK_REASONS,
+    _SAFE_GOOGLE_FINISH_REASONS,
+    _SAFE_OPENAI_ERROR_TYPES,
+    _SAFE_OPENAI_FINISH_REASONS,
+)
+from .provider_errors import (
+    ProviderStreamError as ProviderStreamError,
+)
 from .registry_lifecycle import RegistryLifecycleMixin
+from .request_safety import (
+    _raise_for_status_without_query_secrets,
+    _safe_request_error,
+)
+from .request_safety import (
+    _request_without_query_secrets as _request_without_query_secrets,
+)
 from .responses_api import (
     ResponsesAPIError,
     build_responses_request,
@@ -73,50 +88,6 @@ def _sanitize_usage(raw_usage: dict[str, Any]) -> dict[str, int]:
     {"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 0}}
     """
     return normalize_provider_cache_usage(raw_usage)
-
-
-def _request_without_query_secrets(request: httpx.Request) -> httpx.Request:
-    """Return a metadata-only request safe to attach to provider errors."""
-    url = request.url
-    for parameter in ("key", "api_key"):
-        url = url.copy_remove_param(parameter)
-    return httpx.Request(request.method, url)
-
-
-def _raise_for_status_without_query_secrets(response: Any) -> None:
-    """Raise an HTTP error without retaining provider keys or response bodies."""
-    status_code = int(getattr(response, "status_code", 0) or 0)
-    if 200 <= status_code < 300:
-        return
-
-    request = getattr(response, "request", None)
-    if not isinstance(request, httpx.Request):
-        request = httpx.Request("POST", "https://provider.invalid/")
-    safe_request = _request_without_query_secrets(request)
-    safe_response = httpx.Response(
-        status_code or 500,
-        request=safe_request,
-    )
-    raise httpx.HTTPStatusError(
-        f"Provider returned HTTP {status_code or 500}",
-        request=safe_request,
-        response=safe_response,
-    )
-
-
-def _safe_request_error(error: httpx.RequestError) -> httpx.RequestError:
-    """Replace a transport error with a query-secret-free equivalent."""
-    request = getattr(error, "request", None)
-    if not isinstance(request, httpx.Request):
-        request = httpx.Request("POST", "https://provider.invalid/")
-    safe_request = _request_without_query_secrets(request)
-    try:
-        return type(error)("Provider request failed", request=safe_request)
-    except TypeError:
-        return httpx.RequestError(
-            "Provider request failed",
-            request=safe_request,
-        )
 
 
 @contextlib.asynccontextmanager
@@ -307,82 +278,6 @@ class StreamDelta:
     provider_content_blocks: list[dict[str, Any]] | None = None
 
 
-class ProviderStreamError(RuntimeError):
-    """Prompt-safe provider stream failure surfaced to the runtime boundary."""
-
-    def __init__(self, provider: str, error_type: str) -> None:
-        self.provider = provider
-        self.error_type = error_type
-        super().__init__(f"{provider} stream failed ({error_type})")
-
-
-_SAFE_ANTHROPIC_ERROR_TYPES = frozenset(
-    {
-        "api_error",
-        "authentication_error",
-        "billing_error",
-        "invalid_request_error",
-        "not_found_error",
-        "overloaded_error",
-        "permission_error",
-        "rate_limit_error",
-        "request_too_large",
-    }
-)
-
-_SAFE_OPENAI_FINISH_REASONS = frozenset(
-    {"stop", "length", "tool_calls", "content_filter", "function_call"}
-)
-_SAFE_OPENAI_ERROR_TYPES = frozenset(
-    {
-        "authentication_error",
-        "invalid_request_error",
-        "not_found_error",
-        "permission_error",
-        "rate_limit_error",
-        "server_error",
-    }
-)
-_SAFE_ANTHROPIC_STOP_REASONS = frozenset(
-    {
-        "end_turn",
-        "max_tokens",
-        "stop_sequence",
-        "tool_use",
-        "pause_turn",
-        "refusal",
-        "model_context_window_exceeded",
-    }
-)
-_SAFE_GOOGLE_FINISH_REASONS = frozenset(
-    {
-        "STOP",
-        "MAX_TOKENS",
-        "SAFETY",
-        "RECITATION",
-        "LANGUAGE",
-        "OTHER",
-        "BLOCKLIST",
-        "PROHIBITED_CONTENT",
-        "SPII",
-        "MALFORMED_FUNCTION_CALL",
-        "IMAGE_SAFETY",
-        "UNEXPECTED_TOOL_CALL",
-        "TOO_MANY_TOOL_CALLS",
-    }
-)
-
-_SAFE_GOOGLE_BLOCK_REASONS = frozenset(
-    {
-        "BLOCKLIST",
-        "IMAGE_SAFETY",
-        "OTHER",
-        "PROHIBITED_CONTENT",
-        "SAFETY",
-    }
-)
-
-
 class ModelRegistry(RegistryLifecycleMixin):
     """Unified model catalog and provider request interface."""
 
@@ -419,11 +314,11 @@ class ModelRegistry(RegistryLifecycleMixin):
                 local_runtime=(openai_local_runtime if provider == ModelProvider.OPENAI else None),
             )
             if provider == ModelProvider.DASHSCOPE:
-                qwen_thinking_enabled = _qwen_thinking_enabled(model_id, thinking_level)
-                if qwen_thinking_enabled is not None:
-                    body["enable_thinking"] = qwen_thinking_enabled
-                    if qwen_thinking_enabled and "max_output_tokens" not in body:
-                        body["max_output_tokens"] = 16384
+                from .thinking_policy import apply_qwen_thinking_fields
+
+                apply_qwen_thinking_fields(
+                    body, model_id, thinking_level, token_field="max_output_tokens"
+                )
                 if native_search_config and native_search_config.get("enable_search"):
                     response_tools = body.setdefault("tools", [])
                     response_tools.append({"type": "web_search"})
@@ -529,15 +424,11 @@ class ModelRegistry(RegistryLifecycleMixin):
         #     refuses ("I can't fetch real-time data").
         #   body.enable_search = True → flag RESPECTED, model returns
         #     results with real team names and scores.
-        # Same applies to enable_thinking.
-        qwen_thinking_enabled = _qwen_thinking_enabled(model_id, thinking_level)
-        if qwen_thinking_enabled is not None:
-            body["enable_thinking"] = qwen_thinking_enabled
-            # An explicit caller ceiling is a hard Context Packet boundary.
-            # Only choose the provider-friendly default when the caller did
-            # not reserve an output budget.
-            if qwen_thinking_enabled and "max_tokens" not in body:
-                body["max_tokens"] = 16384
+        # Same applies to enable_thinking. Off must be explicit false:
+        # omitting the flag uses the provider default (on for Qwen 3.7 Plus).
+        from .thinking_policy import apply_qwen_thinking_fields
+
+        apply_qwen_thinking_fields(body, model_id, thinking_level, token_field="max_tokens")
         if native_search_config and native_search_config.get("enable_search"):
             # DashScope CN vs Intl differ in where ``enable_search`` belongs:
             #   CN (dashscope.aliyuncs.com):   body.enable_search = True (top-level)
@@ -955,23 +846,15 @@ class ModelRegistry(RegistryLifecycleMixin):
         #     surface does not accept the field.
         mid = (model_id or "").lower()
         supports_thought_summaries = "gemini-2.5" in mid or "gemini-3" in mid
-        # Gemini 3 Flash defaults to an aggressive thinking level —
-        # observed: 100+ ``thoughtsTokenCount`` even for a 2-character
-        # greeting, yielding ~20s TTFT because nothing visible streams
-        # during the thinking window. Bias toward ``"low"`` for Flash-tier
-        # 3.x models when the caller hasn't asked for more. Users who
-        # want deeper thinking opt in via the UI's thinking-level chip.
-        is_gemini_3_flash = "gemini-3" in mid and "flash" in mid
-        default_thinking_level = "low" if is_gemini_3_flash else None
+        from .thinking_policy import normalize_thinking_level
 
-        effective_level = thinking_level or default_thinking_level
-        if effective_level:
-            thinking_cfg: dict[str, Any] = {"thinkingLevel": effective_level}
-            if supports_thought_summaries:
-                thinking_cfg["includeThoughts"] = True
-            body["generationConfig"]["thinkingConfig"] = thinking_cfg
-        elif supports_thought_summaries:
-            body["generationConfig"]["thinkingConfig"] = {"includeThoughts": True}
+        effective_level = normalize_thinking_level(thinking_level)
+        if effective_level != "off" and supports_thought_summaries:
+            gemini_level = "HIGH" if effective_level == "high" else effective_level.upper()
+            body["generationConfig"]["thinkingConfig"] = {
+                "thinkingLevel": gemini_level,
+                "includeThoughts": True,
+            }
 
         if system_instruction:
             # Strip Anthropic-only cache marker before sending to Gemini.

@@ -685,6 +685,29 @@ class ToolRegistry:
 
         return [t.to_anthropic_schema() for t in tools]
 
+    def _effective_execution_timeout(
+        self,
+        request: ToolCallRequest,
+        definition: ToolDefinition,
+    ) -> float:
+        """Return the wait budget for this invocation.
+
+        ``tool_call`` is a routing bridge. Its own 30s schema timeout must not
+        cancel a longer authorized backend such as document generation.
+        """
+
+        timeout_seconds = definition.timeout_seconds
+        if request.tool_name != "tool_call":
+            return timeout_seconds
+        arguments = request.arguments if isinstance(request.arguments, dict) else {}
+        target_name = str(arguments.get("name") or "").strip()
+        if not target_name:
+            return timeout_seconds
+        target = self.get_tool(target_name)
+        if target is None:
+            return timeout_seconds
+        return max(timeout_seconds, target.timeout_seconds)
+
     async def execute(
         self,
         request: ToolCallRequest,
@@ -785,33 +808,36 @@ class ToolRegistry:
                 },
             )
 
+        timeout_seconds = self._effective_execution_timeout(request, definition)
+
         # Execute tool with timeout enforcement
         try:
             logger.info(
                 "tool_registry.execution_started (tool_label=%s, timeout_seconds=%s)",
                 _tool_log_label(request.tool_name),
-                definition.timeout_seconds,
+                timeout_seconds,
             )
 
-            # Enforce timeout from tool definition
+            # Enforce timeout from tool definition. Discovery ``tool_call``
+            # inherits the target tool's timeout so long backends stay reachable.
             try:
                 # Support both ToolExecutor instances (.execute) and plain callables (MCP closures)
                 coro = (
                     executor.execute(request) if hasattr(executor, "execute") else executor(request)
                 )
-                result = await asyncio.wait_for(coro, timeout=definition.timeout_seconds)
+                result = await asyncio.wait_for(coro, timeout=timeout_seconds)
             except asyncio.TimeoutError:
-                duration_ms = definition.timeout_seconds * 1000
+                duration_ms = timeout_seconds * 1000
                 logger.error(
                     "tool_registry.execution_timeout (tool_label=%s, timeout_seconds=%s)",
                     _tool_log_label(request.tool_name),
-                    definition.timeout_seconds,
+                    timeout_seconds,
                 )
                 return ToolCallResult(
                     call_id=request.call_id,
                     tool_name=request.tool_name,
                     success=False,
-                    error=f"Tool execution timed out after {definition.timeout_seconds}s",
+                    error=f"Tool execution timed out after {timeout_seconds}s",
                     duration_ms=duration_ms,
                 )
 

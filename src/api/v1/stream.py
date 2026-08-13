@@ -4,11 +4,11 @@ import logging
 import time
 import traceback
 
+from ai_gateway_core.exceptions import GatewayError
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from ...core.auth.user_resolver import UserContext
-from ai_gateway_core.exceptions import GatewayError
 from ...core.gateway.dispatcher import GatewayDispatcher
 from ..deps import get_dispatcher, get_user_context
 from ..schemas.request import UnifiedRequestSchema
@@ -16,12 +16,6 @@ from ..schemas.response import StreamChunkSchema
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
-
-def _get_timing_header(timing: dict) -> str:
-    """Format timing data as a header-safe string"""
-    parts = [f"{k}={v:.2f}" for k, v in timing.items()]
-    return "; ".join(parts)
 
 
 @router.post("/stream")

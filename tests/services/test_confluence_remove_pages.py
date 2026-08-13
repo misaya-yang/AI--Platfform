@@ -4,9 +4,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from knowledge_service.services.knowledge.confluence.sync_service import ConfluenceSyncService
 
 from src.core.auth.user_resolver import UserContext
-from src.services.knowledge.confluence.sync_service import ConfluenceSyncService
 
 
 @pytest.mark.asyncio
@@ -16,6 +16,7 @@ async def test_remove_pages_deletes_linked_document_and_counts_it() -> None:
         "dataset_id": "dataset-1",
         "tenant_id": "tenant-1",
         "owner_id": "user-1",
+        "created_by": "user-1",
     }
     database = MagicMock()
     database.get_confluence_page = AsyncMock(
@@ -46,7 +47,8 @@ async def test_remove_pages_deletes_linked_document_and_counts_it() -> None:
 
     assert result == {"removed": 1, "documents_deleted": 1, "errors": []}
     knowledge_service.delete_document.assert_awaited_once_with(
-        dataset_id="dataset-1",
-        document_id="document-1",
+        user,
+        "dataset-1",
+        "document-1",
     )
     database.delete_confluence_page.assert_awaited_once_with("page-record-1")

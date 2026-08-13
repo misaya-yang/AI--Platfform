@@ -1253,6 +1253,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         kb_top_k: 5,
         kb_include_images: false,
         web_search_enabled: config.web_search_enabled,
+        thinking_level: config.thinking_level || "off",
         web_search_max_results: 5,
         file_paths: filePaths.length > 0 ? filePaths : undefined,
         execution_profile: config.execution_profile || "safe",

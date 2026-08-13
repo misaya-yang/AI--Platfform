@@ -27,6 +27,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
+from ai_gateway_core.knowledge import ConfluenceAccessDeniedError, ConfluenceSyncError
+
 from ....config.settings import Settings
 from ....core.auth.user_resolver import UserContext
 from ....persistence.database import (
@@ -64,21 +66,6 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_CONFLUENCE_IMAGE_BYTES = 3 * 1024 * 1024
 _DEFAULT_MAX_CONFLUENCE_IMAGES_PER_PAGE = 50
-
-
-class ConfluenceSyncError(Exception):
-    """Confluence 同步错误"""
-
-    pass
-
-
-class ConfluenceAccessDeniedError(Exception):
-    """Confluence 资源访问被拒绝"""
-
-    def __init__(self, resource_type: str, resource_id: str):
-        self.resource_type = resource_type
-        self.resource_id = resource_id
-        super().__init__(f"Access denied to {resource_type}: {resource_id}")
 
 
 class ConfluenceSyncService:

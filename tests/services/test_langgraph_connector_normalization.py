@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+from src.api.v1._langgraph_connector_config import (
+    _normalize_langgraph_connector_config as extracted_normalize_langgraph_connector_config,
+)
 from src.api.v1.services import _normalize_langgraph_connector_config
 from src.proxy.config_loader import ProxyConfigLoader
 from src.services.llm.provider_service import ProviderService
+
+
+def test_services_module_reexports_langgraph_connector_normalizer():
+    assert _normalize_langgraph_connector_config is extracted_normalize_langgraph_connector_config
 
 
 def test_normalize_langgraph_connector_config_syncs_urls_and_ids():

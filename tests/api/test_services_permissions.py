@@ -7,6 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 from src.api.deps import AuthContext
+from src.api.v1 import services as services_api
 from src.api.v1.services import list_services, register_service
 from src.config.settings import Settings
 from src.core.auth.rbac import RBAC
@@ -22,6 +23,22 @@ def _make_request(request_id: str = "req-services-001") -> SimpleNamespace:
     request.app.state.assistant_service = None
     request.state = SimpleNamespace(request_id=request_id)
     return request
+
+
+def test_services_router_contract_stays_on_facade() -> None:
+    actual = {
+        (method, route.path): route.endpoint
+        for route in services_api.router.routes
+        for method in route.methods or set()
+    }
+    assert actual == {
+        ("POST", "/services"): services_api.register_service,
+        ("GET", "/services"): services_api.list_services,
+        ("GET", "/services/{service_id}"): services_api.get_service,
+        ("PUT", "/services/{service_id}"): services_api.update_service,
+        ("DELETE", "/services/{service_id}"): services_api.delete_service,
+        ("GET", "/services/{service_id}/schema"): services_api.get_service_schema,
+    }
 
 
 @pytest.mark.asyncio

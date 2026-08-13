@@ -9,14 +9,15 @@ from ai_gateway_core.enums import ModelAccessLevel, ModelProvider
 
 from .responses_api import CHAT_COMPLETIONS_WIRE_PROTOCOL
 
-_QWEN_THINKING_DISABLED_LEVELS = frozenset({"disabled", "false", "none", "off"})
-
 
 def _qwen_thinking_enabled(model_id: str, thinking_level: str | None) -> bool | None:
-    """Return an explicit Qwen thinking flag without changing provider defaults."""
-    if thinking_level is None or "qwen3" not in model_id.lower():
+    """Return an explicit Qwen thinking flag. Off is False, never omitted."""
+    from .thinking_policy import qwen_thinking_request, uses_qwen_thinking_protocol
+
+    if not uses_qwen_thinking_protocol(model_id):
         return None
-    return thinking_level.strip().lower() not in _QWEN_THINKING_DISABLED_LEVELS
+    enabled, _budget = qwen_thinking_request(thinking_level)
+    return enabled
 
 
 @dataclass
@@ -104,48 +105,17 @@ NATIVE_SEARCH_CAPABLE: dict[tuple[ModelProvider, str], dict[str, Any]] = {
 }
 
 
-# Simple heuristic: does the user's message look like it wants fresh web info?
-# Used to decide whether to enable native search for this turn. Kept tiny and
-# dependency-free; ``web_fetch`` is the URL-fetch fallback for everything else.
-_SEARCH_HINT_KEYWORDS = (
-    # English
-    "search",
-    "latest",
-    "news",
-    "today",
-    "current",
-    "recent",
-    "who is",
-    "what is happening",
-    "stock price",
-    "weather",
-    # Chinese
-    "搜索",
-    "查一下",
-    "查询",
-    "最新",
-    "今天",
-    "新闻",
-    "现在",
-    "最近",
-    # Arabic
-    "ابحث",
-    "أخبار",
-    "اليوم",
-    "الآن",
-)
+def should_use_native_search(
+    user_message: str,
+    *,
+    enabled: bool = False,
+) -> bool:
+    """Native search is a user/capability flag, not a keyword classifier.
 
-
-def should_use_native_search(user_message: str) -> bool:
-    """Return True if the message looks like it needs fresh web info.
-
-    Intentionally permissive on search intent but conservative on non-search
-    prompts (e.g. "write a poem" returns False).
+    ``user_message`` is accepted for call-site compatibility and ignored.
     """
-    if not user_message:
-        return False
-    lowered = user_message.lower()
-    return any(kw in lowered for kw in _SEARCH_HINT_KEYWORDS)
+    del user_message
+    return bool(enabled)
 
 
 @dataclass

@@ -8,6 +8,7 @@ drop-in replacement for the in-process handlers during Phase 5b.
 
 from __future__ import annotations
 
+from ai_gateway_core.knowledge import is_multimodal_embedding_model
 from ai_gateway_core.logging import record_internal_exception
 from fastapi import APIRouter, Depends, Request
 
@@ -149,24 +150,6 @@ async def list_datasets(request: Request, user: UserContext = Depends(get_user_c
             __name__, "assistant.api.routes.models.internal_failure", exc
         )
         return {"datasets": []}
-
-    # Small frozen set duplicated from gateway-side
-    # ``src/services/knowledge/embedding.py`` MULTIMODAL_EMBEDDING_MODELS
-    # to keep assistant-service free of gateway imports. Keeping sync is
-    # the operator's responsibility; the list is ~5 entries and changes
-    # rarely.
-    _MULTIMODAL_EMBEDDING_MODELS = frozenset(
-        {
-            "multimodal-embedding-v1",
-            "multimodal-embedding-one-peace-v1",
-            "multimodal-embedding-one-peace",
-            "tongyi-embedding-vision-plus",
-            "qwen2.5-vl-embedding",
-        }
-    )
-
-    def is_multimodal_embedding_model(name: str) -> bool:
-        return name in _MULTIMODAL_EMBEDDING_MODELS
 
     datasets = []
     for ds in raw:

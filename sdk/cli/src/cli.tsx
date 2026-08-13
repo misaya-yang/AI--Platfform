@@ -21,14 +21,14 @@ const cli = meow(
   Options
     --api-key, -k     API key for the AI Gateway
     --base-url, -u    Gateway base URL (default: http://localhost:8080)
-    --model, -m       Default model (default: qwen3.6-plus)
+    --model, -m       Default model (default: qwen3.7-plus)
     --tenant-id, -t   Tenant identifier
     --kb              Knowledge base dataset IDs (comma-separated)
     --version, -v     Show version
 
   Examples
     $ ai-gateway --api-key gw_xxx --base-url http://localhost:8080
-    $ ai-gateway -k gw_xxx -m qwen3.6-plus
+    $ ai-gateway -k gw_xxx -m qwen3.7-plus
     $ ai-gateway --kb product-docs,sales
 `,
   {

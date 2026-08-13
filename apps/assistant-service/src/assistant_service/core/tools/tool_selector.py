@@ -30,11 +30,52 @@ TIER_SKILL = 2
 TIER_MCP = 3
 
 ALWAYS_INCLUDE = {
-    ToolName.SEARCH_KB,
-    ToolName.UPDATE_MEMORY,
-    ToolName.SPAWN_SUBAGENT,
     *DISCOVERY_TOOL_NAMES,
+    ToolName.GENERATE_DOCUMENT,
+    ToolName.GENERATE_PPTX,
+    ToolName.GENERATE_IMAGE,
+    ToolName.GENERATE_QUIZ,
 }
+
+_FIRST_CLASS_GENERATION = {
+    ToolName.GENERATE_DOCUMENT,
+    ToolName.GENERATE_PPTX,
+    ToolName.GENERATE_IMAGE,
+    ToolName.GENERATE_QUIZ,
+}
+
+
+def _canonical_generation_name(name: str) -> str:
+    """Map plugin aliases such as ``mcp_docgen__generate_document`` back to ALWAYS."""
+
+    value = str(name or "").strip()
+    if not value:
+        return ""
+    return value.rsplit("__", 1)[-1]
+
+
+def is_first_class_generation_tool(tool: Any) -> bool:
+    """Return whether a registered catalog entry is a first-class generation backend.
+
+    Selection is catalog-based: exact ALWAYS names, MCP/plugin suffixes, or
+    capability metadata that names those backends. User text is not inspected.
+    """
+
+    name = str(getattr(tool, "name", "") or "")
+    if name in _FIRST_CLASS_GENERATION:
+        return True
+    if _canonical_generation_name(name) in _FIRST_CLASS_GENERATION:
+        return True
+    metadata = getattr(tool, "capability_metadata", None) or {}
+    if not isinstance(metadata, dict):
+        return False
+    for key in ("mcp_tool", "tool_id", "upstream_name"):
+        value = str(metadata.get(key) or "")
+        if value in _FIRST_CLASS_GENERATION:
+            return True
+        if _canonical_generation_name(value) in _FIRST_CLASS_GENERATION:
+            return True
+    return False
 
 # Built-in aliases improve direct selection latency. Dynamic MCP and plugin
 # tools do not need an entry here: their own catalog metadata is indexed.
@@ -180,8 +221,18 @@ def _score_tool(tool_def: ToolDefinition, message_lower: str) -> float:
     return 0.15 if name.startswith("mcp_") or category in {"mcp", "skill"} else 0.1
 
 
+def _is_always_visible(tool_def: ToolDefinition, pinned: set[str]) -> bool:
+    name = tool_def.name
+    return (
+        name in ALWAYS_INCLUDE
+        or name in pinned
+        or name == ToolName.SEARCH_KB
+        or is_first_class_generation_tool(tool_def)
+    )
+
+
 def _get_tier(tool_def: ToolDefinition) -> int:
-    if tool_def.name in ALWAYS_INCLUDE:
+    if tool_def.name in ALWAYS_INCLUDE or is_first_class_generation_tool(tool_def):
         return TIER_ALWAYS
     if tool_def.name.startswith("mcp_"):
         return TIER_MCP
@@ -195,11 +246,16 @@ def select_tools(
     all_tools: list[ToolDefinition],
     user_message: str,
     max_tokens: int = DEFAULT_TOOL_TOKEN_BUDGET,
+    *,
+    mode: str = "discover",
+    extra_always: set[str] | None = None,
 ) -> list[ToolDefinition]:
-    """Select direct schemas while keeping discovery bridges visible."""
+    """Select direct schemas. Discover mode only advertises ALWAYS bridges."""
 
     if not all_tools:
         return []
+    pinned = extra_always or set()
+    has_discovery = any(getattr(tool, "name", "") in DISCOVERY_TOOL_NAMES for tool in all_tools)
     message_lower = (user_message or "").lower()
     scored: list[tuple[ToolDefinition, float, int, int]] = []
     for tool in all_tools:
@@ -216,10 +272,12 @@ def select_tools(
         )
     )
 
+    advertise_budget = mode == "budget" or not has_discovery
     selected: list[ToolDefinition] = []
     used_tokens = 0
-    for tool, score, tier, tokens in scored:
-        if tier == TIER_ALWAYS or used_tokens + tokens <= max_tokens:
+    for tool, score, _tier, tokens in scored:
+        direct = _is_always_visible(tool, pinned)
+        if direct or (advertise_budget and used_tokens + tokens <= max_tokens):
             selected.append(tool)
             used_tokens += tokens
         else:

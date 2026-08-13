@@ -14,7 +14,6 @@ import asyncio
 import contextlib
 import json
 import time
-from types import SimpleNamespace
 from typing import Any
 
 from ai_gateway_core.logging import get_logger
@@ -30,10 +29,9 @@ from ...core.auth.permissions import (
 from ...core.auth.service_access import (
     ServiceAccessPolicy,
     evaluate_service_access,
-    normalize_service_scope,
-    service_access_policy_from_metadata,
     service_scope_matches,
 )
+from ...core.auth.service_access_resolver import load_service_access_constraints
 from ...core.auth.user_resolver import UserContext
 from ...core.client_ip import get_client_ip_from_request
 from ...core.gateway.multi_dimension_rate_limiter import (
@@ -50,20 +48,20 @@ from ...proxy import (
     RequestContext,
     TransparentProxy,
 )
-from ...core.auth.service_access_resolver import load_service_access_constraints
 from ...proxy.langgraph_governance import (
     apply_langgraph_run_governance,
+)
+from ...proxy.langgraph_governance import (
     apply_quota_policy as _apply_quota_policy,
+)
+from ...proxy.langgraph_governance import (
     enforce_model_allowlist as _enforce_model_allowlist,
-    estimate_tokens_from_payload as _estimate_tokens_from_payload,
-    is_model_allowed as _is_model_allowed,
-    normalize_allowed_models as _normalize_allowed_models,
-    override_model_in_request_payload as _override_model_in_request_payload,
-    quota_check_failure_mode as _quota_check_failure_mode,
-    quota_retry_after_seconds as _quota_retry_after_seconds,
+)
+from ...proxy.langgraph_governance import (
+    estimate_tokens_from_payload as _estimate_tokens_from_payload,  # noqa: F401
+)
+from ...proxy.langgraph_governance import (
     resolve_effective_provider as _resolve_effective_provider,
-    should_apply_quota_policy as _should_apply_quota_policy,
-    should_create_quota_alert as _should_create_quota_alert,
 )
 from ...proxy.langgraph_run_body import (
     billing_request_snapshot,
@@ -72,8 +70,6 @@ from ...proxy.langgraph_run_body import (
     prepare_langgraph_run_body,
     should_prepare_langgraph_run_body,
 )
-from ._route_trace import current_trace_id
-from ...services.billing import get_quota_service
 from ...services.metrics.usage_parser import extract_model
 from ..deps import (
     AuthContext,
@@ -81,6 +77,7 @@ from ..deps import (
     get_rate_limiter,
     get_user_context,
 )
+from ._route_trace import current_trace_id
 
 logger = get_logger(__name__)
 
@@ -165,10 +162,6 @@ def get_proxy_config_loader(request: Request) -> ProxyConfigLoader:
 # ============ 权限和限流检查 ============
 
 
-def _normalize_allowed_services(value: Any) -> list[str]:
-    return normalize_service_scope(value)
-
-
 def _decode_json_body(body: bytes | None) -> Any | None:
     if not body:
         return None
@@ -176,12 +169,6 @@ def _decode_json_body(body: bytes | None) -> Any | None:
         return json.loads(body.decode("utf-8"))
     except Exception:
         return None
-
-
-def _encode_json_body(payload: Any) -> bytes | None:
-    if payload is None:
-        return None
-    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
 
 async def _resolve_service_definition(registry, service_name: str):

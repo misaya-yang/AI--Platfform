@@ -13,6 +13,12 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+from ai_gateway_core.knowledge import (
+    MULTIMODAL_EMBEDDING_MODELS as MULTIMODAL_EMBEDDING_MODELS,
+)
+from ai_gateway_core.knowledge import (
+    is_multimodal_embedding_model as is_multimodal_embedding_model,
+)
 
 
 # =============================================================================
@@ -46,38 +52,6 @@ class SensitiveDataFilter(logging.Filter):
 # Apply sensitive data filter to embedding logger
 logger = logging.getLogger(__name__)
 logger.addFilter(SensitiveDataFilter())
-
-
-# =============================================================================
-# Multimodal Embedding Model Registry
-# =============================================================================
-# Centralized list of embedding models that support multimodal (image) content.
-# Used by assistant API to identify multimodal knowledge bases.
-
-MULTIMODAL_EMBEDDING_MODELS: frozenset[str] = frozenset(
-    {
-        # DashScope multimodal models
-        "multimodal-embedding-v1",
-        "multimodal-embedding-one-peace-v1",
-        "multimodal-embedding-one-peace",
-        # Tongyi unified vision models
-        "tongyi-embedding-vision-plus",
-        # Qwen VL models
-        "qwen2.5-vl-embedding",
-    }
-)
-
-
-def is_multimodal_embedding_model(model_name: str) -> bool:
-    """Check if a model supports multimodal embedding.
-
-    Args:
-        model_name: The embedding model name to check
-
-    Returns:
-        True if the model supports multimodal (image) embedding
-    """
-    return model_name in MULTIMODAL_EMBEDDING_MODELS
 
 
 class EmbeddingError(RuntimeError):

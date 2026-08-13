@@ -699,16 +699,3 @@ async def prepare_openai_responses_local_runtime(
     if not runtime.tool_definitions():
         return None, OpenAIResponsesLocalReadiness("not_run", "trusted_binding_incomplete")
     return runtime, readiness
-
-
-def native_result_blocks(message: Any) -> list[dict[str, Any]]:
-    """Return only well-formed server-owned local result blocks from a message."""
-
-    blocks = getattr(message, "provider_content_blocks", None)
-    if not isinstance(blocks, list):
-        return []
-    return [
-        copy.deepcopy(block)
-        for block in blocks
-        if isinstance(block, dict) and block.get("type") == OPENAI_LOCAL_RESULT_BLOCK
-    ]

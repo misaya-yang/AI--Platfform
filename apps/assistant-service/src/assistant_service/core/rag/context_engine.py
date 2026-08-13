@@ -824,7 +824,11 @@ def format_long_term_memory(memory_context: dict[str, Any]) -> str:
             if value and key not in ("language",):  # Skip obvious defaults
                 pref_items.append(f"- {key}: {value}")
         if pref_items:
-            parts.append("### Preferences\n" + "\n".join(pref_items))
+            parts.append(
+                "### Preferences\n"
+                "Apply silently; do not discuss unless asked.\n"
+                + "\n".join(pref_items)
+            )
 
     # Format frequent memories (learned patterns)
     frequent = memory_context.get("frequent_memories", [])

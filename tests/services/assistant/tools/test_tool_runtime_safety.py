@@ -64,6 +64,43 @@ def _definition(name: str, risk: ToolRiskLevel) -> ToolDefinition:
     )
 
 
+def test_tool_call_inherits_target_timeout() -> None:
+    registry = ToolRegistry()
+    bridge = _definition("discovery_bridge", ToolRiskLevel.LOW)
+    bridge.timeout_seconds = 30
+    target = _definition("mcp_docgen__generate_document", ToolRiskLevel.LOW)
+    target.timeout_seconds = 306
+    registry.register(target, _RecordingExecutor())
+
+    timeout = registry._effective_execution_timeout(
+        ToolCallRequest(
+            call_id="call-timeout",
+            tool_name="tool_call",
+            arguments={"name": "mcp_docgen__generate_document", "arguments": {}},
+        ),
+        bridge,
+    )
+
+    assert timeout == 306
+
+
+def test_direct_tool_preserves_subsecond_timeout() -> None:
+    registry = ToolRegistry()
+    definition = _definition("subsecond_tool", ToolRiskLevel.LOW)
+    definition.timeout_seconds = 0.01  # type: ignore[assignment]
+
+    timeout = registry._effective_execution_timeout(
+        ToolCallRequest(
+            call_id="call-subsecond-timeout",
+            tool_name="subsecond_tool",
+            arguments={},
+        ),
+        definition,
+    )
+
+    assert timeout == 0.01
+
+
 @pytest.mark.asyncio
 async def test_direct_registry_allows_medium_risk_without_explicit_confirmation() -> None:
     registry = ToolRegistry()

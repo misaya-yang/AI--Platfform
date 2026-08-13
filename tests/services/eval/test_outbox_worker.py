@@ -189,8 +189,11 @@ async def test_outbox_worker_marks_failed_job_for_retry() -> None:
 
     class FailingExecutor(FakeEvaluatorExecutor):
         async def run_job(
-            self, *, tenant_id: str, job_payload: dict[str, Any]
-        ) -> EvaluatorRunResult:  # noqa: ARG002
+            self,
+            *,
+            tenant_id: str,  # noqa: ARG002
+            job_payload: dict[str, Any],  # noqa: ARG002
+        ) -> EvaluatorRunResult:
             raise RuntimeError("judge unavailable")
 
     worker = EvalOutboxWorker(repo, FailingExecutor(), poll_interval_s=0.01, batch_size=1)

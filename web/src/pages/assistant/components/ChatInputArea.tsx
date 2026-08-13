@@ -35,6 +35,8 @@ interface ChatInputAreaProps {
   onToggleDataset: (id: string) => void;
   webSearchEnabled: boolean;
   setWebSearchEnabled: (val: boolean) => void;
+  thinkingLevel: "off" | "low" | "medium" | "high";
+  setThinkingLevel: (val: "off" | "low" | "medium" | "high") => void;
   handleImageGenerate: () => void;
   selectedStyle: string;
   setSelectedStyle: (style: string) => void;
@@ -64,6 +66,8 @@ export function ChatInputArea({
   onToggleDataset,
   webSearchEnabled,
   setWebSearchEnabled,
+  thinkingLevel,
+  setThinkingLevel,
   handleImageGenerate,
   selectedStyle,
   setSelectedStyle,
@@ -195,6 +199,20 @@ export function ChatInputArea({
               ring without elevating the card. */}
           <div className="relative flex items-end gap-2 p-2 rounded-[10px] bg-[hsl(var(--assistant-surface-bg))] border border-[hsl(var(--assistant-border))] focus-within:border-[hsl(var(--assistant-accent))]/40 transition-colors duration-150">
             {/* Quick actions menu */}
+            <select
+              aria-label={t("assistant.thinkingLevel", "Thinking")}
+              value={thinkingLevel}
+              disabled={isStreaming || isGeneratingImage}
+              onChange={(event) =>
+                setThinkingLevel(event.target.value as "off" | "low" | "medium" | "high")
+              }
+              className="h-9 shrink-0 rounded-md border border-transparent bg-transparent px-1.5 text-[11px] text-muted-foreground hover:bg-muted/50"
+            >
+              <option value="off">{t("assistant.thinkingOff", "Think off")}</option>
+              <option value="low">{t("assistant.thinkingLow", "Think low")}</option>
+              <option value="medium">{t("assistant.thinkingMedium", "Think mid")}</option>
+              <option value="high">{t("assistant.thinkingHigh", "Think high")}</option>
+            </select>
             <QuickActionsMenu
               onFileUpload={() => fileInputRef.current?.click()}
               onImageGenerate={handleImageGenerate}

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -11,6 +13,120 @@ COMMUNITY_PLUGIN_SOURCE_COMMIT = "0a6e37e4e242c944380228fa29dbd14e64ac1b63"
 
 def _read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def test_port_scripts_fail_closed_on_untracked_manifest_entries(tmp_path: Path) -> None:
+    for script_name in ("generate-port-patch.sh", "verify-sync-port.sh"):
+        repo = tmp_path / script_name.removesuffix(".sh")
+        goal_dir = repo / "scripts" / "goal"
+        goal_dir.mkdir(parents=True)
+        (goal_dir / script_name).write_text(
+            _read(f"scripts/goal/{script_name}"),
+            encoding="utf-8",
+        )
+        (goal_dir / "sync-port-only.txt").write_text(
+            "src/new_startup_module.py\n",
+            encoding="utf-8",
+        )
+        (goal_dir / "workstream-a-paths.txt").write_text("", encoding="utf-8")
+        untracked_path = repo / "src" / "new_startup_module.py"
+        untracked_path.parent.mkdir()
+        untracked_path.write_text("VALUE = 1\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+
+        scratch = repo / "scratch"
+        result = subprocess.run(
+            ["bash", f"scripts/goal/{script_name}"],
+            cwd=repo,
+            env={**os.environ, "GROK_GOAL_SCRATCH": str(scratch)},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        output = result.stdout + result.stderr
+        assert result.returncode != 0
+        assert "PORT manifest contains untracked files" in output
+        assert "src/new_startup_module.py" in output
+        assert not (scratch / "port-only.patch").exists()
+
+
+def test_port_verifier_skips_deleted_python_paths_in_ruff_but_keeps_deletion(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    goal_dir = repo / "scripts" / "goal"
+    new_scripts_dir = repo / "scripts" / "new"
+    src_dir = repo / "src"
+    command_dir = tmp_path / "commands"
+    for directory in (goal_dir, new_scripts_dir, src_dir, command_dir):
+        directory.mkdir(parents=True)
+
+    (goal_dir / "verify-sync-port.sh").write_text(
+        _read("scripts/goal/verify-sync-port.sh"),
+        encoding="utf-8",
+    )
+    (goal_dir / "sync-port-only.txt").write_text(
+        "src/existing.py\nsrc/deleted.py\n",
+        encoding="utf-8",
+    )
+    (goal_dir / "workstream-a-paths.txt").write_text("", encoding="utf-8")
+    for script_name in ("port-only-diff.sh", "generate-port-patch.sh"):
+        (goal_dir / script_name).write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    (goal_dir / "exercise-shipped-paths.py").write_text("", encoding="utf-8")
+    for script_name in ("migrate.sh", "deploy.sh"):
+        (new_scripts_dir / script_name).write_text(
+            "#!/usr/bin/env bash\nexit 0\n",
+            encoding="utf-8",
+        )
+    (new_scripts_dir / "gateway_preflight.py").write_text("", encoding="utf-8")
+    (src_dir / "existing.py").write_text("EXISTING = True\n", encoding="utf-8")
+    deleted_path = src_dir / "deleted.py"
+    deleted_path.write_text("DELETED = True\n", encoding="utf-8")
+
+    ruff_args_log = tmp_path / "ruff-args.log"
+    (command_dir / "ruff").write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$RUFF_ARGS_LOG\"\n",
+        encoding="utf-8",
+    )
+    for command_name in ("pytest", "python"):
+        (command_dir / command_name).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    for command_path in command_dir.iterdir():
+        command_path.chmod(0o755)
+
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "port-guard@example.test"],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "Port Guard"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repo, check=True)
+    deleted_path.unlink()
+
+    scratch = tmp_path / "scratch"
+    result = subprocess.run(
+        ["bash", "scripts/goal/verify-sync-port.sh"],
+        cwd=repo,
+        env={
+            **os.environ,
+            "GROK_GOAL_SCRATCH": str(scratch),
+            "PATH": f"{command_dir}:/usr/bin:/bin",
+            "RUFF_ARGS_LOG": str(ruff_args_log),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    ruff_args = ruff_args_log.read_text(encoding="utf-8")
+    assert "src/existing.py" in ruff_args
+    assert "src/deleted.py" not in ruff_args
+    diff_evidence = (scratch / "diff-head-port-only.txt").read_text(encoding="utf-8")
+    assert "diff --git a/src/deleted.py b/src/deleted.py" in diff_evidence
+    assert "deleted file mode" in diff_evidence
 
 
 def test_bundled_community_agent_plugins_are_pinned_read_only_data() -> None:

@@ -2,15 +2,14 @@ import sys
 import types
 
 import pytest
-
-from src.services.knowledge.embedding import DashScopeEmbedding, EmbeddingError
+from knowledge_service.services.knowledge.embedding import DashScopeEmbedding, EmbeddingError
 
 
 @pytest.mark.asyncio
 async def test_dashscope_embedding_falls_back_to_singleton_on_timeout(monkeypatch):
     class DummyTextEmbedding:
         @staticmethod
-        def call(**kwargs):
+        def call(**_kwargs):
             return None
 
     dummy = types.SimpleNamespace(TextEmbedding=DummyTextEmbedding, base_http_api_url="")
@@ -24,7 +23,7 @@ async def test_dashscope_embedding_falls_back_to_singleton_on_timeout(monkeypatc
         calls.append(list(batch))
         if len(batch) > 1:
             raise EmbeddingError("timeout")
-        return [[0.0] * 3 for _ in batch]
+        return [[0.0] * 1024 for _ in batch]
 
     monkeypatch.setattr(emb, "_call_with_retry", fake_call_with_retry)
 

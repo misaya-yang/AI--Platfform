@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from pathlib import Path
 
 import pytest
-
 from docgen.sandbox import (
+    DockerSandbox,
     LocalSubprocessSandbox,
     SandboxTimeout,
 )
@@ -68,3 +67,32 @@ async def test_exec_python_can_import_docgen_packages():
     )
     assert r.ok, r.stderr
     assert "stack_ok" in r.stdout
+
+
+@pytest.mark.asyncio
+async def test_docker_sandbox_passes_python_and_node_code_as_literal_argv(
+    monkeypatch,
+    tmp_path,
+):
+    calls: list[tuple[str, ...]] = []
+
+    class CompletedProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return b"ok", b""
+
+    async def fake_create_subprocess_exec(*argv, **_kwargs):
+        calls.append(argv)
+        return CompletedProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    sandbox = DockerSandbox(workdir_root=tmp_path)
+    python_code = "print('$HOME', '`id`', '$(touch should-not-run)')"
+    node_code = "console.log('$HOME', '`id`', '$(touch should-not-run)')"
+
+    await sandbox.exec_python(python_code)
+    await sandbox.exec_node(node_code)
+
+    assert calls[0][-4:] == (sandbox._image, "python3", "-c", python_code)
+    assert calls[1][-4:] == (sandbox._image, "node", "-e", node_code)

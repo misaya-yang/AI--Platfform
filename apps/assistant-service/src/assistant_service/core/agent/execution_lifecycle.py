@@ -661,7 +661,7 @@ class ExecutionLifecycleMixin:
                 # as primary generation so exhaustion always produces
                 # the structured run_budget_exceeded terminal contract.
                 # The owner-bound WorkingMemory was hydrated above.
-                if config.enable_history_trimming and history and not config.use_context_engine:
+                if config.enable_history_trimming and history:
                     history = await self._preprocess_history(
                         history=history,
                         max_tokens=config.max_history_tokens,

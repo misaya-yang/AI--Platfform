@@ -8,7 +8,12 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 VALIDATOR_ROOT = (
-    REPO_ROOT / "apps" / "assistant-service" / "src" / "assistant_service" / "core" / "skills"
+    REPO_ROOT
+    / "packages"
+    / "mcp-docgen-server"
+    / "src"
+    / "docgen"
+    / "_skills_data"
 )
 
 

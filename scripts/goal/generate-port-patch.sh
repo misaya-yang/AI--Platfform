@@ -13,6 +13,27 @@ map_manifest() {
   grep -v '^#' "${MANIFEST}" | grep -v '^$'
 }
 
+untracked_manifest_paths() {
+  comm -12 \
+    <(map_manifest | sort -u) \
+    <(git ls-files --others --exclude-standard | sort -u)
+}
+
+assert_no_untracked_manifest_paths() {
+  local untracked_paths
+  untracked_paths="$(untracked_manifest_paths)"
+  if [[ -z "${untracked_paths}" ]]; then
+    return 0
+  fi
+
+  echo "FATAL: PORT manifest contains untracked files that git diff cannot include:" >&2
+  printf '%s\n' "${untracked_paths}" >&2
+  echo "Track these files before generating a PORT patch." >&2
+  return 1
+}
+
+assert_no_untracked_manifest_paths
+
 STASHED=0
 if comm -23 <(git diff --name-only HEAD | sort) <(map_manifest | sort) | grep -q .; then
   git stash push -m "goal-ws-A-patch" --pathspec-from-file="${WS_A}"

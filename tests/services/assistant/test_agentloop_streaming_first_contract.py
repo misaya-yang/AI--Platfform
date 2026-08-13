@@ -1225,7 +1225,11 @@ async def test_streaming_first_replays_anthropic_pause_turn_blocks_verbatim() ->
             session_id="s1",
             user=MockUserContext(user_id="u1"),  # type: ignore[arg-type]
             message="Search the web",
-            config=AgentLoopConfig(model_id="test", max_tool_iterations=3),
+            config=AgentLoopConfig(
+                model_id="test",
+                max_tool_iterations=3,
+                web_search_enabled=True,
+            ),
             history=[],
         )
     ]
@@ -1299,7 +1303,11 @@ async def test_streaming_first_preserves_mixed_server_and_client_tool_blocks() -
             session_id="s1",
             user=MockUserContext(user_id="u1"),  # type: ignore[arg-type]
             message="Search the latest weather and write it",
-            config=AgentLoopConfig(model_id="test", max_tool_iterations=3),
+            config=AgentLoopConfig(
+                model_id="test",
+                max_tool_iterations=3,
+                web_search_enabled=True,
+            ),
             history=[],
         )
     ]
@@ -1569,12 +1577,8 @@ async def test_forced_synthesis_overflow_then_compact_success_has_one_success_te
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("message", "expected_enabled"),
-    [("Write a poem", False), ("Search the latest weather", True)],
-)
-async def test_native_search_is_intent_gated(
-    message: str,
+@pytest.mark.parametrize("expected_enabled", [False, True])
+async def test_native_search_follows_user_capability_flag(
     expected_enabled: bool,
 ) -> None:
     from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
@@ -1597,8 +1601,12 @@ async def test_native_search_is_intent_gated(
         async for event in loop.execute(
             session_id="s1",
             user=MockUserContext(user_id="u1"),  # type: ignore[arg-type]
-            message=message,
-            config=AgentLoopConfig(model_id="test", max_tool_iterations=2),
+            message="hello",
+            config=AgentLoopConfig(
+                model_id="test",
+                max_tool_iterations=2,
+                web_search_enabled=expected_enabled,
+            ),
             history=[],
         )
     ]
@@ -2176,6 +2184,53 @@ async def test_legacy_history_compaction_receipt_reaches_runtime_snapshot() -> N
     assert receipt["compacted"] is True
     assert receipt["compaction_lineage"]["reason"] == "history_preprocess"
     assert receipt["compaction_lineage"]["summary_provenance"]["untrusted"] is True
+    assert all(event.event_type != "run_error" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_history_compaction_runs_when_context_engine_is_on() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    class CompactingModelRegistry(FakeModelRegistry):
+        async def chat(self, *_args: Any, **_kwargs: Any) -> tuple[str, dict[str, int]]:
+            return "validated historical summary", {}
+
+    model = CompactingModelRegistry(scripted=[[{"content": "hello back"}]])
+    loop = AgentLoop(model_registry=model)
+    history = [
+        {"role": "user", "content": "analyze the contract"},
+        {"role": "assistant", "content": "old verbose evidence " + "x" * 20_000},
+        {"role": "user", "content": "continue the clause review"},
+        {"role": "assistant", "content": "more evidence " + "y" * 8_000},
+        {"role": "user", "content": "recent question"},
+        {"role": "assistant", "content": "recent answer"},
+    ]
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="session-history-compaction",
+            user=MockUserContext(user_id="u1"),  # type: ignore[arg-type]
+            message="你好",
+            config=AgentLoopConfig(
+                model_id="test",
+                max_tool_iterations=1,
+                use_context_engine=True,
+                max_history_tokens=1200,
+                min_recent_messages=2,
+                enable_history_trimming=True,
+            ),
+            history=history,
+        )
+    ]
+
+    budget_payload = next(event.data for event in events if event.event_type == "context_budget")
+    receipt = budget_payload["context_snapshot"]["bootstrap"]["history_compaction"]
+    assert receipt["status"] == "committed"
+    assert receipt["compacted"] is True
+    assert receipt["compaction_lineage"]["reason"] == "history_preprocess"
+    serialized_prompt = json.dumps(model.last_messages, ensure_ascii=False)
+    assert "你好" in serialized_prompt
     assert all(event.event_type != "run_error" for event in events)
 
 
@@ -3558,7 +3613,7 @@ async def test_approval_resume_without_trace_writer_keeps_db_less_contract() -> 
     )
     assert "run_finished" in event_types
     assert invoker.invocation_count == 1
-    assert loop.model_registry.thinking_history == [None]
+    assert loop.model_registry.thinking_history == ["off"]
     collector = TurnEventCollector()
     for event in events:
         collector.accept(event)
@@ -3700,7 +3755,7 @@ async def test_approval_resume_reenters_canonical_loop_with_frozen_profile_and_t
     assert invoker.invocations == [(first_tool, {"version": 1})]
     assert resume_model.temperature_history == [0.0]
     assert resume_model.max_tokens_history == [4096]
-    assert resume_model.thinking_history == ["enabled"]
+    assert resume_model.thinking_history == ["low"]
     assert resume_model.tools_history[0] == initial_model.tools_history[0]
     assert [
         str((tool.get("function") or {}).get("name") or "")

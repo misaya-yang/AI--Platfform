@@ -327,7 +327,7 @@ class AgentLoopConfig:
     react_auto_retry: bool = True  # Auto retry on tool failures
 
     # Thinking display (Phase: Thinking/Workflow)
-    thinking_level: str | None = None  # "enabled" for Qwen3, "high"/"medium" for Gemini
+    thinking_level: str | None = None  # off | low | medium | high
 
     # Error Recovery parameters (Phase 3)
     enable_error_recovery: bool = True  # Enable intelligent error recovery

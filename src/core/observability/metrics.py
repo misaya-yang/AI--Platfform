@@ -435,15 +435,6 @@ class MetricsCollector:
         self.register_gauge(request_metrics.active_connections)
         self.register_histogram(request_metrics.request_duration_ms)
 
-    def collect_all(self) -> dict[str, Any]:
-        """收集所有指标"""
-        return {
-            "counters": {name: c.collect() for name, c in self._counters.items()},
-            "gauges": {name: g.collect() for name, g in self._gauges.items()},
-            "histograms": {name: h.collect() for name, h in self._histograms.items()},
-            "request_stats": self.request_metrics.get_stats(),
-        }
-
     def to_prometheus(self) -> str:
         """
         导出 Prometheus 格式

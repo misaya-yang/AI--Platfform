@@ -17,12 +17,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.core.auth.user_resolver import UserContext
-
 # AuthenticationRequiredError is now raised by the kb-service modules under test
 # (kb-service ships standalone and does not depend on ai_gateway_core, so it has
 # its own copy of the exception class). See plans/kb-fork-merge-report.md.
 from knowledge_service.core.exceptions import AuthenticationRequiredError
+
+from src.core.auth.user_resolver import UserContext
 
 
 def _rbac_has_permission(subjects, permission: str) -> bool:
@@ -451,7 +451,9 @@ class TestConfluenceAccessControl:
     @pytest.fixture
     def mock_sync_service(self):
         """创建 Mock ConfluenceSyncService"""
-        from src.services.knowledge.confluence.sync_service import ConfluenceSyncService
+        from knowledge_service.services.knowledge.confluence.sync_service import (
+            ConfluenceSyncService,
+        )
 
         mock_settings = MagicMock()
         mock_settings.confluence.request_timeout = 30
@@ -482,7 +484,9 @@ class TestConfluenceAccessControl:
         self, mock_sync_service, user_alice, user_bob
     ):
         """测试：非所有者无法访问"""
-        from src.services.knowledge.confluence.sync_service import ConfluenceAccessDeniedError
+        from knowledge_service.services.knowledge.confluence.sync_service import (
+            ConfluenceAccessDeniedError,
+        )
 
         resource = {
             "connection_id": "conn_001",
@@ -526,7 +530,9 @@ class TestConfluenceBindingAccess:
     @pytest.fixture
     def mock_sync_service(self):
         """创建 Mock ConfluenceSyncService"""
-        from src.services.knowledge.confluence.sync_service import ConfluenceSyncService
+        from knowledge_service.services.knowledge.confluence.sync_service import (
+            ConfluenceSyncService,
+        )
 
         mock_settings = MagicMock()
         mock_settings.confluence.request_timeout = 30
@@ -563,7 +569,9 @@ class TestConfluenceBindingAccess:
         self, mock_sync_service, user_alice, user_bob
     ):
         """测试：非所有者无法访问 Binding"""
-        from src.services.knowledge.confluence.sync_service import ConfluenceAccessDeniedError
+        from knowledge_service.services.knowledge.confluence.sync_service import (
+            ConfluenceAccessDeniedError,
+        )
 
         mock_sync_service.db.get_confluence_binding = AsyncMock(
             return_value={
@@ -580,7 +588,9 @@ class TestConfluenceBindingAccess:
     @pytest.mark.asyncio
     async def test_verify_binding_access_not_found(self, mock_sync_service, user_alice):
         """测试：Binding 不存在时抛出错误"""
-        from src.services.knowledge.confluence.sync_service import ConfluenceSyncError
+        from knowledge_service.services.knowledge.confluence.sync_service import (
+            ConfluenceSyncError,
+        )
 
         mock_sync_service.db.get_confluence_binding = AsyncMock(return_value=None)
 
@@ -595,7 +605,9 @@ class TestConfluenceConnectionAccess:
     @pytest.fixture
     def mock_sync_service(self):
         """创建 Mock ConfluenceSyncService"""
-        from src.services.knowledge.confluence.sync_service import ConfluenceSyncService
+        from knowledge_service.services.knowledge.confluence.sync_service import (
+            ConfluenceSyncService,
+        )
 
         mock_settings = MagicMock()
         mock_settings.confluence.request_timeout = 30
@@ -631,7 +643,9 @@ class TestConfluenceConnectionAccess:
         self, mock_sync_service, user_alice, user_bob
     ):
         """测试：非所有者无法访问 Connection"""
-        from src.services.knowledge.confluence.sync_service import ConfluenceAccessDeniedError
+        from knowledge_service.services.knowledge.confluence.sync_service import (
+            ConfluenceAccessDeniedError,
+        )
 
         mock_sync_service.db.get_confluence_connection = AsyncMock(
             return_value={
@@ -669,7 +683,9 @@ class TestConfluencePageAccess:
     @pytest.fixture
     def mock_sync_service(self):
         """创建 Mock ConfluenceSyncService"""
-        from src.services.knowledge.confluence.sync_service import ConfluenceSyncService
+        from knowledge_service.services.knowledge.confluence.sync_service import (
+            ConfluenceSyncService,
+        )
 
         mock_settings = MagicMock()
         mock_settings.confluence.request_timeout = 30
@@ -716,7 +732,9 @@ class TestConfluencePageAccess:
         self, mock_sync_service, user_alice, user_bob
     ):
         """测试：非所有者无法访问 Page"""
-        from src.services.knowledge.confluence.sync_service import ConfluenceAccessDeniedError
+        from knowledge_service.services.knowledge.confluence.sync_service import (
+            ConfluenceAccessDeniedError,
+        )
 
         mock_sync_service.db.get_confluence_page = AsyncMock(
             return_value={

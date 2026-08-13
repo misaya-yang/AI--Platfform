@@ -71,6 +71,7 @@ export interface ChatRequest {
   file_paths?: string[];
   system_prompt?: string;
   execution_profile?: "safe" | "balanced" | "power";
+  thinking_level?: "off" | "low" | "medium" | "high";
   memory_mode?: "auto" | "strict" | "off";
   os_agent_enabled?: boolean;
   local_node_device_id?: string;

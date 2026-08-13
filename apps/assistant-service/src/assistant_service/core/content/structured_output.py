@@ -46,21 +46,8 @@ class OutputFormat(str, Enum):
 class RepairStrategy(str, Enum):
     """Strategies for repairing invalid output."""
 
-    NONE = "none"  # No repair, raise error
     EXTRACT_JSON = "extract_json"  # Try to extract JSON from text
     TRUNCATE = "truncate"  # Truncate to valid JSON
-    LLM_FIX = "llm_fix"  # Use LLM to fix the output
-
-
-@dataclass
-class StructuredOutputConfig:
-    """Configuration for structured output handling."""
-
-    format: OutputFormat = OutputFormat.TEXT
-    schema: type[BaseModel] | None = None
-    max_retries: int = 2
-    repair_strategy: RepairStrategy = RepairStrategy.EXTRACT_JSON
-    strict_validation: bool = True
 
 
 @dataclass
@@ -396,45 +383,6 @@ User Query: {user_query}
 """)
 
     return "\n\n".join(prompt_parts)
-
-
-def get_schema_for_model(
-    model_id: str,
-    schema: type[BaseModel],
-) -> dict[str, Any]:
-    """
-    Get the appropriate schema format for a model's API.
-
-    Different providers have different structured output formats:
-    - OpenAI: response_format with json_schema
-    - Anthropic: tool use with schema
-    - Others: JSON mode
-
-    Args:
-        model_id: Model identifier
-        schema: Pydantic model class
-
-    Returns:
-        Schema dict for API call
-    """
-    json_schema = schema.model_json_schema()
-
-    # OpenAI format (for gpt-4o and later)
-    if model_id.startswith("gpt-"):
-        return {
-            "type": "json_schema",
-            "json_schema": {
-                "name": schema.__name__,
-                "schema": json_schema,
-                "strict": True,
-            },
-        }
-
-    # Generic JSON mode
-    return {
-        "type": "json_object",
-        "schema": json_schema,
-    }
 
 
 # =============================================================================

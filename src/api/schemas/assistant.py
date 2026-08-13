@@ -171,6 +171,11 @@ class AssistantChatRequest(BaseModel):
     enable_task_planning: bool = Field(
         default=False, description="Enable task planning and tool orchestration"
     )
+    thinking_level: str | None = Field(
+        default=None,
+        max_length=16,
+        description="Thinking intensity: off, low, medium, or high. Default off.",
+    )
     confirm_plan: Literal[False] = Field(
         default=False,
         description=(

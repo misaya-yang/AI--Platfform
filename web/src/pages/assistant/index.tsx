@@ -218,6 +218,7 @@ export function AssistantPage() {
   const [selectedDatasets, setSelectedDatasets] = useState<string[]>([]);
   const [temperature, setTemperature] = useState(0.7);
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
+  const [thinkingLevel, setThinkingLevel] = useState<"off" | "low" | "medium" | "high">("off");
   const [selectedStyle, setSelectedStyle] = useState(DEFAULT_STYLE_ID);
   
   // 3. UI State
@@ -578,6 +579,14 @@ export function AssistantPage() {
       }
       setSelectedDatasets(sessionConfig.selected_datasets || []);  // Always reset, even if empty
       if (typeof sessionConfig.web_search_enabled === "boolean") setWebSearchEnabled(sessionConfig.web_search_enabled);
+      if (
+        sessionConfig.thinking_level === "off" ||
+        sessionConfig.thinking_level === "low" ||
+        sessionConfig.thinking_level === "medium" ||
+        sessionConfig.thinking_level === "high"
+      ) {
+        setThinkingLevel(sessionConfig.thinking_level);
+      }
       if (typeof sessionConfig.temperature === "number") setTemperature(sessionConfig.temperature);
       if (sessionConfig.selected_style) setSelectedStyle(sessionConfig.selected_style);
     }
@@ -592,6 +601,7 @@ export function AssistantPage() {
     // Reset feature toggles to defaults
     setSelectedDatasets([]);  // Clear selected knowledge bases
     setWebSearchEnabled(false);  // Disable web search
+    setThinkingLevel("off");
     // Keep model and temperature as user preferences
   }, [handleNewChat, cancelImageMode, isMobile, setShowLeftPanel, disableSessionOptIn]);
 
@@ -649,6 +659,7 @@ export function AssistantPage() {
         selected_model: selectedModel,
         selected_datasets: selectedDatasets,
         web_search_enabled: webSearchEnabled,
+        thinking_level: thinkingLevel,
         temperature,
         selected_style: selectedStyle,
         execution_profile: "safe",
@@ -662,7 +673,7 @@ export function AssistantPage() {
     
     setInput("");
     clearFiles();
-  }, [input, files, selectedModel, selectedDatasets, webSearchEnabled, temperature, selectedStyle, models, datasets, isStreaming, isUploading, isGeneratingImage, sendMessage, clearFiles, t, toast, isSessionOptInEffectiveNow]);
+  }, [input, files, selectedModel, selectedDatasets, webSearchEnabled, thinkingLevel, temperature, selectedStyle, models, datasets, isStreaming, isUploading, isGeneratingImage, sendMessage, clearFiles, t, toast, isSessionOptInEffectiveNow]);
 
   // Handle Image Send
   const handleImageSend = useCallback(() => {
@@ -1085,6 +1096,8 @@ export function AssistantPage() {
               onToggleDataset={(id) => setSelectedDatasets(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])}
               webSearchEnabled={webSearchEnabled}
               setWebSearchEnabled={setWebSearchEnabled}
+              thinkingLevel={thinkingLevel}
+              setThinkingLevel={setThinkingLevel}
               handleImageGenerate={handleImageGenerate}
               selectedStyle={selectedStyle}
               setSelectedStyle={setSelectedStyle}

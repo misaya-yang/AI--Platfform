@@ -44,6 +44,12 @@ from .tool_result_formatter import (
 logger = get_logger(__name__)
 
 
+def _resolve_model_turn_thinking_level(*, requested: str | None, iteration: int) -> str:
+    from ..models.thinking_policy import resolve_turn_thinking_level
+
+    return resolve_turn_thinking_level(requested=requested, iteration=iteration)
+
+
 class AgentModelTurnMixin:
     """Internal methods extracted from :class:`AgentLoop` without behavior changes."""
 
@@ -78,7 +84,9 @@ class AgentModelTurnMixin:
         if (
             model_info
             and getattr(model_info, "supports_native_search", False)
-            and should_use_native_search(ctx.message)
+            and should_use_native_search(
+                ctx.message, enabled=bool(ctx.config.web_search_enabled)
+            )
         ):
             native_search_config = getattr(model_info, "native_search_config", None)
 
@@ -165,7 +173,10 @@ class AgentModelTurnMixin:
                 ctx.config.max_tokens,
             ),
             tools=tools_for_call,
-            thinking_level=ctx.config.thinking_level,
+            thinking_level=_resolve_model_turn_thinking_level(
+                requested=ctx.config.thinking_level,
+                iteration=iteration,
+            ),
             native_search_config=native_search_config,
             openai_local_runtime=ctx.openai_responses_local_runtime,
         ):

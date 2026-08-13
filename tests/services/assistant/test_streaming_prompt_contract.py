@@ -11,19 +11,15 @@ def test_tool_prompt_is_direct_without_progress_preamble() -> None:
         available_tools=["search_knowledge_base"],
     )
 
-    assert "Address the current request directly" in prompt
-    assert "explicit output schemas" in prompt
-    assert "machine-readable artifacts" in prompt
-    assert "one exact allowed value" in prompt
-    assert "decision rules" in prompt
-    assert "field by field" in prompt
-    assert "singular field by punctuation" in prompt
-    assert "<FINAL_JSON>...</FINAL_JSON>" in prompt
-    assert "never substitute Markdown code fences" in prompt
-    assert "Recompute every requested metric" in prompt
-    assert "verify units" in prompt
-    assert "every decisive ID" in prompt
-    assert "do not silently upgrade or downgrade them" in prompt
+    assert "Match the request's language and actual work" in prompt
+    assert "Keep the reply proportional to the task" in prompt
+    assert "Answer immediately when no tool is needed" in prompt
+    assert "Discover tools that" in prompt
+    assert "An outline or promise is not" in prompt
+    assert "Apply remembered preferences silently" in prompt
+    assert "<FINAL_JSON>" not in prompt
+    assert "Recompute every requested metric" not in prompt
+    assert "every decisive ID" not in prompt
     assert "## Knowledge bases" in prompt
     assert "dataset-a" in prompt
     assert "## Available tools" not in prompt

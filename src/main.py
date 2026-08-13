@@ -107,26 +107,6 @@ OPENAPI_TAGS = [
 ]
 
 
-def _make_process_file_handler(app: FastAPI, *, process_file_task):
-    """Build a legacy task handler bound to the initialized assistant service."""
-
-    async def _handler(payload):
-        assistant_service = getattr(app.state, "assistant_service", None)
-        file_processor = (
-            getattr(assistant_service, "file_processor", None)
-            if assistant_service is not None
-            else None
-        )
-        if file_processor is None:
-            logger.warning(
-                "Skipping process_file task because assistant_service.file_processor is unavailable"
-            )
-            return None
-        return await process_file_task(payload, file_processor)
-
-    return _handler
-
-
 def create_app() -> FastAPI:
     """
     创建 FastAPI 应用
@@ -519,25 +499,6 @@ def create_app() -> FastAPI:
         await container.health_monitor.start()
         await container.task_worker.start(settings.task_worker_concurrency)
 
-        # 初始化 Redis 任务队列
-        if settings.redis.enabled:
-            from .core.tasks.queue import TaskQueue
-
-            # Use native client for TaskQueue as it requires raw commands like brpop/lpush
-            task_queue = TaskQueue(container.redis.get_native_client())
-
-            # Phase 5d: ``process_file`` task handler removed. The pre-processing
-            # pipeline (FileProcessor) now lives only in assistant-service, and
-            # AS's chat path processes uploads on-demand on first reference. Any
-            # ``process_file`` task enqueued by an old client would no-op here;
-            # the frontend in ``src/api/v1/files.py`` no longer enqueues them.
-            await task_queue.start_worker()
-            app.state.task_queue = task_queue
-            logger.info("Redis 任务队列已启动 (worker active, no handlers registered)")
-        else:
-            app.state.task_queue = None
-            logger.info("Redis 未启用，文件上传仅走同步保存路径")
-
         # 启动计费拦截器（如果启用）
         if settings.proxy.enabled and settings.proxy.billing_enabled:
             billing_interceptor = container.billing_interceptor
@@ -839,11 +800,6 @@ def create_app() -> FastAPI:
         if usage_recorder is not None:
             await usage_recorder.stop()
 
-        # Stop task queue
-        task_queue = getattr(app.state, "task_queue", None)
-        if task_queue is not None:
-            await task_queue.stop_worker()
-
         # Stop Assistant Service
         assistant_service = getattr(app.state, "assistant_service", None)
         if assistant_service is not None:
@@ -1080,243 +1036,37 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
 
     同时将配置同步到数据库，确保前端可以管理。
     """
-    from ai_gateway_core.config import resolve_dashscope, resolve_google
-    from ai_gateway_core.enums import ModelProvider
+    from .services.llm.startup_seeder import (
+        seed_startup_providers,
+        sync_startup_model_catalog,
+    )
+
+    knowledge_dashscope = getattr(getattr(settings, "knowledge", None), "dashscope", None)
+    legacy_dashscope_api_key = (
+        getattr(knowledge_dashscope, "api_key", "") if knowledge_dashscope else ""
+    )
 
     # Phase 5e: gateway no longer builds an in-process ``ModelRegistry``.
     # Provider-config sync (env → DB seeding) still runs because the admin
-    # UI expects to see the env-derived providers in ``llm_providers``;
-    # that's a DB operation and doesn't need the registry.
-    configured_providers: list[str] = []
-    # Exact provider set the separate Assistant process can configure from the
-    # shared startup environment. DB-only provider rows remain useful metadata,
-    # but the current Assistant runtime does not load their encrypted keys.
-    assistant_runtime_providers: set[str] = set()
-
-    # 默认 provider 配置定义 — for providers whose endpoint selection is
-    # straightforward (single key, single base_url env). DashScope and
-    # Google are resolved below via the per-domain helper because they
-    # have free/paid swap semantics.
-    DEFAULT_PROVIDER_CONFIGS = {
-        "openai": {
-            "display_name": "OpenAI",
-            "api_type": "openai",
-            "base_url": "https://api.openai.com",
-            "env_key": "OPENAI_API_KEY",
-            "env_base_url": "OPENAI_BASE_URL",
-        },
-        "anthropic": {
-            "display_name": "Anthropic",
-            "api_type": "anthropic",
-            "base_url": "https://api.anthropic.com",
-            "env_key": "ANTHROPIC_API_KEY",
-            "env_base_url": "ANTHROPIC_BASE_URL",
-        },
-        "deepseek": {
-            "display_name": "DeepSeek",
-            "api_type": "openai",
-            "base_url": "https://api.deepseek.com",
-            "env_key": "DEEPSEEK_API_KEY",
-            "env_base_url": "DEEPSEEK_BASE_URL",
-        },
-        "dashscope": {
-            "display_name": "Qwen/DashScope",
-            "api_type": "openai",
-            # base_url / env_key are resolved dynamically via
-            # resolve_dashscope("chat") — the values below are just the
-            # defaults the DB row sees if env vars are unset.
-            "base_url": "https://dashscope.aliyuncs.com/compatible-mode",
-            "env_key": "DASHSCOPE_API_KEY",
-            "env_base_url": "DASHSCOPE_CHAT_BASE_URL",
-        },
-        "google": {
-            "display_name": "Google Gemini",
-            "api_type": "google",
-            "base_url": "https://generativelanguage.googleapis.com",
-            "env_key": "GEMINI_API_KEY",
-            "env_base_url": None,
-        },
-        # Vertex AI as a first-class provider: same wire protocol as Google
-        # Gemini but different host + key format (Express Mode ``AQ.xxx``).
-        # Having its own entry means operators configure it through the
-        # Service Management UI the same way they add any other provider;
-        # the env-driven ``GOOGLE_API_BACKEND=vertex`` flip is now a
-        # deprecated fallback (still works, logs a warning below).
-        "google-vertex": {
-            "display_name": "Google Vertex AI",
-            "api_type": "google-vertex",
-            "base_url": "https://aiplatform.googleapis.com",
-            "env_key": "VERTEX_API_KEY",
-            "env_base_url": None,
-        },
-    }
-
-    # Deprecation warnings for the old env-driven Vertex switch. Kept
-    # functional for one release (see ``_google_backend_for_model`` in
-    # model_registry.py) so users with pre-existing deployments don't
-    # break, but the preferred path is to add a ``google-vertex``
-    # provider in the Service Management UI.
-    _legacy_backend = os.environ.get("GOOGLE_API_BACKEND", "").strip().lower()
-    _legacy_models = os.environ.get("GOOGLE_VERTEX_MODELS", "").strip()
-    if _legacy_backend == "vertex":
-        logger.warning(
-            "GOOGLE_API_BACKEND=vertex is deprecated. Add a 'google-vertex' "
-            "provider in the Service Management UI (or set VERTEX_API_KEY "
-            "so the default google-vertex provider is seeded at startup) "
-            "and remove GOOGLE_API_BACKEND from your environment."
-        )
-    if _legacy_models:
-        logger.warning(
-            "GOOGLE_VERTEX_MODELS is deprecated. Use the 'google-vertex' "
-            "provider instead — models configured under that provider route "
-            "to Vertex without needing per-model env overrides."
-        )
-
-    # 获取 provider_service 用于同步到数据库
+    # UI expects to see the env-derived providers in ``llm_providers``.
     provider_service = getattr(app.state, "provider_service", None)
-    tenant_id = "default"
-
-    # 处理每个 provider
-    for provider_id, config in DEFAULT_PROVIDER_CONFIGS.items():
-        # Default: read the provider's single API key env + optional base_url env.
-        api_key = os.environ.get(config["env_key"], "")
-        # Keep this aligned with assistant-service/main.py. Gateway-only legacy
-        # fallbacks may seed admin metadata, but cannot prove execution readiness.
-        assistant_runtime_key = api_key
-        base_url = None
-        if config.get("env_base_url"):
-            base_url = os.environ.get(config["env_base_url"])
-        if not base_url:
-            base_url = config["base_url"]
-        google_backend = "ai_studio"
-
-        # DashScope chat routing: domain-specific helper handles the CN ⇄
-        # Intl swap (DASHSCOPE_CHAT_API_KEY / DASHSCOPE_CHAT_BASE_URL).
-        # Legacy ``settings.knowledge.dashscope.api_key`` is still
-        # honored as a last-resort fallback for pre-env-var installs.
-        if provider_id == "dashscope":
-            resolved_key, resolved_url = resolve_dashscope("chat")
-            api_key = resolved_key
-            assistant_runtime_key = resolved_key
-            base_url = resolved_url
-            if not api_key:
-                knowledge_dashscope = getattr(
-                    getattr(settings, "knowledge", None), "dashscope", None
-                )
-                if knowledge_dashscope:
-                    api_key = getattr(knowledge_dashscope, "api_key", "")
-
-        # Google chat routing: domain-specific helper handles the
-        # AI Studio ⇄ Vertex backend flip and picks the matching key
-        # (GEMINI_API_KEY vs VERTEX_API_KEY / VERTEX_CHAT_API_KEY).
-        # Per-model A/B via GOOGLE_VERTEX_MODELS is still resolved inside
-        # ModelRegistry at request time; this only seeds the default.
-        if provider_id == "google":
-            resolved_key, resolved_url, google_backend = resolve_google("chat")
-            api_key = resolved_key
-            assistant_runtime_key = resolved_key
-            # Only override base_url when backend actually changed — an
-            # explicit DB override (base_url column) would be lost
-            # otherwise. AI Studio default matches config["base_url"],
-            # so leaving base_url alone is correct in that case.
-            if google_backend == "vertex":
-                base_url = None  # let configure_provider pick VERTEX_BASE_URL
-
-        # Phase 5e: gateway just records that the provider env is set
-        # (used below for env → DB seeding). The in-memory ``configure_provider``
-        # dance the old ModelRegistry did is assistant-service's job now.
-        if api_key:
-            try:
-                ModelProvider(provider_id)  # validate it's a known provider
-                configured_providers.append(provider_id)
-                if assistant_runtime_key:
-                    assistant_runtime_providers.add(provider_id)
-                if provider_id == "google" and google_backend == "vertex":
-                    logger.info("Google provider routed to Vertex (env-seeded)")
-            except ValueError:
-                logger.warning(f"Unknown provider enum: {provider_id}")
-
-        # 同步到数据库（如果 provider_service 可用）
-        if provider_service:
-            try:
-                existing = await provider_service.get_provider(tenant_id, provider_id)
-                if not existing:
-                    # 创建新 provider
-                    await provider_service.create_provider(
-                        tenant_id=tenant_id,
-                        provider_id=provider_id,
-                        display_name=config["display_name"],
-                        api_type=config["api_type"],
-                        base_url=base_url,
-                        api_key=api_key if api_key else None,
-                        is_enabled=True,
-                    )
-                    logger.info(f"Created provider {provider_id} in database")
-                elif api_key:
-                    # Keep the persisted runtime row aligned with the
-                    # environment-selected endpoint and re-encrypt legacy
-                    # plaintext values after an encryption key is introduced.
-                    await provider_service.update_provider(
-                        tenant_id=tenant_id,
-                        provider_id=provider_id,
-                        api_key=api_key,
-                        api_type=config["api_type"],
-                        base_url=base_url,
-                    )
-                    logger.info(f"Updated runtime configuration for provider {provider_id}")
-            except Exception as e:
-                logger.warning(f"Failed to sync provider {provider_id} to database: {e}")
-
-    # 从数据库加载 providers（用于加载数据库中用户配置的 providers）
-    if provider_service:
-        try:
-            db_providers = await provider_service.list_providers(tenant_id, include_disabled=False)
-            for p in db_providers:
-                provider_id = p.get("provider_id", "")
-                if provider_id in configured_providers:
-                    continue  # 已从环境变量配置
-                if not p.get("has_api_key"):
-                    continue  # 没有 API key
-
-                # Phase 5e: we no longer configure an in-memory registry
-                # here — just track which providers the DB has so
-                # ``/health/providers`` can enumerate them.
-                try:
-                    ModelProvider(provider_id)
-                    configured_providers.append(provider_id)
-                    logger.info(f"Provider {provider_id} loaded from database")
-                except ValueError:
-                    logger.debug(f"Custom provider {provider_id} not in enum, skipping")
-        except Exception as e:
-            logger.warning(f"Failed to load providers from database: {e}")
+    seed_result = await seed_startup_providers(
+        provider_service=provider_service,
+        legacy_dashscope_api_key=legacy_dashscope_api_key,
+        tenant_id="default",
+        log=logger,
+    )
+    configured_providers = list(seed_result.configured_providers)
+    assistant_runtime_providers = set(seed_result.runtime_configured_providers)
 
     model_service = getattr(app.state, "model_service", None)
-    if provider_service and model_service and configured_providers:
-        from .services.llm.model_catalog_sync import ModelCatalogSyncService
-
-        sync_service = ModelCatalogSyncService(provider_service, model_service)
-        for provider_id in sorted(set(configured_providers)):
-            try:
-                result = await sync_service.sync_provider_models(
-                    tenant_id=tenant_id,
-                    provider_id=provider_id,
-                    discover=False,
-                )
-                created = len(result.get("created_models", []))
-                updated = len(result.get("updated_models", []))
-                if created or updated:
-                    logger.info(
-                        "Synced startup model catalog provider_id=%s created=%s updated=%s",
-                        provider_id,
-                        created,
-                        updated,
-                    )
-            except Exception as e:
-                logger.warning(
-                    "Failed to sync startup model catalog for provider %s: %s",
-                    provider_id,
-                    e,
-                )
+    await sync_startup_model_catalog(
+        provider_service=provider_service,
+        model_service=model_service,
+        configured_providers=configured_providers,
+        tenant_id="default",
+        log=logger,
+    )
 
     # Get KB service if available
     kb_service = getattr(app.state, "knowledge_service", None)

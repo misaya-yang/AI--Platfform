@@ -9,7 +9,6 @@ Code Review 修复验证测试
 """
 
 from datetime import datetime
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -190,7 +189,7 @@ class TestEmbeddingRetryMechanism:
         不对具体数字做硬编码，避免实现优化（如重试次数/基础延迟调整）导致
         非功能性回归失败。这里仅验证“有上限重试 + 正向退避 + 超时保护”。
         """
-        from src.services.knowledge.embedding import DashScopeEmbedding
+        from knowledge_service.services.knowledge.embedding import DashScopeEmbedding
 
         assert hasattr(DashScopeEmbedding, "MAX_RETRIES")
         assert hasattr(DashScopeEmbedding, "RETRY_BASE_DELAY")
@@ -206,56 +205,14 @@ class TestEmbeddingRetryMechanism:
         assert DashScopeEmbedding.REQUEST_TIMEOUT >= 30
 
 
-class TestTaskQueueHandlerBinding:
-    """任务队列处理器绑定测试"""
-
-    @pytest.mark.asyncio
-    async def test_process_file_handler_uses_app_state_assistant_service(self):
-        """处理器应从 app.state 获取 assistant_service"""
-        from fastapi import FastAPI
-
-        from src import main as main_module
-
-        app = FastAPI()
-        file_processor = MagicMock()
-        app.state.assistant_service = SimpleNamespace(file_processor=file_processor)
-
-        mock_task = AsyncMock()
-        handler = main_module._make_process_file_handler(
-            app,
-            process_file_task=mock_task,
-        )
-
-        payload = {"file_path": "test.txt", "user_id": "user-1"}
-        await handler(payload)
-
-        mock_task.assert_awaited_once_with(payload, file_processor)
-
-    @pytest.mark.asyncio
-    async def test_process_file_handler_skips_when_assistant_missing(self):
-        """assistant_service 未初始化时不应调用处理函数"""
-        from fastapi import FastAPI
-
-        from src import main as main_module
-
-        app = FastAPI()
-        mock_task = AsyncMock()
-        handler = main_module._make_process_file_handler(
-            app,
-            process_file_task=mock_task,
-        )
-
-        await handler({"file_path": "test.txt", "user_id": "user-1"})
-
-        mock_task.assert_not_called()
-
+class TestEmbeddingRetryCompatibility:
     @pytest.mark.asyncio
     async def test_call_with_retry_method_exists(self):
         """测试 _call_with_retry 方法存在"""
-        from src.services.knowledge.embedding import DashScopeEmbedding
+        from knowledge_service.services.knowledge.embedding import DashScopeEmbedding
 
         # 创建一个 mock 实例来检查方法
-        with patch.object(DashScopeEmbedding, "__init__", lambda x: None):
+        with patch.object(DashScopeEmbedding, "__init__", lambda _x: None):
             embedding = DashScopeEmbedding()
             assert hasattr(embedding, "_call_with_retry")
             assert callable(getattr(embedding, "_call_with_retry", None))
@@ -383,7 +340,7 @@ class TestCQLValidation:
 
     def test_valid_space_keys(self):
         """测试有效的 Space Key"""
-        from src.services.knowledge.confluence.client import _escape_cql_value
+        from knowledge_service.services.knowledge.confluence.client import _escape_cql_value
 
         assert _escape_cql_value("ENG") == "ENG"
         assert _escape_cql_value("my-space") == "my-space"
@@ -392,7 +349,7 @@ class TestCQLValidation:
 
     def test_invalid_space_keys_rejected(self):
         """测试无效的 Space Key 被拒绝"""
-        from src.services.knowledge.confluence.client import _escape_cql_value
+        from knowledge_service.services.knowledge.confluence.client import _escape_cql_value
 
         invalid_keys = [
             "space key",  # space
@@ -413,7 +370,7 @@ class TestCQLValidation:
 
     def test_escape_cql_string(self):
         """测试 CQL 字符串转义"""
-        from src.services.knowledge.confluence.client import _escape_cql_string
+        from knowledge_service.services.knowledge.confluence.client import _escape_cql_string
 
         assert _escape_cql_string('hello"world') == 'hello\\"world'
         assert _escape_cql_string("hello\\world") == "hello\\\\world"
@@ -425,7 +382,7 @@ class TestUtcNowFunction:
 
     def test_utc_now_returns_naive_datetime(self):
         """测试 _utc_now 返回无时区 datetime"""
-        from src.services.knowledge.confluence.sync_service import _utc_now
+        from knowledge_service.services.knowledge.confluence.sync_service import _utc_now
 
         now = _utc_now()
         assert now.tzinfo is None  # Naive datetime
@@ -434,7 +391,7 @@ class TestUtcNowFunction:
         """测试 _utc_now 返回 UTC 时间"""
         from datetime import timezone
 
-        from src.services.knowledge.confluence.sync_service import _utc_now
+        from knowledge_service.services.knowledge.confluence.sync_service import _utc_now
 
         now = _utc_now()
         utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -445,7 +402,7 @@ class TestUtcNowFunction:
 
     def test_scheduler_utc_now(self):
         """测试调度器 _utc_now 函数"""
-        from src.services.knowledge.confluence.scheduler import _utc_now
+        from knowledge_service.services.knowledge.confluence.scheduler import _utc_now
 
         now = _utc_now()
         assert now.tzinfo is None  # Naive datetime
@@ -457,7 +414,9 @@ class TestAsyncTaskHandling:
     @pytest.mark.asyncio
     async def test_background_task_creation(self):
         """测试后台任务创建方法存在"""
-        from src.services.knowledge.confluence.sync_service import ConfluenceSyncService
+        from knowledge_service.services.knowledge.confluence.sync_service import (
+            ConfluenceSyncService,
+        )
 
         # Check that the method exists
         assert hasattr(ConfluenceSyncService, "_create_background_task")

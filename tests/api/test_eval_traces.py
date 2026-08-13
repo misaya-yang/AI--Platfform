@@ -1935,6 +1935,37 @@ async def test_eval_baseline_promotion_rejects_legacy_coercible_and_forged_recei
         assert error.value.detail["error"] == expected_error
 
 
+def test_eval_dataset_subrouter_reexports_endpoint_identity() -> None:
+    actual = {
+        (method, route.path): route.endpoint
+        for route in eval_routes._eval_dataset_routes.router.routes
+        for method in route.methods or set()
+    }
+    assert actual == {
+        ("GET", "/datasets"): eval_routes.list_eval_datasets,
+        ("GET", "/datasets/{dataset_id}"): eval_routes.get_eval_dataset,
+        ("GET", "/datasets/{dataset_id}/examples"): eval_routes.list_eval_examples,
+        (
+            "PATCH",
+            "/datasets/{dataset_id}/examples/{example_id}",
+        ): eval_routes.update_eval_example,
+        (
+            "POST",
+            "/datasets/{dataset_id}/examples:import",
+        ): eval_routes.import_eval_examples,
+        (
+            "GET",
+            "/datasets/{dataset_id}/examples:export",
+        ): eval_routes.export_eval_examples,
+        ("POST", "/datasets"): eval_routes.create_eval_dataset,
+        (
+            "POST",
+            "/datasets/{dataset_id}/examples:from-trace",
+        ): eval_routes.create_eval_example_from_trace,
+        ("POST", "/trace-feedback:preview"): eval_routes.preview_eval_trace_feedback,
+    }
+
+
 def test_eval_openapi_paths_are_registered() -> None:
     paths = create_app().openapi()["paths"]
 

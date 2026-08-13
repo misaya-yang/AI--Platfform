@@ -282,9 +282,9 @@ class AgentLoop(
         self._background_tasks: set[asyncio.Task] = set()
 
         # Initialize components
-        self.scenario_analyzer = scenario_analyzer or self._create_scenario_analyzer()
+        self.scenario_analyzer = scenario_analyzer
         self.scenario_retriever = scenario_retriever  # Created lazily when kb_service available
-        self.query_intent_analyzer = query_intent_analyzer or self._create_query_intent_analyzer()
+        self.query_intent_analyzer = query_intent_analyzer
         self.task_planner = task_planner  # Created lazily
         self.tool_invoker = tool_invoker if tool_invoker is not None else create_tool_invoker()
         self.context_engine = context_engine or ContextEngine(provider="openai")

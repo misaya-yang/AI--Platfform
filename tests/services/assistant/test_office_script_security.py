@@ -9,15 +9,7 @@ import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-SKILLS_ROOT = (
-    ROOT
-    / "apps"
-    / "assistant-service"
-    / "src"
-    / "assistant_service"
-    / "core"
-    / "skills"
-)
+SKILLS_ROOT = ROOT / "packages" / "mcp-docgen-server" / "src" / "docgen" / "_skills_data"
 
 
 def _load_module(name: str, path: Path):

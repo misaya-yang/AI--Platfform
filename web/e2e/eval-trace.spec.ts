@@ -11,6 +11,7 @@ const permissions = [
   "console:eval:run",
   "conversation:playground:access",
 ];
+const GOLDEN_FIXTURE_CASES = 25;
 
 function jsonResponse(body: unknown, status = 200) {
   return {
@@ -1033,14 +1034,14 @@ test.describe("Eval trace console", () => {
       "../../tests/fixtures/eval/golden/assistant_regression_v1.jsonl"
     );
     await page.locator('[data-testid="golden-jsonl-import"] input[type="file"]').setInputFiles(goldenFixture);
-    await expect(page.getByText("18 case(s) passed validation")).toBeVisible();
+    await expect(page.getByText(`${GOLDEN_FIXTURE_CASES} case(s) passed validation`)).toBeVisible();
     await page.getByTestId("golden-jsonl-import-submit").click();
     await expect(
-      page.getByTestId("golden-jsonl-import").getByText("Imported 18 case(s) across 1 batch(es). Skipped 0.")
+      page.getByTestId("golden-jsonl-import").getByText(`Imported ${GOLDEN_FIXTURE_CASES} case(s) across 1 batch(es). Skipped 0.`)
     ).toBeVisible();
     await page.getByTestId("golden-jsonl-import-submit").click();
     await expect(
-      page.getByTestId("golden-jsonl-import").getByText("Imported 0 case(s) across 1 batch(es). Skipped 18.")
+      page.getByTestId("golden-jsonl-import").getByText(`Imported 0 case(s) across 1 batch(es). Skipped ${GOLDEN_FIXTURE_CASES}.`)
     ).toBeVisible();
 
     await page.getByRole("tab", { name: "Run & Results", exact: true }).click();

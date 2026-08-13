@@ -354,9 +354,6 @@ def test_dynamic_environment_reads_have_closed_compatibility_justifications() ->
         "apps/assistant-service/src/assistant_service/core/gateway/execution_gateway.py:_env_truthy": "direct-construction fallback; production injects snapshot policy",
         "apps/assistant-service/src/assistant_service/api/routes/chat.py:_startup_flag": "production reads app.state startup snapshot",
         "apps/assistant-service/src/assistant_service/api/routes/chat.py:_env_truthy": "route compatibility fallback; production reads app.state snapshot",
-        "apps/assistant-service/src/assistant_service/core/skills/docx/scripts/office/soffice.py:get_soffice_env": "closed LibreOffice bootstrap allowlist guarded by office security tests",
-        "apps/assistant-service/src/assistant_service/core/skills/pptx/scripts/office/soffice.py:get_soffice_env": "closed LibreOffice bootstrap allowlist guarded by office security tests",
-        "apps/assistant-service/src/assistant_service/core/skills/xlsx/scripts/office/soffice.py:get_soffice_env": "closed LibreOffice bootstrap allowlist guarded by office security tests",
     }
     assert all(allowed.values())
     assert dynamic_reads == set(allowed), {
@@ -511,7 +508,6 @@ def test_broad_os_environ_mapping_reads_have_closed_justifications() -> None:
     allowed = {
         "apps/assistant-service/src/assistant_service/config/startup_fingerprint.py:resolve_startup_config": "canonical resolver snapshots the process mapping once",
         "apps/assistant-service/src/assistant_service/core/mcp/stdio_client.py:initialize": "child process receives a bounded OS bootstrap allowlist; plugin config inputs are frozen separately",
-        "apps/assistant-service/src/assistant_service/core/docgen/sandbox/local.py:_scrub_env": "sandbox child receives a bounded OS bootstrap allowlist",
     }
     assert all(allowed.values())
     assert broad_reads == set(allowed), {

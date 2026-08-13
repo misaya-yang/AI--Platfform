@@ -4,6 +4,7 @@ import re
 import shutil
 import stat
 import subprocess
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -260,6 +261,55 @@ def test_dockerfiles_do_not_accept_provider_secrets_as_build_arguments() -> None
     ) in assistant
 
 
+def test_assistant_docgen_wheel_contains_bundled_skill_runtime_data(
+    tmp_path: Path,
+) -> None:
+    uv = shutil.which("uv")
+    assert uv is not None, "uv is required for the offline wheel release guard"
+
+    package_source = ROOT / "packages/mcp-docgen-server"
+    isolated_source = tmp_path / "mcp-docgen-server"
+    shutil.copytree(
+        package_source,
+        isolated_source,
+        ignore=shutil.ignore_patterns("build", "dist", "*.egg-info", "__pycache__"),
+    )
+    wheel_dir = tmp_path / "wheel"
+    result = subprocess.run(
+        [
+            uv,
+            "build",
+            "--wheel",
+            "--offline",
+            "--no-progress",
+            "--out-dir",
+            str(wheel_dir),
+            str(isolated_source),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    wheels = list(wheel_dir.glob("*.whl"))
+    assert len(wheels) == 1
+    with zipfile.ZipFile(wheels[0]) as archive:
+        members = set(archive.namelist())
+
+    required_runtime_data = {
+        "docgen/_skills_data/docx/SKILL.md",
+        "docgen/_skills_data/pptx/SKILL.md",
+        "docgen/_skills_data/xlsx/SKILL.md",
+        "docgen/_skills_data/pdf/SKILL.md",
+        "docgen/_skills_data/docx/scripts/office/schemas/ISO-IEC29500-4_2016/wml.xsd",
+        "docgen/_skills_data/docx/scripts/templates/comments.xml",
+        "docgen/_skills_data/docx/LICENSE.txt",
+    }
+    assert required_runtime_data <= members
+
+
 def test_redis_runtime_config_keeps_secrets_out_of_compose_command(
     tmp_path: Path,
 ) -> None:
@@ -449,7 +499,6 @@ def test_sandbox_images_are_versioned_and_runnable_by_default() -> None:
     fixed_image = "ghcr.io/misaya-yang/ai-gateway-docgen-sandbox:2.0.0"
     for path in (
         ROOT / "packages/mcp-docgen-server/src/docgen/sandbox/docker_backend.py",
-        ROOT / "apps/assistant-service/src/assistant_service/core/docgen/sandbox/docker_backend.py",
     ):
         text = path.read_text()
         assert fixed_image in text

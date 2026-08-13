@@ -5,8 +5,7 @@
  * ---
  * name: code-reviewer
  * description: Review code for bugs
- * model: qwen3.6-plus
- * tools: [read_file, glob, grep]
+ * model: qwen3.7-plus
  * maxTurns: 10
  * ---
  * ## Instructions
@@ -31,27 +30,24 @@ export interface AgentDef {
 const BUILTIN_AGENTS: AgentDef[] = [
   {
     name: "explore",
-    description: "Fast search — read-only tools (KB, web, file search)",
+    description: "Focused research through the remote gateway",
     model: undefined,
-    tools: ["read_file", "glob", "grep", "list_dir", "tree", "search_knowledge_base", "search_web"],
     maxTurns: 8,
-    instructions: "You are an Explore agent. Search and read files to answer the question. Do not modify anything.",
+    instructions: "You are an Explore agent. Research the question using available remote context and return a concise answer.",
     source: "builtin",
   },
   {
     name: "task",
-    description: "Full execution — all tools available",
+    description: "Complete a task through the remote gateway",
     model: undefined,
-    tools: undefined, // all
     maxTurns: 15,
-    instructions: "You are a Task agent. Execute the requested task using all available tools.",
+    instructions: "You are a Task agent. Complete the requested task using the gateway capabilities available to you.",
     source: "builtin",
   },
   {
     name: "plan",
     description: "Analyze and create implementation plan",
     model: undefined,
-    tools: ["read_file", "glob", "grep", "list_dir", "tree"],
     maxTurns: 5,
     instructions: "You are a Plan agent. Analyze the codebase and create a step-by-step implementation plan. Do not execute — only plan.",
     source: "builtin",

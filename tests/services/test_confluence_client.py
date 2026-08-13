@@ -9,9 +9,8 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
-from src.services.knowledge.confluence.client import ConfluenceClient
-from src.services.knowledge.confluence.models import ConfluenceCredentials
+from knowledge_service.services.knowledge.confluence.client import ConfluenceClient
+from knowledge_service.services.knowledge.confluence.models import ConfluenceCredentials
 
 
 class TestGetPageChildrenPagination:

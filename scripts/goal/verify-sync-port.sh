@@ -18,7 +18,31 @@ map_manifest() {
 }
 
 manifest_py_files() {
-  map_manifest | grep '\.py$' || true
+  local manifest_path
+  while IFS= read -r manifest_path; do
+    if [[ "${manifest_path}" == *.py && -f "${manifest_path}" ]]; then
+      printf '%s\n' "${manifest_path}"
+    fi
+  done < <(map_manifest)
+}
+
+untracked_manifest_paths() {
+  comm -12 \
+    <(map_manifest | sort -u) \
+    <(git ls-files --others --exclude-standard | sort -u)
+}
+
+assert_no_untracked_manifest_paths() {
+  local untracked_paths
+  untracked_paths="$(untracked_manifest_paths)"
+  if [[ -z "${untracked_paths}" ]]; then
+    return 0
+  fi
+
+  echo "FATAL: PORT manifest contains untracked files that git diff cannot include:" >&2
+  printf '%s\n' "${untracked_paths}" >&2
+  echo "Track these files before running PORT verification." >&2
+  return 1
 }
 
 count_ws_a_overlap() {
@@ -151,6 +175,7 @@ run_phase_a() {
 }
 
 echo "verify-sync-port: started $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+assert_no_untracked_manifest_paths
 stash_ws_a_if_needed
 run_phase_b
 run_phase_a

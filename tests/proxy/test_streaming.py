@@ -19,7 +19,11 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from src.proxy.billing_interceptor import BillingInterceptor, UsageData
+from src.proxy.billing_interceptor import BillingInterceptor, StreamProcessor, UsageData
+from src.proxy.billing_stream import (
+    StreamProcessor as ExtractedStreamProcessor,
+)
+from src.proxy.billing_stream import UsageData as ExtractedUsageData
 from src.proxy.config_loader import ProxyServiceConfig
 from src.proxy.context_injector import ContextInjector, RequestContext
 from src.proxy.transparent_proxy import ProxyRequest, TransparentProxy
@@ -56,6 +60,15 @@ class MockStreamResponse:
 
 
 # ============ Streaming Tests ============
+
+
+def test_billing_interceptor_reexports_extracted_stream_types() -> None:
+    assert StreamProcessor is ExtractedStreamProcessor
+    assert UsageData is ExtractedUsageData
+    assert isinstance(
+        BillingInterceptor().create_stream_processor("request-1", "service-1"),
+        ExtractedStreamProcessor,
+    )
 
 
 class TestStreamingProxy:

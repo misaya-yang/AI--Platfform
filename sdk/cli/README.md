@@ -1,16 +1,14 @@
 # ai-gateway-cli
 
-A Claude Code-like terminal AI assistant powered by AI Gateway.
+A terminal client for remote streaming chat through AI Gateway.
 
 ## Features
 
-- **Streaming Chat** — Real-time SSE streaming with tool call display
-- **OS Agent** — Read/write/edit files, search code (glob/grep), execute shell commands
-- **MCP Integration** — Connect to Model Context Protocol servers (stdio transport)
+- **Remote Streaming Chat** — Send messages to AI Gateway and render SSE responses in real time
+- **Server Event Display** — Show remote tool calls and sub-agent activity reported by the gateway
+- **MCP Discovery** — Connect to and inspect Model Context Protocol servers (stdio transport)
 - **Knowledge Base** — Bind and query enterprise knowledge bases
-- **Sub-Agent Display** — Parallel agent execution visualization
 - **Slash Commands** — `/model`, `/kb`, `/mcp`, `/session`, `/config`, `/help`
-- **Permission System** — Three-level access control (auto/confirm/dangerous)
 
 ## Install
 
@@ -42,10 +40,8 @@ ai-gateway
 > /session new
 > /help
 
-# AI can use OS tools (with permission prompts)
-> Read the package.json and suggest improvements
-> Search for all TODO comments in src/
-> Run the test suite
+# Send a prompt to the configured remote gateway
+> Summarize the onboarding checklist using the product-docs knowledge base
 ```
 
 ## CLI Options
@@ -60,25 +56,11 @@ ai-gateway
 | `--version` | `-v` | Show version |
 | `--help` | | Show help |
 
-## OS Agent Tools
-
-| Tool | Permission | Description |
-|------|-----------|-------------|
-| `read_file` | Auto | Read file with line numbers |
-| `glob` | Auto | File pattern search |
-| `grep` | Auto | Content regex search |
-| `list_dir` | Auto | Directory listing |
-| `tree` | Auto | Directory tree |
-| `write_file` | Confirm | Create/overwrite file |
-| `edit_file` | Confirm | Exact string replacement |
-| `bash` | Dangerous | Shell command execution |
-
 ## Configuration
 
 ```
 ~/.ai-gateway/
 ├── config.json          # API key, model, base URL
-├── permissions.json     # File access rules
 ├── mcp_servers.json     # MCP server configs
 └── sessions/            # Session cache
 ```

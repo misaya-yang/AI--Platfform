@@ -1,5 +1,5 @@
 /**
- * Config manager — reads/writes ~/.ai-gateway/config.json and permissions.json
+ * Config manager — reads/writes CLI and MCP server configuration.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -7,15 +7,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   DEFAULT_CONFIG,
-  DEFAULT_PERMISSIONS,
   type CLIConfig,
   type MCPServerConfig,
-  type PermissionsConfig,
 } from "./types/config.js";
 
 const CONFIG_DIR = join(homedir(), ".ai-gateway");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
-const PERMISSIONS_FILE = join(CONFIG_DIR, "permissions.json");
 const MCP_SERVERS_FILE = join(CONFIG_DIR, "mcp_servers.json");
 const SESSIONS_DIR = join(CONFIG_DIR, "sessions");
 
@@ -54,17 +51,6 @@ export function updateConfig(updates: Partial<CLIConfig>) {
   return merged;
 }
 
-export function loadPermissions(): PermissionsConfig {
-  return {
-    ...DEFAULT_PERMISSIONS,
-    ...readJSON<Partial<PermissionsConfig>>(PERMISSIONS_FILE, {}),
-  };
-}
-
-export function savePermissions(perms: PermissionsConfig) {
-  writeJSON(PERMISSIONS_FILE, perms);
-}
-
 export function loadMCPServers(): MCPServerConfig[] {
   return readJSON<MCPServerConfig[]>(MCP_SERVERS_FILE, []);
 }
@@ -83,9 +69,6 @@ export function initConfigDir(): CLIConfig {
 
   if (!existsSync(CONFIG_FILE)) {
     writeJSON(CONFIG_FILE, DEFAULT_CONFIG);
-  }
-  if (!existsSync(PERMISSIONS_FILE)) {
-    writeJSON(PERMISSIONS_FILE, DEFAULT_PERMISSIONS);
   }
   if (!existsSync(MCP_SERVERS_FILE)) {
     writeJSON(MCP_SERVERS_FILE, []);

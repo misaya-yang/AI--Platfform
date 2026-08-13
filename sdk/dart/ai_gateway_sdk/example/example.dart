@@ -24,7 +24,7 @@ void main() async {
     print('--- Non-streaming chat ---');
     final response = await ai.chat.send(
       'Summarize the onboarding checklist',
-      modelId: 'qwen3.6-plus',
+      modelId: 'qwen3.7-plus',
       temperature: 0.7,
     );
     print('Session: ${response.sessionId}');

@@ -1,7 +1,7 @@
 {
   "name": "ai-gateway-cli",
   "version": "1.5.0",
-  "description": "AI Gateway CLI — Claude Code-like terminal AI assistant with OS Agent, MCP, and knowledge base integration",
+  "description": "AI Gateway CLI — remote streaming chat with slash commands and knowledge base integration",
   "type": "module",
   "bin": {
     "ai-gateway": "dist/cli.js"
@@ -20,7 +20,8 @@
     "assistant",
     "agent",
     "mcp",
-    "os-agent",
+    "chat",
+    "slash-commands",
     "terminal",
     "gateway"
   ],

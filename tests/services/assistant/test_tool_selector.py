@@ -36,7 +36,7 @@ def test_select_tools_tie_breaks_by_name_for_deterministic_schema_order() -> Non
         FakeToolDefinition("gamma_report"),
     ]
 
-    selected = select_tools(tools, user_message="summarize", max_tokens=10_000)
+    selected = select_tools(tools, user_message="summarize", max_tokens=10_000, mode="budget")
 
     assert [tool.name for tool in selected] == [
         "alpha_report",
@@ -52,7 +52,9 @@ def test_dynamic_mcp_without_hardcoded_keywords_remains_selectable() -> None:
         relevance_keywords=[],
     )
 
-    selected = select_tools([tool], user_message="completely unrelated wording", max_tokens=10_000)
+    selected = select_tools(
+        [tool], user_message="completely unrelated wording", max_tokens=10_000, mode="budget"
+    )
 
     assert selected == [tool]
 
@@ -63,8 +65,10 @@ def test_dynamic_catalog_order_is_stable_for_equal_scores() -> None:
         FakeToolDefinition("mcp_alpha__opaque", category=ToolCategory.MCP),
     ]
 
-    first = select_tools(tools, user_message="unmatched", max_tokens=10_000)
-    second = select_tools(list(reversed(tools)), user_message="unmatched", max_tokens=10_000)
+    first = select_tools(tools, user_message="unmatched", max_tokens=10_000, mode="budget")
+    second = select_tools(
+        list(reversed(tools)), user_message="unmatched", max_tokens=10_000, mode="budget"
+    )
 
     assert [item.name for item in first] == ["mcp_alpha__opaque", "mcp_zeta__opaque"]
     assert [item.name for item in second] == ["mcp_alpha__opaque", "mcp_zeta__opaque"]
@@ -79,3 +83,34 @@ def test_discovery_bridges_survive_a_tight_schema_budget() -> None:
     selected = select_tools(tools, user_message="unmatched", max_tokens=1)
 
     assert {item.name for item in selected} == DISCOVERY_TOOL_NAMES
+
+
+def test_discover_mode_advertises_only_always_bridges() -> None:
+    tools = [
+        *tool_discovery_definitions(),
+        FakeToolDefinition("spawn_subagent"),
+        FakeToolDefinition("update_user_memory"),
+        FakeToolDefinition("mcp_vendor__opaque", category=ToolCategory.MCP),
+        FakeToolDefinition("generate_pptx"),
+    ]
+
+    selected = select_tools(tools, user_message="hello", max_tokens=10_000)
+
+    assert {item.name for item in selected} == {*DISCOVERY_TOOL_NAMES, "generate_pptx"}
+    assert "spawn_subagent" not in {item.name for item in selected}
+
+
+def test_discover_mode_advertises_registered_generation_backends() -> None:
+    tools = [
+        *tool_discovery_definitions(),
+        FakeToolDefinition("mcp_docgen__generate_document", category=ToolCategory.MCP),
+        FakeToolDefinition("mcp_vendor__opaque", category=ToolCategory.MCP),
+        FakeToolDefinition("spawn_subagent"),
+    ]
+
+    selected = select_tools(tools, user_message="hello", max_tokens=10_000)
+    names = {item.name for item in selected}
+
+    assert "mcp_docgen__generate_document" in names
+    assert "mcp_vendor__opaque" not in names
+    assert "spawn_subagent" not in names

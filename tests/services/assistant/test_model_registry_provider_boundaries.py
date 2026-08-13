@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import tempfile
@@ -13,6 +14,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from assistant_service.core.agent.stream_helpers import merge_stream_tool_calls
+from assistant_service.core.models import model_registry as model_registry_module
 from assistant_service.core.models.model_registry import (
     ChatMessage,
     ModelInfo,
@@ -20,7 +22,76 @@ from assistant_service.core.models.model_registry import (
     ModelRegistry,
     ProviderStreamError,
     _raise_for_status_without_query_secrets,
+    _request_without_query_secrets,
+    _safe_request_error,
 )
+from assistant_service.core.models.provider_errors import (
+    ProviderStreamError as CanonicalProviderStreamError,
+)
+from assistant_service.core.models.request_safety import (
+    _raise_for_status_without_query_secrets as canonical_raise_for_status_without_query_secrets,
+)
+from assistant_service.core.models.request_safety import (
+    _request_without_query_secrets as canonical_request_without_query_secrets,
+)
+from assistant_service.core.models.request_safety import (
+    _safe_request_error as canonical_safe_request_error,
+)
+
+
+def test_provider_stream_error_facade_preserves_identity_and_legacy_module() -> None:
+    assert ProviderStreamError is CanonicalProviderStreamError
+    assert ProviderStreamError.__module__ == (
+        "assistant_service.core.models.model_registry"
+    )
+
+    exc = ProviderStreamError("anthropic", "rate_limit_error")
+
+    assert exc.provider == "anthropic"
+    assert exc.error_type == "rate_limit_error"
+    assert str(exc) == "anthropic stream failed (rate_limit_error)"
+
+
+def test_provider_stream_error_facade_remains_a_monkeypatch_seam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SentinelProviderStreamError(RuntimeError):
+        pass
+
+    monkeypatch.setattr(
+        model_registry_module,
+        "ProviderStreamError",
+        SentinelProviderStreamError,
+    )
+
+    with pytest.raises(SentinelProviderStreamError) as exc_info:
+        model_registry_module._parse_sse_event("{", provider="patched")
+
+    assert exc_info.value.args == ("patched", "invalid_sse_json")
+
+
+def test_request_safety_facade_preserves_identity_and_signatures() -> None:
+    cases = (
+        (
+            _request_without_query_secrets,
+            canonical_request_without_query_secrets,
+            "(request: 'httpx.Request') -> 'httpx.Request'",
+        ),
+        (
+            _raise_for_status_without_query_secrets,
+            canonical_raise_for_status_without_query_secrets,
+            "(response: 'Any') -> 'None'",
+        ),
+        (
+            _safe_request_error,
+            canonical_safe_request_error,
+            "(error: 'httpx.RequestError') -> 'httpx.RequestError'",
+        ),
+    )
+
+    for facade, canonical, expected_signature in cases:
+        assert facade is canonical
+        assert str(inspect.signature(facade)) == expected_signature
 
 
 class _FakeResponse:
@@ -88,6 +159,57 @@ class _FakeClient:
     def stream(self, _method: str, _url: str, *, json: dict[str, Any]) -> _StreamContext:
         self.request_body = json
         return self._context
+
+
+@pytest.mark.asyncio
+async def test_request_safety_facade_remains_a_model_registry_monkeypatch_seam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, object]] = []
+    response = _FakeResponse()
+
+    def record_status_check(actual_response: object) -> None:
+        events.append(("status", actual_response))
+
+    monkeypatch.setattr(
+        model_registry_module,
+        "_raise_for_status_without_query_secrets",
+        record_status_check,
+    )
+
+    async with model_registry_module._safe_provider_stream(
+        _FakeClient(_StreamContext(response)),
+        "https://provider.test/stream",
+        {"stream": True},
+    ) as yielded_response:
+        events.append(("yield", yielded_response))
+
+    assert events == [("status", response), ("yield", response)]
+
+    request = httpx.Request("POST", "https://provider.test/stream")
+    transport_error = httpx.ConnectError("raw transport error", request=request)
+    replacement_error = httpx.RequestError("safe transport error", request=request)
+
+    def replace_transport_error(error: httpx.RequestError) -> httpx.RequestError:
+        events.append(("sanitize", error))
+        return replacement_error
+
+    monkeypatch.setattr(
+        model_registry_module,
+        "_safe_request_error",
+        replace_transport_error,
+    )
+
+    with pytest.raises(httpx.RequestError) as exc_info:
+        async with model_registry_module._safe_provider_stream(
+            _FakeClient(_StreamContext(enter_error=transport_error)),
+            "https://provider.test/stream",
+            {"stream": True},
+        ):
+            pass
+
+    assert exc_info.value is replacement_error
+    assert events[-1] == ("sanitize", transport_error)
 
 
 def _sse(event: dict[str, Any]) -> str:

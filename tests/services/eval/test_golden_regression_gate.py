@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 
 from src.services.eval import golden as golden_module
+from src.services.eval import golden_gate as golden_gate_module
+from src.services.eval import golden_validation as golden_validation_module
 from src.services.eval.golden import (
     GATE_METRICS_SCHEMA_VERSION,
     apply_gate,
@@ -30,6 +33,45 @@ def _load_eval_golden_main():
 
 
 eval_golden_main = _load_eval_golden_main()
+
+
+def test_gate_facade_reexports_canonical_gate_contract() -> None:
+    assert golden_module.apply_gate is golden_gate_module.apply_gate
+    assert golden_module.write_gate_report is golden_gate_module.write_gate_report
+    assert (
+        golden_module.DEFAULT_GATE_THRESHOLDS
+        is golden_gate_module.DEFAULT_GATE_THRESHOLDS
+    )
+    assert (
+        golden_module.GATE_METRICS_SCHEMA_VERSION
+        == golden_gate_module.GATE_METRICS_SCHEMA_VERSION
+    )
+    assert (
+        golden_module.GATE_RATE_ABS_TOLERANCE
+        == golden_gate_module.GATE_RATE_ABS_TOLERANCE
+    )
+
+
+def test_validation_facade_reexports_canonical_validation_contract() -> None:
+    assert golden_module.validate_case is golden_validation_module.validate_case
+    assert (
+        golden_module.validate_observations
+        is golden_validation_module.validate_observations
+    )
+    assert (
+        golden_module._validate_stateful_expectations
+        is golden_validation_module._validate_stateful_expectations
+    )
+    for name in (
+        "NUMERIC_ASSERTIONS",
+        "REQUIRED_STATEFUL_NESTED_FIELDS",
+        "STRING_ASSERTIONS",
+        "SUPPORTED_ASSERTIONS",
+        "SUPPORTED_STATEFUL_EXPECTATION_FIELDS",
+        "SUPPORTED_STATEFUL_NESTED_FIELDS",
+        "SUPPORTED_TOOL_EXPECTATION_FIELDS",
+    ):
+        assert getattr(golden_module, name) is getattr(golden_validation_module, name)
 
 
 def golden_case(
@@ -58,6 +100,22 @@ def replay_observation(**evidence: object) -> dict[str, object]:
         "span_kinds": [],
         **evidence,
     }
+
+
+def test_validation_facade_monkeypatch_remains_visible_to_orchestration(monkeypatch) -> None:
+    monkeypatch.setattr(
+        golden_module,
+        "validate_case",
+        lambda _case: ["patched validation failure"],
+    )
+
+    validation = golden_module.validate_cases([golden_case()])
+    evaluation = golden_module.evaluate_case(golden_case(), replay_observation())
+
+    assert validation["errors"][0]["errors"] == ["patched validation failure"]
+    assert evaluation["failures"] == [
+        "invalid behavior contract: patched validation failure"
+    ]
 
 
 def test_assistant_golden_fixture_validates_and_has_seed_coverage() -> None:
@@ -161,6 +219,48 @@ def test_offline_gate_passes_recorded_observations_without_model_calls(tmp_path:
     assert recovery["assistant.runtime.repeated_unknown_side_effect"]["second_dispatch_count"] == 0
     assert provenance["evidence_tiers"]["real_provider"] == "not_run"
     assert "Eval Regression Gate" in markdown.read_text(encoding="utf-8")
+
+
+def test_offline_provenance_hashes_sorted_grader_components(tmp_path: Path) -> None:
+    output = tmp_path / "latest.json"
+    markdown = tmp_path / "latest.md"
+
+    exit_code = eval_golden_main(
+        [
+            "gate",
+            str(GOLDEN),
+            "--observations",
+            str(OBSERVATIONS),
+            "--output",
+            str(output),
+            "--markdown",
+            str(markdown),
+        ]
+    )
+
+    assert exit_code == 0
+    grader = json.loads(output.read_text(encoding="utf-8"))["provenance"]["grader"]
+    repo_root = Path(__file__).resolve().parents[3]
+    component_paths = (
+        "src/services/eval/golden.py",
+        "src/services/eval/golden_gate.py",
+        "src/services/eval/golden_validation.py",
+    )
+    expected_components = {
+        path: hashlib.sha256((repo_root / path).read_bytes()).hexdigest()
+        for path in component_paths
+    }
+    canonical_components = json.dumps(
+        expected_components,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    assert grader["id"] == "assistant_deterministic_contract"
+    assert grader["version"] == "v1"
+    assert list(grader["components"]) == sorted(component_paths)
+    assert grader["components"] == expected_components
+    assert grader["sha256"] == hashlib.sha256(canonical_components).hexdigest()
 
 
 def test_canonical_filename_does_not_grant_canonical_hard_blocker_trust(

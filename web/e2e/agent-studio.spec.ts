@@ -292,6 +292,9 @@ async function installHarness(page: Page, options: HarnessOptions = {}): Promise
     if (path.startsWith("/api/v1/agents")) return fulfillAgentApi(route, state, options);
     if (path === "/api/v1/assistant/models") return route.fulfill(json({ models: [{ id: "qwen3.7-plus", name: "qwen3.7-plus", provider: "dashscope", context_window: 131072, max_output_tokens: 8192, supports_vision: true, supports_tools: true }] }));
     if (path === "/api/v1/assistant/datasets") return route.fulfill(json({ datasets: [] }));
+    if (path === "/api/v1/assistant/local-nodes" && request.method() === "GET") {
+      return route.fulfill(json({ devices: [] }));
+    }
     if (path === "/api/v1/assistant/config") return route.fulfill(json({ default_model_id: "qwen3.7-plus", available_providers: ["dashscope"], kb_enabled: false, web_search_enabled: false }));
     if (path === "/api/v1/sessions" && request.method() === "GET") return route.fulfill(json([]));
     if (path === "/api/v1/confluence/connections") return route.fulfill(json([]));

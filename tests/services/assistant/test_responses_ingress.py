@@ -15,11 +15,18 @@ from typing import Any
 
 import pytest
 from ai_gateway_core.comm import IdempotencyMiddleware, InMemoryIdempotencyStore
+from assistant_service.api.routes import responses as responses_route
 from assistant_service.api.routes.responses import (
     ResponsesIngressError,
     ResponsesStreamProjector,
     iter_responses_sse,
     parse_responses_request,
+)
+from assistant_service.api.routes.responses_projector import (
+    ResponsesIngressError as ProjectorResponsesIngressError,
+)
+from assistant_service.api.routes.responses_projector import (
+    ResponsesStreamProjector as CanonicalResponsesStreamProjector,
 )
 from assistant_service.core.assistant_service import AssistantStreamEvent
 from assistant_service.core.models.model_registry import ModelProvider
@@ -30,6 +37,55 @@ from fastapi.testclient import TestClient
 def _sse_payload(line: str) -> dict[str, Any]:
     data_line = next(part for part in line.splitlines() if part.startswith("data: "))
     return json.loads(data_line.removeprefix("data: "))
+
+
+def test_responses_route_reexports_projector_contract_identity() -> None:
+    assert ResponsesIngressError is ProjectorResponsesIngressError
+    assert ResponsesStreamProjector is CanonicalResponsesStreamProjector
+    assert responses_route.ResponsesIngressError is ProjectorResponsesIngressError
+    assert responses_route.ResponsesStreamProjector is CanonicalResponsesStreamProjector
+    assert ResponsesIngressError.__module__ == responses_route.__name__
+    assert ResponsesStreamProjector.__module__ == responses_route.__name__
+    assert {"ResponsesIngressError", "ResponsesStreamProjector"} <= set(responses_route.__all__)
+
+
+@pytest.mark.asyncio
+async def test_responses_route_projector_reexport_remains_stream_monkeypatch_seam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    constructed: list[dict[str, Any]] = []
+
+    class TrackingProjector(CanonicalResponsesStreamProjector):
+        def __init__(self, **kwargs: Any) -> None:
+            constructed.append(kwargs)
+            super().__init__(**kwargs)
+
+    class EmptyAssistant:
+        async def chat_stream(self, **_kwargs: Any):
+            if False:
+                yield
+
+        def clear_session_runtime_state(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"cleared": True}
+
+    monkeypatch.setattr(responses_route, "ResponsesStreamProjector", TrackingProjector)
+    parsed = parse_responses_request(
+        {"model": "qwen3.7-plus", "input": "hello", "stream": True}
+    )
+    frames = [
+        _sse_payload(frame)
+        async for frame in responses_route.iter_responses_sse(
+            assistant=EmptyAssistant(),
+            parsed=parsed,
+            user=_User(),
+            response_id="resp_test",
+            session_id="session-test",
+        )
+    ]
+
+    assert len(constructed) == 1
+    assert constructed[0]["response_id"] == "resp_test"
+    assert [frame["type"] for frame in frames] == ["response.created", "response.failed"]
 
 
 def test_parse_text_request_is_ephemeral_and_disables_all_platform_tools() -> None:

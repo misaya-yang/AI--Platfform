@@ -8,9 +8,8 @@ Talks to KS over HTTP at ``KB_SERVICE_URL`` (default
 ``http://knowledge-service:8092``) with HMAC-signed requests via
 ``GATEWAY_ASSISTANT_SHARED_SECRET``.
 
-Phase 5f Batch C moved this here from
-``src/services/knowledge/kb_proxy_client.py`` so the assistant-service
-container no longer needs ``COPY src/`` for this dependency.
+Phase 5f Batch C moved this client into shared core so the
+assistant-service container no longer needs ``COPY src/`` for this dependency.
 """
 
 from __future__ import annotations

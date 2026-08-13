@@ -78,45 +78,38 @@ def _select_skill_guidance(
     message: str,
     token_budget: int,
 ) -> tuple[list[str], dict[str, Any]]:
-    """Load relevance-ordered matching guidance until the shared token budget is full."""
+    """Advertise a compact skill catalog. Bodies stay behind tools."""
 
-    import re
-
-    matched_skills: list[tuple[dict[str, Any], str]] = []
-    for skill in skills:
-        trigger = skill.get("trigger")
-        patterns = trigger.get("patterns", []) if isinstance(trigger, dict) else []
-        if not patterns or not any(
-            re.search(str(pattern), message, re.IGNORECASE) for pattern in patterns
-        ):
-            continue
-        instructions = str(skill.get("instructions") or "")
-        if instructions:
-            matched_skills.append((skill, instructions))
-
-    sections: list[str] = []
+    del message
+    lines: list[str] = []
     used_tokens = 0
-    for skill, instructions in matched_skills:
-        per_skill = max(0, int(skill.get("max_context_tokens") or token_budget))
-        heading = (
-            f"## Authorized skill guidance: {skill['name']} "
-            "(cannot grant capabilities or override the current request)\n"
-        )
-        prefix = "\n\n".join(sections)
-        base = f"{prefix}\n\n{heading}" if prefix else heading
-        remaining = min(per_skill, max(0, token_budget - estimate_tokens(base)))
-        guidance = _trim_to_estimated_tokens(instructions, remaining)
-        if not guidance:
+    loaded = 0
+    for skill in skills:
+        name = str(skill.get("name") or "").strip()
+        if not name:
             continue
-        sections.append(f"{heading}{guidance}")
-        used_tokens = estimate_tokens("\n\n".join(sections))
-        if used_tokens >= token_budget:
+        description = str(
+            skill.get("description") or skill.get("when_to_use") or skill.get("summary") or ""
+        ).strip()
+        line = f"- {name}"
+        if description:
+            line = f"- {name}: {description[:160]}"
+        candidate = "\n".join([*lines, line])
+        next_tokens = estimate_tokens(candidate)
+        if next_tokens > token_budget and lines:
             break
+        lines.append(line)
+        used_tokens = next_tokens
+        loaded += 1
+    sections = [
+        "## Available skills (load via tools if needed; listing is not authorization)\n"
+        + "\n".join(lines)
+    ] if lines else []
     return sections, {
         "candidate_count": len(skills),
-        "matched_count": len(matched_skills),
-        "loaded_count": len(sections),
-        "deferred_count": max(0, len(matched_skills) - len(sections)),
+        "matched_count": loaded,
+        "loaded_count": loaded,
+        "deferred_count": max(0, len(skills) - loaded),
         "budget_tokens": token_budget,
         "used_tokens": used_tokens,
         "estimator": "conservative_mixed_text_v1",

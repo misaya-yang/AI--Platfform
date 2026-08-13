@@ -754,6 +754,53 @@ Workflow:
             if existing.service_id and existing.service_id != "__builtin_assistant__":
                 raise PermissionDeniedError("Session is bound to a different service")
 
+    async def _bind_session_thinking_level(
+        self,
+        session_id: str,
+        config: AssistantConfig,
+    ) -> AssistantConfig:
+        """Resolve thinking from this request or the session, never from user text."""
+
+        from .models.thinking_policy import (
+            resolve_session_thinking_level,
+            session_thinking_persist_value,
+        )
+
+        stored: str | None = None
+        session = None
+        if self.session_manager and session_id:
+            try:
+                session = await self.session_manager.get(session_id)
+            except Exception as exc:
+                record_internal_exception(
+                    __name__, "assistant.session.thinking_load_failed", exc
+                )
+        if session is not None:
+            raw_config = getattr(session, "config", None) or {}
+            if isinstance(raw_config, dict):
+                stored_value = raw_config.get("thinking_level")
+                stored = str(stored_value) if stored_value is not None else None
+        requested = getattr(config, "thinking_level", None)
+        effective = resolve_session_thinking_level(requested=requested, stored=stored)
+        persist_value = session_thinking_persist_value(
+            requested=requested, stored=stored, effective=effective
+        )
+        if (
+            persist_value is not None
+            and self.session_manager is not None
+            and session is not None
+            and hasattr(self.session_manager, "update_config")
+        ):
+            merged = dict(getattr(session, "config", None) or {})
+            merged["thinking_level"] = persist_value
+            try:
+                await self.session_manager.update_config(session_id, merged)
+            except Exception as exc:
+                record_internal_exception(
+                    __name__, "assistant.session.thinking_persist_failed", exc
+                )
+        return replace(config, thinking_level=effective)
+
     def _preflight_failure_event(
         self,
         *,
@@ -878,7 +925,7 @@ Workflow:
                 session_id=session_id,
                 agent_runtime=config.agent_runtime,
             )
-            effective_config = replace(config)
+            effective_config = await self._bind_session_thinking_level(session_id, config)
             domain_policy, _ = await self._resolve_domain_policy(user, config.kb_dataset_ids)
         except Exception as exc:
             log_internal_exception(logger, "assistant.turn.preflight_failed", exc)
@@ -1441,14 +1488,7 @@ Workflow:
                     maximum=2_147_483_647,
                 )
             ),
-            # Thinking display: enable for thinking-capable models
-            thinking_level=(
-                "enabled"
-                if "qwen3" in (config.model_id or "").lower()
-                else "high"
-                if "gemini-3" in (config.model_id or "").lower()
-                else None
-            ),
+            thinking_level=getattr(config, "thinking_level", None) or "off",
             resume_run_id=config.resume_run_id,
             resume_approval_id=config.resume_approval_id,
             previous_context_packet_receipt=self._context_packet_receipts.get(context_cache_key),

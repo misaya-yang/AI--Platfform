@@ -508,7 +508,10 @@ class TestDashScopeMultimodalEmbedding:
     @pytest.fixture
     def embedding_service(self):
         """Create DashScopeMultimodalEmbedding instance"""
-        from src.services.knowledge.embedding import DashScopeMultimodalEmbedding, EmbeddingError
+        from knowledge_service.services.knowledge.embedding import (
+            DashScopeMultimodalEmbedding,
+            EmbeddingError,
+        )
 
         try:
             return DashScopeMultimodalEmbedding(
@@ -572,7 +575,7 @@ class TestDashScopeMultimodalEmbedding:
     @pytest.mark.asyncio
     async def test_embed_images_size_limit(self, embedding_service):
         """Test image size limit enforcement"""
-        from src.services.knowledge.embedding import EmbeddingError
+        from knowledge_service.services.knowledge.embedding import EmbeddingError
 
         # Create oversized image (>3MB)
         oversized_image = b"\x89PNG" + b"\x00" * (4 * 1024 * 1024)
@@ -616,7 +619,7 @@ class TestDashScopeMultimodalEmbedding:
 
     def test_parse_multimodal_output_invalid(self, embedding_service):
         """Test output parsing with invalid data"""
-        from src.services.knowledge.embedding import EmbeddingError
+        from knowledge_service.services.knowledge.embedding import EmbeddingError
 
         with pytest.raises(EmbeddingError):
             embedding_service._parse_multimodal_output(None)
@@ -634,7 +637,9 @@ class TestConfluenceImageProcessor:
     @pytest.fixture
     def mock_confluence_client(self):
         """Create mock Confluence client"""
-        from src.services.knowledge.confluence.models import ConfluenceAttachment
+        from knowledge_service.services.knowledge.confluence.models import (
+            ConfluenceAttachment,
+        )
 
         client = AsyncMock()
 
@@ -672,7 +677,7 @@ class TestConfluenceImageProcessor:
     @pytest.fixture
     def image_processor(self, mock_confluence_client, mock_storage_service, mock_embedding_service):
         """Create ConfluenceImageProcessor instance"""
-        from src.services.knowledge.confluence.image_processor import (
+        from knowledge_service.services.knowledge.confluence.image_processor import (
             ConfluenceImageProcessor,
         )
 
@@ -735,21 +740,26 @@ class TestConfluenceImageProcessor:
 
     @pytest.mark.asyncio
     async def test_process_page_images_skip_large(self, image_processor, mock_confluence_client):
-        """Test skipping images that exceed size limit"""
-        from src.services.knowledge.confluence.models import ConfluenceAttachment
+        """Test skipping images whose downloaded bytes exceed the size limit."""
+        from knowledge_service.services.knowledge.confluence.models import (
+            ConfluenceAttachment,
+        )
 
-        # Create oversized attachment
+        # The source-reported size is acceptable, but the downloaded payload is oversized.
         large_attachment = ConfluenceAttachment(
             attachment_id="large_att",
             page_id="page_001",
             filename="large_image.png",
             media_type=TEST_MEDIA_TYPE,
-            file_size=5 * 1024 * 1024,  # 5MB > 3MB limit
+            file_size=len(MINIMAL_PNG_BYTES),
             download_link="/download/large.png",
         )
 
         mock_confluence_client.get_page_image_attachments = AsyncMock(
             return_value=[large_attachment]
+        )
+        mock_confluence_client.download_attachment = AsyncMock(
+            return_value=b"\x89PNG" + b"\x00" * (4 * 1024 * 1024)
         )
 
         result = await image_processor.process_page_images(
@@ -817,7 +827,9 @@ class TestConfluenceImageProcessor:
     ):
         """Test that processing creates proper ImageSegment"""
         del mock_confluence_client
-        from src.services.knowledge.confluence.models import ConfluenceAttachment
+        from knowledge_service.services.knowledge.confluence.models import (
+            ConfluenceAttachment,
+        )
 
         attachment = ConfluenceAttachment(
             attachment_id=TEST_ATTACHMENT_ID,
@@ -996,7 +1008,10 @@ class TestImageSyncIntegration:
     @pytest.fixture
     def mock_all_services(self, tmp_path):
         """Create all mocked services for integration test"""
-        from src.services.knowledge.confluence.models import ConfluenceAttachment
+        from knowledge_service.services.knowledge.confluence.models import (
+            ConfluenceAttachment,
+        )
+
         from src.services.storage.image_storage import (
             ImageStorageService,
             StorageBackend,
@@ -1040,7 +1055,7 @@ class TestImageSyncIntegration:
     @pytest.mark.asyncio
     async def test_full_image_sync_flow(self, mock_all_services):
         """Test complete flow: download -> store -> embed"""
-        from src.services.knowledge.confluence.image_processor import (
+        from knowledge_service.services.knowledge.confluence.image_processor import (
             ConfluenceImageProcessor,
         )
 
@@ -1079,7 +1094,7 @@ class TestImageSyncIntegration:
     @pytest.mark.asyncio
     async def test_reprocess_page_images(self, mock_all_services):
         """Test reprocessing deletes old images first"""
-        from src.services.knowledge.confluence.image_processor import (
+        from knowledge_service.services.knowledge.confluence.image_processor import (
             ConfluenceImageProcessor,
         )
 
@@ -1114,7 +1129,9 @@ class TestParserImageExtraction:
 
     def test_extract_image_references_basic(self):
         """Test extracting image references from storage format"""
-        from src.services.knowledge.confluence.parser import extract_image_references
+        from knowledge_service.services.knowledge.confluence.parser import (
+            extract_image_references,
+        )
 
         content = """
         <ac:image>
@@ -1129,7 +1146,9 @@ class TestParserImageExtraction:
 
     def test_extract_image_references_multiple(self):
         """Test extracting multiple image references"""
-        from src.services.knowledge.confluence.parser import extract_image_references
+        from knowledge_service.services.knowledge.confluence.parser import (
+            extract_image_references,
+        )
 
         content = """
         <p>First image:</p>
@@ -1150,7 +1169,9 @@ class TestParserImageExtraction:
 
     def test_extract_image_references_with_dimensions(self):
         """Test extracting image references with width/height"""
-        from src.services.knowledge.confluence.parser import extract_image_references
+        from knowledge_service.services.knowledge.confluence.parser import (
+            extract_image_references,
+        )
 
         content = """
         <ac:image ac:width="300" ac:height="200">
@@ -1167,7 +1188,9 @@ class TestParserImageExtraction:
 
     def test_extract_image_references_with_alt(self):
         """Test extracting image references with alt text"""
-        from src.services.knowledge.confluence.parser import extract_image_references
+        from knowledge_service.services.knowledge.confluence.parser import (
+            extract_image_references,
+        )
 
         content = """
         <ac:image ac:alt="Alt text for image">
@@ -1182,7 +1205,9 @@ class TestParserImageExtraction:
 
     def test_extract_image_references_empty_content(self):
         """Test with empty or no images"""
-        from src.services.knowledge.confluence.parser import extract_image_references
+        from knowledge_service.services.knowledge.confluence.parser import (
+            extract_image_references,
+        )
 
         refs = extract_image_references("")
         assert refs == []
@@ -1192,7 +1217,9 @@ class TestParserImageExtraction:
 
     def test_extract_embeddable_images(self):
         """Test filtering for embeddable images only"""
-        from src.services.knowledge.confluence.parser import extract_embeddable_images
+        from knowledge_service.services.knowledge.confluence.parser import (
+            extract_embeddable_images,
+        )
 
         content = """
         <ac:image>
@@ -1217,7 +1244,7 @@ class TestParserImageExtraction:
 
     def test_image_reference_is_embeddable(self):
         """Test ImageReference.is_embeddable property"""
-        from src.services.knowledge.confluence.parser import ImageReference
+        from knowledge_service.services.knowledge.confluence.parser import ImageReference
 
         # PNG should be embeddable
         png_ref = ImageReference(filename="test.png", content_type="image/png")
@@ -1233,7 +1260,9 @@ class TestParserImageExtraction:
 
     def test_extract_image_references_with_context(self):
         """Test that context text is extracted"""
-        from src.services.knowledge.confluence.parser import extract_image_references
+        from knowledge_service.services.knowledge.confluence.parser import (
+            extract_image_references,
+        )
 
         content = """
         <p>This is the surrounding context text.</p>
@@ -1251,7 +1280,9 @@ class TestParserImageExtraction:
 
     def test_extract_image_references_nested_structure(self):
         """Test extraction from nested structures"""
-        from src.services.knowledge.confluence.parser import extract_image_references
+        from knowledge_service.services.knowledge.confluence.parser import (
+            extract_image_references,
+        )
 
         content = """
         <ac:layout>
@@ -1279,7 +1310,7 @@ class TestImageSegmentModel:
 
     def test_image_segment_creation(self):
         """Test creating ImageSegment"""
-        from src.services.knowledge.confluence.models import ImageSegment
+        from knowledge_service.services.knowledge.confluence.models import ImageSegment
 
         segment = ImageSegment(
             segment_id="seg_001",
@@ -1298,7 +1329,7 @@ class TestImageSegmentModel:
 
     def test_image_segment_with_embedding(self):
         """Test ImageSegment with embedding"""
-        from src.services.knowledge.confluence.models import ImageSegment
+        from knowledge_service.services.knowledge.confluence.models import ImageSegment
 
         embedding = [0.1] * 1024
 
@@ -1318,7 +1349,7 @@ class TestImageSegmentModel:
 
     def test_image_segment_to_dict(self):
         """Test ImageSegment.to_dict()"""
-        from src.services.knowledge.confluence.models import ImageSegment
+        from knowledge_service.services.knowledge.confluence.models import ImageSegment
 
         segment = ImageSegment(
             segment_id="seg_001",
@@ -1350,7 +1381,9 @@ class TestConfluenceAttachmentModel:
 
     def test_is_image(self):
         """Test is_image property"""
-        from src.services.knowledge.confluence.models import ConfluenceAttachment
+        from knowledge_service.services.knowledge.confluence.models import (
+            ConfluenceAttachment,
+        )
 
         # Image types
         for media_type in ["image/png", "image/jpeg", "image/gif", "image/webp"]:
@@ -1378,7 +1411,9 @@ class TestConfluenceAttachmentModel:
 
     def test_is_embeddable_image(self):
         """Test is_embeddable_image property"""
-        from src.services.knowledge.confluence.models import ConfluenceAttachment
+        from knowledge_service.services.knowledge.confluence.models import (
+            ConfluenceAttachment,
+        )
 
         # Embeddable: PNG, JPEG, BMP, WebP under 3MB
         att = ConfluenceAttachment(
@@ -1415,7 +1450,9 @@ class TestConfluenceAttachmentModel:
 
     def test_to_dict(self):
         """Test ConfluenceAttachment.to_dict()"""
-        from src.services.knowledge.confluence.models import ConfluenceAttachment
+        from knowledge_service.services.knowledge.confluence.models import (
+            ConfluenceAttachment,
+        )
 
         att = ConfluenceAttachment(
             attachment_id="att_001",

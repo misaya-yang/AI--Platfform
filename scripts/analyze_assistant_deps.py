@@ -99,10 +99,6 @@ def classify(target_module: str) -> tuple[str, str]:
         "src.services.session.database_session_manager."
     ):
         return "contract", "database_session_manager — operator to decide shared vs. move"
-    if tm == "src.services.knowledge.kb_proxy_client" or tm.startswith(
-        "src.services.knowledge.kb_proxy_client."
-    ):
-        return "shared", "kb_proxy_client — moved to ai_gateway_core.knowledge.proxy_client (Phase 5f Batch C); src/ path is a shim"
     if tm == "src.services.knowledge" or tm.startswith("src.services.knowledge."):
         return "replace", "src.services.knowledge.* — must be rewritten to KBProxyClient HTTP call"
     if tm == "src.services.metrics" or tm.startswith("src.services.metrics."):

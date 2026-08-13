@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import json
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -1274,7 +1275,41 @@ class AgentContextLifecycleMixin:
         available_tool_schema_hash = stable_cache_hash(
             [_tool_schema(tool) for tool in sorted(tool_defs, key=lambda item: item.name)]
         )
-        selected = self._agent_loop_compat().select_tools(tool_defs, ctx.message)
+        extra_always: set[str] = set()
+        allowlist = ctx.config.capability_allowlist
+        if allowlist is not None:
+            extra_always.update(str(name) for name in getattr(allowlist, "tool_names", ()))
+        if ctx.config.skills_enabled is not False:
+            extra_always.update(
+                tool.name for tool in tool_defs if str(tool.name).startswith("skill_")
+            )
+        selector = self._agent_loop_compat().select_tools
+        selector_options: dict[str, Any] = {
+            "mode": "budget" if str(ctx.config.execution_profile) == "power" else "discover",
+            "extra_always": extra_always,
+        }
+        try:
+            selector_parameters = inspect.signature(selector).parameters.values()
+        except (TypeError, ValueError):
+            selector_options = {}
+        else:
+            accepts_extra_options = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in selector_parameters
+            )
+            if not accepts_extra_options:
+                supported_options = {
+                    parameter.name
+                    for parameter in selector_parameters
+                    if parameter.kind
+                    in {inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY}
+                }
+                selector_options = {
+                    name: value
+                    for name, value in selector_options.items()
+                    if name in supported_options
+                }
+        selected = selector(tool_defs, ctx.message, **selector_options)
         tools: list[dict[str, Any]] = []
         for tool in selected:
             tools.append(_tool_schema(tool))

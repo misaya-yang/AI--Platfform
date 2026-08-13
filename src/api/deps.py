@@ -68,11 +68,6 @@ def get_knowledge_service(request: Request):
     return None
 
 
-def get_knowledge_worker(request: Request):
-    """Deprecated: KB worker now runs inside KB Service microservice."""
-    return None
-
-
 def require_langgraph_proxy(request: Request) -> LangGraphProxy:
     """获取 LangGraph 代理（若未初始化则返回 503）"""
     proxy = getattr(request.app.state, "langgraph_proxy", None)
@@ -82,17 +77,6 @@ def require_langgraph_proxy(request: Request) -> LangGraphProxy:
             detail="LangGraph proxy is not initialized (check GATEWAY_LANGGRAPH__ENABLED and INSTANCE_URLS).",
         )
     return proxy
-
-
-def get_image_storage_service(request: Request):
-    """Get ImageStorageService for image storage operations."""
-    svc = getattr(request.app.state, "image_storage_service", None)
-    if svc is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Image storage service is not initialized.",
-        )
-    return svc
 
 
 def get_rate_limiter(request: Request) -> MultiDimensionRateLimiter | None:
@@ -149,11 +133,6 @@ async def enforce_rate_limit(
                 "Retry-After": str(result.retry_after),
             },
         )
-
-
-def get_guest_session_manager(request: Request):
-    """获取游客会话管理器"""
-    return getattr(request.app.state, "guest_session_manager", None)
 
 
 def _get_client_ip(request: Request) -> str:

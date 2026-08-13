@@ -4,6 +4,7 @@ from ai_gateway_core.logging import (
     configure_structured_logging,
     get_logger,
 )
+
 from .metrics import (
     Counter,
     Gauge,
@@ -13,7 +14,6 @@ from .metrics import (
 )
 from .tracing import (
     TraceContext,
-    TracingMiddleware,
     generate_span_id,
     generate_trace_id,
 )
@@ -27,7 +27,6 @@ __all__ = [
     "TraceContext",
     "generate_trace_id",
     "generate_span_id",
-    "TracingMiddleware",
     # 指标
     "MetricsCollector",
     "RequestMetrics",

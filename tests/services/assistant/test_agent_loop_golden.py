@@ -180,6 +180,7 @@ EXPECTED_ASSISTANT_CONFIG_FIELDS: frozenset[str] = frozenset(
         "enable_rag_metrics",
         "enable_memory_loading",
         "enable_react_loop",
+        "thinking_level",
         # Gateway / policy
         "execution_profile",
         "memory_mode",

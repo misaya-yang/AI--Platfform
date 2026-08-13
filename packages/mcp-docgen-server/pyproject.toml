@@ -47,6 +47,9 @@ dev = [
 [project.scripts]
 mcp-docgen-server = "mcp_docgen_server.__main__:main"
 
+[tool.setuptools]
+include-package-data = true
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
