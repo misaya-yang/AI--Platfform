@@ -670,5 +670,19 @@ class Settings(BaseSettings):
     # Observability / metrics recorder tuning
     metrics: MetricsSettings = Field(default_factory=MetricsSettings)
 
+    # First-run onboarding: how the console treats model-provider setup.
+    # `ui` keeps the console usable while no provider key is configured (the
+    # setup banner / dashboard checklist guide the operator); `environment`
+    # expects providers preseeded and reports the stack as configured.
+    # Env: GATEWAY_MODEL_SETUP_MODE (same semantics as MODEL_SETUP_MODE).
+    model_setup_mode: str = "ui"
+
+    @field_validator("model_setup_mode")
+    @classmethod
+    def _validate_model_setup_mode(cls, v: str) -> str:
+        if v not in ("ui", "environment"):
+            raise ValueError("model_setup_mode must be one of: ui, environment")
+        return v
+
     health_check_interval: int = 30
     task_worker_concurrency: int = 2

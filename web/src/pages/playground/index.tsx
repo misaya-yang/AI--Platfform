@@ -480,6 +480,12 @@ export function PlaygroundPage() {
               <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" /></svg>
             </div>
             <h2 className="text-xl font-semibold tracking-tight">{t("playground.typeToStart", "Type a message to start.")}</h2>
+            <p className="mt-2 text-sm text-muted-foreground max-w-md">
+              {t(
+                "playground.typeToStartHint",
+                "Debug your model services here before wiring them into agents."
+              )}
+            </p>
           </div>
           )
         ) : (

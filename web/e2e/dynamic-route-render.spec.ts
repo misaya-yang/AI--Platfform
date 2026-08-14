@@ -39,6 +39,14 @@ async function installDynamicRouteHarness(page: Page) {
     effective_permissions: allPagePermissions,
   });
 
+  // AppLayout always asks for setup state; keep the banner hidden.
+  await routeJson(page, "**/api/v1/setup/state", {
+    configured: true,
+    missing: [],
+    mode: "environment",
+    default_model: null,
+  });
+
   await page.route("**/api/v1/knowledge/**", async (route) => {
     const request = route.request();
     if (request.method() === "GET") {

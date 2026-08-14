@@ -22,10 +22,16 @@ export function WelcomeScreen() {
       <h2 className="mb-2 text-2xl font-semibold tracking-tight text-foreground">
         {t("assistant.welcomeTitle", "How can I help you today?")}
       </h2>
-      <p className="mb-8 max-w-md text-sm leading-relaxed text-muted-foreground">
+      <p className="mb-4 max-w-md text-sm leading-relaxed text-muted-foreground">
         {t(
           "assistant.welcomeDesc",
           "Select a model and knowledge bases, then send a message to begin."
+        )}
+      </p>
+      <p className="max-w-md text-xs leading-relaxed text-muted-foreground/70">
+        {t(
+          "assistant.welcomeWhy",
+          "This assistant talks to the model services you configure in the console."
         )}
       </p>
     </motion.div>

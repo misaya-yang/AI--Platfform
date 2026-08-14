@@ -116,11 +116,16 @@
   },
   "nav": {
     "dashboard": "Dashboard",
+    "group": {
+      "use": "Use",
+      "build": "Build",
+      "govern": "Govern"
+    },
     "analytics": "Analytics",
     "services": "Services",
     "knowledge": "Knowledge Base",
     "knowledgeSync": "Knowledge Sync",
-    "playground": "Playground",
+    "playground": "Model Debug",
     "assistant": "AI Assistant",
     "agents": "Agents",
     "eval": "Eval Console",
@@ -131,6 +136,23 @@
     "expandSidebar": "Expand sidebar",
     "toggleSidebar": "Toggle sidebar",
     "closeSidebar": "Close sidebar"
+  },
+  "setup": {
+    "banner": {
+      "text": "No model service is configured yet. Set one up to start chatting with assistants.",
+      "action": "Configure model service",
+      "dismiss": "Dismiss"
+    },
+    "checklist": {
+      "title": "First-run setup",
+      "subtitle": "Complete these steps to start your first conversation.",
+      "step": {
+        "provider": "Configure a model service",
+        "knowledge": "Create a knowledge base",
+        "chat": "Start your first conversation"
+      },
+      "go": "Go"
+    }
   },
   "analytics": {
     "title": "Usage Analytics",
@@ -1922,6 +1944,7 @@
     "loadingHistory": "Loading chat history...",
     "selectOrStartChat": "Select a chat on the left, or start a new one.",
     "typeToStart": "Type a message to start.",
+    "typeToStartHint": "Debug your model services here before wiring them into agents.",
     "emptyStateHint": "Conversation history and current draft will stay available after refresh.",
     "historyHiddenTitle": "History is hidden",
     "historyHiddenDescription": "Your earlier chats are still available in the history panel.",
@@ -2461,6 +2484,7 @@
     "kbActive": "knowledge base(s) active",
     "welcomeTitle": "How can I help you today?",
     "welcomeDesc": "Select a model and knowledge bases to start chatting",
+    "welcomeWhy": "This assistant talks to the model services you configure in the console.",
     "placeholder": "Type your message... (Ctrl+V to paste images)",
     "noModelsPlaceholder": "No models available",
     "disclaimer": "AI responses may be inaccurate",

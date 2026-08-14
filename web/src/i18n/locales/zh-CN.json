@@ -116,11 +116,16 @@
   },
   "nav": {
     "dashboard": "仪表盘",
+    "group": {
+      "use": "使用",
+      "build": "构建",
+      "govern": "治理"
+    },
     "analytics": "数据分析",
     "services": "服务管理",
     "knowledge": "知识库",
     "knowledgeSync": "知识同步",
-    "playground": "模型体验",
+    "playground": "模型调试",
     "assistant": "AI 助手",
     "agents": "智能体",
     "eval": "评估控制台",
@@ -131,6 +136,23 @@
     "expandSidebar": "展开侧栏",
     "toggleSidebar": "切换侧栏",
     "closeSidebar": "关闭侧栏"
+  },
+  "setup": {
+    "banner": {
+      "text": "尚未配置模型服务，请先配置一个以开始使用助手。",
+      "action": "配置模型服务",
+      "dismiss": "关闭"
+    },
+    "checklist": {
+      "title": "首次使用引导",
+      "subtitle": "完成以下步骤，即可发起第一次对话。",
+      "step": {
+        "provider": "配置模型服务",
+        "knowledge": "创建知识库",
+        "chat": "发起第一次对话"
+      },
+      "go": "前往"
+    }
   },
   "analytics": {
     "title": "使用量分析",
@@ -1922,6 +1944,7 @@
     "loadingHistory": "加载对话历史中...",
     "selectOrStartChat": "从左侧选择一个对话，或开始新对话。",
     "typeToStart": "输入消息开始对话。",
+    "typeToStartHint": "在这里调试你的模型服务，再接入智能体。",
     "emptyStateHint": "刷新页面后，对话历史和当前草稿仍会保持同步。",
     "historyHiddenTitle": "历史记录已隐藏",
     "historyHiddenDescription": "之前的对话仍保留在历史面板中。",
@@ -2461,6 +2484,7 @@
     "kbActive": "个知识库已启用",
     "welcomeTitle": "今天有什么可以帮您？",
     "welcomeDesc": "选择模型和知识库，开始智能对话",
+    "welcomeWhy": "此助手连接你在控制台配置的模型服务。",
     "placeholder": "输入消息... (Ctrl+V 粘贴图片)",
     "noModelsPlaceholder": "暂无可用模型",
     "disclaimer": "AI 回答可能不准确",

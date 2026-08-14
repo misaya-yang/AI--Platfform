@@ -309,6 +309,13 @@ export function AgentListPage() {
                 {t("agents.list.clearFilters")}
               </Button>
             ) : (
+              <>
+              <div className="agent-empty-why text-sm text-muted-foreground/70 max-w-md">
+                {t(
+                  "agents.list.emptyWhy",
+                  "Agents package your prompts, tools, and knowledge into a reusable runtime."
+                )}
+              </div>
               <div className="agent-empty-actions">
                 <Button type="primary" icon={<Plus size={16} />} onClick={() => navigate("/agents/new")}>
                   {t("agents.list.createBlank")}
@@ -316,6 +323,7 @@ export function AgentListPage() {
                 <Button onClick={() => navigate("/agents/new?template=support")}>{t("agents.list.supportTemplate")}</Button>
                 <Button onClick={() => navigate("/agents/new?template=knowledge")}>{t("agents.list.knowledgeTemplate")}</Button>
               </div>
+              </>
             )}
           </Empty>
         )}

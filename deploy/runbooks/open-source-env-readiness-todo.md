@@ -24,6 +24,10 @@ real deployments must still fail on missing, weak, or placeholder secrets.
       `KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON` and
       `ASSISTANT_CORS_ALLOW_ORIGINS_JSON`.
 - [ ] Set at least one real chat provider key and one real KB embedding key.
+- [ ] Confirm the first-run experience: with `GATEWAY_MODEL_SETUP_MODE=ui` the
+      console shows the setup banner and checklist until a provider is
+      configured, then hides them once `GET /api/v1/setup/state` reports
+      `configured: true`.
 - [ ] Run `make validate-config ENV_FILE=/path/to/.env`.
 - [ ] Start the target stack, then run `make validate ENV_FILE=/path/to/.env`.
 

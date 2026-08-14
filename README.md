@@ -41,10 +41,12 @@ CLI/environment setup for the default Qwen Assistant and KB:
 export DASHSCOPE_API_KEY='your-key'
 ```
 
-Or skip the export and use the web setup after the stack starts. The default
-`MODEL_SETUP_MODE=ui` keeps infrastructure and the console available while no
-provider is configured. Set `MODEL_SETUP_MODE=environment` in production when
-startup validation must reject that setup-only state.
+Or skip the export and use the web setup after the stack starts. With the
+default `MODEL_SETUP_MODE=ui` the console boots without provider keys: the
+dashboard shows a setup banner and first-run checklist, and the Services page
+is where you configure a provider. Once a provider is configured the banner
+disappears automatically. Set `MODEL_SETUP_MODE=environment` in production
+when startup validation must reject that setup-only state.
 
 2. Pull the fixed release images and start the complete stack:
 

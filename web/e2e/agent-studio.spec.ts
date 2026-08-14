@@ -310,6 +310,7 @@ async function installHarness(page: Page, options: HarnessOptions = {}): Promise
     if (path === "/api/v1/connectors/confluence/principals") return route.fulfill(json({ principals: [{ grant_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", principal_type: "service_account", scopes: ["read"], allowed_channels: ["preview"], enabled: true }], total: 1 }));
     if (path === "/api/v1/knowledge/datasets") return route.fulfill(json([{ dataset_id: DATASET_ID, name: "Refund policy", description: "Approved refund and billing policy.", visibility: "tenant", embedding_provider: "dashscope", embedding_model: "text-embedding-v4" }]));
     if (path === "/api/v1/eval/datasets") return route.fulfill(json({ datasets: [], total: 0, limit: 200, offset: 0 }));
+    if (path === "/api/v1/setup/state") return route.fulfill(json({ configured: true, missing: [], mode: "environment", default_model: null }));
     throw new Error(`Unhandled API request: ${request.method()} ${path}`);
   });
   return state;

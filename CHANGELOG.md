@@ -83,6 +83,22 @@
   default. Added `.env.example` `DEFAULT_MODEL` documentation with an
   optional non-empty format check in `validate-env.sh`.
 
+### First-run onboarding and navigation
+
+- Added a first-run onboarding flow: `GET /api/v1/setup/state` reports provider
+  setup status, the console shows a dismissible setup banner and a three-step
+  dashboard checklist until a provider is configured, and a new
+  `GATEWAY_MODEL_SETUP_MODE` env var (`ui` | `environment`) mirrors
+  `MODEL_SETUP_MODE` on the gateway.
+- Regrouped the sidebar navigation into 使用/Use (assistant, agents),
+  构建/Build (knowledge, playground, eval), and 治理/Govern (services, users,
+  tasks, settings) sections, with Dashboard ungrouped on top; the model-tester
+  rail stays flat. The playground entry is now labelled 模型调试 / "Model Debug".
+- Added one-line "why you are here" hints to the assistant welcome screen, the
+  playground empty state, and the agents empty state.
+- Added a frontend CI step running `pnpm -C web i18n:check`, and extended the
+  open-source e2e suite with first-run and nav-group specs.
+
 ### Runtime
 
 - Bundled document generation as the trusted `ai-docgen` Agent Plugin inside
