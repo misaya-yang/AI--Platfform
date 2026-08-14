@@ -130,7 +130,8 @@ jobs:
         run: |
           uv run --all-packages --extra test pytest -q --no-cov \
             tests/services/eval/test_online_sampling.py \
-            tests/services/eval/test_outbox_worker.py
+            tests/services/eval/test_outbox_worker.py \
+            tests/services/assistant/test_internal_exception_logging_gate.py
 
   release-ready:
     name: Release Readiness

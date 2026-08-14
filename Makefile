@@ -196,7 +196,8 @@ agent-eval-core-gate:       ## 运行 Agent Eval 候选执行、统计、评估�
 		tests/services/eval/test_eval_candidate_client.py \
 		tests/services/eval/test_evaluator_executor.py
 	@$(EVAL_UV_RUN) pytest -q --no-cov \
-		tests/services/assistant/test_subagent_manager.py
+		tests/services/assistant/test_subagent_manager.py \
+		tests/services/assistant/test_internal_exception_logging_gate.py
 
 verify-eval-dev:            ## 运行 Agent Trace/Eval dev 分支验证门禁
 	@$(EVAL_RUFF_RUN) ruff check \
