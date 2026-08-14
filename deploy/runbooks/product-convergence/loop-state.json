@@ -1,0 +1,91 @@
+{
+  "schema_version": "prd-phase-harness/loop-state/v4",
+  "goal": "Make the product users see match the README: gateway holds identity/credentials/models/connectors, agents declare capabilities, capabilities extend via plugins.",
+  "cycle": ["observe", "act", "verify", "decide"],
+  "active_phase": "PC-00",
+  "active_feature": "PC-00-F1",
+  "iteration": 1,
+  "max_iterations": 8,
+  "last_result": "Branch product-convergence/main created; checkpoint commit bf74ff6; runbook skeleton written.",
+  "next_action": "Run make harness-check as the PC-00 gate, then start PC-01 deletions.",
+  "blockers": [],
+  "confirmation": null,
+  "phases": [
+    {
+      "id": "PC-00",
+      "file": "phase-00-baseline.md",
+      "depends_on": [],
+      "status": "in_progress",
+      "evidence": [],
+      "review": "not_required"
+    },
+    {
+      "id": "PC-01",
+      "file": "phase-01-deletions.md",
+      "depends_on": ["PC-00"],
+      "status": "pending",
+      "evidence": [],
+      "review": "not_required"
+    },
+    {
+      "id": "PC-02C",
+      "file": "phase-02c-default-model.md",
+      "depends_on": ["PC-01"],
+      "status": "pending",
+      "evidence": [],
+      "review": "not_required"
+    },
+    {
+      "id": "PC-02D",
+      "file": "phase-02d-first-run-nav-i18n.md",
+      "depends_on": ["PC-01"],
+      "status": "pending",
+      "evidence": [],
+      "review": "not_required"
+    },
+    {
+      "id": "PC-02B",
+      "file": "phase-02b-connectors.md",
+      "depends_on": ["PC-01"],
+      "status": "pending",
+      "evidence": [],
+      "review": "not_required"
+    },
+    {
+      "id": "PC-02M",
+      "file": "phase-02m-merge.md",
+      "depends_on": ["PC-02C", "PC-02D", "PC-02B"],
+      "status": "pending",
+      "evidence": [],
+      "review": "not_required"
+    },
+    {
+      "id": "PC-03",
+      "file": "phase-03-quiz-plugin-shares.md",
+      "depends_on": ["PC-02M"],
+      "status": "pending",
+      "evidence": [],
+      "review": "not_required"
+    },
+    {
+      "id": "PC-04",
+      "file": "phase-04-final-verification.md",
+      "depends_on": ["PC-03"],
+      "status": "pending",
+      "evidence": [],
+      "review": "not_required"
+    }
+  ],
+  "features": [
+    {
+      "id": "PC-00-F1",
+      "phase_id": "PC-00",
+      "description": "Checkpoint commit exists on product-convergence/main and the harness is green.",
+      "steps": [
+        "git log shows bf74ff6 on product-convergence/main.",
+        "Run make harness-check; observe exit 0."
+      ],
+      "passes": false
+    }
+  ]
+}
