@@ -86,7 +86,7 @@ def test_port_verifier_skips_deleted_python_paths_in_ruff_but_keeps_deletion(
 
     ruff_args_log = tmp_path / "ruff-args.log"
     (command_dir / "ruff").write_text(
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$RUFF_ARGS_LOG\"\n",
+        '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$RUFF_ARGS_LOG"\n',
         encoding="utf-8",
     )
     for command_name in ("pytest", "python"):
@@ -334,6 +334,70 @@ def test_deploy_stops_app_services_before_migrations():
     assert "Stopping application services before migrations" in script
     assert "Application services will start after migrations" in script
     assert "migrate.sh" in script and "--auto" in script
+
+
+def test_compose_owner_guard_rejects_unlabeled_or_foreign_expected_containers(
+    tmp_path: Path,
+) -> None:
+    fake_docker = tmp_path / "docker"
+    fake_docker.write_text(
+        """#!/bin/bash
+if [ "${1:-}" != "inspect" ]; then
+    exit 1
+fi
+container="${!#}"
+if [ "$container" != "ai-gateway-backend" ]; then
+    exit 1
+fi
+if [ "${2:-}" != "-f" ]; then
+    exit 0
+fi
+format="${3:-}"
+if [[ "$format" == *working_dir* ]]; then
+    printf '%s\n' "${FAKE_OWNER-}"
+elif [[ "$format" == *compose.project* ]]; then
+    printf '%s\n' "${FAKE_PROJECT-}"
+elif [[ "$format" == *compose.service* ]]; then
+    printf '%s\n' gateway
+fi
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+
+    def run_guard(*, owner: str, project: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$REPO_ROOT/scripts/new/common.sh"; assert_compose_owner "$REPO_ROOT"',
+            ],
+            env={
+                **os.environ,
+                "PATH": f"{tmp_path}:{os.environ['PATH']}",
+                "REPO_ROOT": str(ROOT),
+                "FAKE_OWNER": owner,
+                "FAKE_PROJECT": project,
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    assert run_guard(owner=str(ROOT), project="ai-gateway").returncode == 0
+    for owner, project in (
+        ("", "ai-gateway"),
+        (str(ROOT), "foreign-project"),
+        (str(tmp_path / "other-checkout"), "ai-gateway"),
+    ):
+        result = run_guard(owner=owner, project=project)
+        assert result.returncode != 0, result.stdout + result.stderr
+        assert "Refusing to mutate Docker project" in result.stdout + result.stderr
+
+    doctor = _read("scripts/new/doctor.sh")
+    assert 'if [ -z "$owner" ]; then' in doctor
+    assert 'elif [ "$owner" != "$PROJECT_ROOT" ]; then' in doctor
+    assert 'elif [ "$project" != "ai-gateway" ]; then' in doctor
 
 
 def test_migrate_shell_guards_legacy_version_tracking_duplicate_prefixes():

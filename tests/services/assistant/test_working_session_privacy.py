@@ -31,7 +31,7 @@ from assistant_service.core.runtime.memory.working_state import (
 )
 from assistant_service.core.tools.memory_tool import UpdateMemoryExecutor
 from assistant_service.core.tools.tool_registry import ToolCallRequest
-from assistant_service.core.working_memory import WorkingMemory
+from assistant_service.core.working_memory import TaskStatus, WorkingMemory
 from fastapi import FastAPI, HTTPException, Request
 
 
@@ -843,6 +843,66 @@ async def test_working_memory_cold_restore_and_persist_are_session_locked() -> N
     assert isinstance(envelope, dict)
     task_ids = {task["id"] for task in envelope["working_memory"]["tasks"]}
     assert task_ids == {"first", "second"}
+
+
+@pytest.mark.asyncio
+async def test_settled_working_memory_archives_without_persistence_backend() -> None:
+    manager = TaskManager()
+    owner = SimpleNamespace(
+        session_id="session-a",
+        tenant_id="tenant-a",
+        user_id="user-a",
+    )
+    loop = _bare_loop(
+        task_manager=manager,
+        memory_service=None,
+        durable_owner=owner,
+    )
+    ctx = _working_ctx(user_id="user-a")
+
+    async with manager.session_context("session-a", "tenant-a", "user-a") as session:
+        await loop._bind_session_working_memory(ctx=ctx, session=session)
+        assert ctx.working_memory is not None
+        ctx.working_memory.set_goal("finish locally")
+        ctx.working_memory.add_task("task-a", "complete the local task")
+        ctx.working_memory.update_task("task-a", TaskStatus.COMPLETED)
+
+        assert await loop._persist_session_working_memory(ctx=ctx, session=session) is False
+        assert ctx.working_memory.goal is None
+        assert ctx.working_memory.tasks == []
+        assert ctx.working_memory.archived is not None
+        assert ctx.working_memory.archived["goal"] == "finish locally"
+
+
+@pytest.mark.asyncio
+async def test_approval_resume_does_not_double_count_goal_only_turn() -> None:
+    memory = WorkingMemory(session_id="session-a")
+    memory.set_goal("wait for approval")
+    service = _LegacyMemoryService(memory)
+    manager = TaskManager()
+    owner = SimpleNamespace(
+        session_id="session-a",
+        tenant_id="tenant-a",
+        user_id="user-a",
+    )
+    loop = _bare_loop(
+        task_manager=manager,
+        memory_service=service,
+        durable_owner=owner,
+    )
+    ctx = _working_ctx(user_id="user-a")
+
+    async with manager.session_context("session-a", "tenant-a", "user-a") as session:
+        await loop._bind_session_working_memory(ctx=ctx, session=session)
+        assert ctx.working_memory is not None
+
+        ctx.attempt_number = 1
+        assert await loop._persist_session_working_memory(ctx=ctx, session=session) is True
+        assert ctx.working_memory.turns_since_goal == 1
+
+        ctx.attempt_number = 2
+        assert await loop._persist_session_working_memory(ctx=ctx, session=session) is True
+        assert ctx.working_memory.turns_since_goal == 1
 
 
 @pytest.mark.asyncio

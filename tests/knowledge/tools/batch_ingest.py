@@ -5,9 +5,9 @@
 支持批量上传 PDF 到知识库并完成索引。
 
 用法:
-    python scripts/batch_ingest.py --dataset agent --files "/path/to/*.pdf"
-    python scripts/batch_ingest.py --dataset agent --dir /path/to/documents/
-    python scripts/batch_ingest.py --dataset agent --files "*.pdf" --concurrency 3
+    uv run python tests/knowledge/tools/batch_ingest.py --dataset agent --files "/path/to/*.pdf"
+    uv run python tests/knowledge/tools/batch_ingest.py --dataset agent --dir /path/to/documents/
+    uv run python tests/knowledge/tools/batch_ingest.py --dataset agent --files "*.pdf" --concurrency 3
 
 环境变量:
     GATEWAY_API_KEY - API Key for authentication
@@ -102,7 +102,7 @@ class BatchIngestor:
                 try:
                     error_data = resp.json()
                     print(f"   Error: {error_data.get('detail', resp.text[:200])}")
-                except:
+                except ValueError:
                     print(f"   Response: {resp.text[:200]}")
                 return None
 

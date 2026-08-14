@@ -101,10 +101,14 @@ def _select_skill_guidance(
         lines.append(line)
         used_tokens = next_tokens
         loaded += 1
-    sections = [
-        "## Available skills (load via tools if needed; listing is not authorization)\n"
-        + "\n".join(lines)
-    ] if lines else []
+    sections = (
+        [
+            "## Available skills (load via tools if needed; listing is not authorization)\n"
+            + "\n".join(lines)
+        ]
+        if lines
+        else []
+    )
     return sections, {
         "candidate_count": len(skills),
         "matched_count": loaded,
@@ -122,8 +126,9 @@ def _uploaded_file_catalog(processed_files: Any) -> str:
     metadata = list(getattr(processed_files, "file_metadata", None) or [])
     if not metadata:
         return ""
+    session_kb_available = bool(getattr(processed_files, "session_kb_id", None))
     lines = ["## Uploaded files"]
-    if getattr(processed_files, "session_kb_id", None):
+    if session_kb_available:
         lines.append(
             "Long files were indexed for retrieval. Search them; do not invent unread content."
         )
@@ -139,7 +144,10 @@ def _uploaded_file_catalog(processed_files: Any) -> str:
         detail = f"- {name} ({kind}"
         if size not in (None, ""):
             detail += f", {size} bytes"
-        detail += ", indexed)" if needs_rag else ")"
+        if needs_rag:
+            detail += ", indexed)" if session_kb_available else ", retrieval unavailable)"
+        else:
+            detail += ")"
         if error:
             detail += f" error={error}"
         lines.append(detail)
@@ -241,25 +249,22 @@ class StreamingPreparationMixin:
 
                 session_kb_id = getattr(processed_files, "session_kb_id", None)
                 if session_kb_id:
+                    session_kb_id = str(session_kb_id)
                     bound = list(ctx.config.kb_dataset_ids or [])
-                    if str(session_kb_id) not in bound:
-                        ctx.config.kb_dataset_ids = [*bound, str(session_kb_id)]
-                        # Seal the session KB into the retrieval-config set as
-                        # well. The agent-runtime KB gate resolves runtime
-                        # configs per tool call from kb_retrieval_configs
-                        # (AgentLoop._build_invocation_context) and rejects the
-                        # whole call when any dataset_id lacks a sealed config,
-                        # so binding only the id would fail every
-                        # search_knowledge_base call this turn.
-                        ctx.config.kb_retrieval_configs.setdefault(
-                            str(session_kb_id),
-                            {
-                                "mode": "auto",
-                                "top_k": ctx.config.kb_top_k,
-                                "threshold": ctx.config.kb_min_relevance,
-                                "include_images": False,
-                            },
-                        )
+                    if session_kb_id not in bound:
+                        ctx.config.kb_dataset_ids = [*bound, session_kb_id]
+                    # Seal the session KB into the retrieval-config set even
+                    # when its id was already present. A pre-bound id without
+                    # a config would otherwise fail the all-or-nothing KB gate.
+                    ctx.config.kb_retrieval_configs.setdefault(
+                        session_kb_id,
+                        {
+                            "mode": "auto",
+                            "top_k": ctx.config.kb_top_k,
+                            "threshold": ctx.config.kb_min_relevance,
+                            "include_images": False,
+                        },
+                    )
                 yield AgentLoopEvent(
                     phase=phase,
                     # NOTE: The Assistant UI consumes this event to show

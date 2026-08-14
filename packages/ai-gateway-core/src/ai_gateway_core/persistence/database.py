@@ -17,6 +17,8 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from ai_gateway_core.logging import record_internal_exception
+
 try:
     import asyncpg
 

@@ -7,16 +7,16 @@
 ### test_kb_qa.py - 问答功能验证
 ```bash
 # 单次查询测试
-python tests/knowledge/test_kb_qa.py --dataset agent --query "release rollback"
+uv run python tests/knowledge/test_kb_qa.py --dataset agent --query "release rollback"
 
 # 多模态检索测试（含图片）
-python tests/knowledge/test_kb_qa.py --dataset agent --query "diagram" --multimodal
+uv run python tests/knowledge/test_kb_qa.py --dataset agent --query "diagram" --multimodal
 
 # 交互模式
-python tests/knowledge/test_kb_qa.py --dataset agent --interactive
+uv run python tests/knowledge/test_kb_qa.py --dataset agent --interactive
 
 # 列出所有文档
-python tests/knowledge/test_kb_qa.py --dataset agent --list-docs
+uv run python tests/knowledge/test_kb_qa.py --dataset agent --list-docs
 ```
 
 ## 批量入库工具
@@ -25,13 +25,13 @@ python tests/knowledge/test_kb_qa.py --dataset agent --list-docs
 
 ```bash
 # 单个文件入库
-python tests/knowledge/tools/batch_ingest.py --dataset agent --files "/path/to/file.pdf"
+uv run python tests/knowledge/tools/batch_ingest.py --dataset agent --files "/path/to/file.pdf"
 
 # 批量入库
-python tests/knowledge/tools/batch_ingest.py --dataset agent --files "/path/to/*.pdf" --concurrency 3
+uv run python tests/knowledge/tools/batch_ingest.py --dataset agent --files "/path/to/*.pdf" --concurrency 3
 
 # 目录递归扫描
-python tests/knowledge/tools/batch_ingest.py --dataset agent --dir ./documents --recursive
+uv run python tests/knowledge/tools/batch_ingest.py --dataset agent --dir ./documents --recursive
 ```
 
 ## 环境变量

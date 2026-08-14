@@ -25,6 +25,14 @@ Prerequisites:
 - About 4 GiB available to Docker for the complete low-memory profile
 - A model-provider API key (it can be entered before or after startup)
 
+Check the machine first. `make doctor` is read-only — it never starts, builds, or changes
+anything — and reports missing tools, Docker memory, occupied ports, and containers that belong to
+a different checkout of this project:
+
+```bash
+make doctor
+```
+
 1. Choose one model setup path.
 
 CLI/environment setup for the default Qwen Assistant and KB:
@@ -495,6 +503,16 @@ GATEWAY_SESSION__AUTHENTICATED_TTL_SECONDS=604800
 
 ## For agents
 
-Read `AGENTS.md` before changing the repository. For the current Assistant × KB
-session checkpoint, verified evidence boundaries, and continuation prompt, see
-`HANDOFF.md`; re-check live Git and runtime state before relying on the snapshot.
+Read [`AGENTS.md`](AGENTS.md) before changing the repository — it is the contract every coding
+agent follows here, and [`CLAUDE.md`](CLAUDE.md) adds the Claude Code specifics.
+
+The full agent harness — architecture boundaries, canonical commands, gates, task loop, and the
+mandatory Docker/secret rules — lives in [`docs/harness/`](docs/harness/README.md), with the
+machine-readable contract in [`harness.yml`](harness.yml). Verify it with:
+
+```bash
+make harness-check
+```
+
+Everything else is indexed from [`docs/README.md`](docs/README.md). Multi-session programs live in
+`deploy/runbooks/`, where each `loop-state.json` is the authoritative status.

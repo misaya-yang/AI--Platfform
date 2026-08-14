@@ -163,8 +163,6 @@ class AgentContextLifecycleMixin:
     ) -> bool:
         """Persist the current shared object only while its live owner lock is held."""
 
-        if self.memory_service is None or ctx.working_memory_restore_failed:
-            return False
         async with session.lock:
             live_session = await self.task_manager.get_session(
                 ctx.session_id,
@@ -188,6 +186,11 @@ class AgentContextLifecycleMixin:
             session.working_memory.archive_if_settled(
                 turns_since_goal=session.working_memory.turns_since_goal
             )
+            # Settling is an in-memory lifecycle rule, not a persistence
+            # feature. Keep it active when durable memory is disabled or a
+            # cold restore failed; only the external write is skipped.
+            if self.memory_service is None or ctx.working_memory_restore_failed:
+                return False
             try:
                 persisted = await persist_working_memory(
                     self.memory_service,
@@ -1306,8 +1309,7 @@ class AgentContextLifecycleMixin:
             selector_options = {}
         else:
             accepts_extra_options = any(
-                parameter.kind is inspect.Parameter.VAR_KEYWORD
-                for parameter in selector_parameters
+                parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in selector_parameters
             )
             if not accepts_extra_options:
                 supported_options = {

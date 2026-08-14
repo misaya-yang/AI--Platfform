@@ -2,6 +2,64 @@
 
 ## Unreleased
 
+### Platform architecture
+
+- Added [`docs/harness/platform-architecture.md`](docs/harness/platform-architecture.md): the product
+  law behind form and capability diversification — four layers (surfaces / contract / kernel /
+  extensions over the gateway), five rules, the `permissions` + `capabilities` coexistence decision,
+  and the admission table for what may live in the kernel versus ship as an extension.
+- Added the `agent-contract-unification` program under `deploy/runbooks/`: seven phases that make the
+  built-in assistant an `AgentSpec` instance, unify subagents into the same type, move builder
+  settings out of the chat request, put the console on the public runtime contract, extend the SDKs
+  to it, and gate domain logic out of the shared core package.
+- `make harness-check` now validates each program against its own `loop-state` schema version rather
+  than asserting one contract on all of them, which removed eight permanent warnings.
+
+### Agent harness and documentation
+
+- Added an explicit agent harness: `harness.yml` (machine-readable contract) plus
+  `docs/harness/` covering architecture boundaries, the canonical command catalog, the
+  working agreement, and the mandatory Docker/secret rules.
+- Rewrote `AGENTS.md` as a short tier-1 contract (repo map, canonical commands, gates, safety)
+  and added `CLAUDE.md` for Claude Code specifics. Both are line-budgeted.
+- Added `make harness-check` (`scripts/harness/check_harness.py`) and wired it into CI: it fails
+  when a declared command no longer exists, a required doc is missing, an instruction file exceeds
+  its budget, or a harness link breaks.
+- Stopped ignoring `docs/` in `.gitignore`. About 100 design, plan, and program files were
+  invisible to every other machine and every coding agent; the repository is now the system of
+  record. Root-only scratch patterns are anchored so they no longer swallow real documents.
+- Reorganized `docs/` into `harness/`, `design/`, `plans/`, `research/`, `architecture/`, and
+  dated `archive/`, with `docs/README.md` as the index.
+- Consolidated all multi-session programs under `deploy/runbooks/`; `loop-state.json` stays the
+  authoritative status. Archived the root `HANDOFF.md`, which depended on a directory outside
+  this repository, and `PLATFORM_REVIEW_2026-07-14.md`.
+
+### Workspace hygiene
+
+- `make harness-check` now enforces where files go: Playwright specs only under `web/e2e/`
+  (or `web/src/`, `sdk/`), Playwright configs only under `web/`, and no screenshots, archives, or
+  stray test files at the repository root. This is what previously let verification screenshots
+  accumulate in the root.
+- Added [`web/e2e/README.md`](web/e2e/README.md) documenting the E2E layout, the five Playwright
+  configs, where run artifacts go, and how to point browser tooling at `tmp/browser/` instead of
+  the repository root. Added `web/e2e/fixtures/` for static test data.
+- Removed root strays: three verification screenshots, a scratch orchestration script, and the
+  `.playwright-mcp/` dump directory.
+- Removed `claude-code`, an orphan git submodule reference with no `.gitmodules` entry and an empty
+  working directory, and `.kiro/skills/` — 21 tracked symlinks into the gitignored `.agents/`
+  directory that were dangling on every checkout, including this one.
+
+### Deployment
+
+- Added `make doctor`: a read-only host preflight covering required tooling, Compose v2, Docker
+  memory and disk headroom, host ports, `.env` presence/mode/placeholder keys, and — blocking —
+  whether running `ai-gateway-*` containers belong to this checkout.
+- Documented the shortest correct startup path as `make doctor && make quickstart && make status`
+  in `README.md` and `DEPLOY.md`.
+- CI now verifies the harness contract and the syntax of the deploy scripts.
+
+### Runtime
+
 - Bundled document generation as the trusted `ai-docgen` Agent Plugin inside
   the Assistant image and removed the standalone docgen service, image, port,
   signed-download endpoint, and release artifact.

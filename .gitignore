@@ -77,13 +77,15 @@ plugins/frontend-design/
 # AI Agent Skills (local development only)
 .agents/
 
-# Documentation (managed separately)
-docs/*
+# ======================== Documentation ========================
+# docs/ is the system of record and IS tracked. It used to be ignored wholesale
+# (`docs/*`), which hid ~100 design, plan, and program files from every other
+# machine and from every coding agent. See docs/harness/README.md principle 1.
+# Ignore only scratch output that lands inside it.
 docs_project/
-!apps/islamic-content-service/docs/
-!apps/islamic-content-service/docs/**
-!apps/assistant-service/docs/
-!apps/assistant-service/docs/**
+docs/**/node_modules/
+docs/**/.cache/
+docs/scratch/
 
 # ======================== Data & Models ========================
 # Downloaded ML models (OCR, embeddings, etc.)
@@ -122,12 +124,16 @@ nul
 NUL
 
 # ======================== Debug & Temporary Scripts ========================
-check_*.py
-check_*.json
-quick_test*.py
-test_output*.txt
-*_debug.py
-debug_*.py
+# Root-anchored (leading `/`): these patterns describe junk that tooling drops in
+# the working directory, not a file-naming rule for the whole tree. Unanchored,
+# `check_*.py` silently swallowed scripts/harness/check_harness.py — the gate that
+# CI runs — which is exactly the failure mode this anchoring prevents.
+/check_*.py
+/check_*.json
+/quick_test*.py
+/test_output*.txt
+/*_debug.py
+/debug_*.py
 .worktrees
 .mcp.json
 apps/islamic-content-service/data/
@@ -137,15 +143,17 @@ apps/islamic-content-service/data/
 *.jpeg
 .playwright-mcp/
 
-# ======================== Audit & Planning Docs ========================
-# These are development artifacts, not source code
-*-Audit-*.md
-*-Optimization-*.md
-*-Report*.md
-*-Report*.docx
-*-Report*.js
-*-Spec.md
-claude-code-*.md
+# ======================== Audit & Planning Scratch ========================
+# Ad-hoc artifacts dropped at the repository ROOT by tooling. These patterns are
+# deliberately root-anchored (leading `/`): unanchored, they silently swallowed
+# legitimate documents anywhere in the tree, including under docs/ and reports/.
+/*-Audit-*.md
+/*-Optimization-*.md
+/*-Report*.md
+/*-Report*.docx
+/*-Report*.js
+/*-Spec.md
+/claude-code-*.md
 # plans/ holds migration plans and generated reports. Track .md + .json
 # (committable deliverables); ignore any other scratch/binary artifacts
 # that land alongside.
@@ -168,9 +176,9 @@ web/package-lock.json
 # Generated data files
 data/hadith_registry.json
 
-# Old reports
-AI-*.md
-CLAUDE_CODE_OPTIMIZATION_PROMPT.md
+# Old reports (root only)
+/AI-*.md
+/CLAUDE_CODE_OPTIMIZATION_PROMPT.md
 
 # Test output
 test-results/

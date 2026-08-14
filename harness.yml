@@ -1,0 +1,178 @@
+# =============================================================================
+# AI Gateway — Harness Contract
+# =============================================================================
+# Machine-readable description of how work is done in this repository.
+# Human-readable counterpart: docs/harness/README.md
+# Verified by: make harness-check  (scripts/harness/check_harness.py)
+#
+# Keep this file aligned with AGENTS.md, the Makefile, and docs/harness/commands.md.
+# If a command is renamed here it must be renamed in all three.
+# =============================================================================
+
+schema: harness/contract/v1
+project: ai-gateway
+description: >-
+  Open-source enterprise agent platform: LLM gateway, general AI assistant runtime,
+  knowledge-base service, and web console.
+
+# -- Toolchain ----------------------------------------------------------------
+toolchain:
+  python: ">=3.10"          # CI runs 3.12
+  package_manager: uv       # workspace defined in pyproject.toml [tool.uv.workspace]
+  node: "22"
+  pnpm: "10.33.0"           # via corepack; never npm/yarn in web/
+  docker_compose: v2
+
+# -- Entry points agents must read before acting ------------------------------
+entrypoints:
+  contract: AGENTS.md
+  claude: CLAUDE.md
+  harness: docs/harness/README.md
+  docs_index: docs/README.md
+
+# -- Required documents (existence + non-empty is enforced) -------------------
+required_docs:
+  - AGENTS.md
+  - CLAUDE.md
+  - README.md
+  - DEPLOY.md
+  - CHANGELOG.md
+  - CONTRIBUTING.md
+  - SECURITY.md
+  - docs/README.md
+  - docs/harness/README.md
+  - docs/harness/platform-architecture.md
+  - docs/harness/architecture.md
+  - docs/harness/commands.md
+  - docs/harness/workflow.md
+  - docs/harness/runtime-and-secrets.md
+  - deploy/runbooks/open-source-env-readiness-todo.md
+
+# -- Instruction-file line budgets --------------------------------------------
+# Long instruction files raise cost without raising task success. Fix the file,
+# not the budget.
+budgets:
+  AGENTS.md: 150
+  CLAUDE.md: 80
+
+# -- Canonical commands -------------------------------------------------------
+# Each entry must resolve to a real Make target.
+commands:
+  doctor:
+    make: doctor
+    purpose: Preflight the machine — tools, memory, ports, compose ownership.
+  bootstrap:
+    make: quickstart
+    purpose: First run — generate .env, pull versioned images, start, migrate, validate.
+  bootstrap_from_source:
+    make: quickstart-build
+    purpose: Maintainer first run built from the current checkout.
+  validate_config:
+    make: validate-config
+    purpose: Validate .env and Compose rendering without starting containers.
+  validate_runtime:
+    make: validate
+    purpose: Validate config plus the running runtime.
+  validate_public_example:
+    make: validate-example-config
+    purpose: Validate the committed .env.example surface (safe for CI).
+  status:
+    make: status
+    purpose: Health table; nonzero exit on failure, usable as a release gate.
+  hot_update:
+    make: hot-update
+    purpose: Apply changed Python source to running containers without rebuilding.
+  migrate:
+    make: migrate
+    purpose: Run pending database migrations.
+  harness_check:
+    make: harness-check
+    purpose: Verify this contract still matches the repository.
+
+# -- Gates: what to run for what you changed ----------------------------------
+gates:
+  harness:
+    make: harness-check
+    triggers: [AGENTS.md, CLAUDE.md, harness.yml, docs/harness/**]
+  service_boundaries:
+    make: test-isolation
+    triggers: ["src/**", "apps/**", "packages/ai-gateway-core/**"]
+  assistant_runtime:
+    make: verify-assistant-runtime-dev
+    triggers: ["apps/assistant-service/**"]
+  agent_core:
+    make: agent-eval-core-gate
+    triggers: ["apps/assistant-service/src/assistant_service/core/**"]
+  eval_contract:
+    make: eval-e1-gate
+    triggers: ["src/services/eval/**", "packages/ai-gateway-core/src/ai_gateway_core/eval/**", "tests/fixtures/eval/**"]
+  eval_branch:
+    make: verify-eval-dev
+    triggers: ["src/api/v1/eval.py", "src/api/eval_export.py"]
+  rag:
+    make: rag-eval-regression-gate
+    triggers: ["apps/knowledge-service/**"]
+  agent_studio:
+    make: verify-agent-studio
+    triggers: ["web/src/pages/agents/**", "src/api/v1/agents.py", "src/api/v1/agent_runtime.py"]
+  deployment:
+    make: validate-example-config
+    triggers: ["docker-compose*.yml", ".env.example", "scripts/new/**", Dockerfile]
+  frontend:
+    shell: "pnpm -C web type-check && pnpm -C web lint && pnpm -C web build"
+    triggers: ["web/**"]
+
+# -- Workspace hygiene --------------------------------------------------------
+# Agents drop test files and screenshots wherever they happen to be standing.
+# These rules are enforced by `make harness-check`, so the tree stays predictable
+# no matter which machine or which agent produced the change.
+workspace:
+  # Playwright / Vitest specs may only live under these roots.
+  spec_roots: [web/e2e, web/src, sdk]
+  spec_globs: ["*.spec.ts", "*.spec.tsx", "*.test.ts", "*.test.tsx"]
+  # Playwright configs are a web/ concern; nowhere else.
+  playwright_config_root: web
+  # Nothing matching these may sit at the repository root.
+  root_forbidden: ["*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.har", "*.zip", "*.spec.ts", "*.test.ts", "test_*.py", "check_*.py", "*_debug.py"]
+  # Where run artifacts belong. All are ignored by git; never commit them.
+  artifacts:
+    e2e_specs: web/e2e
+    e2e_helpers: web/e2e/support
+    e2e_fixtures: web/e2e/fixtures
+    e2e_run_output: web/test-results
+    e2e_html_report: web/playwright-report
+    e2e_auth_state: web/.playwright
+    browser_scratch: tmp/browser
+    agent_scratch: tmp
+
+# -- Task loop ----------------------------------------------------------------
+loop:
+  stages: [observe, act, verify, decide]
+  rules:
+    - One feature per cycle.
+    - A change is unverified until its gate has run; never merge act and verify into a claim.
+    - Evidence means a named command and its real output.
+    - Status for multi-session programs lives in loop-state.json, not in prose.
+
+# -- Multi-session programs ---------------------------------------------------
+programs:
+  root: deploy/runbooks
+  state_file: loop-state.json
+  # Required files depend on the program's own loop-state schema_version. v4 is the
+  # minimal contract and deliberately dropped v3's plan/report/ledger artifacts, so
+  # asserting v4 on a v3 program produces noise, not signal.
+  required_files_by_schema:
+    prd-phase-harness/loop-state/v4: [README.md, loop-state.json, HANDOFF.md, init.sh]
+    prd-phase-harness/loop-state/v3: [README.md, loop-state.json, agent-handoff.md, progress-log.md]
+    prd-phase-harness/loop-state/v2: [README.md, loop-state.json, agent-handoff.md, progress-log.md]
+    prd-phase-harness/loop-state/v1: [README.md, loop-state.json, agent-handoff.md, progress-log.md]
+  validator: "python3 ../prd-phase-harness/scripts/validate_harness_prd.py <program-dir> --strict"
+  convention: docs/harness/workflow.md#4-multi-phase-programs
+
+# -- Knowledge locations ------------------------------------------------------
+knowledge:
+  design_and_plans: docs/
+  architecture_decisions: docs/architecture/
+  programs: deploy/runbooks/
+  evidence_and_reports: reports/
+  archive: docs/archive/

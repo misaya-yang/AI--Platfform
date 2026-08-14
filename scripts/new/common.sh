@@ -136,8 +136,14 @@ assert_compose_owner() {
         owner=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$container" 2>/dev/null || true)
         project=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project" }}' "$container" 2>/dev/null || true)
         service=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' "$container" 2>/dev/null || true)
-        if [ "$project" = "ai-gateway" ] && [ -n "$owner" ] && [ "$owner" != "$expected_owner" ]; then
+        if [ -z "$owner" ]; then
+            log_error "Container '$container' (service=${service:-unknown}) has no Compose working-directory label"
+            mismatch=true
+        elif [ "$owner" != "$expected_owner" ]; then
             log_error "Container '$container' (service=${service:-unknown}) belongs to a different checkout: $owner"
+            mismatch=true
+        elif [ "$project" != "ai-gateway" ]; then
+            log_error "Container '$container' (service=${service:-unknown}) belongs to a different Compose project: ${project:-unlabeled}"
             mismatch=true
         fi
     done

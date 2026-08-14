@@ -2,7 +2,19 @@
 
 This guide covers Docker Compose deployment for the standalone AI Gateway project.
 
-For a first local run, start with `README.md`. Use this document when you want a repeatable deployment checklist for a server or shared environment.
+For a first local run, start with [`README.md`](README.md). Use this document when you want a
+repeatable deployment checklist for a server or shared environment.
+
+The shortest correct path is three commands:
+
+```bash
+make doctor && make quickstart && make status
+```
+
+Automation and coding agents must also read
+[`docs/harness/runtime-and-secrets.md`](docs/harness/runtime-and-secrets.md) before any Docker or
+deploy action — it holds the compose-ownership, rebuild, memory, and secret-handling rules that
+this guide assumes.
 
 ## Deployment Model
 
@@ -56,7 +68,19 @@ openssl rand -hex 32
 
 ## Preflight
 
-Run configuration validation before building:
+Two checks, in this order. The first inspects the machine, the second inspects the configuration.
+
+```bash
+make doctor
+```
+
+`make doctor` is read-only. It verifies required tooling and Compose v2, Docker memory and disk
+headroom, host ports, `.env` presence and mode, and — most importantly — that any running
+`ai-gateway-*` containers belong to **this** checkout. Acting on another checkout's stack is the
+most damaging mistake available here, so an ownership conflict is a blocking failure. Exit code 0
+means ready; any nonzero exit means fix something first.
+
+Then validate the configuration:
 
 ```bash
 make validate-config
@@ -207,6 +231,12 @@ For production-like deployments:
 - Scrape gateway `/metrics` from your monitoring system and include it in release smoke checks; `gateway_up` should be present after startup.
 
 ## Troubleshooting
+
+Start here — it diagnoses the host, not the app:
+
+```bash
+make doctor
+```
 
 Config validation:
 
