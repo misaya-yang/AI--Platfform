@@ -572,7 +572,8 @@ test.describe("Create agent", () => {
     const continueButton = page.getByRole("button", { name: "Continue" });
     await tabTo(page, continueButton);
     await page.keyboard.press("Enter");
-    await expect(page.getByRole("region", { name: "Behavior" }).getByText("qwen3.7-plus", { exact: true })).toBeVisible();
+    // No concrete model id is preselected: the server applies its deployment default.
+    await expect(page.getByRole("region", { name: "Behavior" }).getByRole("combobox", { name: "Model" })).toHaveValue("");
     await expect(page.getByLabel("Agent instructions")).not.toHaveValue("");
     await captureEvidence(page, "create-behavior-desktop-1440x900");
     await page.getByRole("button", { name: "Continue" }).click();

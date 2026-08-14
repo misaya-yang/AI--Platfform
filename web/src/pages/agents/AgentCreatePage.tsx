@@ -133,7 +133,8 @@ export function AgentCreatePage() {
   });
   const createError = createMutation.error ? agentErrorDetail(createMutation.error) : null;
   const identityValid = name.trim().length > 0 && name.trim().length <= 255 && description.length <= 4000 && isSafeIconUrl(spec.identity.icon_url);
-  const behaviorValid = Boolean(spec.instructions.trim() && spec.model.model_id);
+  // An empty model_id is valid: the server applies its deployment default (DEFAULT_MODEL).
+  const behaviorValid = Boolean(spec.instructions.trim());
   const canSubmit = identityValid && behaviorValid && !createMutation.isPending;
 
   const selectedKeys = useMemo(

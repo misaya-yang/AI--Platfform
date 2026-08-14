@@ -48,11 +48,10 @@ test.describe("sidebar nav groups", () => {
     // Group headings in order.
     await expect(page.locator(".app-nav-group-label")).toHaveText(["Use", "Build", "Govern"]);
 
-    // Full item order: ungrouped items (dashboard, then the PC-01 exam
-    // remnant) first, then the grouped sections, with no trailing items.
+    // Full item order: dashboard ungrouped first, then the grouped sections,
+    // with no trailing items.
     await expect(page.locator("nav .app-nav-label")).toHaveText([
       "Dashboard",
-      "Exams",
       "AI Assistant",
       "Agents",
       "Knowledge Base",
