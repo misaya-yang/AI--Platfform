@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.models import ChatMessage
 
+from assistant_service.core.models.defaults import DEFAULT_MODEL
+
 if TYPE_CHECKING:
     # ModelRegistry is AS-internal (owns per-provider wire protocols).
     # Only the type annotation is needed here; at runtime we call
@@ -24,8 +26,6 @@ if TYPE_CHECKING:
     from assistant_service.core.models.model_registry import ModelRegistry
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_QUIZ_MODEL = "qwen3.7-plus"
 
 # Base prompt — question type rules are injected dynamically
 _PROMPT_HEADER = """\
@@ -111,7 +111,7 @@ class QuizGenerator:
         )
 
         messages = [ChatMessage(role="user", content=prompt)]
-        target_model = model_id or DEFAULT_QUIZ_MODEL
+        target_model = model_id or DEFAULT_MODEL
 
         logger.info(
             f"Generating quiz: model={target_model}, questions={question_count}, "

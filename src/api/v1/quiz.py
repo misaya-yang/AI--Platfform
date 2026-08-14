@@ -4,29 +4,26 @@ assistant tool (apps/assistant-service/core/tools/quiz_tool.py), documented by
 the ai-quiz agent plugin (agent-plugins/ai-quiz).
 
 Endpoints (load-bearing only):
-- POST /assistant/quiz/generate         — Generate a new quiz
 - GET  /assistant/quiz/{quiz_id}         — Get quiz details (no answers)
 - POST /assistant/quiz/{quiz_id}/submit  — Submit answers for grading
 - GET  /assistant/quiz/{quiz_id}/attempts — List attempts for a quiz
 - DELETE /assistant/quiz/{quiz_id}       — Delete a quiz
-- POST /assistant/quiz/{quiz_id}/share   — Generate share link
+- GET  /quiz/shared/{share_code}         — Public share (alias over artifact_shares)
+- POST /quiz/shared/{share_code}/submit  — Anonymous submit (alias over artifact_shares)
+
+Share creation/revocation moved to POST/DELETE /api/v1/artifact-shares
+(src/api/v1/artifact_shares.py); quiz generation moved to the in-chat tool.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import os
+import random
 from typing import Any
 
-import httpx
-from ai_gateway_core.auth.gateway_secret import GatewaySecret
-from ai_gateway_core.quiz import (
-    QuizGenerator,
-    QuizGrader,
-    QuizService,
-    QuizShareManager,
-)
+from ai_gateway_core.quiz import QuizGrader
+from ai_gateway_core.sharing import ArtifactShareManager
+from assistant_service.core.quiz import QuizService
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
@@ -36,7 +33,6 @@ from ..deps import enforce_rate_limit, get_user_context
 
 router = APIRouter(prefix="/assistant/quiz", tags=["quiz"])
 logger = logging.getLogger(__name__)
-ASSISTANT_CHAT_PATH = "/api/v1/assistant/chat"
 
 
 # ---------------------------------------------------------------------------
@@ -44,40 +40,13 @@ ASSISTANT_CHAT_PATH = "/api/v1/assistant/chat"
 # ---------------------------------------------------------------------------
 
 
-class QuizGenerateRequest(BaseModel):
-    dataset_ids: list[str] = Field(..., min_length=1, description="KB dataset IDs to source questions from")
-    topic: str | None = Field(None, description="Optional topic focus")
-    question_count: int = Field(5, ge=1, le=10, description="Number of questions")
-    question_types: list[str] = Field(default=["mc_single"], description="mc_single, mc_multi, true_false, short_answer")
-    difficulty: str = Field("medium", description="easy / medium / hard")
-    language: str = Field("auto", description="Language code or 'auto'")
-    model_id: str | None = Field(None, description="Override LLM model for generation")
-
-
 class QuizSubmitRequest(BaseModel):
     answers: dict[str, str] = Field(..., description="question_id → selected option label")
-
-
-class QuizShareRequest(BaseModel):
-    expires_hours: int | None = Field(None, description="Hours until expiry (None = never)")
-    max_attempts: int | None = Field(None, description="Max attempts (None = unlimited)")
-    require_name: bool = Field(True, description="Require name before taking")
-    time_limit_minutes: int | None = Field(None, description="Time limit per attempt in minutes (None = unlimited)")
 
 
 class PublicQuizSubmitRequest(BaseModel):
     answers: dict[str, str] = Field(..., description="question_id → selected option label")
     display_name: str | None = Field(None, description="Anonymous user's name")
-
-
-class QuizGenerateResponse(BaseModel):
-    quiz_id: str
-    title: str
-    description: str | None = None
-    topic: str | None = None
-    difficulty: str
-    question_count: int
-    questions: list[dict[str, Any]]
 
 
 class QuizAttemptResponse(BaseModel):
@@ -93,205 +62,34 @@ class QuizAttemptResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class _AssistantServiceModelRegistry:
-    """Narrow model-registry adapter backed by assistant-service HTTP chat."""
-
-    def __init__(self, *, user: UserContext, base_url: str | None = None) -> None:
-        self.user = user
-        self.base_url = (base_url or os.getenv("ASSISTANT_SERVICE_URL", "http://assistant-service:8093")).rstrip("/")
-
-    async def chat(
-        self,
-        *,
-        model_id: str,
-        messages: list[Any],
-        temperature: float = 0.7,
-        max_tokens: int | None = None,
-        **_kwargs: Any,
-    ) -> tuple[str, dict[str, int]]:
-        prompt = "\n\n".join(str(getattr(message, "content", "")) for message in messages).strip()
-        body = {
-            "message": prompt,
-            "model_id": model_id,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "kb_mode": "off",
-            "memory_mode": "off",
-            "web_search_enabled": False,
-        }
-        encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        headers = self._headers(encoded)
-
-        async with httpx.AsyncClient(
-            base_url=self.base_url,
-            timeout=httpx.Timeout(connect=5.0, read=180.0, write=30.0, pool=10.0),
-        ) as client:
-            response = await client.post(ASSISTANT_CHAT_PATH, headers=headers, content=encoded)
-
-        if response.status_code >= 400:
-            logger.warning(
-                "quiz_assistant_chat_failed",
-                extra={"status_code": response.status_code},
-            )
-            raise RuntimeError(f"assistant-service returned HTTP {response.status_code}")
-
-        payload = response.json()
-        content = str(payload.get("content") or "")
-        usage = payload.get("usage")
-        return content, usage if isinstance(usage, dict) else {}
-
-    def _headers(self, body: bytes) -> dict[str, str]:
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "X-User-Id": self.user.user_id,
-            "X-Tenant-Id": self.user.tenant_id,
-            "X-User-Tier": getattr(self.user, "tier", "normal"),
-            "X-User-Type": getattr(self.user, "user_type", "user"),
-            "X-User-Roles": ",".join(getattr(self.user, "roles", []) or []),
-        }
-        email = getattr(self.user, "email", "")
-        if email:
-            headers["X-User-Email"] = email
-        name = getattr(self.user, "name", "")
-        if name:
-            headers["X-User-Name"] = name
-
-        signer = _build_assistant_signer()
-        if signer is not None:
-            headers[signer.header_name] = signer.sign(
-                method="POST",
-                path=ASSISTANT_CHAT_PATH,
-                query="",
-                body=body,
-            )
-        return headers
-
-
-class _UnavailableModelRegistry:
-    """Model-registry placeholder that lets QuizGenerator use local fallback."""
-
-    async def chat(self, **_kwargs: Any) -> tuple[str, dict[str, int]]:
-        raise RuntimeError("model registry unavailable")
-
-
-def _quiz_deterministic_fallback_enabled() -> bool:
-    return os.getenv("QUIZ_DETERMINISTIC_FALLBACK_ENABLED", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
-def _build_assistant_signer() -> GatewaySecret | None:
-    secret = os.getenv("GATEWAY_ASSISTANT_SHARED_SECRET", "").strip()
-    if not secret:
-        return None
-    return GatewaySecret(secret=secret)
-
-
-def _get_quiz_service(
-    request: Request,
-    *,
-    user: UserContext | None = None,
-    require_model_registry: bool = True,
-) -> QuizService:
-    """Build a QuizService from app state."""
+def _get_quiz_service(request: Request) -> QuizService:
+    """Build a QuizService from app state (read/grade/delete only — no generator)."""
     db = getattr(request.app.state, "database", None)
     if db is None:
         raise HTTPException(503, "Database not available")
-
-    registry = getattr(request.app.state, "model_registry", None)
-    if registry is None and require_model_registry:
-        if _quiz_deterministic_fallback_enabled():
-            registry = _UnavailableModelRegistry()
-        elif user is None:
-            raise HTTPException(503, "Model registry not available")
-        else:
-            registry = _AssistantServiceModelRegistry(user=user)
-
-    generator = QuizGenerator(registry)
-    grader = QuizGrader(model_registry=registry)
-    return QuizService(db=db, generator=generator, grader=grader)
+    return QuizService(db=db, generator=None, grader=QuizGrader())
 
 
-def _require_quiz_generation_actor(user: UserContext) -> None:
-    """Keep paid quiz generation behind an authenticated tenant identity."""
-    if not user.is_authenticated or not user.user_id:
-        raise HTTPException(status_code=401, detail="Authentication required")
-    if not user.tenant_id or user.tenant_id == "public":
-        raise HTTPException(status_code=403, detail="Tenant identity required")
+def _get_share_manager(request: Request) -> ArtifactShareManager:
+    db = getattr(request.app.state, "database", None)
+    if db is None:
+        raise HTTPException(503, "Database not available")
+    return ArtifactShareManager(db=db)
+
+
+def _shuffle_options(questions: list[dict]) -> list[dict]:
+    """Shuffle option display order per question. Labels stay attached to their text."""
+    shuffled = []
+    for q in questions:
+        opts = list(q.get("options", []))
+        random.shuffle(opts)
+        shuffled.append({**q, "options": opts})
+    return shuffled
 
 
 # ---------------------------------------------------------------------------
-# Endpoints
+# Authenticated endpoints
 # ---------------------------------------------------------------------------
-
-
-@router.post("/generate", response_model=QuizGenerateResponse)
-async def generate_quiz(
-    body: QuizGenerateRequest,
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-):
-    """Generate a quiz from KB datasets."""
-    _require_quiz_generation_actor(user)
-    await enforce_rate_limit(request, user, operation="quiz_generate")
-    svc = _get_quiz_service(request, user=user)
-
-    # Retrieve KB chunks for quiz generation (local service or HTTP proxy)
-    kb_service = getattr(request.app.state, "knowledge_service", None) or getattr(request.app.state, "kb_proxy", None)
-    if kb_service is None:
-        raise HTTPException(503, "Knowledge service not available")
-
-    # Retrieve chunks from each dataset
-    all_chunks: list[dict[str, Any]] = []
-    query = body.topic or "key concepts and important information"
-
-    for dataset_id in body.dataset_ids:
-        try:
-            results, _meta = await kb_service.retrieve(
-                user=user,
-                dataset_id=dataset_id,
-                query=query,
-                top_k=12,
-                mode="hybrid",
-            )
-            for r in results:
-                all_chunks.append({
-                    "content": r.text,
-                    "score": r.score,
-                    "metadata": r.metadata or {},
-                    "segment_id": getattr(r, "segment_id", None),
-                    "document_id": getattr(r, "document_id", None),
-                })
-        except Exception as e:
-            logger.warning(f"Failed to retrieve from dataset {dataset_id}: {e}")
-
-    if not all_chunks:
-        raise HTTPException(400, "No content retrieved from the specified datasets. Ensure the datasets have indexed documents.")
-
-    try:
-        quiz = await svc.create_quiz(
-            tenant_id=user.tenant_id,
-            user_id=user.user_id,
-            dataset_ids=body.dataset_ids,
-            kb_chunks=all_chunks,
-            topic=body.topic,
-            question_count=body.question_count,
-            question_types=body.question_types,
-            difficulty=body.difficulty,
-            language=body.language,
-            model_id=body.model_id,
-        )
-    except ValueError as e:
-        raise HTTPException(422, str(e))
-    except Exception as e:
-        logger.error(f"Quiz generation failed: {e}", exc_info=True)
-        raise HTTPException(500, "Quiz generation failed. Please try again.")
-
-    return quiz
 
 
 @router.get("/{quiz_id}")
@@ -301,7 +99,7 @@ async def get_quiz(
     user: UserContext = Depends(get_user_context),
 ):
     """Get quiz details (questions without answers)."""
-    svc = _get_quiz_service(request, require_model_registry=False)
+    svc = _get_quiz_service(request)
     quiz = await svc.get_quiz(quiz_id, user.tenant_id, include_answers=False)
     if not quiz:
         raise HTTPException(404, "Quiz not found")
@@ -316,7 +114,7 @@ async def submit_quiz(
     user: UserContext = Depends(get_user_context),
 ):
     """Submit quiz answers and receive grading results."""
-    svc = _get_quiz_service(request, user=user)
+    svc = _get_quiz_service(request)
     try:
         result = await svc.submit_attempt(
             quiz_id=quiz_id,
@@ -339,7 +137,7 @@ async def list_attempts(
     user: UserContext = Depends(get_user_context),
 ):
     """List all attempts for a quiz (creator sees all, others see own). Paginated."""
-    svc = _get_quiz_service(request, require_model_registry=False)
+    svc = _get_quiz_service(request)
     return await svc.list_attempts(
         quiz_id, user.tenant_id, user.user_id, limit=limit, offset=offset,
     )
@@ -352,7 +150,7 @@ async def delete_quiz(
     user: UserContext = Depends(get_user_context),
 ):
     """Delete a quiz (only by creator)."""
-    svc = _get_quiz_service(request, require_model_registry=False)
+    svc = _get_quiz_service(request)
     deleted = await svc.delete_quiz(quiz_id, user.tenant_id, user.user_id)
     if not deleted:
         raise HTTPException(404, "Quiz not found or not authorized to delete")
@@ -360,59 +158,7 @@ async def delete_quiz(
 
 
 # ---------------------------------------------------------------------------
-# Share endpoints (authenticated)
-# ---------------------------------------------------------------------------
-
-
-def _get_share_manager(request: Request) -> QuizShareManager:
-    db = getattr(request.app.state, "database", None)
-    if db is None:
-        raise HTTPException(503, "Database not available")
-    return QuizShareManager(db=db)
-
-
-@router.post("/{quiz_id}/share")
-async def create_share_link(
-    quiz_id: str,
-    body: QuizShareRequest,
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-):
-    """Generate a shareable link for a quiz."""
-    mgr = _get_share_manager(request)
-    try:
-        share = await mgr.create_share(
-            quiz_id=quiz_id,
-            user_id=user.user_id,
-            tenant_id=user.tenant_id,
-            expires_hours=body.expires_hours,
-            max_attempts=body.max_attempts,
-            require_name=body.require_name,
-            time_limit_minutes=body.time_limit_minutes,
-        )
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-
-    return share
-
-
-@router.delete("/{quiz_id}/share/{share_id}")
-async def revoke_share_link(
-    quiz_id: str,
-    share_id: str,
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-):
-    """Revoke a share link."""
-    mgr = _get_share_manager(request)
-    revoked = await mgr.revoke_share(share_id, user.user_id)
-    if not revoked:
-        raise HTTPException(404, "Share link not found or not authorized")
-    return {"revoked": True}
-
-
-# ---------------------------------------------------------------------------
-# Public endpoints (no auth required)
+# Public endpoints (no auth required) — aliases over artifact_shares kind='quiz'
 # ---------------------------------------------------------------------------
 
 public_router = APIRouter(prefix="/quiz/shared", tags=["quiz-public"])
@@ -422,10 +168,13 @@ public_router = APIRouter(prefix="/quiz/shared", tags=["quiz-public"])
 async def get_shared_quiz(share_code: str, request: Request):
     """Get a quiz for public taking (no auth required). Returns questions without answers."""
     mgr = _get_share_manager(request)
-    quiz = await mgr.get_public_quiz(share_code)
-    if not quiz:
+    artifact = await mgr.get_public_artifact(share_code)
+    if not artifact:
         raise HTTPException(404, "Quiz not found, expired, or max attempts reached")
-    return quiz
+    # Option display order is shuffled per viewer; answer keys stay server-side.
+    questions = artifact.get("questions", [])
+    artifact["questions"] = _shuffle_options(questions)
+    return artifact
 
 
 @public_router.post("/{share_code}/submit")
@@ -435,15 +184,13 @@ async def submit_shared_quiz(
     request: Request,
 ):
     """Submit answers for a shared quiz (no auth required)."""
-    from ..deps import enforce_rate_limit
     # Anonymous endpoint: IP-only rate limit to prevent submission spam
     await enforce_rate_limit(request, user=None, operation="quiz_submit_public")
 
     mgr = _get_share_manager(request)
-    # P2: Track client IP
     client_ip = get_client_ip_from_request(request)
     try:
-        result = await mgr.submit_public_attempt(
+        result = await mgr.submit_attempt(
             share_code=share_code,
             answers=body.answers,
             display_name=body.display_name,

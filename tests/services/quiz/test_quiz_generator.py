@@ -1,5 +1,5 @@
 import pytest
-from ai_gateway_core.quiz.quiz_generator import QuizGenerator
+from assistant_service.core.quiz.quiz_generator import QuizGenerator
 
 
 class _FailingRegistry:

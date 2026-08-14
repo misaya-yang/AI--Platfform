@@ -1,23 +1,10 @@
 /**
- * Quiz API client — generate, fetch, submit, and list quizzes.
+ * Quiz API client — fetch, submit, and share quizzes.
+ * Generation happens through the in-chat generate_quiz assistant tool.
  */
 
 import { api } from "@/lib/api";
 import type { QuizData, QuizAttemptResult } from "@/pages/assistant/types";
-
-export interface GenerateQuizRequest {
-  dataset_ids: string[];
-  topic?: string;
-  question_count?: number;
-  difficulty?: string;
-  language?: string;
-  model_id?: string;
-}
-
-export async function generateQuiz(data: GenerateQuizRequest): Promise<QuizData> {
-  const { data: result } = await api.post<QuizData>("/api/v1/assistant/quiz/generate", data);
-  return result;
-}
 
 export async function getQuiz(quizId: string): Promise<QuizData> {
   const { data } = await api.get<QuizData>(`/api/v1/assistant/quiz/${quizId}`);
@@ -76,11 +63,13 @@ export interface ShareQuizRequest {
 export interface ShareQuizResponse {
   share_id: string;
   share_code: string;
+  kind: string;
   quiz_id: string;
   quiz_title: string;
   expires_at: string | null;
   require_name: boolean;
   max_attempts: number | null;
+  time_limit_minutes: number | null;
 }
 
 export async function createQuizShare(
@@ -88,8 +77,8 @@ export async function createQuizShare(
   data?: ShareQuizRequest,
 ): Promise<ShareQuizResponse> {
   const { data: result } = await api.post<ShareQuizResponse>(
-    `/api/v1/assistant/quiz/${quizId}/share`,
-    data ?? {},
+    "/api/v1/artifact-shares",
+    { kind: "quiz", quiz_id: quizId, ...(data ?? {}) },
   );
   return result;
 }
@@ -119,5 +108,5 @@ export async function revokeQuizShare(
   quizId: string,
   shareId: string,
 ): Promise<void> {
-  await api.delete(`/api/v1/assistant/quiz/${quizId}/share/${shareId}`);
+  await api.delete(`/api/v1/artifact-shares/${shareId}`);
 }

@@ -367,8 +367,14 @@ Its stdio MCP executable and document dependencies ship inside the Assistant
 image, so document generation requires no second application image, service,
 port, or signed-download endpoint. Generated files are imported directly into
 the Assistant artifact store. The legacy in-process generators remain a
-startup fallback when the plugin handshake fails. Operators can install other
-packages by listing plugin roots with the operating system path separator:
+startup fallback when the plugin handshake fails.
+
+The bundled `agent-plugins/ai-quiz` package documents the assistant's built-in
+quiz capability: ask the assistant to create questions from knowledge-base
+content and it calls the `generate_quiz` tool, renders an interactive quiz card
+in chat, and supports public sharing through the artifact-share mechanism.
+Operators can install other packages by listing plugin roots with the operating
+system path separator:
 
 ```env
 ASSISTANT_RUNTIME_SKILLS=true

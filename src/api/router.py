@@ -5,6 +5,7 @@ from .v1.agent_runtime import router as agent_runtime_router
 from .v1.agents import publication_router as agent_publications_router
 from .v1.agents import router as agents_router
 from .v1.api_keys import router as api_keys_router
+from .v1.artifact_shares import router as artifact_shares_router
 from .v1.assistant import router as assistant_router
 from .v1.auth import router as auth_router
 from .v1.config import router as config_router
@@ -79,8 +80,9 @@ api_router.include_router(eval_router)  # Agent trace eval console APIs
 api_router.include_router(files_router)  # 文件上传 API
 api_router.include_router(presign_router)  # P2: Presigned URL 直传 API
 api_router.include_router(assistant_router)  # GPT-like Assistant API
-api_router.include_router(quiz_router)  # Quiz generation & grading (deprecated shim — see ai-quiz plugin)
-api_router.include_router(quiz_public_router)  # Public quiz sharing (no auth)
+api_router.include_router(quiz_router)  # Quiz grading shim (deprecated — see ai-quiz plugin)
+api_router.include_router(quiz_public_router)  # Public quiz sharing (aliases over artifact_shares)
+api_router.include_router(artifact_shares_router)  # Kind-generic artifact shares
 api_router.include_router(skills_router)  # Skills upload & management
 api_router.include_router(mcp_router)  # MCP server management
 api_router.include_router(legacy_mcp_router)  # Existing Assistant MCP route compatibility

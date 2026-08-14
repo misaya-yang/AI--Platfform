@@ -53,26 +53,26 @@ test.describe("Quiz workflow", () => {
     const datasetId = datasets[0].id ?? datasets[0].dataset_id;
     expect(datasetId).toBeTruthy();
 
-    // --- Step 2: Generate quiz ---
-    const genRes = await request.post(
-      `${apiUrl}/api/v1/assistant/quiz/generate`,
-      {
-        headers,
-        data: {
-          dataset_ids: [datasetId],
-          topic: "general knowledge",
-          question_count: 4,
-          question_types: ["mc_single", "true_false"],
-          difficulty: "easy",
-        },
-      },
-    );
-    expect(
-      genRes.ok(),
-      `Generate quiz failed: ${genRes.status()} ${await genRes.text()}`,
-    ).toBeTruthy();
+    // --- Step 2: Generate a quiz through the assistant (in-chat generate_quiz tool) ---
+    // The gateway quiz-generation API was removed (PC-03); the supported path is
+    // the in-chat tool. Ask the assistant for a quiz and capture the quiz id from
+    // the hydration GET the quiz card fires. Requires a live provider.
+    await page.goto("/assistant", { waitUntil: "domcontentloaded" });
+    const composer = page.locator("#assistant-chat-composer");
+    await expect(composer).toBeVisible();
 
-    const quiz = await genRes.json();
+    const hydration = page.waitForResponse(
+      (res) =>
+        res.request().method() === "GET" &&
+        /\/api\/v1\/assistant\/quiz\/[0-9a-f-]{36}$/.test(new URL(res.url()).pathname),
+      { timeout: 180_000 },
+    );
+    await composer.fill("请根据知识库出 4 道单选题，覆盖核心概念");
+    await composer.press("Enter");
+
+    const hydrateRes = await hydration;
+    expect(hydrateRes.ok(), `Quiz hydration failed: ${hydrateRes.status()}`).toBeTruthy();
+    const quiz = await hydrateRes.json();
     quizId = quiz.quiz_id;
     expect(quizId).toBeTruthy();
     expect(quiz.title).toBeTruthy();
@@ -135,12 +135,12 @@ test.describe("Quiz workflow", () => {
     expect(pq).toHaveProperty("correct_answer");
     expect(pq).toHaveProperty("explanation");
 
-    // --- Step 5: Create share link ---
+    // --- Step 5: Create share link (kind-generic artifact share) ---
     const shareRes = await request.post(
-      `${apiUrl}/api/v1/assistant/quiz/${quizId}/share`,
+      `${apiUrl}/api/v1/artifact-shares`,
       {
         headers,
-        data: { require_name: true },
+        data: { kind: "quiz", quiz_id: quizId, require_name: true },
       },
     );
     expect(shareRes.ok(), `Create share failed: ${shareRes.status()}`).toBeTruthy();

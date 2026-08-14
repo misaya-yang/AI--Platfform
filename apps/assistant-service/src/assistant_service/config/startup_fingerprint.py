@@ -200,6 +200,7 @@ _SETTING_SPECS = (
     # Unprefixed deployment-wide default applied when a caller omits
     # model_id; mirrors core/models/defaults.py.
     _SettingSpec("DEFAULT_MODEL", "qwen3.7-plus", "string"),
+    _SettingSpec("QUIZ_DETERMINISTIC_FALLBACK_ENABLED", False, "bool"),
 )
 _SPECS_BY_NAME = MappingProxyType({spec.name: spec for spec in _SETTING_SPECS})
 

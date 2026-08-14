@@ -8,14 +8,14 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any
-
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ai_gateway_core.persistence import DatabaseStorageLike
+
+from ai_gateway_core.quiz.quiz_grader import QuizGrader
+
 from .quiz_generator import QuizGenerator
-from .quiz_grader import QuizGrader
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ class QuizService:
     def __init__(
         self,
         db: DatabaseStorageLike,
-        generator: QuizGenerator,
+        generator: QuizGenerator | None = None,
         grader: QuizGrader | None = None,
     ) -> None:
         self.db = db
@@ -51,6 +51,8 @@ class QuizService:
         model_id: str | None = None,
     ) -> dict:
         """Generate a quiz from KB chunks and persist it."""
+        if self.generator is None:
+            raise RuntimeError("QuizService has no generator; creation is not supported")
         # 1. Generate via LLM
         quiz_data = await self.generator.generate(
             kb_chunks=kb_chunks,

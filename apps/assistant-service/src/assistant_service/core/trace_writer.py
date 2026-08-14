@@ -212,7 +212,7 @@ def _validated_startup_config_summary(value: Any) -> dict[str, Any] | None:
         for name, item in raw_settings.items():
             if (
                 not isinstance(name, str)
-                or not name.startswith(("ASSISTANT_", "AGENT_STUDIO_", "DASHSCOPE_", "OPENAI_", "DEFAULT_MODEL"))
+                or not name.startswith(("ASSISTANT_", "AGENT_STUDIO_", "DASHSCOPE_", "OPENAI_", "QUIZ_", "DEFAULT_MODEL"))
                 or not isinstance(item, dict)
             ):
                 continue

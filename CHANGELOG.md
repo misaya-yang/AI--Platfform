@@ -99,6 +99,21 @@
 - Added a frontend CI step running `pnpm -C web i18n:check`, and extended the
   open-source e2e suite with first-run and nav-group specs.
 
+### Quiz plugin and artifact shares
+
+- Replaced the standalone quiz-generation API (`POST /assistant/quiz/generate`) with the
+  in-chat `generate_quiz` assistant tool as the supported path, documented by the new
+  `agent-plugins/ai-quiz` data-only plugin (skills + inert agent; no MCP server — stdio
+  children have no DB/KB/model access).
+- Moved quiz generation/orchestration from `packages/ai-gateway-core` into
+  `apps/assistant-service/core/quiz/`; grading stays in the shared leaf because the gateway
+  grades anonymous share submissions in-process. Deleted the orphaned exam service.
+- Generalized quiz sharing into kind-generic `artifact_shares` (migration 083, with a frozen
+  payload/answer-keys snapshot backfilled from `quiz_shares`): new
+  `POST/DELETE /api/v1/artifact-shares` endpoints, and the public `/quiz/shared/{code}`
+  routes now alias over the same rows so legacy links stay valid. Demo seed data was
+  re-pointed at `artifact_shares`.
+
 ### Connectors
 
 - Added a connector catalog admin API (`/api/v1/connectors/admin/configs`) with CRUD,

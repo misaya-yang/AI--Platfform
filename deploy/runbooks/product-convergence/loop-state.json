@@ -1,13 +1,18 @@
 {
   "schema_version": "prd-phase-harness/loop-state/v4",
   "goal": "Make the product users see match the README: gateway holds identity/credentials/models/connectors, agents declare capabilities, capabilities extend via plugins.",
-  "cycle": ["observe", "act", "verify", "decide"],
-  "active_phase": "PC-02C",
-  "active_feature": "PC-02C-F1",
+  "cycle": [
+    "observe",
+    "act",
+    "verify",
+    "decide"
+  ],
+  "active_phase": "PC-03",
+  "active_feature": "PC-03-F1",
   "iteration": 1,
   "max_iterations": 8,
-  "last_result": "PC-01 done: Confluence fossil + exams removed, quiz trimmed to shim. pytest 2981 passed; e2e:opensource 41 passed; committed 4bd021c.",
-  "next_action": "Launch parallel worktree tracks C (default model), D (first-run/nav/i18n), B (connectors); merge order C→D→B.",
+  "last_result": "Phase 2 merged (C d1d91fd, D 9fa4269, B b40f898). pytest 4929 passed/5 skipped; e2e:opensource 46 passed; validate-example-config + harness-check OK.",
+  "next_action": "Start PC-03: ai-quiz plugin, artifact shares, quiz shim wave 2.",
   "blockers": [],
   "confirmation": null,
   "phases": [
@@ -25,7 +30,9 @@
     {
       "id": "PC-01",
       "file": "phase-01-deletions.md",
-      "depends_on": ["PC-00"],
+      "depends_on": [
+        "PC-00"
+      ],
       "status": "done",
       "evidence": [
         "commit 4bd021c refactor: remove Confluence fossil and standalone exams surface",
@@ -41,39 +48,72 @@
     {
       "id": "PC-02C",
       "file": "phase-02c-default-model.md",
-      "depends_on": ["PC-01"],
-      "status": "in_progress",
-      "evidence": [],
+      "depends_on": [
+        "PC-01"
+      ],
+      "status": "done",
+      "evidence": [
+        "commit d1d91fd merged",
+        "pytest 3222 passed (post-C smoke)",
+        "rg qwen3.7-plus sdk/ → zero",
+        "validate-example-config OK"
+      ],
       "review": "not_required"
     },
     {
       "id": "PC-02D",
       "file": "phase-02d-first-run-nav-i18n.md",
-      "depends_on": ["PC-01"],
-      "status": "in_progress",
-      "evidence": [],
+      "depends_on": [
+        "PC-01"
+      ],
+      "status": "done",
+      "evidence": [
+        "commit 9fa4269 merged",
+        "tests/api 538 passed (D track gate)",
+        "e2e:opensource 46 passed incl. first-run + nav-groups",
+        "i18n:check passed"
+      ],
       "review": "not_required"
     },
     {
       "id": "PC-02B",
       "file": "phase-02b-connectors.md",
-      "depends_on": ["PC-01"],
-      "status": "in_progress",
-      "evidence": [],
+      "depends_on": [
+        "PC-01"
+      ],
+      "status": "done",
+      "evidence": [
+        "commit b40f898 merged",
+        "tests/api + tests/adapters + tests/services green (4929 in full merge smoke)",
+        "rg src.connectors|ConnectorType → zero (vendored XSD exempt)",
+        "verify-agent-studio/migrate-status reported not-run: live stack"
+      ],
       "review": "not_required"
     },
     {
       "id": "PC-02M",
       "file": "phase-02m-merge.md",
-      "depends_on": ["PC-02C", "PC-02D", "PC-02B"],
-      "status": "pending",
-      "evidence": [],
+      "depends_on": [
+        "PC-02C",
+        "PC-02D",
+        "PC-02B"
+      ],
+      "status": "done",
+      "evidence": [
+        "merge commits C→D→B on product-convergence/main",
+        "pytest 4929 passed/5 skipped",
+        "e2e:opensource 46 passed",
+        "validate-example-config + harness-check OK",
+        "fix commit: create form empty-model_id gate + spec updates"
+      ],
       "review": "not_required"
     },
     {
       "id": "PC-03",
       "file": "phase-03-quiz-plugin-shares.md",
-      "depends_on": ["PC-02M"],
+      "depends_on": [
+        "PC-02M"
+      ],
       "status": "pending",
       "evidence": [],
       "review": "not_required"
@@ -81,7 +121,9 @@
     {
       "id": "PC-04",
       "file": "phase-04-final-verification.md",
-      "depends_on": ["PC-03"],
+      "depends_on": [
+        "PC-03"
+      ],
       "status": "pending",
       "evidence": [],
       "review": "not_required"
@@ -134,7 +176,7 @@
         "rg -n 'qwen3.7-plus' sdk/ → zero hits (docs and examples included).",
         "assistant-service reads DEFAULT_MODEL via settings/core/models/defaults.py; gateway serves it."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "PC-02D-F1",
@@ -144,7 +186,7 @@
         "Unit test hits the endpoint with a stub app state.",
         "e2e first-run.spec.ts passes in e2e:opensource (no provider keys by design)."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "PC-02D-F2",
@@ -154,7 +196,7 @@
         "e2e nav-group assertions pass in e2e:opensource.",
         ".github/workflows/ci.yml frontend job includes pnpm -C web i18n:check."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "PC-02B-F1",
@@ -164,7 +206,7 @@
         "connector_admin.py tests pass.",
         "rg 'src.connectors|ConnectorType' src/ → zero."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "PC-02B-F2",
@@ -174,7 +216,7 @@
         "New regression test in agent_studio_regression.py passes.",
         "architecture-contract.md gains connector validation semantics."
       ],
-      "passes": false
+      "passes": true
     }
   ]
 }

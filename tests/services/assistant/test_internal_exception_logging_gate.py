@@ -118,7 +118,7 @@ _AI_GATEWAY_CORE_DEBT_LIMITS: dict[str, dict[str, int]] = {
         "broad_suppress": 1,
         "missing_diagnostic": 1,
     },
-    "packages/ai-gateway-core/src/ai_gateway_core/quiz/quiz_generator.py": {
+    "apps/assistant-service/src/assistant_service/core/quiz/quiz_generator.py": {
         "caught_exception_in_log": 1
     },
     "packages/ai-gateway-core/src/ai_gateway_core/quiz/quiz_grader.py": {

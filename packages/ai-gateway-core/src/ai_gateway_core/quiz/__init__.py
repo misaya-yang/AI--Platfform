@@ -1,15 +1,10 @@
-"""Quiz & Exam sub-package."""
+"""Quiz grading primitive.
 
-from .quiz_service import QuizService
-from .quiz_generator import QuizGenerator
+Generation and orchestration moved to apps/assistant-service/core/quiz/
+(product-convergence PC-03). The grader stays here because the gateway
+grades anonymous share submissions in-process (see src/api/v1/quiz.py).
+"""
+
 from .quiz_grader import QuizGrader
-from .quiz_share_manager import QuizShareManager
-from .exam_service import ExamService
 
-__all__ = [
-    "QuizService",
-    "QuizGenerator",
-    "QuizGrader",
-    "QuizShareManager",
-    "ExamService",
-]
+__all__ = ["QuizGrader"]
