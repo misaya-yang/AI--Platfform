@@ -408,17 +408,20 @@ class WorkingMemory:
         return True
 
     def preserve_snapshot(self) -> None:
-        """Keep one pre-clear copy of live state for audit and debugging.
+        """Keep a pre-clear copy of the live state for audit and debugging.
 
         Callers that destructively replace the state (settle, todo rewrite)
-        should invoke this first so goal/notes/collected info are not lost
-        silently.  The first snapshot wins; later cycles do not overwrite it.
+        invoke this first so goal/notes/collected info are not lost silently.
+        Each destructive event refreshes the snapshot to the current live
+        state, so a later settle captures everything accumulated since an
+        earlier todo rewrite.  The nested ``archived`` key is dropped in the
+        snapshot to avoid unbounded nesting across work cycles.
         """
 
-        if self.archived is None and (
-            self.goal or self.tasks or self.collected_info or self.notes
-        ):
-            self.archived = self.to_dict()
+        if self.goal or self.tasks or self.collected_info or self.notes:
+            snapshot = self.to_dict()
+            snapshot["archived"] = None
+            self.archived = snapshot
 
     def get_progress(self) -> dict[str, Any]:
         """

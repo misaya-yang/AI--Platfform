@@ -497,6 +497,12 @@ def _public_effective_native_capabilities(snapshot: dict[str, Any]) -> list[dict
         risk = str(raw.get("risk") or "")
         config = raw.get("config") if isinstance(raw.get("config"), dict) else {}
         requires_confirmation = config.get("requires_confirmation")
+        # The snapshot no longer fabricates a confirmation pin, but this
+        # client-visible projection must still list high/critical native
+        # capabilities as needing confirmation (conservative default matches
+        # the runtime's definition-based fail-closed enforcement).
+        if requires_confirmation is None and risk in {"high", "critical"}:
+            requires_confirmation = True
         if (
             re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}", name) is None
             or re.fullmatch(r"sha256:[a-f0-9]{64}", schema_hash) is None

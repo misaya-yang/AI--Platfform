@@ -923,3 +923,40 @@ class TestWorkingMemorySerialization:
         assert restored.tasks[0].status == memory.tasks[0].status
         assert len(restored.collected_info) == len(memory.collected_info)
         assert restored.notes == memory.notes
+
+
+def test_archive_refreshes_snapshot_on_later_cycles() -> None:
+    memory = WorkingMemory(session_id="session-a")
+    memory.set_goal("cycle one")
+    memory.add_task("t1", "first")
+    memory.update_task("t1", TaskStatus.COMPLETED)
+    assert memory.archive_if_settled() is True
+    assert memory.archived["goal"] == "cycle one"
+
+    # A later work cycle must refresh the snapshot, not keep the first one,
+    # and must not nest archived snapshots.
+    memory.set_goal("cycle two")
+    memory.add_task("t2", "second")
+    memory.add_note("note from cycle two")
+    memory.update_task("t2", TaskStatus.COMPLETED)
+    assert memory.archive_if_settled() is True
+    assert memory.archived["goal"] == "cycle two"
+    assert memory.archived["notes"] == ["note from cycle two"]
+    assert memory.archived["archived"] is None
+
+
+def test_todo_rewrite_then_settle_captures_latest_notes() -> None:
+    memory = WorkingMemory(session_id="session-a")
+    memory.set_goal("finish report")
+    memory.add_task("t1", "collect")
+    memory.preserve_snapshot()  # simulate TodoWrite rewrite
+    memory.clear()
+    memory.add_task("t2", "rewritten")
+    memory.add_note("added after rewrite")
+    memory.update_task("t2", TaskStatus.COMPLETED)
+
+    assert memory.archive_if_settled() is True
+    # Notes accumulated after the rewrite are captured by the settle snapshot
+    # (the goal itself was cleared by the rewrite, so it is None here).
+    assert memory.archived["notes"] == ["added after rewrite"]
+    assert memory.archived["archived"] is None

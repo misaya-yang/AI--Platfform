@@ -177,10 +177,14 @@ class AgentContextLifecycleMixin:
             if ctx.working_memory is not session.working_memory:
                 logger.warning("Working memory persistence skipped for a stale run snapshot")
                 return False
-            if session.working_memory.goal:
-                session.working_memory.turns_since_goal += 1
-            else:
-                session.working_memory.turns_since_goal = 0
+            # Count one user turn, not one attempt: an approval-gated run
+            # finalizes again on resume with attempt_number > 1 and must not
+            # double-increment the goal-only settle counter.
+            if ctx.attempt_number == 1:
+                if session.working_memory.goal:
+                    session.working_memory.turns_since_goal += 1
+                else:
+                    session.working_memory.turns_since_goal = 0
             session.working_memory.archive_if_settled(
                 turns_since_goal=session.working_memory.turns_since_goal
             )

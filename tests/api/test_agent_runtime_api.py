@@ -1130,3 +1130,35 @@ def test_confirmation_stamp_only_pins_definitions_that_confirm() -> None:
         runtime_type="platform",
         definition=SimpleNamespace(requires_confirmation=False),
     )
+
+
+def test_public_effective_native_capabilities_defaults_high_risk_confirmation() -> None:
+    """High/critical native capabilities still project as needing confirmation
+    even when the snapshot no longer fabricates a requires_confirmation pin."""
+    snapshot = {
+        "capabilities": [
+            {
+                "type": "platform",
+                "id": "dangerous-native",
+                "schema_hash": "sha256:" + "a" * 64,
+                "risk": "high",
+                "config": {},
+            },
+            {
+                "type": "platform",
+                "id": "safe-native",
+                "schema_hash": "sha256:" + "b" * 64,
+                "risk": "low",
+                "config": {},
+            },
+        ]
+    }
+    projected = runtime_module._public_effective_native_capabilities(snapshot)
+    assert projected == [
+        {
+            "name": "dangerous-native",
+            "schema_hash": "sha256:" + "a" * 64,
+            "risk": "high",
+            "requires_confirmation": True,
+        }
+    ]
