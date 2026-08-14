@@ -10,7 +10,6 @@ import {
   Bot,
   ChartLine,
   ListTodo,
-  ClipboardCheck,
   Users,
   Settings,
   PanelLeftClose,
@@ -64,7 +63,6 @@ const navItems: NavItem[] = [
   { key: "/agents", labelKey: "nav.agents", icon: Boxes, permission: null },
   { key: "/eval", labelKey: "nav.eval", icon: ChartLine, permission: "console:eval:view" },
   { key: "/tasks", labelKey: "nav.tasks", icon: ListTodo, permission: "console:dashboard:view" },
-  { key: "/exams", labelKey: "nav.exams", icon: ClipboardCheck, permission: "console:dashboard:view" },
   { key: "/users", labelKey: "nav.users", icon: Users, permission: "user:list" },
   { key: "/settings", labelKey: "nav.settings", icon: Settings, permission: "console:settings:view" },
 ];
@@ -109,15 +107,8 @@ function getPageChrome(pathname: string) {
       subtitleFallback: "Review assistant, LangGraph proxy, and RAG traces with bounded previews and human scoring.",
     },
     tasks: { titleKey: "nav.tasks", titleFallback: "Tasks" },
-    confluence: {
-      titleKey: "confluence.pageTitle",
-      titleFallback: "Confluence Integration",
-      subtitleKey: "confluence.pageDesc",
-      subtitleFallback: "Manage Confluence connections and space syncing",
-    },
     users: { titleKey: "nav.users", titleFallback: "Users" },
     settings: { titleKey: "nav.settings", titleFallback: "Settings" },
-    exams: { titleKey: "nav.exams", titleFallback: "Exams" },
   };
   return map[segment] || map.dashboard;
 }

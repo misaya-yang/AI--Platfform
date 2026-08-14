@@ -1,20 +1,18 @@
 from fastapi import APIRouter
 
-from .v1.agent_runtime import router as agent_runtime_router
 from .v1.agent_public import router as agent_public_router
+from .v1.agent_runtime import router as agent_runtime_router
 from .v1.agents import publication_router as agent_publications_router
 from .v1.agents import router as agents_router
 from .v1.api_keys import router as api_keys_router
 from .v1.assistant import router as assistant_router
 from .v1.auth import router as auth_router
 from .v1.config import router as config_router
-from .v1.confluence import router as confluence_router
 from .v1.connectors import router as connectors_router
 from .v1.conversation_shares import router as conversation_shares_router
 from .v1.conversations import router as conversations_router
 from .v1.dashboard import router as dashboard_router
 from .v1.eval import router as eval_router
-from .v1.exams import router as exams_router
 from .v1.files import router as files_router
 from .v1.health import router as health_router
 from .v1.invoke import router as invoke_router
@@ -69,7 +67,6 @@ api_router.include_router(langgraph_router)  # LangGraph 官方 API 代理（向
 api_router.include_router(proxy_router)  # 透明代理路由
 api_router.include_router(knowledge_router)  # KBMS Knowledge Base
 api_router.include_router(kb_tools_router)  # KB Tools API for LangGraph agents
-api_router.include_router(confluence_router)  # Confluence 集成
 api_router.include_router(debug_tools_router)  # /debug/tools — live registry visibility
 api_router.include_router(metrics_router)  # 系统指标统计
 api_router.include_router(usage_router)  # 使用量追踪与分析
@@ -79,9 +76,8 @@ api_router.include_router(eval_router)  # Agent trace eval console APIs
 api_router.include_router(files_router)  # 文件上传 API
 api_router.include_router(presign_router)  # P2: Presigned URL 直传 API
 api_router.include_router(assistant_router)  # GPT-like Assistant API
-api_router.include_router(quiz_router)  # Quiz generation & grading
+api_router.include_router(quiz_router)  # Quiz generation & grading (deprecated shim — see ai-quiz plugin)
 api_router.include_router(quiz_public_router)  # Public quiz sharing (no auth)
-api_router.include_router(exams_router)  # Exam management (admin only)
 api_router.include_router(skills_router)  # Skills upload & management
 api_router.include_router(mcp_router)  # MCP server management
 api_router.include_router(legacy_mcp_router)  # Existing Assistant MCP route compatibility

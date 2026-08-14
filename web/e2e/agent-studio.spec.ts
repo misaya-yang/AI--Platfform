@@ -297,7 +297,6 @@ async function installHarness(page: Page, options: HarnessOptions = {}): Promise
     }
     if (path === "/api/v1/assistant/config") return route.fulfill(json({ default_model_id: "qwen3.7-plus", available_providers: ["dashscope"], kb_enabled: false, web_search_enabled: false }));
     if (path === "/api/v1/sessions" && request.method() === "GET") return route.fulfill(json([]));
-    if (path === "/api/v1/confluence/connections") return route.fulfill(json([]));
     if (path === "/api/v1/assistant/tools") return route.fulfill(json({ tools: [{ name: "lookup_account", description: "Look up the current support account.", category: "support", risk_level: "low" }] }));
     if (path === "/api/v1/mcp/servers") {
       if (options.degradedCatalog) return route.fulfill(json({ detail: { message: "MCP catalog unavailable" } }, 503));

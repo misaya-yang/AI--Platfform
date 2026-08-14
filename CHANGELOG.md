@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Product convergence (program: deploy/runbooks/product-convergence)
+
+- Removed the Confluence fossil stack: the gateway REST surface (`src/api/v1/confluence.py`,
+  `src/api/schemas/confluence.py`) that returned 503 unconditionally since KB was split into a
+  microservice, the zero-reference gateway-side sync code (`src/services/knowledge/confluence/`),
+  and the console UI (`web/src/pages/confluence/`, the Confluence tab of `/tasks`, and the
+  Confluence sync cards in knowledge dataset sources). Confluence connectivity is now exclusively
+  the connector stack (`src/api/v1/connectors.py`); `ConnectorsPanel` in the assistant chat was
+  re-pointed to the connector catalog/OAuth/MCP APIs.
+- Removed the standalone exam management surface (`src/api/v1/exams.py`, `/exams` routes, the
+  Services-page exams tab, i18n keys). Exam data tables remain in place; the capability returns
+  through the assistant quiz tool and the ai-quiz plugin.
+- Trimmed `src/api/v1/quiz.py` to a deprecated shim: deleted `POST /generate/stream`,
+  `GET /list`, and `GET /{quiz_id}/attempts/export`; the load-bearing generate/get/submit/
+  attempts/delete/share endpoints and the public share routes stay (consumed by the in-chat
+  quiz card, QuizShareDialog, and public quiz page).
+
 ### Platform architecture
 
 - Added [`docs/harness/platform-architecture.md`](docs/harness/platform-architecture.md): the product

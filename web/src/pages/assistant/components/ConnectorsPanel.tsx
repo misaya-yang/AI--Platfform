@@ -1,23 +1,17 @@
 /**
- * ConnectorsPanel — quick access to third-party data sources from Chat.
+ * ConnectorsPanel — quick access to third-party data connectors from Chat.
  *
- * Shows:
- * 1. Confluence connections (existing system — API Token auth)
- * 2. Future: Outlook, GitHub, Gmail (OAuth-based)
+ * Backed by the connector stack (src/api/v1/connectors.py):
+ * - GET  /api/v1/connectors/available          — catalog + connection status
+ * - GET  /api/v1/connectors/auth/{provider}    — start OAuth (returns auth_url)
+ * - POST /api/v1/connectors/{provider}/activate — expose MCP tools
+ * - GET  /api/v1/connectors/{provider}/mcp-status
+ * - DELETE /api/v1/connectors/{provider}       — disconnect
  *
- * For Confluence, links to the existing /tasks page for full management,
- * and shows a quick-connect form for new connections.
+ * Canonical management surface lives at /settings/connectors.
  */
 
 import { useState, useEffect, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
-import {
-  listConnections,
-  createConnection,
-  testConnection,
-  deleteConnection,
-} from "@/api/confluence";
-import type { ConfluenceConnection } from "@/types/confluence";
 import { api } from "@/lib/api";
 
 interface ConnectorsPanelProps {
@@ -26,12 +20,22 @@ interface ConnectorsPanelProps {
   onCountChange?: (count: number) => void;
 }
 
-interface ConfluenceMcpStatus {
+interface ConnectorInfo {
+  provider: string;
+  display_name: string;
+  description?: string | null;
+  icon_url?: string | null;
+  enabled: boolean;
+  connected: boolean;
+  status?: string | null;
+}
+
+interface ConnectorMcpStatus {
   mcp_active?: boolean;
   tools?: Array<{ name: string; description: string }>;
 }
 
-interface ConfluenceActivateResponse extends ConfluenceMcpStatus {
+interface ConnectorActivateResponse extends ConnectorMcpStatus {
   tool_count?: number;
 }
 
@@ -49,38 +53,29 @@ function apiErrorMessage(error: unknown, fallback: string): string {
 }
 
 export default function ConnectorsPanel({ open, onClose, onCountChange }: ConnectorsPanelProps) {
-  const navigate = useNavigate();
-  const [connections, setConnections] = useState<ConfluenceConnection[]>([]);
+  const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
   const [loading, setLoading] = useState(true);
-  const [showAddForm, setShowAddForm] = useState(false);
+  const [mcpByProvider, setMcpByProvider] = useState<Record<string, ConnectorMcpStatus>>({});
+  const [busyProvider, setBusyProvider] = useState<string | null>(null);
+  const [error, setError] = useState("");
 
-  // Quick-add form state
-  const [formName, setFormName] = useState("");
-  const [formDomain, setFormDomain] = useState("");
-  const [formEmail, setFormEmail] = useState("");
-  const [formToken, setFormToken] = useState("");
-  const [formError, setFormError] = useState("");
-  const [formSubmitting, setFormSubmitting] = useState(false);
-  const [mcpActive, setMcpActive] = useState(false);
-  const [mcpTools, setMcpTools] = useState<Array<{ name: string; description: string }>>([]);
-  const [activating, setActivating] = useState(false);
-
-  const loadConnections = useCallback(async () => {
+  const loadConnectors = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await listConnections();
-      setConnections(data);
-      onCountChange?.(data.filter((connection) => connection.status === "active").length);
-      // Check MCP status
-      if (data.some((c) => c.status === "active")) {
+      const { data } = await api.get<ConnectorInfo[]>("/api/v1/connectors/available");
+      setConnectors(data);
+      onCountChange?.(data.filter((c) => c.connected).length);
+      for (const c of data.filter((x) => x.connected)) {
         try {
-          const { data: status } = await api.get<ConfluenceMcpStatus>("/api/v1/connectors/confluence/mcp-status");
-          setMcpActive(Boolean(status.mcp_active));
-          setMcpTools(status.tools || []);
-        } catch { /* ignore */ }
+          const { data: status } = await api.get<ConnectorMcpStatus>(
+            `/api/v1/connectors/${c.provider}/mcp-status`,
+          );
+          setMcpByProvider((prev) => ({ ...prev, [c.provider]: status }));
+        } catch {
+          /* MCP status is best-effort */
+        }
       }
     } catch {
-      // No connections yet
       onCountChange?.(0);
     }
     setLoading(false);
@@ -88,63 +83,50 @@ export default function ConnectorsPanel({ open, onClose, onCountChange }: Connec
 
   useEffect(() => {
     if (!open) return;
-    const timer = window.setTimeout(() => {
-      void loadConnections();
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, [open, loadConnections]);
+    void loadConnectors();
+  }, [open, loadConnectors]);
 
-  const handleQuickConnect = async () => {
-    if (!formDomain || !formEmail || !formToken) {
-      setFormError("请填写所有必填字段");
-      return;
-    }
-    setFormSubmitting(true);
-    setFormError("");
+  const handleConnect = async (provider: string) => {
+    setBusyProvider(provider);
+    setError("");
     try {
-      await createConnection({
-        name: formName || formDomain.replace(/\.atlassian\.net$/, ""),
-        domain: formDomain.replace(/^https?:\/\//, "").replace(/\/$/, ""),
-        email: formEmail,
-        api_token: formToken,
-      });
-      setShowAddForm(false);
-      setFormName(""); setFormDomain(""); setFormEmail(""); setFormToken("");
-      void loadConnections();
+      const { data } = await api.get<{ auth_url: string }>(`/api/v1/connectors/auth/${provider}`);
+      window.location.href = data.auth_url;
     } catch (err: unknown) {
-      setFormError(apiErrorMessage(err, "连接失败"));
-    }
-    setFormSubmitting(false);
-  };
-
-  const handleDelete = async (id: string) => {
-    if (!confirm("确定要删除此连接？")) return;
-    try {
-      await deleteConnection(id);
-      void loadConnections();
-    } catch { /* ignore */ }
-  };
-
-  const handleTest = async (id: string) => {
-    try {
-      const result = await testConnection(id);
-      alert(result.status === "success" ? "✅ 连接正常" : `❌ ${result.message}`);
-    } catch (err: unknown) {
-      alert(`测试失败: ${apiErrorMessage(err, "未知错误")}`);
+      setError(apiErrorMessage(err, "发起授权失败"));
+      setBusyProvider(null);
     }
   };
 
-  const handleActivateMCP = async () => {
-    setActivating(true);
+  const handleActivate = async (provider: string) => {
+    setBusyProvider(provider);
     try {
-      const { data } = await api.post<ConfluenceActivateResponse>("/api/v1/connectors/confluence/activate");
-      setMcpActive(true);
-      setMcpTools(data.tools || []);
-      alert(`✅ AI 工具已激活！发现 ${data.tool_count ?? data.tools?.length ?? 0} 个 Confluence 工具`);
+      const { data } = await api.post<ConnectorActivateResponse>(
+        `/api/v1/connectors/${provider}/activate`,
+      );
+      setMcpByProvider((prev) => ({ ...prev, [provider]: data }));
+      alert(`✅ AI 工具已激活！发现 ${data.tool_count ?? data.tools?.length ?? 0} 个工具`);
     } catch (err: unknown) {
       alert(`激活失败: ${apiErrorMessage(err, "未知错误")}`);
     }
-    setActivating(false);
+    setBusyProvider(null);
+  };
+
+  const handleDisconnect = async (provider: string) => {
+    if (!confirm("确定要断开此连接？")) return;
+    setBusyProvider(provider);
+    try {
+      await api.delete(`/api/v1/connectors/${provider}`);
+      setMcpByProvider((prev) => {
+        const next = { ...prev };
+        delete next[provider];
+        return next;
+      });
+      void loadConnectors();
+    } catch (err: unknown) {
+      setError(apiErrorMessage(err, "断开连接失败"));
+    }
+    setBusyProvider(null);
   };
 
   if (!open) return null;
@@ -168,178 +150,77 @@ export default function ConnectorsPanel({ open, onClose, onCountChange }: Connec
 
         {/* Content */}
         <div className="px-6 py-4 space-y-4 overflow-y-auto max-h-[60vh]">
-          {/* ── Confluence Section ── */}
-          <div>
-            <div className="flex items-center gap-2 mb-3">
-              <span className="text-xl">📄</span>
-              <span className="font-medium">Confluence</span>
-              <span className="text-xs text-zinc-400 ml-auto">
-                API Token 认证 · 同步到知识库
-              </span>
+          {loading ? (
+            <div className="text-sm text-zinc-500 py-4 text-center">加载中...</div>
+          ) : connectors.length === 0 ? (
+            <div className="text-sm text-zinc-500 py-4 text-center">
+              暂无可用连接器，请先在「设置 → 连接器」配置数据源
             </div>
-
-            {loading ? (
-              <div className="text-sm text-zinc-500 py-4 text-center">加载中...</div>
-            ) : connections.length === 0 && !showAddForm ? (
-              <div className="text-center py-4">
-                <p className="text-sm text-zinc-500 mb-3">尚未连接 Confluence</p>
-                <button
-                  onClick={() => setShowAddForm(true)}
-                  className="px-4 py-2 text-sm font-medium text-blue-600 bg-blue-50 dark:bg-blue-900/20 dark:text-blue-400 rounded-lg hover:bg-blue-100 transition"
-                >
-                  + 添加连接
-                </button>
-              </div>
-            ) : (
-              <>
-                {/* Existing connections */}
-                {connections.map((conn) => (
-                  <div key={conn.connection_id} className="rounded-lg border border-zinc-200 dark:border-zinc-700 mb-2 overflow-hidden">
-                    <div className="flex items-center gap-3 p-3">
-                      <div className={`w-2 h-2 rounded-full ${conn.status === "active" ? "bg-green-500" : conn.status === "error" ? "bg-red-500" : "bg-zinc-400"}`} />
-                      <div className="flex-1 min-w-0">
-                        <div className="text-sm font-medium truncate">{conn.name}</div>
-                        <div className="text-xs text-zinc-500 truncate">{conn.domain} · {conn.email}</div>
-                      </div>
-                      <div className="flex gap-1.5">
-                        <button onClick={() => handleTest(conn.connection_id)}
-                          className="px-2 py-1 text-xs text-zinc-600 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded transition">
-                          测试
-                        </button>
-                        <button onClick={() => { navigate(`/tasks`); onClose(); }}
-                          className="px-2 py-1 text-xs text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition">
-                          管理
-                        </button>
-                        <button onClick={() => handleDelete(conn.connection_id)}
-                          className="px-2 py-1 text-xs text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition">
-                          删除
-                        </button>
-                      </div>
+          ) : (
+            connectors.map((conn) => {
+              const mcp = mcpByProvider[conn.provider];
+              return (
+                <div key={conn.provider} className="rounded-lg border border-zinc-200 dark:border-zinc-700 overflow-hidden">
+                  <div className="flex items-center gap-3 p-3">
+                    <span className="text-xl">{conn.icon_url || "🔌"}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium">{conn.display_name}</div>
+                      <div className="text-xs text-zinc-500 truncate">{conn.description}</div>
                     </div>
+                    <div className={`w-2 h-2 rounded-full ${conn.connected ? "bg-green-500" : "bg-zinc-400"}`} />
+                  </div>
 
-                    {/* MCP Activation Bar */}
-                    {conn.status === "active" && (
-                      <div className={`px-3 py-2 border-t ${mcpActive ? "bg-green-50 dark:bg-green-900/10 border-green-200 dark:border-green-800" : "bg-amber-50 dark:bg-amber-900/10 border-amber-200 dark:border-amber-800"}`}>
-                        {mcpActive ? (
-                          <div>
-                            <div className="flex items-center gap-2 text-xs text-green-700 dark:text-green-400">
-                              <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
-                              AI 工具已激活 · {mcpTools.length} 个工具可用
-                            </div>
-                            {mcpTools.length > 0 && (
-                              <div className="mt-1 text-[10px] text-green-600/70 dark:text-green-400/60 truncate">
-                                {mcpTools.slice(0, 5).map(t => t.name).join(", ")}{mcpTools.length > 5 ? ` +${mcpTools.length - 5} more` : ""}
-                              </div>
-                            )}
-                          </div>
-                        ) : (
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs text-amber-700 dark:text-amber-400">
-                              已连接但 AI 工具未激活
-                            </span>
+                  <div className="px-3 pb-3 flex items-center justify-between">
+                    {conn.connected ? (
+                      <>
+                        <span className="text-xs text-green-600 dark:text-green-400">
+                          {mcp?.mcp_active
+                            ? `AI 工具已激活 · ${mcp.tools?.length ?? 0} 个工具可用`
+                            : "已连接但 AI 工具未激活"}
+                        </span>
+                        <div className="flex gap-2">
+                          {!mcp?.mcp_active && (
                             <button
-                              onClick={handleActivateMCP}
-                              disabled={activating}
+                              onClick={() => handleActivate(conn.provider)}
+                              disabled={busyProvider === conn.provider}
                               className="px-3 py-1 text-xs font-medium text-white bg-violet-600 hover:bg-violet-700 rounded-lg transition disabled:opacity-50"
                             >
-                              {activating ? "激活中..." : "激活 AI 工具"}
+                              {busyProvider === conn.provider ? "处理中..." : "激活 AI 工具"}
                             </button>
-                          </div>
-                        )}
-                      </div>
+                          )}
+                          <button
+                            onClick={() => handleDisconnect(conn.provider)}
+                            disabled={busyProvider === conn.provider}
+                            className="px-2 py-1 text-xs text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition"
+                          >
+                            断开
+                          </button>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <span className="text-xs text-zinc-400">尚未连接</span>
+                        <button
+                          onClick={() => handleConnect(conn.provider)}
+                          disabled={busyProvider === conn.provider}
+                          className="px-3 py-1 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition disabled:opacity-50"
+                        >
+                          {busyProvider === conn.provider ? "跳转中..." : "连接"}
+                        </button>
+                      </>
                     )}
                   </div>
-                ))}
-
-                {/* Add button */}
-                {!showAddForm && (
-                  <button onClick={() => setShowAddForm(true)}
-                    className="w-full py-2 text-sm text-zinc-500 hover:text-zinc-700 hover:bg-zinc-50 dark:hover:bg-zinc-800 rounded-lg transition">
-                    + 添加新连接
-                  </button>
-                )}
-              </>
-            )}
-
-            {/* Quick-add form */}
-            {showAddForm && (
-              <div className="p-4 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-900/10 space-y-3">
-                <div className="text-sm font-medium text-blue-700 dark:text-blue-300">快速连接 Confluence</div>
-
-                <input placeholder="连接名称 (可选)"
-                  value={formName} onChange={(e) => setFormName(e.target.value)}
-                  className="w-full px-3 py-2 text-sm rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800" />
-
-                <input placeholder="Confluence 域名 (如: mycompany.atlassian.net)"
-                  value={formDomain} onChange={(e) => setFormDomain(e.target.value)}
-                  className="w-full px-3 py-2 text-sm rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800" />
-
-                <input placeholder="邮箱" type="email"
-                  value={formEmail} onChange={(e) => setFormEmail(e.target.value)}
-                  className="w-full px-3 py-2 text-sm rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800" />
-
-                <input placeholder="API Token" type="password"
-                  value={formToken} onChange={(e) => setFormToken(e.target.value)}
-                  className="w-full px-3 py-2 text-sm rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800" />
-
-                <div className="text-xs text-zinc-400">
-                  获取 API Token: <a href="https://id.atlassian.com/manage-profile/security/api-tokens"
-                    target="_blank" rel="noopener" className="text-blue-500 hover:underline">
-                    Atlassian API Tokens
-                  </a>
                 </div>
+              );
+            })
+          )}
 
-                {formError && <div className="text-xs text-red-500">{formError}</div>}
-
-                <div className="flex gap-2 justify-end">
-                  <button onClick={() => { setShowAddForm(false); setFormError(""); }}
-                    className="px-3 py-1.5 text-xs text-zinc-600 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-lg transition">
-                    取消
-                  </button>
-                  <button onClick={handleQuickConnect} disabled={formSubmitting}
-                    className="px-4 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition disabled:opacity-50">
-                    {formSubmitting ? "连接中..." : "连接"}
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* ── Divider ── */}
-          <div className="border-t border-zinc-200 dark:border-zinc-700" />
-
-          {/* ── Coming Soon: Other Connectors ── */}
-          <div className="space-y-2">
-            <div className="text-xs font-medium text-zinc-400 uppercase tracking-wider">即将支持</div>
-
-            {[
-              { icon: "📧", name: "Outlook", desc: "搜索和发送邮件" },
-              { icon: "🐙", name: "GitHub", desc: "搜索代码和管理 Issues" },
-              { icon: "✉️", name: "Gmail", desc: "搜索邮件" },
-              { icon: "📁", name: "Google Drive", desc: "搜索文档" },
-              { icon: "💬", name: "Slack", desc: "搜索消息和频道" },
-            ].map((item) => (
-              <div key={item.name} className="flex items-center gap-3 p-2.5 rounded-lg opacity-50">
-                <span className="text-lg">{item.icon}</span>
-                <div className="flex-1">
-                  <div className="text-sm font-medium">{item.name}</div>
-                  <div className="text-xs text-zinc-500">{item.desc}</div>
-                </div>
-                <span className="text-xs text-zinc-400 bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 rounded">
-                  即将推出
-                </span>
-              </div>
-            ))}
-          </div>
+          {error && <div className="text-xs text-red-500">{error}</div>}
         </div>
 
         {/* Footer */}
         <div className="px-6 py-3 border-t border-zinc-200 dark:border-zinc-700 flex items-center justify-between">
-          <span className="text-xs text-zinc-400">连接后，同步的内容可被 AI 检索引用</span>
-          <button onClick={() => { navigate("/tasks"); onClose(); }}
-            className="text-xs text-blue-500 hover:underline">
-            前往完整管理页面 →
-          </button>
+          <span className="text-xs text-zinc-400">连接后，AI 可通过 MCP 工具检索其中内容</span>
         </div>
       </div>
     </div>

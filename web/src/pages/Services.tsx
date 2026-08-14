@@ -19,7 +19,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Plus, Server, Cloud, Cpu, Search, ClipboardList } from "lucide-react";
+import { Plus, Server, Cloud, Cpu, Search } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useTranslation } from "react-i18next";
 import { getErrorMessage } from "@/lib/utils";
@@ -40,7 +40,6 @@ import type {
   ProviderUpdate,
 } from "@/api/providers";
 import type { LLMModel, ModelCreate, ModelUpdate } from "@/api/models";
-import { ExamsTabContent } from "@/pages/exams";
 
 export function ServicesPage() {
   const { toast } = useToast();
@@ -375,29 +374,20 @@ export function ServicesPage() {
                 <Cpu className="h-4 w-4" />
                 {t("services.page.tabs.models")}
               </TabsTrigger>
-              <TabsTrigger
-                value="exams"
-                className="gap-2 rounded-md px-3 py-2 text-muted-foreground transition-colors data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-xs sm:px-4"
-              >
-                <ClipboardList className="h-4 w-4" />
-                {t("services.page.tabs.exams", "考试管理")}
-              </TabsTrigger>
             </TabsList>
           </div>
 
           <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
-            {activeTab !== "exams" && (
-              <div className="relative w-full sm:w-60">
-                <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-                <Input
-                  aria-label={t("services.page.searchPlaceholder", "Search...")}
-                  placeholder={t("services.page.searchPlaceholder", "Search...")}
-                  value={searchInput}
-                  onChange={(e) => setSearchInput(e.target.value)}
-                  className="h-9 rounded-md border-border/60 bg-background pl-9 transition-colors focus:bg-background"
-                />
-              </div>
-            )}
+            <div className="relative w-full sm:w-60">
+              <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+              <Input
+                aria-label={t("services.page.searchPlaceholder", "Search...")}
+                placeholder={t("services.page.searchPlaceholder", "Search...")}
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                className="h-9 rounded-md border-border/60 bg-background pl-9 transition-colors focus:bg-background"
+              />
+            </div>
 
             {activeTab === "services" && (
               <div className="w-full sm:w-auto [&_button]:w-full sm:[&_button]:w-auto">
@@ -542,11 +532,6 @@ export function ServicesPage() {
                 />
               </div>
             )}
-          </TabsContent>
-
-          {/* Exams Tab */}
-          <TabsContent value="exams" className="mt-0 focus-visible:outline-hidden focus-visible:ring-0">
-            <ExamsTabContent />
           </TabsContent>
         </div>
       </Tabs>

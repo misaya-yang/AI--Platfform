@@ -380,7 +380,6 @@ test("frontend flag hides Agent Studio while Assistant, Knowledge, Eval, and Sha
     if (url.pathname.endsWith("/tools")) return route.fulfill(json({ tools: [] }));
     if (url.pathname.includes("/sessions")) return route.fulfill(json([]));
     if (url.pathname === "/api/v1/connectors/mine" || url.pathname === "/api/v1/connectors/available") return route.fulfill(json([]));
-    if (url.pathname === "/api/v1/confluence/connections") return route.fulfill(json([]));
     if (url.pathname === "/api/v1/skills") return route.fulfill(json({ skills: [] }));
     if (url.pathname === "/api/v1/mcp/servers") return route.fulfill(json({ servers: [] }));
     if (url.pathname.endsWith("/datasets")) return route.fulfill(json([]));

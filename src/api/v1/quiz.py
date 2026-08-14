@@ -1,10 +1,10 @@
 """
-Quiz API — Generate, take, and grade quizzes from KB content.
+Quiz API — DEPRECATED shim. The supported path is the in-chat ``generate_quiz``
+assistant tool (apps/assistant-service/core/tools/quiz_tool.py), documented by
+the ai-quiz agent plugin (agent-plugins/ai-quiz).
 
-Endpoints:
+Endpoints (load-bearing only):
 - POST /assistant/quiz/generate         — Generate a new quiz
-- POST /assistant/quiz/generate/stream   — Generate with SSE progress
-- GET  /assistant/quiz/list              — List user's quizzes
 - GET  /assistant/quiz/{quiz_id}         — Get quiz details (no answers)
 - POST /assistant/quiz/{quiz_id}/submit  — Submit answers for grading
 - GET  /assistant/quiz/{quiz_id}/attempts — List attempts for a quiz
@@ -17,10 +17,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
 from typing import Any
 
-import asyncpg
 import httpx
 from ai_gateway_core.auth.gateway_secret import GatewaySecret
 from ai_gateway_core.quiz import (
@@ -30,7 +28,6 @@ from ai_gateway_core.quiz import (
     QuizShareManager,
 )
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ...core.auth.user_resolver import UserContext
@@ -81,11 +78,6 @@ class QuizGenerateResponse(BaseModel):
     difficulty: str
     question_count: int
     questions: list[dict[str, Any]]
-
-
-class QuizListResponse(BaseModel):
-    quizzes: list[dict[str, Any]]
-    total: int
 
 
 class QuizAttemptResponse(BaseModel):
@@ -302,98 +294,6 @@ async def generate_quiz(
     return quiz
 
 
-@router.post("/generate/stream")
-async def generate_quiz_stream(
-    body: QuizGenerateRequest,
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-):
-    """Generate a quiz with SSE progress events."""
-    _require_quiz_generation_actor(user)
-    await enforce_rate_limit(request, user, operation="quiz_generate")
-    svc = _get_quiz_service(request, user=user)
-    kb_service = getattr(request.app.state, "knowledge_service", None) or getattr(request.app.state, "kb_proxy", None)
-    if kb_service is None:
-        raise HTTPException(503, "Knowledge service not available")
-
-    def _sse(event_type: str, data: Any) -> str:
-        payload = {"event_type": event_type, "data": data, "timestamp": time.time()}
-        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-    async def event_generator():
-        try:
-            yield _sse("quiz:status", {"message": "Retrieving knowledge base content..."})
-
-            all_chunks: list[dict[str, Any]] = []
-            query = body.topic or "key concepts and important information"
-
-            for dataset_id in body.dataset_ids:
-                try:
-                    results, _meta = await kb_service.retrieve(
-                        user=user, dataset_id=dataset_id, query=query, top_k=12, mode="hybrid",
-                    )
-                    for r in results:
-                        all_chunks.append({
-                            "content": r.text, "score": r.score,
-                            "metadata": r.metadata or {},
-                            "segment_id": getattr(r, "segment_id", None),
-                            "document_id": getattr(r, "document_id", None),
-                        })
-                except Exception as e:
-                    logger.warning(f"Failed to retrieve from dataset {dataset_id}: {e}")
-
-            yield _sse("quiz:status", {"message": f"Retrieved {len(all_chunks)} relevant passages"})
-
-            if not all_chunks:
-                yield _sse("quiz:error", {"message": "No content retrieved from datasets"})
-                return
-
-            yield _sse("quiz:status", {"message": "Generating questions..."})
-
-            quiz = await svc.create_quiz(
-                tenant_id=user.tenant_id, user_id=user.user_id,
-                dataset_ids=body.dataset_ids, kb_chunks=all_chunks,
-                topic=body.topic, question_count=body.question_count,
-                question_types=body.question_types, difficulty=body.difficulty,
-                language=body.language, model_id=body.model_id,
-            )
-
-            yield _sse("quiz:status", {"message": "Quiz ready!"})
-            yield _sse("quiz:ready", quiz)
-
-        except Exception as e:
-            logger.error(f"Quiz stream error: {e}", exc_info=True)
-            yield _sse("quiz:error", {"message": str(e)})
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
-    )
-
-
-@router.get("/list", response_model=QuizListResponse)
-async def list_quizzes(
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-    limit: int = Query(20, ge=1, le=100),
-    offset: int = Query(0, ge=0),
-):
-    """List the current user's quizzes."""
-    svc = _get_quiz_service(request, require_model_registry=False)
-    try:
-        quizzes, total = await svc.list_quizzes(
-            tenant_id=user.tenant_id,
-            user_id=user.user_id,
-            limit=limit,
-            offset=offset,
-        )
-    except asyncpg.UndefinedTableError:
-        logger.warning("Quiz tables are not initialized; returning empty quiz list")
-        quizzes, total = [], 0
-    return QuizListResponse(quizzes=quizzes, total=total)
-
-
 @router.get("/{quiz_id}")
 async def get_quiz(
     quiz_id: str,
@@ -442,44 +342,6 @@ async def list_attempts(
     svc = _get_quiz_service(request, require_model_registry=False)
     return await svc.list_attempts(
         quiz_id, user.tenant_id, user.user_id, limit=limit, offset=offset,
-    )
-
-
-@router.get("/{quiz_id}/attempts/export")
-async def export_attempts_csv(
-    quiz_id: str,
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-):
-    """Export attempts as CSV (creator only)."""
-    import csv
-    import io
-
-    svc = _get_quiz_service(request, require_model_registry=False)
-    data = await svc.list_attempts(quiz_id, user.tenant_id, user.user_id, limit=10000, offset=0)
-    attempts = data.get("attempts", [])
-
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(["Name", "Score", "Correct", "Total", "Percentage", "Completed At", "Status"])
-    for a in attempts:
-        pct = f"{a['total_score'] * 100:.0f}%" if a.get("total_score") is not None else ""
-        writer.writerow([
-            a.get("display_name") or a.get("user_id") or "Anonymous",
-            a.get("total_score", ""),
-            a.get("correct_count", ""),
-            a.get("total_count", ""),
-            pct,
-            a.get("completed_at", ""),
-            a.get("status", ""),
-        ])
-
-    from fastapi.responses import Response
-
-    return Response(
-        content=buf.getvalue(),
-        media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="quiz-{quiz_id[:8]}-results.csv"'},
     )
 
 

@@ -98,56 +98,6 @@ async function installDynamicRouteHarness(page: Page) {
     },
   ]);
 
-  await routeJson(page, "**/api/v1/exams/00000000-0000-4000-8000-000000000044", {
-    exam_id: "00000000-0000-4000-8000-000000000044",
-    quiz_id: "00000000-0000-4000-8000-000000000041",
-    title: "AI Gateway Demo Exam",
-    description: "A published exam record for local route smoke checks.",
-    status: "published",
-    published_by: "dynamic-route-user",
-    question_count: 1,
-    attempt_count: 0,
-    avg_score: null,
-    deadline: null,
-    max_retakes: 1,
-    time_limit_minutes: null,
-    passing_score: 0.6,
-    share_id: "00000000-0000-4000-8000-000000000043",
-    share_code: "demo-quiz",
-    created_at: nowIso(),
-    updated_at: nowIso(),
-  });
-
-  await routeJson(page, "**/api/v1/exams/00000000-0000-4000-8000-000000000044/attempts**", {
-    attempts: [],
-    total: 0,
-  });
-
-  await routeJson(page, "**/api/v1/exams/00000000-0000-4000-8000-000000000044/stats", {
-    total_participants: 0,
-    avg_score: null,
-    min_score: null,
-    max_score: null,
-    passed: 0,
-    pass_rate: 0,
-    passing_score: 0.6,
-    score_distribution: {},
-    per_question: [
-      {
-        question_num: 1,
-        question_text: "Which route family is under smoke coverage?",
-        correct_answer: "A",
-        correct_rate: 0,
-        total_answered: 0,
-        most_common_wrong: null,
-      },
-    ],
-  });
-
-  await routeJson(page, "**/api/v1/exams/00000000-0000-4000-8000-000000000044/reports", {
-    reports: [],
-  });
-
   await routeJson(page, "**/api/v1/assistant/shares/demo-share", {
     share_code: "demo-share",
     title: "Open-source demo conversation",
@@ -227,7 +177,7 @@ function watchRuntimeFailures(page: Page) {
 }
 
 test.describe("dynamic route render smoke", () => {
-  test("renders protected dynamic knowledge and exam routes with seeded API responses", async ({
+  test("renders protected dynamic knowledge routes with seeded API responses", async ({
     page,
   }) => {
     const assertNoRuntimeFailures = watchRuntimeFailures(page);
@@ -236,10 +186,6 @@ test.describe("dynamic route render smoke", () => {
     await page.goto("/knowledge/demo-kb-ai-gateway", { waitUntil: "domcontentloaded" });
     await expect(page.getByText("AI Gateway Demo Knowledge Base")).toBeVisible();
     await expect(page.getByText("Local Quickstart Runbook")).toBeVisible();
-
-    await page.goto("/exams/00000000-0000-4000-8000-000000000044", { waitUntil: "domcontentloaded" });
-    await expect(page.getByRole("heading", { name: "AI Gateway Demo Exam" })).toBeVisible();
-    await expect(page.getByText(/0 人参与|暂无考生|No participants/i).first()).toBeVisible();
 
     assertNoRuntimeFailures();
   });

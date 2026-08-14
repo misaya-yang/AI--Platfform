@@ -185,19 +185,6 @@ test.describe("Quiz workflow", () => {
       page.getByRole("heading", { name: publicQuiz.title }).first(),
     ).toBeVisible({ timeout: 10_000 });
 
-    // --- Step 9: List quizzes ---
-    const listRes = await request.get(
-      `${apiUrl}/api/v1/assistant/quiz/list`,
-      { headers },
-    );
-    expect(listRes.ok()).toBeTruthy();
-    const listData = await listRes.json();
-    expect(listData.quizzes).toBeDefined();
-    const found = listData.quizzes.find(
-      (q: Record<string, unknown>) => q.quiz_id === quizId,
-    );
-    expect(found).toBeTruthy();
-
     // --- Step 10: Delete quiz ---
     const delRes = await request.delete(
       `${apiUrl}/api/v1/assistant/quiz/${quizId}`,

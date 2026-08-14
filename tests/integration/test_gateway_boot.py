@@ -19,7 +19,7 @@ def test_gateway_boot_imports_resolve() -> None:
     Exercises every router-level import chain:
       src.main
         → src.api.router
-            → src.api.v1.{assistant,quiz,exams,skills,mcp,connectors,
+            → src.api.v1.{assistant,quiz,skills,mcp,connectors,
                           models,health,tool_inventory,conversation_shares}
                 → assistant_service.core.*   (gateway→assistant bridge)
                 → ai_gateway_core.*          (shared primitives)

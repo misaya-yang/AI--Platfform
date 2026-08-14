@@ -4,7 +4,6 @@
 
 import { api } from "@/lib/api";
 import type { QuizData, QuizAttemptResult } from "@/pages/assistant/types";
-import { useAuthStore } from "@/store/useAuthStore";
 
 export interface GenerateQuizRequest {
   dataset_ids: string[];
@@ -60,79 +59,6 @@ export async function submitSharedQuiz(
     throw new Error(`Share quiz submit failed: ${resp.status}`);
   }
   return resp.json();
-}
-
-export async function listQuizzes(params?: {
-  limit?: number;
-  offset?: number;
-}): Promise<{ quizzes: QuizData[]; total: number }> {
-  const { data } = await api.get<{ quizzes: QuizData[]; total: number }>(
-    "/api/v1/assistant/quiz/list",
-    { params },
-  );
-  return data;
-}
-
-export async function generateQuizStream(
-  data: GenerateQuizRequest,
-  onStatus: (message: string) => void,
-  onReady: (quiz: QuizData) => void,
-  onError: (message: string) => void,
-  signal?: AbortSignal,
-): Promise<void> {
-  const bearerToken = useAuthStore.getState().token || "";
-
-  const resp = await fetch("/api/v1/assistant/quiz/generate/stream", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
-    },
-    body: JSON.stringify(data),
-    signal,
-  });
-
-  if (!resp.ok || !resp.body) {
-    onError(`Generation failed: ${resp.status}`);
-    return;
-  }
-
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() || "";
-
-    for (const part of parts) {
-      const dataLine = part.split("\n").find((l) => l.startsWith("data:"));
-      if (!dataLine) continue;
-      const jsonStr = dataLine.slice(5).trim();
-      if (!jsonStr || jsonStr === "[DONE]") continue;
-
-      try {
-        const event = JSON.parse(jsonStr);
-        switch (event.event_type) {
-          case "quiz:status":
-            onStatus(event.data?.message || "");
-            break;
-          case "quiz:ready":
-            onReady(event.data);
-            break;
-          case "quiz:error":
-            onError(event.data?.message || "Generation failed");
-            break;
-        }
-      } catch {
-        // Skip malformed events
-      }
-    }
-  }
 }
 
 export async function deleteQuiz(quizId: string): Promise<void> {
