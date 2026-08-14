@@ -565,7 +565,7 @@ def create_app() -> FastAPI:
                 key_prefix=getattr(getattr(settings, "storage", None), "key_prefix", None) or "",
             )
             # Get signing key for local file URLs (security)
-            signing_key = getattr(getattr(settings, "confluence", None), "encryption_key", "") or ""
+            signing_key = getattr(getattr(settings, "image_signing", None), "encryption_key", "") or ""
             image_storage_service = ImageStorageService(storage_config, signing_key=signing_key)
             app.state.image_storage_service = image_storage_service
             url_signing = "enabled" if signing_key else "disabled"

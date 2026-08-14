@@ -258,23 +258,6 @@ class TestDatabaseMigration:
 class TestHardcodedValueRemoval:
     """硬编码值移除测试"""
 
-    def test_no_hardcoded_domain_in_connection_create(self):
-        """测试 ConnectionCreate.tsx 中没有硬编码域名"""
-
-        file_path = "web/src/pages/confluence/ConnectionCreate.tsx"
-
-        with open(file_path, encoding="utf-8") as f:
-            content = f.read()
-
-        # 检查不包含硬编码的域名
-        assert "yourcompany.atlassian.net" not in content, (
-            "Should not contain hardcoded domain 'yourcompany.atlassian.net'"
-        )
-
-        # 检查域名默认值是空字符串
-        assert 'domain: ""' in content, "Domain default value should be empty string"
-
-
 class TestCryptoUtilities:
     """加密工具测试"""
 
@@ -421,18 +404,6 @@ class TestAsyncTaskHandling:
         # Check that the method exists
         assert hasattr(ConfluenceSyncService, "_create_background_task")
         assert hasattr(ConfluenceSyncService, "_handle_task_exception")
-
-
-class TestClientCaching:
-    """客户端缓存测试"""
-
-    def test_client_cache_ttl_setting(self):
-        """测试客户端缓存 TTL 设置存在"""
-        from src.config.settings import ConfluenceSettings
-
-        settings = ConfluenceSettings()
-        assert hasattr(settings, "client_cache_ttl_seconds")
-        assert settings.client_cache_ttl_seconds == 300  # Default 5 minutes
 
 
 # 运行测试的入口

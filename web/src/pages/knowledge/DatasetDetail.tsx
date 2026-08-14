@@ -142,9 +142,6 @@ const FILE_TYPE_CATEGORIES = {
 
 function getDatasetMainTab(searchParams: URLSearchParams): DatasetMainTab {
   const requestedTab = searchParams.get("tab");
-  if (requestedTab === "sync" || requestedTab === "confluence") {
-    return "sources";
-  }
   return DATASET_MAIN_TABS.includes(requestedTab as DatasetMainTab)
     ? (requestedTab as DatasetMainTab)
     : "documents";
@@ -208,16 +205,8 @@ export function KnowledgeDatasetDetailPage() {
   );
 
   useEffect(() => {
-    const requestedTab = searchParams.get("tab");
     const nextTab = getDatasetMainTab(searchParams);
     setMainTab((currentTab) => currentTab === nextTab ? currentTab : nextTab);
-
-    if (requestedTab === "sync" || requestedTab === "confluence") {
-      const normalizedParams = new URLSearchParams(searchParams);
-      normalizedParams.set("tab", "sources");
-      normalizedParams.set("source", "confluence");
-      setSearchParams(normalizedParams, { replace: true });
-    }
   }, [searchParams, setSearchParams]);
 
   function handleMainTabChange(tab: DatasetMainTab) {
