@@ -16,9 +16,9 @@
 | 8 个真实企业任务三方对标 | 完成 | AI--Platfform 6/8；Hermes 5/8；OpenClaw 5/8；24/24 有终态，基础设施错误 0。公开摘要：`reports/benchmark/native-agent-parity-summary-2026-08-13.json`。 |
 | P0-1 默认失控循环拦截 | 完成 | canonical `AgentLoop` 默认接入 time/call/repeat/checklist/trace；真实 fake-provider 重复调用测试证明第 4 次在副作用前拒绝。 |
 | P0-2 内部异常可诊断 | 完成 | `ai_gateway_core.logging._exceptions` 统一输出稳定事件码、类型、指纹、有界代码坐标和关联上下文；禁止 message/args/locals/raw traceback；AST 门禁覆盖 Assistant 及共享 memory/skill 吞错边界。 |
-| P1-1 启动配置真值 | 完成 | 单一 immutable typed snapshot 同时进入启动日志、readiness、trace metadata 和 canonical context；实时指纹为 `sha256:295335558e1b368049bcfb11b6861fd9db9b6e462ad533b09c1c67901885c518`。 |
+| P1-1 启动配置真值 | 完成 | 单一 immutable typed snapshot 同时进入启动日志、readiness、trace metadata 和 canonical context；指纹在启动时实时计算（环境相关、未 pin，随 secrets 存在性 / build 版本 / source 变化），例如 `sha256:295335558e1b368049bcfb11b6861fd9db9b6e462ad533b09c1c67901885c518`。 |
 | P2-1 migration fixture 闭包 | 完成 | channel runtime PostgreSQL fixture 执行到 migration 081，保持附件物理占用语义。 |
-| P2-2 SSE 单事件上界 | 完成 | shared transport seam 强制 64 KiB JSON data 上界；闭集大字段转 tenant/user/session scoped redacted artifact；存储或限界失败均 fail closed。 |
+| P2-2 SSE 单事件上界 | 完成 | shared transport seam 强制 64 KiB JSON data 上界；整体超限时才把闭集大字段转 tenant/user/session scoped redacted artifact；存储或限界失败均 fail closed。 |
 | canonical AgentLoop 唯一执行面 | 保持 | benchmark AI 入口为 Gateway → Assistant → `_execute_agent_loop`; Responses 是同一事件流的 adapter，无第二个 loop。 |
 | 企业边界 | 保持 | 未放宽多租户、KB dataset 权限、审批、CapabilityAllowlist、sandbox 或脱敏；production ToolInvoker 注入 tenant-scoped durable audit。 |
 
@@ -117,18 +117,21 @@
 
 ### P0-1　接线可靠性中间件
 
-`core/agent/middlewares/harness.py` 提供 5 个中间件——`CallLimit`、`LoopDetection`、
-`TimeBudget`、`PreCompletionChecklist`、`TraceSensor`——文件顶部写着 "intentionally not
-registered by default"，**生产引用数 0**，只有测试引用。生产链
-（`agent_loop.py:_build_default_middleware_chain`，`chain.add` 共 3 处）只有 `RuntimeMemory` /
-`ToolOutputSpill` / `ResponseCap`。
+`core/agent/middlewares/harness.py` 提供 5 个中间件——`CallLimitMiddleware`、`LoopDetectionMiddleware`、
+`TimeBudgetMiddleware`、`PreCompletionChecklistMiddleware`、`TraceSensorMiddleware`——现已**无条件注册进
+默认生产链**（`agent_loop.py:_build_default_middleware_chain`，`chain.add` 共 8 处：上述 5 个 +
+`RuntimeMemoryMiddleware` / `ToolOutputSpillMiddleware` / `ResponseCapMiddleware`），不再有
+"intentionally not registered by default" 的陈旧声明。阈值（默认 call 256 / repeat 3 / time 1800s /
+trace 256 events 64 errors）在调用时从 `ctx.config` 与 canonical `RunBudget` 解析，可按租户/执行档位覆盖。
 
 失控循环在服务端沙箱里是烧 token，在 Local OS 场景下是在用户真机上反复改文件、反复调外部服务。
 
 **验收**　5 个注册进默认链，阈值可配、可按租户/执行档位覆盖；**结果级证明**——构造真实会重复
 调用同一工具的对话，抓 SSE 流证明拦截发生；默认阈值宽到接线前后全量失败数不变。
+（`test_agentloop_streaming_first_contract.py::test_default_loop_detection_denies_fourth_identical_tool_dispatch`
+以真实 AgentLoop + fake-provider 证明第 4 次重复调度在副作用前被拒绝，`invocation_count == 3`。）
 
-**边界**　`harness.py:140` 的 `if False: yield None` **不要"修"**。它让该函数成为 async
+**边界**　`harness.py:266-267` 的 `if False: yield None` **不要"修"**。它让该函数成为 async
 generator，`MiddlewareChain.run_on_error` 用 `async for` 迭代，删掉会直接坏。可换写法，但须保持
 async generator 语义。
 
@@ -185,8 +188,12 @@ false）、`.env.example`、`docker-compose.yml:538` 三处一致写 `false`；
 
 ### P2-2　单事件传输上界
 
-本轮已修掉 turn_state 的二次增长（每事件恒定 ~450 B，单轮 128 KB → 32 KB）。剩余最大单项是
-`context_budget`：单条 8.7–10 KB 的 context_packet 全量转储。
+本轮已修掉 turn_state 的二次增长（每事件恒定 ~450 B，单轮 128 KB → 32 KB）。`sse_event_transport.py`
+在传输缝对每个 `data:` payload 强制 64 KiB 上界（`SSE_DATA_PAYLOAD_MAX_BYTES`）：低于上界原样放行；
+**整体超限**时才把闭集大字段（`context_packet`/`context_detail`/`provenance`/`debug`/`tool_result`/
+`result`/`context_snapshot`）脱敏后转 tenant/user/session scoped artifact，事件只留 ID；存储或限界
+失败均 fail closed，终态事件永不改写。注意这是"封顶 + 超限 spill"，不是逐字段策略——单条
+`context_budget`（约 8.7–10 KB）低于上界，仍原样内联传输。
 
 **验收**　测试断言任意单条 SSE 事件 payload 小于硬上界；超限走 artifact 引用，事件只留 ID，
 且内容仍可通过 ID 完整取回。
@@ -265,3 +272,30 @@ PYTHONPATH=apps/assistant-service/src:packages/ai-gateway-core/src \
 ```
 
 禁止将单题预检、失败的 `final6`、历史 replay 或非空输出替代上述完整 `final7` 汇总。更强的三次重复 E5 cohort 仍需新 suite ID 和新证据目录，不能覆盖本次最小验收语义。
+
+---
+
+## 附 2：2026-08-14 残留修复复核证据
+
+在 08-13 对标交付之后，按本 runbook 的缺陷清单做了一轮"残留修复"（提交序列
+`b67d476..df6fd89`，全部在 `main`）：P1 session-KB 绑定、working-memory settle 归档、
+python_executable 守卫、requires_confirmation 盖章、异常门禁扩到全 ai-gateway-core + 站点迁移、
+门禁接入 CI、死 RAG 分析集群删除、死中间件删除。全库回归（postgres 已启动）：
+
+```text
+分支        main
+Assistant   2455 passed, 1 skipped, 0 failed
+tests/database  52 passed, 0 failed（依赖本地 PostgreSQL 127.0.0.1:5432）
+全量非集成  5966 passed, 6 skipped, 0 failed, 0 errors
+```
+
+```bash
+# 需要先启动 postgres：docker compose up -d postgres
+.venv/bin/python -m pytest tests/ -q --no-header --no-cov --ignore=tests/integration
+PYTHONPATH=apps/assistant-service/src:packages/ai-gateway-core/src \
+  uv run --package assistant-service pytest -q --no-cov tests/services/assistant
+```
+
+注：`tests/database` 与 3 个 `tests/services/eval/test_coding_parallel_fixture` 用例依赖 docker
+daemon / 本地 PostgreSQL；daemon 未启动时分别报 50 个 ERROR（连接拒绝）与 3 个 FAILED
+（sandbox image 无法 inspect），均为环境问题、非代码回归。启动 postgres 后全部归零。
