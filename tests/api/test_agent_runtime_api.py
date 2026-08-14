@@ -1084,3 +1084,49 @@ async def test_database_repository_hashes_raw_token_and_rejects_past_expiry() ->
             scopes=["chat:write"],
             expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
         )
+
+
+def test_confirmation_stamp_only_pins_definitions_that_confirm() -> None:
+    """High/critical platform bindings are pinned only when the live
+    definition actually supports confirmation; otherwise enforcement stays
+    fail-closed at runtime instead of a misleading snapshot pin."""
+    # Non-platform or non-high-risk bindings are never stamped.
+    assert (
+        runtime_module._confirmation_stamp(
+            {"risk": "high"}, risk="high", runtime_type="mcp", definition=None
+        )
+        == {"risk": "high"}
+    )
+    assert (
+        runtime_module._confirmation_stamp(
+            {}, risk="medium", runtime_type="platform", definition=None
+        )
+        == {}
+    )
+
+    # An existing pin is preserved as-is.
+    pinned = {"requires_confirmation": False}
+    result = runtime_module._confirmation_stamp(
+        dict(pinned), risk="high", runtime_type="platform", definition=None
+    )
+    assert result == pinned
+
+    # A definition that supports confirmation gets stamped.
+    stamped = runtime_module._confirmation_stamp(
+        {},
+        risk="critical",
+        runtime_type="platform",
+        definition=SimpleNamespace(requires_confirmation=True),
+    )
+    assert stamped["requires_confirmation"] is True
+
+    # An unresolvable or non-confirming definition is left unpinned.
+    assert "requires_confirmation" not in runtime_module._confirmation_stamp(
+        {}, risk="high", runtime_type="platform", definition=None
+    )
+    assert "requires_confirmation" not in runtime_module._confirmation_stamp(
+        {},
+        risk="high",
+        runtime_type="platform",
+        definition=SimpleNamespace(requires_confirmation=False),
+    )

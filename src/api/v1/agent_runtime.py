@@ -14,6 +14,7 @@ from typing import Any
 
 from ai_gateway_core.agents import AgentRuntimeSigner, runtime_sha256
 from ai_gateway_core.exceptions import PermissionDeniedError
+from ai_gateway_core.logging import get_logger
 from ai_gateway_core.persistence.repositories.agent_repository import (
     AgentNotFoundError,
     AgentRepositoryError,
@@ -44,6 +45,12 @@ from ._assistant_proxy import (
 from .files import MAX_FILE_SIZE_BYTES, _stream_upload_file, get_mime_type, validate_file_extension
 
 router = APIRouter(tags=["Agent Studio Runtime"])
+
+logger = get_logger(__name__)
+
+# High-risk platform capabilities whose snapshot binding carries no
+# confirmation pin.  Reported once per capability id per process.
+_unpinned_high_risk_platform: set[str] = set()
 
 class RedisAgentChannelLimiter:
     """One atomic Redis decision across principal, IP and Publication buckets."""
@@ -529,6 +536,32 @@ def _assert_attachments_allowed(
         )
 
 
+def _confirmation_stamp(
+    binding_config: dict[str, Any],
+    *,
+    risk: str,
+    runtime_type: str,
+    definition: Any | None,
+) -> dict[str, Any]:
+    """Decide the platform high/critical confirmation pin.
+
+    The gateway cannot resolve the assistant's live tool definitions, so
+    callers normally pass ``definition=None``.  Stamping True
+    unconditionally was inert for enforcement — the runtime validates
+    against the live definition and fails closed when a high/critical
+    tool cannot confirm — while writing a misleading pin into the
+    snapshot.  Stamp only when the live definition actually supports
+    confirmation; otherwise leave the binding unpinned.
+    """
+    if runtime_type != "platform" or risk not in {"high", "critical"}:
+        return binding_config
+    if "requires_confirmation" in binding_config:
+        return binding_config
+    if definition is not None and bool(getattr(definition, "requires_confirmation", False)):
+        binding_config["requires_confirmation"] = True
+    return binding_config
+
+
 async def _build_snapshot(
     request: Request,
     resolution: dict[str, Any],
@@ -594,12 +627,25 @@ async def _build_snapshot(
             continue
         if risk in {"high", "critical"} and not policy["high_risk_tools"]:
             continue
+        binding_config = _confirmation_stamp(
+            binding_config,
+            risk=risk,
+            runtime_type=runtime_type,
+            definition=None,  # gateway cannot resolve assistant tool definitions
+        )
         if (
             runtime_type == "platform"
             and risk in {"high", "critical"}
             and "requires_confirmation" not in binding_config
         ):
-            binding_config["requires_confirmation"] = True
+            capability_id = str(binding.get("resource_id") or binding.get("id") or "")
+            if capability_id not in _unpinned_high_risk_platform:
+                _unpinned_high_risk_platform.add(capability_id)
+                logger.warning(
+                    "High-risk platform capability bound without a confirmation pin "
+                    "(capability_id=%s); enforcement stays fail-closed at runtime",
+                    capability_id,
+                )
         if not user.is_authenticated and channel in {"hosted", "embed"}:
             mutating = bool(
                 binding_config.get("write")

@@ -646,7 +646,7 @@ async def test_gateway_capability_resolver_cannot_mutate_bound_metadata() -> Non
 
 
 @pytest.mark.asyncio
-async def test_preview_snapshot_enables_high_risk_tools_and_stamps_confirmation() -> None:
+async def test_preview_snapshot_enables_high_risk_tools_without_misleading_pin() -> None:
     class ModelResolver:
         def resolve(self, **_kwargs: Any) -> dict[str, Any]:
             return {"id": "qwen3.7-plus", "provider": "dashscope"}
@@ -678,6 +678,9 @@ async def test_preview_snapshot_enables_high_risk_tools_and_stamps_confirmation(
     )
 
     assert snapshot["channel_policy"]["high_risk_tools"] is True
+    # The gateway cannot resolve the live tool definition, so no
+    # confirmation pin is fabricated into the snapshot; runtime validation
+    # stays fail-closed against the real definition.
     assert snapshot["capabilities"] == [
         {
             "type": "platform",
@@ -685,7 +688,7 @@ async def test_preview_snapshot_enables_high_risk_tools_and_stamps_confirmation(
             "version": None,
             "schema_hash": None,
             "risk": "high",
-            "config": {"requires_confirmation": True},
+            "config": {},
         }
     ]
 
