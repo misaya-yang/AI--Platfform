@@ -1,6 +1,7 @@
 {
   "common": {
     "retry": "Retry",
+    "serverDefault": "Server default",
     "cancel": "Cancel",
     "back": "Back",
     "continue": "Continue",

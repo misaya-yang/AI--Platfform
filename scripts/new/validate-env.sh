@@ -695,6 +695,11 @@ validate_config() {
             fail "MODEL_SETUP_MODE must be one of: ui, environment."
             ;;
     esac
+    # Optional format check: DEFAULT_MODEL is never required, but when set it
+    # must be non-empty (the server default model for omitted model_id).
+    if env_file_has_key DEFAULT_MODEL && [ -z "$(env_value DEFAULT_MODEL)" ]; then
+        fail "DEFAULT_MODEL must be non-empty when set."
+    fi
     case "$embedding_provider" in
         gemini|dashscope|siliconflow)
             ;;

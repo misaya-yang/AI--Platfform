@@ -540,7 +540,7 @@ export function createDefaultAgentSpec(): AgentSpec {
     },
     instructions: DEFAULT_AGENT_INSTRUCTIONS,
     model: {
-      model_id: "qwen3.7-plus",
+      model_id: "", // empty → the server applies its deployment default
       provider_id: "dashscope",
       temperature: 0.3,
       max_tokens: 4096,

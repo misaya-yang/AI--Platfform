@@ -75,6 +75,14 @@
   in `README.md` and `DEPLOY.md`.
 - CI now verifies the harness contract and the syntax of the deploy scripts.
 
+### Model defaults
+
+- Made `DEFAULT_MODEL` (unprefixed env var) the single deployment default:
+  SDKs, the console, and the gateway now omit `model_id` unless a caller
+  explicitly requests one, and the assistant service applies the deployment
+  default. Added `.env.example` `DEFAULT_MODEL` documentation with an
+  optional non-empty format check in `validate-env.sh`.
+
 ### Runtime
 
 - Bundled document generation as the trusted `ai-docgen` Agent Plugin inside

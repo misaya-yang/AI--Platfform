@@ -11,6 +11,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from ..gateway import RoutedAssistantRequest
+from ..models.defaults import DEFAULT_MODEL
 from ..rag.context_engine import ContextStructure
 from ..rag.context_metrics import ContextMetricsBuilder
 from ..run_budget import RunBudget, RunBudgetLimits
@@ -223,7 +224,7 @@ class AgentLoopConfig:
     """
 
     # Model configuration
-    model_id: str = "qwen3.7-plus"
+    model_id: str = DEFAULT_MODEL
     # Trusted internal provider pin copied only from a verified Agent Snapshot.
     model_provider_id: str | None = field(default=None, repr=False)
     temperature: float = 0.5  # Lower for more deterministic answers (was 0.7)

@@ -27,7 +27,19 @@ from ai_gateway_core.config.endpoints import (
 )
 
 _SCHEMA_VERSION = "assistant-startup-config/v1"
-_DEFAULT_MODEL = "qwen3.7-plus"
+
+
+def _default_model() -> str:
+    """Deployment default model.
+
+    Lazy import: ``core.models``'s package init pulls in modules that
+    import this one, so a module-level import would be circular.
+    """
+    from ..core.models.defaults import DEFAULT_MODEL
+
+    return DEFAULT_MODEL
+
+
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _PRIMITIVE_TRUTHY = frozenset({"1", "true", "yes"})
 _SAFE_BUILD_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@:+-]{0,255}$")
@@ -185,6 +197,9 @@ _SETTING_SPECS = (
         "string",
         choices=frozenset({"chat_completions", "responses_v1"}),
     ),
+    # Unprefixed deployment-wide default applied when a caller omits
+    # model_id; mirrors core/models/defaults.py.
+    _SettingSpec("DEFAULT_MODEL", "qwen3.7-plus", "string"),
 )
 _SPECS_BY_NAME = MappingProxyType({spec.name: spec for spec in _SETTING_SPECS})
 
@@ -390,7 +405,7 @@ class StartupConfigSnapshot:
                 for name, configured in sorted(self.secrets.items())
             },
             "model": {
-                "default": {"value": _DEFAULT_MODEL, "source": "code_default"},
+                "default": {"value": _default_model(), "source": "code_default"},
             },
             "build": {name: dict(item) for name, item in sorted(self.build.items())},
         }
@@ -1358,7 +1373,7 @@ def _canonical_body(
         "secrets": {
             name: {"configured": configured} for name, configured in sorted(secrets.items())
         },
-        "model": {"default": {"value": _DEFAULT_MODEL, "source": "code_default"}},
+        "model": {"default": {"value": _default_model(), "source": "code_default"}},
         "build": {name: dict(item) for name, item in sorted(build.items())},
     }
 

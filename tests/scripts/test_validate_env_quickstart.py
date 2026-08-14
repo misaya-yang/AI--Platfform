@@ -185,6 +185,43 @@ def test_validate_env_config_still_rejects_committed_example_for_release(
     assert "change_me_generate_with_openssl" not in output
 
 
+def test_validate_env_default_model_optional_round_trip(tmp_path: Path) -> None:
+    secret = secrets.token_hex(32)
+    env_text = _valid_env_text(
+        secret=secret,
+        chat_assignment="DASHSCOPE_API_KEY=test-chat-key",
+    )
+
+    # Unset: valid — DEFAULT_MODEL is optional. Each run gets a fresh
+    # directory: _run_validate_env seeds tmp_path/bin once.
+    for run_dir in ("unset", "set", "empty"):
+        (tmp_path / run_dir).mkdir()
+    result = _run_validate_env(tmp_path / "unset", env_text, args=["--config-only"])
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "Configuration validation passed" in output
+
+    # Set to a non-empty value: valid.
+    result = _run_validate_env(
+        tmp_path / "set",
+        _set_env_value(env_text, "DEFAULT_MODEL", "my-deployment-model"),
+        args=["--config-only"],
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "Configuration validation passed" in output
+
+    # Set but empty: fails the optional non-empty format check.
+    result = _run_validate_env(
+        tmp_path / "empty",
+        _set_env_value(env_text, "DEFAULT_MODEL", ""),
+        args=["--config-only"],
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    assert "DEFAULT_MODEL must be non-empty when set" in output
+
+
 def test_validate_env_rejects_non_release_application_image_tag(
     tmp_path: Path,
 ) -> None:

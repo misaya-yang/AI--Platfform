@@ -492,7 +492,7 @@ export function AssistantPage() {
           listModels().catch(() => []),
           listDatasets().catch(() => []),
           getConfig().catch(() => ({
-            default_model_id: "qwen3.7-plus",
+            default_model_id: "", // empty → the server applies its deployment default
             available_providers: [],
             kb_enabled: false,
             web_search_enabled: false,

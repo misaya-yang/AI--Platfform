@@ -158,8 +158,9 @@ type QAChatMessage = {
   response?: QAResponse;
 };
 
+// Empty value → the server applies its deployment default.
 const QA_MODEL_OPTIONS = [
-  { value: "qwen3.7-plus", label: "Qwen 3.7 Plus", provider: "dashscope" },
+  { value: "", labelKey: "common.serverDefault", provider: "dashscope" },
 ];
 
 const QA_SYSTEM_PROMPT_KEYS = {
@@ -2097,7 +2098,7 @@ export function KnowledgeDatasetDetailPage() {
                       <SelectContent>
                         {QA_MODEL_OPTIONS.map((option) => (
                           <SelectItem key={option.value} value={option.value}>
-                            {option.label}
+                            {option.labelKey ? t(option.labelKey) : option.value}
                           </SelectItem>
                         ))}
                       </SelectContent>

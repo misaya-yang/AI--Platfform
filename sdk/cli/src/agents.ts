@@ -5,7 +5,7 @@
  * ---
  * name: code-reviewer
  * description: Review code for bugs
- * model: qwen3.7-plus
+ * model: <model-id>  # optional; the server default applies when omitted
  * maxTurns: 10
  * ---
  * ## Instructions

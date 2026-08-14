@@ -1,6 +1,7 @@
 {
   "common": {
     "retry": "重试",
+    "serverDefault": "服务端默认",
     "cancel": "取消",
     "back": "上一步",
     "continue": "继续",

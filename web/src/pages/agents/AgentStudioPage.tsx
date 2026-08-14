@@ -495,7 +495,8 @@ function AgentStudioWorkspace({
       );
     }
     if (section === "model") {
-      const modelRows = catalog.models.length ? catalog.models : [{ id: "qwen3.7-plus", name: "qwen3.7-plus", provider: "dashscope", context_window: 0, max_output_tokens: 4096, supports_vision: false, supports_tools: true }];
+      // Empty id → the server applies its deployment default when the model is omitted.
+      const modelRows = catalog.models.length ? catalog.models : [{ id: "", name: t("agents.common.serverDefault"), provider: "dashscope", context_window: 0, max_output_tokens: 4096, supports_vision: false, supports_tools: true }];
       return (
         <FieldSection title={t("agents.studio.sections.model")} description={t("agents.studio.model.description")}>
           {!canEdit && <ReadOnlyNotice />}

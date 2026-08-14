@@ -124,7 +124,8 @@ export function AgentCreatePage() {
   const skills = useQuery({ queryKey: ["agent-catalog", "skills"], queryFn: listAgentSkills, retry: false });
   const connectors = useQuery({ queryKey: ["agent-catalog", "connectors"], queryFn: listAgentConnectors, retry: false });
   const datasets = useQuery({ queryKey: ["agent-catalog", "datasets"], queryFn: listAgentDatasets, retry: false });
-  const fallbackModels = [{ id: "qwen3.7-plus", name: "qwen3.7-plus", provider: "dashscope" }];
+  // Empty id → the server applies its deployment default when the model is omitted.
+  const fallbackModels = [{ id: "", name: t("agents.common.serverDefault"), provider: "dashscope" }];
   const modelRows = models.data?.length ? models.data : fallbackModels;
   const createMutation = useMutation({
     mutationFn: () => createAgent({ name: name.trim(), description: description.trim(), spec }),

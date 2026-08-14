@@ -630,6 +630,11 @@ class Settings(BaseSettings):
     port: int = 8080
     services_path: str = "services"
 
+    # Server-side default model applied when SDKs/console omit model_id.
+    # Read from the unprefixed DEFAULT_MODEL env var (deployment-wide single
+    # default); mirrors apps/assistant-service/.../core/models/defaults.py.
+    default_model: str = Field(default="qwen3.7-plus", validation_alias="DEFAULT_MODEL")
+
     # 数据库和缓存（可选）
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)

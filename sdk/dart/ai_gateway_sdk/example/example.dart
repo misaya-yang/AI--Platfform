@@ -22,9 +22,9 @@ void main() async {
     // 2. Non-streaming chat
     // ---------------------------------------------------------------------
     print('--- Non-streaming chat ---');
+    // modelId is omitted — the server applies its deployment default.
     final response = await ai.chat.send(
       'Summarize the onboarding checklist',
-      modelId: 'qwen3.7-plus',
       temperature: 0.7,
     );
     print('Session: ${response.sessionId}');

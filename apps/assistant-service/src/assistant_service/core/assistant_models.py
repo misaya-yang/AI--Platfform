@@ -17,6 +17,7 @@ from ai_gateway_core.enums import RAGMode
 
 from .agent.runtime_context import AgentRuntimeExecutionContext
 from .content.structured_output import OutputFormat
+from .models.defaults import DEFAULT_MODEL
 from .models.model_registry import ModelProvider
 from .tool_invoker import CapabilityAllowlist
 
@@ -96,7 +97,7 @@ class AssistantConfig:
     """Configuration for an assistant conversation."""
 
     model_provider: ModelProvider = ModelProvider.DASHSCOPE
-    model_id: str = "qwen3.7-plus"
+    model_id: str = DEFAULT_MODEL
     # Verified Agent Runtime only. This is the exact control-plane provider
     # identity; ``model_provider`` is merely the runtime protocol family.
     model_provider_id: str | None = field(default=None, repr=False)
