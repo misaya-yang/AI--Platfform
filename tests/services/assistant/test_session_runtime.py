@@ -28,6 +28,8 @@ def test_active_job_survives_as_prompt_state_settled_job_does_not() -> None:
     settled.set_goal("review the contract")
     settled.add_task("t1", "read exhibits")
     settled.update_task("t1", TaskStatus.COMPLETED)
+    # The settling turn still renders the goal; archiving clears it.
+    assert "review the contract" in str(bounded_working_memory_context(settled))
     settled.archive_if_settled()
     assert bounded_working_memory_context(settled) is None
 

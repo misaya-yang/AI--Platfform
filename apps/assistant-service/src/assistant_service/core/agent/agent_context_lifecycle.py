@@ -177,7 +177,13 @@ class AgentContextLifecycleMixin:
             if ctx.working_memory is not session.working_memory:
                 logger.warning("Working memory persistence skipped for a stale run snapshot")
                 return False
-            session.working_memory.archive_if_settled()
+            if session.working_memory.goal:
+                session.working_memory.turns_since_goal += 1
+            else:
+                session.working_memory.turns_since_goal = 0
+            session.working_memory.archive_if_settled(
+                turns_since_goal=session.working_memory.turns_since_goal
+            )
             try:
                 persisted = await persist_working_memory(
                     self.memory_service,

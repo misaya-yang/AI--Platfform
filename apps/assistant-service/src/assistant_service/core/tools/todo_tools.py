@@ -110,6 +110,10 @@ class TodoWriteExecutor(ToolExecutor):
         if session is None or session.working_memory is None:
             return _err(request, f"no active working memory for session {session_id}", start)
         wm = session.working_memory
+        # TodoWrite destructively replaces the whole task list; keep the
+        # pre-rewrite state in the archived snapshot so goal/notes/collected
+        # info are not lost silently.
+        wm.preserve_snapshot()
         wm.clear()
         for idx, item in enumerate(items):
             if not isinstance(item, dict):

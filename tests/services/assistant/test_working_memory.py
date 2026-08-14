@@ -81,7 +81,7 @@ def test_persisted_working_memory_restores_only_for_expected_session():
     assert restored.to_dict() == memory.to_dict()
 
 
-def test_settled_working_memory_is_hidden_and_can_be_archived() -> None:
+def test_settled_working_memory_renders_settling_turn_then_archives() -> None:
     memory = WorkingMemory(session_id="session-a")
     memory.set_goal("finish the report")
     memory.add_task("task-1", "collect evidence")
@@ -90,18 +90,61 @@ def test_settled_working_memory_is_hidden_and_can_be_archived() -> None:
 
     memory.update_task("task-1", TaskStatus.COMPLETED, result="done")
     assert memory.has_active_job() is False
-    assert bounded_working_memory_context(memory) is None
+    # Settling turn: the goal is still live and must stay in the prompt
+    # until the archive runs at finalization.
+    settling = bounded_working_memory_context(memory)
+    assert settling is not None
+    assert "finish the report" in settling
+
     assert memory.archive_if_settled() is True
     assert memory.goal is None
     assert memory.tasks == []
+    assert bounded_working_memory_context(memory) is None
 
 
-def test_goal_only_working_memory_stays_active() -> None:
+def test_goal_only_working_memory_settles_after_threshold_turns() -> None:
     memory = WorkingMemory(session_id="session-a")
     memory.set_goal("keep reviewing the contract")
     assert memory.has_active_job() is True
-    assert memory.archive_if_settled() is False
+    assert memory.archive_if_settled(turns_since_goal=2) is False
     assert memory.goal == "keep reviewing the contract"
+    assert memory.archive_if_settled(turns_since_goal=3) is True
+    assert memory.goal is None
+    assert memory.archived is not None
+    assert memory.archived["goal"] == "keep reviewing the contract"
+
+
+def test_archive_preserves_goal_notes_and_collected_info() -> None:
+    memory = WorkingMemory(session_id="session-a")
+    memory.set_goal("finish the report")
+    memory.add_task("task-1", "collect evidence")
+    memory.add_note("client prefers tables")
+    memory.add_info("price", "$1000", source="kb_search")
+    memory.update_task("task-1", TaskStatus.COMPLETED)
+
+    assert memory.archive_if_settled() is True
+    assert memory.archived is not None
+    snapshot = WorkingMemory.from_dict(memory.archived)
+    assert snapshot.goal == "finish the report"
+    assert snapshot.notes == ["client prefers tables"]
+    assert snapshot.collected_info[0].key == "price"
+    assert snapshot.tasks[0].status is TaskStatus.COMPLETED
+
+
+def test_archived_snapshot_survives_persisted_round_trip() -> None:
+    memory = WorkingMemory(session_id="session-a")
+    memory.set_goal("finish the report")
+    memory.add_task("task-1", "collect evidence")
+    memory.update_task("task-1", TaskStatus.COMPLETED)
+    assert memory.archive_if_settled() is True
+
+    restored = WorkingMemory.from_persisted_dict(
+        memory.to_dict(),
+        expected_session_id="session-a",
+    )
+    assert restored.to_dict() == memory.to_dict()
+    assert restored.archived is not None
+    assert restored.archived["goal"] == "finish the report"
 
 
 def test_persisted_working_memory_rejects_wrong_session_after_restore_helper() -> None:

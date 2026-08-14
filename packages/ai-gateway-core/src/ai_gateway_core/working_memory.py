@@ -125,6 +125,10 @@ class CollectedInfo:
         )
 
 
+# Turns of inactivity before a task-less goal is considered stale and archived.
+GOAL_ONLY_SETTLE_AFTER_TURNS = 3
+
+
 class WorkingMemory:
     """
     Maintains task state and collected information during complex workflows.
@@ -167,9 +171,12 @@ class WorkingMemory:
         """
         self.session_id = session_id
         self.goal: str | None = None
+        self.goal_set_at: datetime | None = None
+        self.turns_since_goal: int = 0
         self.tasks: list[TaskItem] = []
         self.collected_info: list[CollectedInfo] = []
         self.notes: list[str] = []
+        self.archived: dict[str, Any] | None = None
 
     def set_goal(self, goal: str) -> None:
         """
@@ -179,6 +186,8 @@ class WorkingMemory:
             goal: Description of what the user wants to achieve
         """
         self.goal = goal
+        self.goal_set_at = datetime.now()
+        self.turns_since_goal = 0
 
     def add_task(self, task_id: str, description: str) -> TaskItem:
         """
@@ -378,20 +387,38 @@ class WorkingMemory:
             return True
         return bool(self.goal) and not self.tasks
 
-    def archive_if_settled(self) -> bool:
+    def archive_if_settled(self, *, turns_since_goal: int = 0) -> bool:
         """Clear finished work so later turns do not inherit a stale job.
 
-        Only task status is inspected. User text is not classified.
+        Task status is the primary signal; a task-less goal settles after
+        ``GOAL_ONLY_SETTLE_AFTER_TURNS`` turns of inactivity so goal-only
+        sessions do not carry a stale objective forever.  The pre-clear
+        state is preserved in ``archived`` before it is wiped.
         """
 
-        if not self.tasks:
+        if self.tasks:
+            if any(task.status in self._UNRESOLVED for task in self.tasks):
+                return False
+            if not all(task.status in self._SETTLED for task in self.tasks):
+                return False
+        elif not self.goal or turns_since_goal < GOAL_ONLY_SETTLE_AFTER_TURNS:
             return False
-        if any(task.status in self._UNRESOLVED for task in self.tasks):
-            return False
-        if all(task.status in self._SETTLED for task in self.tasks):
-            self.clear()
-            return True
-        return False
+        self.preserve_snapshot()
+        self.clear()
+        return True
+
+    def preserve_snapshot(self) -> None:
+        """Keep one pre-clear copy of live state for audit and debugging.
+
+        Callers that destructively replace the state (settle, todo rewrite)
+        should invoke this first so goal/notes/collected info are not lost
+        silently.  The first snapshot wins; later cycles do not overwrite it.
+        """
+
+        if self.archived is None and (
+            self.goal or self.tasks or self.collected_info or self.notes
+        ):
+            self.archived = self.to_dict()
 
     def get_progress(self) -> dict[str, Any]:
         """
@@ -416,8 +443,10 @@ class WorkingMemory:
         }
 
     def clear(self) -> None:
-        """Clear all working memory state."""
+        """Clear all working memory state (the archived snapshot is kept)."""
         self.goal = None
+        self.goal_set_at = None
+        self.turns_since_goal = 0
         self.tasks = []
         self.collected_info = []
         self.notes = []
@@ -432,9 +461,12 @@ class WorkingMemory:
         return {
             "session_id": self.session_id,
             "goal": self.goal,
+            "goal_set_at": self.goal_set_at.isoformat() if self.goal_set_at else None,
+            "turns_since_goal": self.turns_since_goal,
             "tasks": [t.to_dict() for t in self.tasks],
             "collected_info": [i.to_dict() for i in self.collected_info],
             "notes": self.notes,
+            "archived": self.archived,
         }
 
     @classmethod
@@ -450,9 +482,14 @@ class WorkingMemory:
         """
         memory = cls(session_id=data["session_id"])
         memory.goal = data.get("goal")
+        memory.goal_set_at = (
+            datetime.fromisoformat(data["goal_set_at"]) if data.get("goal_set_at") else None
+        )
+        memory.turns_since_goal = int(data.get("turns_since_goal", 0))
         memory.tasks = [TaskItem.from_dict(t) for t in data.get("tasks", [])]
         memory.collected_info = [CollectedInfo.from_dict(i) for i in data.get("collected_info", [])]
         memory.notes = data.get("notes", [])
+        memory.archived = data.get("archived")
         return memory
 
     @classmethod
@@ -517,6 +554,14 @@ class WorkingMemory:
 
         if any(not isinstance(note, str) or len(note) > 1_000 for note in notes):
             raise ValueError("Persisted working memory note is invalid")
+
+        archived = data.get("archived")
+        if archived is not None and not isinstance(archived, dict):
+            raise ValueError("Persisted working memory archived snapshot is invalid")
+
+        turns = data.get("turns_since_goal", 0)
+        if isinstance(turns, bool) or not isinstance(turns, int) or not 0 <= turns <= 100_000:
+            raise ValueError("Persisted working memory turns_since_goal is invalid")
 
         try:
             return cls.from_dict(data)

@@ -166,8 +166,13 @@ def bounded_working_memory_context(
     *,
     max_chars: int = 2_000,
 ) -> str | None:
-    """Render Working Memory as lower-priority, bounded task-state data."""
+    """Render Working Memory as lower-priority, bounded task-state data.
 
-    if memory is None or not memory.has_active_job():
+    Settled-but-not-yet-archived state still renders, so the wrap-up turn
+    keeps the goal in the prompt; once archiving clears the goal, later
+    turns render nothing.
+    """
+
+    if memory is None or (not memory.has_active_job() and memory.goal is None):
         return None
     return memory.to_markdown()[: max(0, max_chars)] or None
