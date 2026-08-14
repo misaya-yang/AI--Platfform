@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
-from ai_gateway_core.enums import ConnectorType, ContentType, StreamEventType
+from ai_gateway_core.enums import ContentType, StreamEventType, TransportType
 from ai_gateway_core.exceptions import ValidationFailedError
 
 from ..models.request import ContentItem, UnifiedRequest
@@ -76,7 +76,7 @@ class LangGraphAdapter(ProtocolAdapter):
         super().__init__(service)
         config = service.connector_config or {}
         self.config = config
-        self.remote = service.connector_type != ConnectorType.IN_PROCESS
+        self.remote = service.connector_type != TransportType.IN_PROCESS
         self.assistant_id = (
             config.get("assistant_id")
             or config.get("graph_id")

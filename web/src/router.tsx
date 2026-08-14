@@ -27,6 +27,10 @@ const ServicesPage = lazyNamed(() => import("@/pages/Services"), "ServicesPage")
 const PlaygroundPage = lazyNamed(() => import("@/pages/playground"), "PlaygroundPage");
 const TasksPage = lazyNamed(() => import("@/pages/tasks"), "TasksPage");
 const SettingsPage = lazyNamed(() => import("@/pages/Settings"), "SettingsPage");
+const ConnectorsSettingsPage = lazyNamed(
+  () => import("@/pages/settings/ConnectorsSettings"),
+  "ConnectorsSettingsPage"
+);
 const UserManagementPage = lazyNamed(() => import("@/pages/UserManagement"), "UserManagementPage");
 const UserEditPage = lazyNamed(() => import("@/pages/UserEdit"), "UserEditPage");
 const KnowledgeDatasetsPage = lazyNamed(() => import("@/pages/knowledge"), "KnowledgeDatasetsPage");
@@ -169,6 +173,14 @@ export function AppRouter() {
             element={
               <ProtectedRoute requiredPermission="console:settings:view">
                 <SettingsPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/settings/connectors"
+            element={
+              <ProtectedRoute requiredPermission="console:settings:view">
+                <ConnectorsSettingsPage />
               </ProtectedRoute>
             }
           />

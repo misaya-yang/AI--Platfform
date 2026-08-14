@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from ai_gateway_core.enums import ConnectorType, ContentType
+from ai_gateway_core.enums import ContentType, TransportType
 from ai_gateway_core.exceptions import GatewayError
 
 from src.adapters.base import ProtocolAdapter
@@ -32,7 +32,7 @@ async def test_service_registry_wraps_adapter_with_configured_bulkhead() -> None
     service = ServiceDefinition(
         service_id="slow-service",
         name="Slow Service",
-        connector_type=ConnectorType.IN_PROCESS,
+        connector_type=TransportType.IN_PROCESS,
         connector_config={
             "module": "src.main",
             "callable": "create_app",

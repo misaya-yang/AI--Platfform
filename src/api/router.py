@@ -8,6 +8,7 @@ from .v1.api_keys import router as api_keys_router
 from .v1.assistant import router as assistant_router
 from .v1.auth import router as auth_router
 from .v1.config import router as config_router
+from .v1.connector_admin import router as connector_admin_router
 from .v1.connectors import router as connectors_router
 from .v1.conversation_shares import router as conversation_shares_router
 from .v1.conversations import router as conversations_router
@@ -86,5 +87,6 @@ api_router.include_router(legacy_mcp_router)  # Existing Assistant MCP route com
 api_router.include_router(tenant_policies_router)  # ADR-002: Tenant isolation admin
 api_router.include_router(conversation_shares_router)  # Conversation sharing with artifacts
 api_router.include_router(connectors_router)  # Third-party connectors (Confluence, Outlook, etc.)
+api_router.include_router(connector_admin_router)  # Connector catalog admin (settings surface)
 api_router.include_router(providers_router)  # LLM Provider 管理
 api_router.include_router(models_router)  # LLM Model 管理

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Any
 
 import httpx
@@ -102,11 +103,9 @@ class HTTPConnector(BaseConnector):
             return
 
         async def warm_one():
-            try:
-                # HEAD request is lightweight
+            # HEAD request is lightweight; ignore failures during warm-up
+            with contextlib.suppress(Exception):
                 await self._client.head("/", timeout=2.0)
-            except Exception:
-                pass  # Ignore failures during warm-up
 
         # Warm up connections in parallel
         tasks = [warm_one() for _ in range(min(count, 10))]

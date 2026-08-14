@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 
 import pytest
-from ai_gateway_core.enums import ConnectorType
+from ai_gateway_core.enums import TransportType
 
-from src.connectors.message_queue import MessageQueueConnector
 from src.models.service import ServiceDefinition
+from src.transports.message_queue import MessageQueueConnector
 
 
 class FakeStreamRedis:
@@ -95,7 +95,7 @@ async def test_message_queue_connector_publishes_by_priority_and_consumes_with_a
     service = ServiceDefinition(
         service_id="queue-service",
         name="Queue Service",
-        connector_type=ConnectorType.MESSAGE_QUEUE,
+        connector_type=TransportType.MESSAGE_QUEUE,
         connector_config={
             "redis_url": "redis://unused",
             "streams": {
@@ -147,7 +147,7 @@ async def test_message_queue_connector_routes_failed_message_to_retry_then_dlq()
     service = ServiceDefinition(
         service_id="queue-service",
         name="Queue Service",
-        connector_type=ConnectorType.MESSAGE_QUEUE,
+        connector_type=TransportType.MESSAGE_QUEUE,
         connector_config={
             "redis_url": "redis://unused",
             "streams": {"normal": "queue:normal"},
@@ -199,7 +199,7 @@ async def test_message_queue_connector_empty_consume_is_non_blocking() -> None:
     service = ServiceDefinition(
         service_id="queue-service",
         name="Queue Service",
-        connector_type=ConnectorType.MESSAGE_QUEUE,
+        connector_type=TransportType.MESSAGE_QUEUE,
         connector_config={
             "redis_url": "redis://unused",
             "streams": {"normal": "queue:normal"},

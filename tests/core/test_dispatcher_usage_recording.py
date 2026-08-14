@@ -3,15 +3,15 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-from src.core.gateway.dispatcher import GatewayDispatcher
 from ai_gateway_core.enums import (
-    ConnectorType,
     ContentType,
     InvocationMode,
     ServiceType,
     StreamEventType,
+    TransportType,
 )
+
+from src.core.gateway.dispatcher import GatewayDispatcher
 from src.models.request import ContentItem, UnifiedRequest
 from src.models.response import StreamChunk, UnifiedResponse
 from src.models.service import ServiceDefinition
@@ -22,7 +22,7 @@ def _build_service() -> ServiceDefinition:
         service_id="agent_service",
         name="Agent Service",
         service_type=ServiceType.LANGGRAPH,
-        connector_type=ConnectorType.HTTP,
+        connector_type=TransportType.HTTP,
         supported_modes=[InvocationMode.SYNC, InvocationMode.STREAM],
         accepted_content_types=[ContentType.TEXT],
         output_content_types=[ContentType.TEXT],
@@ -168,10 +168,12 @@ async def test_stream_error_without_usage_records_zero_tokens():
     )
 
     recorder = AsyncMock()
-    with patch("src.services.metrics.get_usage_recorder", return_value=recorder):
-        with pytest.raises(RuntimeError, match="upstream stream failed"):
-            async for _ in dispatcher.stream(request, roles=["user"]):
-                pass
+    with (
+        patch("src.services.metrics.get_usage_recorder", return_value=recorder),
+        pytest.raises(RuntimeError, match="upstream stream failed"),
+    ):
+        async for _ in dispatcher.stream(request, roles=["user"]):
+            pass
 
     recorder.record_usage.assert_awaited_once()
     kwargs = recorder.record_usage.await_args.kwargs

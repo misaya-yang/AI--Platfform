@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from ai_gateway_core.enums import ConnectorType, ContentType, InvocationMode, ServiceType
+from ai_gateway_core.enums import ContentType, InvocationMode, ServiceType, TransportType
 from ai_gateway_core.exceptions import AdapterNotFoundError, ValidationFailedError
 
 from ...adapters.base import BulkheadAdapter, ProtocolAdapter
@@ -176,7 +176,7 @@ class ServiceRegistry:
             as_enum(InvocationMode, m, InvocationMode.SYNC)
             for m in data.get("supported_modes", ["sync"])
         ]
-        connector_type = as_enum(ConnectorType, data.get("connector_type"), ConnectorType.HTTP)
+        connector_type = as_enum(TransportType, data.get("connector_type"), TransportType.HTTP)
 
         accepted = [
             as_enum(ContentType, t, ContentType.TEXT)

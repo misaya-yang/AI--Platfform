@@ -99,6 +99,26 @@
 - Added a frontend CI step running `pnpm -C web i18n:check`, and extended the
   open-source e2e suite with first-run and nav-group specs.
 
+### Connectors
+
+- Added a connector catalog admin API (`/api/v1/connectors/admin/configs`) with CRUD,
+  an enabled toggle, a delete guard while users are connected, and write-only
+  `client_secret` handling via `RedactedValidationRoute`; gated by `console:settings:view`.
+- Added connector `mode` semantics (`live`/`ingest`/`both`) via migration
+  `084_connector_modes.sql` (backfills `both` where `supports_sync`).
+- Added the connector catalog settings page at `/settings/connectors` with full
+  en-US / zh-CN i18n coverage.
+- Made catalog-model connector bindings effective only when the provider has an
+  enabled `connector_configs` row and the calling user holds a connected
+  `user_connectors` row; added stable deny codes
+  (`CONNECTOR_CATALOG_UNAVAILABLE`/`INGEST_ONLY`/`PRINCIPAL_DENIED`/`NOT_CONNECTED`)
+  and documented the semantics in the agent-studio architecture contract.
+- Renamed `src/connectors` to `src/transports` and `ConnectorType` to
+  `TransportType` (field name `connector_type` unchanged); no behaviour change.
+- Added `docs/design/connectors.md` (live vs. ingest modes, OAuth token custody,
+  MCP tool model) and `docs/connectors/ingest-mode.md` (KB upload reuse, token
+  relay boundary — design intent only this round).
+
 ### Runtime
 
 - Bundled document generation as the trusted `ai-docgen` Agent Plugin inside

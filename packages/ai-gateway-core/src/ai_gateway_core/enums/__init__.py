@@ -4,11 +4,10 @@ without updating both backend emitters and the frontend parser.
 """
 
 from ._core import (
-    ConnectorType,
     ContentType,
-    DataSourceType,
     DatasetPermission,
     DatasetVisibility,
+    DataSourceType,
     DocumentStatus,
     InvocationMode,
     ModelAccessLevel,
@@ -20,10 +19,11 @@ from ._core import (
     StreamEventType,
     StylePreset,
     ToolCategory,
+    TransportType,
 )
 
 __all__ = [
-    "ConnectorType",
+    "TransportType",
     "ContentType",
     "DataSourceType",
     "DatasetPermission",

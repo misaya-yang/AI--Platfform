@@ -606,10 +606,10 @@
     },
     "permissions": {
       "categories": {
-      "console": "控制台",
-      "conversation": "对话",
-      "service": "服务",
-      "knowledge": "知识库",
+        "console": "控制台",
+        "conversation": "对话",
+        "service": "服务",
+        "knowledge": "知识库",
         "user": "用户",
         "role": "角色",
         "admin": "管理"
@@ -627,39 +627,39 @@
       },
       "displayNamePlaceholder": "请输入显示名称",
       "departmentPlaceholder": "选择部门",
-    "roles": {
+      "roles": {
         "title": "角色分配",
         "desc": "选择用户角色，角色决定基础权限",
         "system": "系统",
         "noDescription": "无描述",
         "permissionCount": "{{count}} 个权限",
-      "noAccess": "无权限查看角色列表"
-    },
-    "serviceAccess": {
-      "title": "Agent 服务访问",
-      "desc": "为该用户配置 API 与 Playground 共用的服务白名单和拒绝名单。",
-      "mode": "访问模式",
-      "allServices": "全部服务（可叠加拒绝名单）",
-      "allowlistOnly": "仅白名单服务",
-      "policy": "策略说明",
-      "allowlistPolicy": "仅可调用标记为允许的服务，拒绝名单始终优先。",
-      "allPolicy": "默认可调用所有服务，可通过拒绝名单禁用特定服务。",
-      "noAccess": "当前账号无权读取服务列表。",
-      "loading": "正在加载服务...",
-      "empty": "暂无可配置服务",
-      "allow": "允许",
-      "deny": "拒绝"
-    },
-    "extraPermissions": {
+        "noAccess": "无权限查看角色列表"
+      },
+      "serviceAccess": {
+        "title": "Agent 服务访问",
+        "desc": "为该用户配置 API 与 Playground 共用的服务白名单和拒绝名单。",
+        "mode": "访问模式",
+        "allServices": "全部服务（可叠加拒绝名单）",
+        "allowlistOnly": "仅白名单服务",
+        "policy": "策略说明",
+        "allowlistPolicy": "仅可调用标记为允许的服务，拒绝名单始终优先。",
+        "allPolicy": "默认可调用所有服务，可通过拒绝名单禁用特定服务。",
+        "noAccess": "当前账号无权读取服务列表。",
+        "loading": "正在加载服务...",
+        "empty": "暂无可配置服务",
+        "allow": "允许",
+        "deny": "拒绝"
+      },
+      "extraPermissions": {
         "title": "额外权限",
         "desc": "直接分配给用户的独立权限（角色权限之外）",
         "tipLabel": "提示",
         "tipText": "角色已包含的权限显示为灰色。额外权限用于授予角色之外的特殊权限。",
         "categoryCount": "{{count}} 个权限",
         "fromRole": "已通过角色获得此权限",
-      "roleBadge": "角色",
-      "empty": "当前账号暂无可分配的额外权限。",
-      "noAccess": "无权限查看权限列表"
+        "roleBadge": "角色",
+        "empty": "当前账号暂无可分配的额外权限。",
+        "noAccess": "无权限查看权限列表"
       },
       "unsavedChanges": "您有未保存的更改",
       "saveChanges": "保存更改"
@@ -968,6 +968,60 @@
         "status": "状态",
         "createdAt": "创建时间"
       }
+    },
+    "connectors": {
+      "title": "连接器目录",
+      "description": "管理第三方连接器提供商定义（OAuth 应用、模式、工具暴露）",
+      "manage": "管理连接器",
+      "newConnector": "新建连接器",
+      "editConnector": "编辑连接器",
+      "deleteConnector": "删除连接器",
+      "listTitle": "连接器提供商",
+      "empty": "尚未配置任何连接器。创建第一个提供商定义。",
+      "enabled": "已启用",
+      "disabled": "已停用",
+      "column": {
+        "provider": "提供商",
+        "displayName": "显示名称",
+        "mode": "模式",
+        "status": "状态",
+        "actions": "操作"
+      },
+      "modeLive": "实时",
+      "modeIngest": "仅同步",
+      "modeBoth": "两者",
+      "field": {
+        "provider": "提供商",
+        "providerPlaceholder": "例如 confluence",
+        "displayName": "显示名称",
+        "description": "描述",
+        "iconUrl": "图标 URL",
+        "mode": "模式",
+        "modeHint": "live = 智能体工具调用；ingest = 知识库同步源；both = 两者",
+        "enabled": "已启用",
+        "supportsSync": "支持知识库同步",
+        "supportsSearch": "支持搜索",
+        "clientId": "OAuth 客户端 ID",
+        "clientSecret": "OAuth 客户端密钥",
+        "clientSecretPlaceholder": "留空则保留已存储的密钥",
+        "authUrl": "授权 URL",
+        "tokenUrl": "令牌 URL",
+        "scopes": "权限范围",
+        "redirectUri": "回调 URL",
+        "mcpTools": "MCP 工具",
+        "mcpToolsHint": "该提供商暴露的工具信息列表",
+        "toolName": "工具名称",
+        "toolDescription": "工具描述"
+      },
+      "save": "保存",
+      "saving": "保存中...",
+      "cancel": "取消",
+      "createSuccess": "连接器已创建",
+      "updateSuccess": "连接器已更新",
+      "deleteSuccess": "连接器已删除",
+      "deleteGuard": "该连接器仍有已连接用户，请先断开连接再删除。",
+      "deleteConfirm": "确定删除该连接器定义？",
+      "failed": "请求失败：{message}"
     }
   },
   "knowledge": {

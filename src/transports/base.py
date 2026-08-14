@@ -5,7 +5,7 @@ import os
 from abc import ABC, abstractmethod
 from typing import Any
 
-from ai_gateway_core.enums import ConnectorType
+from ai_gateway_core.enums import TransportType
 
 from ..models.service import ServiceDefinition
 
@@ -82,22 +82,22 @@ class InProcessConnector(BaseConnector):
 
 def create_connector(service: ServiceDefinition) -> BaseConnector:
     connector_type = service.connector_type
-    if connector_type == ConnectorType.HTTP:
+    if connector_type == TransportType.HTTP:
         from .http import HTTPConnector
 
         return HTTPConnector(service)
-    if connector_type == ConnectorType.WEBSOCKET:
+    if connector_type == TransportType.WEBSOCKET:
         from .websocket import WebSocketConnector
 
         return WebSocketConnector(service)
-    if connector_type == ConnectorType.GRPC:
+    if connector_type == TransportType.GRPC:
         from .grpc import GRPCConnector
 
         return GRPCConnector(service)
-    if connector_type == ConnectorType.MESSAGE_QUEUE:
+    if connector_type == TransportType.MESSAGE_QUEUE:
         from .message_queue import MessageQueueConnector
 
         return MessageQueueConnector(service)
-    if connector_type == ConnectorType.IN_PROCESS:
+    if connector_type == TransportType.IN_PROCESS:
         return InProcessConnector(service)
     raise ValueError(f"Unsupported connector type: {connector_type}")

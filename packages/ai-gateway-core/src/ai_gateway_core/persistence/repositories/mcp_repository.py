@@ -1252,6 +1252,62 @@ class DatabaseMCPRepository(BaseRepository):
             raise MCPAuthorizationError("CONNECTOR_SCOPE_DENIED")
         return item
 
+    async def authorize_connector_catalog(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        authenticated: bool,
+        provider: str,
+        tool_name: str,
+        channel: str,
+    ) -> dict[str, Any]:
+        """Authorize a catalog-model connector binding (no credential grant).
+
+        Catalog bindings carry only ``provider`` + ``tool_name`` and are
+        effective when (a) the provider has an enabled ``connector_configs``
+        row visible to the tenant (tenant-scoped row wins over global, mirror
+        of the OAuth flow lookup), (b) the provider's mode allows live tool
+        use (``live`` or ``both``, not ``ingest``), and (c) the calling user
+        holds a ``user_connectors`` row with status ``connected``. Catalog
+        connections are inherently user-delegated, so unauthenticated callers
+        and public channels are denied, mirroring the grant-based path.
+        """
+        self._require_enabled()
+        if not provider or not tool_name:
+            raise MCPAuthorizationError("CONNECTOR_CATALOG_INCOMPLETE")
+        config = await self.fetchrow(
+            """
+            SELECT provider, mode, enabled FROM connector_configs
+            WHERE provider = $1 AND (tenant_id = $2 OR tenant_id = '')
+            ORDER BY tenant_id DESC LIMIT 1
+            """,
+            provider,
+            tenant_id,
+        )
+        if not config or not config.get("enabled"):
+            raise MCPAuthorizationError("CONNECTOR_CATALOG_UNAVAILABLE")
+        if str(config.get("mode") or "live") == "ingest":
+            raise MCPAuthorizationError("CONNECTOR_CATALOG_INGEST_ONLY")
+        if channel in MCP_PUBLIC_CHANNELS or not authenticated or not user_id:
+            raise MCPAuthorizationError("CONNECTOR_CATALOG_PRINCIPAL_DENIED")
+        connection = await self.fetchrow(
+            """
+            SELECT user_id, provider, status FROM user_connectors
+            WHERE tenant_id = $1 AND user_id = $2 AND provider = $3
+            """,
+            tenant_id,
+            user_id,
+            provider,
+        )
+        if not connection or str(connection.get("status") or "") != "connected":
+            raise MCPAuthorizationError("CONNECTOR_CATALOG_NOT_CONNECTED")
+        return {
+            "provider": provider,
+            "tool_name": tool_name,
+            "user_id": user_id,
+        }
+
     async def create_connector_principal(
         self,
         *,
@@ -1521,20 +1577,31 @@ class DatabaseMCPAgentCapabilityResolver:
                     principal_type = str(config.get("principal_type") or "")
                     grant_id = str(config.get("grant_id") or "")
                     tool_name = str(config.get("tool_name") or resource_id)
-                    if tool_name != resource_id or not all(
-                        (provider, principal_type, grant_id, resource_id)
-                    ):
+                    if tool_name != resource_id or not provider or not resource_id:
                         continue
-                    await self._repository.authorize_connector_tool(
-                        tenant_id=tenant_id,
-                        user_id=user_id,
-                        authenticated=authenticated,
-                        provider=provider,
-                        tool_name=resource_id,
-                        principal_type=principal_type,
-                        grant_id=grant_id,
-                        channel=channel,
-                    )
+                    if grant_id and principal_type:
+                        # Grant-based binding: full credential-principal check.
+                        await self._repository.authorize_connector_tool(
+                            tenant_id=tenant_id,
+                            user_id=user_id,
+                            authenticated=authenticated,
+                            provider=provider,
+                            tool_name=resource_id,
+                            principal_type=principal_type,
+                            grant_id=grant_id,
+                            channel=channel,
+                        )
+                    else:
+                        # Catalog binding: enabled connector_configs row plus a
+                        # connected user_connectors row for the calling user.
+                        await self._repository.authorize_connector_catalog(
+                            tenant_id=tenant_id,
+                            user_id=user_id,
+                            authenticated=authenticated,
+                            provider=provider,
+                            tool_name=resource_id,
+                            channel=channel,
+                        )
                     allowed.append(binding)
             except (MCPAuthorizationError, MCPRepositoryError):
                 continue

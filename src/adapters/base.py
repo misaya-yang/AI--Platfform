@@ -7,10 +7,10 @@ from typing import Any
 
 from ai_gateway_core.exceptions import GatewayError
 
-from ..connectors.base import create_connector
 from ..models.request import UnifiedRequest
 from ..models.response import StreamChunk, UnifiedResponse
 from ..models.service import ServiceDefinition
+from ..transports.base import create_connector
 
 
 class ProtocolAdapter(ABC):

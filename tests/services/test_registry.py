@@ -8,8 +8,8 @@
 """
 
 import pytest
+from ai_gateway_core.enums import ContentType, InvocationMode, ServiceType, TransportType
 
-from ai_gateway_core.enums import ConnectorType, ContentType, InvocationMode, ServiceType
 from src.services.registry.service_registry import MemoryRegistryStorage, ServiceRegistry
 
 
@@ -45,7 +45,7 @@ class TestServiceRegistry:
         assert service.service_id == "test-svc"
         assert service.service_type == ServiceType.PROCESSING
         assert service.supported_modes == [InvocationMode.SYNC, InvocationMode.ASYNC]
-        assert service.connector_type == ConnectorType.HTTP
+        assert service.connector_type == TransportType.HTTP
         assert service.accepted_content_types == [ContentType.TEXT]
 
     @pytest.mark.asyncio

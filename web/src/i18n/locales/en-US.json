@@ -606,10 +606,10 @@
     },
     "permissions": {
       "categories": {
-      "console": "Console",
-      "conversation": "Conversation",
-      "service": "Service",
-      "knowledge": "Knowledge",
+        "console": "Console",
+        "conversation": "Conversation",
+        "service": "Service",
+        "knowledge": "Knowledge",
         "user": "User",
         "role": "Role",
         "admin": "Admin"
@@ -627,39 +627,39 @@
       },
       "displayNamePlaceholder": "Enter display name",
       "departmentPlaceholder": "Select department",
-    "roles": {
+      "roles": {
         "title": "Role Assignment",
         "desc": "Assign roles to define base permissions",
         "system": "System",
         "noDescription": "No description",
         "permissionCount": "{{count}} permissions",
-      "noAccess": "You don't have permission to view roles"
-    },
-    "serviceAccess": {
-      "title": "Agent Service Access",
-      "desc": "Configure service allowlists and denylists shared by the API and Playground.",
-      "mode": "Access mode",
-      "allServices": "All services (with optional denylist)",
-      "allowlistOnly": "Allowlist only",
-      "policy": "Policy",
-      "allowlistPolicy": "Only services marked Allow can be called. The denylist always takes precedence.",
-      "allPolicy": "All services are available by default. Use the denylist to block specific services.",
-      "noAccess": "You don't have permission to view services.",
-      "loading": "Loading services...",
-      "empty": "No configurable services",
-      "allow": "Allow",
-      "deny": "Deny"
-    },
-    "extraPermissions": {
+        "noAccess": "You don't have permission to view roles"
+      },
+      "serviceAccess": {
+        "title": "Agent Service Access",
+        "desc": "Configure service allowlists and denylists shared by the API and Playground.",
+        "mode": "Access mode",
+        "allServices": "All services (with optional denylist)",
+        "allowlistOnly": "Allowlist only",
+        "policy": "Policy",
+        "allowlistPolicy": "Only services marked Allow can be called. The denylist always takes precedence.",
+        "allPolicy": "All services are available by default. Use the denylist to block specific services.",
+        "noAccess": "You don't have permission to view services.",
+        "loading": "Loading services...",
+        "empty": "No configurable services",
+        "allow": "Allow",
+        "deny": "Deny"
+      },
+      "extraPermissions": {
         "title": "Extra Permissions",
         "desc": "Direct permissions assigned to user (outside roles)",
         "tipLabel": "Tip",
         "tipText": "Role permissions are shown in gray. Extra permissions grant access beyond roles.",
         "categoryCount": "{{count}} permissions",
         "fromRole": "Granted via role",
-      "roleBadge": "Role",
-      "empty": "No extra permissions are available for this account.",
-      "noAccess": "You don't have permission to view permissions"
+        "roleBadge": "Role",
+        "empty": "No extra permissions are available for this account.",
+        "noAccess": "You don't have permission to view permissions"
       },
       "unsavedChanges": "You have unsaved changes",
       "saveChanges": "Save changes"
@@ -968,6 +968,60 @@
         "status": "Status",
         "createdAt": "Created At"
       }
+    },
+    "connectors": {
+      "title": "Connector Catalog",
+      "description": "Manage third-party connector provider definitions (OAuth apps, modes, tool exposure)",
+      "manage": "Manage connectors",
+      "newConnector": "New connector",
+      "editConnector": "Edit connector",
+      "deleteConnector": "Delete connector",
+      "listTitle": "Connector providers",
+      "empty": "No connectors configured yet. Create the first provider definition.",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "column": {
+        "provider": "Provider",
+        "displayName": "Display name",
+        "mode": "Mode",
+        "status": "Status",
+        "actions": "Actions"
+      },
+      "modeLive": "Live",
+      "modeIngest": "Ingest",
+      "modeBoth": "Both",
+      "field": {
+        "provider": "Provider",
+        "providerPlaceholder": "e.g. confluence",
+        "displayName": "Display name",
+        "description": "Description",
+        "iconUrl": "Icon URL",
+        "mode": "Mode",
+        "modeHint": "live = agent tool calls; ingest = KB sync source; both = both",
+        "enabled": "Enabled",
+        "supportsSync": "Supports KB sync",
+        "supportsSearch": "Supports search",
+        "clientId": "OAuth client ID",
+        "clientSecret": "OAuth client secret",
+        "clientSecretPlaceholder": "Leave empty to keep the stored secret",
+        "authUrl": "Authorization URL",
+        "tokenUrl": "Token URL",
+        "scopes": "Scopes",
+        "redirectUri": "Redirect URI",
+        "mcpTools": "MCP tools",
+        "mcpToolsHint": "Informational list of tools this provider exposes",
+        "toolName": "Tool name",
+        "toolDescription": "Tool description"
+      },
+      "save": "Save",
+      "saving": "Saving...",
+      "cancel": "Cancel",
+      "createSuccess": "Connector created",
+      "updateSuccess": "Connector updated",
+      "deleteSuccess": "Connector deleted",
+      "deleteGuard": "This connector still has connected users. Disconnect them before deleting.",
+      "deleteConfirm": "Delete this connector definition?",
+      "failed": "Request failed: {message}"
     }
   },
   "knowledge": {

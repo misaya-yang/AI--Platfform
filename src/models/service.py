@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ai_gateway_core.enums import ConnectorType, ContentType, InvocationMode, ServiceType
+from ai_gateway_core.enums import ContentType, InvocationMode, ServiceType, TransportType
 
 
 @dataclass
@@ -78,7 +78,7 @@ class ServiceDefinition:
     service_type: ServiceType = ServiceType.CUSTOM
     supported_modes: list[InvocationMode] = field(default_factory=lambda: [InvocationMode.SYNC])
 
-    connector_type: ConnectorType = ConnectorType.HTTP
+    connector_type: TransportType = TransportType.HTTP
     connector_config: dict[str, Any] = field(default_factory=dict)
 
     input_schema: dict[str, Any] = field(default_factory=dict)

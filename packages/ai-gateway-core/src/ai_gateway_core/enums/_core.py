@@ -18,7 +18,7 @@ class InvocationMode(str, Enum):
     WEBHOOK = "webhook"
 
 
-class ConnectorType(str, Enum):
+class TransportType(str, Enum):
     HTTP = "http"
     GRPC = "grpc"
     WEBSOCKET = "websocket"
