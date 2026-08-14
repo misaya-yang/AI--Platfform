@@ -7,15 +7,16 @@ Wraps ``/api/v1/assistant/datasets`` and delegates KB-aware chat to the
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
-from ai_assistant.models.events import StreamEvent
 from ai_assistant.models.response import ChatResponse, Dataset
-from ai_assistant.transport.http import HTTPTransport
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from ai_assistant.chat import ChatModule
+    from ai_assistant.models.events import StreamEvent
+    from ai_assistant.transport.http import HTTPTransport
 
 
 class KnowledgeModule:

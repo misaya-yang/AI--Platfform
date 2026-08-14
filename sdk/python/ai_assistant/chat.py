@@ -15,13 +15,16 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ai_assistant.models.events import StreamEvent
 from ai_assistant.models.request import ChatRequest
 from ai_assistant.models.response import ChatResponse
-from ai_assistant.transport.http import HTTPTransport
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from ai_assistant.models.events import StreamEvent
+    from ai_assistant.transport.http import HTTPTransport
 
 
 class ChatModule:

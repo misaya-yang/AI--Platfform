@@ -15,13 +15,14 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from ai_assistant.exceptions import StreamError
 from ai_assistant.models.events import EventType, StreamEvent
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     import httpx
 
 

@@ -9,6 +9,7 @@ Model Context Protocol specification (protocol version 2025-11-25).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -118,10 +119,8 @@ class MCPClient:
         # Cancel the reader task first
         if self._reader_task and not self._reader_task.done():
             self._reader_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._reader_task
-            except asyncio.CancelledError:
-                pass
             self._reader_task = None
 
         # Terminate subprocess
@@ -130,7 +129,7 @@ class MCPClient:
             self._process.terminate()
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("MCP server %s did not exit in time — killing", self.config.name)
                 self._process.kill()
                 await self._process.wait()
@@ -333,7 +332,7 @@ class MCPClient:
 
         try:
             return await asyncio.wait_for(fut, timeout=30.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._pending.pop(req_id, None)
             raise TimeoutError(
                 f"MCP server {self.config.name} did not respond to {method} within 30 s"

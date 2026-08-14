@@ -12,20 +12,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from ai_assistant.auth import AuthManager
 from ai_assistant.exceptions import (
     AssistantError,
     StreamError,
     TimeoutError,
     error_from_status,
 )
-from ai_assistant.models.events import StreamEvent
 from ai_assistant.streaming.sse_parser import SSEParser
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from ai_assistant.auth import AuthManager
+    from ai_assistant.models.events import StreamEvent
 
 logger = logging.getLogger("ai_assistant.transport")
 

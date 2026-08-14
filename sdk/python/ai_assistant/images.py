@@ -8,11 +8,13 @@ Gemini native, etc.) based on the selected model.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ai_assistant.models.request import ImageGenerationRequest
 from ai_assistant.models.response import ImageResult
-from ai_assistant.transport.http import HTTPTransport
+
+if TYPE_CHECKING:
+    from ai_assistant.transport.http import HTTPTransport
 
 
 class ImageModule:
