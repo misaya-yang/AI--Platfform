@@ -244,6 +244,22 @@ class StreamingPreparationMixin:
                     bound = list(ctx.config.kb_dataset_ids or [])
                     if str(session_kb_id) not in bound:
                         ctx.config.kb_dataset_ids = [*bound, str(session_kb_id)]
+                        # Seal the session KB into the retrieval-config set as
+                        # well. The agent-runtime KB gate resolves runtime
+                        # configs per tool call from kb_retrieval_configs
+                        # (AgentLoop._build_invocation_context) and rejects the
+                        # whole call when any dataset_id lacks a sealed config,
+                        # so binding only the id would fail every
+                        # search_knowledge_base call this turn.
+                        ctx.config.kb_retrieval_configs.setdefault(
+                            str(session_kb_id),
+                            {
+                                "mode": "auto",
+                                "top_k": ctx.config.kb_top_k,
+                                "threshold": ctx.config.kb_min_relevance,
+                                "include_images": False,
+                            },
+                        )
                 yield AgentLoopEvent(
                     phase=phase,
                     # NOTE: The Assistant UI consumes this event to show

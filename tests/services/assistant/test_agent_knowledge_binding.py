@@ -10,6 +10,12 @@ from ai_gateway_core.persistence.repositories.agent_resource_resolver import (
     DatabaseAgentKnowledgeResolver,
 )
 from assistant_service.core.agent.agent_loop import AgentLoop
+from assistant_service.core.agent.agent_loop_models import (
+    AgentLoopConfig,
+    AgentLoopContext,
+    AgentLoopPhase,
+)
+from assistant_service.core.agent.streaming_state import StreamingPreparationState
 from assistant_service.core.assistant_service import AssistantService
 from assistant_service.core.tools.builtin_tools import KBSearchExecutor
 from assistant_service.core.tools.tool_registry import ToolCallRequest
@@ -596,3 +602,107 @@ async def test_missing_live_dataset_produces_unavailable_provenance() -> None:
         "historical_replayable": False,
         "catalog_complete": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_session_kb_binding_seals_retrieval_config() -> None:
+    """Binding a session KB must also seal its retrieval config.
+
+    The agent-runtime KB gate resolves runtime_configs per tool call from
+    ctx.config.kb_retrieval_configs (AgentLoop._build_invocation_context) and
+    rejects the whole call when any dataset_id lacks a sealed config. Binding
+    only the dataset id therefore made every search_knowledge_base call fail
+    on turns with uploaded files (AGENT_KNOWLEDGE_CONFIG_INVALID).
+    """
+    processed = SimpleNamespace(
+        session_kb_id="kb-session-1",
+        images=[],
+        text_content="",
+        image_descriptions=[],
+        requires_rag=False,
+        file_metadata=[],
+    )
+
+    class _FileProcessor:
+        async def process_files(self, **kwargs: Any):
+            return processed
+
+    loop = object.__new__(AgentLoop)
+    loop.model_registry = None
+    loop.file_processor = _FileProcessor()
+    loop._schedule_streaming_user_message_persistence = lambda _ctx: None
+
+    config = AgentLoopConfig(
+        file_paths=["/tmp/report.pdf"],
+        kb_dataset_ids=["dataset-a"],
+        kb_top_k=8,
+        kb_min_relevance=0.5,
+    )
+    ctx = AgentLoopContext(
+        session_id="sess-1",
+        user_id="user-1",
+        tenant_id="tenant-1",
+        message="upload and search",
+        config=config,
+    )
+
+    agen = loop._prepare_streaming_capabilities(  # noqa: SLF001
+        ctx,
+        SimpleNamespace(user_id="user-1", tenant_id="tenant-1"),
+        phase=AgentLoopPhase.EXECUTION,
+        out=StreamingPreparationState(),
+    )
+    await agen.__anext__()  # processing_files status event
+    await agen.__anext__()  # file_processed event
+    await agen.aclose()
+
+    assert "kb-session-1" in ctx.config.kb_dataset_ids
+    assert ctx.config.kb_retrieval_configs["kb-session-1"] == {
+        "mode": "auto",
+        "top_k": 8,
+        "threshold": 0.5,
+        "include_images": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_kb_executor_rejects_dataset_without_sealed_config() -> None:
+    """Pin the all-or-nothing gate contract: any dataset_id without a sealed
+    runtime config fails the whole call, before any retrieval."""
+    class RecordingKnowledge:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def retrieve(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return [], {"dataset_name": kwargs["dataset_id"]}
+
+    knowledge = RecordingKnowledge()
+    executor = KBSearchExecutor(knowledge)
+    result = await executor.execute(
+        ToolCallRequest(
+            call_id="kb-call",
+            tool_name="search_knowledge_base",
+            arguments={
+                "query": "unsealed config",
+                "dataset_ids": ["dataset-a", "missing"],
+                "top_k": 1,
+                "score_threshold": 0.9,
+            },
+            user=SimpleNamespace(user_id="user-a", tenant_id="tenant-a"),
+            metadata={
+                "kb_retrieval_configs": {
+                    "dataset-a": {
+                        "mode": "tool",
+                        "top_k": 4,
+                        "threshold": 0.2,
+                        "include_images": False,
+                    },
+                }
+            },
+        )
+    )
+
+    assert result.success is False
+    assert result.error == "AGENT_KNOWLEDGE_CONFIG_INVALID"
+    assert knowledge.calls == []
