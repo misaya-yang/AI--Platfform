@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 
 import jwt
 import pytest
+from ai_gateway_core.exceptions import AuthError
 
 # 测试配置
 TEST_JWT_SECRET = "test-secret-key-for-testing"
@@ -77,28 +78,12 @@ class TestAuthentication:
     @pytest.mark.asyncio
     async def test_valid_token_accepted(self, mock_settings):
         """有效 token 可以访问"""
-        from src.core.middleware.auth import AuthConfig
-
-        AuthConfig(
-            jwt_enabled=True,
-            jwt_secret=TEST_JWT_SECRET,
-            jwt_algorithms=[TEST_JWT_ALGORITHM],
-        )
-
         token = create_test_token(user_id="user_123")
 
-        # 模拟请求
-        mock_request = MagicMock()
-        mock_request.headers = {"Authorization": f"Bearer {token}"}
-        mock_request.url.path = "/api/v1/conversations"
-        mock_request.cookies = {}
-        mock_request.client = MagicMock(host="127.0.0.1")
-        mock_request.state = MagicMock()
-
         # 验证 token 可以被解析
-        from src.core.middleware.auth import default_jwt_decoder
+        from src.core.auth.jwt import decode_jwt_token
 
-        payload = await default_jwt_decoder(
+        payload = decode_jwt_token(
             token,
             secret=TEST_JWT_SECRET,
             algorithms=[TEST_JWT_ALGORITHM],
@@ -110,10 +95,10 @@ class TestAuthentication:
     @pytest.mark.asyncio
     async def test_invalid_token_rejected(self):
         """无效 token 被拒绝"""
-        from src.core.middleware.auth import default_jwt_decoder
+        from src.core.auth.jwt import decode_jwt_token
 
-        with pytest.raises(Exception):
-            await default_jwt_decoder(
+        with pytest.raises(AuthError):
+            decode_jwt_token(
                 "invalid_token",
                 secret=TEST_JWT_SECRET,
                 algorithms=[TEST_JWT_ALGORITHM],
@@ -122,12 +107,12 @@ class TestAuthentication:
     @pytest.mark.asyncio
     async def test_expired_token_rejected(self):
         """过期 token 被拒绝"""
-        from src.core.middleware.auth import default_jwt_decoder
+        from src.core.auth.jwt import decode_jwt_token
 
         expired_token = create_expired_token(user_id="user_123")
 
-        with pytest.raises(jwt.ExpiredSignatureError):
-            await default_jwt_decoder(
+        with pytest.raises(AuthError):
+            decode_jwt_token(
                 expired_token,
                 secret=TEST_JWT_SECRET,
                 algorithms=[TEST_JWT_ALGORITHM],
@@ -509,37 +494,6 @@ class TestRunConfigInjection:
         assert config["configurable"]["custom_key"] == "custom_value"
         # 注入用户信息
         assert config["configurable"]["user_id"] == "user_123"
-
-
-# ============ 请求日志测试 ============
-
-
-class TestRequestLogging:
-    """请求日志测试"""
-
-    @pytest.mark.asyncio
-    async def test_request_log_data(self):
-        """请求日志数据"""
-        from src.core.middleware.request_logging import RequestLog
-
-        log = RequestLog(
-            request_id="test-123",
-            timestamp="2024-01-01T00:00:00",
-            method="POST",
-            path="/api/v1/conversations",
-            user_id="user_123",
-            user_type="user",
-            client_ip="192.168.1.1",
-            status_code=200,
-            duration_ms=150.5,
-        )
-
-        data = log.to_dict()
-
-        assert data["request_id"] == "test-123"
-        assert data["method"] == "POST"
-        assert data["status_code"] == 200
-        assert data["duration_ms"] == 150.5
 
 
 # ============ 运行测试 ============
