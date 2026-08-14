@@ -79,17 +79,6 @@ class TestAssistantServiceInit:
 
         assert service.session_manager == mock_session_mgr
 
-    def test_init_creates_context_manager(self):
-        """Should create context manager during init."""
-        from assistant_service.core.assistant_service import AssistantService
-        from assistant_service.core.models.model_registry import ModelRegistry
-
-        mock_registry = MagicMock(spec=ModelRegistry)
-
-        service = AssistantService(model_registry=mock_registry)
-
-        assert service.context_manager is not None
-
     def test_builtin_domain_policy_disabled_by_default(self):
         """Built-in domain policy should be off for generic assistant by default."""
         from assistant_service.core.assistant_service import AssistantService

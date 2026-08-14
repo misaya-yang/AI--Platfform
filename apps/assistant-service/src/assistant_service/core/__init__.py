@@ -35,7 +35,7 @@ from .agent.agui_protocol import (
     ToolCallEvent,
     create_agui_emitter,
 )
-from .assistant_service import AssistantConfig, AssistantService, RAGEvaluation
+from .assistant_service import AssistantConfig, AssistantService
 from .client import (
     AssistantClientProtocol,
     InProcessAssistantClient,
@@ -119,28 +119,6 @@ from .rag.context_metrics import (
     get_context_metrics_collector,
     init_context_metrics_collector,
 )
-
-# Query Intent Analyzer (Self-RAG style adaptive retrieval)
-from .rag.query_intent_analyzer import (
-    QueryIntent,
-    QueryIntentAnalyzer,
-    QueryType,
-    RetrievalDecision,
-    create_query_intent_analyzer,
-)
-from .rag.rag_metrics import (
-    Citation,
-    CitationStatus,
-    ContextChunkMetrics,
-    RAGEvaluator,
-    RAGMetrics,
-    RAGMetricsCollector,
-    RetrievalMetrics,
-    evaluate_rag,
-    extract_citations,
-    get_rag_evaluator,
-    get_rag_metrics_collector,
-)
 from .tasks.task_manager import (
     SessionResources,
     TaskContext,
@@ -162,7 +140,6 @@ from .tool_invoker import (
 __all__ = [
     "AssistantService",
     "AssistantConfig",
-    "RAGEvaluation",
     "AssistantClientProtocol",
     "InProcessAssistantClient",
     "RemoteAssistantClient",
@@ -170,15 +147,6 @@ __all__ = [
     "ModelRegistry",
     "ModelProvider",
     "ModelInfo",
-    # Phase 3: RAG Metrics
-    "RAGEvaluator",
-    "RAGMetrics",
-    "Citation",
-    "CitationStatus",
-    "ContextChunkMetrics",
-    "get_rag_evaluator",
-    "evaluate_rag",
-    "extract_citations",
     # Phase 4: Structured Output
     "OutputFormat",
     "OutputGuardrail",
@@ -272,9 +240,6 @@ __all__ = [
     "PHASE_INDEX",
     "TOTAL_PHASES",
     "create_agent_loop",
-    "RetrievalMetrics",
-    "RAGMetricsCollector",
-    "get_rag_metrics_collector",
     # Context Metrics (Observability)
     "ContextMetrics",
     "ContextMetricsBuilder",
@@ -286,10 +251,4 @@ __all__ = [
     "MemoryMetrics",
     "get_context_metrics_collector",
     "init_context_metrics_collector",
-    # Query Intent Analyzer (Self-RAG style)
-    "QueryType",
-    "RetrievalDecision",
-    "QueryIntent",
-    "QueryIntentAnalyzer",
-    "create_query_intent_analyzer",
 ]

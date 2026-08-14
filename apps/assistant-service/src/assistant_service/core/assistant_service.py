@@ -80,9 +80,6 @@ from .assistant_models import (
     StreamEventType,
 )
 from .assistant_models import (
-    RAGEvaluation as RAGEvaluation,
-)
-from .assistant_models import (
     ToolErrorInfo as ToolErrorInfo,
 )
 from .code_executor import CodeExecutorService
@@ -107,12 +104,7 @@ from .quality.guardrails import (
     ValidationResult,
 )
 from .rag.context_engine import ContextBudgetManager, ContextStructure
-from .rag.context_manager import ContextConfig, get_context_manager
-from .rag.rag_metrics import get_rag_evaluator
-from .rag.scenario_analyzer import (
-    ScenarioDetectionResult,
-    create_scenario_analyzer,
-)
+from .rag.context_manager import ContextConfig
 from .runtime.context.assembler import ContextAssemblerV2
 from .sse_event_transport import bound_sse_event
 from .tasks.task_planner import TaskPlanner
@@ -328,7 +320,6 @@ Workflow:
         self.tenant_mcp_config = tenant_mcp_config
         self.mcp_runtime = mcp_runtime
         self.session_manager = session_manager
-        self.context_manager = get_context_manager()
         self.context_config = context_config or ContextConfig()
         self.db = db  # Database storage for MemoryManager
         self.redis = redis_client
@@ -375,9 +366,8 @@ Workflow:
         # tool-execution path.
         self._task_planner = task_planner
 
-        # Phase 3: RAG evaluation
+        # Phase 3: RAG evaluation (evaluator removed with the RAG analyzer cluster)
         self.enable_rag_evaluation = enable_rag_evaluation
-        self.rag_evaluator = get_rag_evaluator() if enable_rag_evaluation else None
 
         # Phase 4: Output guardrails
         self.output_guardrail = OutputGuardrail(
@@ -443,10 +433,6 @@ Workflow:
         # Quality Guardrails (ensure content meets minimum quality standards)
         self.quality_guardrails = quality_guardrails or QualityGuardrails()
         self.tool_constraint_validator = tool_constraint_validator or ToolConstraintValidator()
-
-        # Scenario Analyzer for intelligent scenario detection and analysis prompts
-        # This enables "Manus-like" expert analysis capabilities
-        self.scenario_analyzer = create_scenario_analyzer()
 
         # Built-in domain policy is disabled by default for generic assistant behavior.
         self.builtin_domain_policy_enabled = (
@@ -1266,11 +1252,9 @@ Workflow:
         """
         Execute using the streaming-first AgentLoop turn lifecycle.
 
-        This is the new enterprise-grade execution path that integrates:
-        - ScenarioAwareRetriever for intelligent RAG
+        This is the enterprise-grade execution path that integrates:
         - TaskManager for session isolation
         - ToolInvoker for unified tool execution
-        - RAGMetrics for quality tracking
 
         Args:
             user: User context
@@ -1687,67 +1671,6 @@ Workflow:
         """Detect if the user is correcting a previous AI response."""
         return bool(self._CORRECTION_RE.search(message))
 
-    def _build_scenario_prompt(self, scenario: ScenarioDetectionResult) -> str:
-        """Build expert analysis prompt based on detected scenario.
-
-        This method generates scenario-specific prompts that guide the AI to provide
-        expert-level, multi-dimensional analysis - a key feature for "Manus-like" capabilities.
-
-        Args:
-            scenario: The detected scenario with type and metadata.
-
-        Returns:
-            Expert analysis prompt string to inject into system prompt.
-        """
-        from .prompts.scenario_analysis_prompts import EXPERT_TEMPLATES, SCENARIO_TYPES
-
-        scenario_type = scenario.primary_scenario.value
-        scenario_info = SCENARIO_TYPES.get(scenario_type, SCENARIO_TYPES.get("general_inquiry", {}))
-
-        scenario_name = scenario_info.get("name", "通用")
-        dimensions = scenario_info.get("analysis_dimensions", [])
-        expert_template = EXPERT_TEMPLATES.get(
-            scenario_type, EXPERT_TEMPLATES.get("general_inquiry", "")
-        )
-
-        # Build the expert analysis prompt
-        prompt_parts = [
-            f"## 专家分析模式 - {scenario_name}",
-            "",
-            "你现在是一位经验丰富的专家助手。请按照以下框架进行专业分析和回答：",
-            "",
-            "### 分析维度",
-        ]
-
-        for dim in dimensions:
-            prompt_parts.append(f"- {dim}")
-
-        prompt_parts.extend(
-            [
-                "",
-                "### 回答框架",
-                expert_template,
-                "",
-                "### 回答要求",
-                "1. **准确诊断**：准确识别问题的本质和根源",
-                "2. **方案实用**：提供具体可操作的建议",
-                "3. **表达专业**：使用恰当的专业术语",
-                "4. **逻辑清晰**：层次分明，条理清楚",
-                "5. **考虑周全**：涵盖边界情况和注意事项",
-            ]
-        )
-
-        # Add urgency hint if urgent
-        if scenario.urgency.value == "urgent":
-            prompt_parts.extend(
-                [
-                    "",
-                    "**注意**：用户的问题标记为紧急，请优先给出最关键的解决步骤。",
-                ]
-            )
-
-        return "\n".join(prompt_parts)
-
     def _build_messages(
         self,
         message: str,
@@ -1759,7 +1682,6 @@ Workflow:
         model_supports_vision: bool = False,
         session_id: str | None = None,
         user_preferences: str | None = None,
-        scenario_detection: ScenarioDetectionResult | None = None,
         domain_rules: str = "",
         include_citations: bool = False,
         context_packet_receipt: dict[str, Any] | None = None,
@@ -1778,7 +1700,6 @@ Workflow:
             model_supports_vision: Whether the model supports vision/multimodal input.
             session_id: Session ID for working memory lookup (Context Engine mode).
             user_preferences: User preferences loaded from MemoryManager (formatted string).
-            scenario_detection: Detected scenario for expert-level analysis prompts.
 
         Returns:
             List of ChatMessage objects ready to send to the model.
@@ -1813,26 +1734,10 @@ Workflow:
                 system_content = f"{system_content}\n\n{domain_rules}"
             logger.info("[SYSTEM PROMPT] Using custom system prompt from config")
         else:
-            # Build Manus-style system prompt with scenario rules
-            # Only inject scenario framework when agent_loop is enabled (complex tasks)
-            # For simple queries, skip scenario injection to follow "minimal effective context" principle
-            scenario_rules = ""
-            if (
-                config.use_agent_loop
-                and scenario_detection
-                and scenario_detection.confidence >= 0.6
-            ):
-                scenario_rules = self._build_scenario_prompt(scenario_detection)
-                logger.info(
-                    f"[SCENARIO INJECT] Building prompt with scenario: {scenario_detection.primary_scenario.value}"
-                )
-            elif scenario_detection:
-                logger.info(
-                    f"[SCENARIO SKIP] Skipping scenario injection (agent_loop={config.use_agent_loop}, confidence={scenario_detection.confidence:.2f})"
-                )
-
-            if domain_rules:
-                scenario_rules = f"{scenario_rules}\n{domain_rules}".strip()
+            # Build the Manus-style modular system prompt, then fold in any
+            # domain rules.  Scenario injection was removed with the RAG
+            # analyzer cluster.
+            scenario_rules = domain_rules.strip() if domain_rules else ""
 
             # Get dataset names for display
             dataset_names = None

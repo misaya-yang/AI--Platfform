@@ -18,7 +18,6 @@ from ai_gateway_core.enums import RAGMode
 from .agent.runtime_context import AgentRuntimeExecutionContext
 from .content.structured_output import OutputFormat
 from .models.model_registry import ModelProvider
-from .rag.rag_metrics import Citation, RAGMetrics
 from .tool_invoker import CapabilityAllowlist
 
 
@@ -189,16 +188,6 @@ class RetrievedContext:
 
 
 @dataclass
-class RAGEvaluation:
-    """RAG evaluation results for a conversation turn."""
-
-    metrics: RAGMetrics | None = None
-    citations: list[Citation] = field(default_factory=list)
-    quality_score: float = 0.0
-    grounding_ratio: float = 0.0
-
-
-@dataclass
 class ToolErrorInfo:
     """Structured tool failure context retained for model recovery."""
 
@@ -229,7 +218,6 @@ class ToolErrorInfo:
 __all__ = [
     "AssistantConfig",
     "AssistantStreamEvent",
-    "RAGEvaluation",
     "RetrievedContext",
     "StreamEventType",
     "ToolErrorInfo",

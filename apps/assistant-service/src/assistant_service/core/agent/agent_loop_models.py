@@ -13,10 +13,6 @@ from typing import TYPE_CHECKING, Any
 from ..gateway import RoutedAssistantRequest
 from ..rag.context_engine import ContextStructure
 from ..rag.context_metrics import ContextMetricsBuilder
-from ..rag.query_intent_analyzer import QueryIntent
-from ..rag.rag_metrics import RAGMetrics, RetrievalMetrics
-from ..rag.scenario_analyzer import ScenarioDetectionResult
-from ..rag.scenario_aware_retriever import ScenarioRetrievalContext
 from ..run_budget import RunBudget, RunBudgetLimits
 from ..runtime.context import ContextAssemblerV2, ContextPacket
 from ..tasks.task_planner import ExecutionPlan
@@ -462,19 +458,11 @@ class AgentLoopContext:
     conversation_history_available: bool = False
     conversation_history: list[dict[str, Any]] = field(default_factory=list, repr=False)
 
-    # Step 2: Scenario
-    scenario: ScenarioDetectionResult | None = None
-
-    # Step 3: Planning
+    # Step 2: Planning
     execution_plan: ExecutionPlan | None = None
     working_memory: WorkingMemory | None = None
 
-    # Step 4: RAG
-    query_intent: QueryIntent | None = None  # LLM-driven intent analysis result
-    retrieval_context: ScenarioRetrievalContext | None = None
-    retrieval_metrics: RetrievalMetrics | None = None
-
-    # Step 5: Context
+    # Step 3: Context
     context_structure: ContextStructure | None = None
     messages: list[dict[str, Any]] = field(default_factory=list)
     context_packet: ContextPacket | None = field(default=None, repr=False)
@@ -494,17 +482,16 @@ class AgentLoopContext:
     inflight_operation_fingerprints: set[str] = field(default_factory=set, repr=False)
     knowledge_provenance: dict[str, Any] = field(default_factory=dict)
 
-    # Step 6: Execution
+    # Step 4: Execution
     tool_results: list[ToolExecutionResult] = field(default_factory=list)
 
-    # Step 7: Compression
+    # Step 5: Compression
     compressed_context: str | None = None
     tokens_saved: int = 0
     history_compaction_receipt: dict[str, Any] = field(default_factory=dict)
 
-    # Step 8: Generation
+    # Step 6: Generation
     generated_content: str = ""
-    rag_metrics: RAGMetrics | None = None
     usage: dict[str, int] = field(default_factory=dict)
 
     # Observability: Context Metrics

@@ -66,16 +66,6 @@ from ..rag.context_engine import (
     ContextEngine,
     estimate_history_tokens,
 )
-from ..rag.query_intent_analyzer import (
-    QueryIntentAnalyzer,
-    create_query_intent_analyzer,
-)
-from ..rag.rag_metrics import (
-    RAGMetricsCollector,
-    get_rag_metrics_collector,
-)
-from ..rag.scenario_analyzer import ScenarioAnalyzer
-from ..rag.scenario_aware_retriever import ScenarioAwareRetriever
 from ..runtime.compat.runtime_adapter import AssistantRuntimeAdapter
 from ..runtime.memory.lifecycle import build_compaction_lineage
 from ..tasks.task_manager import TaskManager, get_task_manager
@@ -234,14 +224,10 @@ class AgentLoop(
         kb_service: KnowledgeClientLike | None = None,
         memory_service: MemoryService | None = None,
         # Components (optional - will be created if not provided)
-        scenario_analyzer: ScenarioAnalyzer | None = None,
-        scenario_retriever: ScenarioAwareRetriever | None = None,
-        query_intent_analyzer: QueryIntentAnalyzer | None = None,
         task_planner: TaskPlanner | None = None,
         tool_invoker: ToolInvoker | None = None,
         context_engine: ContextEngine | None = None,
         task_manager: TaskManager | None = None,
-        metrics_collector: RAGMetricsCollector | None = None,
         execution_gateway: AssistantExecutionGateway | None = None,
         request_router: AssistantRequestRouter | None = None,
         database: Any | None = None,
@@ -263,14 +249,10 @@ class AgentLoop(
             model_registry: For LLM calls
             kb_service: For knowledge base retrieval
             memory_service: For session/user memory
-            scenario_analyzer: For intent detection
-            scenario_retriever: For scenario-aware RAG
-            query_intent_analyzer: For LLM-driven retrieval decision (Self-RAG style)
             task_planner: For complex task decomposition
             tool_invoker: For unified tool execution
             context_engine: For LLM context construction
             task_manager: For session isolation
-            metrics_collector: For RAG metrics persistence
             system_prompt: Base system prompt
         """
         self.model_registry = model_registry
@@ -282,14 +264,10 @@ class AgentLoop(
         self._background_tasks: set[asyncio.Task] = set()
 
         # Initialize components
-        self.scenario_analyzer = scenario_analyzer
-        self.scenario_retriever = scenario_retriever  # Created lazily when kb_service available
-        self.query_intent_analyzer = query_intent_analyzer
         self.task_planner = task_planner  # Created lazily
         self.tool_invoker = tool_invoker if tool_invoker is not None else create_tool_invoker()
         self.context_engine = context_engine or ContextEngine(provider="openai")
         self.task_manager = task_manager or get_task_manager()
-        self.metrics_collector = metrics_collector or get_rag_metrics_collector()
         self.execution_gateway = execution_gateway
         self.request_router = request_router or AssistantRequestRouter()
         self.context_budget_manager = ContextBudgetManager()
@@ -547,29 +525,6 @@ class AgentLoop(
                 )
             )
         return configs, tool_ids
-
-    def _create_query_intent_analyzer(self) -> QueryIntentAnalyzer:
-        """Create a QueryIntentAnalyzer instance.
-
-        Model selection is delegated to the analyzer's default (sourced from
-        the gateway's configured default model) — we don't hardcode a model
-        ID here. Deployments swap models via ModelRegistry + settings, not
-        by patching this file.
-        """
-        return create_query_intent_analyzer(
-            model_registry=self.model_registry,
-            enable_llm_tier=True,
-            cache_ttl=3600,
-        )
-
-    def _create_scenario_analyzer(self) -> ScenarioAnalyzer:
-        """Create a ScenarioAnalyzer instance."""
-        try:
-            from ..rag.scenario_analyzer import create_scenario_analyzer
-
-            return create_scenario_analyzer()
-        except (ImportError, AttributeError):
-            return ScenarioAnalyzer()
 
     def _build_invocation_context(
         self,

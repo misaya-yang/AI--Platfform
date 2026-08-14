@@ -19,10 +19,6 @@ from assistant_service.core.context_engine import (
     create_context_engine,
 )
 from assistant_service.core.files.file_processor import FileProcessor
-from assistant_service.core.rag.scenario_aware_retriever import (
-    RetrievalResult,
-    ScenarioRetrievalContext,
-)
 from assistant_service.core.runtime.context.assembler import ContextAssemblerV2
 
 # =============================================================================
@@ -486,41 +482,6 @@ class TestRAGSourceScope:
             "user_id": "user-a",
             "session_id": "session-a",
         }
-
-    def test_formatted_rag_context_preserves_source_metadata(self):
-        """Formatted RAG snippets carry citation, freshness, dataset, and scope."""
-        context = ScenarioRetrievalContext(
-            user_query="Summarize the uploaded policy",
-            scenario=SimpleNamespace(),
-            results=[
-                RetrievalResult(
-                    content="Policy cancellation requires written notice.",
-                    source="policy.md",
-                    score=0.92,
-                    chunk_id="chunk-1",
-                    dataset_id="session-kb-1",
-                    metadata={
-                        "source_type": "session_file",
-                        "citation": "policy.md#chunk-1",
-                        "freshness": "uploaded:2026-06-25",
-                        "scope": {
-                            "tenant_id": "tenant-a",
-                            "session_id": "session-a",
-                        },
-                    },
-                )
-            ],
-        )
-
-        formatted = context.to_formatted_context()
-
-        assert "source_type: session_file" in formatted
-        assert "citation: policy.md#chunk-1" in formatted
-        assert "freshness: uploaded:2026-06-25" in formatted
-        assert "dataset_id: session-kb-1" in formatted
-        assert "tenant_id: tenant-a" in formatted
-        assert "session_id: session-a" in formatted
-
 
 # =============================================================================
 # Context Packet Budget Tests

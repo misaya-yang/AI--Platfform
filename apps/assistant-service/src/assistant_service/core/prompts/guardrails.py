@@ -234,10 +234,10 @@ In addition to core constraints, general inquiries require:
 # Scenario Guardrails Mapping
 # =============================================================================
 
-# Maps scenario codes to their guardrails definitions
-# Scenario codes match SCENARIO_TYPES in scenario_analysis_prompts.py
+# Maps scenario codes to their guardrails definitions.
+# Scenario codes match the scenario taxonomy used by the (removed) analyzer.
 SCENARIO_GUARDRAILS_MAP = {
-    # Primary scenario codes (from scenario_analysis_prompts.py)
+    # Primary scenario codes
     "customer_service": CUSTOMER_SERVICE_GUARDRAILS,
     "sales_consultation": SALES_CONSULTATION_GUARDRAILS,
     "technical_support": TECHNICAL_SUPPORT_GUARDRAILS,

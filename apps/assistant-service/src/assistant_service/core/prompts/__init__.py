@@ -7,8 +7,8 @@ available for the current request. Authorization, approvals, tool schema
 validation, and side-effect controls are runtime responsibilities, not
 prompt text.
 
-``scenario_analysis_prompts`` and ``generation_prompts`` are the remaining
-specialized surfaces; each has live callers in ``core/rag`` and ``core/agent``.
+``generation_prompts`` is the remaining specialized surface, with a live
+caller in ``core/agent``.
 
 The ``agent_freedom`` and ``planning_prompts`` modules were removed because
 every symbol they exported was unreferenced outside this package. The legacy
@@ -48,39 +48,6 @@ from .guardrails import (
     get_guardrails,
     get_guardrails_for_scenario,
     get_minimal_guardrails,
-)
-from .scenario_analysis_prompts import (
-    DOCUMENT_ANALYSIS_PROMPT,
-    DOCUMENT_QA_PROMPT,
-    EXPERT_TEMPLATES,
-    FAST_SCENARIO_DETECTION_PROMPT,  # New: TTFT-optimized version
-    KB_ENHANCED_ANALYSIS_PROMPT,
-    MULTI_DIMENSIONAL_ANALYSIS_PROMPT,
-    # Prompt Templates
-    SCENARIO_DETECTION_PROMPT,
-    # Constants
-    SCENARIO_TYPES,
-    build_analysis_prompt,
-    build_document_analysis_prompt,
-    build_document_qa_prompt,
-    build_kb_enhanced_prompt,
-    # Builder Functions
-    build_scenario_detection_prompt,
-    # Scenario Detection Helpers
-    detect_scenario_by_keywords,  # New: Fast keyword-based detection
-    get_all_scenario_types,  # New: Full scenario dictionary
-    get_analysis_dimensions,
-    get_confidence_threshold,  # New: Classification thresholds
-    get_expert_template,
-    get_retrieval_strategy,  # New: Manus-style retrieval strategy
-    get_scenario_codes,
-    get_scenario_keywords,
-    get_scenario_metadata,  # New: Complete metadata accessor
-    # Scenario Metadata Accessors
-    get_scenario_types_description,
-    get_tool_affinity,  # New: Action space management
-    list_scenario_codes,  # New: Valid scenario codes list
-    validate_scenario_detection,  # New: LLM result validation
 )
 
 # Manus-style modular prompts (v2) - Core system prompt
@@ -149,37 +116,6 @@ __all__ = [
     "build_report_prompt",
     "build_email_prompt",
     "build_summary_prompt",
-    # Scenario Analysis Prompts - Constants
-    "SCENARIO_TYPES",
-    "EXPERT_TEMPLATES",
-    # Scenario Analysis Prompts - Templates
-    "SCENARIO_DETECTION_PROMPT",
-    "FAST_SCENARIO_DETECTION_PROMPT",
-    "MULTI_DIMENSIONAL_ANALYSIS_PROMPT",
-    "DOCUMENT_ANALYSIS_PROMPT",
-    "DOCUMENT_QA_PROMPT",
-    "KB_ENHANCED_ANALYSIS_PROMPT",
-    # Scenario Analysis Prompts - Builder Functions
-    "build_scenario_detection_prompt",
-    "build_analysis_prompt",
-    "build_document_analysis_prompt",
-    "build_document_qa_prompt",
-    "build_kb_enhanced_prompt",
-    # Scenario Analysis Prompts - Metadata Accessors
-    "get_scenario_types_description",
-    "get_scenario_codes",
-    "get_scenario_keywords",
-    "get_analysis_dimensions",
-    "get_expert_template",
-    "get_scenario_metadata",
-    "get_retrieval_strategy",
-    "get_tool_affinity",
-    "get_confidence_threshold",
-    # Scenario Analysis Prompts - Detection Helpers
-    "detect_scenario_by_keywords",
-    "validate_scenario_detection",
-    "get_all_scenario_types",
-    "list_scenario_codes",
     # Manus-style System Prompt v2 - Core sections
     "AGENT_IDENTITY",
     "AGENT_CORE_BEHAVIOR",

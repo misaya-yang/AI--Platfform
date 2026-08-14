@@ -63,40 +63,23 @@ def user_context():
 
 
 @pytest.fixture
-def mock_context_manager():
-    """Create a mock context manager that returns proper values."""
-    context_manager = MagicMock()
-    # Mock the process_history method to return a proper result
-    context_result = MagicMock()
-    context_result.messages = []
-    context_result.truncated_count = 0
-    context_result.original_count = 0
-    context_result.total_tokens = 0
-    context_manager.process_history.return_value = context_result
-    return context_manager
-
-
-@pytest.fixture
-def assistant_service(mock_model_registry, mock_context_manager):
+def assistant_service(mock_model_registry):
     """Create an AssistantService instance for testing."""
-    with patch("assistant_service.core.assistant_service.get_context_manager") as mock_get_ctx:
-        mock_get_ctx.return_value = mock_context_manager
-        with (
-            patch("assistant_service.core.assistant_service.get_rag_evaluator"),
-            patch(
-                "assistant_service.core.assistant_service.get_artifact_storage",
-                create=True,
-            ),
-            patch("assistant_service.core.assistant_service.create_file_processor"),
-        ):
-            service = AssistantService(
-                model_registry=mock_model_registry,
-                kb_service=None,
-                session_manager=None,
-                enable_rag_evaluation=False,
-            )
-            service.tool_invoker.get_tool_definitions_filtered = AsyncMock(return_value=[])
-            return service
+    with (
+        patch(
+            "assistant_service.core.assistant_service.get_artifact_storage",
+            create=True,
+        ),
+        patch("assistant_service.core.assistant_service.create_file_processor"),
+    ):
+        service = AssistantService(
+            model_registry=mock_model_registry,
+            kb_service=None,
+            session_manager=None,
+            enable_rag_evaluation=False,
+        )
+        service.tool_invoker.get_tool_definitions_filtered = AsyncMock(return_value=[])
+        return service
 
 
 # =============================================================================
@@ -162,8 +145,6 @@ class TestAssistantServiceProperties:
         custom_planner = TaskPlanner()
 
         with (
-            patch("assistant_service.core.assistant_service.get_context_manager"),
-            patch("assistant_service.core.assistant_service.get_rag_evaluator"),
             patch(
                 "assistant_service.core.assistant_service.get_artifact_storage",
                 create=True,
