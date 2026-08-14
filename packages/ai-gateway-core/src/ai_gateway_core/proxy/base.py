@@ -35,6 +35,7 @@ from fastapi.responses import StreamingResponse
 from starlette.responses import Response
 
 from ai_gateway_core.comm.retry import RetryBudget, RetryPolicy
+from ai_gateway_core.logging import record_internal_exception
 
 from .route_pattern import extract_route_pattern
 
@@ -821,8 +822,13 @@ def _set_store_opened_at(store: CounterStore, opened_at: float) -> None:
         return
     try:
         method(opened_at)
-    except Exception:  # noqa: BLE001
-        logger.debug("Failed to set circuit breaker opened_at", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        record_internal_exception(
+            logger,
+            "assistant.proxy.circuit_breaker_opened_at_failed",
+            exc,
+            level=logging.DEBUG,
+        )
 
 
 def _get_int_env(key: str, default: int) -> int:

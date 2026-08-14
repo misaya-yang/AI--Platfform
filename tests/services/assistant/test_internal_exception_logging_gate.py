@@ -36,7 +36,6 @@ _AI_GATEWAY_CORE_DEBT_WHITELIST: dict[str, frozenset[str]] = {
     "packages/ai-gateway-core/src/ai_gateway_core/connectors/connector_mcp.py": frozenset({"caught_exception_in_log", "missing_diagnostic"}),  # 1+1
     "packages/ai-gateway-core/src/ai_gateway_core/eval/evaluator_executor.py": frozenset({"caught_exception_in_log", "missing_diagnostic"}),  # 2+3
     "packages/ai-gateway-core/src/ai_gateway_core/eval/outbox_worker.py": frozenset({"caught_exception_in_log", "missing_diagnostic"}),  # 2+2
-    "packages/ai-gateway-core/src/ai_gateway_core/events/bus.py": frozenset({"missing_diagnostic", "raw_traceback"}),  # 1+1
     "packages/ai-gateway-core/src/ai_gateway_core/events/consumer.py": frozenset({"broad_suppress", "caught_exception_in_log", "missing_diagnostic"}),  # 2+2+1
     "packages/ai-gateway-core/src/ai_gateway_core/events/envelope.py": frozenset({"missing_diagnostic"}),  # 1
     "packages/ai-gateway-core/src/ai_gateway_core/image/callback.py": frozenset({"caught_exception_in_log", "missing_diagnostic"}),  # 3+2
@@ -50,11 +49,11 @@ _AI_GATEWAY_CORE_DEBT_WHITELIST: dict[str, frozenset[str]] = {
     "packages/ai-gateway-core/src/ai_gateway_core/metrics/context_metrics.py": frozenset({"caught_exception_in_log", "missing_diagnostic"}),  # 1+1
     "packages/ai-gateway-core/src/ai_gateway_core/metrics/realtime_metrics.py": frozenset({"caught_exception_in_log", "missing_diagnostic"}),  # 9+10
     "packages/ai-gateway-core/src/ai_gateway_core/metrics/usage_recorder.py": frozenset({"caught_exception_in_log", "missing_diagnostic"}),  # 14+16
-    "packages/ai-gateway-core/src/ai_gateway_core/persistence/database.py": frozenset({"broad_suppress", "caught_exception_in_log", "raw_traceback"}),  # 2+1+36
+    "packages/ai-gateway-core/src/ai_gateway_core/persistence/database.py": frozenset({"broad_suppress", "caught_exception_in_log"}),  # 2+1 (36 raw tracebacks migrated)
     "packages/ai-gateway-core/src/ai_gateway_core/persistence/redis.py": frozenset({"caught_exception_in_log", "missing_diagnostic"}),  # 1+2
     "packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/api_key_repository.py": frozenset({"broad_suppress"}),  # 1
     "packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/mcp_repository.py": frozenset({"missing_diagnostic"}),  # 1
-    "packages/ai-gateway-core/src/ai_gateway_core/proxy/base.py": frozenset({"broad_suppress", "caught_exception_in_log", "missing_diagnostic", "raw_traceback"}),  # 1+2+9+1
+    "packages/ai-gateway-core/src/ai_gateway_core/proxy/base.py": frozenset({"broad_suppress", "caught_exception_in_log", "missing_diagnostic"}),  # 1+2+9 (1 raw traceback migrated)
     "packages/ai-gateway-core/src/ai_gateway_core/proxy/drain.py": frozenset({"caught_exception_in_log"}),  # 1
     "packages/ai-gateway-core/src/ai_gateway_core/proxy/sse_heartbeat.py": frozenset({"broad_suppress", "missing_diagnostic"}),  # 1+1
     "packages/ai-gateway-core/src/ai_gateway_core/quiz/quiz_generator.py": frozenset({"caught_exception_in_log"}),  # 1
@@ -62,7 +61,7 @@ _AI_GATEWAY_CORE_DEBT_WHITELIST: dict[str, frozenset[str]] = {
     "packages/ai-gateway-core/src/ai_gateway_core/security/secrets.py": frozenset({"caught_exception_in_log", "missing_diagnostic"}),  # 3+3
     "packages/ai-gateway-core/src/ai_gateway_core/skills/artifact_repository.py": frozenset({"missing_diagnostic"}),  # 1
     "packages/ai-gateway-core/src/ai_gateway_core/storage/artifact_storage.py": frozenset({"caught_exception_in_log", "missing_diagnostic"}),  # 3+5
-    "packages/ai-gateway-core/src/ai_gateway_core/storage/image_storage.py": frozenset({"caught_exception_in_log", "missing_diagnostic", "type_only_diagnostic"}),  # 10+6+2
+    "packages/ai-gateway-core/src/ai_gateway_core/storage/image_storage.py": frozenset({"caught_exception_in_log", "missing_diagnostic"}),  # 8+4 (2 type-only migrated)
     "packages/ai-gateway-core/src/ai_gateway_core/tasks/task_manager.py": frozenset({"caught_exception_in_log", "missing_diagnostic"}),  # 1+1
     "packages/ai-gateway-core/src/ai_gateway_core/tasks/task_types.py": frozenset({"caught_exception_in_log", "missing_diagnostic"}),  # 1+1
     "packages/ai-gateway-core/src/ai_gateway_core/tracing/httpx_hooks.py": frozenset({"caught_exception_in_log", "missing_diagnostic"}),  # 1+1

@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, urlencode, urlparse, urlunparse
 
+from ai_gateway_core.logging import record_internal_exception
+
 logger = logging.getLogger(__name__)
 
 
@@ -566,11 +568,15 @@ class S3StorageBackend(BaseStorageBackend):
             await client.delete_object(Bucket=self.bucket, Key=pkey)
             return True
         except Exception as exc:
+            record_internal_exception(
+                logger,
+                "assistant.storage.s3_delete_failed",
+                exc,
+                level=logging.WARNING,
+            )
             logger.warning(
-                "Storage operation failed "
-                "(provider=s3, operation=delete, key_hash=%s, exception_type=%s)",
+                "Storage object delete failed (provider=s3, operation=delete, key_hash=%s)",
                 storage_key_log_hash(pkey),
-                type(exc).__name__,
             )
             return False
 
@@ -841,11 +847,15 @@ class OSSStorageBackend(BaseStorageBackend):
             await asyncio.to_thread(bucket.delete_object, pkey)
             return True
         except Exception as exc:
+            record_internal_exception(
+                logger,
+                "assistant.storage.oss_delete_failed",
+                exc,
+                level=logging.WARNING,
+            )
             logger.warning(
-                "Storage operation failed "
-                "(provider=oss, operation=delete, key_hash=%s, exception_type=%s)",
+                "Storage object delete failed (provider=oss, operation=delete, key_hash=%s)",
                 storage_key_log_hash(pkey),
-                type(exc).__name__,
             )
             return False
 

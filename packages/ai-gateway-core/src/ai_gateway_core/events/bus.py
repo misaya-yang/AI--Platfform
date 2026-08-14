@@ -35,6 +35,7 @@ from typing import Any
 
 import redis.asyncio as aioredis
 
+from ..logging import record_internal_exception
 from .envelope import EventEnvelope
 from .errors import EventBusError
 from .registry import get_stream
@@ -138,8 +139,13 @@ class EventBus:
         if client is not None and self._owns_client:
             try:
                 await client.aclose()
-            except Exception:  # noqa: BLE001 — best-effort teardown
-                logger.debug("EventBus close: ignored client teardown error", exc_info=True)
+            except Exception as exc:  # noqa: BLE001 — best-effort teardown
+                record_internal_exception(
+                    logger,
+                    "assistant.events.client_teardown_failed",
+                    exc,
+                    level=logging.DEBUG,
+                )
         self._owns_client = False
 
     # ----- internals -------------------------------------------------------
