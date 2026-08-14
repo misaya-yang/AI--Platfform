@@ -84,7 +84,7 @@ each program's `loop-state.json`, never from prose. Verified 2026-08-14:
 | Program | Terminal phase | Status |
 | --- | --- | --- |
 | **`agent-contract-unification`** | ACU-00 → ACU-06 | **active** — makes the assistant an `AgentSpec` instance and the public runtime API the only surface contract. Target law: [`harness/platform-architecture.md`](harness/platform-architecture.md) |
-| **`product-convergence`** | PC-04 | **verified** — review findings #1–#5+#8: first-run onboarding, connectors as the only Confluence story, ai-quiz plugin, nav groups, DEFAULT_MODEL. Report: [`reports/code-review/product-convergence-2026-08.md`](../../reports/code-review/product-convergence-2026-08.md) |
+| **`product-convergence`** | PC-04 | **verified** — review findings #1–#5+#8: first-run onboarding, connectors as the only Confluence story, ai-quiz plugin, nav groups, DEFAULT_MODEL. Report: [`reports/code-review/product-convergence-2026-08.md`](../reports/code-review/product-convergence-2026-08.md) |
 | `agent-studio-prd` | AS-09 | verified, no blockers |
 | `agent-trace-eval-prd` | ATE-04 | verified, terminal — expansions need a new program |
 | `assistant-general-agent-harness` | AGA-06 | 7/7 phases done |
