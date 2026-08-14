@@ -373,6 +373,16 @@ class TestCodeExecutorServiceInit:
         with pytest.raises(ValueError, match="CODE_EXECUTOR_PYTHON"):
             CodeExecutorService()
 
+    def test_init_rejects_shell_syntax_in_snapshot_python_executable(self):
+        class _StartupConfig:
+            def runtime_value(self, key: str):
+                if key == "ASSISTANT_CODE_EXECUTOR_PYTHON":
+                    return "python3; id"
+                return None
+
+        with pytest.raises(ValueError, match="CODE_EXECUTOR_PYTHON"):
+            CodeExecutorService(startup_config=_StartupConfig())
+
 
 class TestDockerAvailability:
     """Test Docker availability checking."""

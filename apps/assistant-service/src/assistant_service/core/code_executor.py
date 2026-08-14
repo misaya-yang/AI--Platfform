@@ -344,9 +344,12 @@ class CodeExecutorService:
             self.config.image = str(
                 startup_config.runtime_value("ASSISTANT_CODE_EXECUTOR_IMAGE")
             )
-            self.config.python_executable = str(
+            python_executable = str(
                 startup_config.runtime_value("ASSISTANT_CODE_EXECUTOR_PYTHON")
             )
+            if python_executable and not re.fullmatch(r"[A-Za-z0-9_./-]+", python_executable):
+                raise ValueError("ASSISTANT_CODE_EXECUTOR_PYTHON is invalid")
+            self.config.python_executable = python_executable
         else:
             backend = os.environ.get("ASSISTANT_CODE_EXECUTOR_BACKEND", "").strip().lower()
             if backend:
