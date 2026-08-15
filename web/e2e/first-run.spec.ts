@@ -72,6 +72,25 @@ test.describe("first-run onboarding", () => {
     assertNoRuntimeFailures();
   });
 
+  test("does not query or show setup details without Services permission", async ({ page }) => {
+    const setupRequests: string[] = [];
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname === "/api/v1/setup/state") {
+        setupRequests.push(request.url());
+      }
+    });
+    await installFirstRunHarness(page, {
+      configured: false,
+      permissions: ["console:dashboard:view"],
+    });
+
+    await page.goto("/dashboard", { waitUntil: "domcontentloaded" });
+
+    await expect(page.getByText(/No model service is configured yet/)).toHaveCount(0);
+    await expect(page.getByText("First-run setup")).toHaveCount(0);
+    expect(setupRequests).toEqual([]);
+  });
+
   test("dismisses the banner and persists the dismissal across reloads", async ({ page }) => {
     const assertNoRuntimeFailures = watchRuntimeFailures(page);
     await installFirstRunHarness(page, { configured: false });

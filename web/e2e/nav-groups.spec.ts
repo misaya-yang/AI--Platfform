@@ -3,8 +3,8 @@
  *
  * Dashboard stays ungrouped on top, then 使用 (assistant + agents),
  * 构建 (knowledge + playground + eval), 治理 (services + users +
- * tasks + settings), and exams ungrouped last. The model_tester role
- * renders a flat rail with only the playground item and no headings.
+ * tasks + settings). The model_tester role renders a flat rail with only
+ * the playground item and no headings.
  */
 import { expect, test, type Page } from "@playwright/test";
 import { installFirstRunHarness } from "./support/first-run";

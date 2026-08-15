@@ -483,6 +483,15 @@ def test_compose_keeps_internal_service_ports_private() -> None:
     assert "8765" not in compose
 
 
+def test_compose_forwards_the_single_model_setup_mode_contract() -> None:
+    example = Path(".env.example").read_text()
+    gateway = _compose_service_section(Path("docker-compose.yml").read_text(), "gateway")
+
+    assert "MODEL_SETUP_MODE=ui" in example
+    assert "GATEWAY_MODEL_SETUP_MODE" not in example
+    assert 'MODEL_SETUP_MODE: "${MODEL_SETUP_MODE:-ui}"' in gateway
+
+
 def test_validate_env_rejects_localhost_cors_for_non_local_auth_domain(
     tmp_path: Path,
 ) -> None:

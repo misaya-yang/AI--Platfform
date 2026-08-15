@@ -648,8 +648,9 @@ class Settings(BaseSettings):
     # `ui` keeps the console usable while no provider key is configured (the
     # setup banner / dashboard checklist guide the operator); `environment`
     # expects providers preseeded and reports the stack as configured.
-    # Env: GATEWAY_MODEL_SETUP_MODE (same semantics as MODEL_SETUP_MODE).
-    model_setup_mode: str = "ui"
+    # Public env contract: MODEL_SETUP_MODE. Compose forwards the same name to
+    # the gateway; no second gateway-only mirror is required.
+    model_setup_mode: str = Field(default="ui", validation_alias="MODEL_SETUP_MODE")
 
     @field_validator("model_setup_mode")
     @classmethod

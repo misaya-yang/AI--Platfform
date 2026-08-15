@@ -87,9 +87,8 @@
 
 - Added a first-run onboarding flow: `GET /api/v1/setup/state` reports provider
   setup status, the console shows a dismissible setup banner and a three-step
-  dashboard checklist until a provider is configured, and a new
-  `GATEWAY_MODEL_SETUP_MODE` env var (`ui` | `environment`) mirrors
-  `MODEL_SETUP_MODE` on the gateway.
+  dashboard checklist until a provider is configured, and the existing
+  `MODEL_SETUP_MODE` env var (`ui` | `environment`) is forwarded to the gateway.
 - Regrouped the sidebar navigation into 使用/Use (assistant, agents),
   构建/Build (knowledge, playground, eval), and 治理/Govern (services, users,
   tasks, settings) sections, with Dashboard ungrouped on top; the model-tester

@@ -9,8 +9,6 @@ as configured.
 
 from __future__ import annotations
 
-from ai_gateway_core.enums import ModelProvider
-
 
 async def configured_providers(model_meta, tenant_id: str) -> list[str]:
     """Return provider ids configured for ``tenant_id``.
@@ -20,11 +18,15 @@ async def configured_providers(model_meta, tenant_id: str) -> list[str]:
     an encrypted tenant key). ``model_meta`` is the gateway's
     ``GatewayModelMeta`` facade (``request.app.state.model_meta``).
     """
-    enabled = set(await model_meta.list_enabled_providers(tenant_id))
+    enabled = await model_meta.list_enabled_providers(tenant_id)
     configured: list[str] = []
-    for provider in ModelProvider:
-        provider_id = provider.value
-        if provider_id in enabled and await model_meta.is_provider_configured(
+    seen: set[str] = set()
+    for raw_provider_id in enabled:
+        provider_id = str(raw_provider_id or "").strip()
+        if not provider_id or provider_id in seen:
+            continue
+        seen.add(provider_id)
+        if await model_meta.is_provider_configured(
             tenant_id,
             provider_id,
         ):

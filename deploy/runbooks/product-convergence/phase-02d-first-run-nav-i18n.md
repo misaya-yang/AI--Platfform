@@ -4,8 +4,9 @@
 
 1. New `src/api/v1/setup.py`: `GET /api/v1/setup/state` → `{configured, missing[], mode,
    default_model}`. Derivation reuses `src/api/v1/health.py:117-164` provider-config logic;
-   `mode` from new gateway settings field `model_setup_mode` (env `GATEWAY_MODEL_SETUP_MODE`).
-   Auth: JWT **and** api-key (CLI consumes it); not admin-gated. Registered in router.py.
+   `mode` from gateway settings field `model_setup_mode` (env `MODEL_SETUP_MODE`).
+   Auth: JWT **and** api-key (CLI consumes it); requires the Services-view capability rather
+   than an admin role. Registered in router.py.
 2. `web/src/api/setup.ts` `useSetupState` (react-query, staleTime 5min, invalidate on route
    change) → `web/src/components/SetupBanner.tsx` in AppLayout above content: persistent when
    unconfigured, links to `/services`, auto-disappears when configured; dismiss in localStorage
