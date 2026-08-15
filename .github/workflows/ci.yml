@@ -31,7 +31,7 @@ jobs:
 
       - name: Run focused Python lint
         run: |
-          uv run ruff check \
+          uv run --extra dev ruff check \
             tests/scripts/test_validate_env_quickstart.py \
             tests/scripts/test_web_runtime_config_entrypoint.py \
             tests/scripts/test_seed_demo_data.py
