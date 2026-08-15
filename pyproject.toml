@@ -159,6 +159,10 @@ test = [
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=6.0.0",
     "fakeredis>=2.32.0",
+    # The root assistant plugin suite performs a real stdio handshake with
+    # the bundled docgen MCP server, so a clean test environment needs the
+    # transport dependency rather than inheriting it from a developer venv.
+    "mcp>=2.0,<3",
     "respx>=0.22.0",  # httpx mock transport (confluence tool tests)
 ]
 

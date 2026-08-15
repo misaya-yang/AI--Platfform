@@ -414,34 +414,6 @@ async def test_update_config_extra_only_does_not_emit_empty_set_clause() -> None
 
 
 @pytest.mark.asyncio
-async def test_update_config_extra_only_does_not_emit_empty_set_clause() -> None:
-    """Regression: mcp_tools-only updates must not build `SET , updated_at` SQL.
-
-    The column SET list is empty for an extra-only payload; the endpoint must
-    skip the column UPDATE entirely and only merge the JSONB extra_config.
-    """
-    db = _FakeDb()
-    db.configs = [_config_row(tenant_id="tenant-a", provider="confluence")]
-    request = _request(db)
-
-    result = await update_connector_config(
-        provider="confluence",
-        payload=ConnectorProviderUpdate(
-            mcp_tools=[{"name": "confluence_read", "description": "Read pages"}],
-        ),
-        request=request,
-        user=_user(),
-        auth=_auth(),
-    )
-
-    assert result["mcp_tools"] == [
-        {"name": "confluence_read", "description": "Read pages"}
-    ]
-    stored = db._row("tenant-a", "confluence")
-    assert stored["display_name"] == "Confluence"  # untouched by the extra-only update
-
-
-@pytest.mark.asyncio
 async def test_update_config_rejects_empty_payload() -> None:
     db = _FakeDb()
     db.configs = [_config_row(tenant_id="tenant-a", provider="confluence")]
