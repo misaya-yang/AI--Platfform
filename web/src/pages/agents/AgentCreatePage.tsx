@@ -124,7 +124,8 @@ export function AgentCreatePage() {
   const skills = useQuery({ queryKey: ["agent-catalog", "skills"], queryFn: listAgentSkills, retry: false });
   const connectors = useQuery({ queryKey: ["agent-catalog", "connectors"], queryFn: listAgentConnectors, retry: false });
   const datasets = useQuery({ queryKey: ["agent-catalog", "datasets"], queryFn: listAgentDatasets, retry: false });
-  const fallbackModels = [{ id: "qwen3.7-plus", name: "qwen3.7-plus", provider: "dashscope" }];
+  // Empty id → the server applies its deployment default when the model is omitted.
+  const fallbackModels = [{ id: "", name: t("agents.common.serverDefault"), provider: "dashscope" }];
   const modelRows = models.data?.length ? models.data : fallbackModels;
   const createMutation = useMutation({
     mutationFn: () => createAgent({ name: name.trim(), description: description.trim(), spec }),
@@ -132,7 +133,8 @@ export function AgentCreatePage() {
   });
   const createError = createMutation.error ? agentErrorDetail(createMutation.error) : null;
   const identityValid = name.trim().length > 0 && name.trim().length <= 255 && description.length <= 4000 && isSafeIconUrl(spec.identity.icon_url);
-  const behaviorValid = Boolean(spec.instructions.trim() && spec.model.model_id);
+  // An empty model_id is valid: the server applies its deployment default (DEFAULT_MODEL).
+  const behaviorValid = Boolean(spec.instructions.trim());
   const canSubmit = identityValid && behaviorValid && !createMutation.isPending;
 
   const selectedKeys = useMemo(

@@ -10,6 +10,7 @@ import json
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
+import ai_gateway_core.persistence.database as database_module
 import pytest
 
 from src.persistence.database import DatabaseStorage
@@ -251,6 +252,27 @@ class TestBootstrapAdminPassword:
         db._pool = mock_pool
 
         assert await db._account_permission_schema_missing() is False
+
+
+@pytest.mark.asyncio
+async def test_schema_check_failure_uses_bounded_exception_logger(monkeypatch):
+    db = DatabaseStorage.__new__(DatabaseStorage)
+    db._pool = object()
+
+    async def fail_schema_check():
+        raise OSError("database unavailable")
+
+    db._schema_is_missing = fail_schema_check
+    recorded: list[tuple[str, type[BaseException]]] = []
+    monkeypatch.setattr(
+        database_module,
+        "record_internal_exception",
+        lambda _logger, event, exc: recorded.append((event, type(exc))),
+    )
+
+    await db._auto_initialize_schema()
+
+    assert recorded == [("assistant.database.schema_state_check_failed", OSError)]
 
 
 class TestUpdateSessionPatchFields:

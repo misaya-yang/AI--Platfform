@@ -11,12 +11,13 @@ import java.util.Map;
  * <pre>{@code
  * ChatRequest req = ChatRequest.builder("Summarize the onboarding checklist")
  *     .sessionId("sess_abc123")
- *     .modelId("qwen3.7-plus")
  *     .temperature(0.5)
  *     .maxTokens(2048)
  *     .kbDatasetIds(List.of("ds_product_docs", "ds_support"))
  *     .build();
  * }</pre>
+ *
+ * <p>Omit {@code modelId} to let the server apply its deployment default.
  *
  * <p>Mirrors the Python SDK's {@code ChatRequest} dataclass.
  */
@@ -24,7 +25,7 @@ public final class ChatRequest {
 
     private final String message;
     private String sessionId;
-    private String modelId = "qwen3.7-plus";
+    private String modelId;
     private double temperature = 0.7;
     private Integer maxTokens;
     private String systemPrompt;
@@ -72,7 +73,7 @@ public final class ChatRequest {
             return this;
         }
 
-        /** LLM model identifier (default: {@code "qwen3.7-plus"}). */
+        /** LLM model identifier (omit for the server's deployment default). */
         public Builder modelId(String modelId) {
             req.modelId = modelId;
             return this;
@@ -181,7 +182,7 @@ public final class ChatRequest {
         var map = new LinkedHashMap<String, Object>();
         map.put("message", message);
         putIfNotNull(map, "session_id", sessionId);
-        map.put("model_id", modelId);
+        putIfNotNull(map, "model_id", modelId);
         map.put("temperature", temperature);
         putIfNotNull(map, "max_tokens", maxTokens);
         putIfNotNull(map, "system_prompt", systemPrompt);

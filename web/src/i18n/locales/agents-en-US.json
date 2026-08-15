@@ -1,6 +1,7 @@
 {
   "common": {
     "retry": "Retry",
+    "serverDefault": "Server default",
     "cancel": "Cancel",
     "back": "Back",
     "continue": "Continue",
@@ -40,6 +41,7 @@
     "loadError": "Agents could not be loaded",
     "filteredEmpty": "No agents match these filters.",
     "empty": "Create your first agent to configure a reusable runtime.",
+    "emptyWhy": "Agents package your prompts, tools, and knowledge into a reusable runtime.",
     "clearFilters": "Clear filters",
     "createBlank": "Create blank agent",
     "supportTemplate": "Support template",

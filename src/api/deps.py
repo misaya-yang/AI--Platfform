@@ -62,12 +62,6 @@ def get_langgraph_proxy(request: Request) -> LangGraphProxy | None:
     return getattr(request.app.state, "langgraph_proxy", None)
 
 
-def get_knowledge_service(request: Request):
-    """Deprecated: KB now runs as independent microservice at :8092.
-    Kept as stub — returns None. Knowledge routes proxy to KB Service."""
-    return None
-
-
 def require_langgraph_proxy(request: Request) -> LangGraphProxy:
     """获取 LangGraph 代理（若未初始化则返回 503）"""
     proxy = getattr(request.app.state, "langgraph_proxy", None)

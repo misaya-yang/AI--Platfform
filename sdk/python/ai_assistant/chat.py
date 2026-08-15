@@ -15,13 +15,16 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ai_assistant.models.events import StreamEvent
 from ai_assistant.models.request import ChatRequest
 from ai_assistant.models.response import ChatResponse
-from ai_assistant.transport.http import HTTPTransport
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from ai_assistant.models.events import StreamEvent
+    from ai_assistant.transport.http import HTTPTransport
 
 
 class ChatModule:
@@ -39,7 +42,7 @@ class ChatModule:
         message: str,
         *,
         session_id: str | None = None,
-        model_id: str = "qwen3.7-plus",
+        model_id: str | None = None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
         system_prompt: str | None = None,
@@ -71,7 +74,7 @@ class ChatModule:
         message: str,
         *,
         session_id: str | None = None,
-        model_id: str = "qwen3.7-plus",
+        model_id: str | None = None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
         system_prompt: str | None = None,

@@ -31,7 +31,7 @@ jobs:
 
       - name: Run focused Python lint
         run: |
-          uv run ruff check \
+          uv run --extra dev ruff check \
             tests/scripts/test_validate_env_quickstart.py \
             tests/scripts/test_web_runtime_config_entrypoint.py \
             tests/scripts/test_seed_demo_data.py
@@ -53,15 +53,21 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Verify harness contract
+        run: make harness-check
+
       - name: Validate public example config
         run: make validate-example-config
 
       - name: Validate compose config
         run: docker compose --env-file .env.example config --quiet
 
-      - name: Verify tracked release runbook
+      - name: Check deploy script syntax
         run: |
-          test -s deploy/runbooks/open-source-env-readiness-todo.md
+          bash -n scripts/new/doctor.sh
+          bash -n scripts/new/deploy.sh
+          bash -n scripts/new/init-env.sh
+          bash -n scripts/new/status.sh
 
   frontend:
     name: Frontend Typecheck, Lint, Build
@@ -89,6 +95,9 @@ jobs:
 
       - name: Build
         run: pnpm -C web build
+
+      - name: i18n keys
+        run: pnpm -C web i18n:check
 
       - name: Install Playwright browser
         run: pnpm -C web exec playwright install --with-deps chromium

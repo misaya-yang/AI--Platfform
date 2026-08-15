@@ -2,8 +2,8 @@
 AI Gateway SDK Demo — 直接运行: python demo.py
 """
 import asyncio
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 from ai_assistant import AssistantClient

@@ -354,18 +354,35 @@ class AssistantRuntimeAdapter:
                     exc,
                 )
         for record in legacy_records:
+            source_path = str(record.get("source_path") or "")
+            owner_proven = record.get("owner_proven") is True
+            # The scoped SQL inventory includes both current-layout and legacy
+            # sources. Only owner-proven paths that actually map into the old
+            # tree belong in this compatibility pass; treating every current
+            # source as legacy produces a security error on every request.
+            if (
+                not owner_proven
+                or self.memory_store.resolve_legacy_owned_source(
+                    tenant_id,
+                    user_id,
+                    source_path,
+                    owner_proven=True,
+                )
+                is None
+            ):
+                continue
             try:
                 document, source_handle = self.memory_store.read_legacy_source_document(
                     tenant_id,
                     user_id,
-                    str(record.get("source_path") or ""),
+                    source_path,
                     source_type=str(record.get("source_type") or "unknown"),
-                    owner_proven=record.get("owner_proven") is True,
+                    owner_proven=True,
                 )
                 await self.memory_indexer.index_source(
                     tenant_id=tenant_id,
                     user_id=user_id,
-                    source_path=str(record.get("source_path") or ""),
+                    source_path=source_path,
                     source_type=document.source_type,
                     content=document.content,
                     metadata={

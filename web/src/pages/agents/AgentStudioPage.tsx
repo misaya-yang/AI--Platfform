@@ -236,7 +236,6 @@ function AgentStudioWorkspace({
   });
   const validationIssues = [
     !spec.instructions.trim() ? t("agents.studio.validation.instructionsRequired") : null,
-    !spec.model.model_id ? t("agents.studio.validation.modelRequired") : null,
     !isSafeIconUrl(spec.identity.icon_url) ? t("agents.studio.validation.iconInvalid") : null,
     selectedModelInfo && !selectedModelInfo.supports_tools && spec.capabilities.length > 0 ? t("agents.studio.validation.toolsUnsupported") : null,
     selectedModelInfo && !selectedModelInfo.supports_vision && includesImages ? t("agents.studio.validation.visionUnsupported") : null,
@@ -472,7 +471,7 @@ function AgentStudioWorkspace({
           </Form>
           <div className="agent-runtime-summary">
             <Title level={4}>{t("agents.studio.overview.runtimeSummary")}</Title>
-            <button type="button" onClick={() => setSection("model")}><span>{t("agents.studio.overview.model")}</span><strong>{spec.model.model_id || t("agents.studio.overview.notSet")}</strong><ChevronRight size={15} /></button>
+            <button type="button" onClick={() => setSection("model")}><span>{t("agents.studio.overview.model")}</span><strong>{spec.model.model_id || t("agents.common.serverDefault")}</strong><ChevronRight size={15} /></button>
             <button type="button" onClick={() => setSection("capabilities")}><span>{t("agents.studio.overview.capabilities")}</span><strong>{spec.capabilities.length}</strong><ChevronRight size={15} /></button>
             <button type="button" onClick={() => setSection("knowledge")}><span>{t("agents.studio.overview.knowledgeSources")}</span><strong>{spec.knowledge.length}</strong><ChevronRight size={15} /></button>
             <button type="button" onClick={() => setSection("memory")}><span>{t("agents.studio.overview.memory")}</span><strong>{memoryModeLabel}</strong><ChevronRight size={15} /></button>
@@ -495,7 +494,8 @@ function AgentStudioWorkspace({
       );
     }
     if (section === "model") {
-      const modelRows = catalog.models.length ? catalog.models : [{ id: "qwen3.7-plus", name: "qwen3.7-plus", provider: "dashscope", context_window: 0, max_output_tokens: 4096, supports_vision: false, supports_tools: true }];
+      // Empty id → the server applies its deployment default when the model is omitted.
+      const modelRows = catalog.models.length ? catalog.models : [{ id: "", name: t("agents.common.serverDefault"), provider: "dashscope", context_window: 0, max_output_tokens: 4096, supports_vision: false, supports_tools: true }];
       return (
         <FieldSection title={t("agents.studio.sections.model")} description={t("agents.studio.model.description")}>
           {!canEdit && <ReadOnlyNotice />}
@@ -503,7 +503,7 @@ function AgentStudioWorkspace({
           <Form layout="vertical" disabled={!canEdit}>
             <div className="agent-form-grid">
               <Form.Item label={t("agents.studio.model.provider")} required><Select aria-label={t("agents.studio.model.provider")} value={spec.model.provider_id || undefined} options={Array.from(new Set(modelRows.map((model) => model.provider))).map((provider) => ({ value: provider, label: provider === "dashscope" ? "DashScope" : provider }))} onChange={(value) => setSpec((current) => ({ ...current, model: { ...current.model, provider_id: value, model_id: "" } }))} /></Form.Item>
-              <Form.Item label={t("agents.studio.model.label")} required validateStatus={!spec.model.model_id ? "error" : undefined} help={!spec.model.model_id ? t("agents.studio.model.required") : undefined}><Select aria-label={t("agents.studio.model.label")} showSearch value={spec.model.model_id || undefined} options={modelRows.filter((model) => model.provider === spec.model.provider_id).map((model) => ({ value: model.id, label: model.name || model.id }))} onChange={(value) => setSpec((current) => ({ ...current, model: { ...current.model, model_id: value } }))} /></Form.Item>
+              <Form.Item label={t("agents.studio.model.label")}><Select aria-label={t("agents.studio.model.label")} placeholder={t("agents.common.serverDefault")} showSearch value={spec.model.model_id || undefined} options={modelRows.filter((model) => model.provider === spec.model.provider_id).map((model) => ({ value: model.id, label: model.name || model.id }))} onChange={(value) => setSpec((current) => ({ ...current, model: { ...current.model, model_id: value } }))} /></Form.Item>
             </div>
             <Form.Item label={t("agents.studio.model.temperature", { value: spec.model.temperature ?? 0.3 })}><Slider aria-label={t("agents.studio.model.temperature", { value: spec.model.temperature ?? 0.3 })} min={0} max={2} step={0.1} value={spec.model.temperature ?? 0.3} onChange={(value) => setSpec((current) => ({ ...current, model: { ...current.model, temperature: value } }))} /></Form.Item>
             <Form.Item label={t("agents.studio.model.maxTokens")}><InputNumber aria-label={t("agents.studio.model.maxTokens")} min={1} max={1_000_000} value={spec.model.max_tokens ?? 4096} onChange={(value) => setSpec((current) => ({ ...current, model: { ...current.model, max_tokens: value ?? 4096 } }))} /></Form.Item>

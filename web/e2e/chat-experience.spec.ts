@@ -223,10 +223,6 @@ async function installAssistantHarness(
     await route.fulfill(jsonResponse({ devices: [] }));
   });
 
-  await page.route("**/api/v1/confluence/connections*", async (route) => {
-    await route.fulfill(jsonResponse([]));
-  });
-
   await page.route("**/api/v1/assistant/sessions/*/artifacts", async (route) => {
     const sessionId = pathSegmentAfter(route.request().url(), "sessions");
     const artifacts = artifactsBySessionId[sessionId] || [];
@@ -573,23 +569,11 @@ test("assistant shows the active Confluence connector count", async ({ page }) =
       body: toSseBody([{ event_type: "done", data: { duration_ms: 0 } }]),
     });
   });
-  await page.route("**/api/v1/confluence/connections?*", async (route) => {
-    const connection = (connectionId: string) => ({
-      connection_id: connectionId,
-      tenant_id: "default",
-      name: connectionId,
-      domain: `${connectionId}.atlassian.net`,
-      email: "connector@example.com",
-      sync_mode: "manual",
-      polling_interval_minutes: 60,
-      status: "active",
-      last_sync_at: null,
-      last_error: null,
-      created_by: "e2e-connector-count-user",
-      created_at: null,
-      updated_at: null,
-    });
-    await route.fulfill(jsonResponse([connection("first"), connection("second")]));
+  await page.route("**/api/v1/connectors/available", async (route) => {
+    await route.fulfill(jsonResponse([
+      { provider: "confluence", display_name: "Confluence", description: "Atlassian wiki", enabled: true, connected: true },
+      { provider: "github", display_name: "GitHub", description: "Code and issues", enabled: true, connected: true },
+    ]));
   });
 
   await page.goto("/assistant");
@@ -1722,10 +1706,6 @@ test("assistant restores a pending approval after refresh", async ({ page }) => 
       })
     );
   });
-  await page.route("**/api/v1/confluence/connections?*", async (route) => {
-    await route.fulfill(jsonResponse([]));
-  });
-
   await page.goto("/assistant");
   await page.getByRole("button", { name: /show history/i }).first().click();
   await page.getByRole("button", { name: title, exact: true }).click();

@@ -18,12 +18,16 @@ class InvocationMode(str, Enum):
     WEBHOOK = "webhook"
 
 
-class ConnectorType(str, Enum):
+class TransportType(str, Enum):
     HTTP = "http"
     GRPC = "grpc"
     WEBSOCKET = "websocket"
     MESSAGE_QUEUE = "mq"
     IN_PROCESS = "in_process"
+
+
+# Compatibility alias for SDK/plugins released before the transport rename.
+ConnectorType = TransportType
 
 
 class ContentType(str, Enum):

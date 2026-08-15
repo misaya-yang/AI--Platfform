@@ -22,7 +22,7 @@ interface ChatRequestBody {
   message: string;
   stream: boolean;
   session_id?: string;
-  model_id: string;
+  model_id?: string;
   temperature: number;
   max_tokens?: number;
   system_prompt?: string;
@@ -36,10 +36,11 @@ function buildBody(message: string, stream: boolean, opts: ChatOptions): ChatReq
   const body: ChatRequestBody = {
     message,
     stream,
-    model_id: opts.modelId ?? "qwen3.7-plus",
     temperature: opts.temperature ?? 0.7,
   };
 
+  // Omit model_id when unset — the server applies its deployment default.
+  if (opts.modelId) body.model_id = opts.modelId;
   if (opts.sessionId) body.session_id = opts.sessionId;
   if (opts.maxTokens) body.max_tokens = opts.maxTokens;
   if (opts.systemPrompt) body.system_prompt = opts.systemPrompt;

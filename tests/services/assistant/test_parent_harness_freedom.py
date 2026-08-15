@@ -37,9 +37,7 @@ def test_skill_guidance_lists_catalog_without_bodies() -> None:
 
 
 def test_skill_guidance_defers_when_catalog_exceeds_budget() -> None:
-    skills = [
-        {"name": f"skill-{index}", "description": "x" * 80} for index in range(30)
-    ]
+    skills = [{"name": f"skill-{index}", "description": "x" * 80} for index in range(30)]
 
     sections, receipt = _select_skill_guidance(
         skills,
@@ -71,3 +69,22 @@ def test_uploaded_file_catalog_lists_metadata_without_full_body() -> None:
     assert "indexed" in catalog
     assert "session-kb-1" not in catalog or "indexed" in catalog
     assert "x" * 400 not in catalog
+
+
+def test_uploaded_file_catalog_does_not_claim_failed_indexing() -> None:
+    processed = SimpleNamespace(
+        session_kb_id=None,
+        file_metadata=[
+            {
+                "file_name": "long.pdf",
+                "file_type": "document",
+                "requires_rag": True,
+                "truncated_preview": "preview only",
+            }
+        ],
+    )
+
+    catalog = _uploaded_file_catalog(processed)
+
+    assert "retrieval unavailable" in catalog
+    assert "indexed" not in catalog

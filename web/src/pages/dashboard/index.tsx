@@ -10,6 +10,7 @@ import { FONT_FAMILY, getColors } from "./styles";
 import { Select, DatePicker, Segmented } from "antd";
 import dayjs from "dayjs";
 import { useTranslation } from "react-i18next";
+import { SetupChecklist } from "./components/SetupChecklist";
 import { useDashboardEntityLabels } from "./hooks/useDashboardEntityLabels";
 import type { SourceFilter, RefreshInterval } from "./types";
 
@@ -118,6 +119,9 @@ function DashboardContent() {
       }}
     >
       <div className="dashboard-scroll-surface" style={{ minWidth: 0, width: "100%" }}>
+
+        {/* ── First-run checklist (replaces the dashboard until a provider is configured) ── */}
+        <SetupChecklist />
 
         {/* ── Command header ── */}
         <div style={{

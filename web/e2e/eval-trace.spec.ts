@@ -85,6 +85,11 @@ async function installEvalHarness(page: Page) {
     effective_permissions: permissions,
   });
 
+  // AppLayout always asks for setup state; keep the banner hidden.
+  await page.route("**/api/v1/setup/state", async (route) => {
+    await route.fulfill(jsonResponse({ configured: true, missing: [], mode: "environment", default_model: null }));
+  });
+
   let scores = [
     {
       score_id: "22222222-2222-4222-8222-222222222222",
@@ -940,6 +945,10 @@ test.describe("Eval trace console", () => {
       display_name: "Viewer User",
       permissions: ["console:dashboard:view"],
       effective_permissions: ["console:dashboard:view"],
+    });
+    // AppLayout asks for setup state on protected routes; keep it quiet.
+    await page.route("**/api/v1/setup/state", async (route) => {
+      await route.fulfill(jsonResponse({ configured: true, missing: [], mode: "environment", default_model: null }));
     });
 
     await page.goto("/eval", { waitUntil: "domcontentloaded" });

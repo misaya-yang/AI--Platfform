@@ -1,6 +1,7 @@
 {
   "common": {
     "retry": "重试",
+    "serverDefault": "服务端默认",
     "cancel": "取消",
     "back": "上一步",
     "continue": "继续",
@@ -40,6 +41,7 @@
     "loadError": "无法加载 Agent",
     "filteredEmpty": "没有 Agent 符合当前筛选条件。",
     "empty": "创建第一个 Agent，开始配置可复用运行时。",
+    "emptyWhy": "智能体将你的提示词、工具和知识库封装为可复用的运行时。",
     "clearFilters": "清除筛选",
     "createBlank": "创建空白 Agent",
     "supportTemplate": "支持分流模板",

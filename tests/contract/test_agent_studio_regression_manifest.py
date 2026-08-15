@@ -8,7 +8,7 @@ from scripts import agent_studio_regression
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "tests/fixtures/agent-studio/regression_manifest.json"
-PHASE_FILES = sorted((ROOT / "docs/agent-studio-prd").glob("phase-0[0-8]-*.md"))
+PHASE_FILES = sorted((ROOT / "deploy/runbooks/agent-studio-prd").glob("phase-0[0-8]-*.md"))
 
 
 def _phase_contract(path: Path) -> dict[str, object]:
@@ -56,8 +56,7 @@ def test_manifest_exactly_covers_every_required_phase_gate() -> None:
 
 def test_manifest_keeps_named_critical_and_assistant_gates() -> None:
     entries = {
-        f"{entry['phase']}:{entry['id']}": entry["command"]
-        for entry in _manifest()["gates"]
+        f"{entry['phase']}:{entry['id']}": entry["command"] for entry in _manifest()["gates"]
     }
     assert "test_agent_capability_allowlist.py" in entries["AS-00:capability-tests"]
     assert "test_agent_runtime_envelope.py" in entries["AS-02:gateway-envelope"]
@@ -98,9 +97,7 @@ def test_workspace_hash_excludes_generated_report_diffs(monkeypatch) -> None:
     assert ":(exclude)web/test-results/**" in diff_call
 
 
-def test_required_gate_rejects_zero_exit_with_skipped_tests(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_required_gate_rejects_zero_exit_with_skipped_tests(monkeypatch, tmp_path: Path) -> None:
     gate = {
         "phase": "AS-09",
         "id": "fixture",

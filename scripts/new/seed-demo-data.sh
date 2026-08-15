@@ -78,7 +78,6 @@ Demo routes after applying to a local stack:
   /knowledge/demo-kb-ai-gateway
   /share/demo-share
   /quiz/demo-quiz
-  /exams/00000000-0000-4000-8000-000000000044
 ROUTES
 }
 

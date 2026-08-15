@@ -37,7 +37,7 @@ import {
 } from "@/api/assistant";
 import { ArtifactsPanel } from "@/components/artifacts";
 import { createSession, listSessions } from "@/api/sessions";
-import { listConnections } from "@/api/confluence";
+import { api as apiClient } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 
@@ -492,17 +492,17 @@ export function AssistantPage() {
           listModels().catch(() => []),
           listDatasets().catch(() => []),
           getConfig().catch(() => ({
-            default_model_id: "qwen3.7-plus",
+            default_model_id: "", // empty → the server applies its deployment default
             available_providers: [],
             kb_enabled: false,
             web_search_enabled: false,
           })),
-          listConnections("active").catch(() => []),
+          apiClient.get("/api/v1/connectors/available").catch(() => ({ data: [] })),
         ]);
         setModels(modelsData);
         setDatasets(datasetsData);
         setConfig(configData);
-        setConnectorCount(connectionsData.filter((connection) => connection.status === "active").length);
+        setConnectorCount(connectionsData.data.filter((c: { connected?: boolean }) => c.connected).length);
 
         if (modelsData.length > 0) {
           const defaultId = configData.default_model_id || modelsData[0].id;

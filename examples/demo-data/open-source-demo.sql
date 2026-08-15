@@ -368,69 +368,65 @@ SET
     explanation = EXCLUDED.explanation,
     source_chunks = EXCLUDED.source_chunks;
 
-INSERT INTO quiz_shares (
+INSERT INTO artifact_shares (
     id,
-    quiz_id,
     share_code,
+    kind,
+    title,
+    payload,
+    answer_keys,
+    tenant_id,
     created_by,
     is_active,
     max_attempts,
     require_name,
-    is_exam
+    created_at
 )
 VALUES (
     '00000000-0000-4000-8000-000000000043'::uuid,
-    '00000000-0000-4000-8000-000000000041'::uuid,
     'demo-quiz',
+    'quiz',
+    'AI Gateway Demo Quiz',
+    '{
+        "quiz_id":"00000000-0000-4000-8000-000000000041",
+        "description":"A one-question quiz that proves public quiz routes can render after seeding.",
+        "question_count":1,
+        "difficulty":"easy",
+        "questions":[
+            {
+                "id":"00000000-0000-4000-8000-000000000042",
+                "question_num":1,
+                "question_type":"mc_single",
+                "question_text":"Which route should render after loading the open-source demo data?",
+                "options":[
+                    {"label":"A","text":"/quiz/demo-quiz"},
+                    {"label":"B","text":"/settings/billing"}
+                ]
+            }
+        ]
+    }'::jsonb,
+    '[
+        {
+            "id":"00000000-0000-4000-8000-000000000042",
+            "question_num":1,
+            "correct_answer":{"answer":"A"},
+            "explanation":"The seed creates a public quiz share with code demo-quiz."
+        }
+    ]'::jsonb,
+    'default',
     'demo-user',
     TRUE,
     NULL,
     FALSE,
-    TRUE
+    NOW()
 )
 ON CONFLICT (share_code) DO UPDATE
 SET
-    quiz_id = EXCLUDED.quiz_id,
+    title = EXCLUDED.title,
+    payload = EXCLUDED.payload,
+    answer_keys = EXCLUDED.answer_keys,
     is_active = EXCLUDED.is_active,
     max_attempts = EXCLUDED.max_attempts,
-    require_name = EXCLUDED.require_name,
-    is_exam = EXCLUDED.is_exam;
-
-INSERT INTO exams (
-    id,
-    tenant_id,
-    quiz_id,
-    title,
-    description,
-    published_by,
-    status,
-    max_retakes,
-    passing_score,
-    settings,
-    share_id
-)
-VALUES (
-    '00000000-0000-4000-8000-000000000044'::uuid,
-    'default',
-    '00000000-0000-4000-8000-000000000041'::uuid,
-    'AI Gateway Demo Exam',
-    'A published exam record for local route smoke checks.',
-    'demo-user',
-    'published',
-    1,
-    0.60,
-    '{"seed":"open-source-demo"}'::jsonb,
-    '00000000-0000-4000-8000-000000000043'::uuid
-)
-ON CONFLICT (id) DO UPDATE
-SET
-    title = EXCLUDED.title,
-    description = EXCLUDED.description,
-    status = EXCLUDED.status,
-    max_retakes = EXCLUDED.max_retakes,
-    passing_score = EXCLUDED.passing_score,
-    settings = EXCLUDED.settings,
-    share_id = EXCLUDED.share_id,
-    updated_at = NOW();
+    require_name = EXCLUDED.require_name;
 
 COMMIT;

@@ -88,6 +88,10 @@ class LLMSettings(BaseSettings):
 
 
 class Settings(BaseSettings):
+    # Unprefixed DEFAULT_MODEL: the single deployment default applied when a
+    # caller omits model_id. Mirrors core/models/defaults.py.
+    default_model: str = "qwen3.7-plus"
+
     cors: CORSSettings = Field(default_factory=CORSSettings)
     app: AppSettings = Field(default_factory=AppSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)

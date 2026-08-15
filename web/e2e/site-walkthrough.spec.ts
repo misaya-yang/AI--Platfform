@@ -1,7 +1,7 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 
 const sidebarNavSelector = "aside a[href^='/'], [role='complementary'] a[href^='/']";
-const standaloneProtectedRoutes = ["/knowledge/create", "/exams"];
+const standaloneProtectedRoutes = ["/knowledge/create"];
 
 interface DataBackedRoutes {
   protectedRoutes: string[];
@@ -50,16 +50,6 @@ async function collectDataBackedRoutes(page: Page): Promise<DataBackedRoutes> {
     const firstDataset = firstRecord(await fetchJson("/api/v1/knowledge/datasets"));
     const datasetId = readString(firstDataset, "dataset_id");
     addRoute(routes.protectedRoutes, datasetId ? `/knowledge/${encodeURIComponent(datasetId)}` : "");
-
-    const firstExam = firstRecord(await fetchJson("/api/v1/exams?limit=5"), "exams");
-    const examId = readString(firstExam, "exam_id");
-    const examShareCode = readString(firstExam, "share_code");
-    addRoute(routes.protectedRoutes, examId ? `/exams/${encodeURIComponent(examId)}` : "");
-    addRoute(routes.publicRoutes, examShareCode ? `/quiz/${encodeURIComponent(examShareCode)}` : "");
-
-    const firstQuiz = firstRecord(await fetchJson("/api/v1/assistant/quiz/list?limit=5"), "quizzes");
-    const quizShareCode = readString(firstQuiz, "share_code");
-    addRoute(routes.publicRoutes, quizShareCode ? `/quiz/${encodeURIComponent(quizShareCode)}` : "");
 
     const firstShare = firstRecord(await fetchJson("/api/v1/assistant/shares?limit=5"), "shares");
     const shareCode = readString(firstShare, "share_code");

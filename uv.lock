@@ -168,6 +168,7 @@ storage = [
 ]
 test = [
     { name = "fakeredis" },
+    { name = "mcp" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -197,6 +198,7 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.25.0" },
     { name = "langgraph-sdk", specifier = ">=0.2.15" },
     { name = "lxml", marker = "extra == 'documents'", specifier = ">=6.0.0" },
+    { name = "mcp", marker = "extra == 'test'", specifier = ">=2.0,<3" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.14.0" },
     { name = "orjson", specifier = ">=3.11.0" },
     { name = "oss2", marker = "extra == 'storage'", specifier = ">=2.18.0" },
@@ -616,6 +618,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "python-multipart" },
     { name = "python-pptx" },
+    { name = "qdrant-client" },
     { name = "redis" },
     { name = "sse-starlette" },
     { name = "structlog" },
@@ -648,6 +651,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.2.0" },
     { name = "python-multipart", specifier = ">=0.0.21" },
     { name = "python-pptx", specifier = ">=1.0.0" },
+    { name = "qdrant-client", specifier = ">=1.16.0" },
     { name = "redis", specifier = ">=7.1.0" },
     { name = "sse-starlette", specifier = ">=3.3.0" },
     { name = "structlog", specifier = ">=25.1.0" },

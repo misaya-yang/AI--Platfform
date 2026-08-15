@@ -177,8 +177,7 @@ class AssistantService(AssistantContextMessageBuilderMixin):
         assistant = AssistantService(model_registry, kb_service)
 
         config = AssistantConfig(
-            model_id="qwen3.7-plus",
-            kb_dataset_ids=["docs", "wiki"],
+            kb_dataset_ids=["docs", "wiki"],  # model_id omitted → server default
         )
 
         async for event in assistant.chat_stream(user, session_id, "What is our refund policy?", config, history):

@@ -624,7 +624,7 @@ async def test_session_kb_binding_seals_retrieval_config() -> None:
     )
 
     class _FileProcessor:
-        async def process_files(self, **kwargs: Any):
+        async def process_files(self, **_kwargs: Any):
             return processed
 
     loop = object.__new__(AgentLoop)
@@ -634,7 +634,9 @@ async def test_session_kb_binding_seals_retrieval_config() -> None:
 
     config = AgentLoopConfig(
         file_paths=["/tmp/report.pdf"],
-        kb_dataset_ids=["dataset-a"],
+        # Exercise the pre-bound-id case: the file processor may return an id
+        # that is already selected but still lacks a sealed runtime config.
+        kb_dataset_ids=["dataset-a", "kb-session-1"],
         kb_top_k=8,
         kb_min_relevance=0.5,
     )
@@ -657,6 +659,7 @@ async def test_session_kb_binding_seals_retrieval_config() -> None:
     await agen.aclose()
 
     assert "kb-session-1" in ctx.config.kb_dataset_ids
+    assert ctx.config.kb_dataset_ids.count("kb-session-1") == 1
     assert ctx.config.kb_retrieval_configs["kb-session-1"] == {
         "mode": "auto",
         "top_k": 8,
@@ -669,6 +672,7 @@ async def test_session_kb_binding_seals_retrieval_config() -> None:
 async def test_kb_executor_rejects_dataset_without_sealed_config() -> None:
     """Pin the all-or-nothing gate contract: any dataset_id without a sealed
     runtime config fails the whole call, before any retrieval."""
+
     class RecordingKnowledge:
         def __init__(self) -> None:
             self.calls: list[dict[str, Any]] = []

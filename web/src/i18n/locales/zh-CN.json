@@ -11,6 +11,7 @@
     "edit": "编辑",
     "add": "添加",
     "search": "搜索",
+    "serverDefault": "服务端默认",
     "filter": "筛选",
     "reset": "重置",
     "submit": "提交",
@@ -115,15 +116,19 @@
   },
   "nav": {
     "dashboard": "仪表盘",
+    "group": {
+      "use": "使用",
+      "build": "构建",
+      "govern": "治理"
+    },
     "analytics": "数据分析",
     "services": "服务管理",
     "knowledge": "知识库",
     "knowledgeSync": "知识同步",
-    "playground": "模型体验",
+    "playground": "模型调试",
     "assistant": "AI 助手",
     "agents": "智能体",
     "eval": "评估控制台",
-    "exams": "考试管理",
     "tasks": "任务管理",
     "users": "用户管理",
     "settings": "系统设置",
@@ -131,6 +136,23 @@
     "expandSidebar": "展开侧栏",
     "toggleSidebar": "切换侧栏",
     "closeSidebar": "关闭侧栏"
+  },
+  "setup": {
+    "banner": {
+      "text": "尚未配置模型服务，请先配置一个以开始使用助手。",
+      "action": "配置模型服务",
+      "dismiss": "关闭"
+    },
+    "checklist": {
+      "title": "首次使用引导",
+      "subtitle": "完成以下步骤，即可发起第一次对话。",
+      "step": {
+        "provider": "配置模型服务",
+        "knowledge": "创建知识库",
+        "chat": "发起第一次对话"
+      },
+      "go": "前往"
+    }
   },
   "analytics": {
     "title": "使用量分析",
@@ -584,10 +606,10 @@
     },
     "permissions": {
       "categories": {
-      "console": "控制台",
-      "conversation": "对话",
-      "service": "服务",
-      "knowledge": "知识库",
+        "console": "控制台",
+        "conversation": "对话",
+        "service": "服务",
+        "knowledge": "知识库",
         "user": "用户",
         "role": "角色",
         "admin": "管理"
@@ -605,39 +627,39 @@
       },
       "displayNamePlaceholder": "请输入显示名称",
       "departmentPlaceholder": "选择部门",
-    "roles": {
+      "roles": {
         "title": "角色分配",
         "desc": "选择用户角色，角色决定基础权限",
         "system": "系统",
         "noDescription": "无描述",
         "permissionCount": "{{count}} 个权限",
-      "noAccess": "无权限查看角色列表"
-    },
-    "serviceAccess": {
-      "title": "Agent 服务访问",
-      "desc": "为该用户配置 API 与 Playground 共用的服务白名单和拒绝名单。",
-      "mode": "访问模式",
-      "allServices": "全部服务（可叠加拒绝名单）",
-      "allowlistOnly": "仅白名单服务",
-      "policy": "策略说明",
-      "allowlistPolicy": "仅可调用标记为允许的服务，拒绝名单始终优先。",
-      "allPolicy": "默认可调用所有服务，可通过拒绝名单禁用特定服务。",
-      "noAccess": "当前账号无权读取服务列表。",
-      "loading": "正在加载服务...",
-      "empty": "暂无可配置服务",
-      "allow": "允许",
-      "deny": "拒绝"
-    },
-    "extraPermissions": {
+        "noAccess": "无权限查看角色列表"
+      },
+      "serviceAccess": {
+        "title": "Agent 服务访问",
+        "desc": "为该用户配置 API 与 Playground 共用的服务白名单和拒绝名单。",
+        "mode": "访问模式",
+        "allServices": "全部服务（可叠加拒绝名单）",
+        "allowlistOnly": "仅白名单服务",
+        "policy": "策略说明",
+        "allowlistPolicy": "仅可调用标记为允许的服务，拒绝名单始终优先。",
+        "allPolicy": "默认可调用所有服务，可通过拒绝名单禁用特定服务。",
+        "noAccess": "当前账号无权读取服务列表。",
+        "loading": "正在加载服务...",
+        "empty": "暂无可配置服务",
+        "allow": "允许",
+        "deny": "拒绝"
+      },
+      "extraPermissions": {
         "title": "额外权限",
         "desc": "直接分配给用户的独立权限（角色权限之外）",
         "tipLabel": "提示",
         "tipText": "角色已包含的权限显示为灰色。额外权限用于授予角色之外的特殊权限。",
         "categoryCount": "{{count}} 个权限",
         "fromRole": "已通过角色获得此权限",
-      "roleBadge": "角色",
-      "empty": "当前账号暂无可分配的额外权限。",
-      "noAccess": "无权限查看权限列表"
+        "roleBadge": "角色",
+        "empty": "当前账号暂无可分配的额外权限。",
+        "noAccess": "无权限查看权限列表"
       },
       "unsavedChanges": "您有未保存的更改",
       "saveChanges": "保存更改"
@@ -946,6 +968,60 @@
         "status": "状态",
         "createdAt": "创建时间"
       }
+    },
+    "connectors": {
+      "title": "连接器目录",
+      "description": "管理第三方连接器提供商定义（OAuth 应用、模式、工具暴露）",
+      "manage": "管理连接器",
+      "newConnector": "新建连接器",
+      "editConnector": "编辑连接器",
+      "deleteConnector": "删除连接器",
+      "listTitle": "连接器提供商",
+      "empty": "尚未配置任何连接器。创建第一个提供商定义。",
+      "enabled": "已启用",
+      "disabled": "已停用",
+      "column": {
+        "provider": "提供商",
+        "displayName": "显示名称",
+        "mode": "模式",
+        "status": "状态",
+        "actions": "操作"
+      },
+      "modeLive": "实时",
+      "modeIngest": "仅同步",
+      "modeBoth": "两者",
+      "field": {
+        "provider": "提供商",
+        "providerPlaceholder": "例如 confluence",
+        "displayName": "显示名称",
+        "description": "描述",
+        "iconUrl": "图标 URL",
+        "mode": "模式",
+        "modeHint": "live = 智能体工具调用；ingest = 知识库同步源；both = 两者",
+        "enabled": "已启用",
+        "supportsSync": "支持知识库同步",
+        "supportsSearch": "支持搜索",
+        "clientId": "OAuth 客户端 ID",
+        "clientSecret": "OAuth 客户端密钥",
+        "clientSecretPlaceholder": "留空则保留已存储的密钥",
+        "authUrl": "授权 URL",
+        "tokenUrl": "令牌 URL",
+        "scopes": "权限范围",
+        "redirectUri": "回调 URL",
+        "mcpTools": "MCP 工具",
+        "mcpToolsHint": "该提供商暴露的工具信息列表",
+        "toolName": "工具名称",
+        "toolDescription": "工具描述"
+      },
+      "save": "保存",
+      "saving": "保存中...",
+      "cancel": "取消",
+      "createSuccess": "连接器已创建",
+      "updateSuccess": "连接器已更新",
+      "deleteSuccess": "连接器已删除",
+      "deleteGuard": "该连接器仍有已连接用户，请先断开连接再删除。",
+      "deleteConfirm": "确定删除该连接器定义？",
+      "failed": "请求失败：{message}"
     }
   },
   "knowledge": {
@@ -1922,6 +1998,7 @@
     "loadingHistory": "加载对话历史中...",
     "selectOrStartChat": "从左侧选择一个对话，或开始新对话。",
     "typeToStart": "输入消息开始对话。",
+    "typeToStartHint": "在这里调试你的模型服务，再接入智能体。",
     "emptyStateHint": "刷新页面后，对话历史和当前草稿仍会保持同步。",
     "historyHiddenTitle": "历史记录已隐藏",
     "historyHiddenDescription": "之前的对话仍保留在历史面板中。",
@@ -2461,6 +2538,7 @@
     "kbActive": "个知识库已启用",
     "welcomeTitle": "今天有什么可以帮您？",
     "welcomeDesc": "选择模型和知识库，开始智能对话",
+    "welcomeWhy": "此助手连接你在控制台配置的模型服务。",
     "placeholder": "输入消息... (Ctrl+V 粘贴图片)",
     "noModelsPlaceholder": "暂无可用模型",
     "disclaimer": "AI 回答可能不准确",
@@ -2972,8 +3050,7 @@
       "tabs": {
         "services": "服务管理",
         "providers": "厂商管理",
-        "models": "模型管理",
-        "exams": "考试管理"
+        "models": "模型管理"
       },
       "addProvider": "添加厂商",
       "addModel": "添加模型",
@@ -3172,80 +3249,5 @@
     "blockedUsers": "已封禁",
     "warningUsers": "警告中",
     "exceededUsers": "已超限"
-  },
-  "exams": {
-    "title": "考试管理",
-    "subtitle": "创建、发布和追踪考试结果",
-    "createExam": "创建考试",
-    "searchPlaceholder": "搜索考试...",
-    "filterAll": "全部",
-    "filterDraft": "草稿",
-    "filterPublished": "已发布",
-    "filterClosed": "已关闭",
-    "statsTotal": "总计",
-    "statsPublished": "已发布",
-    "statsParticipants": "参与人数",
-    "statsAvgScore": "平均分",
-    "questions": "{{count}} 道题",
-    "participants": "{{count}} 人参与",
-    "avg": "平均 {{score}}",
-    "due": "截止 {{date}}",
-    "noExams": "暂无考试",
-    "createFirst": "创建第一场考试",
-    "publish": "发布",
-    "close": "关闭",
-    "link": "复制链接",
-    "copied": "已复制",
-    "confirmClose": "确定关闭此考试？关闭后将不再接受提交。",
-    "back": "返回",
-    "pass": "及格线: {{score}}%",
-    "timeLimit": "{{min}} 分钟",
-    "detail": {
-      "participants": "考生成绩",
-      "questionAnalysis": "题目分析",
-      "aiAnalysis": "AI 分析",
-      "participantCount": "{{count}} 人参与",
-      "exportCsv": "导出 CSV",
-      "noParticipants": "暂无考生",
-      "name": "姓名",
-      "score": "分数",
-      "correct": "正确",
-      "status": "状态",
-      "completed": "完成时间",
-      "passed": "通过",
-      "failed": "未通过",
-      "passRate": "通过率",
-      "scoreRange": "分数范围",
-      "correctRate": "正确率",
-      "answered": "{{count}} 人作答",
-      "mostCommonWrong": "最常错选: {{answer}}",
-      "answer": "答案: {{answer}}"
-    },
-    "analysis": {
-      "title": "AI 分析报告",
-      "generate": "生成报告",
-      "regenerate": "重新生成",
-      "analyzing": "正在分析...",
-      "noReport": "暂无分析报告",
-      "noReportHint": "点击「生成报告」，AI 将分析成绩、题目难度并给出建议。",
-      "generated": "生成时间: {{time}}",
-      "model": "模型: {{model}}",
-      "reportCount": "{{count}} 份报告"
-    },
-    "create": {
-      "title": "创建考试",
-      "sourceQuiz": "题库来源",
-      "selectQuiz": "选择一个题库...",
-      "examTitle": "考试标题",
-      "titlePlaceholder": "输入考试标题",
-      "description": "描述 (可选)",
-      "descPlaceholder": "考试描述",
-      "passingScore": "及格分 %",
-      "maxRetakes": "最大重考次数",
-      "timeLimit": "时间限制 (分钟)",
-      "noLimit": "不限",
-      "cancel": "取消",
-      "createDraft": "创建为草稿"
-    }
   }
 }

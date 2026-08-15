@@ -31,6 +31,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ...auth import UserContext, get_user_context
+from ...core.models.defaults import DEFAULT_MODEL
 from ..deps import get_assistant_service, get_model_registry
 
 # Tests override this attribute to shorten the heartbeat interval —
@@ -62,7 +63,7 @@ class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
     history: list[dict[str, str]] | None = None
-    model_id: str = "qwen3.7-plus"
+    model_id: str = DEFAULT_MODEL
     temperature: float = 0.7
     max_tokens: int | None = None
     system_prompt: str | None = None

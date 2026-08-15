@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 from ai_gateway_core.logging import get_logger, record_internal_exception
 from ai_gateway_core.security import redact_trace_text
 
+from ..models.defaults import DEFAULT_MODEL
 from .stream_helpers import merge_stream_tool_calls
 from .subagent_types import (
     SUBAGENT_DEFAULTS,
@@ -1007,7 +1008,7 @@ class SubAgentManager:
         """Select model by agent type — explore prefers fast models, others prefer strongest."""
         models = list(self.model_registry._models.values())
         if not models:
-            return "qwen3.7-plus"
+            return DEFAULT_MODEL
         if config.agent_type == SubAgentType.EXPLORE:
             for m in models:
                 if "flash" in m.id.lower() or "turbo" in m.id.lower():

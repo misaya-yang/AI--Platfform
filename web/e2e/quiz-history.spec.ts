@@ -18,34 +18,30 @@ function sessionButtonName(title: string): RegExp {
   return new RegExp(`^${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s·|$)`);
 }
 
-async function seedSessionWithQuiz(request: APIRequestContext) {
+async function seedSessionWithQuiz(request: APIRequestContext, page: import("@playwright/test").Page) {
   const headers = await buildAuthHeaders(request);
   const apiUrl = getApiUrl();
   const title = `quiz-history-${Date.now()}`;
 
-  // Step 1: Generate a real quiz so it exists in DB
-  // First get a dataset
-  const dsRes = await request.get(`${apiUrl}/api/v1/assistant/datasets`, { headers });
-  expect(dsRes.ok()).toBeTruthy();
-  const dsData = await dsRes.json();
-  const datasets = dsData.datasets ?? dsData.data ?? dsData;
+  // Step 1: Create a real quiz through the in-chat generate_quiz tool so it
+  // exists in the DB (the gateway quiz-generation API was removed in PC-03).
+  // Capture the quiz id from the hydration GET the quiz card fires.
+  await page.goto("/assistant", { waitUntil: "domcontentloaded" });
+  const composer = page.locator("#assistant-chat-composer");
+  await expect(composer).toBeVisible();
 
-  if (!Array.isArray(datasets) || datasets.length === 0) {
-    return null; // skip if no datasets
-  }
+  const hydration = page.waitForResponse(
+    (res) =>
+      res.request().method() === "GET" &&
+      /\/api\/v1\/assistant\/quiz\/[0-9a-f-]{36}$/.test(new URL(res.url()).pathname),
+    { timeout: 180_000 },
+  );
+  await composer.fill("请根据知识库出3道题");
+  await composer.press("Enter");
 
-  const datasetId = datasets[0].id ?? datasets[0].dataset_id;
-  const genRes = await request.post(`${apiUrl}/api/v1/assistant/quiz/generate`, {
-    headers,
-    data: {
-      dataset_ids: [datasetId],
-      topic: "history persistence test",
-      question_count: 3,
-      difficulty: "easy",
-    },
-  });
-  expect(genRes.ok(), `Quiz gen failed: ${genRes.status()}`).toBeTruthy();
-  const quiz = await genRes.json();
+  const hydrateRes = await hydration;
+  expect(hydrateRes.ok(), `Quiz hydration failed: ${hydrateRes.status()}`).toBeTruthy();
+  const quiz = await hydrateRes.json();
   const quizId = quiz.quiz_id;
 
   // Step 2: Create session
@@ -99,9 +95,9 @@ test.describe("Quiz history persistence", () => {
   });
 
   test("restores QuizCard when switching to a session with quiz history", async ({ page, request }) => {
-    const seed = await seedSessionWithQuiz(request);
+    const seed = await seedSessionWithQuiz(request, page);
     if (!seed) {
-      test.skip(true, "No KB datasets available");
+      test.skip(true, "No quiz created");
       return;
     }
     cleanupIds = { sessionId: seed.sessionId, quizId: seed.quizId };

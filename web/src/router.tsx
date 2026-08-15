@@ -27,36 +27,22 @@ const ServicesPage = lazyNamed(() => import("@/pages/Services"), "ServicesPage")
 const PlaygroundPage = lazyNamed(() => import("@/pages/playground"), "PlaygroundPage");
 const TasksPage = lazyNamed(() => import("@/pages/tasks"), "TasksPage");
 const SettingsPage = lazyNamed(() => import("@/pages/Settings"), "SettingsPage");
+const ConnectorsSettingsPage = lazyNamed(
+  () => import("@/pages/settings/ConnectorsSettings"),
+  "ConnectorsSettingsPage"
+);
 const UserManagementPage = lazyNamed(() => import("@/pages/UserManagement"), "UserManagementPage");
 const UserEditPage = lazyNamed(() => import("@/pages/UserEdit"), "UserEditPage");
 const KnowledgeDatasetsPage = lazyNamed(() => import("@/pages/knowledge"), "KnowledgeDatasetsPage");
 const KnowledgeDatasetDetailPage = lazyNamed(() => import("@/pages/knowledge"), "KnowledgeDatasetDetailPage");
 const DatasetCreatePage = lazy(() => import("@/pages/knowledge/DatasetCreate"));
 const AssistantPage = lazyNamed(() => import("@/pages/assistant"), "AssistantPage");
-const ExamsPage = lazyNamed(() => import("@/pages/exams"), "ExamsPage");
-const ExamDetailPage = lazyNamed(() => import("@/pages/exams/ExamDetailPage"), "ExamDetailPage");
 const EvalPage = lazyNamed(() => import("@/pages/eval"), "EvalPage");
 const AgentListPage = lazyNamed(() => import("@/pages/agents"), "AgentListPage");
 const AgentCreatePage = lazyNamed(() => import("@/pages/agents"), "AgentCreatePage");
 const AgentStudioPage = lazyNamed(() => import("@/pages/agents"), "AgentStudioPage");
 const AgentAnalyticsPage = lazyNamed(() => import("@/pages/agents"), "AgentAnalyticsPage");
 const AgentHostedPage = lazyNamed(() => import("@/pages/agent-public"), "AgentHostedPage");
-const ConfluenceConnectionListPage = lazyNamed(
-  () => import("@/pages/confluence"),
-  "ConnectionListPage"
-);
-const ConfluenceConnectionCreatePage = lazyNamed(
-  () => import("@/pages/confluence"),
-  "ConnectionCreatePage"
-);
-const ConfluenceBindSpacePage = lazyNamed(
-  () => import("@/pages/confluence"),
-  "BindSpacePage"
-);
-const ConfluenceSyncedPagesPage = lazyNamed(
-  () => import("@/pages/confluence"),
-  "SyncedPagesPage"
-);
 
 function RouteFallback() {
   return (
@@ -183,38 +169,6 @@ export function AppRouter() {
             }
           />
           <Route
-            path="/confluence"
-            element={
-              <ProtectedRoute requiredPermission="knowledge:confluence:manage">
-                <ConfluenceConnectionListPage />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/confluence/connections/new"
-            element={
-              <ProtectedRoute requiredPermission="knowledge:confluence:manage">
-                <ConfluenceConnectionCreatePage />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/confluence/connections/:connectionId/bind"
-            element={
-              <ProtectedRoute requiredPermission="knowledge:confluence:manage">
-                <ConfluenceBindSpacePage />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/confluence/bindings/:bindingId/pages"
-            element={
-              <ProtectedRoute requiredPermission="knowledge:confluence:manage">
-                <ConfluenceSyncedPagesPage />
-              </ProtectedRoute>
-            }
-          />
-          <Route
             path="/settings"
             element={
               <ProtectedRoute requiredPermission="console:settings:view">
@@ -223,18 +177,10 @@ export function AppRouter() {
             }
           />
           <Route
-            path="/exams"
+            path="/settings/connectors"
             element={
-              <ProtectedRoute requiredPermission="console:dashboard:view">
-                <ExamsPage />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/exams/:examId"
-            element={
-              <ProtectedRoute requiredPermission="console:dashboard:view">
-                <ExamDetailPage />
+              <ProtectedRoute requiredPermission="console:settings:view">
+                <ConnectorsSettingsPage />
               </ProtectedRoute>
             }
           />

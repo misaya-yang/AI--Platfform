@@ -7,7 +7,7 @@ annotations and sensible defaults matching the gateway's expectations.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 
@@ -24,9 +24,9 @@ class ChatRequest:
     history: list[dict[str, str]] | None = None
     """Optional explicit message history (list of ``{role, content}``)."""
 
-    model_id: str = "qwen3.7-plus"
-    """LLM model identifier. Gateway default — override per request for
-    other registered models."""
+    model_id: str | None = None
+    """LLM model identifier. Omit to use the server's deployment default —
+    override per request for other registered models."""
 
     temperature: float = 0.7
     max_tokens: int | None = None

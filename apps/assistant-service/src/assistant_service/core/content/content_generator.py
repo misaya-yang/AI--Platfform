@@ -28,6 +28,7 @@ from typing import Any
 from ai_gateway_core.logging import get_logger
 
 from ..agent.agui_protocol import create_agui_emitter
+from ..models.defaults import DEFAULT_MODEL
 from ..quality.guardrails import (
     DocumentType,
     QualityGuardrails,
@@ -130,7 +131,7 @@ class DeepContentGenerator:
         self,
         llm_client: Any,
         guardrails: QualityGuardrails | None = None,
-        model_name: str = "qwen3.7-plus",
+        model_name: str = DEFAULT_MODEL,
     ):
         """
         Initialize the generator.
@@ -776,7 +777,7 @@ class DeepContentGenerator:
 def create_content_generator(
     llm_client: Any,
     guardrails: QualityGuardrails | None = None,
-    model_name: str = "qwen3.7-plus",
+    model_name: str = DEFAULT_MODEL,
 ) -> DeepContentGenerator:
     """
     Factory function to create a DeepContentGenerator.

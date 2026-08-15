@@ -297,7 +297,6 @@ async function installHarness(page: Page, options: HarnessOptions = {}): Promise
     }
     if (path === "/api/v1/assistant/config") return route.fulfill(json({ default_model_id: "qwen3.7-plus", available_providers: ["dashscope"], kb_enabled: false, web_search_enabled: false }));
     if (path === "/api/v1/sessions" && request.method() === "GET") return route.fulfill(json([]));
-    if (path === "/api/v1/confluence/connections") return route.fulfill(json([]));
     if (path === "/api/v1/assistant/tools") return route.fulfill(json({ tools: [{ name: "lookup_account", description: "Look up the current support account.", category: "support", risk_level: "low" }] }));
     if (path === "/api/v1/mcp/servers") {
       if (options.degradedCatalog) return route.fulfill(json({ detail: { message: "MCP catalog unavailable" } }, 503));
@@ -311,6 +310,7 @@ async function installHarness(page: Page, options: HarnessOptions = {}): Promise
     if (path === "/api/v1/connectors/confluence/principals") return route.fulfill(json({ principals: [{ grant_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", principal_type: "service_account", scopes: ["read"], allowed_channels: ["preview"], enabled: true }], total: 1 }));
     if (path === "/api/v1/knowledge/datasets") return route.fulfill(json([{ dataset_id: DATASET_ID, name: "Refund policy", description: "Approved refund and billing policy.", visibility: "tenant", embedding_provider: "dashscope", embedding_model: "text-embedding-v4" }]));
     if (path === "/api/v1/eval/datasets") return route.fulfill(json({ datasets: [], total: 0, limit: 200, offset: 0 }));
+    if (path === "/api/v1/setup/state") return route.fulfill(json({ configured: true, missing: [], mode: "environment", default_model: null }));
     throw new Error(`Unhandled API request: ${request.method()} ${path}`);
   });
   return state;
@@ -572,7 +572,8 @@ test.describe("Create agent", () => {
     const continueButton = page.getByRole("button", { name: "Continue" });
     await tabTo(page, continueButton);
     await page.keyboard.press("Enter");
-    await expect(page.getByRole("region", { name: "Behavior" }).getByText("qwen3.7-plus", { exact: true })).toBeVisible();
+    // No concrete model id is preselected: the server applies its deployment default.
+    await expect(page.getByRole("region", { name: "Behavior" }).getByRole("combobox", { name: "Model" })).toHaveValue("");
     await expect(page.getByLabel("Agent instructions")).not.toHaveValue("");
     await captureEvidence(page, "create-behavior-desktop-1440x900");
     await page.getByRole("button", { name: "Continue" }).click();
@@ -634,6 +635,24 @@ test.describe("Agent Studio workbench", () => {
       await expect(page.getByRole("alert").filter({ hasText: scenario.expected })).toBeVisible();
     });
   }
+
+  test("keeps a server-default Draft editable and saveable", async ({ page }) => {
+    const state = await installHarness(page);
+    state.currentSpec = {
+      ...state.currentSpec,
+      model: { ...state.currentSpec.model, model_id: "" },
+    };
+    await page.goto(`/agents/${AGENT_ID}`, { waitUntil: "domcontentloaded" });
+
+    await expect(page.getByText("Server default").first()).toBeVisible();
+    await page.getByLabel("Description").fill("Keep using the deployment default model.");
+    const saveDraft = page.locator(".agent-studio-actions").getByRole("button", { name: "Save draft" });
+    await expect(saveDraft).toBeEnabled();
+    await saveDraft.click();
+
+    await expect(page.locator(".agent-save-state")).toHaveText("Saved");
+    expect(state.currentSpec.model.model_id).toBe("");
+  });
 
   test("saves Draft edits and surfaces validation and 409 conflict states", async ({ page }) => {
     const state = await installHarness(page);

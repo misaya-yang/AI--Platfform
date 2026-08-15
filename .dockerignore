@@ -53,8 +53,12 @@ web/
 !web/Dockerfile
 !web/nginx.conf
 
-# Documentation
+# Documentation, harness, runbooks, and evidence — none are needed at runtime.
 docs/
+deploy/
+reports/
+harness.yml
+.claude/
 *.md
 !README.md
 

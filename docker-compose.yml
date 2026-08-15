@@ -190,6 +190,8 @@ services:
       GATEWAY_HOST: "0.0.0.0"
       GATEWAY_PORT: "8080"
       GATEWAY_TASK_WORKER_CONCURRENCY: "${GATEWAY_TASK_WORKER_CONCURRENCY:-1}"
+      DEFAULT_MODEL: "${DEFAULT_MODEL:-qwen3.7-plus}"
+      MODEL_SETUP_MODE: "${MODEL_SETUP_MODE:-ui}"
 
       # Database
       GATEWAY_DATABASE__ENABLED: "true"
@@ -496,6 +498,7 @@ services:
     environment:
       <<: *container-proxy-env
       ASSISTANT_IMAGE_REF: "${ASSISTANT_IMAGE:-ghcr.io/misaya-yang/ai-gateway-assistant-service:2.0.0}"
+      DEFAULT_MODEL: "${DEFAULT_MODEL:-qwen3.7-plus}"
       ASSISTANT_CORS__ALLOW_ORIGINS: '${ASSISTANT_CORS_ALLOW_ORIGINS_JSON:-["http://localhost:80","http://localhost:3000","http://localhost:8081"]}'
       DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-gateway}?options=-csearch_path%3Dassistant%2Cgateway%2Cknowledge%2Cpublic"
       REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
@@ -524,7 +527,7 @@ services:
       ASSISTANT_RUNTIME_TOOL_POLICY_V2: "${ASSISTANT_RUNTIME_TOOL_POLICY_V2:-false}"
       ASSISTANT_GATEWAY_ENABLED: "${ASSISTANT_GATEWAY_ENABLED:-true}"
       ASSISTANT_RUNTIME_SKILLS: "${ASSISTANT_RUNTIME_SKILLS:-true}"
-      ASSISTANT_AGENT_PLUGIN_PATHS: "${ASSISTANT_AGENT_PLUGIN_PATHS:-/opt/agent-plugins/ai-docgen:/opt/agent-plugins/community-doublecheck:/opt/agent-plugins/community-engineering-reviewers}"
+      ASSISTANT_AGENT_PLUGIN_PATHS: "${ASSISTANT_AGENT_PLUGIN_PATHS:-/opt/agent-plugins/ai-docgen:/opt/agent-plugins/ai-quiz:/opt/agent-plugins/community-doublecheck:/opt/agent-plugins/community-engineering-reviewers}"
       ASSISTANT_AGENT_PLUGIN_DATA_ROOT: "${ASSISTANT_AGENT_PLUGIN_DATA_ROOT:-/app/data/agent-plugins}"
       ASSISTANT_TRUSTED_AGENT_PLUGINS: "${ASSISTANT_TRUSTED_AGENT_PLUGINS:-ai-docgen@1.0.0}"
       ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS: "${ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS:-/opt/agent-plugins/ai-docgen}"

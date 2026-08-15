@@ -1,15 +1,11 @@
-"""Quiz & Exam sub-package."""
+"""Shared quiz grading and persistence primitives.
 
-from .quiz_service import QuizService
-from .quiz_generator import QuizGenerator
+Generation stays in apps/assistant-service/core/quiz/ (product-convergence
+PC-03). Gateway-facing read/submit/delete operations live here so the gateway
+never imports the assistant-service application package.
+"""
+
+from .quiz_access_service import QuizAccessService
 from .quiz_grader import QuizGrader
-from .quiz_share_manager import QuizShareManager
-from .exam_service import ExamService
 
-__all__ = [
-    "QuizService",
-    "QuizGenerator",
-    "QuizGrader",
-    "QuizShareManager",
-    "ExamService",
-]
+__all__ = ["QuizAccessService", "QuizGrader"]

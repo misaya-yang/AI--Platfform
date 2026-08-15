@@ -382,6 +382,16 @@ def test_bundled_docgen_plugin_maps_to_trusted_stdio_runtime_config(
     assert capability.requires_confirmation is False
 
 
+def test_bundled_quiz_plugin_discovers_skill_and_agent() -> None:
+    package = load_agent_plugin(ROOT / "agent-plugins" / "ai-quiz")
+
+    assert package.manifest.name == "ai-quiz"
+    assert [skill.name for skill in package.skills] == ["quiz-generation"]
+    assert [agent.id for agent in package.agents] == ["quiz-expert"]
+    assert package.mcp_servers == ()
+    assert package.diagnostics == ()
+
+
 def test_startup_config_freezes_dashscope_keys_only_for_allowlisted_stdio_plugins(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

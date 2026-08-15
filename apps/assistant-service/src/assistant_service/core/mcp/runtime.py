@@ -509,14 +509,28 @@ class MCPRuntimeService:
             raise MCPAuthorizationError("CONNECTOR_CAPABILITY_NOT_BOUND")
         if str(config.get("tool_name") or tool_name) != tool_name:
             raise MCPAuthorizationError("CONNECTOR_CAPABILITY_NOT_BOUND")
-        return await self._repository.authorize_connector_tool(
+        provider = str(config.get("provider") or "")
+        principal_type = str(config.get("principal_type") or "")
+        grant_id = str(config.get("grant_id") or "")
+        if principal_type or grant_id:
+            if not principal_type or not grant_id:
+                raise MCPAuthorizationError("CONNECTOR_BINDING_INCOMPLETE")
+            return await self._repository.authorize_connector_tool(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                authenticated=authenticated,
+                provider=provider,
+                tool_name=tool_name,
+                principal_type=principal_type,
+                grant_id=grant_id,
+                channel=channel,
+            )
+        return await self._repository.authorize_connector_catalog(
             tenant_id=tenant_id,
             user_id=user_id,
             authenticated=authenticated,
-            provider=str(config.get("provider") or ""),
+            provider=provider,
             tool_name=tool_name,
-            principal_type=str(config.get("principal_type") or ""),
-            grant_id=str(config.get("grant_id") or ""),
             channel=channel,
         )
 

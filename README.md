@@ -25,6 +25,14 @@ Prerequisites:
 - About 4 GiB available to Docker for the complete low-memory profile
 - A model-provider API key (it can be entered before or after startup)
 
+Check the machine first. `make doctor` is read-only — it never starts, builds, or changes
+anything — and reports missing tools, Docker memory, occupied ports, and containers that belong to
+a different checkout of this project:
+
+```bash
+make doctor
+```
+
 1. Choose one model setup path.
 
 CLI/environment setup for the default Qwen Assistant and KB:
@@ -33,10 +41,12 @@ CLI/environment setup for the default Qwen Assistant and KB:
 export DASHSCOPE_API_KEY='your-key'
 ```
 
-Or skip the export and use the web setup after the stack starts. The default
-`MODEL_SETUP_MODE=ui` keeps infrastructure and the console available while no
-provider is configured. Set `MODEL_SETUP_MODE=environment` in production when
-startup validation must reject that setup-only state.
+Or skip the export and use the web setup after the stack starts. With the
+default `MODEL_SETUP_MODE=ui` the console boots without provider keys: the
+dashboard shows a setup banner and first-run checklist, and the Services page
+is where you configure a provider. Once a provider is configured the banner
+disappears automatically. Set `MODEL_SETUP_MODE=environment` in production
+when startup validation must reject that setup-only state.
 
 2. Pull the fixed release images and start the complete stack:
 
@@ -302,16 +312,16 @@ The knowledge service supports document ingestion, chunking, vector indexing, an
 Embedding configuration is controlled by:
 
 ```env
-KB_EMBEDDING_PROVIDER=gemini
-KB_EMBEDDING_API_KEY=...
-KB_EMBEDDING_MODEL=gemini-embedding-2-preview
+KB_EMBEDDING_PROVIDER=dashscope
+KB_EMBEDDING_API_KEY=
+KB_EMBEDDING_MODEL=text-embedding-v4
 KB_EMBEDDING_DIMENSION=1024
 ```
 
 Provider notes:
 
 - `gemini`: set `KB_EMBEDDING_API_KEY` to your Google/Gemini embedding key.
-- `dashscope`: set `KB_EMBEDDING_PROVIDER=dashscope`, use a DashScope embedding model, and set `KB_EMBEDDING_API_KEY`.
+- `dashscope`: the default `text-embedding-v4` path reuses `DASHSCOPE_API_KEY`; set `KB_EMBEDDING_API_KEY` only to override it with a dedicated embedding key.
 - `siliconflow`: set `KB_EMBEDDING_PROVIDER=siliconflow`, use a SiliconFlow embedding model, and set `KB_EMBEDDING_API_KEY`.
 
 ## General AI Assistant
@@ -357,8 +367,14 @@ Its stdio MCP executable and document dependencies ship inside the Assistant
 image, so document generation requires no second application image, service,
 port, or signed-download endpoint. Generated files are imported directly into
 the Assistant artifact store. The legacy in-process generators remain a
-startup fallback when the plugin handshake fails. Operators can install other
-packages by listing plugin roots with the operating system path separator:
+startup fallback when the plugin handshake fails.
+
+The bundled `agent-plugins/ai-quiz` package documents the assistant's built-in
+quiz capability: ask the assistant to create questions from knowledge-base
+content and it calls the `generate_quiz` tool, renders an interactive quiz card
+in chat, and supports public sharing through the artifact-share mechanism.
+Operators can install other packages by listing plugin roots with the operating
+system path separator:
 
 ```env
 ASSISTANT_RUNTIME_SKILLS=true
@@ -449,7 +465,7 @@ docker compose logs --tail=200 qdrant
 Common causes:
 
 - `.env` still contains `change_me_*` placeholders.
-- Only a chat key is configured; the knowledge base also needs `KB_EMBEDDING_API_KEY`.
+- The configured embedding provider has no usable credential. The default DashScope path reuses `DASHSCOPE_API_KEY`; `KB_EMBEDDING_API_KEY` is only a dedicated-key override.
 - PostgreSQL password was changed after the first volume initialization.
 - Qdrant is running with old vectors from a different embedding dimension.
 - `FRONTEND_PORT`, `GATEWAY_PORT`, `POSTGRES_PORT`, `REDIS_PORT`, or `QDRANT_HTTP_PORT` conflicts with another local process.
@@ -495,6 +511,16 @@ GATEWAY_SESSION__AUTHENTICATED_TTL_SECONDS=604800
 
 ## For agents
 
-Read `AGENTS.md` before changing the repository. For the current Assistant × KB
-session checkpoint, verified evidence boundaries, and continuation prompt, see
-`HANDOFF.md`; re-check live Git and runtime state before relying on the snapshot.
+Read [`AGENTS.md`](AGENTS.md) before changing the repository — it is the contract every coding
+agent follows here, and [`CLAUDE.md`](CLAUDE.md) adds the Claude Code specifics.
+
+The full agent harness — architecture boundaries, canonical commands, gates, task loop, and the
+mandatory Docker/secret rules — lives in [`docs/harness/`](docs/harness/README.md), with the
+machine-readable contract in [`harness.yml`](harness.yml). Verify it with:
+
+```bash
+make harness-check
+```
+
+Everything else is indexed from [`docs/README.md`](docs/README.md). Multi-session programs live in
+`deploy/runbooks/`, where each `loop-state.json` is the authoritative status.

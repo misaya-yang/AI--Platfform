@@ -49,7 +49,7 @@ class ChatClient {
   Future<ChatResponse> send(
     String message, {
     String? sessionId,
-    String modelId = 'qwen3.7-plus',
+    String? modelId,
     double temperature = 0.7,
     int? maxTokens,
     String? systemPrompt,
@@ -91,7 +91,7 @@ class ChatClient {
   Stream<StreamEvent> stream(
     String message, {
     String? sessionId,
-    String modelId = 'qwen3.7-plus',
+    String? modelId,
     double temperature = 0.7,
     int? maxTokens,
     String? systemPrompt,
@@ -172,7 +172,7 @@ class ChatClient {
   Map<String, dynamic> _buildBody({
     required String message,
     String? sessionId,
-    required String modelId,
+    String? modelId,
     required double temperature,
     int? maxTokens,
     String? systemPrompt,
@@ -183,11 +183,11 @@ class ChatClient {
   }) {
     final body = <String, dynamic>{
       'message': message,
-      'model_id': modelId,
       'temperature': temperature,
       'stream': stream,
     };
 
+    if (modelId != null) body['model_id'] = modelId;
     if (sessionId != null) body['session_id'] = sessionId;
     if (maxTokens != null) body['max_tokens'] = maxTokens;
     if (systemPrompt != null) body['system_prompt'] = systemPrompt;

@@ -230,7 +230,7 @@ class TestHTTPConnectionPool:
 
     def test_default_pool_settings(self):
         """测试默认连接池设置"""
-        from src.connectors.http import HTTPConnector
+        from src.transports.http import HTTPConnector
 
         assert HTTPConnector.DEFAULT_MAX_CONNECTIONS == 200
         assert HTTPConnector.DEFAULT_KEEPALIVE_CONNECTIONS == 50
@@ -238,7 +238,7 @@ class TestHTTPConnectionPool:
 
     def test_default_timeout_settings(self):
         """测试默认超时设置"""
-        from src.connectors.http import HTTPConnector
+        from src.transports.http import HTTPConnector
 
         assert HTTPConnector.DEFAULT_CONNECT_TIMEOUT == 3.0
         assert HTTPConnector.DEFAULT_READ_TIMEOUT == 300.0

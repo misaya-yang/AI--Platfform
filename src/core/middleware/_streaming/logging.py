@@ -41,9 +41,12 @@ class StreamingLoggingMiddleware(PureASGIMiddleware):
     def __init__(self, app: ASGIApp, config: StreamingLogConfig):
         super().__init__(app)
         self.config = config
+        # The event loop keeps only weak references to scheduled tasks. Keep
+        # metrics writes alive until their callbacks run, then release them.
+        self._background_tasks: set[asyncio.Task[None]] = set()
 
-    @staticmethod
     def _schedule_metrics_record(
+        self,
         *,
         method: str,
         path: str,
@@ -70,7 +73,10 @@ class StreamingLoggingMiddleware(PureASGIMiddleware):
             logger.debug("%s: %s", error_label, exc)
             return
 
-        def _done_callback(done: asyncio.Task) -> None:
+        self._background_tasks.add(task)
+
+        def _done_callback(done: asyncio.Task[None]) -> None:
+            self._background_tasks.discard(done)
             with contextlib.suppress(asyncio.CancelledError):
                 exc = done.exception()
                 if exc is not None:

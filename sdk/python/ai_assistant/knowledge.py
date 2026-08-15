@@ -7,15 +7,16 @@ Wraps ``/api/v1/assistant/datasets`` and delegates KB-aware chat to the
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
-from ai_assistant.models.events import StreamEvent
 from ai_assistant.models.response import ChatResponse, Dataset
-from ai_assistant.transport.http import HTTPTransport
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from ai_assistant.chat import ChatModule
+    from ai_assistant.models.events import StreamEvent
+    from ai_assistant.transport.http import HTTPTransport
 
 
 class KnowledgeModule:
@@ -39,7 +40,7 @@ class KnowledgeModule:
         question: str,
         dataset_ids: list[str],
         *,
-        model_id: str = "qwen3.7-plus",
+        model_id: str | None = None,
         kb_mode: str = "auto",
         kb_top_k: int | None = None,
         kb_score_threshold: float | None = None,
@@ -69,7 +70,7 @@ class KnowledgeModule:
         question: str,
         dataset_ids: list[str],
         *,
-        model_id: str = "qwen3.7-plus",
+        model_id: str | None = None,
         kb_mode: str = "auto",
         kb_top_k: int | None = None,
         kb_score_threshold: float | None = None,

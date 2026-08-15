@@ -552,7 +552,7 @@ async function installHarness(page: Page, options: HarnessOptions = {}): Promise
     }
     if (pathname === "/api/v1/assistant/config") return route.fulfill(response({ default_model_id: "qwen3.7-plus", available_providers: ["dashscope"], kb_enabled: false, web_search_enabled: false }));
     if (pathname === "/api/v1/sessions" && request.method() === "GET") return route.fulfill(response([]));
-    if (pathname === "/api/v1/confluence/connections") return route.fulfill(response([]));
+    if (pathname === "/api/v1/setup/state") return route.fulfill(response({ configured: true, missing: [], mode: "environment", default_model: null }));
     throw new Error(`Unhandled API request: ${request.method()} ${pathname}`);
   });
   return state;

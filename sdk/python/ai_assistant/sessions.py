@@ -7,11 +7,13 @@ to message history within a session.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ai_assistant.models.request import SessionCreateRequest
 from ai_assistant.models.response import Message, Session
-from ai_assistant.transport.http import HTTPTransport
+
+if TYPE_CHECKING:
+    from ai_assistant.transport.http import HTTPTransport
 
 
 class SessionModule:

@@ -5,8 +5,10 @@ import hashlib
 import json
 import uuid
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from ai_gateway_core.persistence.repositories.agent_repository import (
     AgentArchivedError,
     AgentDraftConflictError,
@@ -465,6 +467,83 @@ def test_create_list_get_and_cursor_pagination() -> None:
     assert detail.json()["draft"]["revision"] == 1
 
 
+def test_create_materializes_empty_model_before_validation_and_versioning() -> None:
+    client, repository = make_client()
+    client.app.state.settings = SimpleNamespace(default_model="deployment-default-model")
+    spec = valid_spec()
+    spec["model"] = {
+        "model_id": "",
+        "provider_id": "dashscope",
+        "temperature": 0.2,
+    }
+
+    agent = create_agent(client, spec=spec)
+    agent_id = agent["agent_id"]
+    stored_spec = repository.records[("tenant-a", agent_id)]["draft"]["spec"]
+
+    assert stored_spec["model"] == {
+        "model_id": "deployment-default-model",
+        "provider_id": None,
+        "temperature": 0.2,
+        "max_tokens": None,
+        "thinking_mode": None,
+    }
+    validation = client.post(f"/agents/{agent_id}/validate")
+    assert validation.status_code == 200
+    assert validation.json()["valid"] is True
+
+    version = client.post(f"/agents/{agent_id}/versions", headers={"If-Match": '"1"'})
+    assert version.status_code == 201, version.text
+    assert version.json()["version"]["spec"]["model"]["model_id"] == (
+        "deployment-default-model"
+    )
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [None, SimpleNamespace(default_model="")],
+    ids=["missing-settings", "empty-default"],
+)
+def test_create_with_empty_model_fails_typed_when_server_default_is_unavailable(
+    settings: SimpleNamespace | None,
+) -> None:
+    client, repository = make_client()
+    if settings is not None:
+        client.app.state.settings = settings
+    spec = valid_spec()
+    spec["model"] = {"model_id": "", "provider_id": "dashscope"}
+
+    response = client.post(
+        "/agents",
+        json={"name": "Defaultless Agent", "description": "test", "spec": spec},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "AGENT_RUNTIME_MODEL_UNAVAILABLE"
+    assert repository.records == {}
+
+
+def test_update_materializes_empty_model_before_repository_write() -> None:
+    client, repository = make_client()
+    client.app.state.settings = SimpleNamespace(default_model="updated-default-model")
+    agent = create_agent(client)
+    spec = valid_spec("Use the deployment default")
+    spec["model"] = {"model_id": "", "provider_id": "dashscope"}
+
+    response = client.put(
+        f"/agents/{agent['agent_id']}/draft",
+        headers={"If-Match": '"1"'},
+        json={"spec": spec},
+    )
+
+    assert response.status_code == 200, response.text
+    stored_model = repository.records[("tenant-a", agent["agent_id"])]["draft"]["spec"][
+        "model"
+    ]
+    assert stored_model["model_id"] == "updated-default-model"
+    assert stored_model["provider_id"] is None
+
+
 def test_draft_etag_conflict_preserves_newer_edit() -> None:
     client, _ = make_client()
     agent = create_agent(client)
@@ -742,6 +821,7 @@ def test_archive_makes_draft_read_only_and_delete_is_soft() -> None:
 
 def test_validation_and_openapi_contract_are_secret_free() -> None:
     client, _ = make_client()
+    client.app.state.settings = SimpleNamespace(default_model="deployment-default-model")
     invalid = create_agent(
         client,
         spec={
@@ -755,7 +835,6 @@ def test_validation_and_openapi_contract_are_secret_free() -> None:
     assert validation.json()["valid"] is False
     assert {item["code"] for item in validation.json()["errors"]} == {
         "AGENT_INSTRUCTIONS_REQUIRED",
-        "AGENT_MODEL_REQUIRED",
     }
 
     unsafe_specs = []

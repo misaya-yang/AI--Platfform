@@ -25,7 +25,7 @@ export const DEFAULT_CONFIG: CLIConfig = {
   api_key: "",
   base_url: "http://localhost:8080",
   tenant_id: "",
-  default_model: "qwen3.7-plus",
+  default_model: "",
   timeout: 30,
   max_retries: 3,
 };

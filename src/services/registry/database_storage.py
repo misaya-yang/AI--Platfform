@@ -10,7 +10,7 @@ import builtins
 import json
 from typing import TYPE_CHECKING, Any
 
-from ai_gateway_core.enums import ConnectorType, ContentType, InvocationMode, ServiceType
+from ai_gateway_core.enums import ContentType, InvocationMode, ServiceType, TransportType
 
 from ...models.service import (
     ServiceAuthConfig,
@@ -165,7 +165,7 @@ class DatabaseRegistryStorage(RegistryStorage):
                 return default
 
         service_type = as_enum(ServiceType, data.get("service_type"), ServiceType.CUSTOM)
-        connector_type = as_enum(ConnectorType, data.get("connector_type"), ConnectorType.HTTP)
+        connector_type = as_enum(TransportType, data.get("connector_type"), TransportType.HTTP)
 
         supported_modes = []
         for m in data.get("supported_modes", ["sync"]):

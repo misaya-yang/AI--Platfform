@@ -61,6 +61,23 @@ def test_startup_config_digest_covers_value_and_source_without_secrets() -> None
     ] == "process_env"
 
 
+def test_default_model_summary_uses_the_frozen_environment_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from assistant_service.config.startup_fingerprint import resolve_startup_config
+
+    monkeypatch.setenv("DEFAULT_MODEL", "ambient-process-model")
+    supplied_environment = {"DEFAULT_MODEL": "tenant-deployment-model"}
+    snapshot = resolve_startup_config(supplied_environment)
+    supplied_environment["DEFAULT_MODEL"] = "mutated-after-resolution"
+
+    assert snapshot.str_value("DEFAULT_MODEL") == "tenant-deployment-model"
+    assert snapshot.safe_summary()["model"]["default"] == {
+        "value": "tenant-deployment-model",
+        "source": "process_env",
+    }
+
+
 def test_startup_config_marks_invalid_values_and_hides_fallback_model_ids() -> None:
     from assistant_service.config.startup_fingerprint import resolve_startup_config
 

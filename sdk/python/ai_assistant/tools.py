@@ -7,10 +7,12 @@ within the gateway's execution sandbox.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ai_assistant.models.response import ToolInfo
-from ai_assistant.transport.http import HTTPTransport
+
+if TYPE_CHECKING:
+    from ai_assistant.transport.http import HTTPTransport
 
 
 class ToolModule:

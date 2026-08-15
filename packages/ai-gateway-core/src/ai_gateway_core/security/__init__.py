@@ -8,6 +8,7 @@ from .safe_fetch import (
     safe_callback_post,
     safe_fetch,
     safe_fetch_with_response,
+    safe_form_post,
     validate_callback_url,
 )
 from .secrets import decrypt_value, encrypt_value, generate_encryption_key, is_encrypted
@@ -26,5 +27,6 @@ __all__ = [
     "safe_callback_post",
     "safe_fetch",
     "safe_fetch_with_response",
+    "safe_form_post",
     "validate_callback_url",
 ]

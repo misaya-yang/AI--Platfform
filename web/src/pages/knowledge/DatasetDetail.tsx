@@ -142,9 +142,6 @@ const FILE_TYPE_CATEGORIES = {
 
 function getDatasetMainTab(searchParams: URLSearchParams): DatasetMainTab {
   const requestedTab = searchParams.get("tab");
-  if (requestedTab === "sync" || requestedTab === "confluence") {
-    return "sources";
-  }
   return DATASET_MAIN_TABS.includes(requestedTab as DatasetMainTab)
     ? (requestedTab as DatasetMainTab)
     : "documents";
@@ -158,8 +155,9 @@ type QAChatMessage = {
   response?: QAResponse;
 };
 
+// Empty value → the server applies its deployment default.
 const QA_MODEL_OPTIONS = [
-  { value: "qwen3.7-plus", label: "Qwen 3.7 Plus", provider: "dashscope" },
+  { value: "", labelKey: "common.serverDefault", provider: "dashscope" },
 ];
 
 const QA_SYSTEM_PROMPT_KEYS = {
@@ -207,16 +205,8 @@ export function KnowledgeDatasetDetailPage() {
   );
 
   useEffect(() => {
-    const requestedTab = searchParams.get("tab");
     const nextTab = getDatasetMainTab(searchParams);
     setMainTab((currentTab) => currentTab === nextTab ? currentTab : nextTab);
-
-    if (requestedTab === "sync" || requestedTab === "confluence") {
-      const normalizedParams = new URLSearchParams(searchParams);
-      normalizedParams.set("tab", "sources");
-      normalizedParams.set("source", "confluence");
-      setSearchParams(normalizedParams, { replace: true });
-    }
   }, [searchParams, setSearchParams]);
 
   function handleMainTabChange(tab: DatasetMainTab) {
@@ -2097,7 +2087,7 @@ export function KnowledgeDatasetDetailPage() {
                       <SelectContent>
                         {QA_MODEL_OPTIONS.map((option) => (
                           <SelectItem key={option.value} value={option.value}>
-                            {option.label}
+                            {option.labelKey ? t(option.labelKey) : option.value}
                           </SelectItem>
                         ))}
                       </SelectContent>

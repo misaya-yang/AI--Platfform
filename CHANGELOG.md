@@ -2,6 +2,139 @@
 
 ## Unreleased
 
+### Product convergence (program: deploy/runbooks/product-convergence)
+
+- Removed the Confluence fossil stack: the gateway REST surface (`src/api/v1/confluence.py`,
+  `src/api/schemas/confluence.py`) that returned 503 unconditionally since KB was split into a
+  microservice, the zero-reference gateway-side sync code (`src/services/knowledge/confluence/`),
+  and the console UI (`web/src/pages/confluence/`, the Confluence tab of `/tasks`, and the
+  Confluence sync cards in knowledge dataset sources). Confluence connectivity is now exclusively
+  the connector stack (`src/api/v1/connectors.py`); `ConnectorsPanel` in the assistant chat was
+  re-pointed to the connector catalog/OAuth/MCP APIs.
+- Removed the standalone exam management surface (`src/api/v1/exams.py`, `/exams` routes, the
+  Services-page exams tab, i18n keys). Exam data tables remain in place; the capability returns
+  through the assistant quiz tool and the ai-quiz plugin.
+- Trimmed `src/api/v1/quiz.py` to a deprecated shim: deleted `POST /generate/stream`,
+  `GET /list`, and `GET /{quiz_id}/attempts/export`; the load-bearing generate/get/submit/
+  attempts/delete/share endpoints and the public share routes stay (consumed by the in-chat
+  quiz card, QuizShareDialog, and public quiz page).
+
+### Platform architecture
+
+- Added [`docs/harness/platform-architecture.md`](docs/harness/platform-architecture.md): the product
+  law behind form and capability diversification — four layers (surfaces / contract / kernel /
+  extensions over the gateway), five rules, the `permissions` + `capabilities` coexistence decision,
+  and the admission table for what may live in the kernel versus ship as an extension.
+- Added the `agent-contract-unification` program under `deploy/runbooks/`: seven phases that make the
+  built-in assistant an `AgentSpec` instance, unify subagents into the same type, move builder
+  settings out of the chat request, put the console on the public runtime contract, extend the SDKs
+  to it, and gate domain logic out of the shared core package.
+- `make harness-check` now validates each program against its own `loop-state` schema version rather
+  than asserting one contract on all of them, which removed eight permanent warnings.
+
+### Agent harness and documentation
+
+- Added an explicit agent harness: `harness.yml` (machine-readable contract) plus
+  `docs/harness/` covering architecture boundaries, the canonical command catalog, the
+  working agreement, and the mandatory Docker/secret rules.
+- Rewrote `AGENTS.md` as a short tier-1 contract (repo map, canonical commands, gates, safety)
+  and added `CLAUDE.md` for Claude Code specifics. Both are line-budgeted.
+- Added `make harness-check` (`scripts/harness/check_harness.py`) and wired it into CI: it fails
+  when a declared command no longer exists, a required doc is missing, an instruction file exceeds
+  its budget, or a harness link breaks.
+- Stopped ignoring `docs/` in `.gitignore`. About 100 design, plan, and program files were
+  invisible to every other machine and every coding agent; the repository is now the system of
+  record. Root-only scratch patterns are anchored so they no longer swallow real documents.
+- Reorganized `docs/` into `harness/`, `design/`, `plans/`, `research/`, `architecture/`, and
+  dated `archive/`, with `docs/README.md` as the index.
+- Consolidated all multi-session programs under `deploy/runbooks/`; `loop-state.json` stays the
+  authoritative status. Archived the root `HANDOFF.md`, which depended on a directory outside
+  this repository, and `PLATFORM_REVIEW_2026-07-14.md`.
+
+### Workspace hygiene
+
+- `make harness-check` now enforces where files go: Playwright specs only under `web/e2e/`
+  (or `web/src/`, `sdk/`), Playwright configs only under `web/`, and no screenshots, archives, or
+  stray test files at the repository root. This is what previously let verification screenshots
+  accumulate in the root.
+- Added [`web/e2e/README.md`](web/e2e/README.md) documenting the E2E layout, the five Playwright
+  configs, where run artifacts go, and how to point browser tooling at `tmp/browser/` instead of
+  the repository root. Added `web/e2e/fixtures/` for static test data.
+- Removed root strays: three verification screenshots, a scratch orchestration script, and the
+  `.playwright-mcp/` dump directory.
+- Removed `claude-code`, an orphan git submodule reference with no `.gitmodules` entry and an empty
+  working directory, and `.kiro/skills/` — 21 tracked symlinks into the gitignored `.agents/`
+  directory that were dangling on every checkout, including this one.
+
+### Deployment
+
+- Added `make doctor`: a read-only host preflight covering required tooling, Compose v2, Docker
+  memory and disk headroom, host ports, `.env` presence/mode/placeholder keys, and — blocking —
+  whether running `ai-gateway-*` containers belong to this checkout.
+- Documented the shortest correct startup path as `make doctor && make quickstart && make status`
+  in `README.md` and `DEPLOY.md`.
+- CI now verifies the harness contract and the syntax of the deploy scripts.
+
+### Model defaults
+
+- Made `DEFAULT_MODEL` (unprefixed env var) the single deployment default:
+  SDKs, the console, and the gateway now omit `model_id` unless a caller
+  explicitly requests one, and the assistant service applies the deployment
+  default. Added `.env.example` `DEFAULT_MODEL` documentation with an
+  optional non-empty format check in `validate-env.sh`.
+
+### First-run onboarding and navigation
+
+- Added a first-run onboarding flow: `GET /api/v1/setup/state` reports provider
+  setup status, the console shows a dismissible setup banner and a three-step
+  dashboard checklist until a provider is configured, and the existing
+  `MODEL_SETUP_MODE` env var (`ui` | `environment`) is forwarded to the gateway.
+- Regrouped the sidebar navigation into 使用/Use (assistant, agents),
+  构建/Build (knowledge, playground, eval), and 治理/Govern (services, users,
+  tasks, settings) sections, with Dashboard ungrouped on top; the model-tester
+  rail stays flat. The playground entry is now labelled 模型调试 / "Model Debug".
+- Added one-line "why you are here" hints to the assistant welcome screen, the
+  playground empty state, and the agents empty state.
+- Added a frontend CI step running `pnpm -C web i18n:check`, and extended the
+  open-source e2e suite with first-run and nav-group specs.
+
+### Quiz plugin and artifact shares
+
+- Replaced the standalone quiz-generation API (`POST /assistant/quiz/generate`) with the
+  in-chat `generate_quiz` assistant tool as the supported path, documented by the new
+  `agent-plugins/ai-quiz` data-only plugin (skills + inert agent; no MCP server — stdio
+  children have no DB/KB/model access).
+- Moved quiz generation/orchestration from `packages/ai-gateway-core` into
+  `apps/assistant-service/core/quiz/`; grading stays in the shared leaf because the gateway
+  grades anonymous share submissions in-process. Deleted the orphaned exam service.
+- Generalized quiz sharing into kind-generic `artifact_shares` (migration 083, with a frozen
+  payload/answer-keys snapshot backfilled from `quiz_shares`): new
+  `POST/DELETE /api/v1/artifact-shares` endpoints, and the public `/quiz/shared/{code}`
+  routes now alias over the same rows so legacy links stay valid. Demo seed data was
+  re-pointed at `artifact_shares`.
+
+### Connectors
+
+- Added a connector catalog admin API (`/api/v1/connectors/admin/configs`) with CRUD,
+  an enabled toggle, a delete guard while users are connected, and write-only
+  `client_secret` handling via `RedactedValidationRoute`; gated by `console:settings:view`.
+- Added connector `mode` semantics (`live`/`ingest`/`both`) via migration
+  `084_connector_modes.sql` (backfills `both` where `supports_sync`).
+- Added the connector catalog settings page at `/settings/connectors` with full
+  en-US / zh-CN i18n coverage.
+- Made catalog-model connector bindings effective only when the provider has an
+  enabled `connector_configs` row and the calling user holds a connected
+  `user_connectors` row; added stable deny codes
+  (`CONNECTOR_CATALOG_UNAVAILABLE`/`INGEST_ONLY`/`PRINCIPAL_DENIED`/`NOT_CONNECTED`)
+  and documented the semantics in the agent-studio architecture contract.
+- Renamed `src/connectors` to `src/transports` and `ConnectorType` to
+  `TransportType` (field name `connector_type` unchanged); no behaviour change.
+- Added `docs/design/connectors.md` (live vs. ingest modes, OAuth token custody,
+  MCP tool model) and `docs/connectors/ingest-mode.md` (KB upload reuse, token
+  relay boundary — design intent only this round).
+
+### Runtime
+
 - Bundled document generation as the trusted `ai-docgen` Agent Plugin inside
   the Assistant image and removed the standalone docgen service, image, port,
   signed-download endpoint, and release artifact.

@@ -2,17 +2,16 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 import os
+import sys
 
 import pytest
 
 # Add SDK to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from ai_assistant import AssistantClient, StreamEvent
+from ai_assistant import AssistantClient
 from ai_assistant.models.events import EventType
-
 
 SERVER = os.environ.get("SDK_TEST_SERVER", "http://127.0.0.1:8080")
 API_KEY = os.environ.get("SDK_TEST_API_KEY", "")
@@ -40,7 +39,11 @@ async def test_streaming_chat():
         async for event in client.chat.stream("Say hello in 5 words", session_id="sdk-test-stream"):
             events.append(event)
             if event.event_type == EventType.TEXT_DELTA:
-                text += str(event.data) if isinstance(event.data, str) else event.data.get("text", event.data.get("data", ""))
+                text += (
+                    str(event.data)
+                    if isinstance(event.data, str)
+                    else event.data.get("text", event.data.get("data", ""))
+                )
             if event.event_type == EventType.DONE:
                 break
 

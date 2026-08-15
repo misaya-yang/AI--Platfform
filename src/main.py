@@ -565,7 +565,7 @@ def create_app() -> FastAPI:
                 key_prefix=getattr(getattr(settings, "storage", None), "key_prefix", None) or "",
             )
             # Get signing key for local file URLs (security)
-            signing_key = getattr(getattr(settings, "confluence", None), "encryption_key", "") or ""
+            signing_key = getattr(getattr(settings, "image_signing", None), "encryption_key", "") or ""
             image_storage_service = ImageStorageService(storage_config, signing_key=signing_key)
             app.state.image_storage_service = image_storage_service
             url_signing = "enabled" if signing_key else "disabled"
@@ -601,22 +601,6 @@ def create_app() -> FastAPI:
         # plans/kb-fork-merge-report.md for the deletion rationale.
         logger.info(
             "Knowledge Base runs as a microservice (:8092); gateway uses KBProxyClient only."
-        )
-
-        # ========== Confluence Integration ==========
-        # Phase K5c: Confluence scheduler + sync-service moved to
-        # knowledge-service. The gateway no longer polls Confluence, does not
-        # embed pages, does not upsert into Qdrant. All of that runs inside
-        # apps/knowledge-service (see its lifespan + docker-compose).
-        #
-        # The REST API surface at src/api/v1/confluence.py is kept so the
-        # frontend continues to resolve routes, but every endpoint that
-        # depends on ``app.state.confluence_sync_service`` now returns 503
-        # until the follow-up converts those routes to proxy to
-        # knowledge-service. See plans/k5c-migration-plan.md "Deferred".
-        logger.info(
-            "Confluence integration runs in knowledge-service (Phase K5c); "
-            "gateway no longer schedules polling."
         )
 
         # 启动文件清理服务
@@ -908,10 +892,6 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     app.state.knowledge_service = None
     app.state.knowledge_worker = None
     # kb_proxy already initialized before assistant service
-
-    # Confluence 集成
-    app.state.confluence_sync_service = None
-    app.state.confluence_scheduler = None
 
     # 游客会话管理器
     from .services.session.guest_session_manager import GuestSessionConfig, GuestSessionManager

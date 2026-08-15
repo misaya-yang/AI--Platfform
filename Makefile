@@ -3,6 +3,10 @@
 # =============================================================================
 # 运维只需要记住 make 命令:
 #
+#   make doctor          环境体检 (工具/内存/端口/compose 归属，只读不改动)
+#   make quickstart      首次一键启动 (生成 .env + 拉镜像 + 启动 + 迁移 + 校验)
+#   make harness-check   校验 harness.yml 契约与文档预算
+#
 #   make deploy          部署全部服务 (启动+迁移+健康检查，不默认重建镜像)
 #   make deploy-build    部署并强制重新构建镜像
 #   make deploy-cn       使用国内镜像构建部署
@@ -50,7 +54,13 @@ export COMPOSE_PARALLEL_LIMIT
 
 # -- Quick Start --------------------------------------------------------------
 
-.PHONY: quickstart quickstart-build validate-config validate-example-config validate seed-demo seed-demo-apply
+.PHONY: doctor harness-check quickstart quickstart-build validate-config validate-example-config validate seed-demo seed-demo-apply
+
+doctor:                     ## 环境体检: 工具/Docker/内存/端口/compose 归属 (只读)
+	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/doctor.sh --env "$(ENV_FILE)"
+
+harness-check:              ## 校验 harness.yml 契约: 命令存在、必备文档、指令文件行数预算
+	@python3 scripts/harness/check_harness.py
 
 quickstart:                 ## 拉取版本化多架构镜像并一键部署 (仅需模型配置)
 	@bash $(SCRIPTS)/init-env.sh --env "$(ENV_FILE)" --if-missing

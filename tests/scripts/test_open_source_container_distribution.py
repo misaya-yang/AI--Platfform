@@ -252,6 +252,7 @@ def test_dockerfiles_do_not_accept_provider_secrets_as_build_arguments() -> None
     assistant = (ROOT / "apps/assistant-service/Dockerfile").read_text()
     assert 'pip install "./packages/mcp-docgen-server[mcp]"' in assistant
     assert "COPY agent-plugins/ai-docgen/ /opt/agent-plugins/ai-docgen/" in assistant
+    assert "COPY agent-plugins/ai-quiz/ /opt/agent-plugins/ai-quiz/" in assistant
     assert (
         "COPY agent-plugins/community-doublecheck/ /opt/agent-plugins/community-doublecheck/"
     ) in assistant

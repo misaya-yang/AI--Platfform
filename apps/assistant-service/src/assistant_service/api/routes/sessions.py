@@ -112,7 +112,13 @@ async def delete_session(
             __name__, "assistant.api.routes.sessions.internal_failure", exc
         )
         raise HTTPException(503, "Session deletion storage is unavailable") from None
-    if not session or session.user_id != user.user_id or session.tenant_id != user.tenant_id:
+    # Gateway-created sessions live in the gateway schema during the staged
+    # route migration.  They may therefore be absent from assistant.sessions;
+    # the signed gateway identity still scopes all cleanup below.  A row that
+    # does exist must continue to pass strict owner validation.
+    if session and (
+        session.user_id != user.user_id or session.tenant_id != user.tenant_id
+    ):
         raise HTTPException(404, "Session not found")
 
     memory_service = getattr(request.app.state, "memory_service", None)
@@ -177,7 +183,21 @@ async def delete_session(
                 )
                 durable_deleted = False
             if durable_deleted is not True:
-                raise HTTPException(503, "Session deletion was not completed")
+                # DatabaseSessionManager can resolve a gateway-schema session
+                # through the shared Redis cache while DELETE targets the
+                # assistant schema.  Treat DELETE 0 as success only after a
+                # cache-clearing readback proves no assistant row remains.
+                try:
+                    durable_remaining = await sm.get(session_id)
+                except Exception as exc:
+                    record_internal_exception(
+                        __name__, "assistant.api.routes.sessions.internal_failure", exc
+                    )
+                    raise HTTPException(
+                        503, "Session deletion was not completed"
+                    ) from None
+                if durable_remaining is not None:
+                    raise HTTPException(503, "Session deletion was not completed")
     except HTTPException:
         raise
     except SessionDeletionBusyError:

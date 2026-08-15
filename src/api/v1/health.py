@@ -6,6 +6,7 @@ from ai_gateway_core.logging import get_logger
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ...core.auth.user_resolver import UserContext
+from ...services.llm.provider_setup import configured_providers
 from ...services.registry.health_monitor import HealthMonitor
 from ...services.registry.service_registry import ServiceRegistry
 from ..deps import get_health_monitor, get_registry, get_user_context
@@ -143,16 +144,13 @@ async def all_providers_health(
     }
 
     tenant_id = user.tenant_id or "default"
-    enabled = set(await model_meta.list_enabled_providers(tenant_id))
+    configured = set(await configured_providers(model_meta, tenant_id))
     model_counts = await model_meta.count_enabled_models_by_provider(tenant_id)
 
     providers_status = {}
     for provider in ModelProvider:
         pid = provider.value
-        is_configured = pid in enabled and await model_meta.is_provider_configured(
-            tenant_id,
-            pid,
-        )
+        is_configured = pid in configured
         providers_status[pid] = {
             "name": provider_names.get(pid, pid),
             "status": "configured" if is_configured else "not_configured",

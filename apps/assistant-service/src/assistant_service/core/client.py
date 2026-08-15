@@ -21,6 +21,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
+from .models.defaults import DEFAULT_MODEL
+
 logger = logging.getLogger(__name__)
 
 
@@ -29,7 +31,7 @@ class ChatRequest:
     """Unified chat request for both in-process and remote."""
     message: str
     session_id: str
-    model_id: str = "qwen3.7-plus"
+    model_id: str = DEFAULT_MODEL
     temperature: float = 0.7
     max_tokens: int | None = None
     kb_dataset_ids: list[str] | None = None
@@ -228,7 +230,7 @@ class RemoteAssistantClient:
         payload: dict[str, Any] = {
             "message": message,
             "session_id": session_id,
-            "model_id": getattr(config, "model_id", "qwen3.7-plus"),
+            "model_id": getattr(config, "model_id", DEFAULT_MODEL),
             "temperature": getattr(config, "temperature", 0.7),
             "max_tokens": getattr(config, "max_tokens", None),
             "kb_dataset_ids": getattr(config, "kb_dataset_ids", None),

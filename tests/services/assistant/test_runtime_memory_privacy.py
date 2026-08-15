@@ -1677,6 +1677,45 @@ async def test_owner_proven_legacy_source_is_inspected_loaded_and_deleted(
 
 
 @pytest.mark.asyncio
+async def test_current_source_is_not_reopened_as_legacy(tmp_path: Path) -> None:
+    store = MemorySourceStore(
+        tmp_path / "current",
+        legacy_base_dir=tmp_path / "legacy",
+    )
+    source_path = store.append_long_term_facts(
+        "tenant-a",
+        "user-a",
+        ["current private fact"],
+    )
+    database = ScopedMemoryDatabase(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        source_path=source_path,
+        chunk_ids=[],
+    )
+    adapter = build_adapter(store=store, indexer=MemoryIndexer(database))
+    legacy_reads = 0
+
+    def track_legacy_read(*_args: object, **_kwargs: object) -> None:
+        nonlocal legacy_reads
+        legacy_reads += 1
+        raise AssertionError("current source entered the legacy compatibility path")
+
+    store.read_legacy_source_document = track_legacy_read  # type: ignore[method-assign]
+
+    loaded = await adapter.load_memory_context(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        query="private",
+        runtime_mode="compat",
+        memory_profile="basic",
+    )
+
+    assert loaded.loaded_sources == 1
+    assert legacy_reads == 0
+
+
+@pytest.mark.asyncio
 async def test_ambiguous_legacy_owner_is_quarantined_and_not_deleted(
     tmp_path: Path,
 ) -> None:

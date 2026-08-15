@@ -151,6 +151,32 @@ def _raise_agent_error(
     raise HTTPException(status_code=status_code, detail=detail)
 
 
+def _materialize_agent_default_model(request: Request, spec: dict[str, Any]) -> dict[str, Any]:
+    """Seal the deployment default into a Draft before hashing or persistence."""
+
+    materialized = dict(spec)
+    model = dict(materialized.get("model") or {})
+    model_id = str(model.get("model_id") or "").strip()
+    if model_id:
+        model["model_id"] = model_id
+    else:
+        settings = getattr(request.app.state, "settings", None)
+        default_model = str(getattr(settings, "default_model", "") or "").strip()
+        if not default_model:
+            _raise_agent_error(
+                request,
+                503,
+                "AGENT_RUNTIME_MODEL_UNAVAILABLE",
+                "Default Agent model is unavailable",
+            )
+        model["model_id"] = default_model
+        # The empty-ID sentinel delegates provider selection to the server too;
+        # do not seal a UI placeholder provider beside the resolved model.
+        model["provider_id"] = None
+    materialized["model"] = model
+    return materialized
+
+
 def _require_actor(request: Request, user: UserContext) -> None:
     if (
         request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
@@ -281,10 +307,12 @@ async def _resolve_release_model_authorization(
         from inspect import isawaitable
 
         requested = resolution.get("spec", {}).get("model", {})
+        effective_requested = dict(requested) if isinstance(requested, dict) else {}
+        effective_requested.update({"model_id": model_id, "provider_id": provider_id})
         result = resolver.resolve(
             tenant_id=user.tenant_id,
             user_id=user.user_id,
-            model=dict(requested) if isinstance(requested, dict) else {},
+            model=effective_requested,
         )
         if isawaitable(result):
             result = await result
@@ -667,6 +695,7 @@ async def create_agent(
     user: UserContext = Depends(get_user_context),
 ) -> AgentMutationResponse:
     _require_actor(request, user)
+    spec = _materialize_agent_default_model(request, payload.spec.model_dump(mode="python"))
     try:
         agent = await _get_repository(request).create_agent(
             tenant_id=user.tenant_id,
@@ -674,7 +703,7 @@ async def create_agent(
             name=payload.name,
             slug=payload.slug,
             description=payload.description,
-            spec=payload.spec.model_dump(mode="python"),
+            spec=spec,
             is_tenant_admin=_is_tenant_admin(user),
         )
     except Exception as exc:
@@ -1188,6 +1217,7 @@ async def update_agent_draft(
 ) -> AgentDraftMutationResponse:
     _require_actor(request, user)
     expected_revision = _parse_etag(request, if_match)
+    spec = _materialize_agent_default_model(request, payload.spec.model_dump(mode="python"))
     agent_changes = {
         key: value
         for key, value in payload.model_dump(
@@ -1204,7 +1234,7 @@ async def update_agent_draft(
             user_id=user.user_id,
             is_tenant_admin=_is_tenant_admin(user),
             expected_revision=expected_revision,
-            spec=payload.spec.model_dump(mode="python"),
+            spec=spec,
             agent_changes=agent_changes,
         )
     except Exception as exc:

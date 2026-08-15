@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { Layout, Typography, Dropdown } from "antd";
 import type { MenuProps } from "antd";
@@ -10,7 +11,6 @@ import {
   Bot,
   ChartLine,
   ListTodo,
-  ClipboardCheck,
   Users,
   Settings,
   PanelLeftClose,
@@ -34,6 +34,7 @@ import { logout } from "@/api/auth";
 import { HelpModal } from "@/components/HelpModal";
 import { PasswordChangeModal } from "@/components/PasswordChangeModal";
 import { ProfileModal } from "@/components/ProfileModal";
+import { SetupBanner } from "@/components/SetupBanner";
 import { Logo } from "@/components/Logo";
 import { languages } from "@/i18n";
 import { isAgentStudioEnabled } from "@/config/runtime";
@@ -48,25 +49,32 @@ const NAV_ICON_SIZE = 18;
 const NAV_ICON_STROKE = 1.5;
 const HEADER_HEIGHT = 56;
 
+type NavGroup = "use" | "build" | "govern";
+
 type NavItem = {
   key: string;
   labelKey: string;
   icon: LucideIcon;
   permission: string | null;
+  group?: NavGroup;
 };
+
+// Dashboard stays ungrouped on top; the rest splits into 使用 (assistant +
+// agents), 构建 (knowledge, playground, eval), and 治理 (services, users,
+// tasks, settings). Empty groups collapse away during filtering below.
+const GROUP_ORDER: NavGroup[] = ["use", "build", "govern"];
 
 const navItems: NavItem[] = [
   { key: "/dashboard", labelKey: "nav.dashboard", icon: LayoutDashboard, permission: "console:dashboard:view" },
-  { key: "/services", labelKey: "nav.services", icon: Server, permission: "console:services:view" },
-  { key: "/knowledge", labelKey: "nav.knowledge", icon: BookOpen, permission: "knowledge:dataset:view" },
-  { key: "/playground", labelKey: "nav.playground", icon: Zap, permission: "conversation:playground:access" },
-  { key: "/assistant", labelKey: "nav.assistant", icon: Bot, permission: "conversation:playground:access" },
-  { key: "/agents", labelKey: "nav.agents", icon: Boxes, permission: null },
-  { key: "/eval", labelKey: "nav.eval", icon: ChartLine, permission: "console:eval:view" },
-  { key: "/tasks", labelKey: "nav.tasks", icon: ListTodo, permission: "console:dashboard:view" },
-  { key: "/exams", labelKey: "nav.exams", icon: ClipboardCheck, permission: "console:dashboard:view" },
-  { key: "/users", labelKey: "nav.users", icon: Users, permission: "user:list" },
-  { key: "/settings", labelKey: "nav.settings", icon: Settings, permission: "console:settings:view" },
+  { key: "/assistant", labelKey: "nav.assistant", icon: Bot, permission: "conversation:playground:access", group: "use" },
+  { key: "/agents", labelKey: "nav.agents", icon: Boxes, permission: null, group: "use" },
+  { key: "/knowledge", labelKey: "nav.knowledge", icon: BookOpen, permission: "knowledge:dataset:view", group: "build" },
+  { key: "/playground", labelKey: "nav.playground", icon: Zap, permission: "conversation:playground:access", group: "build" },
+  { key: "/eval", labelKey: "nav.eval", icon: ChartLine, permission: "console:eval:view", group: "build" },
+  { key: "/services", labelKey: "nav.services", icon: Server, permission: "console:services:view", group: "govern" },
+  { key: "/users", labelKey: "nav.users", icon: Users, permission: "user:list", group: "govern" },
+  { key: "/tasks", labelKey: "nav.tasks", icon: ListTodo, permission: "console:dashboard:view", group: "govern" },
+  { key: "/settings", labelKey: "nav.settings", icon: Settings, permission: "console:settings:view", group: "govern" },
 ];
 
 function NavItemIcon({ icon: Icon, size = NAV_ICON_SIZE }: { icon: LucideIcon; size?: number }) {
@@ -109,15 +117,8 @@ function getPageChrome(pathname: string) {
       subtitleFallback: "Review assistant, LangGraph proxy, and RAG traces with bounded previews and human scoring.",
     },
     tasks: { titleKey: "nav.tasks", titleFallback: "Tasks" },
-    confluence: {
-      titleKey: "confluence.pageTitle",
-      titleFallback: "Confluence Integration",
-      subtitleKey: "confluence.pageDesc",
-      subtitleFallback: "Manage Confluence connections and space syncing",
-    },
     users: { titleKey: "nav.users", titleFallback: "Users" },
     settings: { titleKey: "nav.settings", titleFallback: "Settings" },
-    exams: { titleKey: "nav.exams", titleFallback: "Exams" },
   };
   return map[segment] || map.dashboard;
 }
@@ -139,7 +140,15 @@ export function AppLayout() {
   const { user, clearAuth, hasPermission, forcePasswordChange, setForcePasswordChange } = useAuthStore();
   const location = useLocation();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [showProfileModal, setShowProfileModal] = useState(false);
+
+  // Re-check setup state on every route change so the banner disappears as
+  // soon as a provider gets configured (e.g. right after the Services page
+  // saves a key). The 5-minute staleTime keeps repeat navigations cheap.
+  useEffect(() => {
+    queryClient.invalidateQueries({ queryKey: ["setup-state"] });
+  }, [location.pathname, queryClient]);
 
   const handleLanguageChange = (langCode: string) => { i18n.changeLanguage(langCode); };
 
@@ -205,6 +214,26 @@ export function AppLayout() {
   const finalNavItems = isModelTesterOnly
     ? filteredNavItems.filter(item => item.key === "/playground")
     : filteredNavItems;
+  // Group headings only when the rail is expanded; the model_tester path and
+  // the collapsed rail render items flat (icons + tooltips only).
+  const showGroupHeadings = !isModelTesterOnly && !collapsed;
+  const ungroupedItems = finalNavItems.filter(item => !item.group);
+  const groupSections = GROUP_ORDER.map((group) => ({
+    group,
+    items: finalNavItems.filter(item => item.group === group),
+  })).filter(section => section.items.length > 0);
+  const navRows: Array<
+    | { kind: "item"; item: NavItem }
+    | { kind: "group-heading"; group: NavGroup }
+  > = showGroupHeadings
+    ? [
+        ...ungroupedItems.map(item => ({ kind: "item" as const, item })),
+        ...groupSections.flatMap(section => [
+          { kind: "group-heading" as const, group: section.group },
+          ...section.items.map(item => ({ kind: "item" as const, item })),
+        ]),
+      ]
+    : finalNavItems.map(item => ({ kind: "item" as const, item }));
   // 187 = 220 × 0.85 (narrowed 15% per 2026-04-24 feedback). Keeps
   // "Knowledge Base" on one line with the 14.5px/400 label and a 12px
   // icon-gap, verified at 1440×900.
@@ -264,7 +293,19 @@ export function AppLayout() {
               gives items a small breath without floating apart. */}
           <nav className="flex-1 overflow-y-auto px-2.5 scrollbar-hide py-4">
             <div className="flex flex-col gap-[3px]">
-              {finalNavItems.map((item) => (
+              {navRows.map((row) => {
+                if (row.kind === "group-heading") {
+                  return (
+                    <div
+                      key={row.group}
+                      className="app-nav-group-label mt-2.5 px-[10px] text-[11px] font-medium uppercase tracking-wide text-muted-foreground/60 first:mt-0"
+                    >
+                      {t(`nav.group.${row.group}`)}
+                    </div>
+                  );
+                }
+                const item = row.item;
+                return (
                 <NavLink
                   key={item.key}
                   to={item.key}
@@ -303,7 +344,8 @@ export function AppLayout() {
                     </>
                   )}
                 </NavLink>
-              ))}
+                );
+              })}
             </div>
           </nav>
 
@@ -394,6 +436,7 @@ export function AppLayout() {
         </Header>
 
         <Content style={{ padding: isMobile ? '8px' : '12px 18px 18px', minHeight: `calc(100dvh - ${HEADER_HEIGHT}px)`, overflow: 'auto' }}>
+          <SetupBanner />
           <div className="page-transition"><Outlet /></div>
         </Content>
       </Layout>

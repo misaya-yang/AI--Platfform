@@ -4,9 +4,9 @@ import hashlib
 from typing import Any
 
 import pytest
-
-from ai_gateway_core.enums import ConnectorType, ContentType, InvocationMode, ServiceType
+from ai_gateway_core.enums import ContentType, InvocationMode, ServiceType, TransportType
 from ai_gateway_core.exceptions import ValidationFailedError
+
 from src.adapters.base import ProtocolAdapter
 from src.adapters.langgraph import LangGraphAdapter, _scrub_sensitive_text
 from src.models.request import ContentItem, UnifiedRequest
@@ -77,13 +77,7 @@ class DummyAdapter(ProtocolAdapter):
 
 
 class FakeErrorConnector:
-    async def post(
-        self,
-        endpoint: str,
-        *,
-        json: dict[str, Any] | None = None,
-        headers: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
+    async def post(self, _endpoint: str, **_: object) -> dict[str, Any]:
         return {
             "__error__": {
                 "error": "RuntimeError",
@@ -115,7 +109,7 @@ def _service(model_override: dict[str, Any] | None = None) -> ServiceDefinition:
         name="Agent Agent",
         service_type=ServiceType.LANGGRAPH,
         supported_modes=[InvocationMode.SYNC, InvocationMode.STREAM],
-        connector_type=ConnectorType.HTTP,
+        connector_type=TransportType.HTTP,
         connector_config=connector_config,
         accepted_content_types=[ContentType.TEXT],
         output_content_types=[ContentType.TEXT],

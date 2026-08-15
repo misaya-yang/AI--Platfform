@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 
@@ -271,6 +272,30 @@ export function SettingsPage() {
               </p>
             </div>
           </div>
+        </CardContent>
+      </Card>
+
+      {/* 连接器目录 */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">{t("settings.connectors.title")}</CardTitle>
+          <CardDescription>{t("settings.connectors.description")}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Link
+            to="/settings/connectors"
+            className="inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline"
+          >
+            {t("settings.connectors.manage")}
+            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M9 5l7 7-7 7"
+              />
+            </svg>
+          </Link>
         </CardContent>
       </Card>
 

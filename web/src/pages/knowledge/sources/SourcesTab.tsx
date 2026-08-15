@@ -2,17 +2,14 @@
  * Sources Tab Component
  *
  * Main tab for managing data sources in dataset detail page.
- * Shows three source options: File Upload, URL Import, and Confluence Sync.
+ * Shows two source options: File Upload and URL Import.
  */
 
-import { Upload, Link, Cloud, FileText, ArrowRight } from "lucide-react";
-import { useSearchParams } from "react-router-dom";
+import { Upload, Link, FileText, ArrowRight } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-
-import { SyncSourcesTab } from "@/pages/knowledge/sync/SyncSourcesTab";
 
 interface SourcesTabProps {
   datasetId: string;
@@ -27,47 +24,11 @@ interface SourcesTabProps {
 }
 
 export function SourcesTab({
-  datasetId,
   onUploadClick,
   onUrlClick,
   documentStats,
 }: SourcesTabProps) {
   const { t } = useTranslation();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const showConfluence = searchParams.get("source") === "confluence";
-
-  const setSourceView = (source?: "confluence") => {
-    const nextParams = new URLSearchParams(searchParams);
-    nextParams.set("tab", "sources");
-    if (source) {
-      nextParams.set("source", source);
-    } else {
-      nextParams.delete("source");
-      nextParams.delete("binding");
-    }
-    setSearchParams(nextParams, { replace: true });
-  };
-
-  // If Confluence panel is active, show the full SyncSourcesTab
-  if (showConfluence) {
-    return (
-      <div className="space-y-4">
-        {/* Back Button */}
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => setSourceView()}
-          className="mb-2"
-        >
-          <ArrowRight className="h-4 w-4 mr-1.5 rotate-180" />
-          {t("knowledge.sources.backToSources")}
-        </Button>
-
-        {/* Full Confluence Sync UI */}
-        <SyncSourcesTab datasetId={datasetId} />
-      </div>
-    );
-  }
 
   // Source cards configuration
   const sourceCards = [
@@ -109,26 +70,6 @@ export function SourcesTab({
       action: {
         label: t("knowledge.sources.importPage"),
         onClick: onUrlClick,
-      },
-    },
-    {
-      key: "confluence",
-      title: t("knowledge.sources.confluenceSync"),
-      description: t("knowledge.sources.confluenceSyncDesc"),
-      icon: Cloud,
-      colorClass: {
-        border: "border-border/80",
-        iconBg: "bg-primary/10 border-primary/15",
-        iconColor: "text-primary",
-        buttonHover: "hover:bg-muted/60 hover:text-foreground",
-      },
-      stat: {
-        label: t("knowledge.sources.syncedPages"),
-        value: documentStats.fromConfluence,
-      },
-      action: {
-        label: t("knowledge.sources.manageSync"),
-        onClick: () => setSourceView("confluence"),
       },
     },
   ];

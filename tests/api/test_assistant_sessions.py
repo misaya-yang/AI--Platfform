@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import asyncpg
 import pytest
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from src.api.v1 import assistant as assistant_api
 from src.api.v1.assistant import _browser_artifact_download_url, _list_assistant_sessions
@@ -85,16 +86,51 @@ async def test_delete_session_proxies_to_runtime_cleanup_route_when_enabled(
 
     async def proxy(request_arg, user_arg, *, path: str):
         observed.update(request=request_arg, user=user_arg, path=path)
-        return {"status": "deleted"}
+        return JSONResponse({"status": "deleted"})
+
+    monkeypatch.setenv("ASSISTANT_ROUTE_SESSIONS_PROXIED", "true")
+    monkeypatch.setattr(_assistant_proxy, "proxy_to_assistant_service", proxy)
+    session_manager.get.side_effect = [
+        SimpleNamespace(user_id=user.user_id, tenant_id=user.tenant_id),
+        None,
+    ]
+
+    response = await assistant_api.delete_session("session-1", user, request)
+
+    assert response.status_code == 200
+    assert observed == {"request": request, "user": user, "path": "sessions/session-1"}
+    session_manager.delete.assert_awaited_once_with("session-1")
+    assert session_manager.get.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_delete_session_preserves_gateway_row_when_runtime_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.api.v1 import _assistant_proxy
+
+    user = UserContext(user_id="user_1", tenant_id="tenant_1", is_authenticated=True)
+    session_manager = AsyncMock()
+    session_manager.get.return_value = SimpleNamespace(
+        user_id=user.user_id,
+        tenant_id=user.tenant_id,
+    )
+    request = _build_request(
+        session_manager,
+        method="DELETE",
+        path="/api/v1/assistant/sessions/session-1",
+    )
+
+    async def proxy(*_args, **_kwargs):
+        return JSONResponse({"detail": "cleanup unavailable"}, status_code=503)
 
     monkeypatch.setenv("ASSISTANT_ROUTE_SESSIONS_PROXIED", "true")
     monkeypatch.setattr(_assistant_proxy, "proxy_to_assistant_service", proxy)
 
     response = await assistant_api.delete_session("session-1", user, request)
 
-    assert response == {"status": "deleted"}
-    assert observed == {"request": request, "user": user, "path": "sessions/session-1"}
-    session_manager.get.assert_not_awaited()
+    assert response.status_code == 503
+    session_manager.delete.assert_not_awaited()
 
 
 @pytest.mark.asyncio

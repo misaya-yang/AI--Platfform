@@ -5,6 +5,7 @@ import hashlib
 import json
 import uuid
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -511,6 +512,55 @@ def test_eval_request_rejects_client_owned_gate_fields(release_client) -> None:
 
     assert response.status_code == 422
     assert repository.last_gate is None
+
+
+@pytest.mark.asyncio
+async def test_release_authorization_receives_the_resolved_default_model() -> None:
+    class Resolver:
+        def __init__(self) -> None:
+            self.models: list[dict[str, Any]] = []
+
+        def resolve(self, **kwargs: Any) -> dict[str, Any]:
+            self.models.append(dict(kwargs["model"]))
+            return {
+                "id": kwargs["model"]["model_id"],
+                "provider": kwargs["model"]["provider_id"],
+                "access_level": "public",
+            }
+
+    resolver = Resolver()
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(agent_runtime_model_resolver=resolver)
+        )
+    )
+    resolution = {
+        "spec": {
+            "model": {
+                "model_id": "",
+                "provider_id": "stale-ui-placeholder",
+                "temperature": 0.2,
+            }
+        }
+    }
+
+    evidence = await agents_module._resolve_release_model_authorization(
+        request=request,
+        user=_user(),
+        resolution=resolution,
+        model_id="deployment-default-model",
+        provider_id="resolved-provider",
+    )
+
+    assert resolver.models == [
+        {
+            "model_id": "deployment-default-model",
+            "provider_id": "resolved-provider",
+            "temperature": 0.2,
+        }
+    ]
+    assert evidence["model_id"] == "deployment-default-model"
+    assert evidence["provider_id"] == "resolved-provider"
 
 
 def test_eval_api_binds_authorized_eval_dataset_snapshot(

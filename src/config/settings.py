@@ -482,40 +482,14 @@ class KnowledgeSettings(BaseModel):
         )
 
 
-class ConfluenceSettings(BaseModel):
-    """Confluence 集成配置"""
+class ImageSigningSettings(BaseModel):
+    """本地文件 URL 签名配置（历史字段 GATEWAY_IMAGE_SIGNING__ENCRYPTION_KEY）。
 
-    enabled: bool = False
+    曾挂靠在已删除的 Confluence 配置组下；Confluence 化石栈移除后，该密钥仅用于
+    图片存储服务生成本地文件签名 URL。
+    """
 
-    # 同步配置
-    sync_batch_size: int = 25  # 每批处理的页面数
-    sync_max_concurrent: int = 3  # 最大并发同步任务数
-    sync_retry_max: int = 3  # 最大重试次数
-    sync_retry_delay: float = 5.0  # 重试延迟（秒）
-
-    # 定时轮询配置
-    polling_enabled: bool = False  # 是否启用定时轮询
-    polling_default_interval_minutes: int = 60  # 默认轮询间隔（分钟）
-    polling_min_interval_minutes: int = 1  # 最小轮询间隔（分钟），用于测试
-    polling_check_interval_seconds: int = 30  # 调度器检查间隔（秒）
-
-    # 测试模式配置
-    test_mode: bool = False  # 启用测试模式（允许更短的轮询间隔）
-    test_polling_interval_seconds: int = 10  # 测试模式下的轮询间隔（秒）
-
-    # API 客户端配置
-    request_timeout: float = 30.0  # 请求超时（秒）
-    max_retries: int = 3  # 最大重试次数
-
-    # Webhook 配置 (二期)
-    webhook_enabled: bool = False
-    webhook_callback_base_url: str = ""  # Webhook 回调基础 URL
-
-    # 安全配置
-    encryption_key: str = ""  # 用于加密 API Token 的密钥（推荐设置为 32 字符随机字符串）
-
-    # 客户端缓存配置
-    client_cache_ttl_seconds: int = 300  # 客户端缓存 TTL（秒），默认 5 分钟
+    encryption_key: str = ""
 
 
 class ProxySettings(BaseModel):
@@ -630,6 +604,11 @@ class Settings(BaseSettings):
     port: int = 8080
     services_path: str = "services"
 
+    # Server-side default model applied when SDKs/console omit model_id.
+    # Read from the unprefixed DEFAULT_MODEL env var (deployment-wide single
+    # default); mirrors apps/assistant-service/.../core/models/defaults.py.
+    default_model: str = Field(default="qwen3.7-plus", validation_alias="DEFAULT_MODEL")
+
     # 数据库和缓存（可选）
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
@@ -653,8 +632,8 @@ class Settings(BaseSettings):
     # Knowledge Base (KBMS)
     knowledge: KnowledgeSettings = Field(default_factory=KnowledgeSettings)
 
-    # Confluence 集成
-    confluence: ConfluenceSettings = Field(default_factory=ConfluenceSettings)
+    # 本地文件 URL 签名（历史字段，见 ImageSigningSettings）
+    image_signing: ImageSigningSettings = Field(default_factory=ImageSigningSettings)
 
     # 透明代理配置
     proxy: ProxySettings = Field(default_factory=ProxySettings)
@@ -664,6 +643,21 @@ class Settings(BaseSettings):
 
     # Observability / metrics recorder tuning
     metrics: MetricsSettings = Field(default_factory=MetricsSettings)
+
+    # First-run onboarding: how the console treats model-provider setup.
+    # `ui` keeps the console usable while no provider key is configured (the
+    # setup banner / dashboard checklist guide the operator); `environment`
+    # expects providers preseeded and reports the stack as configured.
+    # Public env contract: MODEL_SETUP_MODE. Compose forwards the same name to
+    # the gateway; no second gateway-only mirror is required.
+    model_setup_mode: str = Field(default="ui", validation_alias="MODEL_SETUP_MODE")
+
+    @field_validator("model_setup_mode")
+    @classmethod
+    def _validate_model_setup_mode(cls, v: str) -> str:
+        if v not in ("ui", "environment"):
+            raise ValueError("model_setup_mode must be one of: ui, environment")
+        return v
 
     health_check_interval: int = 30
     task_worker_concurrency: int = 2

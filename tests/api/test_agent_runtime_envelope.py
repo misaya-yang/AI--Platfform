@@ -715,6 +715,46 @@ async def test_gateway_snapshot_fails_closed_when_model_readiness_is_unknown() -
 
 
 @pytest.mark.asyncio
+async def test_historical_empty_model_snapshot_uses_server_default_without_provider_pin() -> None:
+    class ModelResolver:
+        def __init__(self) -> None:
+            self.models: list[dict[str, Any]] = []
+
+        def resolve(self, **kwargs: Any) -> dict[str, Any]:
+            self.models.append(dict(kwargs["model"]))
+            return {"id": kwargs["model"]["model_id"], "provider": "resolved-provider"}
+
+    resolver = ModelResolver()
+    request = gateway_request(
+        settings=SimpleNamespace(default_model="deployment-default-model"),
+        agent_runtime_model_resolver=resolver,
+        agent_runtime_knowledge_resolver=_AuthorizedKnowledgeResolver(),
+    )
+    resolution = runtime_resolution()
+    resolution["spec"]["model"] = {
+        "model_id": "",
+        "provider_id": "stale-ui-placeholder",
+        "temperature": 0.2,
+    }
+    user = UserContext(
+        user_id="user-a",
+        tenant_id="tenant-a",
+        is_authenticated=True,
+    )
+
+    snapshot = await _build_snapshot(request, resolution, user, channel="api")
+
+    assert resolver.models == [
+        {"model_id": "deployment-default-model", "temperature": 0.2}
+    ]
+    assert snapshot["model"] == {
+        "id": "deployment-default-model",
+        "provider": "resolved-provider",
+        "parameters": {"temperature": 0.2},
+    }
+
+
+@pytest.mark.asyncio
 async def test_gateway_snapshot_accepts_enabled_database_provider_with_saved_key() -> None:
     class ModelService:
         async def get_model(self, tenant_id: str, model_id: str) -> dict[str, Any]:

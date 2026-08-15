@@ -57,6 +57,7 @@ import logging
 import os
 import socket
 import ssl
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -400,7 +401,7 @@ def validate_callback_url(
     to time the rebind perfectly), validate-only is acceptable; we keep
     the option open by returning a URL the caller can pass to httpx.
     """
-    scheme, host, port, _ = _split_url(url)
+    _, host, port, _ = _split_url(url)
 
     effective = _build_allowlist(allowed_hosts)
     # Host is on the allowlist → bypass all further checks
@@ -453,3 +454,56 @@ async def safe_callback_post(
         follow_redirects=False,
     ) as client:
         return await client.post(url, json=json)
+
+
+async def safe_form_post(
+    url: str,
+    *,
+    data: Mapping[str, Any],
+    headers: Mapping[str, str] | None = None,
+    timeout: float = 10.0,
+) -> httpx.Response:
+    """POST form data to a public HTTPS endpoint using a DNS-pinned transport.
+
+    This is intended for OAuth token endpoints. Redirects are never followed,
+    and the validated IP is the IP used for the connection, closing the DNS
+    rebinding window between validation and request dispatch.
+    """
+
+    parsed = urlparse(url)
+    try:
+        parsed_port = parsed.port
+    except ValueError as exc:
+        raise SafeFetchError("form POST destination has an invalid port") from exc
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        raise SafeFetchError(
+            "form POST destination must be an https URL without userinfo or fragment",
+            status_code=400,
+        )
+    _, host, port, _ = _split_url(url)
+    if parsed_port is not None:
+        port = parsed_port
+    ok, pinned_ip = is_safe_destination(host, port)
+    if not ok:
+        raise SafeFetchError(
+            f"form POST destination rejected: {pinned_ip}",
+            status_code=400,
+        )
+    transport = _DNSPinnedTransport(host, pinned_ip or host)
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            timeout=timeout,
+            follow_redirects=False,
+        ) as client:
+            return await client.post(url, data=data, headers=headers)
+    except httpx.HTTPError as exc:
+        raise SafeFetchError("form POST failed") from exc
+    finally:
+        await transport.aclose()

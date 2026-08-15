@@ -11,6 +11,7 @@
     "edit": "Edit",
     "add": "Add",
     "search": "Search",
+    "serverDefault": "Server default",
     "filter": "Filter",
     "reset": "Reset",
     "submit": "Submit",
@@ -115,15 +116,19 @@
   },
   "nav": {
     "dashboard": "Dashboard",
+    "group": {
+      "use": "Use",
+      "build": "Build",
+      "govern": "Govern"
+    },
     "analytics": "Analytics",
     "services": "Services",
     "knowledge": "Knowledge Base",
     "knowledgeSync": "Knowledge Sync",
-    "playground": "Playground",
+    "playground": "Model Debug",
     "assistant": "AI Assistant",
     "agents": "Agents",
     "eval": "Eval Console",
-    "exams": "Exams",
     "tasks": "Tasks",
     "users": "Users",
     "settings": "Settings",
@@ -131,6 +136,23 @@
     "expandSidebar": "Expand sidebar",
     "toggleSidebar": "Toggle sidebar",
     "closeSidebar": "Close sidebar"
+  },
+  "setup": {
+    "banner": {
+      "text": "No model service is configured yet. Set one up to start chatting with assistants.",
+      "action": "Configure model service",
+      "dismiss": "Dismiss"
+    },
+    "checklist": {
+      "title": "First-run setup",
+      "subtitle": "Complete these steps to start your first conversation.",
+      "step": {
+        "provider": "Configure a model service",
+        "knowledge": "Create a knowledge base",
+        "chat": "Start your first conversation"
+      },
+      "go": "Go"
+    }
   },
   "analytics": {
     "title": "Usage Analytics",
@@ -584,10 +606,10 @@
     },
     "permissions": {
       "categories": {
-      "console": "Console",
-      "conversation": "Conversation",
-      "service": "Service",
-      "knowledge": "Knowledge",
+        "console": "Console",
+        "conversation": "Conversation",
+        "service": "Service",
+        "knowledge": "Knowledge",
         "user": "User",
         "role": "Role",
         "admin": "Admin"
@@ -605,39 +627,39 @@
       },
       "displayNamePlaceholder": "Enter display name",
       "departmentPlaceholder": "Select department",
-    "roles": {
+      "roles": {
         "title": "Role Assignment",
         "desc": "Assign roles to define base permissions",
         "system": "System",
         "noDescription": "No description",
         "permissionCount": "{{count}} permissions",
-      "noAccess": "You don't have permission to view roles"
-    },
-    "serviceAccess": {
-      "title": "Agent Service Access",
-      "desc": "Configure service allowlists and denylists shared by the API and Playground.",
-      "mode": "Access mode",
-      "allServices": "All services (with optional denylist)",
-      "allowlistOnly": "Allowlist only",
-      "policy": "Policy",
-      "allowlistPolicy": "Only services marked Allow can be called. The denylist always takes precedence.",
-      "allPolicy": "All services are available by default. Use the denylist to block specific services.",
-      "noAccess": "You don't have permission to view services.",
-      "loading": "Loading services...",
-      "empty": "No configurable services",
-      "allow": "Allow",
-      "deny": "Deny"
-    },
-    "extraPermissions": {
+        "noAccess": "You don't have permission to view roles"
+      },
+      "serviceAccess": {
+        "title": "Agent Service Access",
+        "desc": "Configure service allowlists and denylists shared by the API and Playground.",
+        "mode": "Access mode",
+        "allServices": "All services (with optional denylist)",
+        "allowlistOnly": "Allowlist only",
+        "policy": "Policy",
+        "allowlistPolicy": "Only services marked Allow can be called. The denylist always takes precedence.",
+        "allPolicy": "All services are available by default. Use the denylist to block specific services.",
+        "noAccess": "You don't have permission to view services.",
+        "loading": "Loading services...",
+        "empty": "No configurable services",
+        "allow": "Allow",
+        "deny": "Deny"
+      },
+      "extraPermissions": {
         "title": "Extra Permissions",
         "desc": "Direct permissions assigned to user (outside roles)",
         "tipLabel": "Tip",
         "tipText": "Role permissions are shown in gray. Extra permissions grant access beyond roles.",
         "categoryCount": "{{count}} permissions",
         "fromRole": "Granted via role",
-      "roleBadge": "Role",
-      "empty": "No extra permissions are available for this account.",
-      "noAccess": "You don't have permission to view permissions"
+        "roleBadge": "Role",
+        "empty": "No extra permissions are available for this account.",
+        "noAccess": "You don't have permission to view permissions"
       },
       "unsavedChanges": "You have unsaved changes",
       "saveChanges": "Save changes"
@@ -946,6 +968,60 @@
         "status": "Status",
         "createdAt": "Created At"
       }
+    },
+    "connectors": {
+      "title": "Connector Catalog",
+      "description": "Manage third-party connector provider definitions (OAuth apps, modes, tool exposure)",
+      "manage": "Manage connectors",
+      "newConnector": "New connector",
+      "editConnector": "Edit connector",
+      "deleteConnector": "Delete connector",
+      "listTitle": "Connector providers",
+      "empty": "No connectors configured yet. Create the first provider definition.",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "column": {
+        "provider": "Provider",
+        "displayName": "Display name",
+        "mode": "Mode",
+        "status": "Status",
+        "actions": "Actions"
+      },
+      "modeLive": "Live",
+      "modeIngest": "Ingest",
+      "modeBoth": "Both",
+      "field": {
+        "provider": "Provider",
+        "providerPlaceholder": "e.g. confluence",
+        "displayName": "Display name",
+        "description": "Description",
+        "iconUrl": "Icon URL",
+        "mode": "Mode",
+        "modeHint": "live = agent tool calls; ingest = KB sync source; both = both",
+        "enabled": "Enabled",
+        "supportsSync": "Supports KB sync",
+        "supportsSearch": "Supports search",
+        "clientId": "OAuth client ID",
+        "clientSecret": "OAuth client secret",
+        "clientSecretPlaceholder": "Leave empty to keep the stored secret",
+        "authUrl": "Authorization URL",
+        "tokenUrl": "Token URL",
+        "scopes": "Scopes",
+        "redirectUri": "Redirect URI",
+        "mcpTools": "MCP tools",
+        "mcpToolsHint": "Informational list of tools this provider exposes",
+        "toolName": "Tool name",
+        "toolDescription": "Tool description"
+      },
+      "save": "Save",
+      "saving": "Saving...",
+      "cancel": "Cancel",
+      "createSuccess": "Connector created",
+      "updateSuccess": "Connector updated",
+      "deleteSuccess": "Connector deleted",
+      "deleteGuard": "This connector still has connected users. Disconnect them before deleting.",
+      "deleteConfirm": "Delete this connector definition?",
+      "failed": "Request failed: {message}"
     }
   },
   "knowledge": {
@@ -1922,6 +1998,7 @@
     "loadingHistory": "Loading chat history...",
     "selectOrStartChat": "Select a chat on the left, or start a new one.",
     "typeToStart": "Type a message to start.",
+    "typeToStartHint": "Debug your model services here before wiring them into agents.",
     "emptyStateHint": "Conversation history and current draft will stay available after refresh.",
     "historyHiddenTitle": "History is hidden",
     "historyHiddenDescription": "Your earlier chats are still available in the history panel.",
@@ -2461,6 +2538,7 @@
     "kbActive": "knowledge base(s) active",
     "welcomeTitle": "How can I help you today?",
     "welcomeDesc": "Select a model and knowledge bases to start chatting",
+    "welcomeWhy": "This assistant talks to the model services you configure in the console.",
     "placeholder": "Type your message... (Ctrl+V to paste images)",
     "noModelsPlaceholder": "No models available",
     "disclaimer": "AI responses may be inaccurate",
@@ -2971,8 +3049,7 @@
       "tabs": {
         "services": "Services",
         "providers": "Providers",
-        "models": "Models",
-        "exams": "Exams"
+        "models": "Models"
       },
       "addProvider": "Add Provider",
       "addModel": "Add Model",
@@ -3172,80 +3249,5 @@
     "blockedUsers": "Blocked Users",
     "warningUsers": "Warning",
     "exceededUsers": "Exceeded"
-  },
-  "exams": {
-    "title": "Exam Management",
-    "subtitle": "Create, publish, and track exam results",
-    "createExam": "Create Exam",
-    "searchPlaceholder": "Search exams...",
-    "filterAll": "All",
-    "filterDraft": "Draft",
-    "filterPublished": "Published",
-    "filterClosed": "Closed",
-    "statsTotal": "Total",
-    "statsPublished": "Published",
-    "statsParticipants": "Participants",
-    "statsAvgScore": "Avg Score",
-    "questions": "{{count}} questions",
-    "participants": "{{count}} participants",
-    "avg": "{{score}} avg",
-    "due": "Due {{date}}",
-    "noExams": "No exams found",
-    "createFirst": "Create your first exam",
-    "publish": "Publish",
-    "close": "Close",
-    "link": "Link",
-    "copied": "Copied",
-    "confirmClose": "Close this exam? No more submissions will be accepted.",
-    "back": "Back",
-    "pass": "Pass: {{score}}%",
-    "timeLimit": "{{min}} min limit",
-    "detail": {
-      "participants": "Participants",
-      "questionAnalysis": "Question Analysis",
-      "aiAnalysis": "AI Analysis",
-      "participantCount": "{{count}} participants",
-      "exportCsv": "Export CSV",
-      "noParticipants": "No participants yet",
-      "name": "Name",
-      "score": "Score",
-      "correct": "Correct",
-      "status": "Status",
-      "completed": "Completed",
-      "passed": "Passed",
-      "failed": "Failed",
-      "passRate": "Pass Rate",
-      "scoreRange": "Score Range",
-      "correctRate": "correct",
-      "answered": "{{count}} answered",
-      "mostCommonWrong": "Most common wrong: {{answer}}",
-      "answer": "Answer: {{answer}}"
-    },
-    "analysis": {
-      "title": "AI Analysis Report",
-      "generate": "Generate Report",
-      "regenerate": "Regenerate",
-      "analyzing": "Analyzing...",
-      "noReport": "No analysis yet",
-      "noReportHint": "Click \"Generate Report\" to create one. AI will analyze scores, question difficulty, and provide recommendations.",
-      "generated": "Generated: {{time}}",
-      "model": "Model: {{model}}",
-      "reportCount": "{{count}} reports"
-    },
-    "create": {
-      "title": "Create Exam",
-      "sourceQuiz": "Source Quiz",
-      "selectQuiz": "Select a quiz...",
-      "examTitle": "Exam Title",
-      "titlePlaceholder": "Enter exam title",
-      "description": "Description (optional)",
-      "descPlaceholder": "Exam description",
-      "passingScore": "Passing Score %",
-      "maxRetakes": "Max Retakes",
-      "timeLimit": "Time Limit (min)",
-      "noLimit": "No limit",
-      "cancel": "Cancel",
-      "createDraft": "Create as Draft"
-    }
   }
 }
