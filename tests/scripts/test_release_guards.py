@@ -216,6 +216,7 @@ def test_bundled_community_agent_plugins_are_pinned_read_only_data() -> None:
     env_example = _read(".env.example")
     assert (
         "ASSISTANT_AGENT_PLUGIN_PATHS=/opt/agent-plugins/ai-docgen:"
+        "/opt/agent-plugins/ai-quiz:"
         "/opt/agent-plugins/community-doublecheck:"
         "/opt/agent-plugins/community-engineering-reviewers"
     ) in env_example
@@ -296,6 +297,7 @@ def test_compose_isolates_runtime_memory_and_wires_cleanup_provider():
     )
     assert assistant_environment["ASSISTANT_AGENT_PLUGIN_PATHS"] == (
         "${ASSISTANT_AGENT_PLUGIN_PATHS:-/opt/agent-plugins/ai-docgen:"
+        "/opt/agent-plugins/ai-quiz:"
         "/opt/agent-plugins/community-doublecheck:"
         "/opt/agent-plugins/community-engineering-reviewers}"
     )
@@ -310,6 +312,7 @@ def test_compose_isolates_runtime_memory_and_wires_cleanup_provider():
     assert not any("/opt/agent-plugins" in str(volume) for volume in assistant_volumes)
     assistant_dockerfile = _read("apps/assistant-service/Dockerfile")
     assert "COPY agent-plugins/ai-docgen/ /opt/agent-plugins/ai-docgen/" in assistant_dockerfile
+    assert "COPY agent-plugins/ai-quiz/ /opt/agent-plugins/ai-quiz/" in assistant_dockerfile
     assert (
         "COPY agent-plugins/community-doublecheck/ /opt/agent-plugins/community-doublecheck/"
     ) in assistant_dockerfile
@@ -321,6 +324,17 @@ def test_compose_isolates_runtime_memory_and_wires_cleanup_provider():
         "${ASSISTANT_ROUTE_SESSIONS_PROXIED:-true}"
     )
     assert "/Users/" not in compose_text
+
+
+def test_playwright_mcp_docgen_server_command_is_implemented() -> None:
+    config = _read("web/playwright.config.ts")
+    script = _read("scripts/dev/start_e2e_stack.sh")
+
+    assert "`${stackScript} mcp-docgen`" in config
+    assert "run_mcp_docgen()" in script
+    assert "mcp-docgen)" in script
+    assert 'export MCP_TRANSPORT="sse"' in script
+    assert "uv run --package ai-docgen --extra mcp python -m mcp_docgen_server" in script
 
 
 def test_deploy_stops_app_services_before_migrations():

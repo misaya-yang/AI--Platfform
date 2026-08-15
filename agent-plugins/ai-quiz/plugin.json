@@ -17,7 +17,7 @@
   "extensions": {
     "com.misaya.ai-gateway": {
       "skills": [
-        "./skills/quiz-generation.md"
+        "./skills/quiz-generation/SKILL.md"
       ],
       "agents": [
         "./agents/quiz-expert.md"

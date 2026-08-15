@@ -524,7 +524,7 @@ services:
       ASSISTANT_RUNTIME_TOOL_POLICY_V2: "${ASSISTANT_RUNTIME_TOOL_POLICY_V2:-false}"
       ASSISTANT_GATEWAY_ENABLED: "${ASSISTANT_GATEWAY_ENABLED:-true}"
       ASSISTANT_RUNTIME_SKILLS: "${ASSISTANT_RUNTIME_SKILLS:-true}"
-      ASSISTANT_AGENT_PLUGIN_PATHS: "${ASSISTANT_AGENT_PLUGIN_PATHS:-/opt/agent-plugins/ai-docgen:/opt/agent-plugins/community-doublecheck:/opt/agent-plugins/community-engineering-reviewers}"
+      ASSISTANT_AGENT_PLUGIN_PATHS: "${ASSISTANT_AGENT_PLUGIN_PATHS:-/opt/agent-plugins/ai-docgen:/opt/agent-plugins/ai-quiz:/opt/agent-plugins/community-doublecheck:/opt/agent-plugins/community-engineering-reviewers}"
       ASSISTANT_AGENT_PLUGIN_DATA_ROOT: "${ASSISTANT_AGENT_PLUGIN_DATA_ROOT:-/app/data/agent-plugins}"
       ASSISTANT_TRUSTED_AGENT_PLUGINS: "${ASSISTANT_TRUSTED_AGENT_PLUGINS:-ai-docgen@1.0.0}"
       ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS: "${ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS:-/opt/agent-plugins/ai-docgen}"

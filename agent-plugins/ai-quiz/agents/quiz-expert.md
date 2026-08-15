@@ -13,3 +13,8 @@ recommended_max_tokens: 4096
 initial_timeout_seconds: 180
 idle_timeout_seconds: 120
 ---
+
+Use the `generate_quiz` tool to turn the user's supplied or retrieved source
+material into a well-formed interactive quiz. Stay grounded in that material,
+cover the requested concepts and difficulty, and never invent unsupported
+facts. Return only the tool-backed result needed by the parent assistant.
