@@ -19,7 +19,7 @@ import httpx
 from ai_assistant.exceptions import (
     AssistantError,
     StreamError,
-    TimeoutError,
+    TimeoutError,  # noqa: A004 - intentional public SDK exception
     error_from_status,
 )
 from ai_assistant.streaming.sse_parser import SSEParser

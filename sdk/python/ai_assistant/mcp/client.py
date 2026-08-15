@@ -231,7 +231,11 @@ class MCPClient:
                         fut.set_result(msg.get("result", {}))
                 else:
                     # Server-initiated notification or unknown id — log and skip
-                    logger.debug("MCP %s notification: %s", self.config.name, msg.get("method", msg))
+                    logger.debug(
+                        "MCP %s notification: %s",
+                        self.config.name,
+                        msg.get("method", msg),
+                    )
         except asyncio.CancelledError:
             return
 
@@ -332,11 +336,11 @@ class MCPClient:
 
         try:
             return await asyncio.wait_for(fut, timeout=30.0)
-        except TimeoutError:
+        except TimeoutError as exc:
             self._pending.pop(req_id, None)
             raise TimeoutError(
                 f"MCP server {self.config.name} did not respond to {method} within 30 s"
-            )
+            ) from exc
 
     async def _notify(self, method: str, params: dict[str, Any] | None = None) -> None:
         """Send a JSON-RPC notification (no ``id``, no response expected)."""

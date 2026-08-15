@@ -33,8 +33,8 @@ class ArtifactModule:
         content_base64: str,
         filename: str,
         title: str,
-        type: str = "file",
-        format: str = "",
+        type: str = "file",  # noqa: A002 - public API field name
+        format: str = "",  # noqa: A002 - public API field name
         mime_type: str | None = None,
         source: str | None = None,
         message_id: str | None = None,

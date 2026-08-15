@@ -11,6 +11,7 @@ import contextlib
 import json
 import logging
 import os
+import re as _re
 import time
 import uuid
 from datetime import date, datetime
@@ -64,8 +65,6 @@ _SCHEMA_ROOT = _resolve_schema_root()
 
 # Column name validation regex — only lowercase letters, digits, underscores allowed.
 # Prevents SQL injection via dynamic field names in UPDATE SET clauses.
-import re as _re
-
 _SAFE_COLUMN_RE = _re.compile(r"^[a-z][a-z0-9_]*$")
 
 
@@ -262,17 +261,16 @@ class DatabaseStorage:
             rows = [(key_hash, count) for key_hash, count in pending.items() if count > 0]
             if not rows:
                 return
-            async with self._pool.acquire() as conn:
-                async with conn.transaction():
-                    await conn.executemany(
-                        """
-                        UPDATE api_keys SET
-                            last_used_at = NOW(),
-                            use_count = use_count + $2
-                        WHERE key_hash = $1
-                    """,
-                        rows,
-                    )
+            async with self._pool.acquire() as conn, conn.transaction():
+                await conn.executemany(
+                    """
+                    UPDATE api_keys SET
+                        last_used_at = NOW(),
+                        use_count = use_count + $2
+                    WHERE key_hash = $1
+                """,
+                    rows,
+                )
         except (asyncpg.PostgresError, OSError):
             # Put counts back to buffer to avoid silently losing stats.
             async with self._api_key_usage_lock:
@@ -2658,9 +2656,9 @@ class DatabaseStorage:
 
     async def search_segments_vector(
         self,
-        dataset_id: str,
-        query_embedding: list[float],
-        top_k: int = 10,
+        dataset_id: str,  # noqa: ARG002 - retained for API compatibility
+        query_embedding: list[float],  # noqa: ARG002 - retained for API compatibility
+        top_k: int = 10,  # noqa: ARG002 - retained for API compatibility
     ) -> list[dict[str, Any]]:
         """Vector search placeholder - delegates to vector_store.
 
@@ -6915,12 +6913,9 @@ class DatabaseStorage:
 
         # Parse JSON fields
         for field in ("value", "metadata"):
-            if field in result and result[field] is not None:
-                if isinstance(result[field], str):
-                    try:
-                        result[field] = json.loads(result[field])
-                    except (json.JSONDecodeError, TypeError):
-                        pass  # Keep original value if parsing fails
+            if field in result and result[field] is not None and isinstance(result[field], str):
+                with contextlib.suppress(json.JSONDecodeError, TypeError):
+                    result[field] = json.loads(result[field])
 
         # Convert datetime fields to ISO format strings
         for field in ("created_at", "updated_at", "last_accessed_at"):

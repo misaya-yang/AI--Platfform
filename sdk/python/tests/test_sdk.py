@@ -39,7 +39,11 @@ async def test_streaming_chat():
         async for event in client.chat.stream("Say hello in 5 words", session_id="sdk-test-stream"):
             events.append(event)
             if event.event_type == EventType.TEXT_DELTA:
-                text += str(event.data) if isinstance(event.data, str) else event.data.get("text", event.data.get("data", ""))
+                text += (
+                    str(event.data)
+                    if isinstance(event.data, str)
+                    else event.data.get("text", event.data.get("data", ""))
+                )
             if event.event_type == EventType.DONE:
                 break
 
