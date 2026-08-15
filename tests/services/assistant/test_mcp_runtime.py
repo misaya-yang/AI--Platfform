@@ -850,6 +850,95 @@ class _Repository:
         self.results.append((values["success"], values.get("error_code")))
 
 
+class _ConnectorAuthorizationRepository:
+    def __init__(self) -> None:
+        self.catalog_calls: list[dict[str, Any]] = []
+        self.grant_calls: list[dict[str, Any]] = []
+
+    async def authorize_connector_catalog(self, **values: Any) -> dict[str, Any]:
+        self.catalog_calls.append(values)
+        return values
+
+    async def authorize_connector_tool(self, **values: Any) -> dict[str, Any]:
+        self.grant_calls.append(values)
+        return values
+
+
+@pytest.mark.asyncio
+async def test_runtime_authorizes_grantless_connector_through_catalog_path() -> None:
+    repository = _ConnectorAuthorizationRepository()
+    runtime = MCPRuntimeService(
+        repository=repository,  # type: ignore[arg-type]
+        secret_resolver=MappingSecretResolver(),
+    )
+    binding = {
+        "type": "connector",
+        "id": "jira_search",
+        "config": {"provider": "jira", "tool_name": "jira_search"},
+    }
+
+    result = await runtime.authorize_connector_binding(
+        tool_name="jira_search", binding=binding, context=_context()
+    )
+
+    assert result["provider"] == "jira"
+    assert repository.catalog_calls[0]["tenant_id"] == "tenant-a"
+    assert repository.catalog_calls[0]["user_id"] == "user-a"
+    assert repository.grant_calls == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_preserves_legacy_confluence_grant_path() -> None:
+    repository = _ConnectorAuthorizationRepository()
+    runtime = MCPRuntimeService(
+        repository=repository,  # type: ignore[arg-type]
+        secret_resolver=MappingSecretResolver(),
+    )
+    binding = {
+        "type": "connector",
+        "id": "confluence_read",
+        "config": {
+            "provider": "confluence",
+            "tool_name": "confluence_read",
+            "principal_type": "user_delegated",
+            "grant_id": "11111111-1111-4111-8111-111111111111",
+        },
+    }
+
+    await runtime.authorize_connector_binding(
+        tool_name="confluence_read", binding=binding, context=_context()
+    )
+
+    assert repository.catalog_calls == []
+    assert repository.grant_calls[0]["grant_id"] == binding["config"]["grant_id"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_rejects_partial_grant_without_catalog_fallback() -> None:
+    repository = _ConnectorAuthorizationRepository()
+    runtime = MCPRuntimeService(
+        repository=repository,  # type: ignore[arg-type]
+        secret_resolver=MappingSecretResolver(),
+    )
+    binding = {
+        "type": "connector",
+        "id": "confluence_read",
+        "config": {
+            "provider": "confluence",
+            "tool_name": "confluence_read",
+            "grant_id": "11111111-1111-4111-8111-111111111111",
+        },
+    }
+
+    with pytest.raises(MCPAuthorizationError, match="CONNECTOR_BINDING_INCOMPLETE"):
+        await runtime.authorize_connector_binding(
+            tool_name="confluence_read", binding=binding, context=_context()
+        )
+
+    assert repository.catalog_calls == []
+    assert repository.grant_calls == []
+
+
 @pytest.mark.asyncio
 async def test_discovery_never_trusts_remote_read_only_or_risk_hints() -> None:
     captured: list[dict[str, Any]] = []

@@ -1150,41 +1150,64 @@ class DatabaseMCPRepository(BaseRepository):
             principal_type = str(config.get("principal_type") or "")
             grant_id = str(config.get("grant_id") or "")
             tool_name = str(config.get("tool_name") or "")
-            if (
-                provider != "confluence"
-                or principal_type not in MCP_PRINCIPALS
-                or not grant_id
-                or tool_name != resource_id
-                or tool_name not in {"confluence_read", "confluence_write"}
-            ):
+            if not provider or tool_name != resource_id:
                 raise MCPValidationError("CONNECTOR_BINDING_INCOMPLETE")
-            expected_risk = "low" if tool_name == "confluence_read" else "high"
-            if risk_level != expected_risk:
-                raise MCPValidationError("CONNECTOR_RISK_INVALID")
-            grant = await fetchrow(
+
+            # Credential-principal bindings remain the legacy Confluence
+            # contract. A partially supplied principal must never fall
+            # through to the grantless catalog path.
+            if principal_type or grant_id:
+                if (
+                    provider != "confluence"
+                    or principal_type not in MCP_PRINCIPALS
+                    or not grant_id
+                    or tool_name not in {"confluence_read", "confluence_write"}
+                ):
+                    raise MCPValidationError("CONNECTOR_BINDING_INCOMPLETE")
+                expected_risk = "low" if tool_name == "confluence_read" else "high"
+                if risk_level != expected_risk:
+                    raise MCPValidationError("CONNECTOR_RISK_INVALID")
+                grant = await fetchrow(
+                    """
+                    SELECT grant_id, scopes FROM connector_credential_principals
+                    WHERE tenant_id = $1 AND grant_id = $2::uuid
+                      AND provider = $3 AND principal_type = $4
+                      AND enabled = TRUE AND revoked_at IS NULL
+                      AND (expires_at IS NULL OR expires_at > NOW())
+                    """,
+                    tenant_id,
+                    grant_id,
+                    provider,
+                    principal_type,
+                )
+                if not grant:
+                    raise MCPValidationError("CONNECTOR_CAPABILITY_UNAVAILABLE")
+                scopes = {str(scope).lower() for scope in (grant.get("scopes") or [])}
+                if tool_name == "confluence_read" and not any(
+                    scope == "read" or scope.startswith(("read:", "write:"))
+                    for scope in scopes
+                ):
+                    raise MCPValidationError("CONNECTOR_SCOPE_DENIED")
+                if tool_name == "confluence_write" and not any(
+                    scope == "write" or scope.startswith("write:") for scope in scopes
+                ):
+                    raise MCPValidationError("CONNECTOR_SCOPE_DENIED")
+                return
+
+            catalog = await fetchrow(
                 """
-                SELECT grant_id, scopes FROM connector_credential_principals
-                WHERE tenant_id = $1 AND grant_id = $2::uuid
-                  AND provider = $3 AND principal_type = $4
-                  AND enabled = TRUE AND revoked_at IS NULL
-                  AND (expires_at IS NULL OR expires_at > NOW())
+                SELECT provider, mode, enabled FROM connector_configs
+                WHERE provider = $1 AND (tenant_id = $2 OR tenant_id = '')
+                ORDER BY tenant_id DESC LIMIT 1
                 """,
-                tenant_id,
-                grant_id,
                 provider,
-                principal_type,
+                tenant_id,
             )
-            if not grant:
-                raise MCPValidationError("CONNECTOR_CAPABILITY_UNAVAILABLE")
-            scopes = {str(scope).lower() for scope in (grant.get("scopes") or [])}
-            if tool_name == "confluence_read" and not any(
-                scope == "read" or scope.startswith(("read:", "write:")) for scope in scopes
-            ):
-                raise MCPValidationError("CONNECTOR_SCOPE_DENIED")
-            if tool_name == "confluence_write" and not any(
-                scope == "write" or scope.startswith("write:") for scope in scopes
-            ):
-                raise MCPValidationError("CONNECTOR_SCOPE_DENIED")
+            if not catalog or not catalog.get("enabled"):
+                raise MCPValidationError("CONNECTOR_CATALOG_UNAVAILABLE")
+            if str(catalog.get("mode") or "live") == "ingest":
+                raise MCPValidationError("CONNECTOR_CATALOG_INGEST_ONLY")
+            return
 
     async def authorize_connector_tool(
         self,
@@ -1579,7 +1602,9 @@ class DatabaseMCPAgentCapabilityResolver:
                     tool_name = str(config.get("tool_name") or resource_id)
                     if tool_name != resource_id or not provider or not resource_id:
                         continue
-                    if grant_id and principal_type:
+                    if grant_id or principal_type:
+                        if not grant_id or not principal_type:
+                            continue
                         # Grant-based binding: full credential-principal check.
                         await self._repository.authorize_connector_tool(
                             tenant_id=tenant_id,

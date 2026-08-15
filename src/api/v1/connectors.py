@@ -15,6 +15,7 @@ Endpoints:
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import urllib.parse
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,12 @@ from uuid import UUID
 
 import httpx
 from ai_gateway_core.logging import get_logger
+from ai_gateway_core.security import (
+    SafeFetchError,
+    decrypt_value,
+    is_encrypted,
+    safe_form_post,
+)
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
@@ -291,6 +298,26 @@ async def _get_connector_config(db, provider: str, tenant_id: str = "") -> dict 
     return dict(row) if row else None
 
 
+def _decrypt_connector_secret(request: Request, config: dict[str, Any]) -> dict[str, Any]:
+    """Decrypt new ``enc:`` secrets while preserving legacy plaintext rows."""
+
+    stored = str(config.get("client_secret") or "")
+    if not is_encrypted(stored):
+        return config
+    injected = getattr(request.app.state, "connector_encryption_key", None)
+    encryption_key = (
+        injected
+        if isinstance(injected, str)
+        else os.environ.get("GATEWAY_ENCRYPTION_KEY", "")
+    )
+    if not encryption_key:
+        raise HTTPException(503, "Connector secret decryption is not configured")
+    decrypted = decrypt_value(stored, encryption_key)
+    if not decrypted or is_encrypted(decrypted):
+        raise HTTPException(503, "Connector secret cannot be decrypted")
+    return {**config, "client_secret": decrypted}
+
+
 async def _get_user_connector(db, tenant_id: str, user_id: str, provider: str) -> dict | None:
     row = await db.fetchrow(
         """SELECT * FROM user_connectors
@@ -325,29 +352,34 @@ async def _refresh_token_if_needed(db, connector: dict, config: dict) -> str:
         if not connector.get("refresh_token"):
             raise HTTPException(400, "Token expired and no refresh token available. Reconnect.")
 
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(config["token_url"], data={
+        try:
+            resp = await safe_form_post(config["token_url"], data={
                 "grant_type": "refresh_token",
                 "refresh_token": connector["refresh_token"],
                 "client_id": config["client_id"],
                 "client_secret": config.get("client_secret", ""),
             })
-            if resp.status_code != 200:
-                await db.execute(
-                    "UPDATE user_connectors SET status = 'expired', last_error = $1, updated_at = NOW() WHERE id = $2",
-                    "Refresh failed", connector["id"],
-                )
-                raise HTTPException(401, "Token refresh failed. Please reconnect.")
-
-            data = resp.json()
-            from datetime import timedelta
-            expires_at = datetime.now(timezone.utc) + timedelta(seconds=data.get("expires_in", 3600))
+        except SafeFetchError as exc:
             await db.execute(
-                """UPDATE user_connectors SET access_token = $1, refresh_token = COALESCE($2, refresh_token),
-                   token_expires_at = $3, status = 'connected', updated_at = NOW() WHERE id = $4""",
-                data["access_token"], data.get("refresh_token"), expires_at, connector["id"],
+                "UPDATE user_connectors SET status = 'expired', last_error = $1, updated_at = NOW() WHERE id = $2",
+                "Refresh failed", connector["id"],
             )
-            return data["access_token"]
+            raise HTTPException(401, "Token refresh failed. Please reconnect.") from exc
+        if resp.status_code != 200:
+            await db.execute(
+                "UPDATE user_connectors SET status = 'expired', last_error = $1, updated_at = NOW() WHERE id = $2",
+                "Refresh failed", connector["id"],
+            )
+            raise HTTPException(401, "Token refresh failed. Please reconnect.")
+
+        data = resp.json()
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=data.get("expires_in", 3600))
+        await db.execute(
+            """UPDATE user_connectors SET access_token = $1, refresh_token = COALESCE($2, refresh_token),
+               token_expires_at = $3, status = 'connected', updated_at = NOW() WHERE id = $4""",
+            data["access_token"], data.get("refresh_token"), expires_at, connector["id"],
+        )
+        return data["access_token"]
 
     return connector["access_token"]
 
@@ -488,6 +520,7 @@ async def oauth_callback(
     config = await _get_connector_config(db, provider, tenant_id)
     if not config:
         raise HTTPException(404, f"Connector not configured: {provider}")
+    config = _decrypt_connector_secret(request, config)
 
     base_url = str(request.base_url).rstrip("/") if request else ""
     redirect_uri = config.get("redirect_uri") or f"{base_url}/api/v1/connectors/callback/{provider}"
@@ -504,8 +537,15 @@ async def oauth_callback(
 
     headers = {"Accept": "application/json"}
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(config["token_url"], data=token_data, headers=headers)
+    try:
+        resp = await safe_form_post(
+            config["token_url"],
+            data=token_data,
+            headers=headers,
+        )
+    except SafeFetchError as exc:
+        logger.warning("OAuth token exchange destination rejected: provider=%s", provider)
+        raise HTTPException(400, "Token exchange failed") from exc
 
     if resp.status_code != 200:
         logger.error(
@@ -667,6 +707,7 @@ async def search_connector(
     config = await _get_connector_config(db, provider, user.tenant_id)
     if not config:
         raise HTTPException(404, f"Connector not configured: {provider}")
+    config = _decrypt_connector_secret(request, config)
 
     access_token = await _refresh_token_if_needed(db, connector, config)
     metadata = connector.get("provider_metadata") or {}

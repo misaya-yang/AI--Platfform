@@ -11,6 +11,16 @@ BEGIN;
 ALTER TABLE connector_configs
     ADD COLUMN IF NOT EXISTS mode VARCHAR(16) NOT NULL DEFAULT 'live';
 
+DO $$
+BEGIN
+    ALTER TABLE connector_configs
+        ADD CONSTRAINT connector_configs_mode_check
+        CHECK (mode IN ('live', 'ingest', 'both'));
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
+END
+$$;
+
 UPDATE connector_configs
 SET mode = 'both'
 WHERE supports_sync = TRUE

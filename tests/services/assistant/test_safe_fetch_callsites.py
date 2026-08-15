@@ -190,6 +190,76 @@ async def test_safe_callback_post_uses_dns_pinned_transport_without_redirects(mo
     assert client_kwargs["follow_redirects"] is False
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://oauth.example.test/token",
+        "https://user:password@oauth.example.test/token",
+        "https://oauth.example.test/token#fragment",
+        "https://169.254.169.254/token",
+    ],
+)
+async def test_safe_form_post_rejects_unsafe_legacy_urls(url: str):
+    from ai_gateway_core.security.safe_fetch import safe_form_post
+
+    with pytest.raises(SafeFetchError):
+        await safe_form_post(url, data={"grant_type": "authorization_code"})
+
+
+@pytest.mark.asyncio
+async def test_safe_form_post_pins_dns_disables_redirects_and_forwards_headers(monkeypatch):
+    mod = importlib.import_module("ai_gateway_core.security.safe_fetch")
+    captured: dict[str, object] = {}
+
+    class FakeTransport:
+        def __init__(self, host: str, pinned_ip: str):
+            captured["transport_host"] = host
+            captured["transport_ip"] = pinned_ip
+
+        async def aclose(self) -> None:
+            captured["transport_closed"] = True
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            captured["client_kwargs"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url: str, *, data: dict, headers: dict | None):
+            captured.update(post_url=url, post_data=data, post_headers=headers)
+            return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(
+        mod,
+        "is_safe_destination",
+        lambda _host, _port: (True, "93.184.216.34"),
+    )
+    monkeypatch.setattr(mod, "_DNSPinnedTransport", FakeTransport)
+    monkeypatch.setattr(mod.httpx, "AsyncClient", FakeAsyncClient)
+
+    response = await mod.safe_form_post(
+        "https://oauth.example.test/token",
+        data={"grant_type": "authorization_code"},
+        headers={"Accept": "application/json"},
+        timeout=4.0,
+    )
+
+    assert response.status_code == 200
+    assert captured["transport_host"] == "oauth.example.test"
+    assert captured["transport_ip"] == "93.184.216.34"
+    assert captured["post_data"] == {"grant_type": "authorization_code"}
+    assert captured["post_headers"] == {"Accept": "application/json"}
+    assert captured["transport_closed"] is True
+    client_kwargs = captured["client_kwargs"]
+    assert client_kwargs["timeout"] == 4.0
+    assert client_kwargs["follow_redirects"] is False
+
+
 # ---------------------------------------------------------------------------
 # 6. web_fetch agent tool — moved to safe_fetch
 # ---------------------------------------------------------------------------

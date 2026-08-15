@@ -244,10 +244,10 @@ sequenceDiagram
 - Tool 调用键由 `tenant_id + server_id + tool_id + schema_hash` 唯一确定；日志使用稳定 ID，不能只依赖可改名的展示名。
 - MCP Server 连续失败进入熔断；健康恢复不会自动绕过已发布 schema hash 校验。
 - 现有平台 Connector（当前包括 Confluence）采用相同的 credential principal/channel contract，并收敛到一个运行授权路径；V1 不新增 Connector 类型。
-- Connector capability 存在两种绑定模型：(a) **grant 绑定**——config 携带 `grant_id` + `principal_type`，走 credential principal 授权（scope/audience/channel/owner 交集，失败码 `CONNECTOR_CAPABILITY_UNAVAILABLE`/`CONNECTOR_DELEGATED_PRINCIPAL_DENIED`/`CONNECTOR_CHANNEL_DENIED`/`CONNECTOR_SCOPE_DENIED`）；(b) **catalog 绑定**——config 只携带 `provider` + `tool_name`（无 grant），由 Gateway Capability Resolver 在解析时校验：provider 在 `connector_configs` 有启用行（tenant 行优先于全局行）**且** 调用用户持有该 provider `status='connected'` 的 `user_connectors` 行，否则该能力被剥离（fail closed）。
+- Connector capability 存在两种绑定模型：(a) **grant 绑定**——config 携带 `grant_id` + `principal_type`，走 credential principal 授权（scope/audience/channel/owner 交集，失败码 `CONNECTOR_CAPABILITY_UNAVAILABLE`/`CONNECTOR_DELEGATED_PRINCIPAL_DENIED`/`CONNECTOR_CHANNEL_DENIED`/`CONNECTOR_SCOPE_DENIED`）；(b) **catalog 绑定**——config 只携带 `provider` + `tool_name`（无 grant）。创建 Version/发布前先验证 provider 在 `connector_configs` 有启用且非 ingest-only 的可见行；Gateway Capability Resolver 与 Assistant 执行时再次校验 provider 行（tenant 行优先于全局行）**且** 调用用户持有该 provider `status='connected'` 的 `user_connectors` 行，否则该能力被剥离（fail closed）。
 - catalog 绑定的稳定拒绝码：`CONNECTOR_CATALOG_UNAVAILABLE`（无启用配置）、`CONNECTOR_CATALOG_INGEST_ONLY`（mode=`ingest` 的 provider 不作为 live 工具暴露）、`CONNECTOR_CATALOG_PRINCIPAL_DENIED`（匿名调用或 public/embed 渠道）、`CONNECTOR_CATALOG_NOT_CONNECTED`（用户未连接或连接非 connected 状态）。
 - catalog 连接本质是 user-delegated：公共渠道与匿名流量一律拒绝，不与 grant 绑定的渠道策略做隐式降级。
-- Assistant 侧执行已 fail closed（`tool_invoker` 对无 grant 的 connector binding 拒绝）；本契约以 Gateway 侧解析校验为主闸，Assistant 侧不重复实现 catalog 查询。
+- Assistant 侧必须重复 catalog 授权查询；发布校验、Gateway 解析和 Assistant 调用三层均为收窄边界，任一层不可用或不满足连接状态都拒绝，且带有任一 grant 字段的半绑定不得降级为 catalog 绑定。
 
 ## 7. Skills 与知识库契约
 

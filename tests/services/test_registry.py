@@ -8,9 +8,19 @@
 """
 
 import pytest
-from ai_gateway_core.enums import ContentType, InvocationMode, ServiceType, TransportType
+from ai_gateway_core.enums import (
+    ConnectorType,
+    ContentType,
+    InvocationMode,
+    ServiceType,
+    TransportType,
+)
 
 from src.services.registry.service_registry import MemoryRegistryStorage, ServiceRegistry
+
+
+def test_connector_type_remains_a_transport_type_alias() -> None:
+    assert ConnectorType is TransportType
 
 
 class TestServiceRegistry:

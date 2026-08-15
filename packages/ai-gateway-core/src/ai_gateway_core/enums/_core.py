@@ -26,6 +26,10 @@ class TransportType(str, Enum):
     IN_PROCESS = "in_process"
 
 
+# Compatibility alias for SDK/plugins released before the transport rename.
+ConnectorType = TransportType
+
+
 class ContentType(str, Enum):
     TEXT = "text"
     IMAGE = "image"

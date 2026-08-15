@@ -4,6 +4,7 @@ without updating both backend emitters and the frontend parser.
 """
 
 from ._core import (
+    ConnectorType,
     ContentType,
     DatasetPermission,
     DatasetVisibility,
@@ -23,6 +24,7 @@ from ._core import (
 )
 
 __all__ = [
+    "ConnectorType",
     "TransportType",
     "ContentType",
     "DataSourceType",

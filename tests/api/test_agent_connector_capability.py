@@ -17,6 +17,7 @@ from ai_gateway_core.persistence.repositories.mcp_repository import (
     DatabaseMCPAgentCapabilityResolver,
     DatabaseMCPRepository,
     MCPAuthorizationError,
+    MCPValidationError,
 )
 
 
@@ -343,3 +344,77 @@ async def test_repository_allows_connected_user() -> None:
     )
 
     assert result == {"provider": "jira", "tool_name": "jira_search", "user_id": "user-a"}
+
+
+@pytest.mark.asyncio
+async def test_publish_validation_allows_live_grantless_catalog_binding() -> None:
+    repo = _CatalogRepository(config_row=_config(), connection_row=None)
+
+    await repo.validate_version_binding(
+        tenant_id="tenant-a",
+        capability_type="connector",
+        resource_id="jira_search",
+        schema_hash=None,
+        risk_level="low",
+        config={"provider": "jira", "tool_name": "jira_search"},
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config_row", "error_code"),
+    [
+        (None, "CONNECTOR_CATALOG_UNAVAILABLE"),
+        (_config(enabled=False), "CONNECTOR_CATALOG_UNAVAILABLE"),
+        (_config(mode="ingest"), "CONNECTOR_CATALOG_INGEST_ONLY"),
+    ],
+)
+async def test_publish_validation_rejects_unavailable_catalog_binding(
+    config_row: dict[str, Any] | None,
+    error_code: str,
+) -> None:
+    repo = _CatalogRepository(config_row=config_row, connection_row=None)
+
+    with pytest.raises(MCPValidationError, match=error_code):
+        await repo.validate_version_binding(
+            tenant_id="tenant-a",
+            capability_type="connector",
+            resource_id="jira_search",
+            schema_hash=None,
+            risk_level="low",
+            config={"provider": "jira", "tool_name": "jira_search"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_publish_validation_preserves_legacy_confluence_grant_semantics() -> None:
+    repo = _CatalogRepository(config_row=None, connection_row=None, grant_row=_grant())
+
+    await repo.validate_version_binding(
+        tenant_id="tenant-a",
+        capability_type="connector",
+        resource_id="confluence_read",
+        schema_hash=None,
+        risk_level="low",
+        config=_grant_binding()["config"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_partial_grant_binding_never_falls_through_to_catalog() -> None:
+    repo = _CatalogRepository(config_row=_config(), connection_row=_connection())
+    binding = _catalog_binding(provider="confluence", tool="confluence_read")
+    binding["config"]["grant_id"] = "11111111-1111-4111-8111-111111111111"
+
+    allowed = await _resolver(repo).resolve(
+        tenant_id="tenant-a",
+        agent_id="agent-1",
+        bindings=[binding],
+        channel="preview",
+        channel_policy={},
+        user_id="user-a",
+        authenticated=True,
+    )
+
+    assert allowed == []
+    assert repo.catalog_calls == []
