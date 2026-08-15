@@ -76,7 +76,8 @@ def test_setup_state_reports_unconfigured(monkeypatch: pytest.MonkeyPatch) -> No
     assert body["configured"] is False
     assert sorted(body["missing"]) == sorted(KNOWN_PROVIDERS)
     assert body["mode"] == "ui"
-    assert body["default_model"] is None
+    # Effective deployment default (code default when the env var is unset).
+    assert body["default_model"] == "qwen3.7-plus"
 
 
 def test_setup_state_reports_configured_when_provider_has_credential() -> None:

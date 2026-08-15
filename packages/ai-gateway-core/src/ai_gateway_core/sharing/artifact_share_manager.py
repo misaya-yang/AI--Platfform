@@ -185,10 +185,7 @@ class ArtifactShareManager:
             result = await self._grade_quiz(share, answers, display_name, client_ip)
         else:
             # Generic kinds: record the attempt without grading.
-            await self.db.execute(
-                "UPDATE artifact_shares SET attempt_count = attempt_count + 1 WHERE id = $1",
-                share_uuid,
-            )
+            await self._reserve_attempt_slot(share)
 
         logger.info(
             "Public attempt on %s share %s: %s",
@@ -197,6 +194,29 @@ class ArtifactShareManager:
             result.get("correct_count", "recorded"),
         )
         return result
+
+    async def _reserve_attempt_slot(self, share: dict) -> None:
+        """Atomically consume one attempt slot, enforcing the cap under concurrency.
+
+        The read-side check in ``get_share_by_code`` alone is a TOCTOU window:
+        two concurrent submissions could both pass ``attempt_count < max_attempts``
+        and both land. The conditional UPDATE closes it — Postgres applies the
+        WHERE against the row version at statement time, so exactly one of the
+        two succeeds once the cap is one slot away.
+        """
+        reserved = await self.db.execute(
+            """
+            UPDATE artifact_shares
+            SET attempt_count = attempt_count + 1
+            WHERE id = $1
+              AND is_active = TRUE
+              AND (expires_at IS NULL OR expires_at > NOW())
+              AND (max_attempts IS NULL OR attempt_count < max_attempts)
+            """,
+            uuid.UUID(share["share_id"]),
+        )
+        if "UPDATE 1" not in reserved:
+            raise ValueError("Share not found, expired, or max attempts reached")
 
     async def _grade_quiz(
         self,
@@ -237,10 +257,16 @@ class ArtifactShareManager:
             now,
             client_ip,
         )
-        await self.db.execute(
-            "UPDATE artifact_shares SET attempt_count = attempt_count + 1 WHERE id = $1",
-            uuid.UUID(share["share_id"]),
-        )
+        try:
+            await self._reserve_attempt_slot(share)
+        except ValueError:
+            # Lost a concurrent race for the last slot: keep the attempt row
+            # for history but mark it rejected so creators don't count it.
+            await self.db.execute(
+                "UPDATE quiz_attempts SET status = 'rejected' WHERE id = $1",
+                uuid.UUID(attempt_id),
+            )
+            raise
         return {"attempt_id": attempt_id, **graded}
 
     async def revoke_share(self, share_id: str, user_id: str | None = None) -> bool:

@@ -11,8 +11,6 @@ not admin-gated so any signed-in operator can act on it.
 
 from __future__ import annotations
 
-import os
-
 from ai_gateway_core.enums import ModelProvider
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -34,12 +32,12 @@ async def setup_state(
 
     Returns:
         ``{"configured": bool, "missing": [provider_id, ...], "mode": str,
-        "default_model": str | None}``. ``configured`` is true when at
+        "default_model": str}``. ``configured`` is true when at
         least one provider has a runtime credential path; ``missing`` lists
         the providers that are not configured; ``mode`` is the
         ``model_setup_mode`` setting (``ui`` | ``environment``);
-        ``default_model`` mirrors ``DEFAULT_MODEL`` when the deployment
-        preselects one.
+        ``default_model`` is the effective deployment default — the
+        ``DEFAULT_MODEL`` env var, or the platform code default when unset.
     """
     if not user.is_authenticated:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -54,5 +52,5 @@ async def setup_state(
         "configured": bool(configured),
         "missing": [provider_id for provider_id in known if provider_id not in configured],
         "mode": settings.model_setup_mode,
-        "default_model": os.getenv("DEFAULT_MODEL"),
+        "default_model": settings.default_model,
     }

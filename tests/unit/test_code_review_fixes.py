@@ -255,9 +255,6 @@ class TestDatabaseMigration:
         assert "TEXT[]" in content, "Arrays should be TEXT[] type"
 
 
-class TestHardcodedValueRemoval:
-    """硬编码值移除测试"""
-
 class TestCryptoUtilities:
     """加密工具测试"""
 

@@ -44,10 +44,17 @@ class _FakeDB:
             return self.attempts[0] if self.attempts else None
         return None
 
-    async def fetch(self, query: str, *args):  # noqa: ANN201
+    async def fetch(self, query: str, *args):  # noqa: ANN201, ARG002
         return []
 
     async def execute(self, query: str, *args):  # noqa: ANN201
+        if query.lstrip().upper().startswith("INSERT INTO QUIZ_ATTEMPTS"):
+            self.attempts.append({"args": args, "status": "completed"})
+            return "OK"
+        if query.lstrip().upper().startswith("UPDATE QUIZ_ATTEMPTS"):
+            if self.attempts:
+                self.attempts[-1]["status"] = "rejected"
+            return "OK"
         if query.lstrip().upper().startswith("INSERT INTO ARTIFACT_SHARES"):
             (
                 _id, share_code, kind, title, payload, answer_keys, tenant_id,
@@ -76,6 +83,17 @@ class _FakeDB:
             row = self.shares.get(str(share_id))
             if row is None:
                 return "UPDATE 0"
+            if "attempt_count = attempt_count + 1" in query:
+                # Mirrors the atomic reservation: only one row-version wins.
+                if not row["is_active"]:
+                    return "UPDATE 0"
+                if (
+                    row["max_attempts"] is not None
+                    and row["attempt_count"] >= row["max_attempts"]
+                ):
+                    return "UPDATE 0"
+                row["attempt_count"] += 1
+                return "UPDATE 1"
             row["is_active"] = False
             return "UPDATE 1"
         return "OK"
@@ -125,6 +143,69 @@ async def test_manager_expiry_and_revoke(fake_db: _FakeDB) -> None:
     assert await mgr.get_public_artifact(share["share_code"]) is None
 
 
+@pytest.mark.asyncio
+async def test_manager_submit_enforces_max_attempts(fake_db: _FakeDB) -> None:
+    mgr = ArtifactShareManager(db=fake_db)
+    share = await mgr.create_share(
+        kind="quiz",
+        title="Capped",
+        payload={"quiz_id": None},
+        answer_keys=[],
+        tenant_id="tenant-a",
+        user_id="alex",
+        max_attempts=1,
+        require_name=False,
+    )
+    first = await mgr.submit_attempt(share["share_code"], answers={})
+    assert first["correct_count"] == 0
+    assert fake_db.shares[share["share_id"]]["attempt_count"] == 1
+
+    with pytest.raises(ValueError, match="max attempts"):
+        await mgr.submit_attempt(share["share_code"], answers={})
+
+
+@pytest.mark.asyncio
+async def test_reserve_attempt_slot_is_atomic_at_the_cap(fake_db: _FakeDB) -> None:
+    """The conditional UPDATE must reject when the cap is already consumed."""
+    mgr = ArtifactShareManager(db=fake_db)
+    share = await mgr.create_share(
+        kind="quiz", title="T", payload={}, max_attempts=1, require_name=False,
+    )
+    row = fake_db.shares[share["share_id"]]
+    row["attempt_count"] = 1  # consumed concurrently after the read-side check
+
+    with pytest.raises(ValueError, match="max attempts"):
+        await mgr._reserve_attempt_slot({"share_id": share["share_id"]})
+
+
+@pytest.mark.asyncio
+async def test_grade_quiz_marks_attempt_rejected_when_slot_lost(fake_db: _FakeDB) -> None:
+    """An attempt that loses the slot race is kept but marked 'rejected'."""
+    mgr = ArtifactShareManager(db=fake_db)
+    share = await mgr.create_share(
+        kind="quiz",
+        title="Raced",
+        payload={"quiz_id": None},
+        answer_keys=[],
+        max_attempts=1,
+        require_name=False,
+    )
+    fake_db.shares[share["share_id"]]["attempt_count"] = 1
+
+    with pytest.raises(ValueError, match="max attempts"):
+        await mgr._grade_quiz(
+            {
+                "share_id": share["share_id"],
+                "answer_keys": [],
+                "payload": {"quiz_id": None},
+            },
+            answers={},
+            display_name=None,
+            client_ip=None,
+        )
+    assert fake_db.attempts[-1]["status"] == "rejected"
+
+
 def test_create_share_endpoint_rejects_unowned_quiz(fake_db: _FakeDB) -> None:
     app = FastAPI()
     app.include_router(artifact_shares_router)
@@ -153,3 +234,51 @@ def test_create_share_endpoint_rejects_unowned_quiz(fake_db: _FakeDB) -> None:
         json={"kind": "conversation", "quiz_id": None},
     )
     assert resp.status_code == 400
+
+
+def test_create_share_endpoint_rejects_invalid_bounds(fake_db: _FakeDB) -> None:
+    """expires_hours / max_attempts must be positive — schema-enforced."""
+    app = FastAPI()
+    app.include_router(artifact_shares_router)
+    app.state.database = fake_db
+
+    class _User:
+        user_id = "alex"
+        tenant_id = "tenant-a"
+
+    async def _user_override():
+        return _User()
+
+    from src.api.v1.artifact_shares import get_user_context
+
+    app.dependency_overrides[get_user_context] = _user_override
+    client = TestClient(app)
+
+    for body in (
+        {"kind": "quiz", "quiz_id": None, "max_attempts": 0},
+        {"kind": "quiz", "quiz_id": None, "expires_hours": -1},
+    ):
+        resp = client.post("/artifact-shares", json=body)
+        assert resp.status_code == 422, body
+
+
+def test_revoke_share_endpoint_returns_503_without_database(fake_db: _FakeDB) -> None:
+    """Regression: revoke must not AttributeError into a 500 when db is missing."""
+    app = FastAPI()
+    app.include_router(artifact_shares_router)
+    app.state.database = None
+
+    class _User:
+        user_id = "alex"
+        tenant_id = "tenant-a"
+
+    async def _user_override():
+        return _User()
+
+    from src.api.v1.artifact_shares import get_user_context
+
+    app.dependency_overrides[get_user_context] = _user_override
+    client = TestClient(app)
+
+    resp = client.delete(f"/artifact-shares/{uuid.uuid4()}")
+    assert resp.status_code == 503

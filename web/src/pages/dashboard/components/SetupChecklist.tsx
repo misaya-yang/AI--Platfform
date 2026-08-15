@@ -21,8 +21,10 @@ export function SetupChecklist() {
     return null;
   }
 
+  // This branch only renders while `configured` is false, so the provider
+  // step is never done here; it flips the whole checklist off instead.
   const steps: ChecklistStep[] = [
-    { key: "provider", href: "/services", done: data.configured },
+    { key: "provider", href: "/services", done: false },
     { key: "knowledge", href: "/knowledge", done: false },
     { key: "chat", href: "/assistant", done: false },
   ];

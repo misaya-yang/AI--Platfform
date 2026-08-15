@@ -247,12 +247,16 @@ async def update_connector_config(
         values.append(secret)
     if not sets and mcp_tools is None and extra_update is None:
         raise HTTPException(422, "No mutable fields provided")
-    values.extend((tenant_id, provider))
-    await db.execute(
-        f"""UPDATE connector_configs SET {', '.join(sets)}, updated_at = NOW()
-            WHERE tenant_id = ${len(values) - 1} AND provider = ${len(values)}""",
-        *values,
-    )
+    # Extra-only updates (mcp_tools / extra_config) merge into JSONB below;
+    # skip the column UPDATE entirely so `SET , updated_at = NOW()` can never
+    # be assembled from an empty set list.
+    if sets:
+        values.extend((tenant_id, provider))
+        await db.execute(
+            f"""UPDATE connector_configs SET {', '.join(sets)}, updated_at = NOW()
+                WHERE tenant_id = ${len(values) - 1} AND provider = ${len(values)}""",
+            *values,
+        )
 
     if mcp_tools is not None:
         extra_merge: dict[str, Any] = {

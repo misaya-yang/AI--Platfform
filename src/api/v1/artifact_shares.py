@@ -28,10 +28,10 @@ logger = logging.getLogger(__name__)
 class ArtifactShareCreateRequest(BaseModel):
     kind: str = Field("quiz", description="Artifact kind; only 'quiz' is supported today")
     quiz_id: str | None = Field(None, description="Source quiz id (kind='quiz')")
-    expires_hours: int | None = Field(None, description="Hours until expiry (None = never)")
-    max_attempts: int | None = Field(None, description="Max attempts (None = unlimited)")
+    expires_hours: int | None = Field(None, ge=1, description="Hours until expiry (None = never)")
+    max_attempts: int | None = Field(None, ge=1, description="Max attempts (None = unlimited)")
     require_name: bool = Field(True, description="Require name before taking")
-    time_limit_minutes: int | None = Field(None, description="Time limit per attempt in minutes (None = unlimited)")
+    time_limit_minutes: int | None = Field(None, ge=1, description="Time limit per attempt in minutes (None = unlimited)")
 
 
 @router.post("")
@@ -122,7 +122,10 @@ async def revoke_artifact_share(
     user: UserContext = Depends(get_user_context),
 ):
     """Revoke a share link (creator only)."""
-    mgr = ArtifactShareManager(db=getattr(request.app.state, "database", None))
+    db = getattr(request.app.state, "database", None)
+    if db is None:
+        raise HTTPException(503, "Database not available")
+    mgr = ArtifactShareManager(db=db)
     revoked = await mgr.revoke_share(share_id, user.user_id)
     if not revoked:
         raise HTTPException(404, "Share link not found or not authorized")
