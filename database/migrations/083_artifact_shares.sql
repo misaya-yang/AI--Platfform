@@ -6,7 +6,8 @@
 
 CREATE TABLE IF NOT EXISTS artifact_shares (
     id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    share_code        VARCHAR(12) NOT NULL UNIQUE,
+    -- Keep the legacy width so existing 13-20 character links can be backfilled.
+    share_code        VARCHAR(20) NOT NULL UNIQUE,
     kind              VARCHAR(32) NOT NULL DEFAULT 'quiz',
     title             TEXT NOT NULL DEFAULT '',
     payload           JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -25,6 +26,7 @@ CREATE TABLE IF NOT EXISTS artifact_shares (
 
 CREATE INDEX IF NOT EXISTS idx_artifact_shares_tenant ON artifact_shares (tenant_id);
 CREATE INDEX IF NOT EXISTS idx_artifact_shares_kind ON artifact_shares (kind);
+ALTER TABLE artifact_shares ALTER COLUMN share_code TYPE VARCHAR(20);
 
 -- Backfill legacy quiz shares as kind='quiz' artifact shares with a frozen
 -- snapshot so old links keep working even if the source quiz changes later.
@@ -75,3 +77,19 @@ SELECT
 FROM quiz_shares s
 JOIN quizzes q ON q.id = s.quiz_id
 ON CONFLICT (share_code) DO NOTHING;
+
+-- Atomic display-name claims close the SELECT-then-INSERT race in anonymous
+-- submissions without rewriting historical attempt rows.
+CREATE TABLE IF NOT EXISTS artifact_share_submitters (
+    share_id       UUID NOT NULL REFERENCES artifact_shares(id) ON DELETE CASCADE,
+    display_name   VARCHAR(100) NOT NULL,
+    claimed_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (share_id, display_name)
+);
+
+INSERT INTO artifact_share_submitters (share_id, display_name)
+SELECT DISTINCT qa.share_id, LEFT(qa.display_name, 100)
+FROM quiz_attempts qa
+JOIN artifact_shares s ON s.id = qa.share_id
+WHERE qa.share_id IS NOT NULL AND qa.display_name IS NOT NULL
+ON CONFLICT (share_id, display_name) DO NOTHING;

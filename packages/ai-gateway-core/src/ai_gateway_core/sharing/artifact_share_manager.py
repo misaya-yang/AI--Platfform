@@ -166,26 +166,27 @@ class ArtifactShareManager:
         if share["require_name"] and not display_name:
             raise ValueError("This share requires a name before submitting.")
 
-        # Dedup by display_name for named attempts. No IP dedup — shared
-        # networks route many users through one IP; max_attempts bounds spam.
+        # Atomically claim display_name for named attempts. A SELECT followed
+        # by INSERT races under concurrent submissions, so the migration owns
+        # a primary-key reservation table. No IP dedup: shared networks route
+        # many users through one IP; max_attempts bounds spam.
         share_uuid = uuid.UUID(share["share_id"])
+        display_name_claimed = False
         if display_name:
-            dup = await self.db.fetchrow(
-                "SELECT id FROM quiz_attempts WHERE share_id = $1 AND display_name = $2 LIMIT 1",
-                share_uuid,
-                display_name,
-            )
-            if dup:
-                raise ValueError(
-                    f"You have already submitted as '{html.unescape(display_name)}'."
-                )
+            await self._claim_display_name(share_uuid, display_name)
+            display_name_claimed = True
 
-        result: dict[str, Any] = {}
-        if share["kind"] == "quiz":
-            result = await self._grade_quiz(share, answers, display_name, client_ip)
-        else:
-            # Generic kinds: record the attempt without grading.
-            await self._reserve_attempt_slot(share)
+        try:
+            result: dict[str, Any] = {}
+            if share["kind"] == "quiz":
+                result = await self._grade_quiz(share, answers, display_name, client_ip)
+            else:
+                # Generic kinds: record the attempt without grading.
+                await self._reserve_attempt_slot(share)
+        except Exception:
+            if display_name_claimed:
+                await self._release_display_name(share_uuid, display_name)
+            raise
 
         logger.info(
             "Public attempt on %s share %s: %s",
@@ -194,6 +195,34 @@ class ArtifactShareManager:
             result.get("correct_count", "recorded"),
         )
         return result
+
+    async def _claim_display_name(self, share_id: uuid.UUID, display_name: str) -> None:
+        claimed = await self.db.execute(
+            """
+            INSERT INTO artifact_share_submitters (share_id, display_name)
+            VALUES ($1, $2)
+            ON CONFLICT (share_id, display_name) DO NOTHING
+            """,
+            share_id,
+            display_name,
+        )
+        if "INSERT 0 1" not in claimed:
+            raise ValueError(
+                f"You have already submitted as '{html.unescape(display_name)}'."
+            )
+
+    async def _release_display_name(
+        self,
+        share_id: uuid.UUID,
+        display_name: str | None,
+    ) -> None:
+        if display_name is None:
+            return
+        await self.db.execute(
+            "DELETE FROM artifact_share_submitters WHERE share_id = $1 AND display_name = $2",
+            share_id,
+            display_name,
+        )
 
     async def _reserve_attempt_slot(self, share: dict) -> None:
         """Atomically consume one attempt slot, enforcing the cap under concurrency.
@@ -269,18 +298,27 @@ class ArtifactShareManager:
             raise
         return {"attempt_id": attempt_id, **graded}
 
-    async def revoke_share(self, share_id: str, user_id: str | None = None) -> bool:
+    async def revoke_share(
+        self,
+        share_id: str | uuid.UUID,
+        user_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> bool:
         """Deactivate a share link."""
+        share_uuid = share_id if isinstance(share_id, uuid.UUID) else uuid.UUID(share_id)
         if user_id is None:
             result = await self.db.execute(
                 "UPDATE artifact_shares SET is_active = FALSE, revoked_at = NOW() WHERE id = $1",
-                uuid.UUID(share_id),
+                share_uuid,
             )
         else:
+            if tenant_id is None:
+                raise ValueError("tenant_id is required for creator-scoped revocation")
             result = await self.db.execute(
                 "UPDATE artifact_shares SET is_active = FALSE, revoked_at = NOW() "
-                "WHERE id = $1 AND created_by = $2",
-                uuid.UUID(share_id),
+                "WHERE id = $1 AND created_by = $2 AND tenant_id = $3",
+                share_uuid,
                 user_id,
+                tenant_id,
             )
         return "UPDATE 1" in result

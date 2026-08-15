@@ -25,6 +25,7 @@ class _FakeDB:
         self.shares: dict[str, dict] = {}
         self.quiz_rows: dict[str, dict] = {}
         self.attempts: list[dict] = []
+        self.submitters: set[tuple[str, str]] = set()
 
     async def fetchrow(self, query: str, *args):  # noqa: ANN201
         if "FROM quizzes" in query:
@@ -48,6 +49,15 @@ class _FakeDB:
         return []
 
     async def execute(self, query: str, *args):  # noqa: ANN201
+        if query.lstrip().upper().startswith("INSERT INTO ARTIFACT_SHARE_SUBMITTERS"):
+            key = (str(args[0]), args[1])
+            if key in self.submitters:
+                return "INSERT 0 0"
+            self.submitters.add(key)
+            return "INSERT 0 1"
+        if query.lstrip().upper().startswith("DELETE FROM ARTIFACT_SHARE_SUBMITTERS"):
+            self.submitters.discard((str(args[0]), args[1]))
+            return "DELETE 1"
         if query.lstrip().upper().startswith("INSERT INTO QUIZ_ATTEMPTS"):
             self.attempts.append({"args": args, "status": "completed"})
             return "OK"
@@ -94,6 +104,10 @@ class _FakeDB:
                     return "UPDATE 0"
                 row["attempt_count"] += 1
                 return "UPDATE 1"
+            if len(args) == 3 and (
+                row["created_by"] != args[1] or row["tenant_id"] != args[2]
+            ):
+                return "UPDATE 0"
             row["is_active"] = False
             return "UPDATE 1"
         return "OK"
@@ -139,7 +153,7 @@ async def test_manager_expiry_and_revoke(fake_db: _FakeDB) -> None:
 
     # Re-activate, then revoke.
     row["expires_at"] = None
-    assert await mgr.revoke_share(share["share_id"], "alex")
+    assert await mgr.revoke_share(share["share_id"], "alex", "t")
     assert await mgr.get_public_artifact(share["share_code"]) is None
 
 
@@ -206,6 +220,41 @@ async def test_grade_quiz_marks_attempt_rejected_when_slot_lost(fake_db: _FakeDB
     assert fake_db.attempts[-1]["status"] == "rejected"
 
 
+@pytest.mark.asyncio
+async def test_display_name_claim_is_atomic(
+    fake_db: _FakeDB,
+) -> None:
+    mgr = ArtifactShareManager(db=fake_db)
+    share = await mgr.create_share(
+        kind="quiz",
+        title="Named",
+        payload={"quiz_id": None},
+        answer_keys=[],
+        max_attempts=2,
+        require_name=True,
+    )
+
+    await mgr.submit_attempt(share["share_code"], answers={}, display_name="Alex")
+    with pytest.raises(ValueError, match="already submitted"):
+        await mgr.submit_attempt(share["share_code"], answers={}, display_name="Alex")
+
+
+@pytest.mark.asyncio
+async def test_revoke_requires_matching_tenant(fake_db: _FakeDB) -> None:
+    mgr = ArtifactShareManager(db=fake_db)
+    share = await mgr.create_share(
+        kind="quiz",
+        title="Tenant scoped",
+        payload={},
+        tenant_id="tenant-a",
+        user_id="alex",
+    )
+
+    assert not await mgr.revoke_share(share["share_id"], "alex", "tenant-b")
+    assert await mgr.get_public_artifact(share["share_code"]) is not None
+    assert await mgr.revoke_share(share["share_id"], "alex", "tenant-a")
+
+
 def test_create_share_endpoint_rejects_unowned_quiz(fake_db: _FakeDB) -> None:
     app = FastAPI()
     app.include_router(artifact_shares_router)
@@ -236,6 +285,42 @@ def test_create_share_endpoint_rejects_unowned_quiz(fake_db: _FakeDB) -> None:
     assert resp.status_code == 400
 
 
+def test_create_share_endpoint_returns_typed_contract(fake_db: _FakeDB) -> None:
+    app = FastAPI()
+    app.include_router(artifact_shares_router)
+    app.state.database = fake_db
+
+    class _User:
+        user_id = "alex"
+        tenant_id = "tenant-a"
+
+    async def _user_override():
+        return _User()
+
+    from src.api.v1.artifact_shares import get_user_context
+
+    app.dependency_overrides[get_user_context] = _user_override
+    client = TestClient(app)
+    quiz_id = uuid.uuid4()
+    fake_db.quiz_rows[str(quiz_id)] = {
+        "id": quiz_id,
+        "tenant_id": "tenant-a",
+        "title": "Typed quiz",
+        "description": "contract",
+        "question_count": 0,
+        "difficulty": "medium",
+    }
+
+    response = client.post(
+        "/artifact-shares",
+        json={"kind": "quiz", "quiz_id": str(quiz_id)},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["quiz_id"] == str(quiz_id)
+    assert response.json()["quiz_title"] == "Typed quiz"
+
+
 def test_create_share_endpoint_rejects_invalid_bounds(fake_db: _FakeDB) -> None:
     """expires_hours / max_attempts must be positive — schema-enforced."""
     app = FastAPI()
@@ -260,6 +345,48 @@ def test_create_share_endpoint_rejects_invalid_bounds(fake_db: _FakeDB) -> None:
     ):
         resp = client.post("/artifact-shares", json=body)
         assert resp.status_code == 422, body
+
+
+def test_artifact_share_endpoints_reject_malformed_uuids(fake_db: _FakeDB) -> None:
+    app = FastAPI()
+    app.include_router(artifact_shares_router)
+    app.state.database = fake_db
+
+    class _User:
+        user_id = "alex"
+        tenant_id = "tenant-a"
+
+    async def _user_override():
+        return _User()
+
+    from src.api.v1.artifact_shares import get_user_context
+
+    app.dependency_overrides[get_user_context] = _user_override
+    client = TestClient(app)
+
+    create = client.post(
+        "/artifact-shares",
+        json={"kind": "quiz", "quiz_id": "not-a-uuid"},
+    )
+    assert create.status_code == 422
+    assert client.delete("/artifact-shares/not-a-uuid").status_code == 422
+
+
+def test_artifact_share_openapi_has_typed_success_responses() -> None:
+    app = FastAPI()
+    app.include_router(artifact_shares_router)
+    paths = app.openapi()["paths"]
+
+    create_schema = paths["/artifact-shares"]["post"]["responses"]["200"]["content"]
+    revoke_schema = paths["/artifact-shares/{share_id}"]["delete"]["responses"]["200"][
+        "content"
+    ]
+    assert create_schema["application/json"]["schema"]["$ref"].endswith(
+        "/ArtifactShareCreateResponse"
+    )
+    assert revoke_schema["application/json"]["schema"]["$ref"].endswith(
+        "/ArtifactShareRevokeResponse"
+    )
 
 
 def test_revoke_share_endpoint_returns_503_without_database(fake_db: _FakeDB) -> None:

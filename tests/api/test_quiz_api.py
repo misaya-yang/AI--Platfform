@@ -6,10 +6,12 @@ import json
 import uuid
 from datetime import datetime, timezone
 
+from ai_gateway_core.quiz import QuizAccessService
+from assistant_service.core.quiz.quiz_service import QuizService
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from src.api.v1.quiz import get_user_context, router
+from src.api.v1.quiz import get_user_context, public_router, router
 
 
 class _QuizDB:
@@ -123,3 +125,43 @@ def test_quiz_read_submit_attempts_and_delete_stay_gateway_local() -> None:
     deleted = client.delete(f"/assistant/quiz/{db.quiz_id}")
     assert deleted.status_code == 200
     assert deleted.json() == {"deleted": True}
+
+
+def test_quiz_routes_reject_malformed_ids_before_shared_service() -> None:
+    client = _client(_QuizDB())
+
+    assert client.get("/assistant/quiz/not-a-uuid").status_code == 422
+    assert client.post(
+        "/assistant/quiz/not-a-uuid/submit",
+        json={"answers": {}},
+    ).status_code == 422
+    assert client.delete("/assistant/quiz/not-a-uuid").status_code == 422
+
+
+def test_assistant_quiz_service_inherits_shared_access_operations() -> None:
+    assert QuizService.get_quiz is QuizAccessService.get_quiz
+    assert QuizService.list_quizzes is QuizAccessService.list_quizzes
+    assert QuizService.list_attempts is QuizAccessService.list_attempts
+    assert QuizService.submit_attempt is QuizAccessService.submit_attempt
+    assert QuizService.delete_quiz is QuizAccessService.delete_quiz
+
+
+def test_quiz_openapi_has_typed_success_responses() -> None:
+    app = FastAPI()
+    app.include_router(router)
+    app.include_router(public_router)
+    paths = app.openapi()["paths"]
+
+    expected = {
+        ("/assistant/quiz/{quiz_id}", "get"): "QuizResponse",
+        ("/assistant/quiz/{quiz_id}", "delete"): "QuizDeleteResponse",
+        ("/assistant/quiz/{quiz_id}/submit", "post"): "QuizAttemptResponse",
+        ("/assistant/quiz/{quiz_id}/attempts", "get"): "QuizAttemptListResponse",
+        ("/quiz/shared/{share_code}", "get"): "PublicQuizResponse",
+        ("/quiz/shared/{share_code}/submit", "post"): "QuizAttemptResponse",
+    }
+    for (path, method), model in expected.items():
+        schema = paths[path][method]["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]
+        assert schema["$ref"].endswith(f"/{model}")

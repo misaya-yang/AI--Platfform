@@ -1,6 +1,4 @@
-"""
-Quiz Service — Orchestrates quiz generation, persistence, and grading.
-"""
+"""Quiz generation service layered on shared quiz persistence operations."""
 
 from __future__ import annotations
 
@@ -21,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class QuizService(QuizAccessService):
-    """Core quiz orchestration: create, fetch, grade, persist."""
+    """Assistant-owned generation plus inherited shared persistence operations."""
 
     def __init__(
         self,
@@ -31,10 +29,6 @@ class QuizService(QuizAccessService):
     ) -> None:
         super().__init__(db=db, grader=grader)
         self.generator = generator
-
-    # -------------------------------------------------------------------------
-    # Create
-    # -------------------------------------------------------------------------
 
     async def create_quiz(
         self,
@@ -52,7 +46,6 @@ class QuizService(QuizAccessService):
         """Generate a quiz from KB chunks and persist it."""
         if self.generator is None:
             raise RuntimeError("QuizService has no generator; creation is not supported")
-        # 1. Generate via LLM
         quiz_data = await self.generator.generate(
             kb_chunks=kb_chunks,
             topic=topic,
@@ -63,10 +56,8 @@ class QuizService(QuizAccessService):
             model_id=model_id,
         )
 
-        # 2. Persist quiz
-        quiz_id = str(uuid.uuid4())
+        quiz_id = uuid.uuid4()
         now = datetime.now(timezone.utc)
-
         await self.db.execute(
             """
             INSERT INTO quizzes (id, tenant_id, created_by, title, description,
@@ -74,7 +65,7 @@ class QuizService(QuizAccessService):
                                  config, status, created_at, updated_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             """,
-            uuid.UUID(quiz_id),
+            quiz_id,
             tenant_id,
             user_id,
             quiz_data.get("title", "Knowledge Quiz"),
@@ -89,24 +80,25 @@ class QuizService(QuizAccessService):
             now,
         )
 
-        # 3. Persist questions
         questions = quiz_data["questions"]
-        q_rows = []
-        for q in questions:
-            q_id = str(uuid.uuid4())
-            q["id"] = q_id
-            q_rows.append((
-                uuid.UUID(q_id),
-                uuid.UUID(quiz_id),
-                q["question_num"],
-                q.get("question_type", "mc_single"),
-                q["question_text"],
-                json.dumps(q.get("options", [])),
-                json.dumps(q.get("correct_answer", [])),
-                q.get("explanation", ""),
-                json.dumps(q.get("source_chunk_ids", [])),
-                now,
-            ))
+        question_rows = []
+        for question in questions:
+            question_id = uuid.uuid4()
+            question["id"] = str(question_id)
+            question_rows.append(
+                (
+                    question_id,
+                    quiz_id,
+                    question["question_num"],
+                    question.get("question_type", "mc_single"),
+                    question["question_text"],
+                    json.dumps(question.get("options", [])),
+                    json.dumps(question.get("correct_answer", [])),
+                    question.get("explanation", ""),
+                    json.dumps(question.get("source_chunk_ids", [])),
+                    now,
+                )
+            )
 
         await self.db.executemany(
             """
@@ -115,14 +107,12 @@ class QuizService(QuizAccessService):
                                         explanation, source_chunks, created_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             """,
-            q_rows,
+            question_rows,
         )
 
-        logger.info(f"Created quiz {quiz_id} with {len(questions)} questions")
-
-        # 4. Return quiz without answers
+        logger.info("Created quiz %s with %s questions", quiz_id, len(questions))
         return {
-            "quiz_id": quiz_id,
+            "quiz_id": str(quiz_id),
             "title": quiz_data["title"],
             "description": quiz_data.get("description", ""),
             "topic": topic,
@@ -130,257 +120,12 @@ class QuizService(QuizAccessService):
             "question_count": len(questions),
             "questions": [
                 {
-                    "id": q["id"],
-                    "question_num": q["question_num"],
-                    "question_type": q.get("question_type", "mc_single"),
-                    "question_text": q["question_text"],
-                    "options": q.get("options", []),
+                    "id": question["id"],
+                    "question_num": question["question_num"],
+                    "question_type": question.get("question_type", "mc_single"),
+                    "question_text": question["question_text"],
+                    "options": question.get("options", []),
                 }
-                for q in questions
+                for question in questions
             ],
         }
-
-    # -------------------------------------------------------------------------
-    # Read
-    # -------------------------------------------------------------------------
-
-    async def get_quiz(
-        self,
-        quiz_id: str,
-        tenant_id: str,
-        include_answers: bool = False,
-    ) -> dict | None:
-        """Fetch a quiz with its questions."""
-        row = await self.db.fetchrow(
-            "SELECT * FROM quizzes WHERE id = $1 AND tenant_id = $2",
-            uuid.UUID(quiz_id),
-            tenant_id,
-        )
-        if not row:
-            return None
-
-        q_rows = await self.db.fetch(
-            "SELECT * FROM quiz_questions WHERE quiz_id = $1 ORDER BY question_num",
-            uuid.UUID(quiz_id),
-        )
-
-        questions = []
-        for qr in q_rows:
-            q: dict[str, Any] = {
-                "id": str(qr["id"]),
-                "question_num": qr["question_num"],
-                "question_type": qr["question_type"],
-                "question_text": qr["question_text"],
-                "options": qr["options"] if isinstance(qr["options"], list) else json.loads(qr["options"] or "[]"),
-            }
-            if include_answers:
-                raw_answer = qr["correct_answer"]
-                q["correct_answer"] = raw_answer if isinstance(raw_answer, list) else json.loads(raw_answer or "[]")
-                q["explanation"] = qr["explanation"]
-            questions.append(q)
-
-        return {
-            "quiz_id": str(row["id"]),
-            "title": row["title"],
-            "description": row["description"],
-            "topic": row["topic"],
-            "difficulty": row["difficulty"],
-            "question_count": row["question_count"],
-            "status": row["status"],
-            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
-            "questions": questions,
-        }
-
-    async def list_quizzes(
-        self,
-        tenant_id: str,
-        user_id: str,
-        limit: int = 20,
-        offset: int = 0,
-    ) -> tuple[list[dict], int]:
-        """List quizzes for a user (paginated)."""
-        total_row = await self.db.fetchrow(
-            "SELECT count(*) AS cnt FROM quizzes WHERE tenant_id = $1 AND created_by = $2",
-            tenant_id,
-            user_id,
-        )
-        total = total_row["cnt"] if total_row else 0
-
-        rows = await self.db.fetch(
-            """
-            SELECT id, title, description, topic, difficulty, question_count,
-                   status, created_at
-            FROM quizzes
-            WHERE tenant_id = $1 AND created_by = $2
-            ORDER BY created_at DESC
-            LIMIT $3 OFFSET $4
-            """,
-            tenant_id,
-            user_id,
-            limit,
-            offset,
-        )
-
-        quizzes = [
-            {
-                "quiz_id": str(r["id"]),
-                "title": r["title"],
-                "description": r["description"],
-                "topic": r["topic"],
-                "difficulty": r["difficulty"],
-                "question_count": r["question_count"],
-                "status": r["status"],
-                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
-            }
-            for r in rows
-        ]
-
-        return quizzes, total
-
-    # -------------------------------------------------------------------------
-    # Submit / Grade
-    # -------------------------------------------------------------------------
-
-    async def list_attempts(
-        self,
-        quiz_id: str,
-        tenant_id: str,
-        user_id: str,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> dict:
-        """List attempts for a quiz. Creator sees all, others see own. Returns {attempts, total}."""
-        # Check quiz ownership
-        quiz_row = await self.db.fetchrow(
-            "SELECT created_by FROM quizzes WHERE id = $1 AND tenant_id = $2",
-            uuid.UUID(quiz_id),
-            tenant_id,
-        )
-        if not quiz_row:
-            return {"attempts": [], "total": 0}
-
-        is_creator = quiz_row["created_by"] == user_id
-        qid = uuid.UUID(quiz_id)
-
-        if is_creator:
-            count_row = await self.db.fetchrow(
-                "SELECT count(*) AS cnt FROM quiz_attempts WHERE quiz_id = $1", qid,
-            )
-            rows = await self.db.fetch(
-                """
-                SELECT id, user_id, display_name, total_score, correct_count,
-                       total_count, started_at, completed_at, status
-                FROM quiz_attempts WHERE quiz_id = $1
-                ORDER BY started_at DESC
-                LIMIT $2 OFFSET $3
-                """,
-                qid, limit, offset,
-            )
-        else:
-            count_row = await self.db.fetchrow(
-                "SELECT count(*) AS cnt FROM quiz_attempts WHERE quiz_id = $1 AND user_id = $2",
-                qid, user_id,
-            )
-            rows = await self.db.fetch(
-                """
-                SELECT id, user_id, display_name, total_score, correct_count,
-                       total_count, started_at, completed_at, status
-                FROM quiz_attempts WHERE quiz_id = $1 AND user_id = $2
-                ORDER BY started_at DESC
-                LIMIT $3 OFFSET $4
-                """,
-                qid, user_id, limit, offset,
-            )
-
-        total = count_row["cnt"] if count_row else 0
-
-        attempts = [
-            {
-                "attempt_id": str(r["id"]),
-                "user_id": r["user_id"],
-                "display_name": r["display_name"],
-                "total_score": float(r["total_score"]) if r["total_score"] is not None else None,
-                "correct_count": r["correct_count"],
-                "total_count": r["total_count"],
-                "started_at": r["started_at"].isoformat() if r["started_at"] else None,
-                "completed_at": r["completed_at"].isoformat() if r["completed_at"] else None,
-                "status": r["status"],
-            }
-            for r in rows
-        ]
-        return {"attempts": attempts, "total": total}
-
-    async def submit_attempt(
-        self,
-        quiz_id: str,
-        tenant_id: str,
-        user_id: str,
-        answers: dict[str, str],
-    ) -> dict:
-        """Grade a submission and persist the attempt."""
-        # Load quiz with answers
-        quiz = await self.get_quiz(quiz_id, tenant_id, include_answers=True)
-        if not quiz:
-            raise ValueError(f"Quiz {quiz_id} not found")
-
-        # Grade (async for short_answer AI grading)
-        has_short_answer = any(q.get("question_type") == "short_answer" for q in quiz["questions"])
-        if has_short_answer and hasattr(self.grader, "grade_async"):
-            result = await self.grader.grade_async(quiz["questions"], answers)
-        else:
-            result = self.grader.grade(quiz["questions"], answers)
-
-        # Persist attempt
-        attempt_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc)
-
-        await self.db.execute(
-            """
-            INSERT INTO quiz_attempts (id, quiz_id, user_id, answers,
-                                       total_score, correct_count, total_count,
-                                       started_at, completed_at, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            """,
-            uuid.UUID(attempt_id),
-            uuid.UUID(quiz_id),
-            user_id,
-            json.dumps(answers),
-            result["total_score"],
-            result["correct_count"],
-            result["total_count"],
-            now,
-            now,
-            "completed",
-        )
-
-        logger.info(
-            f"Quiz attempt {attempt_id}: {result['correct_count']}/{result['total_count']} "
-            f"({result['total_score']:.0%})"
-        )
-
-        return {
-            "attempt_id": attempt_id,
-            **result,
-        }
-
-    # -------------------------------------------------------------------------
-    # Delete
-    # -------------------------------------------------------------------------
-
-    async def delete_quiz(
-        self,
-        quiz_id: str,
-        tenant_id: str,
-        user_id: str,
-    ) -> bool:
-        """Delete a quiz (only by creator)."""
-        result = await self.db.execute(
-            "DELETE FROM quizzes WHERE id = $1 AND tenant_id = $2 AND created_by = $3",
-            uuid.UUID(quiz_id),
-            tenant_id,
-            user_id,
-        )
-        deleted = "DELETE 1" in result
-        if deleted:
-            logger.info(f"Deleted quiz {quiz_id}")
-        return deleted

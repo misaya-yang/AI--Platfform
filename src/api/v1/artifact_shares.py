@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from datetime import datetime
 from typing import Any
 
 from ai_gateway_core.sharing import ArtifactShareManager
@@ -27,14 +28,31 @@ logger = logging.getLogger(__name__)
 
 class ArtifactShareCreateRequest(BaseModel):
     kind: str = Field("quiz", description="Artifact kind; only 'quiz' is supported today")
-    quiz_id: str | None = Field(None, description="Source quiz id (kind='quiz')")
+    quiz_id: uuid.UUID | None = Field(None, description="Source quiz id (kind='quiz')")
     expires_hours: int | None = Field(None, ge=1, description="Hours until expiry (None = never)")
     max_attempts: int | None = Field(None, ge=1, description="Max attempts (None = unlimited)")
     require_name: bool = Field(True, description="Require name before taking")
     time_limit_minutes: int | None = Field(None, ge=1, description="Time limit per attempt in minutes (None = unlimited)")
 
 
-@router.post("")
+class ArtifactShareCreateResponse(BaseModel):
+    share_id: uuid.UUID
+    share_code: str
+    kind: str
+    title: str
+    expires_at: datetime | None
+    require_name: bool
+    max_attempts: int | None
+    time_limit_minutes: int | None
+    quiz_id: uuid.UUID
+    quiz_title: str
+
+
+class ArtifactShareRevokeResponse(BaseModel):
+    revoked: bool
+
+
+@router.post("", response_model=ArtifactShareCreateResponse)
 async def create_artifact_share(
     body: ArtifactShareCreateRequest,
     request: Request,
@@ -55,7 +73,7 @@ async def create_artifact_share(
     quiz_row = await db.fetchrow(
         "SELECT id, tenant_id, title, description, question_count, difficulty "
         "FROM quizzes WHERE id = $1 AND tenant_id = $2 AND created_by = $3",
-        uuid.UUID(body.quiz_id),
+        body.quiz_id,
         user.tenant_id,
         user.user_id,
     )
@@ -67,7 +85,7 @@ async def create_artifact_share(
         "SELECT id, question_num, question_type, question_text, options, "
         "correct_answer, explanation FROM quiz_questions "
         "WHERE quiz_id = $1 ORDER BY question_num",
-        uuid.UUID(body.quiz_id),
+        body.quiz_id,
     )
     questions: list[dict[str, Any]] = []
     answer_keys: list[dict[str, Any]] = []
@@ -93,7 +111,7 @@ async def create_artifact_share(
         })
 
     payload = {
-        "quiz_id": body.quiz_id,
+        "quiz_id": str(body.quiz_id),
         "description": quiz_row["description"],
         "question_count": quiz_row["question_count"],
         "difficulty": quiz_row["difficulty"],
@@ -115,9 +133,9 @@ async def create_artifact_share(
     return {**share, "quiz_id": body.quiz_id, "quiz_title": quiz_row["title"]}
 
 
-@router.delete("/{share_id}")
+@router.delete("/{share_id}", response_model=ArtifactShareRevokeResponse)
 async def revoke_artifact_share(
-    share_id: str,
+    share_id: uuid.UUID,
     request: Request,
     user: UserContext = Depends(get_user_context),
 ):
@@ -126,7 +144,11 @@ async def revoke_artifact_share(
     if db is None:
         raise HTTPException(503, "Database not available")
     mgr = ArtifactShareManager(db=db)
-    revoked = await mgr.revoke_share(share_id, user.user_id)
+    revoked = await mgr.revoke_share(
+        share_id,
+        user_id=user.user_id,
+        tenant_id=user.tenant_id,
+    )
     if not revoked:
         raise HTTPException(404, "Share link not found or not authorized")
     return {"revoked": True}

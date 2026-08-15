@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import logging
 import random
+import uuid
+from datetime import datetime
 from typing import Any
 
 from ai_gateway_core.quiz import QuizAccessService, QuizGrader
@@ -49,11 +51,65 @@ class PublicQuizSubmitRequest(BaseModel):
 
 
 class QuizAttemptResponse(BaseModel):
-    attempt_id: str
+    attempt_id: uuid.UUID
     total_score: float
     correct_count: int
     total_count: int
     per_question: list[dict[str, Any]]
+
+
+class QuizQuestionResponse(BaseModel):
+    id: uuid.UUID
+    question_num: int
+    question_type: str
+    question_text: str
+    options: list[Any]
+
+
+class QuizResponse(BaseModel):
+    quiz_id: uuid.UUID
+    title: str
+    description: str | None
+    topic: str | None
+    difficulty: str
+    question_count: int
+    status: str
+    created_at: datetime | None
+    questions: list[QuizQuestionResponse]
+
+
+class QuizAttemptListItem(BaseModel):
+    attempt_id: uuid.UUID
+    user_id: str | None
+    display_name: str | None
+    total_score: float | None
+    correct_count: int | None
+    total_count: int | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    status: str
+
+
+class QuizAttemptListResponse(BaseModel):
+    attempts: list[QuizAttemptListItem]
+    total: int
+
+
+class QuizDeleteResponse(BaseModel):
+    deleted: bool
+
+
+class PublicQuizResponse(BaseModel):
+    share_code: str
+    kind: str
+    title: str
+    require_name: bool
+    time_limit_minutes: int | None
+    quiz_id: uuid.UUID | None
+    description: str | None = None
+    question_count: int
+    difficulty: str
+    questions: list[QuizQuestionResponse]
 
 
 # ---------------------------------------------------------------------------
@@ -91,9 +147,9 @@ def _shuffle_options(questions: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/{quiz_id}")
+@router.get("/{quiz_id}", response_model=QuizResponse)
 async def get_quiz(
-    quiz_id: str,
+    quiz_id: uuid.UUID,
     request: Request,
     user: UserContext = Depends(get_user_context),
 ):
@@ -107,7 +163,7 @@ async def get_quiz(
 
 @router.post("/{quiz_id}/submit", response_model=QuizAttemptResponse)
 async def submit_quiz(
-    quiz_id: str,
+    quiz_id: uuid.UUID,
     body: QuizSubmitRequest,
     request: Request,
     user: UserContext = Depends(get_user_context),
@@ -127,9 +183,9 @@ async def submit_quiz(
     return result
 
 
-@router.get("/{quiz_id}/attempts")
+@router.get("/{quiz_id}/attempts", response_model=QuizAttemptListResponse)
 async def list_attempts(
-    quiz_id: str,
+    quiz_id: uuid.UUID,
     request: Request,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
@@ -142,9 +198,9 @@ async def list_attempts(
     )
 
 
-@router.delete("/{quiz_id}")
+@router.delete("/{quiz_id}", response_model=QuizDeleteResponse)
 async def delete_quiz(
-    quiz_id: str,
+    quiz_id: uuid.UUID,
     request: Request,
     user: UserContext = Depends(get_user_context),
 ):
@@ -163,7 +219,7 @@ async def delete_quiz(
 public_router = APIRouter(prefix="/quiz/shared", tags=["quiz-public"])
 
 
-@public_router.get("/{share_code}")
+@public_router.get("/{share_code}", response_model=PublicQuizResponse)
 async def get_shared_quiz(share_code: str, request: Request):
     """Get a quiz for public taking (no auth required). Returns questions without answers."""
     mgr = _get_share_manager(request)
@@ -176,7 +232,7 @@ async def get_shared_quiz(share_code: str, request: Request):
     return artifact
 
 
-@public_router.post("/{share_code}/submit")
+@public_router.post("/{share_code}/submit", response_model=QuizAttemptResponse)
 async def submit_shared_quiz(
     share_code: str,
     body: PublicQuizSubmitRequest,
