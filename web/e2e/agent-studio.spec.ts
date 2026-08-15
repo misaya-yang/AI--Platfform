@@ -636,6 +636,24 @@ test.describe("Agent Studio workbench", () => {
     });
   }
 
+  test("keeps a server-default Draft editable and saveable", async ({ page }) => {
+    const state = await installHarness(page);
+    state.currentSpec = {
+      ...state.currentSpec,
+      model: { ...state.currentSpec.model, model_id: "" },
+    };
+    await page.goto(`/agents/${AGENT_ID}`, { waitUntil: "domcontentloaded" });
+
+    await expect(page.getByText("Server default").first()).toBeVisible();
+    await page.getByLabel("Description").fill("Keep using the deployment default model.");
+    const saveDraft = page.locator(".agent-studio-actions").getByRole("button", { name: "Save draft" });
+    await expect(saveDraft).toBeEnabled();
+    await saveDraft.click();
+
+    await expect(page.locator(".agent-save-state")).toHaveText("Saved");
+    expect(state.currentSpec.model.model_id).toBe("");
+  });
+
   test("saves Draft edits and surfaces validation and 409 conflict states", async ({ page }) => {
     const state = await installHarness(page);
     await page.setViewportSize({ width: 1440, height: 900 });

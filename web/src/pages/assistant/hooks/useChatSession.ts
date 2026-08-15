@@ -1144,7 +1144,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     const startTime = Date.now();
     const streamTrace = startChatStreamTrace("assistant", {
       sessionId: sessionId || null,
-      modelId: config.selected_model || "gpt-4o",
+      modelId: config.selected_model || null,
     });
     let streamTraceClosed = false;
     const closeStreamTrace = (
@@ -1245,7 +1245,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         message: messageContent,
         session_id: sessionId || undefined,
         history,
-        model_id: config.selected_model || "gpt-4o",
+        model_id: config.selected_model || undefined,
         temperature: config.temperature,
         system_prompt: styleSystemPrompt || undefined,
         kb_dataset_ids: config.selected_datasets,

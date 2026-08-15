@@ -29,17 +29,6 @@ from ai_gateway_core.config.endpoints import (
 _SCHEMA_VERSION = "assistant-startup-config/v1"
 
 
-def _default_model() -> str:
-    """Deployment default model.
-
-    Lazy import: ``core.models``'s package init pulls in modules that
-    import this one, so a module-level import would be circular.
-    """
-    from ..core.models.defaults import DEFAULT_MODEL
-
-    return DEFAULT_MODEL
-
-
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _PRIMITIVE_TRUTHY = frozenset({"1", "true", "yes"})
 _SAFE_BUILD_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@:+-]{0,255}$")
@@ -288,6 +277,13 @@ class ResolvedSetting:
         }
 
 
+def _default_model_summary(settings: Mapping[str, ResolvedSetting]) -> dict[str, str]:
+    """Project the default model from the same frozen startup settings."""
+
+    setting = settings["DEFAULT_MODEL"]
+    return {"value": str(setting.value), "source": setting.source}
+
+
 @dataclass(frozen=True, slots=True)
 class ResolvedRuntimeSetting:
     """One runtime-affecting value plus its closed, secret-safe projection."""
@@ -405,9 +401,7 @@ class StartupConfigSnapshot:
                 name: {"configured": configured}
                 for name, configured in sorted(self.secrets.items())
             },
-            "model": {
-                "default": {"value": _default_model(), "source": "code_default"},
-            },
+            "model": {"default": _default_model_summary(self.settings)},
             "build": {name: dict(item) for name, item in sorted(self.build.items())},
         }
 
@@ -1374,7 +1368,7 @@ def _canonical_body(
         "secrets": {
             name: {"configured": configured} for name, configured in sorted(secrets.items())
         },
-        "model": {"default": {"value": _default_model(), "source": "code_default"}},
+        "model": {"default": _default_model_summary(settings)},
         "build": {name: dict(item) for name, item in sorted(build.items())},
     }
 

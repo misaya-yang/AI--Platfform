@@ -222,6 +222,15 @@ def test_validate_env_default_model_optional_round_trip(tmp_path: Path) -> None:
     assert "DEFAULT_MODEL must be non-empty when set" in output
 
 
+def test_compose_injects_one_default_model_into_gateway_and_assistant() -> None:
+    compose = Path("docker-compose.yml").read_text()
+    expected = 'DEFAULT_MODEL: "${DEFAULT_MODEL:-qwen3.7-plus}"'
+
+    for service in ("gateway", "assistant-service"):
+        section = _compose_service_section(compose, service)
+        assert expected in section, f"{service} does not receive DEFAULT_MODEL"
+
+
 def test_validate_env_rejects_non_release_application_image_tag(
     tmp_path: Path,
 ) -> None:

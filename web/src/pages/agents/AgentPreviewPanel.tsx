@@ -315,7 +315,7 @@ export function AgentPreviewPanel({
       />
 
       <div className="agent-effective-summary" aria-label={t("agents.preview.summaryLabel")}>
-        <span>{t("agents.preview.summaryModel", { model: effectiveSpec.model.model_id })}</span>
+        <span>{t("agents.preview.summaryModel", { model: effectiveSpec.model.model_id || t("agents.common.serverDefault") })}</span>
         <span>{t("agents.preview.summaryCapabilities", { count: effectiveSpec.capabilities.length })}</span>
         <span>{t("agents.preview.summaryKnowledge", { count: effectiveSpec.knowledge.length })}</span>
         <span>{t("agents.preview.summaryMemory", { mode: memoryModeLabel })}</span>

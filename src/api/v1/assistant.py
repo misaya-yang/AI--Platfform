@@ -520,6 +520,28 @@ async def _check_model_permission(user: UserContext, model_id: str, model_meta: 
         )
 
 
+def _effective_chat_model_id(request: Request, requested_model_id: str | None) -> str:
+    """Resolve the exact model that Gateway authorizes and proxies downstream."""
+
+    requested = str(requested_model_id or "").strip()
+    if requested:
+        return requested
+
+    settings = getattr(request.app.state, "settings", None)
+    default_model = str(getattr(settings, "default_model", "") or "").strip()
+    if not default_model:
+        raise HTTPException(status_code=503, detail="Default model is not configured")
+    return default_model
+
+
+def _chat_body_with_model(raw_body: Any, model_id: str) -> bytes:
+    """Return the validated client body with the server-resolved model pinned."""
+
+    payload = dict(raw_body) if isinstance(raw_body, dict) else {}
+    payload["model_id"] = model_id
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
 async def _validate_chat_session_access(
     request: Request,
     user: UserContext,
@@ -574,9 +596,10 @@ async def chat(
     # Model-permission authz. assistant-service enforces tenant-scoped
     # model lookups on its side too, but belt-and-braces at the edge
     # makes the 403 come back fast without a proxy round-trip.
+    model_id = _effective_chat_model_id(request, body.model_id)
     model_meta = getattr(request.app.state, "model_meta", None)
     if model_meta:
-        await _check_model_permission(user, body.model_id, model_meta)
+        await _check_model_permission(user, model_id, model_meta)
 
     session_id = body.session_id or str(uuid.uuid4())
     if body.session_id:
@@ -584,7 +607,7 @@ async def chat(
 
     from ._assistant_proxy import proxy_to_assistant_service
 
-    body_bytes = await request.body()
+    body_bytes = _chat_body_with_model(raw_body, model_id)
     return await proxy_to_assistant_service(request, user, path="chat", body=body_bytes)
 
 
@@ -638,9 +661,9 @@ async def chat_stream(
     # 403 comes back without a proxy round-trip. DB-backed
     # ``GatewayModelMeta`` query (<1 ms) — the old in-memory
     # ModelRegistry lookup went away with Phase 5e's split.
-    model_id = validated_body.model_id
+    model_id = _effective_chat_model_id(request, validated_body.model_id)
     model_meta = getattr(request.app.state, "model_meta", None)
-    if model_id and model_meta:
+    if model_meta:
         await _check_model_permission(user, model_id, model_meta)
 
     # Authz 2: session ownership. Users resuming a conversation must own
@@ -650,6 +673,7 @@ async def chat_stream(
     if session_id:
         await _validate_chat_session_access(request=request, user=user, session_id=session_id)
 
+    body_bytes = _chat_body_with_model(body_json, model_id)
     return await proxy_to_assistant_service(request, user, path="chat/stream", body=body_bytes)
 
 

@@ -312,16 +312,16 @@ The knowledge service supports document ingestion, chunking, vector indexing, an
 Embedding configuration is controlled by:
 
 ```env
-KB_EMBEDDING_PROVIDER=gemini
-KB_EMBEDDING_API_KEY=...
-KB_EMBEDDING_MODEL=gemini-embedding-2-preview
+KB_EMBEDDING_PROVIDER=dashscope
+KB_EMBEDDING_API_KEY=
+KB_EMBEDDING_MODEL=text-embedding-v4
 KB_EMBEDDING_DIMENSION=1024
 ```
 
 Provider notes:
 
 - `gemini`: set `KB_EMBEDDING_API_KEY` to your Google/Gemini embedding key.
-- `dashscope`: set `KB_EMBEDDING_PROVIDER=dashscope`, use a DashScope embedding model, and set `KB_EMBEDDING_API_KEY`.
+- `dashscope`: the default `text-embedding-v4` path reuses `DASHSCOPE_API_KEY`; set `KB_EMBEDDING_API_KEY` only to override it with a dedicated embedding key.
 - `siliconflow`: set `KB_EMBEDDING_PROVIDER=siliconflow`, use a SiliconFlow embedding model, and set `KB_EMBEDDING_API_KEY`.
 
 ## General AI Assistant
@@ -465,7 +465,7 @@ docker compose logs --tail=200 qdrant
 Common causes:
 
 - `.env` still contains `change_me_*` placeholders.
-- Only a chat key is configured; the knowledge base also needs `KB_EMBEDDING_API_KEY`.
+- The configured embedding provider has no usable credential. The default DashScope path reuses `DASHSCOPE_API_KEY`; `KB_EMBEDDING_API_KEY` is only a dedicated-key override.
 - PostgreSQL password was changed after the first volume initialization.
 - Qdrant is running with old vectors from a different embedding dimension.
 - `FRONTEND_PORT`, `GATEWAY_PORT`, `POSTGRES_PORT`, `REDIS_PORT`, or `QDRANT_HTTP_PORT` conflicts with another local process.

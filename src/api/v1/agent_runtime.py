@@ -277,14 +277,25 @@ async def _resolved_model(
 
     spec = resolution["spec"]
     requested = spec.get("model") if isinstance(spec.get("model"), dict) else {}
-    model_id = str(requested.get("model_id") or "")
+    requested_model_id = str(requested.get("model_id") or "").strip()
+    uses_default_model = not requested_model_id
+    model_id = requested_model_id
+    if uses_default_model:
+        settings = getattr(request.app.state, "settings", None)
+        model_id = str(getattr(settings, "default_model", "") or "").strip()
     if not model_id:
         _raise_runtime_error(
             request,
-            422,
+            503,
             "AGENT_RUNTIME_MODEL_UNAVAILABLE",
             "Agent model is unavailable",
         )
+    effective_requested = dict(requested)
+    effective_requested["model_id"] = model_id
+    if uses_default_model:
+        # An empty model_id delegates both model and provider selection to the
+        # server. A UI placeholder provider must not constrain that lookup.
+        effective_requested.pop("provider_id", None)
 
     e2e_stub_enabled = os.getenv("ASSISTANT_E2E_STUB_LLM", "").strip().lower() in {
         "1",
@@ -294,13 +305,13 @@ async def _resolved_model(
     }
     resolver = getattr(request.app.state, "agent_runtime_model_resolver", None)
     if e2e_stub_enabled:
-        provider = str(requested.get("provider_id") or "dashscope")
+        provider = str(effective_requested.get("provider_id") or "dashscope")
     elif resolver is not None:
         try:
             result = resolver.resolve(
                 tenant_id=user.tenant_id,
                 user_id=user.user_id,
-                model=dict(requested),
+                model=effective_requested,
             )
             if inspect.isawaitable(result):
                 result = await result
@@ -337,7 +348,9 @@ async def _resolved_model(
                 row = await model_service.get_model(
                     user.tenant_id,
                     model_id,
-                    provider_id=(str(requested.get("provider_id") or "") or None),
+                    provider_id=(
+                        str(effective_requested.get("provider_id") or "") or None
+                    ),
                 )
             else:
                 row = await model_service.get_model(user.tenant_id, model_id)
@@ -356,7 +369,7 @@ async def _resolved_model(
                 "AGENT_RUNTIME_MODEL_UNAVAILABLE",
                 "Agent model is unavailable",
             )
-        requested_provider = str(requested.get("provider_id") or "")
+        requested_provider = str(effective_requested.get("provider_id") or "")
         if requested_provider and requested_provider != provider:
             _raise_runtime_error(
                 request,
