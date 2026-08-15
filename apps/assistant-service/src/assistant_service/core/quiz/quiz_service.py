@@ -13,14 +13,14 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ai_gateway_core.persistence import DatabaseStorageLike
 
-from ai_gateway_core.quiz.quiz_grader import QuizGrader
+from ai_gateway_core.quiz import QuizAccessService, QuizGrader
 
 from .quiz_generator import QuizGenerator
 
 logger = logging.getLogger(__name__)
 
 
-class QuizService:
+class QuizService(QuizAccessService):
     """Core quiz orchestration: create, fetch, grade, persist."""
 
     def __init__(
@@ -29,9 +29,8 @@ class QuizService:
         generator: QuizGenerator | None = None,
         grader: QuizGrader | None = None,
     ) -> None:
-        self.db = db
+        super().__init__(db=db, grader=grader)
         self.generator = generator
-        self.grader = grader or QuizGrader()
 
     # -------------------------------------------------------------------------
     # Create

@@ -21,9 +21,8 @@ import logging
 import random
 from typing import Any
 
-from ai_gateway_core.quiz import QuizGrader
+from ai_gateway_core.quiz import QuizAccessService, QuizGrader
 from ai_gateway_core.sharing import ArtifactShareManager
-from assistant_service.core.quiz import QuizService
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
@@ -62,12 +61,12 @@ class QuizAttemptResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _get_quiz_service(request: Request) -> QuizService:
-    """Build a QuizService from app state (read/grade/delete only — no generator)."""
+def _get_quiz_service(request: Request) -> QuizAccessService:
+    """Build the shared read/grade/delete service from app state."""
     db = getattr(request.app.state, "database", None)
     if db is None:
         raise HTTPException(503, "Database not available")
-    return QuizService(db=db, generator=None, grader=QuizGrader())
+    return QuizAccessService(db=db, grader=QuizGrader())
 
 
 def _get_share_manager(request: Request) -> ArtifactShareManager:

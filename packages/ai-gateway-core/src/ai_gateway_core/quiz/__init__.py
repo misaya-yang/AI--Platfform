@@ -1,10 +1,11 @@
-"""Quiz grading primitive.
+"""Shared quiz grading and persistence primitives.
 
-Generation and orchestration moved to apps/assistant-service/core/quiz/
-(product-convergence PC-03). The grader stays here because the gateway
-grades anonymous share submissions in-process (see src/api/v1/quiz.py).
+Generation stays in apps/assistant-service/core/quiz/ (product-convergence
+PC-03). Gateway-facing read/submit/delete operations live here so the gateway
+never imports the assistant-service application package.
 """
 
+from .quiz_access_service import QuizAccessService
 from .quiz_grader import QuizGrader
 
-__all__ = ["QuizGrader"]
+__all__ = ["QuizAccessService", "QuizGrader"]
