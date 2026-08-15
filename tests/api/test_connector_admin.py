@@ -683,3 +683,19 @@ def test_response_contract_uses_datetimes_and_has_no_secret_field() -> None:
         "ConnectorAuthResponse"
     ]
     assert "client_secret" not in auth_schema["properties"]
+
+
+def test_response_contract_decodes_legacy_json_string_extra_config() -> None:
+    public = ConnectorProviderResponse.model_validate(
+        _row_to_response(
+            _config_row(
+                extra_config=(
+                    '{"audience":"api.atlassian.com",'
+                    '"mcp_tools":[{"name":"search","description":"Search"}]}'
+                )
+            )
+        )
+    )
+
+    assert public.extra_config == {"audience": "api.atlassian.com"}
+    assert [tool.name for tool in public.mcp_tools] == ["search"]

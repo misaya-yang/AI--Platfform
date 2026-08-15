@@ -850,15 +850,11 @@ async def delete_session(
     """
     from ._route_flags import proxied
 
-    if proxied("SESSIONS"):
-        from ._assistant_proxy import proxy_to_assistant_service
-
-        return await proxy_to_assistant_service(request, user, path=f"sessions/{session_id}")
-
     session_manager = get_session_manager(request)
 
     try:
-        # First verify ownership
+        # Verify ownership against the gateway's canonical session row before
+        # asking assistant-service to clear its runtime/session-schema state.
         session = await session_manager.get(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -866,7 +862,23 @@ async def delete_session(
         if session.user_id != user.user_id or session.tenant_id != user.tenant_id:
             raise HTTPException(status_code=404, detail="Session not found")
 
+        if proxied("SESSIONS"):
+            from ._assistant_proxy import proxy_to_assistant_service
+
+            upstream_response = await proxy_to_assistant_service(
+                request,
+                user,
+                path=f"sessions/{session_id}",
+            )
+            if getattr(upstream_response, "status_code", 200) >= 400:
+                return upstream_response
+
         await session_manager.delete(session_id)
+        if await session_manager.get(session_id) is not None:
+            raise HTTPException(status_code=503, detail="Session deletion was not completed")
+
+        if proxied("SESSIONS"):
+            return upstream_response
         return {"session_id": session_id, "status": "deleted"}
     except HTTPException:
         raise

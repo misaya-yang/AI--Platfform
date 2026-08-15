@@ -602,6 +602,29 @@ async def test_session_delete_partial_failure_never_reports_success(
         sm.delete.assert_awaited_once_with("session-a")
 
 
+@pytest.mark.asyncio
+async def test_session_delete_accepts_absent_assistant_schema_row_after_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = UserContext(user_id="user-a", tenant_id="tenant-a")
+    manager = TaskManager()
+    memory = _ScopedSessionMemory()
+    sm = _session_manager(owner=owner, delete_result=False)
+    sm.get.side_effect = [None, None]
+    monkeypatch.setattr(session_routes, "get_task_manager", lambda: manager)
+
+    result = await session_routes.delete_session(
+        "session-a",
+        _request(session_manager=sm, memory_service=memory),
+        owner,
+    )
+
+    assert result == {"status": "deleted", "session_id": "session-a"}
+    assert memory.delete_calls == [("tenant-a", "session-a")]
+    sm.delete.assert_awaited_once_with("session-a")
+    assert sm.get.await_count == 2
+
+
 class _ReadbackDatabase:
     def __init__(self, *, remaining: bool, error: BaseException | None = None) -> None:
         self.remaining = remaining

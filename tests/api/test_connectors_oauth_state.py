@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from ai_gateway_core.security import encrypt_value
@@ -14,6 +15,7 @@ from src.api.v1.connectors import (
     _decrypt_connector_secret,
     _refresh_token_if_needed,
     _store_oauth_state,
+    initiate_oauth,
     oauth_callback,
 )
 from src.core.auth.user_resolver import UserContext
@@ -145,6 +147,29 @@ class _ConnectorDb:
 
     async def execute(self, query: str, *args) -> None:
         self.executions.append((query, args))
+
+
+@pytest.mark.asyncio
+async def test_oauth_init_decodes_json_string_extra_config() -> None:
+    db = _ConnectorDb(
+        {
+            "tenant_id": "tenant",
+            "provider": "confluence",
+            "client_id": "client-id",
+            "auth_url": "https://oauth.example/authorize",
+            "token_url": "https://oauth.example/token",
+            "redirect_uri": None,
+            "scopes": "read",
+            "enabled": True,
+            "extra_config": '{"audience":"custom-audience"}',
+        }
+    )
+    request = _request(redis=_FakeRedis(), database=db)
+
+    result = await initiate_oauth("confluence", request, _user())
+
+    params = parse_qs(urlsplit(result["auth_url"]).query)
+    assert params["audience"] == ["custom-audience"]
 
 
 @pytest.mark.asyncio

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -154,7 +155,13 @@ def _row_to_response(row: dict[str, Any]) -> dict[str, Any]:
 
     client_secret is write-only — it is dropped here and never re-added.
     """
-    extra = dict(row.get("extra_config") or {})
+    raw_extra = row.get("extra_config")
+    if isinstance(raw_extra, str):
+        try:
+            raw_extra = json.loads(raw_extra)
+        except (TypeError, json.JSONDecodeError):
+            raw_extra = None
+    extra = dict(raw_extra) if isinstance(raw_extra, Mapping) else {}
     mcp_tools = extra.pop(_MCP_TOOLS_EXTRA_KEY, None) or []
     auth = None
     if any(

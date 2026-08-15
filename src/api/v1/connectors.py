@@ -18,6 +18,7 @@ import json
 import os
 import secrets
 import urllib.parse
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
@@ -210,6 +211,17 @@ def _decode_oauth_state(raw: Any) -> dict[str, Any] | None:
     if isinstance(raw, dict):
         return raw
     return None
+
+
+def _json_object(raw: Any) -> dict[str, Any]:
+    """Decode JSON/JSONB values returned by either configured asyncpg codec."""
+
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return {}
+    return dict(raw) if isinstance(raw, Mapping) else {}
 
 
 async def _redis_save_json(redis: Any, key: str, value: dict[str, Any], ttl: int) -> None:
@@ -464,7 +476,7 @@ async def initiate_oauth(
     base_url = str(request.base_url).rstrip("/")
     redirect_uri = config.get("redirect_uri") or f"{base_url}/api/v1/connectors/callback/{provider}"
 
-    extra_config = config.get("extra_config") or {}
+    extra_config = _json_object(config.get("extra_config"))
     params = {
         "client_id": config["client_id"],
         "redirect_uri": redirect_uri,
