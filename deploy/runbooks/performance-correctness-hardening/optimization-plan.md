@@ -126,6 +126,48 @@ finance/engineering、governance、unknown-effect 和 research medium 的隔离�
 完整 cohort。Web 全量 Playwright 因缺少 `E2E_API_URL`/登录环境出现 29 个环境型失败，直接覆盖
 本轮改动的定向用例通过。两项都必须按未完整验证记录，不能算 release pass。
 
+### PCH-07：用户停止与工具交换闭合（2026-08-17）
+
+问题不是“停止按钮是否变灰”，而是停止发生在模型已经产生 `tool_use`、运行时尚未追加
+`tool_result` 的窗口时，模型 transcript、SSE 生命周期和持久化检查点必须同时闭合。否则下一次
+Anthropic/OpenAI 兼容请求会携带孤立工具调用并被 provider 以 HTTP 400 拒绝。
+
+核心不变量：
+
+1. 每个已接受的 assistant tool-call ID，在任何后续模型边界或非暂停 terminal checkpoint 前，
+   必须恰好存在一个同 ID 的 tool-result；并行批次必须全量闭合，不能只闭合当前项。
+2. 用户停止先走 owner-checked task cancel API，让服务器有机会产生规范的 cancelled result；SSE
+   保留一个有界 grace 窗口接收 terminal 事件，超时后才 abort transport。
+3. 已知未执行/安全取消使用 synthetic cancelled result；dispatch 后副作用未知继续走
+   `side_effect_unknown` 阻断恢复，禁止伪造成 cancelled 或 success。
+4. synthetic result 必须同时进入模型消息、turn tool metadata、公开 SSE 和取消 checkpoint；修复逻辑
+   必须幂等，重复清理不能产生第二个 result。
+5. provider request builder 在网络请求前验证工具调用/结果配对；残缺 transcript 本地失败，不再把
+   可预防的 400 交给外部 API。
+
+实施顺序：
+
+- Web：记录 `run_started.task_id`；停止时立即标记用户意图、调用 `/assistant/tasks/{id}/cancel`，
+  继续消费闭合事件，并在 2.5 秒后 abort 兜底。停止早于 task ID 时，在收到 `run_started` 后补发取消。
+- Runtime：对当前及同批尚未执行的工具追加 bounded synthetic result，更新 `ctx.messages` 和 turn
+  records，保存 `tool_call_cancelled` checkpoint，再发 cancelled terminal。
+- Provider boundary：Anthropic 与 OpenAI-compatible body 在发送前拒绝 orphan、duplicate、missing
+  tool result，错误中只含安全的 call ID 摘要。
+- UI projection：cancelled tool 不得显示为 completed；run terminal 保持 first-wins，停止后仍可立即
+  发送下一轮消息。
+
+分层验收：
+
+- 单元：单工具、并行两工具、停止前/执行中/结果后竞态、重复清理、unknown-side-effect 分支。
+- Provider contract：完整 pair 可构造请求；missing/orphan/duplicate 在本地抛错且不发网络请求。
+- Web：`run_started` 后停止必须先命中 cancel API；grace 内保留 tool-result/run-error；无 task ID 时
+  只走有界 transport fallback。
+- Docker/内置浏览器：启动真实长工具任务，在活动面板出现 tool start 后停止；确认 cancelled result
+  与 terminal 可见、服务无 provider 400，并在同一会话发送后续工具请求成功。
+
+性能阈值：停止点击后 UI 状态立即切换；本地可取消工具的 canonical terminal 目标不超过 3 秒；
+正常成功路径不得增加 provider 调用次数，非停止请求仅增加 O(n) 的小批次配对校验。
+
 ## 4. 回滚与边界
 
 - 每个 phase 单独可回滚；不混合 schema、前端和 AgentLoop 大改。

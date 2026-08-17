@@ -17,9 +17,7 @@ import hashlib
 import os
 import re
 import sys
-from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -38,29 +36,41 @@ MIGRATIONS_DIR = DATABASE_DIR / "migrations"
 
 
 def get_dsn() -> str:
-    """Get database DSN from environment or settings."""
-    # 1) Explicit environment variable
-    dsn = os.environ.get("GATEWAY_DATABASE__DSN")
+    """Get database DSN from environment or settings. Fail closed — no default password."""
+    dsn = os.environ.get("DATABASE_URL") or os.environ.get("GATEWAY_DATABASE__DSN")
     if dsn:
         return dsn
 
-    # 2) Try loading from project Settings
     try:
         from src.config.settings import Settings
         settings = Settings()
         if getattr(settings, "database", None) and settings.database.dsn:
             return settings.database.dsn
     except Exception:
-        pass
+        print("Failed to load Settings for database DSN.", file=sys.stderr)
 
-    # 3) Fallback default
-    return "postgresql://postgres:postgres@localhost:5432/gateway"
+    print(
+        "DATABASE_URL and GATEWAY_DATABASE__DSN are not set, and Settings "
+        "could not provide a DSN. "
+        "Cannot determine database connection string.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 
 def mask_dsn(dsn: str) -> str:
-    """Mask password in DSN for display."""
-    import re
-    return re.sub(r':([^:@]+)@', ':******@', dsn)
+    """Mask the userinfo password in a DSN without leaking ':' or '@' inside it."""
+    scheme_sep = dsn.find("://")
+    if scheme_sep == -1:
+        return dsn
+    userinfo_start = scheme_sep + 3
+    at = dsn.rfind("@")
+    if at <= userinfo_start:
+        return dsn
+    colon = dsn.find(":", userinfo_start)
+    if colon == -1 or colon > at:
+        return dsn
+    return f"{dsn[: colon + 1]}******{dsn[at:]}"
 
 
 def compute_checksum(content: str) -> str:
@@ -68,7 +78,7 @@ def compute_checksum(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
 
 
-def discover_migrations() -> List[Tuple[str, str, Path]]:
+def discover_migrations() -> list[tuple[str, str, Path]]:
     """
     Discover all migration files.
 
@@ -129,7 +139,7 @@ async def ensure_migration_table(conn: asyncpg.Connection) -> None:
     """)
 
 
-async def get_applied_migrations(conn: asyncpg.Connection) -> List[str]:
+async def get_applied_migrations(conn: asyncpg.Connection) -> list[str]:
     """Get list of applied migration versions."""
     rows = await conn.fetch(
         "SELECT version FROM schema_migrations ORDER BY version"
@@ -155,7 +165,7 @@ async def record_migration(
     """, version, name, checksum, execution_time_ms)
 
 
-async def run_sql_file(conn: asyncpg.Connection, file_path: Path) -> Tuple[bool, str, int]:
+async def run_sql_file(conn: asyncpg.Connection, file_path: Path) -> tuple[bool, str, int]:
     """
     Execute a SQL file.
 
@@ -174,12 +184,12 @@ async def run_sql_file(conn: asyncpg.Connection, file_path: Path) -> Tuple[bool,
         execution_time_ms = int((time.time() - start_time) * 1000)
         return True, "OK", execution_time_ms
 
-    except asyncpg.exceptions.DuplicateTableError as e:
-        return True, f"Table already exists (skipped)", 0
-    except asyncpg.exceptions.DuplicateColumnError as e:
-        return True, f"Column already exists (skipped)", 0
-    except asyncpg.exceptions.DuplicateObjectError as e:
-        return True, f"Object already exists (skipped)", 0
+    except asyncpg.exceptions.DuplicateTableError:
+        return True, "Table already exists (skipped)", 0
+    except asyncpg.exceptions.DuplicateColumnError:
+        return True, "Column already exists (skipped)", 0
+    except asyncpg.exceptions.DuplicateObjectError:
+        return True, "Object already exists (skipped)", 0
     except Exception as e:
         return False, str(e), 0
 
@@ -262,7 +272,7 @@ async def cmd_init():
         await conn.close()
 
 
-async def cmd_migrate(target_version: Optional[str] = None):
+async def cmd_migrate(target_version: str | None = None):
     """Run pending migrations."""
     dsn = get_dsn()
     print(f"\nDatabase: {mask_dsn(dsn)}")
@@ -308,7 +318,7 @@ async def cmd_migrate(target_version: Optional[str] = None):
                 print("\nMigration aborted.")
                 sys.exit(1)
 
-        print(f"\nAll migrations completed successfully!")
+        print("\nAll migrations completed successfully!")
 
     finally:
         await conn.close()
@@ -334,8 +344,7 @@ async def cmd_status():
         print("Migration Status")
         print("=" * 60)
 
-        for version, description, path in migrations:
-            status = "Applied" if version in applied else "Pending"
+        for version, description, _path in migrations:
             icon = "[x]" if version in applied else "[ ]"
             print(f"  {icon} {version}  {description}")
 

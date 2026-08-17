@@ -42,6 +42,7 @@ logger = get_logger(__name__)
 
 router = APIRouter()
 _E2E_MEMORY_BY_USER: dict[str, dict[str, str]] = {}
+_CONTROL_AUDIT_TEXT_LIMIT = 4096
 _RESERVED_AGENT_RUNTIME_FIELDS = frozenset(
     {
         "agent_id",
@@ -57,6 +58,70 @@ _RESERVED_AGENT_RUNTIME_FIELDS = frozenset(
         "model_provider_id",
     }
 )
+
+
+def _control_audit_digest(value: Any) -> str:
+    encoded = str(value or "").encode("utf-8", errors="replace")
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+class TaskCancelRequest(BaseModel):
+    reason: str | None = None
+
+
+class TaskCancelResponse(BaseModel):
+    task_id: str
+    session_id: str
+    cancelled: bool
+    message: str
+
+
+@router.post("/tasks/{task_id}/cancel", response_model=TaskCancelResponse)
+async def cancel_task(
+    task_id: str,
+    body: TaskCancelRequest | None = None,
+    user: UserContext = Depends(get_user_context),
+) -> TaskCancelResponse:
+    """Cancel a task in this process after owner-scoped lookup."""
+
+    from ai_gateway_core.tasks import get_task_manager
+
+    task_manager = get_task_manager()
+    task_ctx = await task_manager.get_task_context(task_id)
+    if task_ctx is None:
+        raise HTTPException(status_code=404, detail="Task not found or already completed")
+    session = await task_manager.get_session(
+        task_ctx.session_id,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+    )
+    if session is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    success = await task_manager.cancel_task(task_ctx.session_id, task_id)
+    reason = body.reason if body else None
+    reason_chars = len(str(reason or ""))
+    logger.info(
+        "event_code=assistant_control_task_cancel_requested event_type=task_cancel "
+        "task_sha256=%s actor_sha256=%s reason_sha256=%s reason_chars=%s "
+        "reason_truncated=%s accepted=%s",
+        _control_audit_digest(task_id),
+        _control_audit_digest(user.user_id),
+        _control_audit_digest(reason),
+        min(reason_chars, _CONTROL_AUDIT_TEXT_LIMIT),
+        str(reason_chars > _CONTROL_AUDIT_TEXT_LIMIT).lower(),
+        str(bool(success)).lower(),
+    )
+    return TaskCancelResponse(
+        task_id=task_id,
+        session_id=task_ctx.session_id,
+        cancelled=success,
+        message=(
+            "Cancellation requested"
+            if success
+            else "Task already completed or not cancellable"
+        ),
+    )
 
 
 class ChatRequest(BaseModel):

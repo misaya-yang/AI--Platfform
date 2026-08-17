@@ -31,6 +31,8 @@ class StreamingAuthConfig:
     anonymous_enabled: bool = True
     anonymous_cookie: str = "ag_anon_id"
     anonymous_header: str = "X-AG-Anonymous-Id"
+    jwt_audience: str | None = None
+    jwt_issuer: str | None = None
     whitelist_paths: list[str] = field(
         default_factory=lambda: [
             "/health",
@@ -119,17 +121,24 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
                 logger.debug("JWT secret not configured, skipping JWT authentication")
             else:
                 try:
-                    import jwt
+                    # SPO-02 / GW3: verify ONCE here with the same strictness
+                    # as the API deps (same canonical decoder, same secret /
+                    # algorithms / audience / issuer sources), and stash the
+                    # verified claims so deps reuse them instead of decoding
+                    # the token a second time.
+                    from ...auth.jwt import decode_jwt_token
+                    from ...auth.jwt_config import get_jwt_algorithms, get_jwt_secret
 
                     token = auth_header.split(" ", 1)[1]
 
-                    # CRITICAL FIX: Verify signature using PyJWT
-                    payload = jwt.decode(
+                    payload = decode_jwt_token(
                         token,
-                        key=jwt_secret,
-                        algorithms=jwt_algorithms,
-                        options={"verify_signature": True, "verify_exp": True},
+                        secret=get_jwt_secret(jwt_secret),
+                        algorithms=get_jwt_algorithms(jwt_algorithms),
+                        audience=getattr(self.config, "jwt_audience", None),
+                        issuer=getattr(self.config, "jwt_issuer", None),
                     )
+                    scope.setdefault("state", {})["verified_jwt_claims"] = payload
 
                     user_id = str(payload.get("sub") or payload.get("user_id") or "")
                     if user_id:
@@ -142,14 +151,11 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
                             "ip": client_ip,
                             "roles": payload.get("roles", ["user"]),
                         }
-                except jwt.InvalidSignatureError:
-                    logger.warning(f"Invalid JWT signature from {client_ip}")
-                except jwt.ExpiredSignatureError:
-                    logger.warning(f"Expired JWT token from {client_ip}")
-                except jwt.DecodeError as e:
-                    logger.warning(f"JWT decode error from {client_ip}: {e}")
                 except Exception as e:
-                    logger.error(f"Unexpected JWT error from {client_ip}: {e}")
+                    # Same never-reject contract as before: a bad token falls
+                    # through to API key / guest / anonymous; the API deps
+                    # still raise the strict 401 on their own verification.
+                    logger.warning(f"JWT verification failed from {client_ip}: {e}")
                 # Fall through to other auth methods or anonymous
 
         # Try configured static API keys. Unknown client-supplied keys must not

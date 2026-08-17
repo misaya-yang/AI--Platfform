@@ -207,6 +207,7 @@ async def test_tenant_admin_cannot_operate_on_a_user_in_another_tenant(
 @pytest.mark.asyncio
 async def test_create_user_uses_callers_tenant(monkeypatch) -> None:
     db = _TenantDB()
+    monkeypatch.setattr(users_module, "DEFAULT_PASSWORD", "test-bootstrap-password")
     monkeypatch.setattr(users_module, "hash_password", lambda _value: "test-hash")
 
     result = await create_user(
@@ -219,3 +220,19 @@ async def test_create_user_uses_callers_tenant(monkeypatch) -> None:
     assert db.saved_user is not None
     assert db.saved_user["tenant_id"] == "tenant-a"
     assert db.assigned_roles == [("new-user", "user", "admin-a")]
+
+
+@pytest.mark.asyncio
+async def test_create_user_requires_configured_default_password(monkeypatch) -> None:
+    db = _TenantDB()
+    monkeypatch.setattr(users_module, "DEFAULT_PASSWORD", "")
+
+    with pytest.raises(HTTPException) as exc:
+        await create_user(
+            UserCreate(email="new-user@example.com", display_name="New tenant user"),
+            _request(db),
+            _tenant_admin(),
+        )
+
+    assert exc.value.status_code == 503
+    assert db.saved_user is None

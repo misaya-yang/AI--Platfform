@@ -1,6 +1,7 @@
 """Assistant session listing compatibility tests."""
 
 import base64
+import json
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -344,50 +345,43 @@ async def test_download_artifact_streams_local_content_instead_of_file_redirect(
 
 
 @pytest.mark.asyncio
-async def test_cancel_task_audit_log_contains_only_bounded_digests(
-    caplog: pytest.LogCaptureFixture,
+async def test_cancel_task_proxies_to_owning_assistant_process(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import ai_gateway_core.tasks as task_package
+    from src.api.v1 import _assistant_proxy
 
     task_id = "task-private-identifier"
     user_id = "user-private-identifier"
-    session_id = "session-private-identifier"
     reason = "private cancellation reason " + ("x" * 5000)
     user = UserContext(user_id=user_id, tenant_id="tenant_1", is_authenticated=True)
-    task_manager = AsyncMock()
-    task_manager.get_task_context.return_value = SimpleNamespace(session_id=session_id)
-    task_manager.get_session.return_value = Session(
-        session_id=session_id,
-        user_id=user.user_id,
-        tenant_id=user.tenant_id,
-        service_id="__builtin_assistant__",
+    request = _build_request(
+        AsyncMock(),
+        method="POST",
+        path=f"/api/v1/assistant/tasks/{task_id}/cancel",
     )
-    task_manager.cancel_task.return_value = True
-    monkeypatch.setattr(task_package, "get_task_manager", lambda: task_manager)
+    observed: dict[str, object] = {}
 
-    with caplog.at_level("INFO"):
-        response = await assistant_api.cancel_task(
-            task_id=task_id,
-            request=_build_request(AsyncMock()),
-            body=assistant_api.TaskCancelRequest(reason=reason),
-            user=user,
+    async def proxy(request_arg, user_arg, *, path: str, body: bytes):
+        observed.update(request=request_arg, user=user_arg, path=path, body=body)
+        return JSONResponse(
+            {
+                "task_id": task_id,
+                "session_id": "session-private-identifier",
+                "cancelled": True,
+                "message": "Cancellation requested",
+            }
         )
 
-    route_logs = [
-        record.getMessage() for record in caplog.records if record.name == assistant_api.__name__
-    ]
-    assert response.cancelled is True
-    assert route_logs
-    serialized = "\n".join(record.getMessage() for record in caplog.records)
-    assert "event_code=assistant_control_task_cancel_requested" in serialized
-    assert "event_type=task_cancel" in serialized
-    assert "task_sha256=" in serialized
-    assert "actor_sha256=" in serialized
-    assert "reason_sha256=" in serialized
-    assert "reason_chars=4096" in serialized
-    assert "reason_truncated=true" in serialized
-    assert task_id not in serialized
-    assert user_id not in serialized
-    assert session_id not in serialized
-    assert reason not in serialized
+    monkeypatch.setattr(_assistant_proxy, "proxy_to_assistant_service", proxy)
+    response = await assistant_api.cancel_task(
+        task_id=task_id,
+        request=request,
+        body=assistant_api.TaskCancelRequest(reason=reason),
+        user=user,
+    )
+
+    assert response.status_code == 200
+    assert observed["request"] is request
+    assert observed["user"] is user
+    assert observed["path"] == f"tasks/{task_id}/cancel"
+    assert json.loads(observed["body"]) == {"reason": reason}

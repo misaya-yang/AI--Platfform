@@ -12,6 +12,7 @@ Supports three OCR strategies:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import enum
 import logging
@@ -180,7 +181,8 @@ def ocr_image_bytes(
         img_file.write(image_bytes)
         img_path = img_file.name
 
-    out_base = tempfile.NamedTemporaryFile(delete=False).name
+    with tempfile.NamedTemporaryFile(delete=False) as out_file:
+        out_base = out_file.name
 
     try:
         # Try OCR with configured languages
@@ -372,7 +374,8 @@ def _run_tesseract_with_temp(
         img_file.write(img_bytes)
         img_path = img_file.name
 
-    out_base = tempfile.NamedTemporaryFile(delete=False).name
+    with tempfile.NamedTemporaryFile(delete=False) as out_file:
+        out_base = out_file.name
 
     try:
         text = _run_tesseract(tesseract, img_path, out_base, langs, dpi, timeout)
@@ -391,7 +394,6 @@ def _process_completed_futures(futures: list, parts_by_page: dict[int, str]) -> 
 
     Safely removes completed futures from the list without corrupting iteration.
     """
-    from concurrent.futures import as_completed
 
     # Collect completed futures first, then remove — avoids modifying list during iteration
     done = [f for f in futures if f.done()]
@@ -441,8 +443,11 @@ async def ocr_image_bytes_auto(
     """
     strat = strategy.lower().strip()
 
+    # SPO-04 / K2: Tesseract runs a subprocess; keep it off the event loop.
     if strat == OCRStrategy.TESSERACT or (strat != OCRStrategy.TESSERACT and vlm_ocr_service is None):
-        return ocr_image_bytes(image_bytes, config=config, fallback_to_eng=True)
+        return await asyncio.to_thread(
+            ocr_image_bytes, image_bytes, config=config, fallback_to_eng=True
+        )
 
     if strat == OCRStrategy.VLM:
         try:
@@ -461,4 +466,6 @@ async def ocr_image_bytes_auto(
     except Exception as e:
         logger.warning(f"VLM OCR failed in hybrid mode, falling back to Tesseract: {e}")
 
-    return ocr_image_bytes(image_bytes, config=config, fallback_to_eng=True)
+    return await asyncio.to_thread(
+        ocr_image_bytes, image_bytes, config=config, fallback_to_eng=True
+    )

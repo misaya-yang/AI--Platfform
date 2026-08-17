@@ -160,23 +160,29 @@ start_containers() {
         -e POSTGRES_USER="$PG_USER" \
         -e POSTGRES_PASSWORD="$PG_PASS" \
         -e POSTGRES_DB="$PG_DB" \
-        -p "${PG_PORT}:5432"
+        -p "127.0.0.1:${PG_PORT}:5432"
 
     ensure_container "$DEV_REDIS_CONTAINER" "$DEV_REDIS_IMAGE" \
         --memory "${REDIS_MEMORY_LIMIT:-256m}" \
-        -p "${REDIS_DEV_PORT}:6379" \
+        -e REDIS_PASSWORD="$REDIS_PASS" \
+        -p "127.0.0.1:${REDIS_DEV_PORT}:6379" \
         -- redis-server --requirepass "$REDIS_PASS" \
             --maxmemory "${REDIS_MAXMEMORY:-192mb}" --maxmemory-policy allkeys-lru
 
     ensure_container "$DEV_QDRANT_CONTAINER" "$DEV_QDRANT_IMAGE" \
         --memory "${QDRANT_MEMORY_LIMIT:-384m}" \
-        -p "${QDRANT_DEV_PORT}:6333" \
-        -p "${QDRANT_GRPC_DEV_PORT}:6334"
+        -p "127.0.0.1:${QDRANT_DEV_PORT}:6333" \
+        -p "127.0.0.1:${QDRANT_GRPC_DEV_PORT}:6334"
+}
+
+check_dev_redis_health() {
+    docker exec -e REDISCLI_AUTH="$REDIS_PASS" "$DEV_REDIS_CONTAINER" \
+        sh -c 'REDISCLI_AUTH="$REDISCLI_AUTH" redis-cli ping' 2>/dev/null | grep -q PONG
 }
 
 wait_all_healthy() {
     wait_for_healthy "PostgreSQL" "docker exec $DEV_PG_CONTAINER pg_isready -U $PG_USER -d $PG_DB" 30
-    wait_for_healthy "Redis" "docker exec $DEV_REDIS_CONTAINER redis-cli -a $REDIS_PASS ping 2>/dev/null | grep -q PONG" 30
+    wait_for_healthy "Redis" "check_dev_redis_health" 30
     wait_for_healthy "Qdrant" "curl -sf http://localhost:${QDRANT_DEV_PORT}/healthz" 30 || log_warn "Qdrant may still be starting"
 }
 

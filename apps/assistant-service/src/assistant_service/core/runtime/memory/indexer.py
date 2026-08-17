@@ -17,7 +17,8 @@ from typing import Any
 
 from ai_gateway_core.logging import record_internal_exception
 
-from .chunker import ChunkConfig, chunk_markdown
+from .chunker import ChunkConfig, MemoryChunk, chunk_markdown
+from .index_metrics import memory_index_metrics
 from .scope import (
     public_source_label,
     scoped_collection_candidates,
@@ -150,6 +151,13 @@ class MemoryIndexer:
         self.chunk_config = chunk_config or ChunkConfig()
         self.collection_prefix = collection_prefix
 
+    def _chunk_config_fingerprint(self) -> str:
+        return f"{self.chunk_config.target_tokens}:{self.chunk_config.overlap_tokens}"
+
+    def _chunk_markdown(self, content: str) -> list[MemoryChunk]:
+        memory_index_metrics.chunk_markdown_calls += 1
+        return chunk_markdown(content, self.chunk_config)
+
     @staticmethod
     def _collection_name(prefix: str, tenant_id: str, user_id: str) -> str:
         return scoped_collection_name(prefix, tenant_id, user_id)
@@ -256,6 +264,10 @@ class MemoryIndexer:
             completed_absence_receipt,
             persisted_content_hash,
             persisted_source_generation,
+            persisted_chunk_count,
+            persisted_chunk_fingerprint,
+            persisted_indexed_byte_length,
+            persisted_indexed_prefix_sha256,
         ) = await self._load_source_manifest(
             database=database,
             tenant_id=tenant_id,
@@ -271,7 +283,7 @@ class MemoryIndexer:
             source_id = existing_source_id
         content_sha256 = hashlib.sha256(content.encode()).hexdigest()
         content_md5 = hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()
-        expected_chunks = len(chunk_markdown(content, self.chunk_config))
+        chunk_fingerprint = self._chunk_config_fingerprint()
         vector_generation_complete = (
             persisted_vector_state == "not_configured"
             and not persisted_vector_collections
@@ -288,9 +300,12 @@ class MemoryIndexer:
             and not deletion_pending
             and persisted_content_hash == content_md5
             and persisted_source_generation == content_sha256
-            and expected_chunks == len(old_chunk_ids)
             and vector_generation_complete
+            and persisted_chunk_fingerprint in {None, chunk_fingerprint}
+            and persisted_chunk_count is not None
+            and persisted_chunk_count == len(old_chunk_ids)
         ):
+            memory_index_metrics.short_circuits += 1
             return MemoryIndexResult(
                 source_id=source_id,
                 chunk_count=len(old_chunk_ids),
@@ -310,7 +325,19 @@ class MemoryIndexer:
             # may still contain points from the previous generation.  The old
             # chunk ids and collection lineage are the only exact retry handle.
             raise RuntimeError("memory_vector_cleanup_unavailable")
-        if old_chunk_ids and self.vector_store is not None:
+        # A2 (SPO-03): byte-watermark incremental indexing for append-only
+        # journals. When the new content is the indexed prefix plus appended
+        # bytes (verified by the persisted prefix hash), only the final chunk
+        # region is re-chunked and embedded instead of the whole file.
+        content_bytes = content.encode("utf-8")
+        append_only = (
+            persisted_indexed_byte_length is not None
+            and persisted_indexed_prefix_sha256 is not None
+            and len(content_bytes) > persisted_indexed_byte_length
+            and hashlib.sha256(content_bytes[:persisted_indexed_byte_length]).hexdigest()
+            == persisted_indexed_prefix_sha256
+        )
+        if old_chunk_ids and self.vector_store is not None and not append_only:
             vector_status, _, _ = await self._delete_vector_points(
                 tenant_id=tenant_id,
                 user_id=user_id,
@@ -336,8 +363,27 @@ class MemoryIndexer:
             source_metadata.pop(reserved_key, None)
         source_metadata["indexing_token"] = indexing_token
         source_metadata["source_generation"] = content_sha256
-        source_metadata["vector_state"] = "not_configured"
-        source_metadata["vector_collections"] = []
+        if append_only and persisted_vector_collections:
+            # Kept prefix vectors remain live while the appended tail is
+            # rebuilt. Preserve their exact cleanup lineage and mark the
+            # generation incomplete until the new tail upsert succeeds.
+            source_metadata["vector_state"] = "pending"
+            source_metadata["vector_collections"] = list(
+                persisted_vector_collections
+            )
+        else:
+            source_metadata["vector_state"] = "not_configured"
+            source_metadata["vector_collections"] = []
+        if append_only:
+            if persisted_indexed_byte_length is not None:
+                source_metadata["indexed_byte_length"] = persisted_indexed_byte_length
+            if persisted_indexed_prefix_sha256 is not None:
+                source_metadata["indexed_prefix_sha256"] = (
+                    persisted_indexed_prefix_sha256
+                )
+            if persisted_chunk_count is not None:
+                source_metadata["chunk_count"] = persisted_chunk_count
+        source_metadata["chunk_config"] = chunk_fingerprint
 
         upsert_source = """
             INSERT INTO assistant_memory_sources (
@@ -429,6 +475,8 @@ class MemoryIndexer:
                 content=content,
                 metadata=metadata,
                 indexing_token=indexing_token,
+                incremental=append_only,
+                persisted_vector_collections=persisted_vector_collections,
             )
         finally:
             await database.execute(
@@ -461,24 +509,125 @@ class MemoryIndexer:
         content: str,
         metadata: dict[str, Any] | None,
         indexing_token: str,
+        incremental: bool = False,
+        persisted_vector_collections: list[str] | None = None,
     ) -> MemoryIndexResult:
-        """Replace SQL/vector derivatives for one fenced source generation."""
+        """Replace SQL/vector derivatives for one fenced source generation.
 
-        await database.execute(
-            """
-            DELETE FROM assistant_memory_chunks
-            WHERE source_id = $1::uuid
-              AND tenant_id = $2::varchar
-              AND user_id = $3::varchar
-            """,
-            source_id,
-            tenant_id,
-            user_id,
-        )
+        ``incremental`` (SPO-03 / A2) is set when the new content is the
+        indexed prefix plus appended bytes: only the final chunk region is
+        re-chunked and embedded, the earlier chunk rows and vectors stay in
+        place, and only the replaced tail points are deleted from the vector
+        store.
+        """
+        content_bytes = content.encode("utf-8")
+        watermark_patch = {
+            "indexed_byte_length": len(content_bytes),
+            "indexed_prefix_sha256": hashlib.sha256(content_bytes).hexdigest(),
+        }
 
-        chunks = chunk_markdown(content, self.chunk_config)
+        replaced_vector_point_ids: list[str] = []
+        kept_chunk_count = 0
+        if incremental:
+            rows = await database.fetch(
+                """
+                SELECT chunk_id, chunk_index, start_line
+                FROM assistant_memory_chunks
+                WHERE source_id = $1::uuid
+                  AND tenant_id = $2::varchar
+                  AND user_id = $3::varchar
+                ORDER BY chunk_index ASC
+                """,
+                source_id,
+                tenant_id,
+                user_id,
+            )
+            persisted = [
+                (
+                    str(_row_value(row, "chunk_id")),
+                    int(_row_value(row, "chunk_index")),
+                    int(_row_value(row, "start_line")),
+                )
+                for row in (rows or [])
+                if _row_value(row, "chunk_id") is not None
+            ]
+            if persisted:
+                _, tail_index, tail_start_line = persisted[-1]
+                replaced_vector_point_ids = [
+                    chunk_id
+                    for chunk_id, chunk_index, _start_line in persisted
+                    if chunk_index >= tail_index
+                ]
+                kept_chunk_count = len(persisted) - len(replaced_vector_point_ids)
+                if replaced_vector_point_ids and self.vector_store is not None:
+                    # Same fence as the full path: vectors leave the store
+                    # before SQL / watermark mutate, otherwise a failed
+                    # delete orphans tail points the next run cannot see.
+                    vector_status, _, _ = await self._delete_vector_points(
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        point_ids=replaced_vector_point_ids,
+                        collection_names=list(persisted_vector_collections or []),
+                    )
+                    if vector_status != "completed":
+                        raise RuntimeError("memory_vector_cleanup_pending")
+                await database.execute(
+                    """
+                    DELETE FROM assistant_memory_chunks
+                    WHERE source_id = $1::uuid
+                      AND tenant_id = $2::varchar
+                      AND user_id = $3::varchar
+                      AND chunk_index >= $4::integer
+                    """,
+                    source_id,
+                    tenant_id,
+                    user_id,
+                    tail_index,
+                )
+                tail_text = "\n".join(content.splitlines()[tail_start_line - 1 :])
+                chunks = [
+                    MemoryChunk(
+                        chunk_index=chunk.chunk_index + tail_index,
+                        start_line=chunk.start_line + tail_start_line - 1,
+                        end_line=chunk.end_line + tail_start_line - 1,
+                        text=chunk.text,
+                        token_estimate=chunk.token_estimate,
+                    )
+                    for chunk in self._chunk_markdown(tail_text)
+                ]
+            else:
+                # Defensive: a manifest watermark without chunk rows cannot be
+                # treated as append-only; fall back to the full path.
+                incremental = False
+                chunks = []
+        if not incremental:
+            await database.execute(
+                """
+                DELETE FROM assistant_memory_chunks
+                WHERE source_id = $1::uuid
+                  AND tenant_id = $2::varchar
+                  AND user_id = $3::varchar
+                """,
+                source_id,
+                tenant_id,
+                user_id,
+            )
+
+            chunks = self._chunk_markdown(content)
+            kept_chunk_count = 0
         if not chunks:
-            return MemoryIndexResult(source_id=source_id, chunk_count=0, vector_indexed=0)
+            if replaced_vector_point_ids and self.vector_store is not None:
+                await self._delete_vector_points(
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    point_ids=replaced_vector_point_ids,
+                    collection_names=list(persisted_vector_collections or []),
+                )
+            return MemoryIndexResult(
+                source_id=source_id,
+                chunk_count=kept_chunk_count,
+                vector_indexed=0,
+            )
 
         chunk_rows: list[tuple[str, str, str, str, int, int, int, str, int, str, str]] = []
         for chunk in chunks:
@@ -527,6 +676,26 @@ class MemoryIndexer:
         else:
             for row_data in chunk_rows:
                 await database.execute(insert_chunk, *row_data)
+
+        await database.execute(
+            """
+            UPDATE assistant_memory_sources
+            SET metadata = COALESCE(metadata, '{}'::jsonb) || $4::jsonb
+            WHERE source_id = $1::uuid
+              AND tenant_id = $2::varchar
+              AND user_id = $3::varchar
+            """,
+            source_id,
+            tenant_id,
+            user_id,
+            json.dumps(
+                {
+                    "chunk_count": kept_chunk_count + len(chunks),
+                    "chunk_config": self._chunk_config_fingerprint(),
+                    **watermark_patch,
+                }
+            ),
+        )
 
         await self._assert_source_indexable(
             database=database,
@@ -803,6 +972,10 @@ class MemoryIndexer:
                 _,
                 _,
                 _,
+                _,
+                _,
+                _,
+                _,
             ) = await self._load_source_manifest(
                 database=database,
                 tenant_id=tenant_id,
@@ -942,6 +1115,10 @@ class MemoryIndexer:
                 _,
                 _,
                 _,
+                _,
+                _,
+                _,
+                _,
             ) = await self._load_source_manifest(
                 database=database,
                 tenant_id=tenant_id,
@@ -1037,6 +1214,10 @@ class MemoryIndexer:
                 remaining_tombstone,
                 _,
                 remaining_indexing_token,
+                _,
+                _,
+                _,
+                _,
                 _,
                 _,
                 _,
@@ -1188,6 +1369,10 @@ class MemoryIndexer:
             (
                 remaining_source_id,
                 remaining_chunks,
+                _,
+                _,
+                _,
+                _,
                 _,
                 _,
                 _,
@@ -1608,6 +1793,10 @@ class MemoryIndexer:
         bool,
         str | None,
         str | None,
+        int | None,
+        str | None,
+        int | None,
+        str | None,
     ]:
         db = database or self.database
         rows = await db.fetch(
@@ -1636,6 +1825,10 @@ class MemoryIndexer:
         completed_absence_receipt = False
         content_hash: str | None = None
         source_generation: str | None = None
+        chunk_count: int | None = None
+        chunk_fingerprint: str | None = None
+        indexed_byte_length: int | None = None
+        indexed_prefix_sha256: str | None = None
         for row in rows or []:
             raw_source_id = _row_value(row, "source_id")
             if raw_source_id:
@@ -1674,6 +1867,24 @@ class MemoryIndexer:
                 raw_source_generation = str(metadata.get("source_generation") or "").strip()
                 if raw_source_generation:
                     source_generation = raw_source_generation.lower()
+                raw_chunk_count = metadata.get("chunk_count")
+                try:
+                    if raw_chunk_count is not None:
+                        chunk_count = int(raw_chunk_count)
+                except (TypeError, ValueError):
+                    chunk_count = None
+                raw_chunk_config = str(metadata.get("chunk_config") or "").strip()
+                if raw_chunk_config:
+                    chunk_fingerprint = raw_chunk_config
+                raw_indexed_byte_length = metadata.get("indexed_byte_length")
+                try:
+                    if raw_indexed_byte_length is not None:
+                        indexed_byte_length = int(raw_indexed_byte_length)
+                except (TypeError, ValueError):
+                    indexed_byte_length = None
+                raw_indexed_prefix = str(metadata.get("indexed_prefix_sha256") or "").strip()
+                if raw_indexed_prefix:
+                    indexed_prefix_sha256 = raw_indexed_prefix.lower()
                 completed_absence_receipt = completed_absence_receipt or bool(
                     metadata.get("deletion_pending") is True
                     and metadata.get("deletion_completed") is True
@@ -1697,6 +1908,10 @@ class MemoryIndexer:
             completed_absence_receipt and not chunk_ids and not vector_collections,
             content_hash,
             source_generation,
+            chunk_count,
+            chunk_fingerprint,
+            indexed_byte_length,
+            indexed_prefix_sha256,
         )
 
     @staticmethod
@@ -1845,6 +2060,7 @@ class MemoryIndexer:
         """Call embedder regardless of sync/async or method shape."""
         if not texts:
             return []
+        memory_index_metrics.embed_calls += 1
 
         candidate_names = (
             "embed_texts",

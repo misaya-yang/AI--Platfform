@@ -53,19 +53,42 @@ async function verifyApi(apiURL: string) {
   }
 }
 
-async function detectDefaultPassword(): Promise<string> {
-  const passwordModule = await fs.readFile(
-    path.join(repoRoot(), "src/core/auth/password.py"),
-    "utf-8"
-  );
-  // Match literal: DEFAULT_PASSWORD = "xxx"
-  // or environ: DEFAULT_PASSWORD = os.environ.get("...", "xxx")
-  const match = passwordModule.match(/DEFAULT_PASSWORD\s*=\s*["']([^"']+)["']/)
-    || passwordModule.match(/DEFAULT_PASSWORD\s*=\s*os\.environ\.get\(\s*["'][^"']*["']\s*,\s*["']([^"']+)["']\s*\)/);
-  if (!match) {
-    throw new Error("Unable to detect DEFAULT_PASSWORD from src/core/auth/password.py");
+function passwordFromEnvLine(line: string): string | null {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith("#") || !trimmed.startsWith("DEFAULT_USER_PASSWORD=")) {
+    return null;
   }
-  return match[1];
+  let value = trimmed.slice("DEFAULT_USER_PASSWORD=".length);
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    value = value.slice(1, -1);
+  }
+  return value || null;
+}
+
+async function detectDefaultPassword(): Promise<string> {
+  const fromEnv = process.env.DEFAULT_USER_PASSWORD || process.env.E2E_BOOTSTRAP_PASSWORD;
+  if (fromEnv) {
+    return fromEnv;
+  }
+
+  try {
+    const envText = await fs.readFile(path.join(repoRoot(), ".env"), "utf-8");
+    for (const line of envText.split("\n")) {
+      const value = passwordFromEnvLine(line);
+      if (value) {
+        return value;
+      }
+    }
+  } catch {
+    // .env is optional when the password is already in the process environment.
+  }
+
+  throw new Error(
+    "DEFAULT_USER_PASSWORD is not set. Export it or add it to .env for Playwright setup."
+  );
 }
 
 async function detectBootstrapPasswords(defaultPassword: string): Promise<string[]> {

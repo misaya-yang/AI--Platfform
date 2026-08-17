@@ -26,8 +26,56 @@ class StreamingRateLimitConfig:
     guest_window: int = 60
     ip_limit: int = 60
     ip_window: int = 60
+    # Optional tenant dimension (single-authority slice of SPO-02): when set,
+    # the middleware counts the tenant key so the route-level multi-dimension
+    # limiter can skip its tenant dimension instead of double counting.
+    tenant_limit: int | None = None
+    tenant_window: int = 60
+    # Per-tier user caps mirrored from MultiDimensionRateLimitConfig so the
+    # middleware (the sole user-dimension counter) does not silently loosen
+    # RATE_LIMIT_NORMAL_LIMIT / enterprise / admin.
+    user_tier_limits: dict[str, int] = field(default_factory=dict)
     whitelist_paths: list[str] = field(
         default_factory=lambda: ["/health", "/health/live", "/health/ready"]
+    )
+
+
+def streaming_rate_limit_config_from_policy(
+    md: Any,
+    *,
+    whitelist_paths: list[str],
+    global_limit: int = 5000,
+    guest_limit: int = 200,
+) -> StreamingRateLimitConfig:
+    """Build middleware limits from the env-facing multi-dimension policy.
+
+    Middleware is the single counter for global/user/ip/tenant. Its user and
+    IP numbers must match ``create_rate_limit_config()`` or skipping those
+    dimensions at the route layer loosens the live cap.
+    """
+    user_tier_limits = {
+        str(name): max(int(tier.requests) + int(getattr(tier, "burst", 0) or 0), 1)
+        for name, tier in dict(getattr(md, "user_tier_limits", {}) or {}).items()
+    }
+    tenant_limit = (
+        int(md.tenant_default_limit)
+        if getattr(md, "tenant_enabled", False) and not getattr(md, "tenant_limits", None)
+        else None
+    )
+    return StreamingRateLimitConfig(
+        enabled=True,
+        global_limit=global_limit,
+        global_window=60,
+        user_limit=user_tier_limits.get("normal", 60),
+        user_window=60,
+        guest_limit=guest_limit,
+        guest_window=60,
+        ip_limit=int(getattr(md, "ip_limit", 30) or 30),
+        ip_window=int(getattr(md, "ip_window", 60) or 60),
+        tenant_limit=tenant_limit,
+        tenant_window=int(getattr(md, "tenant_window", 60) or 60),
+        user_tier_limits=user_tier_limits,
+        whitelist_paths=list(whitelist_paths),
     )
 
 
@@ -87,14 +135,26 @@ class StreamingRateLimitMiddleware(PureASGIMiddleware):
 
         if user_info:
             if user_type == "user":
+                tier = str(self._get_user_field(user_info, "tier", "") or "normal")
+                user_limit = self.config.user_tier_limits.get(tier, self.config.user_limit)
                 checks.append(
                     (
                         "user",
                         f"ratelimit:user:{user_id}",
-                        self.config.user_limit,
+                        user_limit,
                         self.config.user_window,
                     )
                 )
+                tenant_id = self._get_user_field(user_info, "tenant_id", "")
+                if self.config.tenant_limit is not None and tenant_id:
+                    checks.append(
+                        (
+                            "tenant",
+                            f"ratelimit:tenant:{tenant_id}",
+                            self.config.tenant_limit,
+                            self.config.tenant_window,
+                        )
+                    )
             elif user_type in ("guest", "anonymous"):
                 guest_key = user_id if user_type == "guest" else client_ip
                 checks.append(
@@ -115,13 +175,24 @@ class StreamingRateLimitMiddleware(PureASGIMiddleware):
             )
         )
 
-        for dimension, key, limit, window in checks:
-            result = await self.limiter.check(key, limit, window)
-            if not result.allowed:
-                result.dimension = dimension
-                response = self._build_rate_limit_response(result)
-                await response(scope, receive, send)
-                return
+        # Single authoritative count: one atomic EVAL covers every dimension
+        # (SPO-02). The flag lets the route-level multi-dimension limiter skip
+        # the dimensions already counted here instead of counting twice.
+        result = await self.limiter.check_many(
+            [(key, limit, window) for _, key, limit, window in checks]
+        )
+        if not result.allowed:
+            dimension = checks[result.dimension_index][0] if result.dimension_index >= 0 else ""
+            result.dimension = dimension
+            response = self._build_rate_limit_response(result)
+            await response(scope, receive, send)
+            return
+
+        # Record which dimensions were counted so the route-level limiter
+        # skips exactly those — never one the middleware did not count.
+        scope.setdefault("state", {})["rate_limit_counted_dimensions"] = {
+            dimension for dimension, _key, _limit, _window in checks
+        }
 
         async def rate_limit_send(message: Message) -> None:
             if message["type"] == "http.response.start":

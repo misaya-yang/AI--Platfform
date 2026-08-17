@@ -119,6 +119,7 @@ class StreamProcessor:
         self._first_chunk_offset_ms = 0
         self._event_offsets_ms: dict[str, int] = {}
         self._duration_breakdown: dict[str, Any] = {}
+        self._pending_usage: UsageData | None = None
 
     async def process_chunk(self, chunk: bytes) -> bytes:
         """
@@ -289,10 +290,12 @@ class StreamProcessor:
             logger.debug(f"Failed to record request complete: {e}")
 
     async def _extract_usage(self, data_str: str, event_type: str) -> None:
-        """从数据中提取 usage 信息"""
-        if self._usage_collected:
-            return
+        """从数据中提取 usage 信息
 
+        SPO-05 / G1: a stream may emit partial usage before the final usage;
+        every usage-bearing event records, and the usage_records conflict
+        branch takes the monotonic GREATEST across partial + final writes.
+        """
         if not data_str or data_str == "[DONE]":
             return
 
@@ -498,22 +501,79 @@ class StreamProcessor:
             f"duration={duration_ms:.2f}ms"
         )
 
-        # 修复：记录实时指标（用于 Dashboard WebSocket 推送）
-        await self._record_request_complete()
+        # Usage events in SSE streams are cumulative snapshots. Keep only the
+        # monotonic latest observation and publish it once from finalize();
+        # appending every partial snapshot double-counts realtime and durable
+        # aggregates when partial + final cross a recorder flush boundary.
+        pending = self._pending_usage
+        if pending is None:
+            self._pending_usage = usage_data
+        else:
+            pending.input_tokens = max(pending.input_tokens, usage_data.input_tokens)
+            pending.output_tokens = max(pending.output_tokens, usage_data.output_tokens)
+            pending.total_tokens = max(
+                pending.total_tokens,
+                usage_data.total_tokens,
+                pending.input_tokens + pending.output_tokens,
+            )
+            pending.duration_ms = max(pending.duration_ms, usage_data.duration_ms)
+            pending.first_token_latency_ms = max(
+                pending.first_token_latency_ms, usage_data.first_token_latency_ms
+            )
+            pending.request_total_duration_ms = max(
+                pending.request_total_duration_ms,
+                usage_data.request_total_duration_ms,
+            )
+            pending.llm_inference_duration_ms = max(
+                pending.llm_inference_duration_ms,
+                usage_data.llm_inference_duration_ms,
+            )
+            pending.retrieval_duration_ms = max(
+                pending.retrieval_duration_ms, usage_data.retrieval_duration_ms
+            )
+            pending.tool_call_duration_ms = max(
+                pending.tool_call_duration_ms, usage_data.tool_call_duration_ms
+            )
+            pending.agent_or_graph_overhead_ms = max(
+                pending.agent_or_graph_overhead_ms,
+                usage_data.agent_or_graph_overhead_ms,
+            )
+            pending.status = usage_data.status
+            pending.error_type = usage_data.error_type
+            pending.trace_steps = usage_data.trace_steps
+            pending.tool_call_breakdown = usage_data.tool_call_breakdown
+            pending.raw_metadata.update(usage_data.raw_metadata)
+
+    async def _flush_pending_usage(self) -> None:
+        pending = self._pending_usage
+        if pending is None:
+            return
+        self._pending_usage = None
+
+        pending.status = self._status
+        pending.error_type = classify_error_type(
+            status=self._status,
+            upstream_error_type=str(
+                self._error_metadata.get("upstream_error_type") or ""
+            ),
+            upstream_error_message=str(
+                self._error_metadata.get("upstream_error_message") or ""
+            ),
+        )
+        pending.raw_metadata.update(self._error_metadata)
+        pending.raw_metadata["error_type"] = pending.error_type
+
         if self.interceptor.realtime_metrics:
             try:
                 await self.interceptor.realtime_metrics.record_token_usage(
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
+                    input_tokens=pending.input_tokens,
+                    output_tokens=pending.output_tokens,
                 )
             except Exception as e:
                 logger.debug(f"Failed to record realtime token metrics: {e}")
 
-        # 添加到缓冲区
         async with self.interceptor._buffer_lock:
-            self.interceptor._buffer.append(usage_data)
-
-            # 如果缓冲区满，立即刷新（Phase 0 hotfix: tracked for shutdown drain）
+            self.interceptor._buffer.append(pending)
             if len(self.interceptor._buffer) >= self.interceptor.buffer_size:
                 self.interceptor._spawn_tracked_flush()
 
@@ -525,6 +585,8 @@ class StreamProcessor:
         """
         if self._buffer:
             await self._parse_events()
+
+        await self._flush_pending_usage()
 
         if not self._usage_collected and self._should_record_fallback(self.request_type):
             duration_ms = (time.time() - self.start_time) * 1000

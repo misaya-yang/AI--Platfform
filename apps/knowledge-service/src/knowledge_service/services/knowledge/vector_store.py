@@ -28,6 +28,7 @@ from .lexical_config import (
     LexicalConfigError,
 )
 from .retrieval import text_to_sparse_vector
+from .vector_store_metrics import vector_store_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,10 @@ class VectorStore:
         )
         self._dataset_write_lease = dataset_write_lease
         self._collection_dims: dict[str, int] = {}  # Cache: collection_name → dimension
+        # SPO-04 / K1: short-TTL collection metadata cache with write
+        # invalidation, so each retrieve pays at most ONE get_collection.
+        self._collection_info_cache: dict[str, tuple[float, Any]] = {}
+        self._collection_info_ttl_s = 30.0
         self._sparse_collections: set[str] = set()
         self._sparse_readiness: dict[str, bool] = {}
         self._bm25_v2_capability_receipts: dict[str, float] = {}
@@ -145,6 +150,33 @@ class VectorStore:
             return True
         except Exception:
             return False
+
+    def _invalidate_collection_info(self, collection_name: str) -> None:
+        """Drop cached collection metadata after a metadata-bearing write."""
+        normalized = str(collection_name or "").strip()
+        self._collection_info_cache.pop(normalized, None)
+        self._collection_dims.pop(normalized, None)
+
+    async def _cached_get_collection(self, collection_name: str) -> Any:
+        """get_collection with a short TTL cache (SPO-04 / K1).
+
+        Collection scope metadata is immutable after creation; lexical
+        serving mode changes go through ``update_collection`` write points,
+        each of which invalidates this cache. A stale read can therefore only
+        last up to the TTL for out-of-band metadata changes.
+        """
+        normalized = str(collection_name or "").strip()
+        now = time.monotonic()
+        cached = self._collection_info_cache.get(normalized)
+        if cached is not None and cached[0] > now:
+            return cached[1]
+        info = await self._call(lambda: self._client.get_collection(normalized))
+        vector_store_metrics.get_collection_calls += 1
+        self._collection_info_cache[normalized] = (
+            now + self._collection_info_ttl_s,
+            info,
+        )
+        return info
 
     async def _call(self, coro_or_factory):
         is_factory = callable(coro_or_factory)
@@ -255,9 +287,7 @@ class VectorStore:
                 "collection_name is required for retrieval"
             )
 
-        info = await self._call(
-            lambda: self._client.get_collection(normalized_collection)
-        )
+        info = await self._cached_get_collection(normalized_collection)
         metadata = self._collection_metadata(info)
 
         try:
@@ -486,6 +516,7 @@ class VectorStore:
                 metadata=adopting_scope,
             )
         )
+        self._invalidate_collection_info(collection_name)
         if updated is not True:
             raise VectorStoreError(
                 f"collection '{collection_name}' ownership adoption was rejected"
@@ -521,6 +552,7 @@ class VectorStore:
                         metadata=invalid_scope,
                     )
                 )
+                self._invalidate_collection_info(collection_name)
             raise VectorStoreError(
                 f"collection '{collection_name}' changed during ownership adoption"
             )
@@ -530,6 +562,7 @@ class VectorStore:
                 metadata=expected_metadata,
             )
         )
+        self._invalidate_collection_info(collection_name)
         if finalized is not True:
             raise VectorStoreError(
                 f"collection '{collection_name}' ownership adoption finalization was rejected"
@@ -572,6 +605,7 @@ class VectorStore:
                 metadata={BM25_V2_BACKFILL_METADATA_KEY: invalidated},
             )
         )
+        self._invalidate_collection_info(collection_name)
         if updated is not True:
             raise VectorStoreError(
                 f"collection '{collection_name}' BM25 v2 receipt invalidation was rejected"
@@ -859,6 +893,7 @@ class VectorStore:
                     ),
                 )
             )
+            self._invalidate_collection_info(collection_name)
             if updated is not True:
                 raise VectorStoreError(
                     f"collection '{collection_name}' strict filtering update was rejected"
@@ -879,6 +914,7 @@ class VectorStore:
                     strict_mode_config=qmodels.StrictModeConfig(enabled=False),
                 )
             )
+            self._invalidate_collection_info(collection_name)
             if updated is not True:
                 raise VectorStoreError(
                     f"collection '{collection_name}' strict filtering rollback was rejected"
@@ -1036,6 +1072,8 @@ class VectorStore:
         deleted = await self._call(
             lambda: self._client.delete_collection(collection_name=collection_name)
         )
+        if deleted is True:
+            self._invalidate_collection_info(collection_name)
         if deleted is not True:
             still_exists = bool(
                 await self._call(
@@ -1195,6 +1233,7 @@ class VectorStore:
                 **create_kwargs,
             )
         )
+        self._invalidate_collection_info(collection_name)
         if created is not True:
             if allow_existing:
                 # Preserve the idempotent ensure contract for ingestion and
@@ -1297,6 +1336,7 @@ class VectorStore:
                     },
                 )
             )
+            self._invalidate_collection_info(collection_name)
             self._sparse_collections.add(collection_name)
             self._sparse_readiness.pop(collection_name, None)
             logger.info("Added BM25 sparse vector config to collection %s", collection_name)
@@ -1552,6 +1592,7 @@ class VectorStore:
                 raise VectorStoreError(
                     f"collection '{collection_name}' bm25_v2 schema update was rejected"
                 )
+            self._invalidate_collection_info(collection_name)
 
         refreshed: Any | None = None
         if config.writes_bm25_v2 or stored is not None:

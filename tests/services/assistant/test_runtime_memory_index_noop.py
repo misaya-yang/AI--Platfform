@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import assistant_service.core.runtime.memory.indexer as memory_indexer_module
 import pytest
+from assistant_service.core.runtime.memory.index_metrics import memory_index_metrics
 from assistant_service.core.runtime.memory.indexer import MemoryIndexer
 from assistant_service.core.runtime.memory.scope import scoped_collection_name
 
@@ -51,6 +52,8 @@ def _indexed_fixture(
             "source_generation": hashlib.sha256(content.encode()).hexdigest(),
             "vector_state": "indexed",
             "vector_collections": [collection],
+            "chunk_count": 1,
+            "chunk_config": "400:80",
         }
     )
     database.chunk_ids = ["22222222-2222-2222-2222-222222222222"]
@@ -71,6 +74,7 @@ async def test_unchanged_complete_generation_skips_delete_and_embedding(
     )
     content, source_path, database, vector_store, embedder = _indexed_fixture(tmp_path)
     original_chunks = list(database.chunk_ids)
+    memory_index_metrics.reset()
 
     result = await MemoryIndexer(
         database,
@@ -87,6 +91,9 @@ async def test_unchanged_complete_generation_skips_delete_and_embedding(
     assert result.source_id == database.source_id
     assert result.chunk_count == len(original_chunks)
     assert embedder.calls == []
+    assert memory_index_metrics.chunk_markdown_calls == 0
+    assert memory_index_metrics.embed_calls == 0
+    assert memory_index_metrics.short_circuits == 1
     assert vector_store.delete_calls == []
     assert database.chunk_ids == original_chunks
     assert not any(

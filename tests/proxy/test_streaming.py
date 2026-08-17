@@ -323,6 +323,7 @@ class TestBillingInterceptor:
             b'\n\nevent: metadata\ndata: {"usage": {"input_tokens": 4, '
             b'"output_tokens": 3}}\n\n'
         )
+        await processor.finalize()
 
         assert processor._discarding_oversized_event is False
         assert processor._usage_collected is True
@@ -331,6 +332,40 @@ class TestBillingInterceptor:
         assert (
             billing_interceptor._buffer[-1].raw_metadata["upstream_error_type"]
             == "billing_stream_buffer_overflow"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cumulative_usage_records_once_with_final_totals(self):
+        realtime = AsyncMock()
+        interceptor = BillingInterceptor(
+            callback=None,
+            redis_client=None,
+            realtime_metrics=realtime,
+            buffer_size=10,
+        )
+        processor = interceptor.create_stream_processor(
+            request_id="req-cumulative",
+            service_id="agent-service",
+            user_id="user-1",
+            tenant_id="tenant-1",
+        )
+
+        await processor.process_chunk(
+            b'event: metadata\ndata: {"usage": {"input_tokens": 10, '
+            b'"output_tokens": 2}}\n\n'
+        )
+        await processor.process_chunk(
+            b'event: metadata\ndata: {"usage": {"input_tokens": 10, '
+            b'"output_tokens": 9}}\n\n'
+        )
+        await processor.finalize()
+
+        assert len(interceptor._buffer) == 1
+        assert interceptor._buffer[0].input_tokens == 10
+        assert interceptor._buffer[0].output_tokens == 9
+        realtime.record_token_usage.assert_awaited_once_with(
+            input_tokens=10,
+            output_tokens=9,
         )
 
     @pytest.mark.asyncio

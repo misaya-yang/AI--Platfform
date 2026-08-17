@@ -96,6 +96,7 @@ export async function listSessions(params?: {
 }
 
 export async function createSession(body?: {
+  session_id?: string;
   service_id?: string;
   metadata?: Record<string, unknown>;
   config?: SessionConfig;

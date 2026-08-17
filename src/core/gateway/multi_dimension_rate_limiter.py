@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..auth.user_resolver import UserContext
+from ..hot_path_metrics import gateway_hot_path_metrics
+from .lua_scripts import SLIDING_WINDOW_CHECK_LUA, eval_script
 
 
 def _get_bool_env(key: str, default: bool) -> bool:
@@ -201,35 +203,50 @@ class MultiDimensionRateLimiter:
         self._requests: dict[str, deque[float]] = {}
         self._lock = asyncio.Lock()
 
-    async def check(self, context: RateLimitContext) -> RateLimitResult:
+    async def check(
+        self,
+        context: RateLimitContext,
+        *,
+        skip_dimensions: set[str] | None = None,
+    ) -> RateLimitResult:
         """
         按优先级检查所有限流维度
         任一维度超限则拒绝
+
+        ``skip_dimensions`` lets the ASGI rate-limit middleware remain the
+        single authoritative counter for the dimensions it already counted
+        (SPO-02); the route-level check then only counts the dimensions the
+        middleware cannot know (e.g. per-operation limits).
         """
+        skip = skip_dimensions or set()
         checks = []
 
         # 1. 全局限流
-        if self.config.global_enabled:
+        if self.config.global_enabled and "global" not in skip:
             checks.append(("global", self._check_global, context))
 
         # 2. IP 限流
-        if self.config.ip_enabled and context.ip:
+        if self.config.ip_enabled and context.ip and "ip" not in skip:
             checks.append(("ip", self._check_ip, context))
 
         # 3. 用户限流
-        if context.user_id:
+        if context.user_id and "user" not in skip:
             checks.append(("user", self._check_user, context))
 
         # 4. 租户限流
-        if self.config.tenant_enabled and context.tenant_id:
+        if self.config.tenant_enabled and context.tenant_id and "tenant" not in skip:
             checks.append(("tenant", self._check_tenant, context))
 
         # 5. Assistant 限流
-        if self.config.assistant_enabled and context.assistant_id:
+        if self.config.assistant_enabled and context.assistant_id and "assistant" not in skip:
             checks.append(("assistant", self._check_assistant, context))
 
         # 6. 操作类型限流
-        if context.operation and context.operation in self.config.operation_limits:
+        if (
+            context.operation
+            and context.operation in self.config.operation_limits
+            and "operation" not in skip
+        ):
             checks.append(("operation", self._check_operation, context))
 
         allowed_result: RateLimitResult | None = None
@@ -402,31 +419,30 @@ class MultiDimensionRateLimiter:
         now: float,
         window_start: float,
     ) -> RateLimitResult:
-        """Redis 滑动窗口（使用 sorted set）"""
+        """Redis 滑动窗口（单 EVAL 原子检查，SPO-02 消除 TOCTOU）"""
         try:
-            # 使用 pipeline 提高效率
-            pipe = self.redis.pipeline()
+            result = await eval_script(
+                self.redis,
+                SLIDING_WINDOW_CHECK_LUA,
+                keys=[key],
+                args=[
+                    now,
+                    window_start,
+                    window + 1,
+                    f"{now}:{time.time_ns()}",
+                    limit,
+                ],
+            )
+            gateway_hot_path_metrics.redis_round_trips += 1
+            rejected_index, earliest_score = int(result[0]), float(result[1])
 
-            # 移除过期的请求记录
-            pipe.zremrangebyscore(key, 0, window_start)
-            # 添加当前请求。member 必须唯一，否则同一时间戳下的并发请求会相互覆盖。
-            pipe.zadd(key, {f"{now}:{time.time_ns()}": now})
-            # 获取窗口内的请求数
-            pipe.zcard(key)
-            # 设置 key 过期时间
-            pipe.expire(key, window + 1)
-
-            results = await pipe.execute()
-            current_count = results[2]
-
-            remaining = max(0, limit - current_count)
             reset_at = int(now + window)
-
-            if current_count > limit:
-                # 获取最早的请求时间来计算重试时间
-                earliest = await self.redis.zrange(key, 0, 0, withscores=True)
-                retry_after = int(earliest[0][1] - window_start) + 1 if earliest else window
-
+            if rejected_index >= 0:
+                retry_after = (
+                    int(earliest_score - window_start) + 1
+                    if earliest_score > window_start
+                    else window
+                )
                 return RateLimitResult(
                     allowed=False,
                     dimension=dimension,
@@ -440,7 +456,11 @@ class MultiDimensionRateLimiter:
                 allowed=True,
                 dimension=dimension,
                 limit=limit,
-                remaining=remaining,
+                remaining=(
+                    max(int(result[2]), 0)
+                    if len(result) > 2
+                    else max(limit - 1, 0)
+                ),
                 reset_at=reset_at,
             )
         except Exception:

@@ -34,6 +34,7 @@ current local Compose runtime.
 | PCH-04 | Web stream state/rendering/bundle and SDK stream contracts | Terminal first-wins, long-stream render bounded, initial bundles reduced |
 | PCH-05 | Knowledge ingestion/retrieval, Local Node and infrastructure | Partial-index and unbounded-worker defects closed with service tests |
 | PCH-06 | Full regression, container/live/load re-test and final report | All required gates pass; remaining blockers explicitly enumerated |
+| PCH-07 | Stop-safe tool exchange and strong browser interruption acceptance | Cancelled tool calls stay provider-valid and the next turn never receives HTTP 400 |
 
 The authoritative current phase is loop-state.json. Detailed ordering and
 acceptance thresholds live in optimization-plan.md.

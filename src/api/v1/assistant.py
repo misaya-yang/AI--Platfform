@@ -20,7 +20,6 @@ Endpoints:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import uuid
@@ -59,20 +58,12 @@ from ._artifact_headers import attachment_content_disposition
 router = APIRouter(prefix="/assistant", tags=["assistant"])
 logger = logging.getLogger(__name__)
 
-_CONTROL_AUDIT_TEXT_LIMIT = 4096
-
-
 def _browser_artifact_download_url(raw_url: str | None, artifact_id: str) -> str:
     """Return only browser-reachable URLs; local file paths stay server-side."""
 
     if raw_url and urlsplit(raw_url).scheme.lower() in {"http", "https"}:
         return raw_url
     return f"/api/v1/assistant/artifacts/{artifact_id}/download"
-
-
-def _control_audit_digest(value: Any) -> str:
-    encoded = str(value or "").encode("utf-8", errors="replace")
-    return hashlib.sha256(encoded).hexdigest()[:16]
 
 
 # =========================================================================
@@ -961,62 +952,20 @@ async def cancel_task(
     body: TaskCancelRequest | None = None,
     user: UserContext = Depends(get_user_context),
 ) -> TaskCancelResponse:
-    """
-    Cancel a running assistant task.
+    """Authenticate at the edge and cancel in the owning Assistant process."""
 
-    Requests cancellation of an ongoing streaming response.
-    The actual cancellation may take a moment as the current
-    operation completes gracefully.
+    from ._assistant_proxy import proxy_to_assistant_service
 
-    Args:
-        task_id: Task ID (from run_started event)
-        body: Optional cancellation reason
-
-    Returns:
-        TaskCancelResponse with cancellation status
-    """
-    from ai_gateway_core.tasks import get_task_manager
-
-    task_manager = get_task_manager()
-
-    # Get task context to verify existence
-    task_ctx = await task_manager.get_task_context(task_id)
-    if not task_ctx:
-        raise HTTPException(status_code=404, detail="Task not found or already completed")
-
-    # Get session to verify ownership
-    session = await task_manager.get_session(task_ctx.session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    # Security check: Only allow cancelling own tasks
-    if session.user_id != user.user_id or session.tenant_id != user.tenant_id:
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    # Request cancellation
-    success = await task_manager.cancel_task(task_ctx.session_id, task_id)
-
-    reason = body.reason if body else None
-    reason_chars = len(str(reason or ""))
-    logger.info(
-        "event_code=assistant_control_task_cancel_requested event_type=task_cancel "
-        "task_sha256=%s actor_sha256=%s reason_sha256=%s reason_chars=%s "
-        "reason_truncated=%s accepted=%s",
-        _control_audit_digest(task_id),
-        _control_audit_digest(user.user_id),
-        _control_audit_digest(reason),
-        min(reason_chars, _CONTROL_AUDIT_TEXT_LIMIT),
-        str(reason_chars > _CONTROL_AUDIT_TEXT_LIMIT).lower(),
-        str(bool(success)).lower(),
-    )
-
-    return TaskCancelResponse(
-        task_id=task_id,
-        session_id=task_ctx.session_id,
-        cancelled=success,
-        message="Cancellation requested"
-        if success
-        else "Task already completed or not cancellable",
+    body_bytes = json.dumps(
+        body.model_dump(exclude_none=True) if body is not None else {},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return await proxy_to_assistant_service(
+        request,
+        user,
+        path=f"tasks/{task_id}/cancel",
+        body=body_bytes,
     )
 
 

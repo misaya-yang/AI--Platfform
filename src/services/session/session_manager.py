@@ -5,7 +5,8 @@ import uuid
 from collections import OrderedDict
 from datetime import datetime, timedelta
 
-from ai_gateway_core.exceptions import PermissionDeniedError
+from ai_gateway_core.exceptions import PermissionDeniedError, SessionAlreadyExistsError
+
 from ...models.session import Session, SessionMessage
 
 
@@ -54,13 +55,6 @@ class SessionManager:
             self._last_cleanup = now
             return len(expired_keys)
 
-    async def _ensure_capacity(self) -> None:
-        """确保会话数不超过上限，必要时执行 LRU 淘汰。线程安全。"""
-        async with self._lock:
-            while len(self._sessions) >= self.max_sessions:
-                # OrderedDict 保证最左边（最早加入且未被 move_to_end）的是最久未使用的
-                oldest_key, _ = self._sessions.popitem(last=False)
-
     async def create(
         self,
         user_id: str,
@@ -69,14 +63,12 @@ class SessionManager:
         session_id: str | None = None,
         metadata: dict | None = None,
         ttl: int | None = None,
+        fail_if_exists: bool = False,
     ) -> Session:
         # 定期清理过期会话
         now = datetime.utcnow()
         if (now - self._last_cleanup).total_seconds() >= self.cleanup_interval:
             await self._cleanup_expired(now)
-
-        # 确保容量
-        await self._ensure_capacity()
 
         expires_at = None
         ttl_seconds = ttl
@@ -102,6 +94,12 @@ class SessionManager:
 
         # 使用 OrderedDict 的 move_to_end 实现 LRU
         async with self._lock:
+            if fail_if_exists and session.session_id in self._sessions:
+                raise SessionAlreadyExistsError("session already exists")
+            while len(self._sessions) >= self.max_sessions:
+                # Check + eviction + insert share one critical section so a
+                # collision never evicts an unrelated session first.
+                self._sessions.popitem(last=False)
             self._sessions[session.session_id] = session
         return session
 
@@ -186,8 +184,14 @@ class SessionManager:
             user_id=user_id, tenant_id=tenant_id, service_id=service_id, limit=limit,
         )
         if service_ids and len(service_ids) > 1:
-            allowed = set(service_ids) | {None}
+            allowed: set[str | None] = set(service_ids)
+            if include_null_service_id:
+                allowed.update({None, ""})
             sessions = [s for s in sessions if s.service_id in allowed]
+        if status:
+            sessions = [
+                s for s in sessions if getattr(s, "status", "active") == status
+            ]
         return [
             {
                 "session_id": s.session_id, "service_id": s.service_id,

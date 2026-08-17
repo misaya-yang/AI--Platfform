@@ -65,10 +65,11 @@ export function ActivityPanel({
 
   const cancelled =
     message?.status === "cancelled" || message?.processSummary?.status === "cancelled";
+  const blocked = message?.processSummary?.status === "blocked";
   const failed =
-    !cancelled &&
+    !cancelled && !blocked &&
     (message?.status === "failed" || message?.processSummary?.status === "failed");
-  const running = !cancelled && !failed && !!message?.isStreaming;
+  const running = !cancelled && !blocked && !failed && !!message?.isStreaming;
   const stepCount = steps.length;
   const durationLabel = formatTotal(totalDurationMs);
   const pendingApprovals =
@@ -78,11 +79,13 @@ export function ActivityPanel({
 
   const statusWord = running
     ? t("playground.activity.running", { defaultValue: "running" })
-    : failed
-      ? t("assistant.processSummary.failed", { defaultValue: "Execution failed" })
-      : cancelled
-        ? t("playground.activity.statusCancelled", { defaultValue: "cancelled" })
-        : t("playground.activity.statusCompleted", { defaultValue: "completed" });
+    : blocked
+      ? t("assistant.activity.approvalRequired", { defaultValue: "Approval required" })
+      : failed
+        ? t("assistant.processSummary.failed", { defaultValue: "Execution failed" })
+        : cancelled
+          ? t("playground.activity.statusCancelled", { defaultValue: "cancelled" })
+          : t("playground.activity.statusCompleted", { defaultValue: "completed" });
 
   const stepsText = t("playground.activity.steps", {
     count: stepCount,

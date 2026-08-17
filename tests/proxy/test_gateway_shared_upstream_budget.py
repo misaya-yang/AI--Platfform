@@ -10,10 +10,48 @@ class FakeRedisBudget:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
         self.zsets: dict[str, dict[str, float]] = {}
+        self.round_trips = 0
 
-    async def zremrangebyscore(self, key: str, minimum: float, maximum: float) -> int:
+    async def _check(self) -> None:
         if self.fail:
             raise ConnectionError("redis unavailable")
+
+    async def eval(self, script: str, numkeys: int, *keys_and_args: object) -> object:
+        await self._check()
+        self.round_trips += 1
+        keys = [str(key) for key in keys_and_args[:numkeys]]
+        args = [str(arg) for arg in keys_and_args[numkeys:]]
+        if "ZREM" in script and "PEXPIRE" not in script:
+            # CAPACITY_RELEASE_LUA: KEYS[1..N], ARGV[1] = member
+            for key in keys:
+                self.zsets.setdefault(key, {}).pop(args[0], None)
+            return len(keys)
+        # Simulate the CAPACITY_ACQUIRE_PAIR_LUA contract:
+        # KEYS[1..2]; ARGV = now_ms, expires_at_ms, member, ttl_ms,
+        # shared limit, tenant limit. Shared-before-tenant ordering.
+        now_ms = float(args[0])
+        expires_at = float(args[1])
+        member = args[2]
+
+        def _admit(key: str, limit: int) -> int:
+            zset = self.zsets.setdefault(key, {})
+            for existing, score in list(zset.items()):
+                if 0 <= score <= now_ms:
+                    zset.pop(existing, None)
+            count = len(zset)
+            if count < limit:
+                zset[member] = expires_at
+            return count
+
+        shared_count = _admit(keys[0], int(args[4]))
+        tenant_count = -1
+        if shared_count < int(args[4]):
+            tenant_count = _admit(keys[1], int(args[5]))
+        return [shared_count, tenant_count]
+
+    async def zremrangebyscore(self, key: str, minimum: float, maximum: float) -> int:
+        await self._check()
+        self.round_trips += 1
         zset = self.zsets.setdefault(key, {})
         expired = [member for member, score in zset.items() if minimum <= score <= maximum]
         for member in expired:
@@ -21,19 +59,19 @@ class FakeRedisBudget:
         return len(expired)
 
     async def zcard(self, key: str) -> int:
-        if self.fail:
-            raise ConnectionError("redis unavailable")
+        await self._check()
+        self.round_trips += 1
         return len(self.zsets.setdefault(key, {}))
 
     async def zadd(self, key: str, mapping: dict[str, float]) -> int:
-        if self.fail:
-            raise ConnectionError("redis unavailable")
+        await self._check()
+        self.round_trips += 1
         self.zsets.setdefault(key, {}).update(mapping)
         return len(mapping)
 
     async def zrem(self, key: str, member: str) -> int:
-        if self.fail:
-            raise ConnectionError("redis unavailable")
+        await self._check()
+        self.round_trips += 1
         existed = member in self.zsets.setdefault(key, {})
         self.zsets[key].pop(member, None)
         return 1 if existed else 0

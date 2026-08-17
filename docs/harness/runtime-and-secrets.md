@@ -78,6 +78,13 @@ memory ceiling. The complete low-memory profile needs roughly 4 GiB available to
 - If `.env` is missing or Compose interpolation fails, fix the project init/env workflow.
   Do not force Compose with ad-hoc inline environment variables.
 - Keep secret values redacted in logs, reports, and final answers.
+- Do not hardcode DSN passwords or bootstrap admin passwords in source. `database/cli.py`
+  and `database/run_migration.py` fail closed when no DSN is configured.
+  `DEFAULT_USER_PASSWORD` is a runtime env value only; the local documented bootstrap
+  default is accepted by `validate-env.sh` with a warning, never as a Python fallback.
+- Local Compose and `setup-dev.sh` publish host ports on `127.0.0.1`. The optional
+  monitoring stack interpolates the same env secrets and must not embed `gateway123`
+  or Grafana `admin/admin`.
 
 ## 7. Providers and readiness
 

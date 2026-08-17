@@ -12,7 +12,7 @@ from collections import OrderedDict
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from ai_gateway_core.exceptions import PermissionDeniedError
+from ai_gateway_core.exceptions import PermissionDeniedError, SessionAlreadyExistsError
 
 from .models import Session, SessionMessage
 
@@ -57,6 +57,7 @@ class DatabaseSessionManager:
         metadata: dict | None = None,
         config: dict | None = None,
         ttl: int = None,
+        fail_if_exists: bool = False,
     ) -> Session:
         """创建新会话"""
         session_id_value = session_id or str(uuid.uuid4())
@@ -86,8 +87,16 @@ class DatabaseSessionManager:
             expires_at=expires_at,
         )
 
-        # 保存到数据库
-        await self._save_to_db(session)
+        # Client-selected ids must be inserted atomically. A read-before-write
+        # check would still allow two tenants to race on the same UUID.
+        if fail_if_exists:
+            created = await self.database.create_session_if_absent(
+                self._session_to_dict(session)
+            )
+            if not created:
+                raise SessionAlreadyExistsError("session already exists")
+        else:
+            await self._save_to_db(session)
 
         # 写入缓存
         await self._cache_session(session)

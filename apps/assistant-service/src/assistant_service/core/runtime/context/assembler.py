@@ -91,6 +91,10 @@ class ContextPacket:
     _model_context_window: int = field(repr=False)
     _reserved_output_tokens: int = field(repr=False)
     _protected_start_index: int = field(repr=False)
+    # SPO-03 / A5: fingerprint of the last bound inputs (system + protected
+    # suffix + effective tools + cache dimensions). An identical incoming
+    # boundary can skip the whole rebind.
+    _boundary_fingerprint: str | None = field(repr=False, default=None)
 
     @property
     def schema_version(self) -> str:
@@ -171,6 +175,49 @@ class ContextAssemblerV2:
         self.budget_manager = budget_manager or ContextBudgetManager()
         self.context_engine = context_engine or ContextEngine(provider=provider)
         self.cost_breakdown = cost_breakdown or ContextCostBreakdown()
+        # SPO-03 / A5: per-message token estimates are pure functions of the
+        # message dict; reuse them across boundary rebinds instead of paying
+        # the CJK-aware estimate for the whole history on every model turn.
+        self._message_token_cache: dict[str, int] = {}
+        self._MESSAGE_TOKEN_CACHE_MAX = 512
+
+    def _cached_message_tokens(self, message: dict[str, Any]) -> int:
+        key = _canonical_json(message)
+        cached = self._message_token_cache.get(key)
+        if cached is not None:
+            return cached
+        estimated = estimate_message_tokens(message)
+        if len(self._message_token_cache) >= self._MESSAGE_TOKEN_CACHE_MAX:
+            self._message_token_cache.clear()
+        self._message_token_cache[key] = estimated
+        return estimated
+
+    def boundary_fingerprint(
+        self,
+        *,
+        packet: ContextPacket,
+        messages: list[dict[str, Any]],
+        tool_definitions: list[dict[str, Any]],
+        cache_dimensions: Mapping[str, Any] | None = None,
+        previous_cache_receipt: Mapping[str, Any] | None = None,
+    ) -> str:
+        """Fingerprint the inputs that fully determine a rebind outcome.
+
+        ``previous_cache_receipt`` is accepted for call-site compatibility
+        but is not part of the digest: it is an *output* of the last bind,
+        so including it makes the next turn's incoming digest never match.
+        """
+        del previous_cache_receipt
+        system = str(messages[0].get("content") or "") if messages else ""
+        suffix = messages[packet.protected_start_index :]
+        return _digest(
+            {
+                "system": system,
+                "suffix": suffix,
+                "tools": _canonical_model_tools(tool_definitions),
+                "cache_dimensions": dict(cache_dimensions or {}),
+            }
+        )
 
     def build(
         self,
@@ -452,8 +499,8 @@ class ContextAssemblerV2:
             packet.model_context_window - packet.reserved_output_tokens,
         )
 
-        def message_tokens(message: dict[str, Any]) -> int:
-            return estimate_message_tokens(message)
+        # SPO-03 / A5: reuse the per-message token cache across rebinds.
+        message_tokens = self._cached_message_tokens
 
         protected_tokens = (
             message_tokens(boundary_messages[0])
@@ -603,6 +650,14 @@ class ContextAssemblerV2:
             _model_context_window=packet.model_context_window,
             _reserved_output_tokens=packet.reserved_output_tokens,
             _protected_start_index=1 + len(trimmed_old_history),
+            _boundary_fingerprint=_digest(
+                {
+                    "system": system_prompt,
+                    "suffix": protected_suffix,
+                    "tools": effective_tools,
+                    "cache_dimensions": dict(cache_dimensions or {}),
+                }
+            ),
         )
 
     @classmethod

@@ -14,8 +14,43 @@ def _build_manager() -> tuple[DatabaseSessionManager, AsyncMock]:
     db.update_session_config = AsyncMock(return_value=True)
     db.update_session_metadata = AsyncMock(return_value=True)
     db.save_session = AsyncMock()
+    db.create_session_if_absent = AsyncMock(return_value=True)
     manager = DatabaseSessionManager(database=db, redis=None)
     return manager, db
+
+
+@pytest.mark.asyncio
+async def test_client_selected_session_id_uses_atomic_insert() -> None:
+    manager, db = _build_manager()
+
+    session = await manager.create(
+        user_id="user-1",
+        tenant_id="tenant-1",
+        session_id="11111111-1111-4111-8111-111111111111",
+        fail_if_exists=True,
+    )
+
+    assert session.session_id == "11111111-1111-4111-8111-111111111111"
+    db.create_session_if_absent.assert_awaited_once()
+    db.save_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_client_selected_session_id_conflict_does_not_cache() -> None:
+    from ai_gateway_core.exceptions import SessionAlreadyExistsError
+
+    manager, db = _build_manager()
+    db.create_session_if_absent.return_value = False
+
+    with pytest.raises(SessionAlreadyExistsError):
+        await manager.create(
+            user_id="user-1",
+            tenant_id="tenant-1",
+            session_id="11111111-1111-4111-8111-111111111111",
+            fail_if_exists=True,
+        )
+
+    assert manager._memory_cache == {}
 
 
 def _build_session(session_id: str = "session-1") -> Session:

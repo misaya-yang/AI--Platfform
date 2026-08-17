@@ -999,7 +999,9 @@ async def test_repeated_trace_failures_keep_sticky_state_bounded() -> None:
         )
     await writer.drain(timeout_s=1.0)
 
-    assert writer.failed_writes == 5
+    # SPO-03 / A3: five events travel as ONE batched write, so exactly one
+    # failed write outcome is recorded (sticky per trace).
+    assert writer.failed_writes == 1
     assert len(writer._failed_outcomes) == 1
     with pytest.raises(RuntimeError, match="trace persistence barrier failed"):
         await writer.resume_sequence(ctx)

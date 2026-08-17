@@ -88,6 +88,7 @@ export const SSEEventType = {
   QUEUE_STATE: "queue_state",
   APPROVAL_REQUIRED: "approval_required",
   APPROVAL_RESULT: "approval_result",
+  SIDE_EFFECT_UNKNOWN: "side_effect_unknown",
   GATEWAY_DECISION: "gateway_decision",
 
   // Quiz events

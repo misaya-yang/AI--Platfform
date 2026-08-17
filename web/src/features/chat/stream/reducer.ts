@@ -470,6 +470,11 @@ export function reduceNormalizedStreamEvent(
         break;
       }
       const rawType = extractRawType(event);
+      const rawStatus =
+        typeof event.metadata?.status === "string"
+          ? event.metadata.status.trim().toLowerCase()
+          : "";
+      const failed = ["cancelled", "not_executed", "error", "failed"].includes(rawStatus);
       const incomingArgs = extractToolArguments(event);
       next = recordSequence(state, event, toolCallId);
       next = upsertToolCall(next, toolCallId, (tool) => {
@@ -489,7 +494,7 @@ export function reduceNormalizedStreamEvent(
           arguments: resolvedArgs.text,
           argsValid: resolvedArgs.isValid,
           result: resultText,
-          status: "completed",
+          status: failed ? "error" : "completed",
           endedAt: nowMs,
         };
       });

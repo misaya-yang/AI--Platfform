@@ -111,3 +111,52 @@
   then reapplied current Python/shared-core source with `make hot-update`. Final status is
   enabled=false, backend=none, docker_socket=no, healthy; all Compose health checks and the
   frontend local/container index hash still pass.
+
+## 2026-08-17 — PCH-07 iteration 8 handoff
+
+- Reproduced the stop-window defect: an assistant `tool_use` without its matching `tool_result`
+  was still serializable into an Anthropic request while the context validator classified the
+  same transcript as invalid.
+- Added idempotent cancelled/not-executed tool results for the whole proposed batch, paired
+  checkpoints, provider-boundary orphan/missing/duplicate validation, and a terminal trace drain.
+- Changed the main Assistant stop path to retain `run_started.task_id`, call the owner-checked
+  cancel API first, consume tool/result terminal events for 2.5 seconds, and abort only as fallback.
+- Fixed the cross-container ownership bug by proxying Gateway cancellation into the Assistant
+  process TaskManager; cross-owner lookups remain 404 and audit logs contain only bounded digests.
+- Focused evidence passed before the final handoff edits: provider boundaries 81/81,
+  streaming-first contract 122/122 plus 2 targeted approval/cancellation cases after the added
+  regression, Assistant runtime gate 5/5, cancellation/session tests 41/41 plus 4 targeted
+  cross-container cases, and browser cancellation/approval set 4/4. Web type-check/lint/build,
+  Ruff and harness passed at their recorded checkpoints; lint retained 10 pre-existing warnings.
+  The final blocked/side-effect UI projection was production-built during hot update but is
+  intentionally left for the combined post-Grok type/lint/browser gate.
+- In-app browser exercised an approved 20-second Code Executor operation, stopped it in about
+  0.3 seconds, observed paired tool result/end events, and then completed a same-session `web_fetch`
+  without provider HTTP 400. Because cancellation happened after a medium-risk dispatch, the
+  backend correctly kept the run blocked as `side_effect_unknown`; the final frontend projection
+  change still needs the combined post-Grok browser gate.
+- Code Executor was returned to `enabled=false`, `backend=none`, `docker_socket=no`; Assistant
+  source was hot-updated after the recreation. No commit or push was made so the concurrent Grok
+  performance/security changes can be reviewed and gated as one integration.
+
+## 2026-08-17 — PCH-07 iteration 9 integration closure
+
+- Closed the combined review findings: client-selected session IDs now use an atomic
+  create-if-absent path; partial/final usage preserves final token and cost totals without a second
+  request charge; realtime stream usage records once; incremental memory keeps vector lineage on
+  failure; PDF rendering no longer shares PyMuPDF objects across worker threads; retrieval defaults
+  cannot truncate a requested `top_k`; and Redis success headers report real remaining capacity.
+- Removed the Playwright spec-to-spec import by consolidating the composer readiness checks into the
+  owning Assistant suite. The container frontend gate completed 35/36 with one explicit skip because
+  no live Playground service was configured; all Assistant cases passed, including tool cancellation
+  and same-session follow-up.
+- Combined verification passed: 477 Gateway/Assistant/security tests, 873 Knowledge/embedding/PDF
+  tests, all changed/untracked Python Ruff, Web type-check/build, 6 Node tests, Harness, diff check,
+  runtime validate/status, and repository-owned Compose health.
+- In-app-browser acceptance logged in with the ignored E2E account, loaded the Assistant composer in
+  178 ms, completed a real Qwen turn with first visible text in 7.918 s, stopped a running docgen tool
+  into the conservative `SIDE_EFFECT_UNKNOWN` terminal, and completed a same-session follow-up with
+  no provider HTTP 400 or interrupted-stream UI.
+- The latest native-agent parity evidence remains an explicit quality gap rather than a correctness
+  pass: AI Platform is 5/8 raw while OpenClaw is 7/8. This integration is release-safe for the tested
+  contracts, but the broader complex-task quality target remains future optimization work.

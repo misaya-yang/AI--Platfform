@@ -345,3 +345,85 @@ async def test_oversized_safety_critical_terminal_envelope_fails_closed_without_
 
     with pytest.raises(SSEEventTransportError, match="safety-critical terminal envelope"):
         await bound_sse_event(event, artifact_storage=storage, **_SCOPE)
+
+
+def _tool_completed_with_huge_metadata() -> AssistantStreamEvent:
+    return AssistantStreamEvent(
+        event_type="tool_call_completed",
+        data={
+            "run_id": "run-1",
+            "thread_id": _SCOPE["session_id"],
+            "tool_call_id": "tool-1",
+            "tool_name": "search_knowledge_base",
+            "result": "kb result",
+            "metadata": {
+                "total_results": 8,
+                "contexts": [
+                    {
+                        "dataset_id": "kb-1",
+                        "chunks": [
+                            {"content": "检索内容全文" * 8_000, "score": 0.9}
+                        ],
+                    }
+                ],
+            },
+        },
+        timestamp=123.5,
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_completed_oversized_metadata_spills_under_wire_budget() -> None:
+    """SPO-03 / A4: non-terminal metadata is spillable → frame ≤ 64 KB."""
+    storage = _ScopedArtifactStorage()
+    event = _tool_completed_with_huge_metadata()
+    assert sse_data_payload_size(event) > SSE_DATA_PAYLOAD_MAX_BYTES
+
+    bounded = await bound_sse_event(event, artifact_storage=storage, **_SCOPE)
+
+    assert sse_data_payload_size(bounded) <= SSE_DATA_PAYLOAD_MAX_BYTES
+    assert "metadata" in bounded.data["payload_artifact"]["replaced_fields"]
+    assert "metadata" not in {
+        key for key in bounded.data if key != "payload_artifact"
+    }
+
+
+@pytest.mark.asyncio
+async def test_terminal_metadata_is_never_spilled_fails_closed() -> None:
+    """Approval flows read metadata in-frame; spilling it is forbidden."""
+    storage = _ScopedArtifactStorage()
+    event = _oversized_event("approval_required")
+    event.data["metadata"] = {"approval_proof": "审批凭据" * 12_000}
+    event.data["terminal_envelope"]["error"] = None
+
+    with pytest.raises(SSEEventTransportError):
+        await bound_sse_event(event, artifact_storage=storage, **_SCOPE)
+
+
+def test_bounded_context_item_caps_chunk_content() -> None:
+    from assistant_service.core.tools.builtin_tools import _bounded_context_item
+
+    item = {
+        "content": "x" * 50_000,
+        "score": 0.9,
+        "dataset_id": "kb-1",
+        "segment_id": "seg-1",
+        "_cross_dataset_rrf_score": 1.0,
+        "metadata": {"text": "y" * 50_000, "source_url": "https://example.test/doc"},
+    }
+    bounded = _bounded_context_item(item)
+
+    assert bounded["score"] == 0.9
+    assert bounded["dataset_id"] == "kb-1"
+    assert bounded["segment_id"] == "seg-1"
+    assert len(bounded["content"]) <= 400
+    assert "metadata" not in bounded
+    assert item["content"] == "x" * 50_000  # the model-facing copy is untouched
+    assert item["metadata"]["text"] == "y" * 50_000
+
+
+def test_bounded_context_item_keeps_short_content() -> None:
+    from assistant_service.core.tools.builtin_tools import _bounded_context_item
+
+    bounded = _bounded_context_item({"content": "short", "score": 0.5})
+    assert bounded == {"content": "short", "score": 0.5}

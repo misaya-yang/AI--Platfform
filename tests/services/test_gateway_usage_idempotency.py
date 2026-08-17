@@ -73,6 +73,8 @@ class _UsageConn:
 
         if existing["status"] in {"running", "pending"} and args[20] == "success":
             existing["status"] = "success"
+        existing["input_tokens"] = max(existing["input_tokens"], args[7])
+        existing["output_tokens"] = max(existing["output_tokens"], args[8])
         return {"inserted": False}
 
     async def executemany(self, query: str, rows: list[tuple[Any, ...]]):
@@ -141,6 +143,9 @@ class _BatchUsageConn(_UsageConn):
                 }
             elif existing["status"] in {"running", "pending"} and row[20] == "success":
                 existing["status"] = "success"
+            if not inserted:
+                existing["input_tokens"] = max(existing["input_tokens"], row[7])
+                existing["output_tokens"] = max(existing["output_tokens"], row[8])
             returned.append(
                 {
                     "inserted": inserted,
@@ -192,7 +197,7 @@ async def test_duplicate_request_identity_creates_one_chargeable_row():
 
     assert len(conn.usage_rows) == 1
     assert len(conn.quota_updates) == 1
-    assert conn.quota_updates[0][2] == 140
+    assert conn.quota_updates[0][2] == 1998
 
 
 @pytest.mark.asyncio
@@ -238,6 +243,33 @@ async def test_reflush_after_success_does_not_double_charge():
 
 
 @pytest.mark.asyncio
+async def test_partial_then_final_across_flushes_accounts_final_total_once():
+    conn = _UsageConn()
+    recorder = UsageRecorder(
+        database=_DB(conn),
+        buffer_size=100,
+        normal_trace_sample_rate=0.0,
+        default_trace_p95_threshold_ms=999_999,
+    )
+
+    await recorder.record(
+        _record(status="running", input_tokens=100, output_tokens=40)
+    )
+    await recorder._flush_buffer()
+    await recorder.record(
+        _record(status="success", input_tokens=160, output_tokens=90)
+    )
+    await recorder._flush_buffer()
+
+    assert len(conn.usage_rows) == 1
+    stored = next(iter(conn.usage_rows.values()))
+    assert stored["input_tokens"] == 160
+    assert stored["output_tokens"] == 90
+    assert sum(update[2] for update in conn.quota_updates) == 250
+    assert sum(update[4] for update in conn.quota_updates) == 1
+
+
+@pytest.mark.asyncio
 async def test_production_usage_flush_batches_unique_rows_into_one_round_trip():
     conn = _BatchUsageConn()
     recorder = UsageRecorder(database=None)
@@ -267,8 +299,28 @@ async def test_batched_usage_flush_collapses_same_identity_without_double_charge
 
     accepted = await recorder._write_records(conn, [first, final])
 
-    assert accepted == [first]
+    assert len(accepted) == 1
+    assert accepted[0].input_tokens == 999
+    assert accepted[0].output_tokens == 999
     assert len(conn.usage_rows) == 1
     assert next(iter(conn.usage_rows.values()))["status"] == "success"
     assert len(conn.batch_fetch_calls) == 1
     assert len(conn.batch_fetch_calls[0][1]) == 24
+
+
+@pytest.mark.asyncio
+async def test_later_cumulative_flush_accounts_only_token_delta() -> None:
+    conn = _BatchUsageConn()
+    recorder = UsageRecorder(database=None)
+    first = _record(status="running", input_tokens=100, output_tokens=40)
+    final = _record(status="success", input_tokens=160, output_tokens=90)
+
+    first_accepted = await recorder._write_records(conn, [first])
+    final_accepted = await recorder._write_records(conn, [final])
+
+    assert first_accepted == [first]
+    assert len(final_accepted) == 1
+    assert final_accepted[0].input_tokens == 60
+    assert final_accepted[0].output_tokens == 50
+    assert final_accepted[0].metadata["_accounting_request_delta"] == 0
+    assert final_accepted[0].metadata["_accounting_success_delta"] == 1

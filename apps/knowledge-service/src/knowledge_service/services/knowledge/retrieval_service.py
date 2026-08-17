@@ -48,6 +48,13 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# SPO-04 / K3: interactive retrieval defaults — 12 dense + 12 lexical hybrid
+# with a tight candidate pool; rerank / MMR stay off unless explicitly
+# configured (unchanged).
+_INTERACTIVE_DEFAULT_VECTOR_K = 12
+_INTERACTIVE_DEFAULT_KEYWORD_K = 12
+_INTERACTIVE_DEFAULT_CANDIDATE_K = 24
+
 MULTI_QUERY_TOP_K = {1: 5, 2: 6, 3: 8, 4: 9, 5: 10}
 _SERVER_OWNED_RERANK_FIELD_ALIASES = frozenset(
     {
@@ -817,20 +824,28 @@ class RetrievalService:
         )
 
         top_k = max(int(top_k), 1)
+        # SPO-04 / K3: the interactive default profile is a short hybrid
+        # (12 dense + 12 lexical) without the evaluation-profile over-retrieval
+        # (top_k*4 / *10 candidate expansion). Explicit request overrides and
+        # dataset-level retrieval configs (balanced/accurate presets) keep
+        # their own values.
         vector_k = int(
             vector_top_k
             if vector_top_k is not None
-            else retrieval_defaults.get("vector_top_k") or max(top_k * 4, 20)
+            else retrieval_defaults.get("vector_top_k")
+            or max(top_k, _INTERACTIVE_DEFAULT_VECTOR_K)
         )
         keyword_k = int(
             keyword_top_k
             if keyword_top_k is not None
-            else retrieval_defaults.get("keyword_top_k") or max(top_k * 4, 20)
+            else retrieval_defaults.get("keyword_top_k")
+            or max(top_k, _INTERACTIVE_DEFAULT_KEYWORD_K)
         )
         candidate_k = int(
             candidate_top_k
             if candidate_top_k is not None
-            else retrieval_defaults.get("candidate_top_k") or max(top_k * 10, 50)
+            else retrieval_defaults.get("candidate_top_k")
+            or max(top_k * 2, _INTERACTIVE_DEFAULT_CANDIDATE_K)
         )
         candidate_k = max(candidate_k, top_k)
         candidate_k = min(candidate_k, 2000)

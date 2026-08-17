@@ -5,11 +5,23 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from ai_gateway_core.persistence.repositories.agent_trace_repository import AgentTraceRepository
 
 logger = logging.getLogger(__name__)
+
+
+def _affected_row_count(result: object) -> int:
+    """Extract the row count from a DatabaseStorage execute result."""
+    if isinstance(result, str):
+        parts = result.split()
+        if parts and parts[-1].isdigit():
+            return int(parts[-1])
+    try:
+        return int(result)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
 
 _trace_retention_scheduler: TraceRetentionScheduler | None = None
 
@@ -20,12 +32,17 @@ class TraceRetentionScheduler:
         database,
         *,
         retention_days: int = 90,
+        request_trace_retention_days: int = 14,
         cleanup_hour: int = 2,
         cleanup_minute: int = 15,
         batch_size: int = 500,
     ) -> None:
         self.database = database
         self.retention_days = retention_days
+        # SPO-05 / D3: request_traces retention (7–14 days default window).
+        self.request_trace_retention_days = max(
+            7, min(int(request_trace_retention_days), 14)
+        )
         self.cleanup_hour = cleanup_hour
         self.cleanup_minute = cleanup_minute
         self.batch_size = batch_size
@@ -90,7 +107,26 @@ class TraceRetentionScheduler:
             total_deleted += deleted
             if deleted < self.batch_size:
                 break
+        total_deleted += await self._purge_expired_request_traces()
         return total_deleted
+
+    async def _purge_expired_request_traces(self) -> int:
+        """SPO-05 / D3: bound request_traces growth to the retention window."""
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            days=self.request_trace_retention_days
+        )
+        try:
+            result = await self.database.execute(
+                "DELETE FROM request_traces WHERE created_at < $1",
+                cutoff,
+            )
+            deleted = _affected_row_count(result)
+            if deleted:
+                logger.info("Request trace retention removed %s traces", deleted)
+            return deleted
+        except Exception as exc:
+            logger.exception("Request trace retention cleanup failed: %s", exc)
+            return 0
 
 
 def init_trace_retention_scheduler(database) -> TraceRetentionScheduler | None:

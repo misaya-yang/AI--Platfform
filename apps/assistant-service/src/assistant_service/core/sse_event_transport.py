@@ -33,10 +33,14 @@ _SPILLABLE_FIELDS = (
     "tool_result",
     "result",
     "context_snapshot",
+    "metadata",
 )
 _TERMINAL_EVENTS = frozenset(
     {"approval_required", "side_effect_unknown", "run_finished", "run_error"}
 )
+# Approval / terminal flows read these in-frame; spilling them would break the
+# collector's byte-for-byte comparisons and the approval gate.
+_NON_SPILLABLE_ON_TERMINAL = frozenset({"context_snapshot", "metadata"})
 
 
 class SSEEventTransportError(RuntimeError):
@@ -85,7 +89,7 @@ def _replace_spillable_fields(
     for field in _SPILLABLE_FIELDS:
         if field not in bounded:
             continue
-        if event_type in _TERMINAL_EVENTS and field in {"context_snapshot"}:
+        if event_type in _TERMINAL_EVENTS and field in _NON_SPILLABLE_ON_TERMINAL:
             # The collector compares/copies this receipt together with the
             # terminal envelope. It must stay byte-for-byte identical.
             continue

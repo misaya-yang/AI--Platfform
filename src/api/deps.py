@@ -116,7 +116,15 @@ async def enforce_rate_limit(
     if not ctx.ip:
         ctx.ip = _get_client_ip(request)
 
-    result = await limiter.check(ctx)
+    # Single authority (SPO-02): skip exactly the dimensions the ASGI
+    # rate-limit middleware already counted for this request; the route-level
+    # limiter keeps counting what the middleware cannot know (operation /
+    # assistant) and stays the full authority when the middleware is
+    # disabled or did not run.
+    counted = getattr(request.state, "rate_limit_counted_dimensions", None)
+    skip_dimensions = set(counted) if counted else None
+
+    result = await limiter.check(ctx, skip_dimensions=skip_dimensions)
     if not result.allowed:
         raise HTTPException(
             status_code=429,
@@ -359,17 +367,28 @@ async def get_user_context(
         t_jwt_start = time.perf_counter()
         token = auth_header.split(" ", 1)[1].strip()
 
+        # SPO-02 / GW3: the ASGI auth middleware already verified this exact
+        # token with the same canonical decoder (signature + exp + aud/iss);
+        # reuse its verified claims instead of decoding twice. When the
+        # middleware did not run or verification failed there, fall back to
+        # the strict decode below.
+        verified_claims = getattr(request.state, "verified_jwt_claims", None)
+
         # Use unified JWT config for consistent secret/algorithms
         jwt_secret = get_jwt_secret(auth_cfg.jwt.secret)
         jwt_algorithms = get_jwt_algorithms(auth_cfg.jwt.algorithms)
 
         try:
-            payload = decode_jwt_token(
-                token,
-                secret=jwt_secret,
-                algorithms=jwt_algorithms,
-                audience=auth_cfg.jwt.audience,
-                issuer=auth_cfg.jwt.issuer,
+            payload = (
+                verified_claims
+                if isinstance(verified_claims, dict)
+                else decode_jwt_token(
+                    token,
+                    secret=jwt_secret,
+                    algorithms=jwt_algorithms,
+                    audience=auth_cfg.jwt.audience,
+                    issuer=auth_cfg.jwt.issuer,
+                )
             )
         except AuthError:
             await _record_auth_failure(request, None, None)
@@ -621,13 +640,19 @@ async def get_auth_context(
         jwt_secret = get_jwt_secret(auth_cfg.jwt.secret)
         jwt_algorithms = get_jwt_algorithms(auth_cfg.jwt.algorithms)
 
+        # SPO-02 / GW3: reuse the middleware's verified claims when present.
+        verified_claims = getattr(request.state, "verified_jwt_claims", None)
         try:
-            payload = decode_jwt_token(
-                token,
-                secret=jwt_secret,
-                algorithms=jwt_algorithms,
-                audience=auth_cfg.jwt.audience,
-                issuer=auth_cfg.jwt.issuer,
+            payload = (
+                verified_claims
+                if isinstance(verified_claims, dict)
+                else decode_jwt_token(
+                    token,
+                    secret=jwt_secret,
+                    algorithms=jwt_algorithms,
+                    audience=auth_cfg.jwt.audience,
+                    issuer=auth_cfg.jwt.issuer,
+                )
             )
         except AuthError:
             await _record_auth_failure(request, None, None)

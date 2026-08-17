@@ -598,3 +598,6 @@ def test_standalone_dev_runtime_uses_pinned_images_and_memory_guards() -> None:
     assert '--memory "${REDIS_MEMORY_LIMIT:-256m}"' in script
     assert '--memory "${QDRANT_MEMORY_LIMIT:-384m}"' in script
     assert "this checkout requires $image" in script
+    assert '-p "127.0.0.1:${PG_PORT}:5432"' in script
+    assert '-p "127.0.0.1:${REDIS_DEV_PORT}:6379"' in script
+    assert "redis-cli -a $REDIS_PASS" not in script

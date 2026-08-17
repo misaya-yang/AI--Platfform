@@ -330,6 +330,15 @@ class ScopedMemoryDatabase:
                 self.metadata["vector_state"] = "indexed"
             return "UPDATE 1"
         if "UPDATE assistant_memory_sources" in sql:
+            if "COALESCE(metadata, '{}'::jsonb) || $4::jsonb" in sql:
+                source_id, tenant_id, user_id, raw_metadata = args
+                assert source_id == self.source_id
+                assert tenant_id == self.tenant_id
+                assert user_id == self.user_id
+                merged = json.loads(str(raw_metadata))
+                if isinstance(merged, dict):
+                    self.metadata.update(merged)
+                return "UPDATE 1"
             source_id, tenant_id, user_id, source_path, indexing_token = args
             assert source_id == self.source_id
             assert tenant_id == self.tenant_id

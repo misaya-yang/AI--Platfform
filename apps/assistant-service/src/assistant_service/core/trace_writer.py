@@ -29,6 +29,7 @@ from ..config.startup_fingerprint import (
     fingerprinted_runtime_names,
     fingerprinted_secret_names,
 )
+from .trace_metrics import trace_writer_metrics
 
 logger = get_logger(__name__)
 
@@ -606,9 +607,22 @@ class AssistantTraceWriter:
         self._failed_outcomes: dict[str, tuple[int, str]] = {}
         self._initialized_traces: set[str] = set()
         self._trace_init_locks: dict[str, asyncio.Lock] = {}
+        # SPO-03 / A3: per-run event batching. Events accumulate per trace
+        # until 25 pending, 50 ms, or finish/drain, then persist in one
+        # executemany statement instead of one INSERT per event.
+        self._event_buffers: dict[str, list[tuple[str, int, Any, str | None, float | None]]] = {}
+        self._event_contexts: dict[str, AssistantTraceContext] = {}
+        self._flush_timers: dict[str, asyncio.Task[None]] = {}
+        # Traces whose finish submission is queued: the finish task flushes
+        # its own buffer inline, so drain must not flush it again (that race
+        # re-inserted the root/lifecycle pair).
+        self._pending_finishes: set[str] = set()
         self.dropped_writes = 0
         self.failed_writes = 0
         self.timed_out_writes = 0
+
+    _BATCH_MAX_EVENTS = 25
+    _BATCH_FLUSH_DELAY_S = 0.05
 
     @property
     def pending_count(self) -> int:
@@ -635,17 +649,101 @@ class AssistantTraceWriter:
         phase: str | None = None,
         occurred_at: float | None = None,
     ) -> bool:
-        return self._submit(
-            self._record_event(
-                ctx=ctx,
-                event_type=event_type,
-                sequence_no=sequence_no,
-                payload=payload,
-                phase=phase,
-                occurred_at=occurred_at,
-            ),
-            trace_id=ctx.trace_id,
+        if self.database is None or not hasattr(self.database, "execute"):
+            return self._drop_write(trace_id=ctx.trace_id)
+        if self.max_pending <= 0:
+            return self._drop_write(trace_id=ctx.trace_id)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return self._drop_write(trace_id=ctx.trace_id)
+
+        buffer = self._event_buffers.setdefault(ctx.trace_id, [])
+        buffer.append((event_type, sequence_no, payload, phase, occurred_at))
+        self._event_contexts.setdefault(ctx.trace_id, ctx)
+        if len(buffer) >= self._BATCH_MAX_EVENTS:
+            self._submit_flush(ctx.trace_id)
+        elif len(buffer) == 1:
+            self._arm_flush_timer(ctx.trace_id)
+        return True
+
+    def _drop_write(self, *, trace_id: str) -> bool:
+        """Mirror ``_submit``'s drop accounting for synchronous rejections."""
+        self._submission_generation += 1
+        self.dropped_writes += 1
+        self._record_failed_outcome(
+            trace_id=trace_id,
+            generation=self._submission_generation,
+            outcome="dropped",
         )
+        return False
+
+    def _arm_flush_timer(self, trace_id: str) -> None:
+        existing = self._flush_timers.get(trace_id)
+        if existing is not None and not existing.done():
+            return
+
+        loop = asyncio.get_running_loop()
+
+        async def _delayed_flush() -> None:
+            try:
+                await asyncio.sleep(self._BATCH_FLUSH_DELAY_S)
+            except asyncio.CancelledError:
+                return
+            self._submit_flush(trace_id)
+
+        timer = loop.create_task(_delayed_flush())
+        self._flush_timers[trace_id] = timer
+
+    def _submit_flush(self, trace_id: str) -> None:
+        buffer = self._event_buffers.get(trace_id)
+        if not buffer:
+            return
+        events = list(buffer[: self._BATCH_MAX_EVENTS])
+        del buffer[: self._BATCH_MAX_EVENTS]
+        ctx = self._event_contexts.get(trace_id)
+        self._flush_timers.pop(trace_id, None)
+        if ctx is not None:
+            self._submit(
+                self._flush_events(ctx=ctx, events=events),
+                trace_id=trace_id,
+            )
+        if buffer:
+            # More than one batch worth accumulated; drain the remainder
+            # immediately so sequence order persists without a long tail.
+            self._submit_flush(trace_id)
+
+    def _submit_pending_flush(self, trace_id: str) -> bool:
+        """Pop the pending buffer and submit it through the bounded writer."""
+        if trace_id in self._pending_finishes:
+            # The queued finish task flushes its own buffer inline; flushing
+            # here would race it and re-insert the root/lifecycle pair.
+            return False
+        timer = self._flush_timers.pop(trace_id, None)
+        if timer is not None and not timer.done():
+            timer.cancel()
+        buffer = self._event_buffers.pop(trace_id, None)
+        if not buffer:
+            return False
+        ctx = self._event_contexts.pop(trace_id, None)
+        if ctx is None:
+            return False
+        return self._submit(
+            self._flush_events(ctx=ctx, events=list(buffer)),
+            trace_id=trace_id,
+        )
+
+    async def _flush_pending_events(self, trace_id: str) -> None:
+        """Inline flush for ``finish_trace`` (already inside a bounded submission)."""
+        timer = self._flush_timers.pop(trace_id, None)
+        if timer is not None and not timer.done():
+            timer.cancel()
+        buffer = self._event_buffers.pop(trace_id, None)
+        if not buffer:
+            return
+        ctx = self._event_contexts.pop(trace_id, None)
+        if ctx is not None:
+            await self._flush_events(ctx=ctx, events=list(buffer))
 
     def record_span(
         self,
@@ -694,7 +792,8 @@ class AssistantTraceWriter:
         terminal_sequence_no: int | None = None,
         terminal_envelope: dict[str, Any] | None = None,
     ) -> bool:
-        return self._submit(
+        self._pending_finishes.add(ctx.trace_id)
+        accepted = self._submit(
             self._finish_trace(
                 ctx=ctx,
                 status=status,
@@ -708,6 +807,9 @@ class AssistantTraceWriter:
             ),
             trace_id=ctx.trace_id,
         )
+        if not accepted:
+            self._pending_finishes.discard(ctx.trace_id)
+        return accepted
 
     async def drain(
         self,
@@ -716,6 +818,16 @@ class AssistantTraceWriter:
         strict: bool = False,
         trace_id: str | None = None,
     ) -> None:
+        # Persist any still-buffered events before waiting on the submission
+        # barrier, so a drain never reports done while deltas are in memory.
+        # The flush goes through the bounded submission machinery (write
+        # timeout + generation barrier) rather than blocking the caller.
+        if trace_id is not None:
+            self._submit_pending_flush(trace_id)
+        else:
+            for buffered_trace_id in list(self._event_buffers):
+                self._submit_pending_flush(buffered_trace_id)
+
         def latest_relevant_generation() -> int:
             if trace_id is None:
                 return self._submission_generation
@@ -789,7 +901,7 @@ class AssistantTraceWriter:
         )
         if not hasattr(self.database, "fetchrow"):
             raise RuntimeError("trace resume sequence lookup is unavailable")
-        row = await self.database.fetchrow(
+        row = await self._trace_fetchrow(
             """
             SELECT COALESCE(MAX(sequence_no), 0)::int AS max_sequence_no
             FROM (
@@ -925,6 +1037,26 @@ class AssistantTraceWriter:
                 level=logging.WARNING,
             )
 
+    async def _trace_execute(self, sql: str, *args: Any) -> Any:
+        trace_writer_metrics.sql_statements += 1
+        return await self.database.execute(sql, *args)
+
+    async def _trace_executemany(self, sql: str, rows: list[tuple[Any, ...]]) -> Any:
+        if not rows:
+            return None
+        if hasattr(self.database, "executemany"):
+            trace_writer_metrics.sql_statements += 1
+            return await self.database.executemany(sql, rows)
+        # Adapter fallback: one statement per row, still inside one flush task.
+        for row in rows:
+            trace_writer_metrics.sql_statements += 1
+            await self.database.execute(sql, *row)
+        return None
+
+    async def _trace_fetchrow(self, sql: str, *args: Any) -> Any:
+        trace_writer_metrics.sql_statements += 1
+        return await self.database.fetchrow(sql, *args)
+
     async def _start_trace(self, ctx: AssistantTraceContext) -> None:
         await self._ensure_trace_started(ctx)
 
@@ -946,40 +1078,60 @@ class AssistantTraceWriter:
             await self._upsert_lifecycle_span(ctx, status="running")
             self._initialized_traces.add(ctx.trace_id)
 
-    async def _record_event(
+    async def _flush_events(
         self,
         *,
         ctx: AssistantTraceContext,
-        event_type: str,
-        sequence_no: int,
-        payload: Any,
-        phase: str | None,
-        occurred_at: float | None,
+        events: list[tuple[str, int, Any, str | None, float | None]],
     ) -> None:
+        """Persist one buffered batch of trace events (SPO-03 / A3).
+
+        Root/lifecycle are ensured once for the batch, span-producing events
+        still upsert their spans inline, and all event rows go out as a
+        single ``executemany`` statement.
+        """
+        if not events:
+            return
         await self._ensure_trace_started(ctx)
-        span_id = await self._record_span_for_event(
-            ctx=ctx,
-            event_type=event_type,
-            sequence_no=sequence_no,
-            payload=payload,
-            occurred_at=occurred_at,
-        )
-        sanitized_payload = {
-            "phase": phase,
-            "data": _sanitize_payload(_event_payload_for_storage(event_type, payload)),
-        }
-        if ctx.transcript_locator:
-            sanitized_payload["locator"] = _sanitize_payload(
-                {
-                    "turn_index": ctx.transcript_locator.get("turn_index"),
-                    "turn_id": ctx.transcript_locator.get("turn_id"),
-                    "request_id": ctx.request_id,
-                    "run_id": ctx.run_id,
-                    "session_id": ctx.session_id,
-                }
+        rows: list[tuple[Any, ...]] = []
+        ttft_ms: int | None = None
+        for event_type, sequence_no, payload, phase, occurred_at in events:
+            span_id = await self._record_span_for_event(
+                ctx=ctx,
+                event_type=event_type,
+                sequence_no=sequence_no,
+                payload=payload,
+                occurred_at=occurred_at,
             )
-        payload_json = _json_dumps(sanitized_payload)
-        await self.database.execute(
+            sanitized_payload = {
+                "phase": phase,
+                "data": _sanitize_payload(_event_payload_for_storage(event_type, payload)),
+            }
+            if ctx.transcript_locator:
+                sanitized_payload["locator"] = _sanitize_payload(
+                    {
+                        "turn_index": ctx.transcript_locator.get("turn_index"),
+                        "turn_id": ctx.transcript_locator.get("turn_id"),
+                        "request_id": ctx.request_id,
+                        "run_id": ctx.run_id,
+                        "session_id": ctx.session_id,
+                    }
+                )
+            payload_json = _json_dumps(sanitized_payload)
+            rows.append(
+                (
+                    ctx.trace_id,
+                    span_id,
+                    event_type,
+                    sequence_no,
+                    _utc_from_timestamp(occurred_at),
+                    payload_json,
+                    len(payload_json.encode("utf-8")),
+                )
+            )
+            if event_type == "ttft" and isinstance(payload, dict):
+                ttft_ms = max(ttft_ms or 0, int(float(payload.get("ttft_ms") or 0)))
+        await self._trace_executemany(
             """
             INSERT INTO agent_trace_events (
                 trace_id, span_id, event_type, sequence_no, occurred_at,
@@ -993,17 +1145,10 @@ class AssistantTraceWriter:
                 payload_size_bytes = EXCLUDED.payload_size_bytes,
                 redacted = TRUE;
             """,
-            ctx.trace_id,
-            span_id,
-            event_type,
-            sequence_no,
-            _utc_from_timestamp(occurred_at),
-            payload_json,
-            len(payload_json.encode("utf-8")),
+            rows,
         )
-        if event_type == "ttft" and isinstance(payload, dict):
-            ttft_ms = int(float(payload.get("ttft_ms") or 0))
-            await self.database.execute(
+        if ttft_ms is not None:
+            await self._trace_execute(
                 """
                 UPDATE agent_traces
                 SET first_token_latency_ms = GREATEST(first_token_latency_ms, $2),
@@ -1060,7 +1205,38 @@ class AssistantTraceWriter:
         terminal_sequence_no: int | None,
         terminal_envelope: dict[str, Any] | None,
     ) -> None:
+        try:
+            await self._finish_trace_impl(
+                ctx=ctx,
+                status=status,
+                output_preview=output_preview,
+                usage=usage,
+                error=error,
+                total_latency_ms=total_latency_ms,
+                terminal_event_type=terminal_event_type,
+                terminal_sequence_no=terminal_sequence_no,
+                terminal_envelope=terminal_envelope,
+            )
+        finally:
+            self._pending_finishes.discard(ctx.trace_id)
+
+    async def _finish_trace_impl(
+        self,
+        *,
+        ctx: AssistantTraceContext,
+        status: str,
+        output_preview: Any,
+        usage: dict[str, Any] | None,
+        error: Any,
+        total_latency_ms: int | None,
+        terminal_event_type: str | None,
+        terminal_sequence_no: int | None,
+        terminal_envelope: dict[str, Any] | None,
+    ) -> None:
         ended_at = time.time()
+        # Persist every buffered event before the terminal update so the run
+        # is never marked finished while delta events are still in memory.
+        await self._flush_pending_events(ctx.trace_id)
         await self._ensure_trace_started(ctx)
         total = (
             total_latency_ms
@@ -1104,7 +1280,7 @@ class AssistantTraceWriter:
             metadata["transcript_locator"] = _sanitize_payload(ctx.transcript_locator)
         if terminal_envelope:
             metadata["terminal_envelope"] = _sanitize_payload(terminal_envelope)
-        await self.database.execute(
+        await self._trace_execute(
             """
             UPDATE agent_traces
             SET status = $2,
@@ -1138,22 +1314,26 @@ class AssistantTraceWriter:
             output_preview=output_preview,
         )
         if terminal_event_type and terminal_sequence_no is not None:
-            await self._record_event(
+            await self._flush_events(
                 ctx=ctx,
-                event_type=terminal_event_type,
-                sequence_no=terminal_sequence_no,
-                payload={
-                    "run_id": ctx.run_id,
-                    "thread_id": ctx.session_id,
-                    "status": status,
-                    "error": _redact_trace_text(error) if error else None,
-                    "usage": usage or {},
-                    "terminal_envelope": _sanitize_payload(terminal_envelope)
-                    if terminal_envelope
-                    else None,
-                },
-                phase="generation_storage",
-                occurred_at=ended_at,
+                events=[
+                    (
+                        terminal_event_type,
+                        terminal_sequence_no,
+                        {
+                            "run_id": ctx.run_id,
+                            "thread_id": ctx.session_id,
+                            "status": status,
+                            "error": _redact_trace_text(error) if error else None,
+                            "usage": usage or {},
+                            "terminal_envelope": _sanitize_payload(terminal_envelope)
+                            if terminal_envelope
+                            else None,
+                        },
+                        "generation_storage",
+                        ended_at,
+                    )
+                ],
             )
         await self._enqueue_trace_ingested(ctx, status=status)
         self._initialized_traces.discard(ctx.trace_id)
@@ -1173,7 +1353,7 @@ class AssistantTraceWriter:
             }
         )
         try:
-            await self.database.execute(
+            await self._trace_execute(
                 """
                 INSERT INTO agent_trace_outbox (tenant_id, job_type, payload)
                 SELECT $1, 'trace.ingested', $2::jsonb
@@ -1213,7 +1393,7 @@ class AssistantTraceWriter:
             metadata["startup_config"] = self.startup_config_summary
         if ctx.transcript_locator:
             metadata["transcript_locator"] = _sanitize_payload(ctx.transcript_locator)
-        await self.database.execute(
+        await self._trace_execute(
             """
             INSERT INTO agent_traces (
                 trace_id, trace_family, workflow_kind, tenant_id, user_id,
@@ -1588,7 +1768,7 @@ class AssistantTraceWriter:
         parent_span_id: str | None = None,
     ) -> None:
         safe_error = _redact_trace_text(error_message) if error_message else None
-        await self.database.execute(
+        await self._trace_execute(
             """
             INSERT INTO agent_trace_spans (
                 span_id, trace_id, parent_span_id, span_kind, name, status, sequence_no,

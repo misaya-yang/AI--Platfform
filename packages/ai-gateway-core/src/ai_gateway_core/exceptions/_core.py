@@ -42,6 +42,12 @@ class PermissionDeniedError(GatewayError):
     pass
 
 
+class SessionAlreadyExistsError(GatewayError):
+    """Raised when a caller attempts to create an existing session id."""
+
+    pass
+
+
 class RateLimitExceededError(GatewayError):
     def __init__(self, key: str):
         super().__init__(f"Rate limit exceeded for {key}")

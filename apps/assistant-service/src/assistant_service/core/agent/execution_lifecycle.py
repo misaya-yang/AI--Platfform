@@ -28,6 +28,13 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# The non-paused terminal drain must never hold the user-facing response:
+# trace persistence is background best-effort by contract (see trace_writer
+# module docstring). Bound the barrier tightly so a stalled trace DB costs
+# milliseconds, not the full write timeout, while a healthy DB still
+# completes the drain before the run is marked finished.
+_TERMINAL_DRAIN_MAX_S = 0.25
+
 
 @dataclass(slots=True)
 class _ExecutionLifecycleState:
@@ -1044,7 +1051,7 @@ class ExecutionLifecycleMixin:
                     ctx, status=final_status, error=state.run_error
                 )
         if ctx.execution_paused:
-            if self.trace_writer:
+            if self.trace_writer and not ctx.trace_capture_disabled:
                 try:
                     await self.trace_writer.drain(
                         timeout_s=self.trace_writer.write_timeout_s,
@@ -1072,6 +1079,15 @@ class ExecutionLifecycleMixin:
                     error=state.run_error,
                     terminal_event_type=terminal_event_type,
                 )
+                if self.trace_writer and not ctx.trace_capture_disabled:
+                    await self.trace_writer.drain(
+                        timeout_s=min(
+                            self.trace_writer.write_timeout_s,
+                            _TERMINAL_DRAIN_MAX_S,
+                        ),
+                        strict=True,
+                        trace_id=self._trace_context(ctx).trace_id,
+                    )
             except Exception as exc:
                 log_internal_exception(
                     logger,

@@ -146,6 +146,7 @@ class DatabaseStorage:
         permission_cache_ttl_seconds: int = 60,
         pool_min_size: int = int(os.environ.get("DB_POOL_MIN_SIZE", "2")),
         pool_max_size: int = int(os.environ.get("DB_POOL_MAX_SIZE", "20")),
+        command_timeout_s: int = int(os.environ.get("DB_COMMAND_TIMEOUT_S", "30")),
         api_key_usage_flush_interval_seconds: int = 2,
         api_key_usage_flush_batch_size: int = 100,
         bootstrap_admin_password_hash: str | None = None,
@@ -160,6 +161,9 @@ class DatabaseStorage:
         self._pool: Any | None = None
         self._pool_min_size = max(int(pool_min_size), 1)
         self._pool_max_size = max(int(pool_max_size), self._pool_min_size)
+        # SPO-05 / D1: bound every pooled query so a stuck statement cannot
+        # pin a connection forever.
+        self._command_timeout_s = max(int(command_timeout_s or 0), 0)
         self._permission_cache: dict[str, tuple[list[str], float]] = {}
         self._permission_cache_max_size = 10000  # Prevent unbounded memory growth
         self._permission_cache_ttl_seconds = max(int(permission_cache_ttl_seconds or 0), 0)
@@ -347,6 +351,7 @@ class DatabaseStorage:
             self.dsn,
             min_size=self._pool_min_size,
             max_size=self._pool_max_size,
+            command_timeout=self._command_timeout_s,
         )
         logger.info(
             f"Database pool created: min_size={self._pool_min_size}, max_size={self._pool_max_size}"
@@ -1384,6 +1389,33 @@ class DatabaseStorage:
                 session.get("status", "active"),
                 session.get("expires_at"),
             )
+
+    async def create_session_if_absent(self, session: dict[str, Any]) -> bool:
+        """Insert a session without overwriting an existing global id."""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO assistant.sessions (
+                    session_id, service_id, user_id, tenant_id,
+                    state, history, metadata, config, status, expires_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                ON CONFLICT (session_id) DO NOTHING
+                RETURNING session_id
+                """,
+                session.get("session_id"),
+                session.get("service_id"),
+                session.get("user_id"),
+                session.get("tenant_id"),
+                json.dumps(session.get("state", {})),
+                json.dumps(session.get("history", [])),
+                json.dumps(session.get("metadata", {})),
+                json.dumps(session.get("config", {})),
+                session.get("status", "active"),
+                session.get("expires_at"),
+            )
+            return row is not None
 
     async def get_session(self, session_id: str) -> dict[str, Any] | None:
         """获取会话"""

@@ -48,13 +48,13 @@ from .core.file_cleanup import get_cleanup_service
 
 # 使用流式友好的纯 ASGI 中间件（替换 BaseHTTPMiddleware）
 from .core.middleware.streaming import (
+    SecurityHeadersMiddleware,
     StreamingAnonymousConfig,
     StreamingAnonymousMiddleware,
     StreamingAuthConfig,
     StreamingAuthMiddleware,
     StreamingLogConfig,
     StreamingLoggingMiddleware,
-    StreamingRateLimitConfig,
     StreamingRateLimitMiddleware,
     StreamingTracingConfig,
     StreamingTracingMiddleware,
@@ -183,16 +183,17 @@ def create_app() -> FastAPI:
     # HTTP 级别限流中间件 - 纯 ASGI
     # Note: Limits should be generous enough for frontend usage patterns
     # (multiple concurrent API calls on page load)
-    rate_limit_config = StreamingRateLimitConfig(
-        enabled=True,
-        global_limit=5000,  # High global limit for overall traffic
-        global_window=60,
-        user_limit=300,  # Authenticated users: 300/min
-        user_window=60,
-        guest_limit=200,  # Guests: 200/min (frontend makes many calls)
-        guest_window=60,
-        ip_limit=500,  # Per-IP: 500/min (shared IPs, proxies)
-        ip_window=60,
+    # SPO-02: the middleware is the single authoritative counter for
+    # global/user/guest/ip/tenant; the route-level multi-dimension limiter
+    # skips those dimensions (deps.enforce_rate_limit).
+    from .core.gateway.multi_dimension_rate_limiter import create_rate_limit_config
+    from .core.middleware._streaming.rate_limit import (
+        streaming_rate_limit_config_from_policy,
+    )
+
+    md_rate_config = create_rate_limit_config()
+    rate_limit_config = streaming_rate_limit_config_from_policy(
+        md_rate_config,
         whitelist_paths=[
             "/health",
             "/health/live",
@@ -219,6 +220,12 @@ def create_app() -> FastAPI:
         jwt_algorithms=settings.authentication.jwt.algorithms
         if hasattr(settings, "authentication")
         else ["HS256"],
+        jwt_audience=getattr(settings.authentication.jwt, "audience", None)
+        if hasattr(settings, "authentication")
+        else None,
+        jwt_issuer=getattr(settings.authentication.jwt, "issuer", None)
+        if hasattr(settings, "authentication")
+        else None,
         api_key_enabled=settings.authentication.api_key.enabled
         if hasattr(settings, "authentication")
         else False,
@@ -294,20 +301,8 @@ def create_app() -> FastAPI:
 
     app.add_middleware(OTelInboundMiddleware)
 
-    # Security response headers
-    @app.middleware("http")
-    async def security_headers(request, call_next):
-        response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        if not request.url.path.startswith("/embed/agents/"):
-            response.headers["X-Frame-Options"] = "DENY"
-        else:
-            if "X-Frame-Options" in response.headers:
-                del response.headers["X-Frame-Options"]
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        return response
+    # Security response headers — pure ASGI so SSE is never wrapped in call_next.
+    app.add_middleware(SecurityHeadersMiddleware)
 
     # 追踪中间件 - 纯 ASGI
     tracing_config = StreamingTracingConfig(

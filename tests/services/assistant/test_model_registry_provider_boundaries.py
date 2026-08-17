@@ -512,6 +512,208 @@ def test_anthropic_body_preserves_tool_use_and_parallel_results() -> None:
     assert [block["tool_use_id"] for block in tool_results] == ["toolu_1", "toolu_2"]
 
 
+@pytest.mark.parametrize("builder_name", ["_build_anthropic_body", "_build_openai_body"])
+def test_provider_body_rejects_unpaired_tool_call_before_network(builder_name: str) -> None:
+    registry = ModelRegistry(use_default_models=False)
+    builder = getattr(registry, builder_name)
+
+    with pytest.raises(ValueError, match="unpaired tool exchange"):
+        builder(
+            "provider-test",
+            [
+                ChatMessage(role="user", content="run the tool"),
+                ChatMessage(
+                    role="assistant",
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "toolu_cancelled",
+                            "type": "function",
+                            "function": {
+                                "name": "slow_tool",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                ),
+            ],
+            temperature=0,
+            max_tokens=100,
+            tools=None,
+            stream=True,
+        )
+
+
+def _unpaired_messages() -> list[ChatMessage]:
+    return [
+        ChatMessage(role="user", content="run the tool"),
+        ChatMessage(
+            role="assistant",
+            content="",
+            tool_calls=[
+                {
+                    "id": "toolu_cancelled",
+                    "type": "function",
+                    "function": {"name": "slow_tool", "arguments": "{}"},
+                }
+            ],
+        ),
+    ]
+
+
+def _duplicate_call_messages() -> list[ChatMessage]:
+    call = {
+        "id": "toolu_dup",
+        "type": "function",
+        "function": {"name": "slow_tool", "arguments": "{}"},
+    }
+    return [
+        ChatMessage(role="user", content="run the tool"),
+        ChatMessage(role="assistant", content="", tool_calls=[call, call]),
+    ]
+
+
+def _complete_pair_messages() -> list[ChatMessage]:
+    return [
+        ChatMessage(role="user", content="run the tool"),
+        ChatMessage(
+            role="assistant",
+            content="",
+            tool_calls=[
+                {
+                    "id": "toolu_ok",
+                    "type": "function",
+                    "function": {"name": "slow_tool", "arguments": "{}"},
+                }
+            ],
+        ),
+        ChatMessage(
+            role="tool",
+            content="cancelled",
+            name="slow_tool",
+            tool_call_id="toolu_ok",
+        ),
+    ]
+
+
+class _RecordingProviderClient:
+    def __init__(self) -> None:
+        self.posts = 0
+        self.streams = 0
+
+    async def post(self, *_args: Any, **_kwargs: Any) -> Any:
+        self.posts += 1
+        raise AssertionError("provider HTTP POST must not run")
+
+    def stream(self, *_args: Any, **_kwargs: Any) -> Any:
+        self.streams += 1
+        raise AssertionError("provider HTTP stream must not run")
+
+
+def _registry_with_providers() -> ModelRegistry:
+    registry = ModelRegistry(use_default_models=False)
+    registry.replace_models_from_database_rows(
+        [
+            {
+                "provider_id": "openai",
+                "model_id": "gpt-test",
+                "display_name": "GPT test",
+                "access_level": "public",
+            },
+            {
+                "provider_id": "anthropic",
+                "model_id": "claude-test",
+                "display_name": "Claude test",
+                "access_level": "public",
+            },
+        ]
+    )
+    return registry
+
+
+@pytest.mark.parametrize("builder_name", ["_build_anthropic_body", "_build_openai_body"])
+def test_provider_body_rejects_duplicate_tool_call_before_network(builder_name: str) -> None:
+    registry = ModelRegistry(use_default_models=False)
+    builder = getattr(registry, builder_name)
+
+    with pytest.raises(ValueError, match="duplicate tool call"):
+        builder(
+            "provider-test",
+            _duplicate_call_messages(),
+            temperature=0,
+            max_tokens=100,
+            tools=None,
+            stream=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("model_id", "messages", "match"),
+    [
+        ("gpt-test", _unpaired_messages(), "unpaired tool exchange"),
+        ("claude-test", _unpaired_messages(), "unpaired tool exchange"),
+        ("gpt-test", _duplicate_call_messages(), "duplicate tool call"),
+        ("claude-test", _duplicate_call_messages(), "duplicate tool call"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_chat_stream_rejects_invalid_tool_transcript_without_http(
+    monkeypatch: pytest.MonkeyPatch,
+    model_id: str,
+    messages: list[ChatMessage],
+    match: str,
+) -> None:
+    registry = _registry_with_providers()
+    client = _RecordingProviderClient()
+    monkeypatch.setattr(registry, "_get_client", AsyncMock(return_value=client))
+
+    with pytest.raises(ValueError, match=match):
+        async for _delta in registry.chat_stream(model_id, messages, temperature=0):
+            pass
+
+    assert client.posts == 0
+    assert client.streams == 0
+
+
+@pytest.mark.parametrize("builder_name", ["_build_anthropic_body", "_build_openai_body"])
+def test_provider_body_accepts_complete_tool_pair(builder_name: str) -> None:
+    registry = ModelRegistry(use_default_models=False)
+    builder = getattr(registry, builder_name)
+    body = builder(
+        "provider-test",
+        _complete_pair_messages(),
+        temperature=0,
+        max_tokens=100,
+        tools=None,
+        stream=True,
+    )
+    assert body["messages"]
+
+
+@pytest.mark.parametrize("builder_name", ["_build_anthropic_body", "_build_openai_body"])
+def test_provider_body_rejects_orphan_tool_result_before_network(builder_name: str) -> None:
+    registry = ModelRegistry(use_default_models=False)
+    builder = getattr(registry, builder_name)
+
+    with pytest.raises(ValueError, match="orphan tool result"):
+        builder(
+            "provider-test",
+            [
+                ChatMessage(role="user", content="run the tool"),
+                ChatMessage(
+                    role="tool",
+                    content="cancelled",
+                    name="slow_tool",
+                    tool_call_id="toolu_missing",
+                ),
+            ],
+            temperature=0,
+            max_tokens=100,
+            tools=None,
+            stream=True,
+        )
+
+
 @pytest.mark.parametrize("arguments", ["not-json", "[]", "1"])
 def test_anthropic_body_rejects_non_object_tool_arguments(arguments: str) -> None:
     registry = ModelRegistry(use_default_models=False)

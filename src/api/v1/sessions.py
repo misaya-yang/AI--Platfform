@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
+from ai_gateway_core.exceptions import SessionAlreadyExistsError
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from ...core.auth.user_resolver import UserContext
 from ...services.session.session_manager import SessionManager
@@ -13,9 +15,17 @@ router = APIRouter()
 
 
 class SessionCreate(BaseModel):
+    session_id: str | None = None
     service_id: str | None = None
     metadata: dict[str, Any] | None = None
     config: dict[str, Any] | None = None  # 会话配置（知识库、模型等）
+
+    @field_validator("session_id")
+    @classmethod
+    def _normalize_session_id(cls, value: str | None) -> str | None:
+        if value is None or not str(value).strip():
+            return None
+        return str(UUID(str(value).strip()))
 
 
 class SessionUpdate(BaseModel):
@@ -117,12 +127,18 @@ async def create_session(
         "user_id": user.user_id,
         "tenant_id": user.tenant_id,
         "service_id": body.service_id,
+        "session_id": body.session_id,
         "metadata": body.metadata,
     }
     if body.config:
         create_kwargs["config"] = body.config
+    if body.session_id:
+        create_kwargs["fail_if_exists"] = True
 
-    session = await session_manager.create(**create_kwargs)
+    try:
+        session = await session_manager.create(**create_kwargs)
+    except SessionAlreadyExistsError as exc:
+        raise HTTPException(status_code=409, detail="session already exists") from exc
     return {"session_id": session.session_id}
 
 

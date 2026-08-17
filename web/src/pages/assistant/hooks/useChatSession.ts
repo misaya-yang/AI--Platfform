@@ -4,6 +4,7 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import {
   approveToolCall,
+  cancelTask,
   chatStream,
   getArtifactDownloadUrl,
   getAssistantRunStatus,
@@ -36,6 +37,12 @@ import {
   reduceLegacyStreamChunk,
   type StreamTurnState,
 } from "@/features/chat/stream";
+import {
+  beginNewChatSession,
+  persistNewChatSession,
+  startChatWithoutAwaitingSessionCreate,
+} from "@/features/chat/newChatStream";
+import { createActivityFlushQueue } from "@/features/chat/coalesceUpdates";
 import { reduceSubAgentEvent } from "../subagentEventReducer";
 import type {
   ChatMessage as ChatMessageType,
@@ -85,6 +92,18 @@ function normalizeUnknownToString(value: unknown): string {
     return String(value);
   }
 }
+
+const CANCEL_CLOSURE_EVENT_TYPES = new Set<string>([
+  SSEEventType.RUN_STARTED,
+  SSEEventType.TOOL_CALL_START,
+  SSEEventType.TOOL_CALL_RESULT,
+  SSEEventType.TOOL_CALL_END,
+  SSEEventType.APPROVAL_REQUIRED,
+  SSEEventType.SIDE_EFFECT_UNKNOWN,
+  SSEEventType.CANCELLED,
+  SSEEventType.RUN_ERROR,
+  SSEEventType.RUN_FINISHED,
+]);
 
 function parseToolArguments(value: string): Record<string, unknown> {
   if (!value) return {};
@@ -210,6 +229,7 @@ async function restoreLatestRun(
         processSummary: {
           ...base,
           collapsed: false,
+          status: "blocked",
           tools: [{
             id: nonEmptyString(pendingTool?.tool_id) ?? `approval-${approvalId}`,
             name: nonEmptyString(pendingTool?.tool_name) ?? "Pending tool",
@@ -359,9 +379,13 @@ const restoreMessageMetadata = (msg: any, index: number, sessionId: string): Cha
             ? (tc.arguments as Record<string, unknown>)
             : {},
         status:
-          tc?.status === "error" || tc?.status === "pending" || tc?.status === "running"
+          tc?.status === "pending" || tc?.status === "running"
             ? tc.status
-            : "completed",
+            : tc?.status === "error" ||
+                tc?.status === "cancelled" ||
+                tc?.status === "not_executed"
+              ? "error"
+              : "completed",
       }));
     }
     if (Array.isArray(msg.metadata.tool_results) && msg.metadata.tool_results.length > 0) {
@@ -633,7 +657,7 @@ function finalizeProcessSummary(
   if (summary.tools.some((tool) => tool.status === "approval_required")) {
     return {
       ...summary,
-      status: "running",
+      status: "blocked",
       collapsed: false,
       totalDurationMs,
     };
@@ -694,6 +718,9 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const cancelRequestedRef = useRef(false);
+  const activeTaskIdRef = useRef<string | null>(null);
+  const cancelApiTaskIdRef = useRef<string | null>(null);
+  const cancelFallbackTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
   const sendInFlightRef = useRef(false);
   // Monotonic ownership token for every stream attempt. Session switches can
   // invalidate an in-flight createSession/fetch even before an AbortController
@@ -709,6 +736,50 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
   // 用于跟踪是否已经初始化完成
   const isInitialized = useRef(false);
 
+  const clearCancelFallback = useCallback(() => {
+    if (cancelFallbackTimerRef.current !== null) {
+      window.clearTimeout(cancelFallbackTimerRef.current);
+      cancelFallbackTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleCancelFallback = useCallback((controller: AbortController) => {
+    clearCancelFallback();
+    cancelFallbackTimerRef.current = window.setTimeout(() => {
+      cancelFallbackTimerRef.current = null;
+      if (abortControllerRef.current === controller && !controller.signal.aborted) {
+        controller.abort();
+      }
+    }, 2500);
+  }, [clearCancelFallback]);
+
+  const requestTaskCancellation = useCallback(
+    (taskId: string, controller: AbortController) => {
+      if (!taskId || cancelApiTaskIdRef.current === taskId) return;
+      cancelApiTaskIdRef.current = taskId;
+      void cancelTask(taskId, "user_requested_stop")
+        .then((result) => {
+          if (
+            !result.cancelled &&
+            abortControllerRef.current === controller &&
+            !controller.signal.aborted
+          ) {
+            controller.abort();
+          }
+        })
+        .catch((error) => {
+          console.warn("Assistant task cancellation request failed", error);
+          if (
+            abortControllerRef.current === controller &&
+            !controller.signal.aborted
+          ) {
+            controller.abort();
+          }
+        });
+    },
+    [],
+  );
+
   // Cleanup AbortController on unmount to prevent state updates on unmounted component
   useEffect(() => {
     messagesRef.current = messages;
@@ -717,9 +788,10 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
   useEffect(() => {
     return () => {
       streamEpochRef.current += 1;
+      clearCancelFallback();
       abortControllerRef.current?.abort();
     };
-  }, []);
+  }, [clearCancelFallback]);
 
   // Load sessions on mount and restore active session if exists
   useEffect(() => {
@@ -864,11 +936,18 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     streamEpochRef.current += 1;
     cancelRequestedRef.current = true;
     const controller = abortControllerRef.current;
+    const taskId = activeTaskIdRef.current;
+    if (controller && taskId) {
+      requestTaskCancellation(taskId, controller);
+    }
+    clearCancelFallback();
     abortControllerRef.current = null;
+    activeTaskIdRef.current = null;
+    cancelApiTaskIdRef.current = null;
     sendInFlightRef.current = false;
     setIsStreaming(false);
     controller?.abort();
-  }, []);
+  }, [clearCancelFallback, requestTaskCancellation]);
 
   const handleNewChat = useCallback(() => {
     abandonActiveStream();
@@ -1018,11 +1097,16 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
   const stopStreaming = useCallback(() => {
     const controller = abortControllerRef.current;
     if (!controller) return;
-    // Preserve the user's terminal intent even when a proxy or mocked
-    // transport does not settle its fetch immediately after abort().
+    // Preserve the user's terminal intent and ask the owner-checked backend
+    // task to cancel before closing SSE. The grace window lets the runtime
+    // deliver paired tool_result/tool_call_end plus the cancelled terminal.
     cancelRequestedRef.current = true;
-    controller.abort();
-  }, []);
+    scheduleCancelFallback(controller);
+    const taskId = activeTaskIdRef.current;
+    if (taskId) {
+      requestTaskCancellation(taskId, controller);
+    }
+  }, [requestTaskCancellation, scheduleCancelFallback]);
 
   const sendMessage = useCallback(async (params: {
     messageContent: string;
@@ -1135,28 +1219,18 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     }
     setIsStreaming(true);
 
-    // 2. Create/Update Session
-    let sessionId = activeSessionId;
-    let shouldRefreshSessionsInBackground = false;
-    if (!sessionId) {
-      try {
-        const sessionTitle = messageContent.slice(0, 50);
-        const { session_id } = await createSession({
-          service_id: "__builtin_assistant__",  // 保留的 service_id
-          metadata: { title: sessionTitle },
-          config,
-        });
-        sessionId = session_id;
-        if (!isCurrentStream()) return;
-        setActiveSessionId(sessionId);
-        shouldRefreshSessionsInBackground = true;
-        setAssistantLocalTitles((prev: Record<string, string>) => ({
-          ...prev,
-          [sessionId!]: sessionTitle,
-        }));
-      } catch (error) {
-        console.error("Failed to create session:", error);
-      }
+    // 2. Bind a session id without waiting for createSession. A new chat
+    // mints a client id and opens SSE immediately; persistence is background.
+    const preparedSession = beginNewChatSession(activeSessionId || undefined);
+    const sessionId = preparedSession.sessionId;
+    let shouldRefreshSessionsInBackground = preparedSession.isNew;
+    if (preparedSession.isNew) {
+      const sessionTitle = messageContent.slice(0, 50);
+      setActiveSessionId(sessionId);
+      setAssistantLocalTitles((prev: Record<string, string>) => ({
+        ...prev,
+        [sessionId]: sessionTitle,
+      }));
     } else {
       updateSession(sessionId, { config }).catch(console.error);
     }
@@ -1183,7 +1257,10 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     };
 
     // 3. Start Stream
+    clearCancelFallback();
     cancelRequestedRef.current = false;
+    activeTaskIdRef.current = null;
+    cancelApiTaskIdRef.current = null;
     const streamAbortController = new AbortController();
     abortControllerRef.current = streamAbortController;
     const startTime = Date.now();
@@ -1316,6 +1393,63 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       }
     };
 
+    const activityQueue = createActivityFlushQueue({
+      scheduleFlush: (flush) => {
+        requestAnimationFrame(flush);
+      },
+      apply: (batch) => {
+        if (!isCurrentStream()) return;
+        updateAssistantMessage((message) => {
+          let next = message;
+          if (batch.thinkingStart) {
+            const thinkStartMs = Date.now();
+            const prev = next.processSummary ?? initProcessSummary(undefined, thinkStartMs);
+            next = {
+              ...next,
+              isThinkingStreaming: true,
+              streamingThinkingContent: "",
+              processSummary: { ...prev, thinkingStartedAt: thinkStartMs },
+            };
+          }
+          if (batch.thinkingDelta) {
+            next = {
+              ...next,
+              streamingThinkingContent: (next.streamingThinkingContent || "") + batch.thinkingDelta,
+              firstTokenMs,
+            };
+          }
+          if (batch.thinkingEnd !== null) {
+            const thinkEndMs = Date.now();
+            const prev = next.processSummary;
+            const thinkingDuration = prev?.thinkingStartedAt
+              ? thinkEndMs - prev.thinkingStartedAt
+              : undefined;
+            next = {
+              ...next,
+              isThinkingStreaming: false,
+              thinkingContent: batch.thinkingEnd.trim() || next.streamingThinkingContent?.trim() || "",
+              streamingThinkingContent: undefined,
+              ...(prev && thinkingDuration
+                ? { processSummary: { ...prev, thinkingDurationMs: thinkingDuration } }
+                : {}),
+            };
+          }
+          for (const subagent of batch.subagentEvents) {
+            next = {
+              ...next,
+              activeSubAgents: reduceSubAgentEvent(
+                next.activeSubAgents ?? [],
+                subagent.eventType,
+                subagent.data,
+                subagent.now,
+              ),
+            };
+          }
+          return next;
+        });
+      },
+    });
+
     try {
       const styleSystemPrompt = getStyleSystemPrompt(config.selected_style || "default");
       const history: AssistantMessage[] = messages.map((m) => ({ role: m.role, content: m.content }));
@@ -1325,9 +1459,23 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         config.os_agent_enabled === true &&
         (osAgentEligibilityRef.current?.() ?? false) &&
         Boolean(localNodeBinding);
-      const stream = chatStream({
+      const sessionTitle = messageContent.slice(0, 50);
+      const stream = startChatWithoutAwaitingSessionCreate({
+        sessionId,
+        isNew: preparedSession.isNew,
+        persistSession: preparedSession.isNew
+          ? (id) =>
+              persistNewChatSession(createSession, {
+                sessionId: id,
+                title: sessionTitle,
+                config,
+              }).catch((error) => {
+                console.error("Failed to persist session:", error);
+              })
+          : undefined,
+        openStream: (id) => chatStream({
         message: messageContent,
-        session_id: sessionId || undefined,
+        session_id: id || undefined,
         history,
         model_id: config.selected_model || undefined,
         temperature: config.temperature,
@@ -1347,7 +1495,8 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         local_node_grant_ids: localNodeEnabled ? localNodeBinding?.grantIds : undefined,
         resume_run_id: resumeRunId,
         resume_approval_id: resumeApprovalId,
-      }, streamAbortController.signal);
+      }, streamAbortController.signal),
+      });
 
       for await (const event of stream) {
         // The chat request is active before this background sidebar refresh.
@@ -1355,10 +1504,15 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         refreshSessionsInBackground();
         if (
           !isCurrentStream() ||
-          cancelRequestedRef.current ||
           streamAbortController.signal.aborted
         ) {
           break;
+        }
+        if (
+          cancelRequestedRef.current &&
+          !CANCEL_CLOSURE_EVENT_TYPES.has(event.event_type)
+        ) {
+          continue;
         }
         const now = Date.now();
         const eventPayload =
@@ -1449,16 +1603,8 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
 
           case SSEEventType.THINKING_START:
           case "thinking_start": {
-            const thinkStartMs = Date.now();
-            updateAssistantMessage(m => {
-              const prev = m.processSummary ?? initProcessSummary(undefined, thinkStartMs);
-              return {
-                ...m,
-                isThinkingStreaming: true,
-                streamingThinkingContent: "",
-                processSummary: { ...prev, thinkingStartedAt: thinkStartMs },
-              };
-            });
+            markFirstResponse(now);
+            activityQueue.enqueue({ kind: "thinking_start" });
             break;
           }
 
@@ -1469,11 +1615,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
               : (event.data as { content?: string })?.content || "";
             if (thinkingDelta) {
               markFirstResponse(now);
-              updateAssistantMessage(m => ({
-                ...m,
-                streamingThinkingContent: (m.streamingThinkingContent || "") + thinkingDelta,
-                firstTokenMs,
-              }));
+              activityQueue.enqueue({ kind: "thinking_delta", text: thinkingDelta });
             }
             break;
           }
@@ -1482,22 +1624,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
           case "thinking_end": {
             const thinkingData = event.data as { content?: string } | undefined;
             const thinkingText = thinkingData?.content || "";
-            const thinkEndMs = Date.now();
-            updateAssistantMessage(m => {
-              const prev = m.processSummary;
-              const thinkingDuration = prev?.thinkingStartedAt
-                ? thinkEndMs - prev.thinkingStartedAt
-                : undefined;
-              return {
-                ...m,
-                isThinkingStreaming: false,
-                thinkingContent: thinkingText.trim() || m.streamingThinkingContent?.trim() || "",
-                streamingThinkingContent: undefined,
-                ...(prev && thinkingDuration
-                  ? { processSummary: { ...prev, thinkingDurationMs: thinkingDuration } }
-                  : {}),
-              };
-            });
+            activityQueue.enqueue({ kind: "thinking_end", text: thinkingText });
             break;
           }
 
@@ -1508,15 +1635,12 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
           case SSEEventType.SUBAGENT_TOOL_START:
           case SSEEventType.SUBAGENT_TOOL_RESULT:
           case SSEEventType.SUBAGENT_FINISHED:
-            updateAssistantMessage((message) => ({
-              ...message,
-              activeSubAgents: reduceSubAgentEvent(
-                message.activeSubAgents ?? [],
-                event.event_type,
-                event.data,
-                now,
-              ),
-            }));
+            activityQueue.enqueue({
+              kind: "subagent",
+              eventType: event.event_type,
+              data: event.data,
+              now,
+            });
             break;
 
           case SSEEventType.STATUS:
@@ -1731,7 +1855,44 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                 },
               };
             });
+            streamTurnState = completeStreamTurn(streamTurnState, now);
+            syncTurnStateToMessage();
             await persistAssistantRunId(approvalData.run_id);
+            if (!isCurrentStream()) return;
+            break;
+
+          case SSEEventType.SIDE_EFFECT_UNKNOWN:
+            const sideEffectData = (event.data || {}) as Record<string, unknown>;
+            streamTurnState = failStreamTurn(
+              streamTurnState,
+              "side_effect_unknown",
+              now,
+            );
+            syncTurnStateToMessage();
+            setWorkingMemory((prev) => prev ? {
+              ...prev,
+              error: "side_effect_unknown",
+            } : null);
+            updateAssistantMessage((m) => {
+              const prev = m.processSummary ?? initProcessSummary(undefined, now);
+              return {
+                ...m,
+                processSummary: {
+                  ...prev,
+                  runId:
+                    typeof sideEffectData.run_id === "string"
+                      ? sideEffectData.run_id
+                      : prev.runId,
+                  status: "failed",
+                  collapsed: false,
+                  isErrorExpanded: true,
+                  totalDurationMs: prev.startedAt
+                    ? now - prev.startedAt
+                    : prev.totalDurationMs,
+                },
+              };
+            });
+            await persistAssistantRunId(sideEffectData.run_id);
             if (!isCurrentStream()) return;
             break;
 
@@ -1829,7 +1990,17 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
           // === AG-UI Lifecycle Events ===
           case SSEEventType.RUN_STARTED:
             // Agent execution started - initialize working memory if needed
-            const runStartedData = event.data as { run_id?: string; timestamp?: number };
+            const runStartedData = event.data as {
+              run_id?: string;
+              task_id?: string | null;
+              timestamp?: number;
+            };
+            if (runStartedData?.task_id) {
+              activeTaskIdRef.current = runStartedData.task_id;
+              if (cancelRequestedRef.current) {
+                requestTaskCancellation(runStartedData.task_id, streamAbortController);
+              }
+            }
             if (!workingMemory) {
               setWorkingMemory({
                 goal: "",
@@ -1870,16 +2041,26 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
             break;
 
           case SSEEventType.RUN_ERROR:
-            // Agent execution failed
+            // A user-requested stop is transported as run_error with a
+            // cancelled terminal envelope. Keep it distinct from failures.
             const runErrorData = event.data as {
               error?: string;
               message?: string;
               run_id?: string;
+              status?: string;
+              terminal_envelope?: { status?: string; exit_reason?: string };
             };
-            failVisibleStream(
-              runErrorData.error || runErrorData.message || "assistant_run_failed",
-              now
-            );
+            const runWasCancelled =
+              runErrorData.status === "cancelled" ||
+              runErrorData.terminal_envelope?.status === "cancelled";
+            if (runWasCancelled) {
+              streamTurnState = cancelStreamTurn(streamTurnState, now);
+            } else {
+              failVisibleStream(
+                runErrorData.error || runErrorData.message || "assistant_run_failed",
+                now
+              );
+            }
             syncTurnStateToMessage();
             setWorkingMemory((prev) => prev ? {
               ...prev,
@@ -1892,7 +2073,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                 processSummary: {
                   ...prev,
                   runId: runErrorData.run_id || prev.runId,
-                  status: "failed",
+                  status: runWasCancelled ? "cancelled" : "failed",
                   collapsed: false,
                   isErrorExpanded: true,
                   totalDurationMs: prev.startedAt ? now - prev.startedAt : prev.totalDurationMs,
@@ -2096,15 +2277,27 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
           case SSEEventType.TOOL_CALL_END:
             const toolEndData = event.data as {
               tool_call_id: string;
+              status?: string;
+              error?: unknown;
               timestamp: number;
             };
+            const toolEndStatus = toolEndData.status?.trim().toLowerCase();
+            const toolEndFailed =
+              toolEndStatus === "cancelled" ||
+              toolEndStatus === "not_executed" ||
+              toolEndStatus === "error" ||
+              toolEndStatus === "failed";
             setWorkingMemory((prev) => prev ? {
               ...prev,
               tasks: prev.tasks.map((t) => ({
                 ...t,
                 subTasks: (t.subTasks || []).map((st) =>
                   st.id === toolEndData.tool_call_id
-                    ? { ...st, status: "completed", endTime: toolEndData.timestamp }
+                    ? {
+                        ...st,
+                        status: toolEndFailed ? "failed" : "completed",
+                        endTime: toolEndData.timestamp,
+                      }
                     : st
                 ),
               })),
@@ -2120,12 +2313,18 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                   tools: upsertTool(prev.tools, {
                     id: existing.id,
                     name: existing.name,
-                    status: existing.status === "running" ? "completed" : existing.status,
+                    status:
+                      existing.status === "running"
+                        ? (toolEndFailed ? "error" : "completed")
+                        : existing.status,
                     finishedAt: toolEndData.timestamp ?? now,
                     durationMs:
                       existing.startedAt != null
                         ? (toolEndData.timestamp ?? now) - existing.startedAt
                         : existing.durationMs,
+                    error: toolEndFailed
+                      ? summarizeToolResult(toolEndData.error) || toolEndStatus
+                      : existing.error,
                   }),
                 },
               };
@@ -2805,6 +3004,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         closeStreamTrace("cancelled", { reason: "abort_signal" });
       }
     } finally {
+      activityQueue.flushNow();
       if (isCurrentStream()) {
         refreshSessionsInBackground();
       }
@@ -2813,14 +3013,17 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       }
       if (isCurrentStream()) {
         setIsStreaming(false);
+        clearCancelFallback();
         if (abortControllerRef.current === streamAbortController) {
           abortControllerRef.current = null;
         }
+        activeTaskIdRef.current = null;
+        cancelApiTaskIdRef.current = null;
         cancelRequestedRef.current = false;
         sendInFlightRef.current = false;
       }
     }
-  }, [activeSessionId, messages, setActiveSessionId, setAssistantLocalTitles, t, workingMemory]);
+  }, [activeSessionId, clearCancelFallback, messages, requestTaskCancellation, setActiveSessionId, setAssistantLocalTitles, t, workingMemory]);
 
   const handleToolApproval = useCallback(
     async (

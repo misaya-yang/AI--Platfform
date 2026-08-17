@@ -4,6 +4,8 @@ from __future__ import annotations
 
 STREAMING_PATHS: set[str] = {
     "/api/v1/stream",
+    "/api/v1/assistant/chat/stream",
+    "/v1/responses",
 }
 
 STREAMING_PATH_PREFIXES: list[str] = [

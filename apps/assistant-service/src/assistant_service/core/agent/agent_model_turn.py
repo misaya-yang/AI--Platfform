@@ -119,32 +119,62 @@ class AgentModelTurnMixin:
                 **ctx.context_cache_dimensions,
                 "rule_revision": rule_revision,
             }
-            rebound_packet = ctx.context_assembler.bind_model_boundary(
+            incoming_fingerprint = ctx.context_assembler.boundary_fingerprint(
                 packet=ctx.context_packet,
                 messages=messages,
                 tool_definitions=list(tools_for_call or []),
-                trusted_system_prompt=boundary_system_prompt,
                 cache_dimensions=boundary_dimensions,
                 previous_cache_receipt=ctx.context_packet_receipt,
             )
-            ctx.context_packet = rebound_packet
-            ctx.context_packet_receipt = rebound_packet.receipt()
-            ctx.context_cache_dimensions = boundary_dimensions
-            messages[:] = rebound_packet.materialize_messages()
-            tools_for_call = rebound_packet.materialize_tools()
-            ctx.messages = list(messages)
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type=StreamEventType.CONTEXT_BUDGET.value,
-                data={
-                    "run_id": ctx.run_id,
-                    "thread_id": ctx.session_id,
-                    "session_id": ctx.session_id,
-                    "mode": "model_boundary",
-                    "iteration": iteration,
-                    "context_packet": ctx.context_packet_receipt,
-                },
-            )
+            if (
+                ctx.context_packet._boundary_fingerprint is not None
+                and ctx.context_packet._boundary_fingerprint == incoming_fingerprint
+            ):
+                # SPO-03 / A5: identical system + protected suffix + tools +
+                # cache dimensions produce a byte-identical rebound packet;
+                # skip the deepcopy / canonicalization / token estimation.
+                messages[:] = ctx.context_packet.materialize_messages()
+                tools_for_call = ctx.context_packet.materialize_tools()
+                ctx.messages = list(messages)
+                yield AgentLoopEvent(
+                    phase=phase,
+                    event_type=StreamEventType.CONTEXT_BUDGET.value,
+                    data={
+                        "run_id": ctx.run_id,
+                        "thread_id": ctx.session_id,
+                        "session_id": ctx.session_id,
+                        "mode": "model_boundary",
+                        "iteration": iteration,
+                        "context_packet": ctx.context_packet_receipt,
+                    },
+                )
+            else:
+                rebound_packet = ctx.context_assembler.bind_model_boundary(
+                    packet=ctx.context_packet,
+                    messages=messages,
+                    tool_definitions=list(tools_for_call or []),
+                    trusted_system_prompt=boundary_system_prompt,
+                    cache_dimensions=boundary_dimensions,
+                    previous_cache_receipt=ctx.context_packet_receipt,
+                )
+                ctx.context_packet = rebound_packet
+                ctx.context_packet_receipt = rebound_packet.receipt()
+                ctx.context_cache_dimensions = boundary_dimensions
+                messages[:] = rebound_packet.materialize_messages()
+                tools_for_call = rebound_packet.materialize_tools()
+                ctx.messages = list(messages)
+                yield AgentLoopEvent(
+                    phase=phase,
+                    event_type=StreamEventType.CONTEXT_BUDGET.value,
+                    data={
+                        "run_id": ctx.run_id,
+                        "thread_id": ctx.session_id,
+                        "session_id": ctx.session_id,
+                        "mode": "model_boundary",
+                        "iteration": iteration,
+                        "context_packet": ctx.context_packet_receipt,
+                    },
+                )
 
         await self._save_checkpoint(
             ctx,

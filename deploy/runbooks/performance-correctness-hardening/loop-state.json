@@ -1,11 +1,11 @@
 {
   "schema_version": "prd-phase-harness/loop-state/v1",
-  "active_phase": "PCH-06",
-  "active_feature": "PCH-F06",
-  "iteration": 7,
+  "active_phase": "PCH-07",
+  "active_feature": "PCH-F07",
+  "iteration": 9,
   "status": "in_progress",
-  "last_decision": "Thinking remains enabled at low. Ten-trial first-reasoning p50 is 3.146s and text TTFT p50 is 3.925s. The final full native cohort is raw 5/8 and semantically revalidated 6/8 with zero infrastructure errors after one evaluator false-positive fix; Security and Research remain genuine failures. Component, container, Code Executor, and frontend hot-update gates pass, but release maturity remains NO-GO because text TTFT misses 3.41s and one full 6/8 cohort is not stability evidence.",
-  "next_action": "Implement provider/model variant canary routing and generic constraint/evidence self-checks, then rerun at least three complete eight-task cohorts plus configured full Web E2E before marking PCH-06 verified.",
+  "last_decision": "The stop-safety slice and concurrent performance/security work passed the combined correctness gate: 477 Gateway/Assistant tests, 873 Knowledge tests, changed-file Ruff, Web build and 35/36 container Playwright with one unconfigured Playground skip. In-app browser cancellation closed a running docgen tool as SIDE_EFFECT_UNKNOWN and the same session continued without HTTP 400. Native-agent quality remains 5/8 raw and is not claimed complete.",
+  "next_action": "Commit and push this validated integration, then continue the separate complex-task quality optimization from the recorded 5/8 raw parity baseline.",
   "blockers": [],
-  "updated_at": "2026-08-16T22:36:51-04:00"
+  "updated_at": "2026-08-17T12:43:25-04:00"
 }

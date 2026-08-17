@@ -40,6 +40,68 @@ logger = get_logger(__name__)
 DEFAULT_LARGE_FILE_THRESHOLD = 50 * 1024 * 1024
 
 
+def _extract_pdf_text_sync(content: bytes) -> str:
+    """Sync PDF text extraction (SPO-04 / K2: runs inside asyncio.to_thread)."""
+    try:
+        import pymupdf as fitz  # type: ignore
+    except ImportError:
+        import fitz  # type: ignore
+    doc = fitz.open(stream=content, filetype="pdf")
+    text_parts = []
+    text_chars = 0
+    text_bytes = 0
+    try:
+        for page in doc:
+            page_text = page.get_text() or ""
+            separator_size = 2 if text_parts else 0
+            text_chars += separator_size + len(page_text)
+            text_bytes += separator_size + len(page_text.encode("utf-8"))
+            _require_extracted_text_counts_budget(text_chars, text_bytes)
+            text_parts.append(page_text)
+    finally:
+        doc.close()
+    return "\n\n".join(text_parts)
+
+
+def _extract_docx_text_sync(content: bytes) -> str:
+    """Sync DOCX text extraction (SPO-04 / K2: runs inside asyncio.to_thread)."""
+    from io import BytesIO
+
+    import docx
+
+    document = docx.Document(BytesIO(content))
+    text_parts = []
+    text_chars = 0
+    text_bytes = 0
+    for paragraph in document.paragraphs:
+        paragraph_text = paragraph.text
+        if not paragraph_text.strip():
+            continue
+        separator_size = 2 if text_parts else 0
+        text_chars += separator_size + len(paragraph_text)
+        text_bytes += separator_size + len(paragraph_text.encode("utf-8"))
+        _require_extracted_text_counts_budget(text_chars, text_bytes)
+        text_parts.append(paragraph_text)
+    return "\n\n".join(text_parts)
+
+
+def _render_pdf_pages_sync(pdf_bytes: bytes, batch_start: int, batch_end: int) -> list[bytes]:
+    """Sync page rasterization for VLM OCR (SPO-04 / K2)."""
+    import fitz
+
+    pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    images: list[bytes] = []
+    try:
+        for pn in range(batch_start, batch_end):
+            page = pdf_doc[pn]
+            mat = fitz.Matrix(200 / 72, 200 / 72)  # 200 DPI
+            pix = page.get_pixmap(matrix=mat)
+            images.append(pix.tobytes("png"))
+    finally:
+        pdf_doc.close()
+    return images
+
+
 @dataclass(frozen=True)
 class KnowledgeIngestTask:
     dataset_id: str
@@ -816,9 +878,8 @@ class KnowledgeWorker:
         )
 
         total_pages = 0
-        text_temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".txt")
-        text_temp_path = text_temp_file.name
-        text_temp_file.close()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as text_temp_file:
+            text_temp_path = text_temp_file.name
         extracted_text_chars = 0
         extracted_text_bytes = 0
 
@@ -973,9 +1034,8 @@ class KnowledgeWorker:
 
     async def _download_original_to_temp(self, storage_key: str) -> str:
         """Download a file to a temporary path to avoid large memory spikes."""
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".bin")
-        temp_path = temp_file.name
-        temp_file.close()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as temp_file:
+            temp_path = temp_file.name
         try:
             await self.service.image_storage_service.download_original_file_to_path(
                 storage_key, temp_path
@@ -1077,8 +1137,10 @@ class KnowledgeWorker:
             )
             return
 
-        pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        # SPO-04 / K2: open + rasterize off the event loop.
+        pdf_doc = await asyncio.to_thread(fitz.open, stream=pdf_bytes, filetype="pdf")
         total_pages = len(pdf_doc)
+        pdf_doc.close()
         logger.info(f"[Worker] VLM OCR processing {total_pages} pages for {task.document_id}")
 
         # Render pages to images and OCR in batches
@@ -1086,35 +1148,32 @@ class KnowledgeWorker:
         extracted_text_chars = 0
         extracted_text_bytes = 0
         batch_size = 5
-        try:
-            for batch_start in range(0, total_pages, batch_size):
-                batch_end = min(batch_start + batch_size, total_pages)
-                images = []
-                for pn in range(batch_start, batch_end):
-                    page = pdf_doc[pn]
-                    mat = fitz.Matrix(200 / 72, 200 / 72)  # 200 DPI
-                    pix = page.get_pixmap(matrix=mat)
-                    images.append(pix.tobytes("png"))
+        for batch_start in range(0, total_pages, batch_size):
+            batch_end = min(batch_start + batch_size, total_pages)
+            images = await asyncio.to_thread(
+                _render_pdf_pages_sync,
+                pdf_bytes,
+                batch_start,
+                batch_end,
+            )
 
-                texts = await self.vlm_ocr_service.ocr_pdf_pages(images)
-                for i, text in enumerate(texts):
-                    if text and text.strip():
-                        part = f"[Page {batch_start + i + 1}]\n{text}"
-                        separator_size = 2 if all_text_parts else 0
-                        extracted_text_chars += separator_size + len(part)
-                        extracted_text_bytes += separator_size + len(part.encode("utf-8"))
-                        _require_extracted_text_counts_budget(
-                            extracted_text_chars,
-                            extracted_text_bytes,
-                        )
-                        all_text_parts.append(part)
+            texts = await self.vlm_ocr_service.ocr_pdf_pages(images)
+            for i, text in enumerate(texts):
+                if text and text.strip():
+                    part = f"[Page {batch_start + i + 1}]\n{text}"
+                    separator_size = 2 if all_text_parts else 0
+                    extracted_text_chars += separator_size + len(part)
+                    extracted_text_bytes += separator_size + len(part.encode("utf-8"))
+                    _require_extracted_text_counts_budget(
+                        extracted_text_chars,
+                        extracted_text_bytes,
+                    )
+                    all_text_parts.append(part)
 
-                progress = 5 + int((batch_end / total_pages) * 60)
-                await self.service.db.update_document_status(
-                    task.document_id, status="processing", progress=progress,
-                )
-        finally:
-            pdf_doc.close()
+            progress = 5 + int((batch_end / total_pages) * 60)
+            await self.service.db.update_document_status(
+                task.document_id, status="processing", progress=progress,
+            )
 
         if not all_text_parts:
             await self.service.db.update_document_status(
@@ -1140,6 +1199,7 @@ class KnowledgeWorker:
         mode: ProcessingMode,
     ) -> None:
         """Process document using hierarchical indexer for L2/L3 chunking."""
+        del mode
         metadata = doc.get("metadata", {})
         original_key = metadata.get("original_file_key")
 
@@ -1310,25 +1370,10 @@ class KnowledgeWorker:
 
         # Use magic bytes for more reliable detection
         if content.startswith(b"%PDF") or "pdf" in mime:
-            # Extract text from PDF
+            # Extract text from PDF (SPO-04 / K2: rasterize off the event loop)
             try:
-                try:
-                    import pymupdf as fitz  # type: ignore
-                except ImportError:
-                    import fitz  # type: ignore
-                doc = fitz.open(stream=content, filetype="pdf")
-                text_parts = []
-                text_chars = 0
-                text_bytes = 0
-                for page in doc:
-                    page_text = page.get_text() or ""
-                    separator_size = 2 if text_parts else 0
-                    text_chars += separator_size + len(page_text)
-                    text_bytes += separator_size + len(page_text.encode("utf-8"))
-                    _require_extracted_text_counts_budget(text_chars, text_bytes)
-                    text_parts.append(page_text)
-                doc.close()
-                return _require_extracted_text_budget("\n\n".join(text_parts))
+                extracted = await asyncio.to_thread(_extract_pdf_text_sync, content)
+                return _require_extracted_text_budget(extracted)
             except ValidationFailedError:
                 raise
             except Exception as e:
@@ -1336,26 +1381,10 @@ class KnowledgeWorker:
                 return ""
 
         elif content.startswith(b"PK\x03\x04") or "word" in mime or "docx" in mime:
-            # Try to extract from DOCX
+            # Try to extract from DOCX (SPO-04 / K2: parse off the event loop)
             try:
-                from io import BytesIO
-
-                import docx
-
-                document = docx.Document(BytesIO(content))
-                text_parts = []
-                text_chars = 0
-                text_bytes = 0
-                for paragraph in document.paragraphs:
-                    paragraph_text = paragraph.text
-                    if not paragraph_text.strip():
-                        continue
-                    separator_size = 2 if text_parts else 0
-                    text_chars += separator_size + len(paragraph_text)
-                    text_bytes += separator_size + len(paragraph_text.encode("utf-8"))
-                    _require_extracted_text_counts_budget(text_chars, text_bytes)
-                    text_parts.append(paragraph_text)
-                return _require_extracted_text_budget("\n\n".join(text_parts))
+                extracted = await asyncio.to_thread(_extract_docx_text_sync, content)
+                return _require_extracted_text_budget(extracted)
             except ValidationFailedError:
                 raise
             except Exception as e:
@@ -1490,7 +1519,10 @@ class KnowledgeWorker:
                     max_size_bytes=self._pdf_split_max_size,
                     min_pages_per_part=self._pdf_split_min_pages,
                 )
-                split_results = splitter.split_pdf(temp_path, tmp_dir=tmp_dir)
+                # SPO-04 / K2: heavy sync fitz splitting off the event loop.
+                split_results = await asyncio.to_thread(
+                    splitter.split_pdf, temp_path, tmp_dir=tmp_dir
+                )
                 parts = [sr.path for sr in split_results]
                 logger.info(
                     f"[Worker] Split {file_size / 1024 / 1024:.1f}MB PDF into {len(parts)} parts"

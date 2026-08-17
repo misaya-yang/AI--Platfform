@@ -112,10 +112,15 @@ def group_records_by_hour(records: list[UsageRecord]) -> dict[tuple, dict[str, A
             }
 
         agg = aggregates[key]
-        agg["request_count"] += 1
-        if record.status == "success":
+        metadata = record.metadata or {}
+        request_delta = int(metadata.get("_accounting_request_delta", 1))
+        agg["request_count"] += request_delta
+        if "_accounting_success_delta" in metadata:
+            agg["success_count"] += int(metadata["_accounting_success_delta"])
+            agg["error_count"] += int(metadata.get("_accounting_error_delta", 0))
+        elif record.status == "success":
             agg["success_count"] += 1
-        else:
+        elif record.status not in {"running", "pending"}:
             agg["error_count"] += 1
         agg["total_input_tokens"] += record.input_tokens
         agg["total_output_tokens"] += record.output_tokens
@@ -125,8 +130,9 @@ def group_records_by_hour(records: list[UsageRecord]) -> dict[tuple, dict[str, A
             if int(record.request_total_duration_ms or 0) > 0
             else int(record.latency_ms or 0)
         )
-        agg["latency_sum"] += total_duration
-        agg["first_token_sum"] += record.first_token_ms
+        if request_delta:
+            agg["latency_sum"] += total_duration
+            agg["first_token_sum"] += record.first_token_ms
 
     return aggregates
 
@@ -167,6 +173,9 @@ class UsageRecorder:
         self._trace_p95_cache: dict[str, tuple[int, float]] = {}
         self._flushed_ids: set[str] = set()
         self._flushed_identities: set[tuple[str, str, str, str]] = set()
+        self._flushed_observations: dict[
+            tuple[str, str, str, str], UsageRecord
+        ] = {}
         self._flushed_ids_max: int = 5000
 
         # ── Phase 6 dual-write event bus ────────────────────────────────
@@ -298,6 +307,14 @@ class UsageRecorder:
     @staticmethod
     def _merge_idempotent_record(existing: UsageRecord, incoming: UsageRecord) -> None:
         """Merge duplicate request identities without changing billing dimensions."""
+        existing.input_tokens = max(existing.input_tokens, incoming.input_tokens)
+        existing.output_tokens = max(existing.output_tokens, incoming.output_tokens)
+        existing.input_cost_cents = max(
+            existing.input_cost_cents, incoming.input_cost_cents
+        )
+        existing.output_cost_cents = max(
+            existing.output_cost_cents, incoming.output_cost_cents
+        )
         existing.metadata = {
             **(existing.metadata if isinstance(existing.metadata, dict) else {}),
             **(incoming.metadata if isinstance(incoming.metadata, dict) else {}),
@@ -307,10 +324,113 @@ class UsageRecorder:
             existing.error_type = incoming.error_type
         if not existing.trace_steps and incoming.trace_steps:
             existing.trace_steps = incoming.trace_steps
-        if existing.request_total_duration_ms <= 0 and incoming.request_total_duration_ms > 0:
-            existing.request_total_duration_ms = incoming.request_total_duration_ms
-        if existing.first_token_ms <= 0 and incoming.first_token_ms > 0:
-            existing.first_token_ms = incoming.first_token_ms
+        existing.latency_ms = max(existing.latency_ms, incoming.latency_ms)
+        existing.request_total_duration_ms = max(
+            existing.request_total_duration_ms,
+            incoming.request_total_duration_ms,
+        )
+        existing.first_token_ms = max(existing.first_token_ms, incoming.first_token_ms)
+        existing.llm_inference_duration_ms = max(
+            existing.llm_inference_duration_ms,
+            incoming.llm_inference_duration_ms,
+        )
+        existing.retrieval_duration_ms = max(
+            existing.retrieval_duration_ms, incoming.retrieval_duration_ms
+        )
+        existing.tool_call_duration_ms = max(
+            existing.tool_call_duration_ms, incoming.tool_call_duration_ms
+        )
+        existing.agent_or_graph_overhead_ms = max(
+            existing.agent_or_graph_overhead_ms,
+            incoming.agent_or_graph_overhead_ms,
+        )
+
+    def _observation_advances(self, record: UsageRecord) -> bool:
+        previous = self._flushed_observations.get(self._request_identity(record))
+        if previous is None:
+            return True
+        if previous.status in {"running", "pending"} and record.status == "success":
+            return True
+        return any(
+            incoming > current
+            for incoming, current in (
+                (record.input_tokens, previous.input_tokens),
+                (record.output_tokens, previous.output_tokens),
+                (record.input_cost_cents, previous.input_cost_cents),
+                (record.output_cost_cents, previous.output_cost_cents),
+            )
+        )
+
+    @staticmethod
+    def _snapshot_record(record: UsageRecord) -> UsageRecord:
+        return replace(
+            record,
+            metadata=dict(record.metadata or {}),
+            trace_steps=list(record.trace_steps or []),
+            tool_call_breakdown=dict(record.tool_call_breakdown or {}),
+        )
+
+    def _remember_observation(self, record: UsageRecord) -> UsageRecord | None:
+        identity = self._usage_identity(record)
+        if identity is None:
+            return None
+        previous = self._flushed_observations.get(identity)
+        if previous is None:
+            self._flushed_observations[identity] = self._snapshot_record(record)
+            return None
+        merged = self._snapshot_record(previous)
+        self._merge_idempotent_record(merged, record)
+        self._flushed_observations[identity] = merged
+        return previous
+
+    @staticmethod
+    def _accounting_adjustment(
+        record: UsageRecord,
+        previous: UsageRecord,
+    ) -> UsageRecord | None:
+        input_delta = max(record.input_tokens - previous.input_tokens, 0)
+        output_delta = max(record.output_tokens - previous.output_tokens, 0)
+        input_cost_delta = max(
+            record.input_cost_cents - previous.input_cost_cents, 0
+        )
+        output_cost_delta = max(
+            record.output_cost_cents - previous.output_cost_cents, 0
+        )
+        success_delta = int(
+            previous.status in {"running", "pending"} and record.status == "success"
+        )
+        if not any(
+            (
+                input_delta,
+                output_delta,
+                input_cost_delta,
+                output_cost_delta,
+                success_delta,
+            )
+        ):
+            return None
+        return replace(
+            record,
+            input_tokens=input_delta,
+            output_tokens=output_delta,
+            input_cost_cents=input_cost_delta,
+            output_cost_cents=output_cost_delta,
+            latency_ms=0,
+            first_token_ms=0,
+            request_total_duration_ms=0,
+            llm_inference_duration_ms=0,
+            retrieval_duration_ms=0,
+            tool_call_duration_ms=0,
+            agent_or_graph_overhead_ms=0,
+            trace_steps=[],
+            metadata={
+                **(record.metadata or {}),
+                "_accounting_adjustment": True,
+                "_accounting_request_delta": 0,
+                "_accounting_success_delta": success_delta,
+                "_accounting_error_delta": 0,
+            },
+        )
 
     def _coalesce_idempotent_records(self, records: list[UsageRecord]) -> list[UsageRecord]:
         coalesced: dict[tuple[str, str, str, str], UsageRecord] = {}
@@ -603,10 +723,9 @@ class UsageRecorder:
         self._ensure_request_ids(records)
         records = self._coalesce_idempotent_records(records)
 
-        # Dedup: skip identities already flushed successfully in this process.
-        records = [
-            r for r in records if self._request_identity(r) not in self._flushed_identities
-        ]
+        # Exact retries are ignored, while cumulative partial -> final usage is
+        # allowed through so the durable row and aggregate deltas can advance.
+        records = [r for r in records if self._observation_advances(r)]
         if not records:
             return
 
@@ -653,6 +772,10 @@ class UsageRecorder:
                 # Evict: clear and keep only current batch ids
                 self._flushed_ids = {r.request_id for r in records}
                 self._flushed_identities = {self._request_identity(r) for r in records}
+                self._flushed_observations = {
+                    self._request_identity(r): self._snapshot_record(r)
+                    for r in records
+                }
             logger.debug(
                 "Flushed %s usage records (%s accepted)",
                 len(records),
@@ -726,6 +849,8 @@ class UsageRecorder:
         threshold_cache: dict[str, int] = {}
 
         for record in records:
+            if (record.metadata or {}).get("_accounting_adjustment"):
+                continue
             tenant_id = self._normalize_identity(record.tenant_id, "default")
             if tenant_id not in threshold_cache:
                 threshold_cache[tenant_id] = await self._get_trace_p95_threshold_ms(conn, tenant_id)
@@ -914,11 +1039,30 @@ class UsageRecorder:
             collapsed[index] = (
                 replace(
                     current,
+                    input_tokens=max(current.input_tokens, record.input_tokens),
+                    output_tokens=max(current.output_tokens, record.output_tokens),
+                    input_cost_cents=max(
+                        current.input_cost_cents, record.input_cost_cents
+                    ),
+                    output_cost_cents=max(
+                        current.output_cost_cents, record.output_cost_cents
+                    ),
                     status=self._merge_usage_status(current.status, record.status),
                     error_type=current.error_type or record.error_type,
                     metadata={**(current.metadata or {}), **(record.metadata or {})},
                 ),
-                accounting,
+                replace(
+                    accounting,
+                    input_tokens=max(accounting.input_tokens, record.input_tokens),
+                    output_tokens=max(accounting.output_tokens, record.output_tokens),
+                    input_cost_cents=max(
+                        accounting.input_cost_cents, record.input_cost_cents
+                    ),
+                    output_cost_cents=max(
+                        accounting.output_cost_cents, record.output_cost_cents
+                    ),
+                    status=self._merge_usage_status(accounting.status, record.status),
+                ),
             )
         return collapsed
 
@@ -988,6 +1132,13 @@ class UsageRecorder:
             )
             WHERE request_id IS NOT NULL AND request_id <> ''
             DO UPDATE SET
+                -- SPO-05 / G1: partial SSE usage arrives before the final
+                -- usage; the conflict branch takes the monotonic max so the
+                -- final (larger) numbers always win.
+                input_tokens = GREATEST(usage_records.input_tokens, EXCLUDED.input_tokens),
+                output_tokens = GREATEST(usage_records.output_tokens, EXCLUDED.output_tokens),
+                input_cost_cents = GREATEST(usage_records.input_cost_cents, EXCLUDED.input_cost_cents),
+                output_cost_cents = GREATEST(usage_records.output_cost_cents, EXCLUDED.output_cost_cents),
                 status = CASE
                     WHEN usage_records.status IN ('running', 'pending')
                          AND EXCLUDED.status = 'success'
@@ -1020,8 +1171,13 @@ class UsageRecorder:
         accepted: list[UsageRecord] = []
         for database_record, accounting_record in collapsed:
             identity = self._usage_identity(database_record)
+            previous = self._remember_observation(database_record)
             if identity is None or identity in inserted_identities:
                 accepted.append(accounting_record)
+            elif previous is not None:
+                adjustment = self._accounting_adjustment(database_record, previous)
+                if adjustment is not None:
+                    accepted.append(adjustment)
         return accepted
 
     async def _write_records_compat(
@@ -1062,6 +1218,11 @@ class UsageRecorder:
             )
             WHERE request_id IS NOT NULL AND request_id <> ''
             DO UPDATE SET
+                -- SPO-05 / G1: monotonic max for partial-then-final SSE usage.
+                input_tokens = GREATEST(usage_records.input_tokens, EXCLUDED.input_tokens),
+                output_tokens = GREATEST(usage_records.output_tokens, EXCLUDED.output_tokens),
+                input_cost_cents = GREATEST(usage_records.input_cost_cents, EXCLUDED.input_cost_cents),
+                output_cost_cents = GREATEST(usage_records.output_cost_cents, EXCLUDED.output_cost_cents),
                 status = CASE
                     WHEN usage_records.status IN ('running', 'pending')
                          AND EXCLUDED.status = 'success'
@@ -1083,6 +1244,13 @@ class UsageRecorder:
                     inserted = bool(row["inserted"])
             if inserted:
                 accepted.append(r)
+                self._remember_observation(r)
+            else:
+                previous = self._remember_observation(r)
+                if previous is not None:
+                    adjustment = self._accounting_adjustment(r, previous)
+                    if adjustment is not None:
+                        accepted.append(adjustment)
         return accepted
 
     async def _update_quota_counters(self, conn: Connection, records: list[UsageRecord]) -> None:
@@ -1102,7 +1270,9 @@ class UsageRecorder:
             current["cost_microcents"] += max(
                 int(record.input_cost_cents + record.output_cost_cents), 0
             )
-            current["requests"] += 1
+            current["requests"] += int(
+                (record.metadata or {}).get("_accounting_request_delta", 1)
+            )
 
         if not aggregates:
             return
@@ -1160,16 +1330,22 @@ class UsageRecorder:
                 }
 
             agg = aggregates[key]
-            agg["request_count"] += 1
-            if record.status == "success":
+            metadata = record.metadata or {}
+            request_delta = int(metadata.get("_accounting_request_delta", 1))
+            agg["request_count"] += request_delta
+            if "_accounting_success_delta" in metadata:
+                agg["success_count"] += int(metadata["_accounting_success_delta"])
+                agg["error_count"] += int(metadata.get("_accounting_error_delta", 0))
+            elif record.status == "success":
                 agg["success_count"] += 1
-            else:
+            elif record.status not in {"running", "pending"}:
                 agg["error_count"] += 1
             agg["total_input_tokens"] += record.input_tokens
             agg["total_output_tokens"] += record.output_tokens
             agg["total_cost_cents"] += record.input_cost_cents + record.output_cost_cents
-            agg["latency_sum"] += self._record_total_duration(record)
-            agg["first_token_sum"] += record.first_token_ms
+            if request_delta:
+                agg["latency_sum"] += self._record_total_duration(record)
+                agg["first_token_sum"] += record.first_token_ms
 
         for key, agg in aggregates.items():
             tenant_id, user_id, model, assistant_id, service_id, agg_date = key
@@ -1363,10 +1539,12 @@ class UsageRecorder:
                 # When provider filter is present we use raw usage_records to avoid
                 # lossy provider inference from model_pricing joins.
                 if provider:
+                    # SPO-05 / D3: half-open interval on created_at keeps the
+                    # index usable instead of casting every row with ::date.
                     conditions = [
                         "tenant_id = $1",
-                        "created_at::date >= $2",
-                        "created_at::date <= $3",
+                        "created_at >= $2::date",
+                        "created_at < ($3::date + interval '1 day')",
                         "provider = $4",
                     ]
                     params: list[Any] = [tenant_id, start_date, end_date, provider]

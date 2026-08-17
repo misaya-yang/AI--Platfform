@@ -26,6 +26,15 @@ from ..deps import AuthContext, get_auth_context, get_dispatcher, get_user_conte
 router = APIRouter(prefix="/users", tags=["users"])
 
 
+def _configured_default_password() -> str:
+    if not DEFAULT_PASSWORD:
+        raise HTTPException(
+            status_code=503,
+            detail="DEFAULT_USER_PASSWORD is not configured",
+        )
+    return DEFAULT_PASSWORD
+
+
 # ============================================================
 # Request/Response Models
 # ============================================================
@@ -267,8 +276,8 @@ async def create_user(
 
         user_id = f"{user_id}_{uuid.uuid4().hex[:6]}"
 
-    # Create user with default password
-    password_hash = hash_password(DEFAULT_PASSWORD)
+    # Create user with the configured default password (env-only; no source fallback).
+    password_hash = hash_password(_configured_default_password())
 
     user_data = {
         "user_id": user_id,
@@ -515,7 +524,7 @@ async def reset_user_password(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    password_hash = hash_password(DEFAULT_PASSWORD)
+    password_hash = hash_password(_configured_default_password())
     reset = await db.reset_user_password_for_tenant(user_id, tenant_id, password_hash)
     if not reset:
         raise HTTPException(status_code=404, detail="User not found")

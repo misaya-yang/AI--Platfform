@@ -2,9 +2,100 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import httpx
+
+
+def _bounded_call_id(value: Any) -> str:
+    return str(value or "").strip()[:100]
+
+
+def _validate_openai_tool_exchange_pairs(messages: Sequence[Mapping[str, Any]]) -> None:
+    """Reject provider-invalid assistant/tool transcripts before network I/O."""
+
+    pending: set[str] = set()
+    seen: set[str] = set()
+    for message in messages:
+        role = str(message.get("role") or "")
+        if pending:
+            if role != "tool":
+                raise ValueError("provider request contains an unpaired tool exchange")
+            tool_call_id = _bounded_call_id(message.get("tool_call_id"))
+            if not tool_call_id or tool_call_id not in pending:
+                raise ValueError("provider request contains an orphan tool result")
+            pending.remove(tool_call_id)
+            continue
+
+        if role == "tool":
+            raise ValueError("provider request contains an orphan tool result")
+        if role != "assistant":
+            continue
+        raw_calls = message.get("tool_calls")
+        if not isinstance(raw_calls, list) or not raw_calls:
+            continue
+        identifiers = [_bounded_call_id(call.get("id")) for call in raw_calls if isinstance(call, dict)]
+        if len(identifiers) != len(raw_calls) or any(not call_id for call_id in identifiers):
+            raise ValueError("provider request contains an invalid tool exchange")
+        if len(set(identifiers)) != len(identifiers) or any(
+            call_id in seen for call_id in identifiers
+        ):
+            raise ValueError("provider request contains duplicate tool call IDs")
+        pending = set(identifiers)
+        seen.update(identifiers)
+
+    if pending:
+        raise ValueError("provider request contains an unpaired tool exchange")
+
+
+def _validate_anthropic_tool_exchange_pairs(messages: Sequence[Mapping[str, Any]]) -> None:
+    """Validate Anthropic client tool_use/tool_result adjacency and identity."""
+
+    pending: set[str] = set()
+    seen: set[str] = set()
+    for message in messages:
+        role = str(message.get("role") or "")
+        raw_content = message.get("content")
+        blocks = raw_content if isinstance(raw_content, list) else []
+        tool_use_ids = [
+            _bounded_call_id(block.get("id"))
+            for block in blocks
+            if isinstance(block, dict) and block.get("type") == "tool_use"
+        ]
+        tool_result_ids = [
+            _bounded_call_id(block.get("tool_use_id"))
+            for block in blocks
+            if isinstance(block, dict) and block.get("type") == "tool_result"
+        ]
+
+        if pending:
+            if role != "user" or not tool_result_ids:
+                raise ValueError("provider request contains an unpaired tool exchange")
+            if (
+                any(not call_id or call_id not in pending for call_id in tool_result_ids)
+                or len(set(tool_result_ids)) != len(tool_result_ids)
+            ):
+                raise ValueError("provider request contains an orphan tool result")
+            if set(tool_result_ids) != pending:
+                raise ValueError("provider request contains an unpaired tool exchange")
+            pending.clear()
+        elif tool_result_ids:
+            raise ValueError("provider request contains an orphan tool result")
+
+        if not tool_use_ids:
+            continue
+        if role != "assistant" or any(not call_id for call_id in tool_use_ids):
+            raise ValueError("provider request contains an invalid tool exchange")
+        if len(set(tool_use_ids)) != len(tool_use_ids) or any(
+            call_id in seen for call_id in tool_use_ids
+        ):
+            raise ValueError("provider request contains duplicate tool call IDs")
+        pending = set(tool_use_ids)
+        seen.update(tool_use_ids)
+
+    if pending:
+        raise ValueError("provider request contains an unpaired tool exchange")
 
 
 def _request_without_query_secrets(request: httpx.Request) -> httpx.Request:

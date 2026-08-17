@@ -6,7 +6,7 @@ Page-as-image processing for scanned PDFs using multimodal embedding.
 
 from __future__ import annotations
 
-import contextlib
+import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -81,6 +81,30 @@ class VisionPDFProcessor:
             logger.debug(f"Render failed at low scale: {exc}")
         return None, None
 
+    def _pdf_page_count(self, pdf_bytes: bytes) -> int:
+        """Open, inspect, and close a PDF within one worker thread."""
+        doc = self._get_fitz().open(stream=pdf_bytes, filetype="pdf")
+        try:
+            return len(doc)
+        finally:
+            doc.close()
+
+    def _render_page_batch(
+        self,
+        pdf_bytes: bytes,
+        start: int,
+        stop: int,
+    ) -> list[tuple[int, bytes | None, tuple[int, int] | None]]:
+        """Render a bounded page batch without sharing PyMuPDF objects."""
+        doc = self._get_fitz().open(stream=pdf_bytes, filetype="pdf")
+        try:
+            return [
+                (page_index, *self._render_page(doc[page_index]))
+                for page_index in range(start, min(stop, len(doc)))
+            ]
+        finally:
+            doc.close()
+
     async def process(
         self,
         pdf_bytes: bytes,
@@ -93,12 +117,11 @@ class VisionPDFProcessor:
         text_extractor: Callable[[bytes], Awaitable[str]] | None = None,
         page_offset: int = 0,
     ) -> ProcessingResult:
-        fitz = self._get_fitz()
-        doc = None
-
         try:
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            total_pages = len(doc)
+            # PyMuPDF does not support sharing Document/Page objects across
+            # worker threads. Each bounded render batch opens, uses, and closes
+            # its own document entirely inside one worker.
+            total_pages = await asyncio.to_thread(self._pdf_page_count, pdf_bytes)
             processed_pages = 0
             failed_pages = 0
             segments_created = 0
@@ -164,78 +187,87 @@ class VisionPDFProcessor:
                 batch_images.clear()
                 batch_meta.clear()
 
-            for page_index in range(total_pages):
-                page = doc[page_index]
-                img_bytes, dims = self._render_page(page)
-                if not img_bytes or not dims:
-                    failed_pages += 1
-                    continue
-
-                width, height = dims
-                global_page_index = page_offset + page_index
-                page_number = global_page_index + 1
-
-                # Extract text via VLM OCR callback (reuses rendered image)
-                if text_extractor and img_bytes:
-                    try:
-                        page_text = await text_extractor(img_bytes)
-                        if page_text:
-                            extracted_texts[page_number] = page_text
-                    except Exception as exc:
-                        logger.debug(f"Text extraction failed for page {page_number}: {exc}")
-
-                image_url = None
-                image_attachment_id = None
-                image_filename = None
-                image_media_type = "image/png"
-                image_file_size = len(img_bytes)
-
-                if storage_service:
-                    try:
-                        image_attachment_id = f"page_{page_number}"
-                        image_filename = f"page_{page_number}.png"
-                        image_url = await storage_service.upload_image(
-                            tenant_id=tenant_id,
-                            document_id=document_id,
-                            attachment_id=image_attachment_id,
-                            filename=image_filename,
-                            content=img_bytes,
-                            content_type=image_media_type,
-                            metadata={
-                                "width": str(width),
-                                "height": str(height),
-                                "page_number": str(page_number),
-                            },
-                        )
-                    except Exception as exc:
-                        logger.warning(f"Failed to upload page image {page_number}: {exc}")
-
-                batch_images.append(img_bytes)
-                batch_meta.append(
-                    {
-                        "segment_id": str(uuid.uuid4()),
-                        "position": self.position_offset + global_page_index,
-                        "text": f"[Page {page_number}]",
-                        "image_id": f"{document_id}_page_{page_number}",
-                        "image_mime_type": image_media_type,
-                        "image_width": width,
-                        "image_height": height,
-                        "page_number": page_number,
-                        "source_position": global_page_index,
-                        "image_url": image_url,
-                        "image_attachment_id": image_attachment_id,
-                        "image_filename": image_filename,
-                        "image_media_type": image_media_type,
-                        "image_file_size": image_file_size,
-                    }
+            for batch_start in range(0, total_pages, self.batch_size):
+                rendered_pages = await asyncio.to_thread(
+                    self._render_page_batch,
+                    pdf_bytes,
+                    batch_start,
+                    batch_start + self.batch_size,
                 )
+                for page_index, img_bytes, dims in rendered_pages:
+                    if not img_bytes or not dims:
+                        failed_pages += 1
+                        continue
 
-                processed_pages += 1
-                if on_progress:
-                    await on_progress(processed_pages, total_pages)
+                    width, height = dims
+                    global_page_index = page_offset + page_index
+                    page_number = global_page_index + 1
 
-                if len(batch_images) >= self.batch_size:
-                    await flush_batch()
+                    # Extract text via VLM OCR callback (reuses rendered image)
+                    if text_extractor and img_bytes:
+                        try:
+                            page_text = await text_extractor(img_bytes)
+                            if page_text:
+                                extracted_texts[page_number] = page_text
+                        except Exception as exc:
+                            logger.debug(
+                                f"Text extraction failed for page {page_number}: {exc}"
+                            )
+
+                    image_url = None
+                    image_attachment_id = None
+                    image_filename = None
+                    image_media_type = "image/png"
+                    image_file_size = len(img_bytes)
+
+                    if storage_service:
+                        try:
+                            image_attachment_id = f"page_{page_number}"
+                            image_filename = f"page_{page_number}.png"
+                            image_url = await storage_service.upload_image(
+                                tenant_id=tenant_id,
+                                document_id=document_id,
+                                attachment_id=image_attachment_id,
+                                filename=image_filename,
+                                content=img_bytes,
+                                content_type=image_media_type,
+                                metadata={
+                                    "width": str(width),
+                                    "height": str(height),
+                                    "page_number": str(page_number),
+                                },
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                f"Failed to upload page image {page_number}: {exc}"
+                            )
+
+                    batch_images.append(img_bytes)
+                    batch_meta.append(
+                        {
+                            "segment_id": str(uuid.uuid4()),
+                            "position": self.position_offset + global_page_index,
+                            "text": f"[Page {page_number}]",
+                            "image_id": f"{document_id}_page_{page_number}",
+                            "image_mime_type": image_media_type,
+                            "image_width": width,
+                            "image_height": height,
+                            "page_number": page_number,
+                            "source_position": global_page_index,
+                            "image_url": image_url,
+                            "image_attachment_id": image_attachment_id,
+                            "image_filename": image_filename,
+                            "image_media_type": image_media_type,
+                            "image_file_size": image_file_size,
+                        }
+                    )
+
+                    processed_pages += 1
+                    if on_progress:
+                        await on_progress(processed_pages, total_pages)
+
+                    if len(batch_images) >= self.batch_size:
+                        await flush_batch()
 
             await flush_batch()
 
@@ -256,7 +288,3 @@ class VisionPDFProcessor:
                 failed_pages=0,
                 error=str(exc),
             )
-        finally:
-            if doc is not None:
-                with contextlib.suppress(Exception):
-                    doc.close()

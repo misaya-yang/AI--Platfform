@@ -988,6 +988,281 @@ async def test_requested_task_cancellation_projects_cancelled_terminal() -> None
 
 
 @pytest.mark.asyncio
+async def test_requested_tool_cancellation_pairs_entire_batch_before_terminal() -> None:
+    import asyncio
+
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.rag.context_engine import _history_units
+    from assistant_service.core.tools.tool_registry import ToolCallResult
+
+    class CancelAwareToolInvoker(FakeToolInvoker):
+        def __init__(self) -> None:
+            super().__init__({"slow_tool": {}})
+            self.entered = asyncio.Event()
+
+        async def invoke(
+            self,
+            tool_name: str,
+            arguments: dict[str, Any],
+            context: Any,
+            cancel_event: Any = None,
+        ) -> ToolCallResult:
+            del arguments, context
+            self.invocation_count += 1
+            self.entered.set()
+            assert cancel_event is not None
+            await cancel_event.wait()
+            return ToolCallResult(
+                call_id="internal-cancelled",
+                tool_name=tool_name,
+                success=False,
+                result=None,
+                error="cancelled",
+                duration_ms=1.0,
+                metadata={"cancelled": True, "side_effect_state": "not_started"},
+            )
+
+    class CheckpointRecordingLoop(AgentLoop):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.checkpoints: list[dict[str, Any]] = []
+
+        async def _save_checkpoint(self, ctx: Any, **kwargs: Any) -> dict[str, Any]:
+            del ctx
+            self.checkpoints.append(copy.deepcopy(kwargs))
+            return {"checkpoint_id": f"cp-{len(self.checkpoints)}", "committed": True}
+
+    tool_calls = [
+        {
+            "id": "toolu_cancelled",
+            "type": "function",
+            "function": {"name": "slow_tool", "arguments": '{"value":1}'},
+        },
+        {
+            "id": "toolu_not_executed",
+            "type": "function",
+            "function": {"name": "slow_tool", "arguments": '{"value":2}'},
+        },
+    ]
+    model = FakeModelRegistry(
+        scripted=[
+            [{"tool_calls": tool_calls, "finish_reason": "tool_calls"}],
+            [{"content": "must not run", "finish_reason": "stop"}],
+        ]
+    )
+    invoker = CancelAwareToolInvoker()
+    trace_writer = RecordingTraceWriter()
+    loop = CheckpointRecordingLoop(
+        model_registry=model,
+        tool_invoker=invoker,  # type: ignore[arg-type]
+        trace_writer=trace_writer,  # type: ignore[arg-type]
+    )
+    events: list[Any] = []
+
+    async def consume() -> None:
+        async for event in loop.execute(
+            session_id="cancel-tool-batch",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="run both slow tools",
+            config=AgentLoopConfig(model_id="test", persist_messages=False),
+            history=[],
+        ):
+            events.append(event)
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.wait_for(invoker.entered.wait(), timeout=1)
+    started = next(event.data for event in events if event.event_type == "run_started")
+    assert await loop.task_manager.cancel_task("cancel-tool-batch", started["task_id"])
+    await asyncio.wait_for(consumer, timeout=1)
+
+    cancelled_checkpoint = next(
+        checkpoint
+        for checkpoint in loop.checkpoints
+        if checkpoint.get("phase") == "tool_call_cancelled"
+    )
+    checkpoint_messages = cancelled_checkpoint["messages"]
+    assistant_call_ids = {
+        call["id"]
+        for message in checkpoint_messages
+        if message.get("role") == "assistant"
+        for call in message.get("tool_calls") or []
+    }
+    result_ids = {
+        message["tool_call_id"]
+        for message in checkpoint_messages
+        if message.get("role") == "tool"
+    }
+    _, invalid_tool_messages = _history_units(
+        [message for message in checkpoint_messages if message.get("role") != "system"]
+    )
+
+    assert assistant_call_ids == {"toolu_cancelled", "toolu_not_executed"}
+    assert result_ids == assistant_call_ids
+    assert invalid_tool_messages == 0
+    assert cancelled_checkpoint["status"] == "cancelled"
+    assert model._call_index == 1
+    assert invoker.invocation_count == 1
+    terminal = next(event for event in events if event.event_type == "run_error")
+    assert terminal.data["terminal_envelope"]["status"] == "cancelled"
+    public_results = {
+        event.data["tool_call_id"]: event.data["status"]
+        for event in events
+        if event.event_type == "tool_call_result"
+    }
+    assert public_results == {
+        "toolu_cancelled": "cancelled",
+        "toolu_not_executed": "not_executed",
+    }
+    assert trace_writer.finished[-1]["status"] == "cancelled"
+    assert trace_writer.drain_strict[-1] is True
+    assert trace_writer.drain_trace_ids[-1] == trace_writer.started[-1].trace_id
+
+
+def test_append_terminal_tool_results_is_idempotent() -> None:
+    from assistant_service.core.agent.streaming_tool_execution import (
+        StreamingToolExecutionMixin,
+    )
+
+    calls = [
+        {
+            "id": "toolu_a",
+            "type": "function",
+            "function": {"name": "slow_tool", "arguments": "{}"},
+        },
+        {
+            "id": "toolu_b",
+            "type": "function",
+            "function": {"name": "slow_tool", "arguments": "{}"},
+        },
+    ]
+    ctx = SimpleNamespace(messages=[], openai_responses_local_runtime=None)
+    state = SimpleNamespace(
+        messages=[{"role": "assistant", "tool_calls": calls}],
+        turn_tool_calls=[],
+        turn_tool_results=[],
+    )
+    frame = SimpleNamespace(
+        tool_index=1,
+        tool_call=calls[0],
+        tool_calls_batch=calls,
+    )
+    first = StreamingToolExecutionMixin._append_terminal_tool_results(
+        ctx,
+        state,
+        frame,
+        current_status="cancelled",
+        reason="user stop",
+    )
+    second = StreamingToolExecutionMixin._append_terminal_tool_results(
+        ctx,
+        state,
+        frame,
+        current_status="cancelled",
+        reason="user stop",
+    )
+    result_ids = [
+        message["tool_call_id"]
+        for message in state.messages
+        if message.get("role") == "tool"
+    ]
+    assert first == ["toolu_a", "toolu_b"]
+    assert second == []
+    assert result_ids == ["toolu_a", "toolu_b"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_side_effect_cancel_is_not_forged_as_cancelled() -> None:
+    import asyncio
+
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.tools.tool_registry import ToolCallResult
+
+    class UnknownEffectInvoker(FakeToolInvoker):
+        def __init__(self) -> None:
+            super().__init__({"write_tool": {}})
+            self.entered = asyncio.Event()
+
+        async def invoke(
+            self,
+            tool_name: str,
+            arguments: dict[str, Any],
+            context: Any,
+            cancel_event: Any = None,
+        ) -> ToolCallResult:
+            del arguments, context
+            self.invocation_count += 1
+            self.entered.set()
+            assert cancel_event is not None
+            await cancel_event.wait()
+            return ToolCallResult(
+                call_id="internal-unknown",
+                tool_name=tool_name,
+                success=False,
+                result=None,
+                error="SIDE_EFFECT_UNKNOWN",
+                duration_ms=1.0,
+                metadata={
+                    "tool_failure": {
+                        "failure_kind": "side_effect_unknown",
+                        "recovery_action": "pause",
+                    },
+                    "tool_operation": {"operation_id": "op-1"},
+                },
+            )
+
+    model = FakeModelRegistry(
+        scripted=[
+            [
+                {
+                    "tool_calls": [
+                        {
+                            "id": "toolu_write",
+                            "type": "function",
+                            "function": {"name": "write_tool", "arguments": "{}"},
+                        }
+                    ],
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            [{"content": "must not run", "finish_reason": "stop"}],
+        ]
+    )
+    invoker = UnknownEffectInvoker()
+    loop = AgentLoop(
+        model_registry=model,
+        tool_invoker=invoker,  # type: ignore[arg-type]
+    )
+    events: list[Any] = []
+
+    async def consume() -> None:
+        async for event in loop.execute(
+            session_id="unknown-effect-cancel",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="write something",
+            config=AgentLoopConfig(model_id="test", persist_messages=False),
+            history=[],
+        ):
+            events.append(event)
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.wait_for(invoker.entered.wait(), timeout=1)
+    started = next(event.data for event in events if event.event_type == "run_started")
+    assert await loop.task_manager.cancel_task("unknown-effect-cancel", started["task_id"])
+    await asyncio.wait_for(consumer, timeout=1)
+
+    assert model._call_index == 1
+    assert all(event.event_type != "tool_call_cancelled" for event in events)
+    unknown = next(event for event in events if event.event_type == "side_effect_unknown")
+    assert unknown.data["terminal_envelope"]["exit_reason"] == "side_effect_unknown"
+    public_results = [
+        event.data["status"]
+        for event in events
+        if event.event_type == "tool_call_result"
+    ]
+    assert "cancelled" not in public_results
+
+
+@pytest.mark.asyncio
 async def test_client_disconnect_persists_cancelled_never_succeeded() -> None:
     import asyncio
 
@@ -3653,6 +3928,105 @@ async def test_approval_resume_continues_after_persisted_trace_sequence() -> Non
         resumed_run_started["attempt_id"]
         != resumed_run_started["turn_state"]["resumed_from_attempt_id"]
     )
+    assert writer.finished[-1]["status"] == "succeeded"
+    assert writer.drain_strict[-1] is True
+
+
+@pytest.mark.asyncio
+async def test_approval_resume_tool_cancellation_finishes_trace_as_cancelled() -> None:
+    import asyncio
+
+    from assistant_service.core.agent.agent_loop import AgentLoopConfig
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+    from assistant_service.core.tools.tool_registry import ToolCallResult
+
+    class CancelledApprovedToolInvoker(FakeToolInvoker):
+        def __init__(self) -> None:
+            super().__init__({"generate_image": {}})
+            self.entered = asyncio.Event()
+
+        async def invoke(
+            self,
+            tool_name: str,
+            arguments: dict[str, Any],
+            context: Any,
+            cancel_event: Any = None,
+        ) -> ToolCallResult:
+            del arguments, context
+            self.invocation_count += 1
+            self.entered.set()
+            assert cancel_event is not None
+            await cancel_event.wait()
+            return ToolCallResult(
+                call_id="approved-tool-cancelled",
+                tool_name=tool_name,
+                success=False,
+                result=None,
+                error="cancelled",
+                duration_ms=1.0,
+                metadata={"cancelled": True, "side_effect_state": "not_started"},
+            )
+
+    invoker = CancelledApprovedToolInvoker()
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
+    writer = RecordingTraceWriter()
+    user = MockUserContext(user_id="u1")
+    run_id, approval_id = await _create_pending_approval(
+        invoker=invoker,
+        gateway=gateway,
+        trace_writer=writer,
+        user=user,
+    )
+    approved = await gateway.approve(
+        approval_id=approval_id,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        approved=True,
+        approver_user_id=user.user_id,
+    )
+    assert approved is not None
+
+    writer.operations.clear()
+    writer.started.clear()
+    writer.events.clear()
+    writer.finished.clear()
+    writer.drain_timeouts.clear()
+    writer.drain_strict.clear()
+    writer.drain_trace_ids.clear()
+    loop = _confirmation_loop(
+        model=FakeModelRegistry(scripted=[[{"content": "must not continue"}]]),
+        invoker=invoker,
+        gateway=gateway,
+        trace_writer=writer,
+    )
+    events: list[Any] = []
+
+    async def consume() -> None:
+        async for event in loop.execute(
+            session_id="s1",
+            user=user,  # type: ignore[arg-type]
+            message="Continue",
+            config=AgentLoopConfig(
+                model_id="test",
+                max_tool_iterations=2,
+                resume_run_id=run_id,
+                resume_approval_id=approval_id,
+            ),
+            history=[],
+        ):
+            events.append(event)
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.wait_for(invoker.entered.wait(), timeout=1)
+    started = next(event.data for event in events if event.event_type == "run_started")
+    assert await loop.task_manager.cancel_task("s1", started["task_id"])
+    await asyncio.wait_for(consumer, timeout=1)
+
+    terminal = next(event for event in events if event.event_type == "run_error")
+    assert terminal.data["terminal_envelope"]["status"] == "cancelled"
+    assert writer.finished[-1]["status"] == "cancelled"
+    assert writer.drain_strict[-1] is True
+    assert invoker.invocation_count == 1
 
 
 @pytest.mark.asyncio

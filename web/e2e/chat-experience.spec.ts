@@ -27,6 +27,7 @@ const MOCK_ASSISTANT_MODEL_ID = "gpt-4o";
 const MOCK_PLAYGROUND_SERVICE_ID = "e2e-mock-playground";
 const MOCK_PLAYGROUND_THREAD_ID = "e2e-mock-thread";
 const MOCK_PLAYGROUND_TOOL_ID = "pg-tool-1";
+const LAST_MODEL_STORAGE_KEY = "assistant.lastModelId.v1";
 
 const translateDefault = (
   key: string,
@@ -204,7 +205,7 @@ function buildMockAssistantSession(
   };
 }
 
-async function installAssistantHarness(
+export async function installAssistantHarness(
   page: Page,
   fulfillStream: (route: Route) => Promise<void>,
   options: {
@@ -216,6 +217,7 @@ async function installAssistantHarness(
     artifactsBySessionId?: Record<string, MockAssistantArtifact[]>;
     createSessionDelayMs?: number;
     postCreateSessionListDelayMs?: number;
+    releaseModels?: () => Promise<void>;
     onCreateShare?: (
       sessionId: string,
       payload: { include_artifacts?: boolean }
@@ -245,6 +247,9 @@ async function installAssistantHarness(
   ];
 
   await page.route("**/api/v1/assistant/models", async (route) => {
+    if (options.releaseModels) {
+      await options.releaseModels();
+    }
     await route.fulfill(
       jsonResponse({
         models,
@@ -385,6 +390,97 @@ async function installAssistantHarness(
 
   await page.route("**/api/v1/assistant/chat/stream", fulfillStream);
 }
+
+test("composer sends with the cached last model before the catalog resolves", async ({
+  page,
+}) => {
+  test.setTimeout(20_000);
+
+  let releaseModels!: () => void;
+  const modelsGate = new Promise<void>((resolve) => {
+    releaseModels = resolve;
+  });
+  let modelsRequested = false;
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/v1/assistant/models") {
+      modelsRequested = true;
+    }
+  });
+
+  await seedClientPrefs(page, { locale: "en-US" });
+  await installClientAuth(page, {
+    user_id: "e2e-assistant-composer-unlock-user",
+    email: "assistant-composer-unlock@example.com",
+    display_name: "Composer Unlock",
+  });
+  await page.addInitScript(
+    ({ key, modelId }) => {
+      localStorage.setItem(key, modelId);
+    },
+    { key: LAST_MODEL_STORAGE_KEY, modelId: MOCK_ASSISTANT_MODEL_ID }
+  );
+
+  await installAssistantHarness(
+    page,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: toSseBody([
+          { event_type: "started", data: { request_id: "composer-unlock-e2e" } },
+          { event_type: "text_delta", data: "Catalog-free first message" },
+          { event_type: "done", data: { duration_ms: 50, total_tokens: 4 } },
+          { event_type: "run_finished", data: { run_id: "composer-unlock-e2e" } },
+        ]),
+      });
+    },
+    {
+      releaseModels: () => modelsGate,
+    }
+  );
+
+  await page.goto("/assistant");
+  await expect.poll(() => modelsRequested, { timeout: 10_000 }).toBeTruthy();
+
+  const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
+  await composer.fill("send before catalog");
+  await expect(composer).toBeEnabled();
+  const sendButton = page.locator('button[aria-label="Send"]');
+  await expect(sendButton).toBeEnabled();
+
+  await composer.press("Enter");
+  await expect(page.getByText("Catalog-free first message")).toBeVisible({
+    timeout: 2_000,
+  });
+
+  releaseModels();
+  await expect(page.getByText("GPT-4o")).toBeVisible({ timeout: 2_000 });
+  await composer.fill("still unlocked after catalog");
+  await expect(sendButton).toBeEnabled();
+});
+
+test("composer stays locked when the catalog loads empty and no model is cached", async ({
+  page,
+}) => {
+  test.setTimeout(20_000);
+
+  await seedClientPrefs(page, { locale: "en-US" });
+  await installClientAuth(page, {
+    user_id: "e2e-assistant-no-model-cache-user",
+    email: "assistant-no-model-cache@example.com",
+    display_name: "No Model Cache",
+  });
+  await installAssistantHarness(page, async () => {}, {
+    models: [],
+    defaultModelId: "",
+  });
+
+  await page.goto("/assistant");
+
+  const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
+  await expect(composer).toBeDisabled();
+  await expect(page.locator('button[aria-label="Send"]')).toBeDisabled();
+});
 
 async function installPlaygroundHarness(page: Page) {
   let sessionCounter = 0;
@@ -983,7 +1079,7 @@ test("assistant new-session stream is not blocked by delayed sidebar refresh", a
   const interactionToFirstTokenMs = Number(firstTokenPayload?.interactionToFirstTokenMs);
   expect(Number.isFinite(streamFirstTokenMs)).toBeTruthy();
   expect(Number.isFinite(interactionToFirstTokenMs)).toBeTruthy();
-  expect(interactionToFirstTokenMs - streamFirstTokenMs).toBeGreaterThanOrEqual(200);
+  expect(interactionToFirstTokenMs - streamFirstTokenMs).toBeLessThan(80);
 
   await expect
     .poll(() => postCreateListFinishedAt, { timeout: sessionListDelayMs + 3_000 })
@@ -2107,6 +2203,183 @@ test("assistant escape cancels delayed stream", async ({ page }) => {
         event.payload?.outcome === "cancelled"
     )
   ).toBeTruthy();
+});
+
+test("assistant stop closes tool exchange through task cancel and allows follow-up", async ({ page }) => {
+  await seedClientPrefs(page, { locale: "en-US" });
+  await installClientAuth(page, {
+    user_id: "e2e-assistant-tool-cancel-user",
+    email: "assistant-tool-cancel@example.com",
+    display_name: "Assistant Tool Cancel",
+  });
+
+  let cancelHits = 0;
+  await page.route("**/api/v1/assistant/tasks/task-stop-paired/cancel", async (route) => {
+    cancelHits += 1;
+    await route.fulfill(jsonResponse({
+      task_id: "task-stop-paired",
+      session_id: "session-stop-paired",
+      cancelled: true,
+      message: "Cancellation requested",
+    }));
+  });
+  await installAssistantHarness(page, async (route) => {
+    await route.fulfill({
+      status: 500,
+      contentType: "text/plain",
+      body: "stream override was not installed",
+    });
+  });
+  await page.addInitScript(() => {
+    const nativeFetch = window.fetch.bind(window);
+    let streamNumber = 0;
+    window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string"
+        ? input
+        : input instanceof Request
+          ? input.url
+          : String(input);
+      if (!url.includes("/api/v1/assistant/chat/stream")) {
+        return nativeFetch(input, init);
+      }
+      streamNumber += 1;
+      const encoder = new TextEncoder();
+      const frames = streamNumber === 1
+        ? [
+            {
+              delayMs: 0,
+              event: {
+                event_type: "run_started",
+                data: {
+                  run_id: "run-stop-paired",
+                  session_id: "session-stop-paired",
+                  task_id: "task-stop-paired",
+                  timestamp: Date.now(),
+                },
+              },
+            },
+            {
+              delayMs: 50,
+              event: {
+                event_type: "tool_call_start",
+                data: {
+                  tool_call_id: "tool-stop-paired",
+                  tool_name: "web_fetch",
+                  arguments: { url: "https://example.com" },
+                  status: "running",
+                },
+              },
+            },
+            {
+              delayMs: 900,
+              event: {
+                event_type: "tool_call_result",
+                data: {
+                  tool_call_id: "tool-stop-paired",
+                  tool_name: "web_fetch",
+                  status: "cancelled",
+                  success: false,
+                  error: "cancelled",
+                  synthetic: true,
+                },
+              },
+            },
+            {
+              delayMs: 920,
+              event: {
+                event_type: "tool_call_end",
+                data: {
+                  tool_call_id: "tool-stop-paired",
+                  tool_name: "web_fetch",
+                  status: "cancelled",
+                  error: "cancelled",
+                  synthetic: true,
+                },
+              },
+            },
+            {
+              delayMs: 950,
+              event: {
+                event_type: "run_error",
+                data: {
+                  run_id: "run-stop-paired",
+                  status: "cancelled",
+                  error: "Cancelled by user",
+                  terminal_envelope: {
+                    status: "cancelled",
+                    exit_reason: "cancelled",
+                  },
+                },
+              },
+            },
+          ]
+        : [
+            {
+              delayMs: 0,
+              event: {
+                event_type: "run_started",
+                data: {
+                  run_id: "run-after-stop",
+                  session_id: "session-stop-paired",
+                  task_id: "task-after-stop",
+                  timestamp: Date.now(),
+                },
+              },
+            },
+            { delayMs: 30, event: { event_type: "text_delta", data: "FOLLOWUP_OK" } },
+            {
+              delayMs: 50,
+              event: {
+                event_type: "run_finished",
+                data: { run_id: "run-after-stop", status: "succeeded" },
+              },
+            },
+          ];
+
+      return new Response(new ReadableStream({
+        start(controller) {
+          let closed = false;
+          const close = () => {
+            if (closed) return;
+            closed = true;
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            controller.close();
+          };
+          for (const frame of frames) {
+            window.setTimeout(() => {
+              if (!closed) {
+                controller.enqueue(
+                  encoder.encode(`data: ${JSON.stringify(frame.event)}\n\n`)
+                );
+              }
+            }, frame.delayMs);
+          }
+          window.setTimeout(close, Math.max(...frames.map((frame) => frame.delayMs)) + 30);
+          init?.signal?.addEventListener("abort", close, { once: true });
+        },
+      }), { headers: { "content-type": "text/event-stream" } });
+    };
+  });
+
+  await ensureAuthenticatedPage(page, "/assistant");
+  const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
+  await composer.fill("Start a slow tool and let me stop it");
+  await composer.press("Enter");
+
+  await expect(page.getByRole("button", { name: "Stop generating" })).toBeVisible();
+  await page.getByRole("button", { name: /Activity/ }).last().click();
+  await expect(page.getByText("web_fetch")).toBeVisible();
+  await page.getByRole("button", { name: "Stop generating" }).click();
+
+  await expect.poll(() => cancelHits).toBe(1);
+  await expect(page.getByRole("button", { name: "Stop generating" })).toBeHidden();
+  await expect(page.getByText(/^cancelled ·/)).toBeVisible();
+  await expect(page.getByText(/^completed ·/)).toHaveCount(0);
+
+  await composer.fill("continue after stop");
+  await composer.press("Enter");
+  await expect(page.getByText("FOLLOWUP_OK")).toBeVisible();
+  await expect(page.getByText(/^completed ·/)).toBeVisible();
 });
 
 test("assistant new chat invalidates late events from the previous stream", async ({ page }) => {

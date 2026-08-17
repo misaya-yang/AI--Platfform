@@ -15,6 +15,7 @@ from ai_gateway_core.logging import get_logger, record_internal_exception
 from ..trace_payloads import build_rag_trace_payload
 from .agent_loop_helpers import (
     _apply_tool_schema_correction_limit,
+    _envelope_tool_result,
     _redact_trace_text,
 )
 from .agent_loop_models import (
@@ -52,6 +53,140 @@ logger = get_logger(__name__)
 
 class StreamingToolExecutionMixin:
     """Execute an approved tool and ingest its durable result."""
+
+    @staticmethod
+    def _append_terminal_tool_results(
+        ctx: AgentLoopContext,
+        state: StreamingToolLoopState,
+        frame: StreamingToolCallState,
+        *,
+        current_status: str,
+        reason: str,
+    ) -> list[str]:
+        """Close every unresolved call in the provider-visible assistant batch.
+
+        The model emitted the whole batch in one assistant message, so a stop
+        during the first tool still requires results for every call ID before
+        the transcript can cross another provider or checkpoint boundary.
+        """
+
+        existing_result_ids = {
+            str(message.get("tool_call_id") or "")
+            for message in state.messages
+            if isinstance(message, dict) and message.get("role") == "tool"
+        }
+        turn_call_records = {
+            str(record.get("id") or ""): record
+            for record in state.turn_tool_calls
+            if isinstance(record, dict) and str(record.get("id") or "")
+        }
+        appended: list[str] = []
+        unresolved_calls = frame.tool_calls_batch[max(0, frame.tool_index - 1) :]
+        for offset, tool_call in enumerate(unresolved_calls):
+            if not isinstance(tool_call, dict):
+                continue
+            tool_call_id = str(tool_call.get("id") or "").strip()
+            function = tool_call.get("function")
+            if not tool_call_id or not isinstance(function, dict):
+                continue
+            if tool_call_id in existing_result_ids:
+                continue
+
+            tool_name = str(function.get("name") or "unknown")
+            status = current_status if offset == 0 else "not_executed"
+            error_code = "TOOL_CALL_CANCELLED" if status == "cancelled" else "TOOL_CALL_NOT_EXECUTED"
+            result_text = json.dumps(
+                {
+                    "error": {
+                        "code": error_code,
+                        "message": reason,
+                        "status": status,
+                    }
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            tool_message: dict[str, Any] = {
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+                "content": _envelope_tool_result(
+                    result_text,
+                    tool_name=tool_name,
+                    tool_id=tool_call_id,
+                ),
+            }
+
+            local_runtime = ctx.openai_responses_local_runtime
+            if local_runtime is not None:
+                provider_blocks: list[dict[str, Any]] = []
+                for prior_message in reversed(state.messages):
+                    if prior_message.get("role") != "assistant":
+                        continue
+                    raw_blocks = prior_message.get("provider_content_blocks")
+                    if isinstance(raw_blocks, list):
+                        provider_blocks = [
+                            block for block in raw_blocks if isinstance(block, dict)
+                        ]
+                    break
+                provider_result = local_runtime.result_block(
+                    provider_blocks=provider_blocks,
+                    call_id=tool_call_id,
+                    tool_name=tool_name,
+                    success=False,
+                    result=None,
+                    error=reason,
+                    metadata={"cancelled": True, "synthetic": True, "status": status},
+                )
+                if provider_result is not None:
+                    tool_message["provider_content_blocks"] = [provider_result]
+
+            state.messages.append(tool_message)
+            existing_result_ids.add(tool_call_id)
+            appended.append(tool_call_id)
+
+            record = turn_call_records.get(tool_call_id)
+            if record is None:
+                raw_arguments = function.get("arguments")
+                arguments: dict[str, Any] = {}
+                if isinstance(raw_arguments, dict):
+                    arguments = copy.deepcopy(raw_arguments)
+                elif isinstance(raw_arguments, str):
+                    try:
+                        decoded = json.loads(raw_arguments)
+                    except (TypeError, ValueError):
+                        decoded = None
+                    if isinstance(decoded, dict):
+                        arguments = decoded
+                record = {
+                    "id": tool_call_id,
+                    "name": tool_name,
+                    "arguments": arguments,
+                }
+                state.turn_tool_calls.append(record)
+                turn_call_records[tool_call_id] = record
+            record["status"] = status
+            record["error"] = reason
+            if not any(
+                str(result.get("tool_call_id") or "") == tool_call_id
+                for result in state.turn_tool_results
+                if isinstance(result, dict)
+            ):
+                state.turn_tool_results.append(
+                    {
+                        "tool_call_id": tool_call_id,
+                        "name": tool_name,
+                        "result": None,
+                        "error": reason,
+                        "status": status,
+                        "duration_ms": None,
+                        "synthetic": True,
+                    }
+                )
+
+        if appended:
+            ctx.messages = list(state.messages)
+        return appended
 
     def _subagent_dispatch_registry(self) -> SubAgentDispatchRegistry:
         return GLOBAL_SUBAGENT_DISPATCH_REGISTRY
@@ -299,9 +434,45 @@ class StreamingToolExecutionMixin:
                 yield event
         except asyncio.CancelledError:
             abort_reason = "streaming_cancelled"
+            paired_ids = self._append_terminal_tool_results(
+                ctx,
+                state,
+                frame,
+                current_status="cancelled",
+                reason="tool execution cancelled before completion",
+            )
+            if paired_ids:
+                try:
+                    await asyncio.shield(
+                        self._save_checkpoint(
+                            ctx,
+                            phase="tool_call_cancelled",
+                            iteration=state.iteration,
+                            messages=state.messages,
+                            status="cancelled",
+                            resume_payload={
+                                "paired_tool_call_ids": paired_ids,
+                                "blind_replay_allowed": False,
+                            },
+                            error="streaming_cancelled",
+                        )
+                    )
+                except (Exception, asyncio.CancelledError) as exc:
+                    record_internal_exception(
+                        __name__,
+                        "assistant.tool_cancel.checkpoint_failed",
+                        exc,
+                    )
             raise
         except GeneratorExit:
             abort_reason = "streaming_consumer_closed"
+            self._append_terminal_tool_results(
+                ctx,
+                state,
+                frame,
+                current_status="cancelled",
+                reason="tool stream consumer closed before completion",
+            )
             raise
         except BaseException:
             abort_reason = "streaming_coordinator_exception"
@@ -932,6 +1103,25 @@ class StreamingToolExecutionMixin:
                 frame.step_error = frame.tool_error or "cancelled"
                 ctx.cancelled = True
                 ctx.terminal_exit_reason = "cancelled"
+                paired_ids = self._append_terminal_tool_results(
+                    ctx,
+                    state,
+                    frame,
+                    current_status="cancelled",
+                    reason=frame.step_error,
+                )
+                await self._save_checkpoint(
+                    ctx,
+                    phase="tool_call_cancelled",
+                    iteration=state.iteration,
+                    messages=state.messages,
+                    status="cancelled",
+                    resume_payload={
+                        "paired_tool_call_ids": paired_ids,
+                        "blind_replay_allowed": False,
+                    },
+                    error=frame.step_error,
+                )
                 for later_call in frame.tool_calls_batch[frame.tool_index :]:
                     later_function = later_call.get("function") or {}
                     for synthetic_event in self._synthetic_tool_lifecycle_events(

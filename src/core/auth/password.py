@@ -34,7 +34,7 @@ from ai_gateway_core.exceptions import AuthError
 # Configuration Constants
 # ============================================================
 ALLOWED_EMAIL_DOMAIN = os.environ.get("AUTH_ALLOWED_EMAIL_DOMAIN", "example.com").strip().lower()
-DEFAULT_PASSWORD = os.environ.get("DEFAULT_USER_PASSWORD", "ChangeMe-Admin-2026!")
+DEFAULT_PASSWORD = os.environ.get("DEFAULT_USER_PASSWORD", "")
 MIN_PASSWORD_LENGTH = 8
 BCRYPT_COST_FACTOR = 12
 MAX_LOGIN_ATTEMPTS = 5

@@ -416,7 +416,15 @@ async def lifespan(app: FastAPI):
     try:
         from ai_gateway_core.persistence import DatabaseStorage
 
-        database = DatabaseStorage(db_dsn, enabled=True, auto_init=False)
+        # SPO-05 / D1: explicit small pool for the assistant worker profile
+        # (single worker per container) plus the shared command timeout.
+        database = DatabaseStorage(
+            db_dsn,
+            enabled=True,
+            auto_init=False,
+            pool_min_size=1,
+            pool_max_size=5,
+        )
         await database.connect()
         app.state.database = database
         logger.info("Database connected")

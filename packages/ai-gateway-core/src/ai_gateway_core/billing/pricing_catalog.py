@@ -153,9 +153,10 @@ def resolve_pricing_with_status(model: str) -> tuple[dict[str, Any], str]:
         if known_model == "default":
             continue
         known_model_lower = known_model.lower()
-        if canonical_lower.startswith(known_model_lower) or known_model_lower.startswith(
-            canonical_lower
-        ):
+        # SPO-05 gate: only "requested starts with the catalog entry" may
+        # match (variants like gpt-4o-mini → gpt-4o). The reverse direction
+        # is forbidden: "gpt-4" must never inherit gpt-4o pricing.
+        if canonical_lower.startswith(known_model_lower):
             score = len(known_model)
             if matched is None or score > matched[0]:
                 matched = (score, pricing)

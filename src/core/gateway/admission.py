@@ -13,6 +13,7 @@ from typing import Any
 from ai_gateway_core.logging import get_logger
 
 from .capacity import CapacityBudget
+from .lua_scripts import CAPACITY_ACQUIRE_PAIR_LUA, CAPACITY_RELEASE_LUA, eval_script
 
 logger = get_logger(__name__)
 
@@ -211,7 +212,7 @@ class CapacityAdmissionController:
         enforced = [budget for budget in budgets if budget.enforced]
         acquired_local: list[CapacityBudget] = []
         acquired_tenant: list[tuple[str, str, str]] = []
-        acquired_shared: list[tuple[str, str]] = []
+        acquired_shared: list[tuple[str, str, str]] = []
         started = time.perf_counter()
 
         try:
@@ -227,24 +228,40 @@ class CapacityAdmissionController:
             for budget in enforced:
                 wait_ms = await self._acquire_local(budget)
                 acquired_local.append(budget)
-                if budget.shared:
-                    lease = await self._acquire_shared(
+                if self.redis is not None and budget.shared:
+                    # One atomic EVAL covers the shared budget AND the tenant
+                    # share (SPO-02): a single round trip, no TOCTOU window.
+                    tenant_id_resolved = tenant_id or "public"
+                    tenant_limit = self._tenant_limit_for(budget, tenant_id_resolved)
+                    pair = await self._acquire_shared_and_tenant(
                         budget=budget,
-                        tenant_id=tenant_id,
+                        tenant_id=tenant_id_resolved,
+                        request_class=request_class,
+                        request_id=request_id,
+                        tenant_limit=tenant_limit,
+                        allow_degraded_open=allow_degraded_open,
+                    )
+                    if pair is not None:
+                        (shared_key, member), (tenant_key, _tenant_member) = pair
+                        acquired_shared.append((shared_key, tenant_key, member))
+                    else:
+                        # Degraded open: the shared layer was skipped; the
+                        # tenant share falls back to the local budget.
+                        key = await self._acquire_tenant_local(
+                            budget=budget,
+                            tenant_id=tenant_id_resolved,
+                            tenant_limit=tenant_limit,
+                        )
+                        acquired_tenant.append(("local", key, ""))
+                else:
+                    tenant_lease = await self._acquire_tenant_capacity(
+                        budget=budget,
+                        tenant_id=tenant_id or "public",
                         request_class=request_class,
                         request_id=request_id,
                         allow_degraded_open=allow_degraded_open,
                     )
-                    if lease is not None:
-                        acquired_shared.append(lease)
-                tenant_lease = await self._acquire_tenant_capacity(
-                    budget=budget,
-                    tenant_id=tenant_id or "public",
-                    request_class=request_class,
-                    request_id=request_id,
-                    allow_degraded_open=allow_degraded_open,
-                )
-                acquired_tenant.append(tenant_lease)
+                    acquired_tenant.append(tenant_lease)
                 _record_admission_state(
                     service_id=service_id,
                     tenant_id=tenant_id or "public",
@@ -301,19 +318,11 @@ class CapacityAdmissionController:
         request_id: str,
         allow_degraded_open: bool,
     ) -> tuple[str, str, str]:
+        """Local tenant share (used when Redis is absent or the budget is
+        not shared; the Redis shared path is handled by the combined
+        ``_acquire_shared_and_tenant`` EVAL)."""
+        del request_class, request_id, allow_degraded_open
         tenant_limit = self._tenant_limit_for(budget, tenant_id)
-        if self.redis is not None and budget.shared:
-            lease = await self._acquire_tenant_shared(
-                budget=budget,
-                tenant_id=tenant_id,
-                request_class=request_class,
-                request_id=request_id,
-                tenant_limit=tenant_limit,
-                allow_degraded_open=allow_degraded_open,
-            )
-            if lease is not None:
-                key, member = lease
-                return "shared", key, member
         key = await self._acquire_tenant_local(
             budget=budget,
             tenant_id=tenant_id,
@@ -362,7 +371,7 @@ class CapacityAdmissionController:
             state.inflight = max(state.inflight - 1, 0)
             condition.notify(1)
 
-    async def _acquire_tenant_shared(
+    async def _acquire_shared_and_tenant(
         self,
         *,
         budget: CapacityBudget,
@@ -371,11 +380,20 @@ class CapacityAdmissionController:
         request_id: str,
         tenant_limit: int,
         allow_degraded_open: bool,
-    ) -> tuple[str, str] | None:
-        if self.redis is None:
-            return None
+    ) -> tuple[tuple[str, str], tuple[str, str]] | None:
+        """Atomically admit the shared budget and the tenant share in one EVAL.
 
-        key = self._tenant_redis_key(
+        SPO-02: replaces the former two-step ``zremrangebyscore → zcard →
+        zadd`` sequence (six round trips across both keys, TOCTOU between
+        workers) with a single script that cleans, counts, and conditionally
+        adds for both keys, preserving shared-before-tenant rejection order.
+        """
+        shared_key = self._redis_key(
+            tenant_id=tenant_id or "public",
+            budget_key=budget.key,
+            request_class=request_class or "sync",
+        )
+        tenant_key = self._tenant_redis_key(
             tenant_id=tenant_id or "public",
             budget_key=budget.key,
             request_class=request_class or "sync",
@@ -392,9 +410,30 @@ class CapacityAdmissionController:
             sort_keys=True,
         )
         try:
-            await self.redis.zremrangebyscore(key, 0, now_ms)
-            count = int(await self.redis.zcard(key))
-            if count >= tenant_limit:
+            shared_count, tenant_count = await eval_script(
+                self.redis,
+                CAPACITY_ACQUIRE_PAIR_LUA,
+                keys=[shared_key, tenant_key],
+                args=[
+                    now_ms,
+                    expires_at,
+                    member,
+                    self.lease_ttl_ms,
+                    budget.limit,
+                    tenant_limit,
+                ],
+            )
+            shared_count = int(shared_count)
+            tenant_count = int(tenant_count)
+            if shared_count >= budget.limit:
+                raise CapacityRejected(
+                    budget_key=budget.key,
+                    retry_after=math.ceil(budget.queue_timeout_ms / 1000),
+                )
+            if tenant_count >= tenant_limit:
+                # Lua already ZREM'd the shared member; release is idempotent
+                # and covers an older script that admitted shared first.
+                await self._release_shared_pair(shared_key, tenant_key, member)
                 raise CapacityRejected(
                     budget_key=budget.key,
                     code="GATEWAY_TENANT_CAPACITY_EXHAUSTED",
@@ -406,23 +445,22 @@ class CapacityAdmissionController:
                         "X-Gateway-Tenant-Id": tenant_id,
                     },
                 )
-            await self.redis.zadd(key, {member: expires_at})
         except CapacityRejected:
             raise
         except Exception as exc:
             if allow_degraded_open:
                 logger.warning(
-                    "gateway_tenant_capacity result=degraded_open budget_key=%s error=%s",
+                    "gateway_capacity_decision result=degraded_open budget_key=%s error=%s",
                     budget.key,
                     exc,
                 )
                 return None
             raise CapacityRejected(
                 budget_key=budget.key,
-                code="GATEWAY_TENANT_CAPACITY_DEGRADED",
-                message=f"Shared tenant capacity unavailable for {budget.key}",
+                code="GATEWAY_CAPACITY_DEGRADED",
+                message=f"Shared capacity unavailable for {budget.key}",
             ) from exc
-        return key, member
+        return (shared_key, member), (tenant_key, member)
 
     async def _acquire_local(self, budget: CapacityBudget) -> float:
         condition = self._conditions.setdefault(budget.key, asyncio.Condition())
@@ -484,92 +522,48 @@ class CapacityAdmissionController:
             state.inflight = max(state.inflight - 1, 0)
             condition.notify(1)
 
-    async def _acquire_shared(
-        self,
-        *,
-        budget: CapacityBudget,
-        tenant_id: str,
-        request_class: str,
-        request_id: str,
-        allow_degraded_open: bool,
-    ) -> tuple[str, str] | None:
-        if self.redis is None:
-            return None
-
-        key = self._redis_key(
-            tenant_id=tenant_id or "public",
-            budget_key=budget.key,
-            request_class=request_class or "sync",
-        )
-        now_ms = int(time.time() * 1000)
-        expires_at = now_ms + self.lease_ttl_ms
-        member = json.dumps(
-            {
-                "request_id": request_id,
-                "gateway_instance_id": self.gateway_instance_id,
-                "started_at_ms": now_ms,
-                "lease_expires_at_ms": expires_at,
-            },
-            sort_keys=True,
-        )
-        try:
-            await self.redis.zremrangebyscore(key, 0, now_ms)
-            count = int(await self.redis.zcard(key))
-            if count >= budget.limit:
-                raise CapacityRejected(
-                    budget_key=budget.key,
-                    retry_after=math.ceil(budget.queue_timeout_ms / 1000),
-                )
-            await self.redis.zadd(key, {member: expires_at})
-        except CapacityRejected:
-            raise
-        except Exception as exc:
-            if allow_degraded_open:
-                logger.warning(
-                    "gateway_capacity_decision result=degraded_open budget_key=%s error=%s",
-                    budget.key,
-                    exc,
-                )
-                return None
-            raise CapacityRejected(
-                budget_key=budget.key,
-                code="GATEWAY_CAPACITY_DEGRADED",
-                message=f"Shared capacity unavailable for {budget.key}",
-            ) from exc
-        return key, member
-
-    async def _release_shared(self, key: str, member: str) -> None:
+    async def _release_shared_pair(
+        self, shared_key: str, tenant_key: str, member: str
+    ) -> None:
         if self.redis is None:
             return
         try:
-            await self.redis.zrem(key, member)
+            # One EVAL releases both keys (SPO-02): a single round trip.
+            await eval_script(
+                self.redis,
+                CAPACITY_RELEASE_LUA,
+                keys=[shared_key, tenant_key],
+                args=[member],
+            )
         except Exception as exc:
-            logger.warning("Failed to release shared capacity lease key=%s error=%s", key, exc)
+            logger.warning(
+                "Failed to release shared capacity lease shared_key=%s error=%s",
+                shared_key,
+                exc,
+            )
 
     async def _release_many(
         self,
         local_budgets: list[CapacityBudget],
-        shared_leases: list[tuple[str, str]],
+        shared_leases: list[tuple[str, str, str]],
         tenant_leases: list[tuple[str, str, str]] | None = None,
     ) -> None:
         # Each loop is independently guarded so a single failed release
         # does not prevent the remaining budgets from being freed.
-        for kind, key, member in reversed(tenant_leases or []):
+        for kind, key, _member in reversed(tenant_leases or []):
             try:
-                if kind == "shared":
-                    await self._release_shared(key, member)
-                else:
+                if kind == "local":
                     await self._release_tenant_local(key)
             except Exception as exc:
                 logger.warning(
                     "Failed to release tenant lease kind=%s key=%s: %s", kind, key, exc
                 )
-        for key, member in reversed(shared_leases):
+        for shared_key, tenant_key, member in reversed(shared_leases):
             try:
-                await self._release_shared(key, member)
+                await self._release_shared_pair(shared_key, tenant_key, member)
             except Exception as exc:
                 logger.warning(
-                    "Failed to release shared lease key=%s: %s", key, exc
+                    "Failed to release shared lease shared_key=%s: %s", shared_key, exc
                 )
         for budget in reversed(local_budgets):
             try:

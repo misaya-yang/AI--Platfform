@@ -19,9 +19,10 @@
 | Redis | `ai-gateway-redis` | Cache, sessions, queues | `127.0.0.1:6379` |
 | Qdrant | `ai-gateway-qdrant` | Vector store | `127.0.0.1:6333/6334` |
 
-The gateway and frontend are the only public entry points. Assistant service stays private to the
-Docker network; infrastructure ports bind to `127.0.0.1`. Do not publish a service that is
-currently internal without an explicit decision recorded in an ADR.
+The gateway and frontend are the only public entry points. Local Compose publishes them on
+`127.0.0.1` so the host browser can reach `localhost` without exposing the stack on the LAN.
+Assistant service stays private to the Docker network; infrastructure ports bind to `127.0.0.1`.
+Do not publish a service that is currently internal without an explicit decision recorded in an ADR.
 
 ## 2. Code layout and ownership
 

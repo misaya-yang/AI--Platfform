@@ -49,6 +49,7 @@ import {
   type AgentTask,
 } from "./components";
 import { ChatInputArea } from "./components/ChatInputArea";
+import { readLastModelId, writeLastModelId } from "./lastModel";
 import { ShareDialog } from "./components/ShareDialog";
 import ConnectorsPanel from "./components/ConnectorsPanel";
 import { WelcomeScreen } from "./components/WelcomeScreen";
@@ -212,9 +213,12 @@ export function AssistantPage() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [datasets, setDatasets] = useState<DatasetInfo[]>([]);
   const [config, setConfig] = useState<AssistantConfig | null>(null);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
 
   // 2. Settings State
-  const [selectedModel, setSelectedModel] = useState<string>("");
+  // Unlock the composer with the last-selected model immediately; the catalog
+  // validates the cached id once listModels resolves (W3).
+  const [selectedModel, setSelectedModel] = useState<string>(() => readLastModelId());
   const [selectedDatasets, setSelectedDatasets] = useState<string[]>([]);
   const [temperature, setTemperature] = useState(0.7);
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
@@ -513,9 +517,18 @@ export function AssistantPage() {
             if (current && modelsData.some((m) => m.id === current)) return current;
             return fallbackModelId;
           });
+          // Validate the cache against the catalog; persist the resolved id.
+          const cached = readLastModelId();
+          const resolved =
+            cached && modelsData.some((m) => m.id === cached)
+              ? cached
+              : fallbackModelId;
+          writeLastModelId(resolved);
         }
       } catch (error) {
         console.error("Failed to load assistant data:", error);
+      } finally {
+        setModelsLoaded(true);
       }
     }
     loadData();
@@ -576,6 +589,7 @@ export function AssistantPage() {
     if (sessionConfig) {
       if (sessionConfig.selected_model && models.some((m) => m.id === sessionConfig.selected_model)) {
         setSelectedModel(sessionConfig.selected_model);
+        writeLastModelId(sessionConfig.selected_model);
       }
       setSelectedDatasets(sessionConfig.selected_datasets || []);  // Always reset, even if empty
       if (typeof sessionConfig.web_search_enabled === "boolean") setWebSearchEnabled(sessionConfig.web_search_enabled);
@@ -616,7 +630,10 @@ export function AssistantPage() {
 
   // Handle Send
   const handleSend = useCallback(() => {
-    if (!selectedModel || models.length === 0) {
+    // Block only once the catalog has loaded and is genuinely empty. While
+    // the catalog is still loading, the cached last model unlocks the first
+    // message (W3).
+    if (!selectedModel || (modelsLoaded && models.length === 0)) {
       toast({
         title: t("assistant.noModels", "No models available"),
         variant: "destructive",
@@ -675,7 +692,7 @@ export function AssistantPage() {
     
     setInput("");
     clearFiles();
-  }, [input, files, selectedModel, selectedDatasets, webSearchEnabled, thinkingLevel, temperature, selectedStyle, models, datasets, isStreaming, isUploading, isGeneratingImage, sendMessage, clearFiles, t, toast, isSessionOptInEffectiveNow]);
+  }, [input, files, selectedModel, selectedDatasets, webSearchEnabled, thinkingLevel, temperature, selectedStyle, models, modelsLoaded, datasets, isStreaming, isUploading, isGeneratingImage, sendMessage, clearFiles, t, toast, isSessionOptInEffectiveNow]);
 
   // Handle Image Send
   const handleImageSend = useCallback(() => {
@@ -822,7 +839,15 @@ export function AssistantPage() {
                 </TooltipTrigger>
                 <TooltipContent side="bottom">{showLeftPanel ? t("assistant.hideHistory", "Hide history") : t("assistant.showHistory", "Show history")}</TooltipContent>
               </Tooltip>
-              <CompactModelSelector models={models} selectedModel={selectedModel} onSelect={setSelectedModel} disabled={isStreaming} />
+              <CompactModelSelector
+                models={models}
+                selectedModel={selectedModel}
+                onSelect={(modelId) => {
+                  setSelectedModel(modelId);
+                  writeLastModelId(modelId);
+                }}
+                disabled={isStreaming}
+              />
               {/* Share button */}
               {activeSessionId && messages.length > 0 && !isStreaming && (
                 <Tooltip>
@@ -1085,7 +1110,10 @@ export function AssistantPage() {
               isStreaming={isStreaming}
               isGeneratingImage={isGeneratingImage}
               isImageMode={isImageMode}
-              hasAvailableModel={models.length > 0 && Boolean(selectedModel)}
+              hasAvailableModel={
+                (models.length > 0 && Boolean(selectedModel)) ||
+                (!modelsLoaded && Boolean(selectedModel))
+              }
               handleFileSelect={handleFileSelect}
               removeFile={removeFile}
               onSend={isImageMode ? handleImageSend : handleSend}

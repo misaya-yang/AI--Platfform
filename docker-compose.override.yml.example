@@ -20,8 +20,8 @@ services:
       LOG_LEVEL: DEBUG
     # Expose additional debug ports
     ports:
-      - "8080:8080"
-      - "5678:5678"  # debugpy port
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:5678:5678"  # debugpy port
 
   frontend:
     # Use development build
@@ -31,16 +31,16 @@ services:
     environment:
       NODE_ENV: development
 
-  # Expose database ports for local access
+  # Expose database ports for local access (loopback only)
   postgres:
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
 
   redis:
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
 
   qdrant:
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"

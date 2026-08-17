@@ -1,11 +1,18 @@
 """Compatibility tests for assistant session listing."""
 
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from ai_gateway_core.exceptions import SessionAlreadyExistsError
+from fastapi import HTTPException
 
-from src.api.v1.sessions import _list_assistant_sessions_for_service_id
+from src.api.v1.sessions import (
+    SessionCreate,
+    _list_assistant_sessions_for_service_id,
+    create_session,
+)
 from src.core.auth.user_resolver import UserContext
 from src.models.session import Session
 
@@ -56,3 +63,50 @@ async def test_list_sessions_builtin_includes_legacy_and_blank():
     )
 
     assert [s.session_id for s in sessions] == ["s_builtin", "s_legacy", "s_blank"]
+
+
+@pytest.mark.asyncio
+async def test_create_session_honors_client_session_id() -> None:
+    client_session_id = "11111111-1111-4111-8111-111111111111"
+    captured: dict[str, object] = {}
+
+    class _Manager:
+        async def create(self, **kwargs: object) -> SimpleNamespace:
+            captured.update(kwargs)
+            return SimpleNamespace(session_id=kwargs["session_id"])
+
+    result = await create_session(
+        body=SessionCreate(
+            session_id=client_session_id,
+            service_id="__builtin_assistant__",
+            metadata={"title": "hello"},
+        ),
+        session_manager=_Manager(),  # type: ignore[arg-type]
+        user=UserContext(user_id="user_1", tenant_id="tenant_1", is_authenticated=True),
+    )
+
+    assert result["session_id"] == client_session_id
+    assert captured["session_id"] == client_session_id
+    assert captured["user_id"] == "user_1"
+    assert captured["service_id"] == "__builtin_assistant__"
+    assert captured["fail_if_exists"] is True
+
+
+@pytest.mark.asyncio
+async def test_create_session_rejects_existing_client_session_id() -> None:
+    class _Manager:
+        async def create(self, **_kwargs: object) -> SimpleNamespace:
+            raise SessionAlreadyExistsError("session already exists")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await create_session(
+            body=SessionCreate(
+                session_id="11111111-1111-4111-8111-111111111111",
+            ),
+            session_manager=_Manager(),  # type: ignore[arg-type]
+            user=UserContext(
+                user_id="user_1", tenant_id="tenant_1", is_authenticated=True
+            ),
+        )
+
+    assert exc_info.value.status_code == 409

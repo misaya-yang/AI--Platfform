@@ -45,6 +45,33 @@ _MAX_KB_QUERY_CHARS = 4096
 _MAX_KB_DATASETS = 8
 _MAX_KB_DATASET_ID_CHARS = 128
 _MAX_KB_TOP_K = 20
+_CONTEXT_METADATA_CHUNK_CONTENT_CHARS = 400
+_CONTEXT_METADATA_PUBLIC_KEYS = (
+    "content",
+    "score",
+    "dataset_id",
+    "dataset_name",
+    "segment_id",
+    "document_id",
+    "image_url",
+    "citation_text",
+    "source_url",
+)
+
+
+def _bounded_context_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Preview-only chunk for tool metadata (A4).
+
+    Drops the Qdrant payload (``metadata.text`` is the full chunk) so
+    ``tool_call_completed`` cannot re-ship the document body.
+    """
+    bounded = {key: item[key] for key in _CONTEXT_METADATA_PUBLIC_KEYS if key in item}
+    content = str(bounded.get("content") or "")
+    if len(content) > _CONTEXT_METADATA_CHUNK_CONTENT_CHARS:
+        bounded["content"] = (
+            content[: _CONTEXT_METADATA_CHUNK_CONTENT_CHARS - 3].rstrip() + "..."
+        )
+    return bounded
 
 
 def _safe_kb_public_error(value: Any) -> str:
@@ -395,7 +422,11 @@ class KBSearchExecutor(ToolExecutor):
                         "_cross_dataset_rrf_score": 1.0 / (60 + dataset_rank),
                     }
                     all_results.append(item)
-                    dataset_chunks.append(item)
+                    # SPO-03 / A4: the tool metadata carries only a bounded
+                    # preview of each chunk. The model-facing result keeps the
+                    # full content; the canonical context_retrieved payloads
+                    # are compacted downstream.
+                    dataset_chunks.append(_bounded_context_item(item))
 
                 contexts.append(
                     {
