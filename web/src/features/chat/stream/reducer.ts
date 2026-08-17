@@ -348,6 +348,13 @@ export function cancelStreamTurn(
   state: StreamTurnState,
   nowMs: number
 ): StreamTurnState {
+  if (
+    state.status === "completed" ||
+    state.status === "failed" ||
+    state.status === "cancelled"
+  ) {
+    return withDuration(state, nowMs);
+  }
   return withDuration({ ...state, status: "cancelled" }, nowMs);
 }
 
@@ -356,6 +363,13 @@ export function failStreamTurn(
   message: string,
   nowMs: number
 ): StreamTurnState {
+  if (
+    state.status === "completed" ||
+    state.status === "failed" ||
+    state.status === "cancelled"
+  ) {
+    return withDuration(state, nowMs);
+  }
   return withDuration(
     {
       ...state,

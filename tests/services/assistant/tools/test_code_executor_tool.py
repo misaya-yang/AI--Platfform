@@ -14,6 +14,7 @@ from assistant_service.core.code_executor import (
     ExecutionStatus,
     OutputFile,
 )
+from assistant_service.core.tool_invoker import RegistryToolInvoker, ToolInvocationContext
 from assistant_service.core.tools.code_executor_tool import (
     CODE_EXECUTOR_TOOL,
     CodeExecutorToolExecutor,
@@ -55,6 +56,13 @@ class TestCodeExecutorToolDefinition:
     def test_tool_requires_confirmation(self):
         """Test that the tool does not require confirmation."""
         assert CODE_EXECUTOR_TOOL.requires_confirmation is False
+
+    def test_tool_declares_isolated_write_semantics(self):
+        """Sandbox failures are known outcomes, while artifacts stay governed writes."""
+        assert CODE_EXECUTOR_TOOL.capability_metadata == {
+            "operation_kind": "write",
+            "external_service": False,
+        }
 
     def test_tool_has_code_parameter(self):
         """Test that the tool has a code parameter."""
@@ -195,6 +203,37 @@ class TestCodeExecutorToolExecutor:
         assert result.success is False
         assert result.error is not None
         assert result.metadata["status"] == "error"
+        assert result.metadata["side_effect_state"] == "known"
+
+    @pytest.mark.asyncio
+    async def test_failed_process_is_returned_to_model_instead_of_pausing_unknown_effect(
+        self,
+        executor,
+        mock_code_executor,
+        sample_request,
+        failed_execution_result,
+    ):
+        """A non-zero sandbox exit is deterministic feedback the agent can repair."""
+        mock_code_executor.execute = AsyncMock(return_value=failed_execution_result)
+        registry = ToolRegistry()
+        registry.register(CODE_EXECUTOR_TOOL, executor)
+        invoker = RegistryToolInvoker(registry)
+
+        result = await invoker.invoke(
+            sample_request.tool_name,
+            sample_request.arguments,
+            ToolInvocationContext(
+                session_id="session-code-repair",
+                user_id="user-code-repair",
+                tenant_id="tenant-code-repair",
+                request_id="request-code-repair",
+            ),
+        )
+
+        assert result.success is False
+        assert result.error == "Process exited with code 1"
+        assert result.metadata["side_effect_state"] == "known"
+        assert "tool_failure" not in result.metadata
 
     @pytest.mark.asyncio
     async def test_execute_empty_code(self, executor, mock_code_executor):

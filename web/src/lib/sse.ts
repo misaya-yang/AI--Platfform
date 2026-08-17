@@ -2,6 +2,7 @@ export type SSEMessage<T = unknown> = { data: T };
 export type SSEEvent<T = unknown> = { event: string; data: T };
 
 import { isSseDebugEnabled } from "@/config/runtime";
+import { getAuthToken } from "@/lib/api";
 
 export interface SSEFetchOptions extends RequestInit {
   signal?: AbortSignal;
@@ -10,6 +11,15 @@ export interface SSEFetchOptions extends RequestInit {
 }
 
 const DEFAULT_SSE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+
+function authenticatedHeaders(headers?: HeadersInit): Headers {
+  const resolved = new Headers(headers);
+  const token = getAuthToken();
+  if (token && !resolved.has("Authorization")) {
+    resolved.set("Authorization", `Bearer ${token}`);
+  }
+  return resolved;
+}
 
 /**
  * Create a combined AbortSignal that fires on either the caller's signal or a timeout.
@@ -186,6 +196,7 @@ export async function* sseFetch<T>(
   const { signal: timeoutSignal, cleanup: cleanupTimeout } = createTimeoutSignal(init.signal, init.timeoutMs);
   const resp = await fetch(url, {
     ...init,
+    headers: authenticatedHeaders(init.headers),
     signal: timeoutSignal,
   });
 
@@ -308,6 +319,7 @@ export async function* sseFetchEvents<T>(
   try {
     resp = await fetch(url, {
       ...init,
+      headers: authenticatedHeaders(init.headers),
       signal,
     });
   } catch (error) {

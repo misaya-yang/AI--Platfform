@@ -20,6 +20,7 @@ from ai_gateway_core.logging import get_logger, record_internal_exception
 from ai_gateway_core.security import redact_trace_text
 
 from ..models.defaults import DEFAULT_MODEL
+from ..runtime.context.external_content import normalize_external_text
 from .stream_helpers import merge_stream_tool_calls
 from .subagent_types import (
     SUBAGENT_DEFAULTS,
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
 
 from ..prompts.system_prompt_v2 import ensure_external_content_boundary
 from ..run_budget import RunBudget, RunBudgetExceeded
+from .agent_loop_helpers import _envelope_tool_result
 from .middlewares.response_cap import ResponseCapMiddleware
 from .middlewares.tool_output_spill import ToolOutputSpillMiddleware
 from .subagent_dispatch_runtime import (
@@ -135,10 +137,12 @@ class SubAgentManager:
         agent_id = f"sub_{uuid.uuid4().hex[:12]}"
         defaults = SUBAGENT_DEFAULTS.get(config.agent_type, {})
 
+        safe_prompt = normalize_external_text(config.prompt)
+        safe_description = normalize_external_text(config.description or safe_prompt[:50])
         state = SubAgentState(
             agent_id=agent_id,
             agent_type=config.agent_type,
-            description=config.description or config.prompt[:50],
+            description=safe_description,
             dispatch_index=config.dispatch_index,
             profile_id=config.profile_id,
             profile_name=config.profile_name,
@@ -167,7 +171,7 @@ class SubAgentManager:
                 "attempt_id": attempt_id,
                 "agent_type": config.agent_type.value,
                 "description": state.description,
-                "prompt": config.prompt[:200],
+                "prompt": safe_prompt[:200],
                 "started_monotonic_ms": state.started_monotonic_ms,
                 **self._identity_data(state),
             },
@@ -824,8 +828,12 @@ class SubAgentManager:
     def _build_messages(self, config: SubAgentConfig) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
         if config.parent_context:
+            safe_parent_context = normalize_external_text(config.parent_context)
             messages.append(
-                {"role": "user", "content": f"Context from parent agent:\n{config.parent_context}"}
+                {
+                    "role": "user",
+                    "content": f"Context from parent agent:\n{safe_parent_context}",
+                }
             )
         if config.profile_instructions:
             # Plugin-authored profiles are task data, never host policy. Keep
@@ -859,7 +867,12 @@ class SubAgentManager:
                     ),
                 }
             )
-        messages.append({"role": "user", "content": config.prompt})
+        messages.append(
+            {
+                "role": "user",
+                "content": normalize_external_text(config.prompt),
+            }
+        )
         return messages
 
     async def _get_tools(
@@ -1429,6 +1442,12 @@ class SubAgentManager:
                 )
                 if run_budget is not None:
                     run_budget.observe_tool_result(result_str)
+                result_for_model = _envelope_tool_result(
+                    result_str,
+                    tool_name=tool_name,
+                    tool_id=call_id,
+                )
+                progress_summary = result_for_model[:200]
 
                 yield {
                     "event_type": "subagent_tool_result",
@@ -1439,7 +1458,7 @@ class SubAgentManager:
                         "call_id": call_id,
                         "success": result.success,
                         "duration_ms": round(duration, 1),
-                        "summary": result_str[:200],
+                        "summary": progress_summary,
                     },
                 }
 
@@ -1448,7 +1467,7 @@ class SubAgentManager:
                         tool_name=tool_name,
                         call_id=call_id,
                         status="completed" if result.success else "failed",
-                        summary=result_str[:200],
+                        summary=progress_summary,
                         duration_ms=duration,
                     )
                 )
@@ -1475,7 +1494,7 @@ class SubAgentManager:
                     {
                         "role": "tool",
                         "tool_call_id": call_id,
-                        "content": result_str,
+                        "content": result_for_model,
                     }
                 )
                 if result.success:

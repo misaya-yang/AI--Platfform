@@ -26,13 +26,56 @@ _SOURCE_MAP: dict[str, str] = {
 }
 
 
+def ensure_artifact_metadata_database(
+    artifact_storage: Any | None,
+    database: Any | None,
+) -> bool:
+    """Bind artifact metadata writes to the live Assistant database pool.
+
+    Artifact bytes and metadata form one externally visible receipt. A storage
+    singleton created without a connected database can upload bytes while the
+    Gateway session-artifact API permanently returns an empty list. Rebind that
+    stale singleton at the composition root, where both dependencies are
+    authoritative, and report whether metadata persistence is actually ready.
+    """
+
+    if artifact_storage is None or getattr(database, "_pool", None) is None:
+        return False
+
+    bound_database = getattr(artifact_storage, "database", None)
+    if getattr(bound_database, "_pool", None) is None:
+        try:
+            artifact_storage.database = database
+        except (AttributeError, TypeError):
+            return False
+
+    return getattr(getattr(artifact_storage, "database", None), "_pool", None) is not None
+
+
+def resolve_artifact_storage_for_persistence(
+    artifact_storage: Any | None,
+    database: Any | None,
+) -> Any | None:
+    """Expose storage to the runtime only when metadata writes are authoritative."""
+
+    if not ensure_artifact_metadata_database(artifact_storage, database):
+        return None
+    return artifact_storage
+
+
 def sanitize_output_files(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Reduce payload for non-image files when we already have download_url /
-    artifact_id — the UI can fetch them lazily, no need to ship base64 in SSE."""
+    """Remove inline bytes once an owner-scoped artifact receipt exists.
+
+    Images used to keep ``content_base64`` in the SSE result even after they
+    had an ``artifact_id`` and authenticated ``download_url``. A normal PNG
+    therefore exceeded the 64 KiB transport ceiling after successful provider
+    generation and turned a completed write into a failed run. The Web client
+    already resolves image artifact URLs with an authenticated blob fetch, so
+    every persisted output can use the same bounded receipt-only contract.
+    """
     sanitized: list[dict[str, Any]] = []
     for f in files:
-        mime = str(f.get("mime_type") or "")
-        if f.get("artifact_id") and (not mime.startswith("image/")):
+        if f.get("artifact_id"):
             sanitized.append({**f, "content_base64": ""})
         else:
             sanitized.append(f)
@@ -99,10 +142,17 @@ async def persist_and_collect_events(
     """
     # Always log entry so "did persistence run?" is answerable from logs.
     logger.info(
-        "[artifact_persister] tool=%s output_files_in=%d storage=%s",
+        "[artifact_persister] tool=%s output_files_in=%d storage=%s metadata_db=%s",
         tool_name,
         len(tool_output_files or []),
         "s3" if artifact_storage is not None else "none",
+        bool(
+            getattr(
+                getattr(artifact_storage, "database", None),
+                "_pool",
+                None,
+            )
+        ),
     )
 
     if not tool_output_files:

@@ -39,6 +39,8 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from ai_gateway_core.logging import record_internal_exception
 from ai_gateway_core.security import redact_trace_text
 
+from ..run_budget import RunBudgetExceeded
+
 # =============================================================================
 # Preserve Patterns
 # =============================================================================
@@ -491,6 +493,8 @@ Structured summary:"""
                 max_tokens=budget_tokens or self.max_summary_tokens,
             )
             return summary.strip()
+        except RunBudgetExceeded:
+            raise
         except Exception as exc:
             # Fallback to simple summary if LLM fails
             record_internal_exception(
@@ -637,9 +641,9 @@ class ModelRegistryLLMService:
 
     async def complete(self, prompt: str, max_tokens: int = 200) -> str:
         effective_max = min(max_tokens or self._max_tokens, self._max_tokens)
+        if self._before_complete is not None:
+            self._before_complete()
         try:
-            if self._before_complete is not None:
-                self._before_complete()
             content, _usage = await self._registry.chat(
                 model_id=self._model_id,
                 messages=[{"role": "user", "content": prompt}],

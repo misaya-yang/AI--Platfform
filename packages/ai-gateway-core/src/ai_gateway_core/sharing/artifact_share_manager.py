@@ -67,7 +67,7 @@ class ArtifactShareManager:
 
         await self.db.execute(
             """
-            INSERT INTO artifact_shares (id, share_code, kind, title, payload,
+            INSERT INTO assistant.artifact_shares (id, share_code, kind, title, payload,
                                          answer_keys, tenant_id, created_by,
                                          is_active, max_attempts, expires_at,
                                          require_name, time_limit_minutes,
@@ -108,7 +108,7 @@ class ArtifactShareManager:
             SELECT id, share_code, kind, title, payload, answer_keys,
                    tenant_id, created_by, is_active, max_attempts, expires_at,
                    require_name, time_limit_minutes, attempt_count, created_at
-            FROM artifact_shares
+            FROM assistant.artifact_shares
             WHERE share_code = $1 AND is_active = TRUE
             """,
             share_code,
@@ -199,7 +199,7 @@ class ArtifactShareManager:
     async def _claim_display_name(self, share_id: uuid.UUID, display_name: str) -> None:
         claimed = await self.db.execute(
             """
-            INSERT INTO artifact_share_submitters (share_id, display_name)
+            INSERT INTO assistant.artifact_share_submitters (share_id, display_name)
             VALUES ($1, $2)
             ON CONFLICT (share_id, display_name) DO NOTHING
             """,
@@ -219,7 +219,8 @@ class ArtifactShareManager:
         if display_name is None:
             return
         await self.db.execute(
-            "DELETE FROM artifact_share_submitters WHERE share_id = $1 AND display_name = $2",
+            "DELETE FROM assistant.artifact_share_submitters "
+            "WHERE share_id = $1 AND display_name = $2",
             share_id,
             display_name,
         )
@@ -235,7 +236,7 @@ class ArtifactShareManager:
         """
         reserved = await self.db.execute(
             """
-            UPDATE artifact_shares
+            UPDATE assistant.artifact_shares
             SET attempt_count = attempt_count + 1
             WHERE id = $1
               AND is_active = TRUE
@@ -270,7 +271,7 @@ class ArtifactShareManager:
         now = datetime.now(timezone.utc)
         await self.db.execute(
             """
-            INSERT INTO quiz_attempts (id, quiz_id, user_id, share_id, display_name,
+            INSERT INTO assistant.quiz_attempts (id, quiz_id, user_id, share_id, display_name,
                                        answers, total_score, correct_count, total_count,
                                        started_at, completed_at, status, client_ip, exam_id)
             VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $9, 'completed', $10, NULL)
@@ -292,7 +293,7 @@ class ArtifactShareManager:
             # Lost a concurrent race for the last slot: keep the attempt row
             # for history but mark it rejected so creators don't count it.
             await self.db.execute(
-                "UPDATE quiz_attempts SET status = 'rejected' WHERE id = $1",
+                "UPDATE assistant.quiz_attempts SET status = 'rejected' WHERE id = $1",
                 uuid.UUID(attempt_id),
             )
             raise
@@ -308,14 +309,16 @@ class ArtifactShareManager:
         share_uuid = share_id if isinstance(share_id, uuid.UUID) else uuid.UUID(share_id)
         if user_id is None:
             result = await self.db.execute(
-                "UPDATE artifact_shares SET is_active = FALSE, revoked_at = NOW() WHERE id = $1",
+                "UPDATE assistant.artifact_shares SET is_active = FALSE, "
+                "revoked_at = NOW() WHERE id = $1",
                 share_uuid,
             )
         else:
             if tenant_id is None:
                 raise ValueError("tenant_id is required for creator-scoped revocation")
             result = await self.db.execute(
-                "UPDATE artifact_shares SET is_active = FALSE, revoked_at = NOW() "
+                "UPDATE assistant.artifact_shares "
+                "SET is_active = FALSE, revoked_at = NOW() "
                 "WHERE id = $1 AND created_by = $2 AND tenant_id = $3",
                 share_uuid,
                 user_id,

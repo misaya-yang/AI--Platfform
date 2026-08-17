@@ -11,6 +11,7 @@ Performance: 70s → <1s (eliminates redundant LLM + KB calls).
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import uuid
@@ -66,7 +67,10 @@ def _coerce_questions(raw: Any) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for idx, item in enumerate(raw, start=1):
         if isinstance(item, dict):
-            out.append(item)
+            # The executor normalizes question fields in place. Keep the
+            # caller-owned tool arguments immutable so durable command and
+            # completion-checkpoint hashes remain identical.
+            out.append(copy.deepcopy(item))
         elif isinstance(item, str):
             # Lift bare-string items into the minimal dict shape the
             # downstream validator expects. Use the string as the

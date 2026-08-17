@@ -28,6 +28,7 @@ class _FakeDB:
         self.submitters: set[tuple[str, str]] = set()
 
     async def fetchrow(self, query: str, *args):  # noqa: ANN201
+        query = query.replace("assistant.", "")
         if "FROM quizzes" in query:
             quiz_id = str(args[0])
             row = self.quiz_rows.get(quiz_id)
@@ -49,6 +50,7 @@ class _FakeDB:
         return []
 
     async def execute(self, query: str, *args):  # noqa: ANN201
+        query = query.replace("assistant.", "")
         if query.lstrip().upper().startswith("INSERT INTO ARTIFACT_SHARE_SUBMITTERS"):
             key = (str(args[0]), args[1])
             if key in self.submitters:
@@ -387,6 +389,15 @@ def test_artifact_share_openapi_has_typed_success_responses() -> None:
     assert revoke_schema["application/json"]["schema"]["$ref"].endswith(
         "/ArtifactShareRevokeResponse"
     )
+
+
+def test_artifact_share_manager_uses_canonical_assistant_schema() -> None:
+    """Gateway and Assistant use different search paths in production."""
+    import inspect
+
+    source = inspect.getsource(ArtifactShareManager)
+    for table in ("artifact_shares", "artifact_share_submitters", "quiz_attempts"):
+        assert f"assistant.{table}" in source
 
 
 def test_revoke_share_endpoint_returns_503_without_database(fake_db: _FakeDB) -> None:

@@ -225,8 +225,57 @@ async def agent_pool() -> AsyncIterator[asyncpg.Pool]:
 
 @dataclass
 class _Holder:
-    _pool: asyncpg.Pool
+    _pool: Any
     enabled: bool = True
+
+
+class _SchemaIsolatedConnection:
+    """Keep schema-qualified production SQL inside this test's random schema."""
+
+    def __init__(self, connection: asyncpg.Connection) -> None:
+        self._connection = connection
+
+    @staticmethod
+    def _query(query: str) -> str:
+        return query.replace("assistant.sessions", "sessions")
+
+    async def fetch(self, query: str, *args: Any) -> Any:
+        return await self._connection.fetch(self._query(query), *args)
+
+    async def fetchrow(self, query: str, *args: Any) -> Any:
+        return await self._connection.fetchrow(self._query(query), *args)
+
+    async def fetchval(self, query: str, *args: Any) -> Any:
+        return await self._connection.fetchval(self._query(query), *args)
+
+    async def execute(self, query: str, *args: Any) -> Any:
+        return await self._connection.execute(self._query(query), *args)
+
+    def transaction(self, *args: Any, **kwargs: Any) -> Any:
+        return self._connection.transaction(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._connection, name)
+
+
+class _SchemaIsolatedAcquire:
+    def __init__(self, acquire: Any) -> None:
+        self._acquire = acquire
+
+    async def __aenter__(self) -> _SchemaIsolatedConnection:
+        connection = await self._acquire.__aenter__()
+        return _SchemaIsolatedConnection(connection)
+
+    async def __aexit__(self, *args: Any) -> Any:
+        return await self._acquire.__aexit__(*args)
+
+
+class _SchemaIsolatedPool:
+    def __init__(self, pool: asyncpg.Pool) -> None:
+        self._pool = pool
+
+    def acquire(self) -> _SchemaIsolatedAcquire:
+        return _SchemaIsolatedAcquire(self._pool.acquire())
 
 
 async def _insert_graph(conn: asyncpg.Connection, tenant_id: str, suffix: str) -> dict[str, Any]:
@@ -2473,7 +2522,7 @@ async def test_user_deletion_removes_ephemeral_data_and_preserves_history(
     operations_pool: asyncpg.Pool,
 ) -> None:
     tenant_id, agent_id, publication_id, owner_id = await _seed_operations_agent(operations_pool)
-    repository = DatabaseAgentRepository(_Holder(operations_pool))
+    repository = DatabaseAgentRepository(_Holder(_SchemaIsolatedPool(operations_pool)))
     subject_id = "subject-user"
     session_id = str(uuid.uuid4())
     version_id = str(uuid.uuid4())

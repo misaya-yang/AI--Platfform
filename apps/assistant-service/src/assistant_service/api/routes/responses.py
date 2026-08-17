@@ -20,6 +20,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from ai_gateway_core.logging import get_logger, log_internal_exception
+from ai_gateway_core.proxy.sse_heartbeat import (
+    DEFAULT_HEARTBEAT_INTERVAL_S,
+    with_sse_heartbeat,
+)
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -41,6 +45,7 @@ ResponsesStreamProjector.__module__ = __name__
 
 router = APIRouter()
 logger = get_logger(__name__)
+_SSE_HEARTBEAT_INTERVAL_S = DEFAULT_HEARTBEAT_INTERVAL_S
 
 _ALLOWED_REQUEST_FIELDS = frozenset(
     {
@@ -469,35 +474,13 @@ async def _iter_response_events(
                 async for assistant_event in source:
                     yield assistant_event
 
-        pending_terminal: AssistantStreamEvent | None = None
         async for assistant_event in canonical_events():
-            if pending_terminal is not None:
-                for event in projector.fail(code="event_after_terminal"):
-                    yield event
-                break
-
-            event_type = projector._event_type(assistant_event)
-            if event_type in {"run_finished", "run_error"}:
-                bind_events = projector._bind_run(
-                    projector._data(assistant_event).get("run_id"),
-                    required=True,
-                )
-                for event in bind_events:
-                    yield event
-                if projector.terminal:
-                    break
-                pending_terminal = assistant_event
-                continue
-
             for event in projector.accept(assistant_event):
                 yield event
             if projector.terminal:
                 break
         else:
-            if pending_terminal is not None:
-                for event in projector.accept(pending_terminal):
-                    yield event
-            elif not projector.terminal:
+            if not projector.terminal:
                 for event in projector.fail(code="incomplete_response"):
                     yield event
     except (asyncio.CancelledError, GeneratorExit):
@@ -608,10 +591,18 @@ async def create_response(
     except ResponsesIngressError as exc:
         return _error_response(exc)
 
+    assistant = get_assistant_service(request)
+    tenant_resolution_available = (
+        getattr(assistant, "tenant_model_registry_resolver", None) is not None
+    )
     model_registry = get_model_registry(request)
     get_model = getattr(model_registry, "get_model", None)
     configured = getattr(model_registry, "is_provider_configured", None)
-    if not callable(get_model) or not callable(configured):
+    registry_usable = callable(get_model) and callable(configured)
+    model_lookup_failed = False
+    model_info = None
+    provider_configured = False
+    if not registry_usable and not tenant_resolution_available:
         return _error_response(
             ResponsesIngressError(
                 "model_registry_unavailable",
@@ -620,63 +611,73 @@ async def create_response(
                 error_type="server_error",
             )
         )
-    try:
-        model_info = get_model(parsed.model_id)
-    except Exception as exc:
-        log_internal_exception(logger, "assistant.responses.model_lookup_failed", exc)
-        return _error_response(
-            ResponsesIngressError(
-                "model_registry_unavailable",
-                param="model",
-                status_code=503,
-                error_type="server_error",
+    if registry_usable:
+        try:
+            model_info = get_model(parsed.model_id)
+        except Exception as exc:
+            log_internal_exception(logger, "assistant.responses.model_lookup_failed", exc)
+            model_lookup_failed = True
+        if model_info is not None:
+            try:
+                provider_configured = bool(configured(model_info.provider))
+            except Exception as exc:
+                log_internal_exception(
+                    logger,
+                    "assistant.responses.provider_readiness_failed",
+                    exc,
+                )
+
+    if not tenant_resolution_available:
+        if model_lookup_failed:
+            return _error_response(
+                ResponsesIngressError(
+                    "model_registry_unavailable",
+                    param="model",
+                    status_code=503,
+                    error_type="server_error",
+                )
             )
-        )
-    if model_info is None:
-        return _error_response(
-            ResponsesIngressError("model_not_found", param="model", status_code=400)
-        )
-    try:
-        provider_configured = configured(model_info.provider)
-    except Exception as exc:
-        log_internal_exception(
-            logger,
-            "assistant.responses.provider_readiness_failed",
-            exc,
-        )
-        provider_configured = False
-    if not provider_configured:
-        return _error_response(
-            ResponsesIngressError(
-                "model_not_available",
-                param="model",
-                status_code=503,
-                error_type="server_error",
+        if model_info is None:
+            return _error_response(
+                ResponsesIngressError("model_not_found", param="model", status_code=400)
             )
-        )
-    model_output_limit = int(getattr(model_info, "max_output_tokens", 0) or 0)
-    if (
-        parsed.max_output_tokens is not None
-        and model_output_limit > 0
-        and parsed.max_output_tokens > model_output_limit
-    ):
-        return _error_response(
-            ResponsesIngressError(
-                "max_output_tokens_exceeds_model_limit",
-                param="max_output_tokens",
-                status_code=400,
+        if not provider_configured:
+            return _error_response(
+                ResponsesIngressError(
+                    "model_not_available",
+                    param="model",
+                    status_code=503,
+                    error_type="server_error",
+                )
             )
-        )
-    parsed.config.model_provider = model_info.provider
+
+    # A tenant registry is resolved again inside the canonical AgentLoop.  The
+    # process-global registry is only authoritative when it can serve the exact
+    # model; otherwise the verified Gateway request must reach tenant resolution
+    # without substituting or rejecting the requested model ID.
+    if provider_configured:
+        model_output_limit = int(getattr(model_info, "max_output_tokens", 0) or 0)
+        if (
+            parsed.max_output_tokens is not None
+            and model_output_limit > 0
+            and parsed.max_output_tokens > model_output_limit
+        ):
+            return _error_response(
+                ResponsesIngressError(
+                    "max_output_tokens_exceeds_model_limit",
+                    param="max_output_tokens",
+                    status_code=400,
+                )
+            )
+        parsed.config.model_provider = model_info.provider
     parsed.config.traceparent = (
         getattr(request.state, "traceparent", None) or request.headers.get("traceparent") or None
     )
 
-    assistant = get_assistant_service(request)
     response_id = f"resp_{uuid.uuid4().hex}"
     session_id = str(uuid.uuid4())
     if parsed.stream:
-        return StreamingResponse(
+        event_stream = with_sse_heartbeat(
             iter_responses_sse(
                 assistant=assistant,
                 parsed=parsed,
@@ -684,6 +685,11 @@ async def create_response(
                 response_id=response_id,
                 session_id=session_id,
             ),
+            interval_seconds=_SSE_HEARTBEAT_INTERVAL_S,
+            as_str=True,
+        )
+        return StreamingResponse(
+            event_stream,
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",

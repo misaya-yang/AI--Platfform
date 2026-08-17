@@ -67,7 +67,7 @@ export interface ToolTimelineItem {
 export interface ProcessSummaryState {
   collapsed: boolean;
   runId?: string;
-  status: "running" | "succeeded" | "failed";
+  status: "running" | "succeeded" | "failed" | "cancelled";
   startedAt?: number;
   totalDurationMs?: number;
   currentStep?: string;
@@ -316,7 +316,10 @@ export interface ChatMessage {
     total_tokens?: number;
   };
   durationMs?: number;
+  /** First user-visible reasoning, tool, or text token. */
   firstTokenMs?: number;
+  /** First final-answer text token, kept separate from visible reasoning TTFT. */
+  firstTextTokenMs?: number;
   modelId?: string;
   timestamp?: string;
 }

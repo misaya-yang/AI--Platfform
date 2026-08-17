@@ -229,6 +229,122 @@ def test_assistant_service_new_dependencies_follow_existing_positional_contract(
     assert parameter_names.index("file_storage") < parameter_names.index("runtime_adapter")
 
 
+def test_artifact_storage_rebinds_to_connected_assistant_database() -> None:
+    from assistant_service.core.agent.artifact_persister import (
+        ensure_artifact_metadata_database,
+    )
+
+    connected_database = SimpleNamespace(_pool=object())
+    stale_database = SimpleNamespace(_pool=None)
+    artifact_storage = SimpleNamespace(database=stale_database)
+
+    assert ensure_artifact_metadata_database(artifact_storage, connected_database) is True
+    assert artifact_storage.database is connected_database
+
+
+def test_artifact_storage_never_claims_metadata_readiness_without_pool() -> None:
+    from assistant_service.core.agent.artifact_persister import (
+        ensure_artifact_metadata_database,
+    )
+
+    artifact_storage = SimpleNamespace(database=None)
+    disconnected_database = SimpleNamespace(_pool=None)
+
+    assert ensure_artifact_metadata_database(artifact_storage, disconnected_database) is False
+    assert artifact_storage.database is None
+
+
+@pytest.mark.asyncio
+async def test_startup_artifact_gate_controls_upload_and_receipt_emission() -> None:
+    from assistant_service.core.agent.artifact_persister import (
+        persist_and_collect_events,
+        resolve_artifact_storage_for_persistence,
+    )
+
+    class RecordingStorage:
+        def __init__(self, database: Any) -> None:
+            self.database = database
+            self.uploads = 0
+
+        async def create_artifact(self, **_values: Any) -> Any:
+            assert getattr(self.database, "_pool", None) is not None
+            self.uploads += 1
+            return SimpleNamespace(artifact_id="art_tracked")
+
+        async def get_presigned_download_url(self, _artifact: Any, **_values: Any) -> str:
+            return "https://example.invalid/art_tracked"
+
+    output_files = [
+        {
+            "filename": "proof.txt",
+            "mime_type": "text/plain",
+            "content_base64": "cHJvb2Y=",
+            "size_bytes": 5,
+        }
+    ]
+    user = SimpleNamespace(tenant_id="tenant-a", user_id="user-a")
+
+    disconnected_storage = RecordingStorage(SimpleNamespace(_pool=None))
+    runtime_storage = resolve_artifact_storage_for_persistence(
+        disconnected_storage,
+        SimpleNamespace(_pool=None),
+    )
+    persisted, events, ids = await persist_and_collect_events(
+        artifact_storage=runtime_storage,
+        user=user,
+        session_id="session-a",
+        tool_name="execute_python_code",
+        tool_output_files=output_files,
+    )
+
+    assert runtime_storage is None
+    assert disconnected_storage.uploads == 0
+    assert persisted == output_files
+    assert events == []
+    assert ids == []
+
+    connected_database = SimpleNamespace(_pool=object())
+    connected_storage = RecordingStorage(SimpleNamespace(_pool=None))
+    runtime_storage = resolve_artifact_storage_for_persistence(
+        connected_storage,
+        connected_database,
+    )
+    persisted, events, ids = await persist_and_collect_events(
+        artifact_storage=runtime_storage,
+        user=user,
+        session_id="session-a",
+        tool_name="execute_python_code",
+        tool_output_files=output_files,
+    )
+
+    assert runtime_storage is connected_storage
+    assert connected_storage.database is connected_database
+    assert connected_storage.uploads == 1
+    assert persisted[0]["artifact_id"] == "art_tracked"
+    assert events[0]["artifact_id"] == "art_tracked"
+    assert ids == ["art_tracked"]
+
+
+def test_persisted_image_output_is_projected_as_bounded_receipt() -> None:
+    from assistant_service.core.agent.artifact_persister import sanitize_output_files
+
+    original = {
+        "filename": "generated.png",
+        "mime_type": "image/png",
+        "content_base64": "x" * 100_000,
+        "size_bytes": 75_000,
+        "artifact_id": "art-image-1",
+        "download_url": "/api/v1/assistant/artifacts/art-image-1/download",
+    }
+
+    projected = sanitize_output_files([original])
+
+    assert projected[0]["content_base64"] == ""
+    assert projected[0]["artifact_id"] == "art-image-1"
+    assert projected[0]["download_url"].endswith("/art-image-1/download")
+    assert original["content_base64"] == "x" * 100_000
+
+
 def test_assistant_service_rejects_conflicting_gateway_invoker_identity() -> None:
     from assistant_service.core.assistant_service import AssistantService
     from assistant_service.core.models.model_registry import ModelRegistry

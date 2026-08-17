@@ -1,7 +1,8 @@
 """Thinking is a session capability, not a text classifier or turn index.
 
 Hidden provider CoT follows the caller's or session's level. User text and
-loop iteration are never inspected. Off must be explicit for Qwen.
+loop iteration are never inspected. The capability defaults to low; off must
+be explicit for Qwen.
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 from typing import Final
 
 THINKING_LEVELS: Final[frozenset[str]] = frozenset({"off", "low", "medium", "high"})
+DEFAULT_THINKING_LEVEL: Final[str] = "low"
 
 _ALIASES: Final[dict[str, str]] = {
     "disabled": "off",
@@ -39,15 +41,15 @@ _QWEN_THINKING_MARKERS: Final[tuple[str, ...]] = ("qwen3", "qwen-plus", "qwen-ma
 
 
 def normalize_thinking_level(raw: str | None) -> str:
-    """Map caller strings onto off/low/medium/high. Unknown values are off."""
+    """Map caller strings onto off/low/medium/high without silently disabling thought."""
 
     if raw is None:
-        return "off"
+        return DEFAULT_THINKING_LEVEL
     key = str(raw).strip().lower()
     if not key:
-        return "off"
+        return DEFAULT_THINKING_LEVEL
     mapped = _ALIASES.get(key, key)
-    return mapped if mapped in THINKING_LEVELS else "off"
+    return mapped if mapped in THINKING_LEVELS else DEFAULT_THINKING_LEVEL
 
 
 def uses_qwen_thinking_protocol(model_id: str) -> bool:
@@ -71,13 +73,13 @@ def resolve_session_thinking_level(
     requested: str | None,
     stored: str | None = None,
 ) -> str:
-    """Prefer this request, then the session value, then off."""
+    """Prefer this request, then the session value, then low."""
 
     if requested is not None and str(requested).strip():
         return normalize_thinking_level(requested)
     if stored is not None and str(stored).strip():
         return normalize_thinking_level(stored)
-    return "off"
+    return DEFAULT_THINKING_LEVEL
 
 
 def session_thinking_persist_value(

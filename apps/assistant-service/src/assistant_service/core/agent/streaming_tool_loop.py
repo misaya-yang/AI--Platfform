@@ -117,6 +117,12 @@ class StreamingToolLoopMixin(StreamingToolCallMixin):
                     denied_tools=state.denied_tools,
                     dataset_name_map=state.dataset_name_map,
                     result=model_turn,
+                    # On the final leased work turn, a provider may stream a
+                    # long preamble and only then reveal a tool call. Buffer
+                    # that turn until its finish contract is known so forced
+                    # synthesis never becomes a second public answer. Earlier
+                    # turns keep immediate TTFT.
+                    defer_text_until_turn_complete=state.iteration >= iteration_lease,
                 ):
                     yield event
             except httpx.HTTPStatusError as exc:

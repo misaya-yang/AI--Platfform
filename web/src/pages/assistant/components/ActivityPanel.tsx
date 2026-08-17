@@ -63,9 +63,12 @@ export function ActivityPanel({
     return buildTimeline(message, t);
   }, [message, t]);
 
-  const running = !!message?.isStreaming;
+  const cancelled =
+    message?.status === "cancelled" || message?.processSummary?.status === "cancelled";
   const failed =
-    message?.status === "failed" || message?.processSummary?.status === "failed";
+    !cancelled &&
+    (message?.status === "failed" || message?.processSummary?.status === "failed");
+  const running = !cancelled && !failed && !!message?.isStreaming;
   const stepCount = steps.length;
   const durationLabel = formatTotal(totalDurationMs);
   const pendingApprovals =
@@ -77,7 +80,9 @@ export function ActivityPanel({
     ? t("playground.activity.running", { defaultValue: "running" })
     : failed
       ? t("assistant.processSummary.failed", { defaultValue: "Execution failed" })
-    : t("playground.activity.statusCompleted", { defaultValue: "completed" });
+      : cancelled
+        ? t("playground.activity.statusCancelled", { defaultValue: "cancelled" })
+        : t("playground.activity.statusCompleted", { defaultValue: "completed" });
 
   const stepsText = t("playground.activity.steps", {
     count: stepCount,

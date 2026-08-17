@@ -15,6 +15,7 @@ import os
 import time
 import zipfile
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -22,6 +23,8 @@ import pytest
 API_BASE_URL = os.getenv("ASSISTANT_E2E_BASE_URL", "http://127.0.0.1:8080").rstrip("/")
 API_PREFIX = f"{API_BASE_URL}/api/v1"
 RUN_LIVE = os.getenv("RUN_ASSISTANT_API_E2E", "0") == "1"
+API_HOST = (urlsplit(API_BASE_URL).hostname or "").lower()
+HTTPX_TRUST_ENV = API_HOST not in {"127.0.0.1", "::1", "localhost"}
 
 AUTH_EMAIL_DOMAIN = os.getenv("ASSISTANT_E2E_AUTH_EMAIL_DOMAIN", "example.com")
 USER1_EMAIL = os.getenv("ASSISTANT_E2E_USER1_EMAIL", f"assistant.e2e.user1@{AUTH_EMAIL_DOMAIN}")
@@ -30,6 +33,7 @@ LOGIN_PASSWORD = os.getenv("ASSISTANT_E2E_PASSWORD", "")
 USER2_PASSWORD = os.getenv("ASSISTANT_E2E_USER2_PASSWORD", LOGIN_PASSWORD)
 MODEL_ID = os.getenv("ASSISTANT_E2E_MODEL_ID", "qwen3.7-plus")
 REPETITIONS = int(os.getenv("ASSISTANT_CAPABILITY_REPETITIONS", "3"))
+MAX_APPROVAL_ROUNDS = int(os.getenv("ASSISTANT_E2E_MAX_APPROVAL_ROUNDS", "8"))
 
 
 def _require_live() -> None:
@@ -170,7 +174,10 @@ def _stream_chat(
             with contextlib.suppress(json.JSONDecodeError):
                 evt = json.loads(raw)
                 events.append(evt)
-                if evt.get("event_type") in {"done", "run_error"}:
+                # ``done`` closes model transport output, but the canonical
+                # run still has persistence/finalization work to perform.  Do
+                # not disconnect until the authoritative run terminal arrives.
+                if evt.get("event_type") in {"run_finished", "run_error"}:
                     break
     return events
 
@@ -284,6 +291,21 @@ def _assert_valid_document(data: bytes, artifact: dict[str, Any]) -> None:
     raise AssertionError(f"Expected a PDF or DOCX artifact, got {artifact!r}")
 
 
+def _assert_valid_image(data: bytes, artifact: dict[str, Any]) -> None:
+    filename = str(artifact.get("filename") or "").lower()
+    mime_type = str(artifact.get("mime_type") or "").lower()
+    if filename.endswith(".png") or mime_type == "image/png":
+        assert data.startswith(b"\x89PNG\r\n\x1a\n"), artifact
+        return
+    if filename.endswith((".jpg", ".jpeg")) or mime_type == "image/jpeg":
+        assert data.startswith(b"\xff\xd8") and data.endswith(b"\xff\xd9"), artifact
+        return
+    if filename.endswith(".webp") or mime_type == "image/webp":
+        assert data.startswith(b"RIFF") and data[8:12] == b"WEBP", artifact
+        return
+    raise AssertionError(f"Expected a PNG, JPEG, or WebP artifact, got {artifact!r}")
+
+
 def _has_any_event(events: list[dict[str, Any]], *event_types: str) -> bool:
     names = {evt.get("event_type") for evt in events}
     return any(name in names for name in event_types)
@@ -328,11 +350,18 @@ def _stream_chat_until_success(
             memory_mode=memory_mode,
             os_agent_enabled=os_agent_enabled,
         )
-        approval_event = next(
-            (event for event in last_events if event.get("event_type") == "approval_required"),
-            None,
-        )
-        if approval_event is not None:
+        current_events = last_events
+        for _approval_round in range(MAX_APPROVAL_ROUNDS):
+            approval_event = next(
+                (
+                    event
+                    for event in current_events
+                    if event.get("event_type") == "approval_required"
+                ),
+                None,
+            )
+            if approval_event is None:
+                break
             approval_data = approval_event.get("data")
             assert isinstance(approval_data, dict), approval_event
             approval_id = str(approval_data.get("approval_id") or "")
@@ -357,9 +386,17 @@ def _stream_chat_until_success(
                 resume_approval_id=approval_id,
             )
             last_events.extend(resumed)
+            current_events = resumed
+        else:
+            if _has_any_event(current_events, "approval_required"):
+                raise AssertionError(
+                    f"approval rounds exceeded ASSISTANT_E2E_MAX_APPROVAL_ROUNDS="
+                    f"{MAX_APPROVAL_ROUNDS}"
+                )
         has_content_or_tool = _has_any_event(last_events, "text_delta", "tool_call_result")
-        has_run_error = _has_any_event(last_events, "run_error")
-        if has_content_or_tool and not has_run_error:
+        has_run_error = _has_any_event(current_events, "run_error")
+        has_pending_approval = _has_any_event(current_events, "approval_required")
+        if has_content_or_tool and not has_run_error and not has_pending_approval:
             return last_events
         if attempt < max_attempts:
             time.sleep(1.5 * attempt)
@@ -367,11 +404,64 @@ def _stream_chat_until_success(
 
 
 @pytest.mark.integration
+def test_assistant_code_executor_live():
+    """Prove the Assistant tool loop executes code and persists its exact artifact."""
+    _require_live()
+    assert 1 <= MAX_APPROVAL_ROUNDS <= 32
+
+    with httpx.Client(timeout=60.0, trust_env=HTTPX_TRUST_ENV) as client:
+        _assert_service_ready(client)
+        token = _login(client, USER1_EMAIL, LOGIN_PASSWORD)
+        session_id = _create_session(client, token)
+        assert "execute_python_code" in _visible_tool_names(client, token)
+
+        marker = f"CODE-EXEC-LIVE-{time.time_ns()}"
+        artifacts_before = _session_artifacts(client, token, session_id)
+        events = _stream_chat_until_success(
+            client,
+            token,
+            session_id,
+            (
+                "必须实际调用 execute_python_code 工具运行 Python，不要只给代码。"
+                f"把唯一一行 {marker} 打印到 stdout，并将同一内容写入 "
+                "/workspace/output/capability-result.txt。"
+            ),
+            execution_profile="balanced",
+            os_agent_enabled=True,
+            max_attempts=1,
+        )
+
+        _assert_no_event(events, "run_error")
+        assert _has_any_event(events, "tool_call_start", "tool_call_result")
+        execution_result = _event_data(events, "code_execution_result")
+        assert execution_result.get("success") is True, execution_result
+        assert execution_result.get("exit_code") == 0, execution_result
+        assert marker in str(execution_result.get("result") or ""), execution_result
+        artifacts = _wait_for_new_artifacts(
+            client,
+            token,
+            session_id,
+            artifacts_before,
+        )
+        artifact = next(
+            (
+                item
+                for item in artifacts
+                if str(item.get("filename") or "").endswith("capability-result.txt")
+            ),
+            None,
+        )
+        assert artifact is not None, artifacts
+        content = _download_artifact(client, token, str(artifact["artifact_id"]))
+        assert content.decode("utf-8").strip() == marker
+
+
+@pytest.mark.integration
 def test_assistant_docgen_plugin_live():
     """Verify the bundled Agent Plugin creates a downloadable document."""
 
     _require_live()
-    with httpx.Client(timeout=60.0) as client:
+    with httpx.Client(timeout=60.0, trust_env=HTTPX_TRUST_ENV) as client:
         _assert_service_ready(client)
         token = _login(client, USER1_EMAIL, LOGIN_PASSWORD)
         session_id = _create_session(client, token)
@@ -415,6 +505,85 @@ def test_assistant_docgen_plugin_live():
 
 
 @pytest.mark.integration
+def test_assistant_image_generation_live():
+    """Verify image generation returns a persisted, decodable image artifact."""
+
+    _require_live()
+    with httpx.Client(timeout=60.0, trust_env=HTTPX_TRUST_ENV) as client:
+        _assert_service_ready(client)
+        token = _login(client, USER1_EMAIL, LOGIN_PASSWORD)
+        session_id = _create_session(client, token)
+
+        assert "generate_image" in _visible_tool_names(client, token)
+        artifacts_before = _session_artifacts(client, token, session_id)
+        events = _stream_chat_until_success(
+            client,
+            token,
+            session_id,
+            (
+                "请实际调用图像生成工具生成一张 1024x1024 的极简蓝色圆形图标，"
+                "纯白背景；必须生成可下载图片，不要只描述画面。"
+            ),
+            execution_profile="balanced",
+            max_attempts=1,
+        )
+        _assert_no_event(events, "run_error")
+        assert _has_any_event(events, "tool_call_start", "tool_call_result")
+        assert _has_any_event(events, "image_generation_result", "artifact_created")
+
+        artifacts = _wait_for_new_artifacts(
+            client,
+            token,
+            session_id,
+            artifacts_before,
+            timeout_seconds=30.0,
+        )
+        image = next(
+            (
+                artifact
+                for artifact in artifacts
+                if str(artifact.get("mime_type") or "").startswith("image/")
+                or str(artifact.get("filename") or "")
+                .lower()
+                .endswith((".png", ".jpg", ".jpeg", ".webp"))
+            ),
+            None,
+        )
+        assert image is not None, artifacts
+        image_bytes = _download_artifact(client, token, str(image["artifact_id"]))
+        _assert_valid_image(image_bytes, image)
+
+
+@pytest.mark.integration
+def test_assistant_quiz_generation_live():
+    """Verify the model invokes Quiz and emits its structured ready receipt."""
+
+    _require_live()
+    with httpx.Client(timeout=60.0, trust_env=HTTPX_TRUST_ENV) as client:
+        _assert_service_ready(client)
+        token = _login(client, USER1_EMAIL, LOGIN_PASSWORD)
+        session_id = _create_session(client, token)
+
+        assert "generate_quiz" in _visible_tool_names(client, token)
+        events = _stream_chat_until_success(
+            client,
+            token,
+            session_id,
+            (
+                "请实际调用 Quiz 工具，创建一份两题的 Python 基础单选测验；"
+                "每题四个选项，必须返回可交互 quiz，不要只输出题目正文。"
+            ),
+            execution_profile="balanced",
+            max_attempts=1,
+        )
+        _assert_no_event(events, "run_error")
+        assert _has_any_event(events, "tool_call_start", "tool_call_result")
+        quiz = _event_data(events, "quiz:ready")
+        assert quiz.get("quiz_id"), quiz
+        assert len(quiz.get("questions") or []) == 2, quiz
+
+
+@pytest.mark.integration
 @pytest.mark.parametrize("trial", range(1, REPETITIONS + 1))
 def test_assistant_api_e2e_live_dialogues(trial: int):
     """
@@ -431,7 +600,7 @@ def test_assistant_api_e2e_live_dialogues(trial: int):
     _require_live()
     assert 1 <= REPETITIONS <= 10
 
-    with httpx.Client(timeout=60.0) as client:
+    with httpx.Client(timeout=60.0, trust_env=HTTPX_TRUST_ENV) as client:
         _assert_service_ready(client)
 
         # Login/create two users

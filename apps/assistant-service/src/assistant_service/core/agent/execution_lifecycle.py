@@ -194,13 +194,24 @@ class ExecutionLifecycleMixin:
             )
             persisted_budget = previous_resume_payload.get("run_budget")
             try:
-                # Approval resume must never turn a missing or tampered
-                # checkpoint into a fresh budget.
-                ctx.run_budget = RunBudget.restore(
-                    configured_limits=ctx.run_budget.limits,
-                    snapshot=(persisted_budget if isinstance(persisted_budget, dict) else None),
-                )
-                ctx.budget_restored_from_checkpoint = isinstance(persisted_budget, dict)
+                if "run_budget" not in previous_resume_payload:
+                    # Explicit legacy upgrade path: checkpoints written before
+                    # budget snapshots already have a fresh, configured and
+                    # bounded budget from _initialize_turn_kernel.  Mark it as
+                    # legacy so approval continuation reserves the pending
+                    # tool exactly once instead of silently granting a second
+                    # budget or rejecting every pre-upgrade run.
+                    ctx.budget_restored_from_checkpoint = False
+                else:
+                    # Once the field exists, malformed/tampered snapshots fail
+                    # closed instead of being mistaken for legacy data.
+                    ctx.run_budget = RunBudget.restore(
+                        configured_limits=ctx.run_budget.limits,
+                        snapshot=(
+                            persisted_budget if isinstance(persisted_budget, dict) else None
+                        ),
+                    )
+                    ctx.budget_restored_from_checkpoint = True
             except (KeyError, TypeError, ValueError):
                 yield self._canonical_terminal_error_event(
                     ctx,
@@ -652,10 +663,12 @@ class ExecutionLifecycleMixin:
                 reason="model_invocation_started",
             )
         budget_error: RunBudgetExceeded | None = None
+        wall_timeout_scope: asyncio.Timeout | None = None
         try:
             if ctx.run_budget is None:
                 raise RuntimeError("run_budget_not_initialized")
-            async with asyncio.timeout(ctx.run_budget.remaining_wall_time_seconds):
+            wall_timeout_scope = asyncio.timeout(ctx.run_budget.remaining_wall_time_seconds)
+            async with wall_timeout_scope:
                 # Legacy history compaction can itself consume a model
                 # turn. Keep it inside the same wall/model budget catch
                 # as primary generation so exhaustion always produces
@@ -738,6 +751,13 @@ class ExecutionLifecycleMixin:
                 ctx.terminal_exit_reason = "model_error"
                 raise RuntimeError("provider_stream_cancelled") from None
         except TimeoutError:
+            # Only the timeout context owned by this lifecycle may exhaust the
+            # run's wall budget.  Provider, database and checkpoint layers can
+            # raise their own TimeoutError while this deadline is still live;
+            # converting those into wall_time_exhausted corrupts the durable
+            # budget snapshot and hides the actual failure.
+            if wall_timeout_scope is None or not wall_timeout_scope.expired():
+                raise
             try:
                 ctx.run_budget.exhaust_wall_time()
             except RunBudgetExceeded as exc:

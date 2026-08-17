@@ -11,10 +11,16 @@ def test_tool_prompt_is_direct_without_progress_preamble() -> None:
         available_tools=["search_knowledge_base"],
     )
 
-    assert "Match the request's language and actual work" in prompt
-    assert "Keep the reply proportional to the task" in prompt
-    assert "Answer immediately when no tool is needed" in prompt
+    assert "Match the request's language" in prompt
+    assert "keep work and reply proportional" in prompt
+    assert "Answer ordinary questions immediately" in prompt
     assert "Discover tools that" in prompt
+    assert "without public preambles" in prompt
+    assert "use thinking for intermediate work" in prompt
+    assert "Obey explicit output contracts" in prompt
+    assert "silently check required keys" in prompt
+    assert "enum/evidence literals" in prompt
+    assert "JSON-only/no-Markdown overrides prose" in prompt
     assert "An outline or promise is not" in prompt
     assert "Apply remembered preferences silently" in prompt
     assert "<FINAL_JSON>" not in prompt

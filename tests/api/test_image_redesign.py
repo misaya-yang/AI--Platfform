@@ -231,6 +231,8 @@ class _FakeArtifactStorage:
         expiry_seconds: int = 3600,
         *,
         owner_scope: str | None = None,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
     ):
         order = (
             ("thumbnail", "display", "raw")
@@ -243,12 +245,17 @@ class _FakeArtifactStorage:
             artifact = await self.find_variant(artifact_id, v)
             if artifact is None:
                 continue
-            if (
-                owner_scope is not None
-                and artifact.owner_scope is not None
-                and artifact.owner_scope != owner_scope
-            ):
-                continue
+            if owner_scope is not None:
+                if artifact.owner_scope is not None:
+                    if artifact.owner_scope != owner_scope:
+                        continue
+                elif not (
+                    tenant_id
+                    and user_id
+                    and artifact.tenant_id == tenant_id
+                    and artifact.user_id == user_id
+                ):
+                    continue
             url = await self.get_presigned_download_url(artifact, expiry_seconds)
             return url, v
         return None, None

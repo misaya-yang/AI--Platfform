@@ -123,7 +123,7 @@ class DatabaseSessionRepository(SessionRepository, BaseRepository):
         """保存或更新会话"""
         await self.execute(
             """
-            INSERT INTO sessions (
+            INSERT INTO assistant.sessions (
                 session_id, service_id, user_id, tenant_id,
                 state, history, metadata, config, status, expires_at
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -163,7 +163,10 @@ class DatabaseSessionRepository(SessionRepository, BaseRepository):
                 return cached
 
         # 从数据库获取
-        row = await self.fetchrow("SELECT * FROM sessions WHERE session_id = $1", session_id)
+        row = await self.fetchrow(
+            "SELECT * FROM assistant.sessions WHERE session_id = $1",
+            session_id,
+        )
         session = self._row_to_dict(row) if row else None
 
         # 写入 Redis 缓存
@@ -194,7 +197,7 @@ class DatabaseSessionRepository(SessionRepository, BaseRepository):
         if metadata_update:
             result = await self.execute(
                 """
-                UPDATE sessions
+                UPDATE assistant.sessions
                 SET history = history || $2::jsonb,
                     metadata = metadata || $3::jsonb,
                     updated_at = NOW()
@@ -207,7 +210,7 @@ class DatabaseSessionRepository(SessionRepository, BaseRepository):
         else:
             result = await self.execute(
                 """
-                UPDATE sessions
+                UPDATE assistant.sessions
                 SET history = history || $2::jsonb,
                     updated_at = NOW()
                 WHERE session_id = $1
@@ -229,7 +232,7 @@ class DatabaseSessionRepository(SessionRepository, BaseRepository):
         if not self.enabled:
             return []
 
-        query = "SELECT * FROM sessions WHERE 1=1"
+        query = "SELECT * FROM assistant.sessions WHERE 1=1"
         params: builtins.list[Any] = []
         param_idx = 1
 
@@ -267,7 +270,7 @@ class DatabaseSessionRepository(SessionRepository, BaseRepository):
     async def update_history(self, session_id: str, history: builtins.list[dict[str, Any]]) -> None:
         """更新会话历史"""
         await self.execute(
-            "UPDATE sessions SET history = $1, updated_at = NOW() WHERE session_id = $2",
+            "UPDATE assistant.sessions SET history = $1, updated_at = NOW() WHERE session_id = $2",
             json.dumps(history),
             session_id,
         )
@@ -280,7 +283,7 @@ class DatabaseSessionRepository(SessionRepository, BaseRepository):
     async def update_state(self, session_id: str, state: dict[str, Any]) -> None:
         """更新会话状态"""
         await self.execute(
-            "UPDATE sessions SET state = $1, updated_at = NOW() WHERE session_id = $2",
+            "UPDATE assistant.sessions SET state = $1, updated_at = NOW() WHERE session_id = $2",
             json.dumps(state),
             session_id,
         )
@@ -296,7 +299,7 @@ class DatabaseSessionRepository(SessionRepository, BaseRepository):
             return True
         result = await self.execute(
             """
-            UPDATE sessions
+            UPDATE assistant.sessions
             SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb,
                 updated_at = NOW()
             WHERE session_id = $1
@@ -312,7 +315,7 @@ class DatabaseSessionRepository(SessionRepository, BaseRepository):
             return True
         result = await self.execute(
             """
-            UPDATE sessions
+            UPDATE assistant.sessions
             SET config = COALESCE(config, '{}'::jsonb) || $2::jsonb,
                 updated_at = NOW()
             WHERE session_id = $1
@@ -324,7 +327,10 @@ class DatabaseSessionRepository(SessionRepository, BaseRepository):
 
     async def delete(self, session_id: str) -> bool:
         """删除会话"""
-        result = await self.execute("DELETE FROM sessions WHERE session_id = $1", session_id)
+        result = await self.execute(
+            "DELETE FROM assistant.sessions WHERE session_id = $1",
+            session_id,
+        )
         # 清除缓存
         if self.redis and self.redis.enabled:
             await self.redis.delete_session(session_id)
@@ -336,7 +342,8 @@ class DatabaseSessionRepository(SessionRepository, BaseRepository):
             return 0
         async with self._pool.acquire() as conn:
             result = await conn.execute(
-                "DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at < NOW()"
+                "DELETE FROM assistant.sessions "
+                "WHERE expires_at IS NOT NULL AND expires_at < NOW()"
             )
             # 解析结果获取删除行数
             if result.startswith("DELETE "):

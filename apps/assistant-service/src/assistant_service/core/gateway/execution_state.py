@@ -231,6 +231,10 @@ class GatewayStateMixin:
     @classmethod
     def _message_state_hash(cls, messages: list[dict[str, Any]] | None) -> str:
         digest = cls._message_state_digest(messages or [])
+        return cls._message_state_hash_from_digest(digest)
+
+    @staticmethod
+    def _message_state_hash_from_digest(digest: list[dict[str, Any]]) -> str:
         encoded = json.dumps(
             digest,
             sort_keys=True,
@@ -289,9 +293,14 @@ class GatewayStateMixin:
         *,
         messages: list[dict[str, Any]] | None,
         durability: str,
+        message_digest: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         supplied_messages = messages or []
-        digest = cls._message_state_digest(supplied_messages)
+        digest = (
+            message_digest
+            if message_digest is not None
+            else cls._message_state_digest(supplied_messages)
+        )
         return {
             "version": 1,
             "committed": True,

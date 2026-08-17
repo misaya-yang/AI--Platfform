@@ -256,6 +256,15 @@ class StreamingToolExecutionMixin:
             or str(metadata.get("side_effect_state") or "").casefold() == "unknown"
         ):
             return "write_unknown"
+        reported_state = str(metadata.get("side_effect_state") or "").casefold()
+        if reported_state in {
+            "known",
+            "committed",
+            "rolled_back",
+            "not_started",
+            "none",
+        }:
+            return "write_known"
         definition = self._tool_definition_for_context(ctx, frame.tool_name)
         capability = dict(getattr(definition, "capability_metadata", None) or {})
         operation_kind = str(capability.get("operation_kind") or "").casefold()

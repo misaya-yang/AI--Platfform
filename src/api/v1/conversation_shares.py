@@ -6,6 +6,7 @@ import json
 import secrets
 import string
 import uuid
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
@@ -190,7 +191,8 @@ async def create_share(
     db = _get_db(request)
 
     session = await db.fetchrow(
-        "SELECT session_id, history, metadata, user_id, tenant_id FROM sessions WHERE session_id = $1",
+        "SELECT session_id, history, metadata, user_id, tenant_id "
+        "FROM assistant.sessions WHERE session_id = $1",
         session_id,
     )
     if not session:
@@ -209,7 +211,8 @@ async def create_share(
     artifacts_data = []
     if body.include_artifacts:
         rows = await db.fetch(
-            "SELECT artifact_id, type, format, title, filename, size_bytes, mime_type, source FROM artifacts WHERE session_id = $1",
+            "SELECT artifact_id, type, format, title, filename, size_bytes, "
+            "mime_type, source FROM assistant.artifacts WHERE session_id = $1",
             session_id,
         )
         artifacts_data = [dict(r) for r in rows]
@@ -317,13 +320,11 @@ async def get_share(share_code: str, request: Request):
     if row["expires_at"] and row["expires_at"] < datetime.now(timezone.utc):
         raise HTTPException(410, "Share has expired")
 
-    try:
+    with suppress(Exception):
         await db.execute(
             "UPDATE conversation_shares SET view_count = view_count + 1 WHERE share_code = $1",
             share_code,
         )
-    except Exception:
-        pass
 
     snapshot = row["snapshot"] if isinstance(row["snapshot"], dict) else json.loads(row["snapshot"])
     snapshot = _strip_snapshot_for_public(snapshot)

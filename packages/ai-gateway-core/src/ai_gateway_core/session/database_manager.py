@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -31,17 +33,20 @@ class DatabaseSessionManager:
         database: DatabaseStorage,
         redis: RedisStorage | None = None,
         cache_ttl: int = 3600,  # Redis 缓存 1 小时
+        memory_cache_max_entries: int = 1024,
         default_session_ttl: int = 86400 * 7,  # 默认会话有效期 7 天
         anonymous_session_ttl: int = 86400,  # 匿名会话有效期 24 小时
     ):
         self.database = database
         self.redis = redis
         self.cache_ttl = cache_ttl
+        self.memory_cache_max_entries = max(int(memory_cache_max_entries), 1)
         self.default_session_ttl = default_session_ttl
         self.anonymous_session_ttl = anonymous_session_ttl
 
         # 内存缓存，用于没有 Redis 时
-        self._memory_cache: dict[str, Session] = {}
+        self._memory_cache: OrderedDict[str, Session] = OrderedDict()
+        self._memory_cache_deadlines: dict[str, float] = {}
 
     async def create(
         self,
@@ -316,8 +321,9 @@ class DatabaseSessionManager:
         # 更新数据库
         await self.database.update_session_state(session_id, state)
 
-        # 更新缓存
-        await self._cache_session(session)
+        # A concurrent append or metadata patch may have advanced the
+        # database after the snapshot loaded above. Do not put it back.
+        await self._remove_from_cache(session_id)
 
         return True
 
@@ -389,7 +395,7 @@ class DatabaseSessionManager:
         if self.database and getattr(self.database, "_pool", None):
             async with self.database._pool.acquire() as conn:
                 await conn.execute(
-                    "UPDATE sessions SET expires_at = $1 WHERE session_id = $2",
+                    "UPDATE assistant.sessions SET expires_at = $1 WHERE session_id = $2",
                     new_expires, session_id,
                 )
         return True
@@ -415,6 +421,13 @@ class DatabaseSessionManager:
             await self.redis.save_session(session.session_id, session_dict, self.cache_ttl)
         else:
             self._memory_cache[session.session_id] = session
+            self._memory_cache.move_to_end(session.session_id)
+            self._memory_cache_deadlines[session.session_id] = (
+                time.monotonic() + max(int(self.cache_ttl), 1)
+            )
+            while len(self._memory_cache) > self.memory_cache_max_entries:
+                evicted_id, _ = self._memory_cache.popitem(last=False)
+                self._memory_cache_deadlines.pop(evicted_id, None)
 
     async def _get_from_cache(self, session_id: str) -> Session | None:
         """从缓存获取会话"""
@@ -424,7 +437,20 @@ class DatabaseSessionManager:
                 return self._dict_to_session(cached)
             return None
         else:
-            return self._memory_cache.get(session_id)
+            session = self._memory_cache.get(session_id)
+            if session is None:
+                return None
+            deadline = self._memory_cache_deadlines.get(session_id)
+            if deadline is not None and deadline <= time.monotonic():
+                self._memory_cache.pop(session_id, None)
+                self._memory_cache_deadlines.pop(session_id, None)
+                return None
+            if deadline is None:
+                self._memory_cache_deadlines[session_id] = (
+                    time.monotonic() + max(int(self.cache_ttl), 1)
+                )
+            self._memory_cache.move_to_end(session_id)
+            return session
 
     async def _remove_from_cache(self, session_id: str) -> None:
         """从缓存移除会话"""
@@ -432,6 +458,7 @@ class DatabaseSessionManager:
             await self.redis.delete_session(session_id)
         else:
             self._memory_cache.pop(session_id, None)
+            self._memory_cache_deadlines.pop(session_id, None)
 
     def _session_to_dict(self, session: Session) -> dict[str, Any]:
         """将 Session 转换为字典"""

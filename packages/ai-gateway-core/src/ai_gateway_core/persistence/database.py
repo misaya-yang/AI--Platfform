@@ -1359,7 +1359,7 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """
-                INSERT INTO sessions (
+                INSERT INTO assistant.sessions (
                     session_id, service_id, user_id, tenant_id,
                     state, history, metadata, config, status, expires_at
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -1390,7 +1390,10 @@ class DatabaseStorage:
         if not self._pool:
             return None
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT * FROM sessions WHERE session_id = $1", session_id)
+            row = await conn.fetchrow(
+                "SELECT * FROM assistant.sessions WHERE session_id = $1",
+                session_id,
+            )
             return self._row_to_dict(row) if row else None
 
     async def bind_agent_runtime_session(
@@ -1416,7 +1419,7 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
                 """
-                INSERT INTO sessions (
+                INSERT INTO assistant.sessions AS existing_session (
                     session_id, service_id, user_id, tenant_id,
                     state, history, metadata, config, status, expires_at,
                     agent_id, agent_version_id, agent_draft_revision,
@@ -1428,19 +1431,19 @@ class DatabaseStorage:
                     $6::uuid, $7::uuid, $8, $9::uuid, $10, $11, $12
                 )
                 ON CONFLICT (session_id) DO UPDATE SET
-                    expires_at = GREATEST(sessions.expires_at, EXCLUDED.expires_at),
+                    expires_at = GREATEST(existing_session.expires_at, EXCLUDED.expires_at),
                     updated_at = NOW()
-                WHERE sessions.user_id = EXCLUDED.user_id
-                  AND sessions.tenant_id = EXCLUDED.tenant_id
-                  AND sessions.service_id = EXCLUDED.service_id
-                  AND sessions.status = 'active'
-                  AND sessions.agent_id = EXCLUDED.agent_id
-                  AND sessions.agent_version_id IS NOT DISTINCT FROM EXCLUDED.agent_version_id
-                  AND sessions.agent_draft_revision IS NOT DISTINCT FROM EXCLUDED.agent_draft_revision
-                  AND sessions.publication_id IS NOT DISTINCT FROM EXCLUDED.publication_id
-                  AND sessions.channel = EXCLUDED.channel
-                  AND sessions.runtime_fingerprint = EXCLUDED.runtime_fingerprint
-                  AND sessions.agent_spec_hash = EXCLUDED.agent_spec_hash
+                WHERE existing_session.user_id = EXCLUDED.user_id
+                  AND existing_session.tenant_id = EXCLUDED.tenant_id
+                  AND existing_session.service_id = EXCLUDED.service_id
+                  AND existing_session.status = 'active'
+                  AND existing_session.agent_id = EXCLUDED.agent_id
+                  AND existing_session.agent_version_id IS NOT DISTINCT FROM EXCLUDED.agent_version_id
+                  AND existing_session.agent_draft_revision IS NOT DISTINCT FROM EXCLUDED.agent_draft_revision
+                  AND existing_session.publication_id IS NOT DISTINCT FROM EXCLUDED.publication_id
+                  AND existing_session.channel = EXCLUDED.channel
+                  AND existing_session.runtime_fingerprint = EXCLUDED.runtime_fingerprint
+                  AND existing_session.agent_spec_hash = EXCLUDED.agent_spec_hash
                 RETURNING *
                 """,
                 session_id,
@@ -1484,7 +1487,7 @@ class DatabaseStorage:
             if metadata_update:
                 result = await conn.execute(
                     """
-                    UPDATE sessions
+                    UPDATE assistant.sessions
                     SET history = history || $2::jsonb,
                         metadata = metadata || $3::jsonb,
                         updated_at = NOW()
@@ -1497,7 +1500,7 @@ class DatabaseStorage:
             else:
                 result = await conn.execute(
                     """
-                    UPDATE sessions
+                    UPDATE assistant.sessions
                     SET history = history || $2::jsonb,
                         updated_at = NOW()
                     WHERE session_id = $1
@@ -1519,7 +1522,7 @@ class DatabaseStorage:
         if not self._pool:
             return []
 
-        query = "SELECT * FROM sessions WHERE 1=1"
+        query = "SELECT * FROM assistant.sessions WHERE 1=1"
         params = []
         param_idx = 1
 
@@ -1579,7 +1582,7 @@ class DatabaseStorage:
             ") as metadata, "
             "status, expires_at, created_at, updated_at"
         )
-        query = f"SELECT {cols} FROM sessions WHERE 1=1"
+        query = f"SELECT {cols} FROM assistant.sessions WHERE 1=1"
         params: list[Any] = []
         param_idx = 1
 
@@ -1621,7 +1624,7 @@ class DatabaseStorage:
             return
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "UPDATE sessions SET history = $1, updated_at = NOW() WHERE session_id = $2",
+                "UPDATE assistant.sessions SET history = $1, updated_at = NOW() WHERE session_id = $2",
                 json.dumps(history),
                 session_id,
             )
@@ -1632,7 +1635,7 @@ class DatabaseStorage:
             return
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "UPDATE sessions SET state = $1, updated_at = NOW() WHERE session_id = $2",
+                "UPDATE assistant.sessions SET state = $1, updated_at = NOW() WHERE session_id = $2",
                 json.dumps(state),
                 session_id,
             )
@@ -1646,7 +1649,7 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 """
-                UPDATE sessions
+                UPDATE assistant.sessions
                 SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb,
                     updated_at = NOW()
                 WHERE session_id = $1
@@ -1665,7 +1668,7 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 """
-                UPDATE sessions
+                UPDATE assistant.sessions
                 SET config = COALESCE(config, '{}'::jsonb) || $2::jsonb,
                     updated_at = NOW()
                 WHERE session_id = $1
@@ -1680,7 +1683,10 @@ class DatabaseStorage:
         if not self._pool:
             return False
         async with self._pool.acquire() as conn:
-            result = await conn.execute("DELETE FROM sessions WHERE session_id = $1", session_id)
+            result = await conn.execute(
+                "DELETE FROM assistant.sessions WHERE session_id = $1",
+                session_id,
+            )
             return result == "DELETE 1"
 
     async def cleanup_expired_sessions(self) -> int:
@@ -1689,7 +1695,8 @@ class DatabaseStorage:
             return 0
         async with self._pool.acquire() as conn:
             result = await conn.execute(
-                "DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at < NOW()"
+                "DELETE FROM assistant.sessions "
+                "WHERE expires_at IS NOT NULL AND expires_at < NOW()"
             )
             # 解析结果获取删除行数
             if result.startswith("DELETE "):

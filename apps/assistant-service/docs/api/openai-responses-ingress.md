@@ -17,7 +17,7 @@ agent or tool loop.
 | Sampling | `temperature` from 0 through 2 |
 | Output budget | Positive `max_output_tokens` no greater than the selected model limit |
 | Storage | `store` omitted or `false`; conversation messages are not persisted and the response is not addressable later |
-| Streaming | Responses SSE events with strictly increasing `sequence_number` and one authoritative `response.completed` or `response.failed` terminal |
+| Streaming | Responses SSE events with strictly increasing `sequence_number`, canonical heartbeat comments during producer silence, and one authoritative `response.completed` or `response.failed` terminal |
 | Non-streaming | A Responses `response` object, including explicit `status: failed` on a runtime failure |
 | Idempotency | Non-stream requests replay an identical body for the same `Idempotency-Key`, route, tenant and user; conflicting bodies return 409 |
 
@@ -50,6 +50,23 @@ run/approval APIs for platform tools and human approval.
 
 Streaming `Idempotency-Key` values are forwarded for transport retry safety but
 SSE bodies are not cached or replayed after a connection has begun.
+
+## Streaming terminal and recovery semantics
+
+Canonical `run_finished` and `run_error` events are authoritative source
+boundaries. The adapter projects the corresponding Responses terminal
+immediately, then closes the Assistant source; it does not wait for source
+exhaustion or consume producer events after that boundary.
+
+During producer silence, the stream emits the shared canonical
+`: heartbeat` SSE comment at the configured interval (15 seconds by default).
+Heartbeat comments are transport keepalives, not Responses events, and do not
+consume a `sequence_number`.
+
+If a run fails after text deltas were emitted, the terminal response preserves
+the received partial text. Its started output message is closed with
+`status: incomplete` before `response.failed`; a failed response never contains
+an `in_progress` output child.
 
 ## Examples
 
@@ -102,3 +119,18 @@ Stateless continuation after an externally completed function call:
   ]
 }
 ```
+
+## Live verification
+
+The opt-in live contract suite exercises both non-streaming and streaming
+Responses through the running Gateway and the configured real provider. Load a
+dedicated test user's credentials from the operator environment, then run:
+
+```bash
+RUN_RESPONSES_API_E2E=1 \
+uv run --all-packages --extra test pytest -q --no-cov \
+  tests/integration/test_responses_api_e2e_live.py
+```
+
+A release receipt must show both cases passing with no skips. A default skipped
+run proves only that the opt-in guard works; it is not live-provider evidence.

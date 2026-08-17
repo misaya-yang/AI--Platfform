@@ -685,7 +685,7 @@ class ToolRegistry:
 
         return [t.to_anthropic_schema() for t in tools]
 
-    def _effective_execution_timeout(
+    def effective_execution_timeout(
         self,
         request: ToolCallRequest,
         definition: ToolDefinition,
@@ -707,6 +707,15 @@ class ToolRegistry:
         if target is None:
             return timeout_seconds
         return max(timeout_seconds, target.timeout_seconds)
+
+    def _effective_execution_timeout(
+        self,
+        request: ToolCallRequest,
+        definition: ToolDefinition,
+    ) -> float:
+        """Backward-compatible alias for the public timeout resolver."""
+
+        return self.effective_execution_timeout(request, definition)
 
     async def execute(
         self,
@@ -808,7 +817,7 @@ class ToolRegistry:
                 },
             )
 
-        timeout_seconds = self._effective_execution_timeout(request, definition)
+        timeout_seconds = self.effective_execution_timeout(request, definition)
 
         # Execute tool with timeout enforcement
         try:

@@ -1958,6 +1958,7 @@
       "thought": "思考过程",
       "running": "执行中…",
       "statusCompleted": "已完成",
+      "statusCancelled": "已取消",
       "errorFallback": "步骤失败",
       "foundResults_one": "{{count}} 条结果",
       "foundResults_other": "{{count}} 条结果",

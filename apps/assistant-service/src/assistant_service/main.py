@@ -674,6 +674,7 @@ async def lifespan(app: FastAPI):
         register_builtin_tools,
         register_document_generation_tool,
         register_pptx_generation_tool,
+        register_quiz_tool,
     )
     from .core.tools.image_generator_tool import register_image_generation_tool
 
@@ -735,6 +736,11 @@ async def lifespan(app: FastAPI):
                 level=logging.WARNING,
             )
     register_image_generation_tool(startup_config=_STARTUP_CONFIG)
+    # Quiz generation is a first-class Assistant capability.  The executor
+    # validates and persists model-supplied questions without a second model
+    # call, so it must be wired to the live Assistant database just like the
+    # other built-in generation tools.
+    register_quiz_tool(database=database)
 
     # ── Todo tools (Phase 5) — always on; exposes the per-session
     # WorkingMemory to the model for long-horizon task tracking.
@@ -788,6 +794,7 @@ async def lifespan(app: FastAPI):
     )
 
     from .core import AssistantService
+    from .core.agent.artifact_persister import resolve_artifact_storage_for_persistence
 
     realtime_metrics = get_realtime_metrics()
     usage_recorder = get_usage_recorder()
@@ -811,7 +818,15 @@ async def lifespan(app: FastAPI):
                 level=logging.WARNING,
             )
 
-    artifact_storage = get_artifact_storage()
+    artifact_storage = resolve_artifact_storage_for_persistence(
+        get_artifact_storage(),
+        database,
+    )
+    artifact_metadata_ready = artifact_storage is not None
+    logger.info(
+        "Artifact metadata persistence ready=%s",
+        artifact_metadata_ready,
+    )
     from .core.tools.tool_artifact_reader import register_tool_artifact_reader
 
     if register_tool_artifact_reader(

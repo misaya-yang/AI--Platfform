@@ -89,7 +89,11 @@ def _stream_chat(
                 event = json.loads(line[6:].strip())
                 if isinstance(event, dict):
                     events.append(event)
-                    if event.get("event_type") in {"done", "run_finished", "run_error"}:
+                    # ``done`` is only the model-transport terminal. Keep the
+                    # connection open until the durable run reaches its
+                    # authoritative terminal so persistence failures cannot be
+                    # mistaken for a successful KB answer.
+                    if event.get("event_type") in {"run_finished", "run_error"}:
                         break
     return events
 
@@ -260,6 +264,9 @@ def test_assistant_kb_lifecycle_is_grounded_and_tenant_isolated(trial: int) -> N
             assert all(event.get("event_type") != "run_error" for event in first_events), (
                 first_events
             )
+            assert sum(
+                event.get("event_type") == "run_finished" for event in first_events
+            ) == 1, first_events
             assert _stream_text(first_events) == marker, first_events
             cited_chunks = _context_chunks(first_events)
             matching_chunk = next(
@@ -286,6 +293,9 @@ def test_assistant_kb_lifecycle_is_grounded_and_tenant_isolated(trial: int) -> N
             assert all(event.get("event_type") != "run_error" for event in follow_events), (
                 follow_events
             )
+            assert sum(
+                event.get("event_type") == "run_finished" for event in follow_events
+            ) == 1, follow_events
             assert _stream_text(follow_events) == marker, follow_events
         finally:
             if created:

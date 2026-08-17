@@ -30,6 +30,7 @@ import type { TimelineState } from "@/components/agent/AgentTimeline";
 import type { ArtifactData } from "@/components/agent/ArtifactCard";
 import { cancelTask } from "@/api/assistant";
 import type { ErrorSeverity, AgentLoopPhase } from "@/api/assistant";
+import { getAuthToken } from "@/lib/api";
 
 // Re-export for convenience
 export type { AGUIEvent };
@@ -566,11 +567,13 @@ export function useAgentStream(options: UseAgentStreamOptions = {}) {
       setIsConnected(true);
 
       try {
+        const token = getAuthToken();
         const response = await fetch(url, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             Accept: "text/event-stream",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
           body: JSON.stringify(body),
           signal: abortController.signal,

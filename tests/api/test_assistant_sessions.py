@@ -1,5 +1,6 @@
 """Assistant session listing compatibility tests."""
 
+import base64
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -194,6 +195,49 @@ async def test_list_session_artifacts_preserves_unexpected_storage_errors(
 
     assert exc_info.value.status_code == 500
     assert exc_info.value.detail == "storage offline"
+
+
+@pytest.mark.asyncio
+async def test_create_artifact_rejects_foreign_session_before_writing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = UserContext(user_id="user_1", tenant_id="tenant_1", is_authenticated=True)
+    session_manager = AsyncMock()
+    session_manager.get.return_value = Session(
+        session_id="foreign-session",
+        user_id="other-user",
+        tenant_id=user.tenant_id,
+        service_id="__builtin_assistant__",
+    )
+    artifact_storage = AsyncMock()
+    monkeypatch.setattr(
+        assistant_api,
+        "get_artifact_storage",
+        lambda: artifact_storage,
+    )
+    body = assistant_api.ArtifactCreateRequest(
+        session_id="foreign-session",
+        type="document",
+        format="txt",
+        title="Injected",
+        filename="injected.txt",
+        content_base64=base64.b64encode(b"not allowed").decode(),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await assistant_api.create_artifact(
+            body,
+            _build_request(
+                session_manager,
+                method="POST",
+                path="/api/v1/assistant/artifacts",
+            ),
+            user,
+        )
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "Session not found"
+    artifact_storage.create_artifact.assert_not_awaited()
 
 
 @pytest.mark.asyncio

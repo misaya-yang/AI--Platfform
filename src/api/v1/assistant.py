@@ -1189,6 +1189,19 @@ async def create_artifact(
         raise HTTPException(status_code=503, detail="Artifact storage not initialized")
 
     try:
+        session_manager = get_session_manager(request)
+        try:
+            session = await session_manager.get(body.session_id)
+        except Exception as exc:
+            logger.error("Failed to verify artifact session ownership: %s", exc)
+            raise HTTPException(status_code=500, detail="Failed to verify session") from exc
+        if (
+            not session
+            or session.user_id != user.user_id
+            or session.tenant_id != user.tenant_id
+        ):
+            raise HTTPException(status_code=404, detail="Session not found")
+
         # Decode base64 content
         try:
             content = base64.b64decode(body.content_base64)

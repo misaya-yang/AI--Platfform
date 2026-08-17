@@ -1012,7 +1012,7 @@ def _resolve_runtime(
     runtime["DASHSCOPE_IMAGE_MODEL"] = _runtime_string(
         environment,
         "DASHSCOPE_IMAGE_MODEL",
-        default="wanx-v1",
+        default="wan2.6-t2i",
     )
     runtime["DOUBAO_IMAGE_MODEL"] = _runtime_string(
         environment,

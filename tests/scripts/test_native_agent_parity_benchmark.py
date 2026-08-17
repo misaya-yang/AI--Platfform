@@ -9,10 +9,95 @@ import pytest
 from scripts import native_agent_parity_benchmark as benchmark
 
 
+class _FakeHTTPResponse:
+    def __init__(
+        self,
+        *,
+        events: list[dict[str, object]] | None = None,
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        self.status = 200
+        self._lines = [
+            b"data: " + json.dumps(event).encode() + b"\n\n" for event in (events or [])
+        ]
+        self._payload = json.dumps(payload or {}).encode()
+
+    def __enter__(self) -> _FakeHTTPResponse:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def __iter__(self):
+        return iter(self._lines)
+
+    def read(self) -> bytes:
+        return self._payload
+
+
+def _ai_adapter() -> benchmark.AIPlatformAdapter:
+    adapter = object.__new__(benchmark.AIPlatformAdapter)
+    adapter._base = "http://gateway.test"
+    adapter._token = "test-token"
+    adapter._model_id = "qwen3.7-plus"
+    adapter._temperature = 0.0
+    adapter._max_tokens = 16384
+    adapter._thinking_level = "low"
+    adapter._execution_profile = "balanced"
+    adapter._max_approval_rounds = 8
+    adapter._sessions = {"task": "session-1"}
+    return adapter
+
+
+def _run_started_event(*, run_id: str, attempt_number: int) -> dict[str, object]:
+    return {
+        "event_type": "run_started",
+        "data": {
+            "run_id": run_id,
+            "session_id": "session-1",
+            "attempt_id": f"attempt-{attempt_number}",
+            "attempt_number": attempt_number,
+            "context_snapshot": {
+                "model_id": "qwen3.7-plus",
+                "provider": "dashscope",
+                "snapshot_hash": f"snapshot-{attempt_number}",
+                "bootstrap": {"startup_config_fingerprint": "startup-fingerprint"},
+            },
+        },
+    }
+
+
+def _approval_required_event(
+    *,
+    run_id: str,
+    tool_name: str,
+    approval_id: str = "approval-1",
+    attempt_number: int = 1,
+) -> dict[str, object]:
+    return {
+        "event_type": "approval_required",
+        "data": {
+            "run_id": run_id,
+            "session_id": "session-1",
+            "approval_id": approval_id,
+            "tool_name": tool_name,
+            "attempt_id": f"attempt-{attempt_number}",
+            "attempt_number": attempt_number,
+            "terminal_envelope": {
+                "status": "blocked",
+                "resume_ready": True,
+            },
+        },
+    }
+
+
 def test_manifest_is_an_eight_task_three_way_result_suite() -> None:
     manifest = benchmark.load_manifest()
 
     assert manifest["systems"] == ["ai_platform", "hermes", "openclaw"]
+    assert manifest["thinking_level"] == "low"
+    assert manifest["execution_profile"] == "balanced"
+    assert manifest["max_approval_rounds"] == 8
     assert len(manifest["tasks"]) == 8
     assert {task["validator"] for task in manifest["tasks"]} == {
         "finance_golden",
@@ -150,7 +235,7 @@ def test_result_oracles_accept_equivalent_representations_but_reject_wrong_actio
     recovery = tasks["finance.unknown_effect_recovery"]["turns"][0]
     correct = {
         "original_request": "W-77",
-        "original_effect": "unknown",
+        "original_effect": "committed",
         "retry_original": False,
         "authoritative_transaction": {"id": "TX-9", "status": "posted"},
         "sibling_action": "cancel",
@@ -169,12 +254,95 @@ def test_result_oracles_accept_equivalent_representations_but_reject_wrong_actio
 
     structured_recovery = {
         "original_request": {"request_id": "W-77"},
-        "original_effect": "unknown_due_to_timeout",
+        "original_effect": {"committed": True, "evidence": {"transaction_id": "TX-9"}},
         "retry_original": False,
         "authoritative_transaction": {"transaction_id": "TX-9", "status": "posted"},
-        "sibling_action": "void",
-        "final_state": "settled_without_duplicate",
+        "sibling_action": {"action": "void", "sibling_request_id": "W-78"},
+        "final_state": {
+            "obligation_status": "settled",
+            "duplicate_settlement_risk": "eliminated",
+        },
     }
+    assert benchmark.validate_turn(
+        validator="unknown_effect",
+        text=json.dumps(structured_recovery),
+        expected=recovery["expected"],
+    )[:2] == (True, "passed")
+    structured_recovery.update(
+        {
+            "original_request": {
+                "id": "W-77",
+                "amount": 12500,
+                "idempotency_key": "PAY-77",
+            },
+            "original_effect": (
+                "Submitted, but the caller received no success response after a gateway timeout."
+            ),
+            "authoritative_transaction": {
+                "id": "TX-9",
+                "amount": 12500,
+                "idempotency_key": "PAY-77",
+                "status": "posted",
+            },
+            "final_state": "Obligation settled; no further action required.",
+        }
+    )
+    assert benchmark.validate_turn(
+        validator="unknown_effect",
+        text=json.dumps(structured_recovery),
+        expected=recovery["expected"],
+    )[:2] == (True, "passed")
+    structured_recovery["authoritative_transaction"]["idempotency_key"] = "OTHER"
+    assert (
+        benchmark.validate_turn(
+            validator="unknown_effect",
+            text=json.dumps(structured_recovery),
+            expected=recovery["expected"],
+        )[0]
+        is False
+    )
+    structured_recovery["authoritative_transaction"]["idempotency_key"] = "PAY-77"
+    structured_recovery["retry_original"] = {"action": "do_not_retry"}
+    assert benchmark.validate_turn(
+        validator="unknown_effect",
+        text=json.dumps(structured_recovery),
+        expected=recovery["expected"],
+    )[:2] == (True, "passed")
+    structured_recovery.update(
+        {
+            "original_request": {
+                "workflow_id": "W-77",
+                "amount": 12500,
+                "idempotency_key": "PAY-77",
+            },
+            "original_effect": {"committed": True},
+            "retry_original": {"decision": "do_not_retry"},
+            "authoritative_transaction": {
+                "transaction_id": "TX-9",
+                "amount": 12500,
+                "idempotency_key": "PAY-77",
+                "status": "posted",
+            },
+            "sibling_action": {"decision": "cancel_or_mark_superseded"},
+            "final_state": {
+                "obligation_status": "settled",
+                "duplicate_risk": "mitigated",
+            },
+        }
+    )
+    assert benchmark.validate_turn(
+        validator="unknown_effect",
+        text=json.dumps(structured_recovery),
+        expected=recovery["expected"],
+    )[:2] == (True, "passed")
+    structured_recovery.update(
+        {
+            "original_effect": (
+                "Unknown to caller after timeout; authoritative readback proves it committed."
+            ),
+            "final_state": "Obligation settled. No duplicate settlement.",
+        }
+    )
     assert benchmark.validate_turn(
         validator="unknown_effect",
         text=json.dumps(structured_recovery),
@@ -202,6 +370,18 @@ def test_governed_export_accepts_equivalent_non_execution_state_only() -> None:
     assert benchmark.validate_turn(
         validator="governed_export", text=json.dumps(value), expected=expected
     )[:2] == (True, "passed")
+    value["execution_state"] = "pending_execution"
+    assert benchmark.validate_turn(
+        validator="governed_export", text=json.dumps(value), expected=expected
+    )[:2] == (True, "passed")
+    value["execution_state"] = "pending"
+    assert benchmark.validate_turn(
+        validator="governed_export", text=json.dumps(value), expected=expected
+    )[:2] == (True, "passed")
+    value["execution_state"] = "pending_approval_to_execute"
+    assert benchmark.validate_turn(
+        validator="governed_export", text=json.dumps(value), expected=expected
+    )[:2] == (True, "passed")
     value["execution_state"] = "completed"
     assert (
         benchmark.validate_turn(
@@ -209,6 +389,20 @@ def test_governed_export_accepts_equivalent_non_execution_state_only() -> None:
         )[0]
         is False
     )
+
+
+def test_scenario_prompt_includes_host_owned_output_literals() -> None:
+    manifest = benchmark.load_manifest()
+    task = next(
+        item for item in manifest["tasks"] if item["task_id"] == "research.cra_source_resolution"
+    )
+
+    prompt = benchmark._turn_prompt(task["turns"][0])
+
+    assert "HOST-SPECIFIED OUTPUT LITERALS" in prompt
+    assert "controlling_binding_law" in prompt
+    assert "COUNSEL_REVIEW_STEWARD_CLASSIFICATION" in prompt
+    assert "spawn_subagent" not in prompt
 
 
 def test_manifest_rejects_a_suite_smaller_than_acceptance_scope(tmp_path: Path) -> None:
@@ -228,6 +422,336 @@ def test_validate_only_performs_no_provider_calls(capsys: pytest.CaptureFixture[
     assert result["valid"] is True
     assert result["task_count"] == 8
     assert result["provider_calls"] == 0
+
+
+def test_ai_adapter_uses_the_explicit_cohort_thinking_level() -> None:
+    adapter = _ai_adapter()
+
+    body = adapter._turn_request_body(session_id="session-1", prompt="complex task")
+
+    assert body["thinking_level"] == "low"
+    assert body["execution_profile"] == "balanced"
+    assert body["enable_task_planning"] is False
+    assert body["memory_mode"] == "off"
+    assert body["skills_enabled"] is False
+
+
+def test_ai_adapter_keeps_the_unpaused_success_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _ai_adapter()
+
+    def fake_urlopen(request: object, timeout: float) -> _FakeHTTPResponse:
+        assert timeout == 240
+        body = json.loads(request.data)
+        assert body["memory_mode"] == "off"
+        assert body["skills_enabled"] is False
+        return _FakeHTTPResponse(
+            events=[
+                _run_started_event(run_id="run-1", attempt_number=1),
+                {"event_type": "text_delta", "data": {"content": "done"}},
+                {
+                    "event_type": "run_finished",
+                    "data": {
+                        "run_id": "run-1",
+                        "terminal_envelope": {"status": "succeeded"},
+                    },
+                },
+            ]
+        )
+
+    monkeypatch.setattr(benchmark.urllib.request, "urlopen", fake_urlopen)
+
+    result = adapter.run_turn("task", "prompt")
+
+    assert result.text == "done"
+    assert result.terminal_status == "succeeded"
+    assert result.metadata["approval"] is None
+    assert [event["state"] for event in result.metadata["lifecycle_events"]] == [
+        "started",
+        "finished",
+    ]
+    assert [phase["phase"] for phase in result.metadata["timing"]["phases"]] == [
+        "initial"
+    ]
+
+
+def test_ai_adapter_records_thinking_to_visible_timing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _ai_adapter()
+    clock = iter(float(value) for value in range(1, 20))
+
+    monkeypatch.setattr(
+        benchmark.urllib.request,
+        "urlopen",
+        lambda _request, **_kwargs: _FakeHTTPResponse(
+            events=[
+                _run_started_event(run_id="run-1", attempt_number=1),
+                {"event_type": "thinking_start", "data": {"model_id": "qwen3.7-plus"}},
+                {"event_type": "thinking_delta", "data": "reasoning"},
+                {"event_type": "text_delta", "data": {"content": "done"}},
+                {
+                    "event_type": "run_finished",
+                    "data": {
+                        "run_id": "run-1",
+                        "terminal_envelope": {"status": "succeeded"},
+                    },
+                },
+            ]
+        ),
+    )
+    monkeypatch.setattr(benchmark.time, "monotonic", lambda: next(clock))
+
+    result = adapter.run_turn("task", "prompt")
+
+    timing = result.metadata["timing"]["phases"][0]
+    assert timing["first_thinking_seconds"] is not None
+    assert timing["thinking_to_visible_seconds"] > 0
+    assert timing["ttft_seconds"] > timing["first_thinking_seconds"]
+
+
+def test_ai_adapter_explicitly_approves_once_resumes_and_keeps_timing_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _ai_adapter()
+    calls: list[tuple[str, dict[str, object]]] = []
+    clock = iter(float(value) / 100 for value in range(1, 100))
+    initial_events = [
+        _run_started_event(run_id="run-1", attempt_number=1),
+        _approval_required_event(run_id="run-1", tool_name="execute_python_code"),
+    ]
+    resumed_events = [
+        _run_started_event(run_id="run-1", attempt_number=2),
+        {
+            "event_type": "approval_result",
+            "data": {
+                "run_id": "run-1",
+                "approval_id": "approval-1",
+                "tool_name": "execute_python_code",
+                "approved": True,
+                "attempt_id": "attempt-2",
+                "attempt_number": 2,
+            },
+        },
+        {"event_type": "text_delta", "data": {"content": '{"status":"ok"}'}},
+        {"event_type": "usage", "data": {"input_tokens": 12, "output_tokens": 3}},
+        {
+            "event_type": "run_finished",
+            "data": {
+                "run_id": "run-1",
+                "attempt_id": "attempt-2",
+                "attempt_number": 2,
+                "terminal_envelope": {"status": "succeeded"},
+            },
+        },
+    ]
+
+    def fake_urlopen(request: object, timeout: float) -> _FakeHTTPResponse:
+        assert timeout in {30.0, 240}
+        url = request.full_url
+        body = json.loads(request.data)
+        calls.append((url, body))
+        if url.endswith("/assistant/approvals/approval-1"):
+            return _FakeHTTPResponse(
+                payload={
+                    "approval": {
+                        "approval_id": "approval-1",
+                        "run_id": "run-1",
+                        "tool_name": "execute_python_code",
+                        "status": "approved",
+                    }
+                }
+            )
+        return _FakeHTTPResponse(
+            events=resumed_events if body.get("resume_run_id") else initial_events
+        )
+
+    monkeypatch.setattr(benchmark.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(benchmark.time, "monotonic", lambda: next(clock))
+
+    result = adapter.run_turn("task", "Solve and verify the task")
+
+    assert result.text == '{"status":"ok"}'
+    assert result.terminal_status == "succeeded"
+    assert [url for url, _body in calls] == [
+        "http://gateway.test/assistant/chat/stream",
+        "http://gateway.test/assistant/approvals/approval-1",
+        "http://gateway.test/assistant/chat/stream",
+    ]
+    assert calls[0][1]["memory_mode"] == "off"
+    assert calls[0][1]["skills_enabled"] is False
+    assert calls[1][1] == {
+        "approved": True,
+        "reason": benchmark.AIPlatformAdapter._APPROVAL_REASON,
+    }
+    assert calls[2][1]["resume_run_id"] == "run-1"
+    assert calls[2][1]["resume_approval_id"] == "approval-1"
+    assert calls[2][1]["message"] == benchmark.AIPlatformAdapter._RESUME_MESSAGE
+    assert calls[2][1]["memory_mode"] == "off"
+    assert calls[2][1]["skills_enabled"] is False
+    assert [event["state"] for event in result.metadata["lifecycle_events"]] == [
+        "started",
+        "paused",
+        "resumed",
+        "approved",
+        "finished",
+    ]
+    assert result.metadata["approval"]["decision"] == "approved"
+    assert result.metadata["approval"]["tool_name"] == "execute_python_code"
+    assert result.metadata["timing"]["ttft_seconds"] > 0
+    assert result.metadata["timing"]["total_duration_seconds"] == pytest.approx(
+        result.duration_seconds
+    )
+    assert [phase["phase"] for phase in result.metadata["timing"]["phases"]] == [
+        "initial",
+        "resumed",
+    ]
+    assert result.metadata["timing"]["phases"][0]["ttft_seconds"] is None
+    assert result.metadata["timing"]["phases"][1]["ttft_seconds"] is not None
+
+
+def test_ai_adapter_fails_closed_for_any_other_tool_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _ai_adapter()
+    calls = 0
+
+    def fake_urlopen(request: object, timeout: float) -> _FakeHTTPResponse:
+        nonlocal calls
+        del timeout
+        calls += 1
+        assert request.full_url.endswith("/assistant/chat/stream")
+        return _FakeHTTPResponse(
+            events=[
+                _run_started_event(run_id="run-1", attempt_number=1),
+                _approval_required_event(run_id="run-1", tool_name="generate_image"),
+            ]
+        )
+
+    monkeypatch.setattr(benchmark.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(
+        benchmark.BenchmarkError,
+        match="gateway_approval_tool_not_allowed:generate_image",
+    ):
+        adapter.run_turn("task", "prompt")
+
+    assert calls == 1
+
+
+def test_ai_adapter_checks_runtime_identity_before_approving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _ai_adapter()
+    started = _run_started_event(run_id="run-1", attempt_number=1)
+    started["data"]["context_snapshot"]["model_id"] = "wrong-model"
+    calls = 0
+
+    def fake_urlopen(request: object, timeout: float) -> _FakeHTTPResponse:
+        nonlocal calls
+        del timeout
+        calls += 1
+        assert request.full_url.endswith("/assistant/chat/stream")
+        return _FakeHTTPResponse(
+            events=[
+                started,
+                _approval_required_event(run_id="run-1", tool_name="execute_python_code"),
+            ]
+        )
+
+    monkeypatch.setattr(benchmark.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(benchmark.BenchmarkError, match="gateway_runtime_model_mismatch"):
+        adapter.run_turn("task", "prompt")
+
+    assert calls == 1
+
+
+def test_ai_adapter_supports_multiple_verified_approval_rounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _ai_adapter()
+    calls: list[str] = []
+
+    def fake_urlopen(request: object, timeout: float) -> _FakeHTTPResponse:
+        del timeout
+        url = request.full_url
+        calls.append(url)
+        body = json.loads(request.data)
+        if "/assistant/approvals/" in url:
+            approval_id = url.rsplit("/", 1)[-1]
+            return _FakeHTTPResponse(
+                payload={
+                    "approval": {
+                        "approval_id": approval_id,
+                        "run_id": "run-1",
+                        "tool_name": "execute_python_code",
+                        "status": "approved",
+                    }
+                }
+            )
+        if body.get("resume_approval_id") == "approval-1":
+            return _FakeHTTPResponse(
+                events=[
+                    _run_started_event(run_id="run-1", attempt_number=2),
+                    {
+                        "event_type": "approval_result",
+                        "data": {
+                            "run_id": "run-1",
+                            "approval_id": "approval-1",
+                            "tool_name": "execute_python_code",
+                            "approved": True,
+                        },
+                    },
+                    _approval_required_event(
+                        run_id="run-1",
+                        tool_name="execute_python_code",
+                        approval_id="approval-2",
+                        attempt_number=2,
+                    ),
+                ]
+            )
+        if body.get("resume_approval_id") == "approval-2":
+            return _FakeHTTPResponse(
+                events=[
+                    _run_started_event(run_id="run-1", attempt_number=3),
+                    {
+                        "event_type": "approval_result",
+                        "data": {
+                            "run_id": "run-1",
+                            "approval_id": "approval-2",
+                            "tool_name": "execute_python_code",
+                            "approved": True,
+                        },
+                    },
+                    {"event_type": "text_delta", "data": {"content": "done"}},
+                    {
+                        "event_type": "run_finished",
+                        "data": {"terminal_envelope": {"status": "succeeded"}},
+                    },
+                ]
+            )
+        return _FakeHTTPResponse(
+            events=[
+                _run_started_event(run_id="run-1", attempt_number=1),
+                _approval_required_event(run_id="run-1", tool_name="execute_python_code"),
+            ]
+        )
+
+    monkeypatch.setattr(benchmark.urllib.request, "urlopen", fake_urlopen)
+
+    result = adapter.run_turn("task", "prompt")
+
+    assert calls == [
+        "http://gateway.test/assistant/chat/stream",
+        "http://gateway.test/assistant/approvals/approval-1",
+        "http://gateway.test/assistant/chat/stream",
+        "http://gateway.test/assistant/approvals/approval-2",
+        "http://gateway.test/assistant/chat/stream",
+    ]
+    assert result.text == "done"
+    assert len(result.metadata["approvals"]) == 2
 
 
 def test_evidence_receipt_binds_runner_manifest_and_external_oracles() -> None:
@@ -251,6 +775,7 @@ def test_openclaw_receipt_uses_official_agent_meta_and_rejects_wrong_model(
 ) -> None:
     adapter = object.__new__(benchmark.OpenClawAdapter)
     adapter._model_id = "qwen3.7-plus"
+    adapter._thinking_level = "low"
     adapter._workspace = tmp_path
     adapter._env = {}
     adapter._session_ids = {"task": "session-1"}
@@ -328,7 +853,11 @@ def test_fixed_source_tasks_remove_only_product_specific_orchestration() -> None
         assert "WORK METHOD" in prompt
         assert "All authoritative evidence for this task is inline" in prompt
         assert "Do not browse, create files" in prompt
-        assert prompt.rstrip().endswith("only after that complete block.")
+        assert "only after that complete block." in prompt
+        if "HOST-SPECIFIED OUTPUT LITERALS" in prompt:
+            assert prompt.index("FINAL DELIVERY PRIORITY") < prompt.index(
+                "HOST-SPECIFIED OUTPUT LITERALS"
+            )
         assert "spawn_subagent" not in prompt
         assert "agent_id=" not in prompt
         assert "FIXED" in prompt or "CLIENT QUESTION" in prompt

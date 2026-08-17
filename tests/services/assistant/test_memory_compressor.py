@@ -4,7 +4,8 @@ import copy
 from typing import Any
 
 import pytest
-from assistant_service.core.memory.compressor import ContextCompressor
+from assistant_service.core.memory.compressor import ContextCompressor, ModelRegistryLLMService
+from assistant_service.core.run_budget import RunBudgetDimension, RunBudgetExceeded
 
 
 class _CapturingLLM:
@@ -15,6 +16,77 @@ class _CapturingLLM:
         del max_tokens
         self.prompts.append(prompt)
         return f"summary stage {len(self.prompts)}"
+
+
+@pytest.mark.asyncio
+async def test_model_registry_llm_service_propagates_run_budget_exceeded() -> None:
+    class _Registry:
+        def __init__(self) -> None:
+            self.called = False
+
+        async def chat(self, *_args: Any, **_kwargs: Any) -> tuple[str, dict[str, Any]]:
+            self.called = True
+            return "must not execute", {}
+
+    budget_error = RunBudgetExceeded(
+        dimension=RunBudgetDimension.MODEL_TURNS,
+        limit=1,
+        used=1,
+        requested=2,
+        snapshot={"status": "exhausted"},
+    )
+    registry = _Registry()
+
+    def reject_model_turn() -> None:
+        raise budget_error
+
+    service = ModelRegistryLLMService(
+        registry,
+        model_id="test",
+        before_complete=reject_model_turn,
+    )
+
+    with pytest.raises(RunBudgetExceeded) as caught:
+        await service.complete("summarize")
+
+    assert caught.value is budget_error
+    assert registry.called is False
+
+
+@pytest.mark.asyncio
+async def test_context_compressor_propagates_run_budget_exceeded() -> None:
+    budget_error = RunBudgetExceeded(
+        dimension=RunBudgetDimension.MODEL_TURNS,
+        limit=1,
+        used=1,
+        requested=2,
+        snapshot={"status": "exhausted"},
+    )
+
+    class _BudgetFailingLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, prompt: str, max_tokens: int = 200) -> str:
+            del prompt, max_tokens
+            self.calls += 1
+            raise budget_error
+
+    llm = _BudgetFailingLLM()
+    compressor = ContextCompressor(llm)
+
+    with pytest.raises(RunBudgetExceeded) as caught:
+        await compressor.compress(
+            [
+                {"role": "user", "content": "old context"},
+                {"role": "user", "content": "current request"},
+            ],
+            target_tokens=500,
+            preserve_recent=1,
+        )
+
+    assert caught.value is budget_error
+    assert llm.calls == 1
 
 
 @pytest.mark.asyncio

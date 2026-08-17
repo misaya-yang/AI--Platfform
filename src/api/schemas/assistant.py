@@ -177,7 +177,10 @@ class AssistantChatRequest(BaseModel):
     thinking_level: str | None = Field(
         default=None,
         max_length=16,
-        description="Thinking intensity: off, low, medium, or high. Default off.",
+        description=(
+            "Thinking intensity: off, low, medium, or high. "
+            "Omitted requests default to low; only explicit off disables thinking."
+        ),
     )
     confirm_plan: Literal[False] = Field(
         default=False,

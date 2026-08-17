@@ -67,6 +67,7 @@ class AgentModelTurnMixin:
         denied_tools: set[str],
         dataset_name_map: dict[str, str] | None,
         result: StreamingModelTurn,
+        defer_text_until_turn_complete: bool = False,
     ) -> AsyncGenerator[AgentLoopEvent, None]:
         if ctx.run_budget is None:
             raise RuntimeError("run_budget_not_initialized")
@@ -163,6 +164,7 @@ class AgentModelTurnMixin:
         thinking_started = False
         thinking_ended = False
         accumulated_thinking = ""
+        deferred_public_chunks: list[str] = []
         async for streamed in self._stream_chat_with_failover(
             ctx,
             phase=phase,
@@ -200,6 +202,15 @@ class AgentModelTurnMixin:
                     data=delta.thinking_content,
                 )
 
+            chunk_has_tool_call = bool(delta.tool_calls)
+            if delta.tool_calls:
+                anonymous_tool_counter = merge_stream_tool_calls(
+                    delta.tool_calls,
+                    tool_calls_accumulated,
+                    tool_call_order,
+                    anonymous_tool_counter,
+                )
+
             if delta.content:
                 if thinking_started and not thinking_ended:
                     thinking_ended = True
@@ -210,6 +221,17 @@ class AgentModelTurnMixin:
                     )
                 for text_chunk in _fmt_split_text_for_stream(delta.content):
                     result.content += text_chunk
+                    # Some providers attach a conversational preamble to the
+                    # same delta that initiates a tool call (for example,
+                    # "I am generating the deck...").  It is not a completed
+                    # answer and must not be appended ahead of the later forced
+                    # synthesis.  Keep it in the model-turn record/history for
+                    # diagnostics, but never project it as public final text.
+                    if chunk_has_tool_call:
+                        continue
+                    if defer_text_until_turn_complete:
+                        deferred_public_chunks.append(text_chunk)
+                        continue
                     ctx.generated_content += text_chunk
                     if not result.first_token_emitted:
                         ttft_ms = (time.time() - ttft_start) * 1000
@@ -225,14 +247,6 @@ class AgentModelTurnMixin:
                         event_type="text_delta",
                         data=text_chunk,
                     )
-
-            if delta.tool_calls:
-                anonymous_tool_counter = merge_stream_tool_calls(
-                    delta.tool_calls,
-                    tool_calls_accumulated,
-                    tool_call_order,
-                    anonymous_tool_counter,
-                )
 
             if delta.finish_reason:
                 result.finish_reason = delta.finish_reason
@@ -259,7 +273,7 @@ class AgentModelTurnMixin:
                             )
 
         for key, value in call_usage.items():
-            ctx.usage[key] = int(value)
+            ctx.usage[key] = int(ctx.usage.get(key, 0)) + int(value)
 
         if thinking_started and not thinking_ended:
             yield AgentLoopEvent(
@@ -299,6 +313,23 @@ class AgentModelTurnMixin:
                 deduped.append(tool_call)
             tool_calls = deduped
         result.tool_calls = tool_calls
+        if deferred_public_chunks and not tool_calls:
+            for text_chunk in deferred_public_chunks:
+                ctx.generated_content += text_chunk
+                if not result.first_token_emitted:
+                    ttft_ms = (time.time() - ttft_start) * 1000
+                    result.first_token_emitted = True
+                    logger.info("[STREAMING-FIRST] TTFT: %.0fms", ttft_ms)
+                    yield AgentLoopEvent(
+                        phase=phase,
+                        event_type="ttft",
+                        data={"ttft_ms": round(ttft_ms, 2)},
+                    )
+                yield AgentLoopEvent(
+                    phase=phase,
+                    event_type="text_delta",
+                    data=text_chunk,
+                )
 
     async def _run_forced_synthesis(
         self,
@@ -451,7 +482,7 @@ class AgentModelTurnMixin:
                 __name__, "assistant.core.agent.agent_model_turn.internal_failure", exc
             )
         for key, value in forced_usage.items():
-            ctx.usage[key] = int(value)
+            ctx.usage[key] = int(ctx.usage.get(key, 0)) + int(value)
 
     # =========================================================================
     # Streaming-First Mode Implementation (Manus-style)

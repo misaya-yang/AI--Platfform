@@ -374,6 +374,42 @@ def test_streaming_error_redaction_keeps_exception_type_and_redacts_provider_key
 
 
 @pytest.mark.asyncio
+async def test_plain_first_turn_does_not_pin_every_builtin_skill_schema() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    model = FakeModelRegistry(scripted=[[{"content": "hello", "finish_reason": "stop"}]])
+    invoker = FakeToolInvoker(
+        {
+            "tool_call": {},
+            "tool_describe": {},
+            "tool_search": {},
+            "skill_create_document": {},
+            "skill_quiz_generation": {},
+        }
+    )
+    loop = AgentLoop(model_registry=model, tool_invoker=invoker)
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="plain-first-turn",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="hello",
+            config=AgentLoopConfig(
+                model_id="test",
+                skills_enabled=True,
+                persist_messages=False,
+            ),
+            history=[],
+        )
+    ]
+
+    first_turn_names = {schema["function"]["name"] for schema in (model.tools_history[0] or [])}
+    assert first_turn_names == {"tool_call", "tool_describe", "tool_search"}
+    assert any(event.event_type == "run_finished" for event in events)
+
+
+@pytest.mark.asyncio
 async def test_run_budget_hard_stops_hidden_second_model_turn() -> None:
     from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
     from assistant_service.core.run_budget import RunBudgetLimits
@@ -809,6 +845,49 @@ async def test_run_budget_wall_time_cancels_a_hung_model_stream() -> None:
 
     assert budget_event.data["dimension"] == "wall_time"
     assert sum(event.event_type == "run_error" for event in events) == 1
+
+
+@pytest.mark.asyncio
+async def test_internal_timeout_is_not_misclassified_as_wall_budget_exhaustion() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.run_budget import RunBudgetLimits
+
+    loop = AgentLoop(
+        model_registry=FakeModelRegistry(scripted=[]),
+        tool_invoker=FakeToolInvoker({}),
+    )
+
+    async def fail_with_internal_timeout(*_args: Any, **_kwargs: Any) -> AsyncIterator[Any]:
+        if False:
+            yield None
+        raise TimeoutError("database statement timeout")
+
+    loop._execute_streaming_first = fail_with_internal_timeout  # type: ignore[method-assign]
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="internal-timeout",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="wait",
+            config=AgentLoopConfig(
+                model_id="test",
+                run_budget_limits=RunBudgetLimits(
+                    max_model_turns=2,
+                    max_tool_calls=2,
+                    max_parallel_tool_calls=1,
+                    max_wall_time_seconds=10,
+                    max_tool_result_bytes=100,
+                ),
+                persist_messages=False,
+            ),
+            history=[],
+        )
+    ]
+
+    assert not any(event.event_type == "run_budget_exceeded" for event in events)
+    terminal = next(event for event in events if event.event_type == "run_error")
+    assert terminal.data["error"] != "run_budget_exceeded"
 
 
 @pytest.mark.asyncio
@@ -1416,6 +1495,50 @@ async def test_forced_synthesis_hides_incomplete_text_and_uses_no_capability_pro
 
 
 @pytest.mark.asyncio
+async def test_forced_synthesis_replaces_same_delta_tool_preamble() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    model = FakeModelRegistry(
+        scripted=[
+            [
+                {"content": "I am generating the deck..."},
+                {
+                    "tool_calls": [
+                        {
+                            "id": "tc_write",
+                            "function": {
+                                "name": "write_data",
+                                "arguments": '{"value":1}',
+                            },
+                        }
+                    ],
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            [{"content": "The deck is ready.", "finish_reason": "stop"}],
+        ]
+    )
+    invoker = FakeToolInvoker({"write_data": {"success": True, "result": "written"}})
+    loop = AgentLoop(model_registry=model, tool_invoker=invoker)  # type: ignore[arg-type]
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="s-tool-preamble",
+            user=MockUserContext(user_id="u1"),  # type: ignore[arg-type]
+            message="Write the result",
+            config=AgentLoopConfig(model_id="test", max_tool_iterations=1),
+            history=[],
+        )
+    ]
+
+    text = "".join(str(event.data) for event in events if event.event_type == "text_delta")
+    assert text == "The deck is ready."
+    assert all(event.event_type != "run_error" for event in events)
+    assert any(event.event_type == "run_finished" for event in events)
+
+
+@pytest.mark.asyncio
 async def test_post_tool_http_400_recovers_without_replaying_tool() -> None:
     from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
 
@@ -1504,7 +1627,7 @@ async def test_failed_forced_synthesis_never_emits_internal_success() -> None:
     assert model._call_index == 3
     assert "first unsafe" not in text
     assert "second unsafe" not in text
-    assert "working narrative" in text
+    assert "working narrative" not in text
     assert [event.event_type for event in events][-1] == "run_error"
     assert events[-1].data["fallback_delivered"] is True
     assert "I ran into trouble composing a final answer" in text
@@ -2623,6 +2746,87 @@ async def test_streaming_first_usage_preserves_provider_cache_metrics() -> None:
 
 
 @pytest.mark.asyncio
+async def test_streaming_first_usage_accumulates_across_model_calls() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    tool_calls = [
+        {
+            "id": "tc_usage",
+            "function": {"name": "read_data", "arguments": "{}"},
+        }
+    ]
+    model = FakeModelRegistry(
+        scripted=[
+            [
+                {
+                    "tool_calls": tool_calls,
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 10,
+                        "total_tokens": 110,
+                        "prompt_tokens_details": {"cached_tokens": 40},
+                        "cache_read_input_tokens": 30,
+                        "cache_creation_input_tokens": 20,
+                    },
+                }
+            ],
+            [
+                {
+                    "content": "Done",
+                    "usage": {
+                        "input_tokens": 60,
+                        "output_tokens": 7,
+                        "total_tokens": 67,
+                        "cached_input_tokens": 15,
+                        "cache_read_input_tokens": 15,
+                        "cache_creation_input_tokens": 5,
+                    },
+                }
+            ],
+        ]
+    )
+    tool_invoker = FakeToolInvoker(
+        results_by_name={
+            "read_data": {
+                "success": True,
+                "result": "ok",
+                "duration_ms": 25.0,
+            }
+        }
+    )
+    loop = AgentLoop(
+        model_registry=model,
+        tool_invoker=tool_invoker,  # type: ignore[arg-type]
+    )
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="usage-two-model-calls",
+            user=MockUserContext(user_id="u1"),  # type: ignore[arg-type]
+            message="Read then answer",
+            config=AgentLoopConfig(model_id="test", max_tool_iterations=3),
+            history=[],
+        )
+    ]
+
+    run_finished = next(event.data for event in events if event.event_type == "run_finished")
+    usage = run_finished["metadata"]["usage"]
+    assert model._call_index == 2
+    assert usage == {
+        "input_tokens": 160,
+        "output_tokens": 17,
+        "total_tokens": 177,
+        "cached_input_tokens": 55,
+        "cache_read_input_tokens": 45,
+        "cache_creation_input_tokens": 25,
+    }
+    tool_finished = next(event.data for event in events if event.event_type == "tool_call_end")
+    assert tool_finished["duration_ms"] == 25.0
+    assert run_finished["terminal_envelope"]["duration_ms"] >= 0
+
+
+@pytest.mark.asyncio
 async def test_streaming_first_system_prompt_keeps_client_prompt_out_of_system() -> None:
     """
     Regression: frontend may send a style-only system_prompt.
@@ -2788,7 +2992,8 @@ async def test_streaming_first_tool_artifact_semantic_events() -> None:
     )
 
     # Tool returns output_files so AgentLoop should persist and emit artifact_created.
-    png_bytes = b"hello"
+    # Larger than the canonical 64 KiB SSE ceiling once base64 encoded.
+    png_bytes = b"x" * 70_000
     output_files = [
         {
             "filename": "x.png",
@@ -2862,6 +3067,13 @@ async def test_streaming_first_tool_artifact_semantic_events() -> None:
     # Semantic image events for UI
     assert "image_generation_start" in got
     assert "image_generation_result" in got
+    image_result = next(
+        data for event_type, data in got_events if event_type == "image_generation_result"
+    )
+    assert image_result["success"] is True
+    assert image_result["output_files"][0]["content_base64"] == ""
+    assert image_result["output_files"][0]["artifact_id"] == "art_123"
+    assert image_result["output_files"][0]["download_url"].endswith("/art_123")
 
     # Artifact persistence + UI event
     assert "artifact_created" in got
@@ -3082,7 +3294,6 @@ async def test_streaming_first_invalid_approval_arguments_hash_fails_closed(
 @pytest.mark.parametrize(
     "tamper_case",
     [
-        "missing",
         "malformed",
         "unknown_schema",
         "boolean_counter",
@@ -3118,9 +3329,7 @@ async def test_approval_resume_rejects_invalid_run_budget_checkpoint(
     snapshot = approval_checkpoint.resume_payload["run_budget"]
     assert isinstance(snapshot, dict)
 
-    if tamper_case == "missing":
-        approval_checkpoint.resume_payload.pop("run_budget")
-    elif tamper_case == "malformed":
+    if tamper_case == "malformed":
         approval_checkpoint.resume_payload["run_budget"] = []
     elif tamper_case == "unknown_schema":
         snapshot["schema_version"] = "assistant-run-budget/v999"
@@ -3183,6 +3392,68 @@ async def test_approval_resume_rejects_invalid_run_budget_checkpoint(
     assert events[0].data["terminal_envelope"]["turn_state"]["terminal"] is True
     assert model._call_index == 0
     assert invoker.invocation_count == 0
+
+
+@pytest.mark.asyncio
+async def test_approval_resume_reconstructs_bounded_budget_for_legacy_checkpoint() -> None:
+    """A pre-budget approval checkpoint must use the documented reserve-once path."""
+
+    from assistant_service.core.agent.agent_loop import AgentLoopConfig
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+
+    invoker = FakeToolInvoker(results_by_name={"generate_image": {"success": True}})
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
+    writer = RecordingTraceWriter()
+    user = MockUserContext(user_id="u1")
+    run_id, approval_id = await _create_pending_approval(
+        invoker=invoker,
+        gateway=gateway,
+        trace_writer=writer,
+        user=user,
+    )
+    approval_checkpoint = next(
+        checkpoint
+        for checkpoint in gateway._checkpoints[run_id]
+        if checkpoint.phase == "approval_pending"
+    )
+    approval_checkpoint.resume_payload.pop("run_budget")
+
+    approved = await gateway.approve(
+        approval_id=approval_id,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        approved=True,
+        approver_user_id=user.user_id,
+    )
+    assert approved is not None
+
+    model = FakeModelRegistry(scripted=[[{"content": "done", "finish_reason": "stop"}]])
+    loop = _confirmation_loop(
+        model=model,
+        invoker=invoker,
+        gateway=gateway,
+        trace_writer=None,
+    )
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="s1",
+            user=user,  # type: ignore[arg-type]
+            message="Continue",
+            config=AgentLoopConfig(
+                model_id="test",
+                max_tool_iterations=2,
+                resume_run_id=run_id,
+                resume_approval_id=approval_id,
+            ),
+            history=[],
+        )
+    ]
+
+    assert invoker.invocation_count == 1
+    assert model._call_index == 1
+    assert any(event.event_type == "run_finished" for event in events)
+    assert all(event.event_type != "run_budget_restore_failed" for event in events)
 
 
 @pytest.mark.asyncio
@@ -3613,7 +3884,7 @@ async def test_approval_resume_without_trace_writer_keeps_db_less_contract() -> 
     )
     assert "run_finished" in event_types
     assert invoker.invocation_count == 1
-    assert loop.model_registry.thinking_history == ["off"]
+    assert loop.model_registry.thinking_history == ["low"]
     collector = TurnEventCollector()
     for event in events:
         collector.accept(event)

@@ -33,13 +33,14 @@ and don't require Postgres.
 from __future__ import annotations
 
 import asyncio
+import copy
+import json
 
 import pytest
-
-from src.core.auth.user_resolver import UserContext
 from assistant_service.core.tools.quiz_tool import QuizGeneratorExecutor
 from assistant_service.core.tools.tool_registry import ToolCallRequest
 
+from src.core.auth.user_resolver import UserContext
 
 # Standard 4-option multiple choice used by most cases.
 MC_OPTIONS = [
@@ -93,7 +94,8 @@ def _build_question(
 
 
 def _run(questions: list[dict]):
-    executor = QuizGeneratorExecutor(database=_StubDB())
+    database = _StubDB()
+    executor = QuizGeneratorExecutor(database=database)
     args = {
         "title": "T",
         "difficulty": "easy",
@@ -106,7 +108,15 @@ def _run(questions: list[dict]):
         user=_user(),
     )
     result = asyncio.run(executor.execute(req))
-    return result, args["questions"]
+    # Return the normalized persisted shape without relying on the executor
+    # mutating caller-owned arguments (which would invalidate durable command
+    # acknowledgement hashes).
+    persisted = copy.deepcopy(args["questions"])
+    if result.success and database.question_rows:
+        for question, row in zip(persisted, database.question_rows[-1], strict=True):
+            question["options"] = json.loads(row[5])
+            question["correct_answer"] = json.loads(row[6])
+    return result, persisted
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +301,35 @@ def test_valid_quiz_returns_quiz_data_metadata():
     for q in qd["questions"]:
         labels = [o["label"] for o in q["options"]]
         assert labels == ["A", "B", "C", "D"]
+
+
+def test_executor_does_not_mutate_tool_call_arguments():
+    """Durable command acknowledgement hashes the original arguments.
+
+    Normalization may change the executor's working copy, but it must not
+    change ``request.arguments`` after the command has been recorded.
+    """
+    executor = QuizGeneratorExecutor(database=_StubDB())
+    args = {
+        "title": "T",
+        "difficulty": "easy",
+        "questions": [
+            _build_question(1, ["Self-attention"]),
+            _build_question(2, ["C"]),
+        ],
+    }
+    original = copy.deepcopy(args)
+    request = ToolCallRequest(
+        call_id="c-hash-stability",
+        tool_name="generate_quiz",
+        arguments=args,
+        user=_user(),
+    )
+
+    result = asyncio.run(executor.execute(request))
+
+    assert result.success is True
+    assert request.arguments == original
 
 
 # ---------------------------------------------------------------------------

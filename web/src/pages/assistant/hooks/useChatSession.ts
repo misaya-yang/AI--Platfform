@@ -65,6 +65,7 @@ import { getStyleSystemPrompt } from "../styles";
 import type { Artifact } from "@/components/artifacts";
 import {
   finishChatStreamTrace,
+  markChatStreamFirstTextToken,
   markChatStreamFirstToken,
   startChatStreamTrace,
   trackChatHistoryRestored,
@@ -597,7 +598,7 @@ function taskStatusToProcessStatus(
 
 function finalizeProcessSummary(
   summary: ProcessSummaryState | undefined,
-  status: "succeeded" | "failed",
+  status: "succeeded" | "failed" | "cancelled",
   finishedAtMs: number,
   keepFailed = false
 ): ProcessSummaryState | undefined {
@@ -617,6 +618,14 @@ function finalizeProcessSummary(
       status: "failed",
       collapsed: false,
       isErrorExpanded: true,
+      totalDurationMs,
+    };
+  }
+
+  if (finalStatus === "cancelled") {
+    return {
+      ...summary,
+      status: "cancelled",
       totalDurationMs,
     };
   }
@@ -684,7 +693,12 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
   });
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const cancelRequestedRef = useRef(false);
   const sendInFlightRef = useRef(false);
+  // Monotonic ownership token for every stream attempt. Session switches can
+  // invalidate an in-flight createSession/fetch even before an AbortController
+  // exists, and stale finally blocks must never clear a newer stream's refs.
+  const streamEpochRef = useRef(0);
   const lastStreamConfigRef = useRef<{
     config: SessionConfig;
     selectedDatasets: string[];
@@ -702,6 +716,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
 
   useEffect(() => {
     return () => {
+      streamEpochRef.current += 1;
       abortControllerRef.current?.abort();
     };
   }, []);
@@ -845,7 +860,18 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
   }, []);
 
   // Session Actions
+  const abandonActiveStream = useCallback(() => {
+    streamEpochRef.current += 1;
+    cancelRequestedRef.current = true;
+    const controller = abortControllerRef.current;
+    abortControllerRef.current = null;
+    sendInFlightRef.current = false;
+    setIsStreaming(false);
+    controller?.abort();
+  }, []);
+
   const handleNewChat = useCallback(() => {
+    abandonActiveStream();
     setMessages([]);
     setActiveSessionId(undefined);  // 清除 AI助手 的活动会话
     setHistoryRestoreState("idle");
@@ -864,7 +890,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       status: "idle",
       outputFiles: [],
     });
-  }, [setActiveSessionId]);
+  }, [abandonActiveStream, setActiveSessionId]);
 
   const handleDeleteSession = useCallback(async (sessionId: string) => {
     try {
@@ -887,6 +913,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       return;
     }
 
+    abandonActiveStream();
     try {
       setHistoryRestoreState("loading");
       setHistoryRestoreError(null);
@@ -979,11 +1006,22 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         reason,
       });
     }
-  }, [activeSessionId, historyRestoreState, messages.length, setActiveSessionId]);
+  }, [
+    abandonActiveStream,
+    activeSessionId,
+    historyRestoreState,
+    messages.length,
+    setActiveSessionId,
+  ]);
 
   // Streaming Logic
   const stopStreaming = useCallback(() => {
-    abortControllerRef.current?.abort();
+    const controller = abortControllerRef.current;
+    if (!controller) return;
+    // Preserve the user's terminal intent even when a proxy or mocked
+    // transport does not settle its fetch immediately after abort().
+    cancelRequestedRef.current = true;
+    controller.abort();
   }, []);
 
   const sendMessage = useCallback(async (params: {
@@ -1034,6 +1072,10 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     if (!isResume && !messageContent.trim() && attachments.length === 0) {
       return;
     }
+    const interactionStartedAtMs = performance.now();
+    const streamEpoch = streamEpochRef.current + 1;
+    streamEpochRef.current = streamEpoch;
+    const isCurrentStream = () => streamEpochRef.current === streamEpoch;
     sendInFlightRef.current = true;
 
     // 1. Setup UI for new message
@@ -1095,6 +1137,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
 
     // 2. Create/Update Session
     let sessionId = activeSessionId;
+    let shouldRefreshSessionsInBackground = false;
     if (!sessionId) {
       try {
         const sessionTitle = messageContent.slice(0, 50);
@@ -1104,11 +1147,9 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
           config,
         });
         sessionId = session_id;
+        if (!isCurrentStream()) return;
         setActiveSessionId(sessionId);
-        
-        // 更新会话列表和标题缓存
-        const updatedSessions = await listSessions({ service_id: "__builtin_assistant__", limit: 100 });
-        setSessions(updatedSessions);
+        shouldRefreshSessionsInBackground = true;
         setAssistantLocalTitles((prev: Record<string, string>) => ({
           ...prev,
           [sessionId!]: sessionTitle,
@@ -1119,6 +1160,8 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     } else {
       updateSession(sessionId, { config }).catch(console.error);
     }
+
+    if (!isCurrentStream()) return;
 
     let persistedRunId = resumeRunId;
     const persistAssistantRunId = async (value: unknown) => {
@@ -1140,12 +1183,18 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     };
 
     // 3. Start Stream
-    abortControllerRef.current = new AbortController();
+    cancelRequestedRef.current = false;
+    const streamAbortController = new AbortController();
+    abortControllerRef.current = streamAbortController;
     const startTime = Date.now();
-    const streamTrace = startChatStreamTrace("assistant", {
-      sessionId: sessionId || null,
-      modelId: config.selected_model || null,
-    });
+    const streamTrace = startChatStreamTrace(
+      "assistant",
+      {
+        sessionId: sessionId || null,
+        modelId: config.selected_model || null,
+      },
+      { interactionStartedAtMs }
+    );
     let streamTraceClosed = false;
     const closeStreamTrace = (
       outcome: "completed" | "cancelled" | "failed",
@@ -1155,29 +1204,63 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       streamTraceClosed = true;
       finishChatStreamTrace(streamTrace, outcome, payload);
     };
+    const refreshSessionsInBackground = () => {
+      if (!shouldRefreshSessionsInBackground) return;
+      shouldRefreshSessionsInBackground = false;
+      void listSessions({ service_id: "__builtin_assistant__", limit: 100 })
+        .then(setSessions)
+        .catch((error) => {
+          console.warn("Assistant session list refresh failed", error);
+        });
+    };
     let streamTurnState = createStreamTurnState(startTime);
     const streamReducerContext = createStreamReducerContext();
     let firstTokenMs: number | undefined;
+    let firstTextTokenMs: number | undefined;
     let content = "";
     const contexts: RetrievedContext[] = [];
     let webSearchResults: WebSearchResult[] = [];
     let usage: any = {};
     let durationMs: number | undefined;
+    const interruptionNotice = t(
+      "assistant.streamInterrupted",
+      "The response stream was interrupted. The generated content above was preserved; please retry."
+    );
+    const failVisibleStream = (message: string, timestampMs: number) => {
+      streamTurnState = failStreamTurn(streamTurnState, message, timestampMs);
+      if (!streamTurnState.content.includes(interruptionNotice)) {
+        streamTurnState = {
+          ...streamTurnState,
+          content: streamTurnState.content.trimEnd()
+            ? `${streamTurnState.content.trimEnd()}\n\n> ⚠️ ${interruptionNotice}`
+            : `⚠️ ${interruptionNotice}`,
+        };
+      }
+    };
     const markFirstResponse = (timestampMs: number) => {
       if (firstTokenMs === undefined) {
         firstTokenMs = timestampMs - startTime;
+        markChatStreamFirstToken(streamTrace, firstTokenMs);
+      }
+    };
+    const markFirstTextResponse = (timestampMs: number) => {
+      if (firstTextTokenMs === undefined) {
+        firstTextTokenMs = timestampMs - startTime;
+        markChatStreamFirstTextToken(streamTrace, firstTextTokenMs);
       }
     };
 
     // Helper to update search status
     let searchStatus = [...initialSearchStatus];
     const updateSearchStatus = (type: "kb" | "web", updates: Partial<SearchStatusItem>) => {
+      if (!isCurrentStream()) return;
       searchStatus = searchStatus.map((s) => s.type === type ? { ...s, ...updates } : s);
       // Ensure firstTokenMs is passed from the local scope to the state update
       setMessages((prev) => prev.map((m) => m.id === assistantMessage.id ? { ...m, searchStatus, firstTokenMs } : m));
     };
 
     const updateAssistantMessage = (updater: (m: ChatMessageType) => ChatMessageType) => {
+      if (!isCurrentStream()) return;
       setMessages((prev) =>
         prev.map((m) => (m.id === assistantMessage.id ? updater(m) : m))
       );
@@ -1191,6 +1274,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     const flushTurnStateToMessage = () => {
       if (!pendingSyncTurnState) return;
       pendingSyncTurnState = false;
+      if (!isCurrentStream()) return;
 
       content = streamTurnState.content;
       firstTokenMs = streamTurnState.firstTokenMs ?? firstTokenMs;
@@ -1253,7 +1337,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         kb_top_k: 5,
         kb_include_images: false,
         web_search_enabled: config.web_search_enabled,
-        thinking_level: config.thinking_level || "off",
+        thinking_level: config.thinking_level || "low",
         web_search_max_results: 5,
         file_paths: filePaths.length > 0 ? filePaths : undefined,
         execution_profile: config.execution_profile || "safe",
@@ -1263,9 +1347,19 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         local_node_grant_ids: localNodeEnabled ? localNodeBinding?.grantIds : undefined,
         resume_run_id: resumeRunId,
         resume_approval_id: resumeApprovalId,
-      }, abortControllerRef.current.signal);
+      }, streamAbortController.signal);
 
       for await (const event of stream) {
+        // The chat request is active before this background sidebar refresh.
+        // A slow session-list query must never delay the first visible response.
+        refreshSessionsInBackground();
+        if (
+          !isCurrentStream() ||
+          cancelRequestedRef.current ||
+          streamAbortController.signal.aborted
+        ) {
+          break;
+        }
         const now = Date.now();
         const eventPayload =
           typeof event.data === "object" && event.data !== null
@@ -1341,8 +1435,17 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
             // Immediate response received - stream connection established
             break;
 
-          case "text_delta":
+          case "text_delta": {
+            const textDelta =
+              typeof event.data === "string"
+                ? event.data
+                : (event.data as { content?: string })?.content || "";
+            if (textDelta) {
+              markFirstResponse(now);
+              markFirstTextResponse(now);
+            }
             break;
+          }
 
           case SSEEventType.THINKING_START:
           case "thinking_start": {
@@ -1365,9 +1468,11 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
               ? event.data
               : (event.data as { content?: string })?.content || "";
             if (thinkingDelta) {
+              markFirstResponse(now);
               updateAssistantMessage(m => ({
                 ...m,
                 streamingThinkingContent: (m.streamingThinkingContent || "") + thinkingDelta,
+                firstTokenMs,
               }));
             }
             break;
@@ -1627,6 +1732,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
               };
             });
             await persistAssistantRunId(approvalData.run_id);
+            if (!isCurrentStream()) return;
             break;
 
           case SSEEventType.RAG_RETRIEVAL_STARTED:
@@ -1742,11 +1848,14 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
               ),
             }));
             await persistAssistantRunId(runStartedData?.run_id);
+            if (!isCurrentStream()) return;
             break;
 
           case SSEEventType.RUN_FINISHED:
             // Agent execution completed
             // Working memory stays visible for user reference
+            streamTurnState = completeStreamTurn(streamTurnState, now);
+            syncTurnStateToMessage();
             updateAssistantMessage((m) => {
               const prev = m.processSummary ?? initProcessSummary(undefined, now);
               return {
@@ -1762,10 +1871,19 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
 
           case SSEEventType.RUN_ERROR:
             // Agent execution failed
-            const runErrorData = event.data as { error: string; run_id?: string };
+            const runErrorData = event.data as {
+              error?: string;
+              message?: string;
+              run_id?: string;
+            };
+            failVisibleStream(
+              runErrorData.error || runErrorData.message || "assistant_run_failed",
+              now
+            );
+            syncTurnStateToMessage();
             setWorkingMemory((prev) => prev ? {
               ...prev,
-              error: runErrorData.error,
+              error: runErrorData.error || runErrorData.message || "assistant_run_failed",
             } : null);
             updateAssistantMessage((m) => {
               const prev = m.processSummary ?? initProcessSummary(runErrorData.run_id, now);
@@ -1782,6 +1900,12 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
               };
             });
             await persistAssistantRunId(runErrorData.run_id);
+            if (!isCurrentStream()) return;
+            break;
+
+          case SSEEventType.CANCELLED:
+            streamTurnState = cancelStreamTurn(streamTurnState, now);
+            syncTurnStateToMessage();
             break;
 
           // === AG-UI Step Events (Manus-style) ===
@@ -2520,32 +2644,15 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
             break;
             
           case "done":
-            streamTurnState = completeStreamTurn(streamTurnState, now);
             if (event.data && typeof event.data === "object") {
               streamTurnState = applyUsageToTurnState(
                 streamTurnState,
                 event.data as Record<string, unknown>
               );
             }
-            // Also flip processSummary to "succeeded" here so the
-            // "Preparing response" indicator always clears on stream end —
-            // decouples the UI from `run_finished` which may arrive late
-            // (or be buffered behind the generator's finally block).
-            updateAssistantMessage((m) => {
-              if (!m.processSummary) return m;
-              if (m.processSummary.status === "failed") return m;
-              const startedAt = m.processSummary.startedAt;
-              return {
-                ...m,
-                processSummary: {
-                  ...m.processSummary,
-                  status: "succeeded",
-                  totalDurationMs: startedAt
-                    ? now - startedAt
-                    : m.processSummary.totalDurationMs,
-                },
-              };
-            });
+            // `done` closes model transport output only. The canonical AgentLoop
+            // can still fail during durable finalization, so only run_finished
+            // may mark the turn successful.
             syncTurnStateToMessage();
             break;
             
@@ -2553,26 +2660,10 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
             const errData = event.data as any;
             const streamErrorMessage =
               errData?.message || "Unknown error";
-            streamTurnState = failStreamTurn(
-              streamTurnState,
-              streamErrorMessage,
-              now
-            );
+            failVisibleStream(streamErrorMessage, now);
             // A provider can disconnect after already streaming useful text.
             // Keep that partial answer, but make the terminal failure visible
             // instead of leaving a sentence cut off with no explanation.
-            const interruptionNotice = t(
-              "assistant.streamInterrupted",
-              "The response stream was interrupted. The generated content above was preserved; please retry."
-            );
-            if (!streamTurnState.content.includes(interruptionNotice)) {
-              streamTurnState = {
-                ...streamTurnState,
-                content: streamTurnState.content.trimEnd()
-                  ? `${streamTurnState.content.trimEnd()}\n\n> ⚠️ ${interruptionNotice}`
-                  : `⚠️ ${interruptionNotice}`,
-              };
-            }
             updateAssistantMessage((m) => ({
               ...m,
               processSummary: finalizeProcessSummary(
@@ -2586,6 +2677,20 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         }
       }
 
+      if (!isCurrentStream()) {
+        closeStreamTrace("cancelled", { reason: "session_epoch_changed" });
+        return;
+      }
+      const streamFinishedAtMs = Date.now();
+      if (cancelRequestedRef.current || streamAbortController.signal.aborted) {
+        streamTurnState = cancelStreamTurn(streamTurnState, streamFinishedAtMs);
+      } else if (
+        streamTurnState.status === "idle" ||
+        streamTurnState.status === "streaming"
+      ) {
+        failVisibleStream("stream_ended_without_terminal", streamFinishedAtMs);
+      }
+
       // Cancel pending RAF and flush before final update
       if (syncRafId !== null) { cancelAnimationFrame(syncRafId); syncRafId = null; }
       flushTurnStateToMessage();
@@ -2597,6 +2702,12 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       firstTokenMs = streamTurnState.firstTokenMs ?? firstTokenMs;
       durationMs = streamTurnState.durationMs ?? durationMs;
       usage = mergeUsageWithTurnState(usage, streamTurnState);
+      const processSummaryStatus =
+        streamTurnState.status === "failed"
+          ? "failed"
+          : streamTurnState.status === "cancelled"
+            ? "cancelled"
+            : "succeeded";
       setMessages(prev => prev.map(m => m.id === assistantMessage.id ? {
         ...m,
         content,
@@ -2606,6 +2717,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         usage,
         durationMs,
         firstTokenMs,
+        firstTextTokenMs,
         isStreaming: false,
         isThinkingStreaming: false,
         streamingThinkingContent: undefined,
@@ -2616,7 +2728,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         toolCalls: mapStreamToolCallsToAssistant(streamTurnState),
         processSummary: finalizeProcessSummary(
           m.processSummary,
-          "succeeded",
+          processSummaryStatus,
           finishedAtMs,
           true
         ),
@@ -2630,6 +2742,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       closeStreamTrace(finalOutcome, {
         durationMs,
         firstTokenMs,
+        firstTextTokenMs,
         totalTokens:
           typeof usage?.total_tokens === "number" ? usage.total_tokens : undefined,
         toolCalls: streamTurnState.toolCalls.length,
@@ -2638,24 +2751,28 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
 
     } catch (error: any) {
       if (syncRafId !== null) { cancelAnimationFrame(syncRafId); syncRafId = null; }
-      if (error.name !== "AbortError") {
+      if (!isCurrentStream()) {
+        closeStreamTrace("cancelled", { reason: "session_epoch_changed" });
+        return;
+      }
+      const userCancelled =
+        cancelRequestedRef.current ||
+        (error.name === "AbortError" && streamAbortController.signal.aborted === true);
+      if (!userCancelled) {
         const finishedAtMs = Date.now();
-        streamTurnState = failStreamTurn(
-          streamTurnState,
-          error.message || "Unknown error",
-          finishedAtMs
-        );
+        failVisibleStream(error.message || "Unknown error", finishedAtMs);
         setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { 
           ...m,
-          content: `**Error:** ${streamTurnState.error || error.message}`,
+          content: streamTurnState.content,
           parts: buildTextParts(
             assistantMessage.id,
-            `**Error:** ${streamTurnState.error || error.message}`,
+            streamTurnState.content,
             createdAt
           ),
           isStreaming: false,
           status: "failed",
           firstTokenMs: streamTurnState.firstTokenMs ?? firstTokenMs,
+          firstTextTokenMs,
           toolCalls: mapStreamToolCallsToAssistant(streamTurnState),
           processSummary: finalizeProcessSummary(
             m.processSummary,
@@ -2676,10 +2793,11 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
           isStreaming: false,
           status: "cancelled",
           firstTokenMs: streamTurnState.firstTokenMs ?? firstTokenMs,
+          firstTextTokenMs,
           toolCalls: mapStreamToolCallsToAssistant(streamTurnState),
           processSummary: finalizeProcessSummary(
             m.processSummary,
-            "succeeded",
+            "cancelled",
             finishedAtMs,
             true
           ),
@@ -2687,12 +2805,20 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         closeStreamTrace("cancelled", { reason: "abort_signal" });
       }
     } finally {
+      if (isCurrentStream()) {
+        refreshSessionsInBackground();
+      }
       if (!streamTraceClosed) {
         closeStreamTrace("cancelled", { reason: "finalized_without_outcome" });
       }
-      setIsStreaming(false);
-      abortControllerRef.current = null;
-      sendInFlightRef.current = false;
+      if (isCurrentStream()) {
+        setIsStreaming(false);
+        if (abortControllerRef.current === streamAbortController) {
+          abortControllerRef.current = null;
+        }
+        cancelRequestedRef.current = false;
+        sendInFlightRef.current = false;
+      }
     }
   }, [activeSessionId, messages, setActiveSessionId, setAssistantLocalTitles, t, workingMemory]);
 

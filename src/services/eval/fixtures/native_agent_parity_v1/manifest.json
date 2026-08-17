@@ -4,6 +4,9 @@
   "model_id": "qwen3.7-plus",
   "temperature": 0.0,
   "max_tokens": 16384,
+  "thinking_level": "low",
+  "execution_profile": "balanced",
+  "max_approval_rounds": 8,
   "systems": ["ai_platform", "hermes", "openclaw"],
   "tasks": [
     {

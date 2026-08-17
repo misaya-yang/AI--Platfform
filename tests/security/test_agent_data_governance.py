@@ -514,7 +514,7 @@ async def test_retention_principal_inventory_uses_frozen_session_update_cutoff()
 
     class _PrincipalConnection:
         async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
-            assert "FROM sessions" in sql
+            assert "FROM assistant.sessions" in sql
             assert "updated_at <= $3" in sql
             assert args == ("tenant-a", AGENT_ID, cutoff)
             return [

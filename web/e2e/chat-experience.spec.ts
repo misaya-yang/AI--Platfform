@@ -12,6 +12,13 @@ import {
 } from "./support/helpers";
 import { buildTimeline } from "../src/pages/assistant/components/buildTimeline";
 import type { ChatMessage as AssistantChatMessage } from "../src/pages/assistant/types";
+import {
+  cancelStreamTurn,
+  completeStreamTurn,
+  createStreamTurnState,
+  failStreamTurn,
+} from "../src/features/chat/stream/reducer";
+import { splitStreamingMarkdownBlocks } from "../src/components/streamingMarkdown";
 
 const ASSISTANT_COMPOSER_ID = "assistant-chat-composer";
 const PLAYGROUND_COMPOSER_ID = "playground-chat-composer";
@@ -61,6 +68,45 @@ test("assistant timeline tolerates transient tool entries without names", () => 
     "External tool",
     "External tool",
   ]);
+});
+
+test("assistant stream terminal state is first-wins", () => {
+  const completed = completeStreamTurn(createStreamTurnState(0), 10);
+  expect(cancelStreamTurn(completed, 20).status).toBe("completed");
+  expect(failStreamTurn(completed, "late transport error", 20).status).toBe(
+    "completed"
+  );
+
+  const failed = failStreamTurn(createStreamTurnState(0), "provider failed", 10);
+  expect(cancelStreamTurn(failed, 20).status).toBe("failed");
+  expect(completeStreamTurn(failed, 20).status).toBe("failed");
+});
+
+test("streaming markdown splits completed blocks without breaking code or math", () => {
+  const blocks = splitStreamingMarkdownBlocks(
+    "Intro\n\n```ts\nconst x = 1;\n\nconst y = 2;\n```\n\n$$\na + b\n\nc + d\n$$\n\nTail"
+  );
+
+  expect(blocks).toHaveLength(4);
+  expect(blocks[1]).toContain("const y = 2");
+  expect(blocks[2]).toContain("c + d");
+  expect(blocks[3]).toBe("Tail");
+});
+
+test("streaming markdown keeps loose list continuations in one parse block", () => {
+  const blocks = splitStreamingMarkdownBlocks(
+    "Intro\n\n1. first paragraph\n\n   continuation of first item\n\n2. second item\n\nTail"
+  );
+
+  expect(blocks).toHaveLength(3);
+  expect(blocks[1]).toContain("continuation of first item");
+  expect(blocks[1]).toContain("2. second item");
+});
+
+test("streaming markdown keeps reference syntax in one parse block", () => {
+  const text = "See [the guide][docs].\n\nMore context.\n\n[docs]: https://example.com";
+
+  expect(splitStreamingMarkdownBlocks(text)).toEqual([text]);
 });
 
 type MockAssistantSession = {
@@ -168,6 +214,8 @@ async function installAssistantHarness(
     preloadedSessions?: MockAssistantSession[];
     historyBySessionId?: Record<string, MockAssistantMessage[]>;
     artifactsBySessionId?: Record<string, MockAssistantArtifact[]>;
+    createSessionDelayMs?: number;
+    postCreateSessionListDelayMs?: number;
     onCreateShare?: (
       sessionId: string,
       payload: { include_artifacts?: boolean }
@@ -223,6 +271,13 @@ async function installAssistantHarness(
     await route.fulfill(jsonResponse({ devices: [] }));
   });
 
+  // Keep mocked Assistant tests independent from a running Gateway.  Without
+  // this route, a live container can reject the synthetic E2E bearer token and
+  // the global auth interceptor redirects the page to /login mid-assertion.
+  await page.route("**/api/v1/connectors/available", async (route) => {
+    await route.fulfill(jsonResponse([]));
+  });
+
   await page.route("**/api/v1/assistant/sessions/*/artifacts", async (route) => {
     const sessionId = pathSegmentAfter(route.request().url(), "sessions");
     const artifacts = artifactsBySessionId[sessionId] || [];
@@ -249,6 +304,11 @@ async function installAssistantHarness(
   });
 
   const listAssistantSessions = async (route: Route) => {
+    if (sessionCounter > 0 && options.postCreateSessionListDelayMs) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, options.postCreateSessionListDelayMs)
+      );
+    }
     await route.fulfill(jsonResponse(Array.from(sessions.values())));
   };
 
@@ -275,6 +335,9 @@ async function installAssistantHarness(
     const sessionId = `e2e-assistant-session-${++sessionCounter}`;
     const session = buildMockAssistantSession(sessionId, payload?.metadata, payload?.config);
     sessions.set(sessionId, session);
+    if (options.createSessionDelayMs) {
+      await new Promise((resolve) => setTimeout(resolve, options.createSessionDelayMs));
+    }
     await route.fulfill(jsonResponse({ session_id: sessionId }));
   });
 
@@ -492,6 +555,7 @@ async function selectFirstPlaygroundService(page: Page) {
 
 test("assistant stream path keeps a11y and performance budget", async ({ page }) => {
   await ensureAuthenticatedPage(page, "/assistant");
+  await installTelemetryCollector(page);
   const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
   await expect(composer).toBeVisible();
   await expect(composer).toBeEnabled();
@@ -509,7 +573,19 @@ test("assistant stream path keeps a11y and performance budget", async ({ page })
   await composer.press("Enter");
   await expect(page.getByText(prompt)).toBeVisible();
 
-  await expect(page.locator('[role="log"]')).toBeVisible();
+  const log = page.locator('[role="log"]');
+  await expect(log).toBeVisible();
+  await expect
+    .poll(
+      async () => {
+        const events = await readTelemetryEvents(page);
+        return events.find((event) => event.event === "chat.stream.finished")?.payload?.outcome;
+      },
+      { timeout: 120_000 }
+    )
+    .toBe("completed");
+  await expect(log).not.toContainText("The response stream was interrupted");
+  await expect(composer).toBeEnabled();
   await assertInpBudget(page);
 });
 
@@ -754,6 +830,9 @@ test("assistant emits stream telemetry lifecycle on mocked stream", async ({ pag
   await installAssistantHarness(page, async (route) => {
     const body = toSseBody([
       { event_type: "started", data: { request_id: "e2e-mock" } },
+      { event_type: "thinking_start", data: {} },
+      { event_type: "thinking_delta", data: "Checking the request." },
+      { event_type: "thinking_end", data: { content: "Checking the request." } },
       { event_type: "text_delta", data: "Mocked " },
       {
         event_type: "tool_call_start",
@@ -774,6 +853,7 @@ test("assistant emits stream telemetry lifecycle on mocked stream", async ({ pag
       },
       { event_type: "text_delta", data: "stream response" },
       { event_type: "done", data: { duration_ms: 120, total_tokens: 42 } },
+      { event_type: "run_finished", data: { run_id: "run-e2e-mock" } },
     ]);
     await route.fulfill({
       status: 200,
@@ -795,10 +875,241 @@ test("assistant emits stream telemetry lifecycle on mocked stream", async ({ pag
   const names = events.map((event) => event.event);
   expect(names).toContain("chat.stream.started");
   expect(names).toContain("chat.stream.first_token");
+  expect(names).toContain("chat.stream.first_text_token");
   expect(names).toContain("chat.stream.finished");
+
+  const firstToken = events.find((event) => event.event === "chat.stream.first_token");
+  const firstTextToken = events.find(
+    (event) => event.event === "chat.stream.first_text_token"
+  );
+  expect(Number(firstTextToken?.payload?.firstTextTokenMs)).toBeGreaterThanOrEqual(
+    Number(firstToken?.payload?.firstTokenMs)
+  );
 
   const finishedEvent = events.find((event) => event.event === "chat.stream.finished");
   expect(finishedEvent?.payload?.outcome).toBe("completed");
+});
+
+test("assistant new-session stream is not blocked by delayed sidebar refresh", async ({ page }) => {
+  test.setTimeout(20_000);
+  const createSessionDelayMs = 250;
+  const sessionListDelayMs = 5_000;
+  let initialListResponses = 0;
+  let sessionCreateRequested = false;
+  let chatRequestedAt: number | null = null;
+  let postCreateListStartedAt: number | null = null;
+  let postCreateListFinishedAt: number | null = null;
+
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/v1/sessions" && request.method() === "POST") {
+      sessionCreateRequested = true;
+    } else if (
+      path === "/api/v1/sessions" &&
+      request.method() === "GET" &&
+      sessionCreateRequested
+    ) {
+      postCreateListStartedAt ??= Date.now();
+    } else if (path === "/api/v1/assistant/chat/stream") {
+      chatRequestedAt ??= Date.now();
+    }
+  });
+  page.on("response", (response) => {
+    const request = response.request();
+    const path = new URL(request.url()).pathname;
+    if (path !== "/api/v1/sessions" || request.method() !== "GET") return;
+    if (sessionCreateRequested) {
+      postCreateListFinishedAt ??= Date.now();
+    } else {
+      initialListResponses += 1;
+    }
+  });
+
+  await seedClientPrefs(page, { locale: "en-US" });
+  await installClientAuth(page, {
+    user_id: "e2e-assistant-session-latency-user",
+    email: "assistant-session-latency@example.com",
+    display_name: "Assistant Session Latency",
+  });
+  await installAssistantHarness(
+    page,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: toSseBody([
+          { event_type: "started", data: { request_id: "session-latency-e2e" } },
+          { event_type: "text_delta", data: "Sidebar-independent response" },
+          { event_type: "done", data: { duration_ms: 50, total_tokens: 4 } },
+          { event_type: "run_finished", data: { run_id: "session-latency-e2e" } },
+        ]),
+      });
+    },
+    {
+      createSessionDelayMs,
+      postCreateSessionListDelayMs: sessionListDelayMs,
+    }
+  );
+
+  await page.goto("/assistant");
+  await expect.poll(() => initialListResponses).toBeGreaterThan(0);
+  await installTelemetryCollector(page);
+
+  const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
+  await composer.fill("new session latency regression");
+  const sentAt = Date.now();
+  await composer.press("Enter");
+
+  await expect(page.getByText("Sidebar-independent response")).toBeVisible({ timeout: 2_000 });
+  await expect.poll(() => chatRequestedAt, { timeout: 2_000 }).not.toBeNull();
+  await expect.poll(() => postCreateListStartedAt, { timeout: 2_000 }).not.toBeNull();
+  expect(chatRequestedAt! - sentAt).toBeLessThan(2_000);
+  expect(postCreateListFinishedAt).toBeNull();
+
+  await expect
+    .poll(
+      async () => {
+        const events = await readTelemetryEvents(page);
+        return events.find((event) => event.event === "chat.stream.first_token") || null;
+      },
+      { timeout: 2_000 }
+    )
+    .not.toBeNull();
+  const telemetryEvents = await readTelemetryEvents(page);
+  const firstTokenPayload = telemetryEvents.find(
+    (event) => event.event === "chat.stream.first_token"
+  )?.payload;
+  const streamFirstTokenMs = Number(firstTokenPayload?.firstTokenMs);
+  const interactionToFirstTokenMs = Number(firstTokenPayload?.interactionToFirstTokenMs);
+  expect(Number.isFinite(streamFirstTokenMs)).toBeTruthy();
+  expect(Number.isFinite(interactionToFirstTokenMs)).toBeTruthy();
+  expect(interactionToFirstTokenMs - streamFirstTokenMs).toBeGreaterThanOrEqual(200);
+
+  await expect
+    .poll(() => postCreateListFinishedAt, { timeout: sessionListDelayMs + 3_000 })
+    .not.toBeNull();
+  expect(postCreateListFinishedAt! - postCreateListStartedAt!).toBeGreaterThanOrEqual(
+    sessionListDelayMs - 100
+  );
+});
+
+test("assistant fails closed on run_error and preserves partial text", async ({ page }) => {
+  await seedClientPrefs(page, { locale: "en-US" });
+  await installClientAuth(page, {
+    user_id: "e2e-assistant-run-error-user",
+    email: "assistant-run-error@example.com",
+    display_name: "Assistant Run Error",
+  });
+  await installAssistantHarness(page, async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body: toSseBody([
+        { event_type: "run_started", data: { run_id: "run-error-e2e" } },
+        { event_type: "text_delta", data: "Useful partial answer." },
+        {
+          event_type: "run_error",
+          data: {
+            run_id: "run-error-e2e",
+            error: "provider_failed",
+          },
+        },
+      ]),
+    });
+  });
+
+  await page.goto("/assistant");
+  await installTelemetryCollector(page);
+  const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
+  await composer.fill("trigger run error");
+  await composer.press("Enter");
+
+  const log = page.locator('[role="log"]');
+  await expect(log).toContainText("Useful partial answer.");
+  await expect(log).toContainText("The response stream was interrupted");
+  await expect(composer).toBeEnabled();
+  await expect
+    .poll(async () => {
+      const events = await readTelemetryEvents(page);
+      return events.find((event) => event.event === "chat.stream.finished")?.payload?.outcome;
+    })
+    .toBe("failed");
+});
+
+test("assistant treats EOF before a terminal event as interrupted", async ({ page }) => {
+  await seedClientPrefs(page, { locale: "en-US" });
+  await installClientAuth(page, {
+    user_id: "e2e-assistant-eof-user",
+    email: "assistant-eof@example.com",
+    display_name: "Assistant EOF",
+  });
+  await installAssistantHarness(page, async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body: toSseBody([
+        { event_type: "run_started", data: { run_id: "run-eof-e2e" } },
+        { event_type: "text_delta", data: "Partial before EOF." },
+      ]),
+    });
+  });
+
+  await page.goto("/assistant");
+  await installTelemetryCollector(page);
+  const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
+  await composer.fill("trigger incomplete stream");
+  await composer.press("Enter");
+
+  const log = page.locator('[role="log"]');
+  await expect(log).toContainText("Partial before EOF.");
+  await expect(log).toContainText("The response stream was interrupted");
+  await expect(composer).toBeEnabled();
+  await expect
+    .poll(async () => {
+      const events = await readTelemetryEvents(page);
+      return events.find((event) => event.event === "chat.stream.finished")?.payload?.outcome;
+    })
+    .toBe("failed");
+});
+
+test("assistant treats done followed by EOF before a run terminal as interrupted", async ({ page }) => {
+  await seedClientPrefs(page, { locale: "en-US" });
+  await installClientAuth(page, {
+    user_id: "e2e-assistant-done-eof-user",
+    email: "assistant-done-eof@example.com",
+    display_name: "Assistant Done EOF",
+  });
+  await installAssistantHarness(page, async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body: toSseBody([
+        { event_type: "run_started", data: { run_id: "run-done-eof-e2e" } },
+        { event_type: "text_delta", data: "Partial before transport done." },
+        {
+          event_type: "done",
+          data: { run_id: "run-done-eof-e2e", duration_ms: 42, total_tokens: 12 },
+        },
+      ]),
+    });
+  });
+
+  await page.goto("/assistant");
+  await installTelemetryCollector(page);
+  const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
+  await composer.fill("trigger transport done without run terminal");
+  await composer.press("Enter");
+
+  const log = page.locator('[role="log"]');
+  await expect(log).toContainText("Partial before transport done.");
+  await expect(log).toContainText("The response stream was interrupted");
+  await expect(composer).toBeEnabled();
+  await expect
+    .poll(async () => {
+      const events = await readTelemetryEvents(page);
+      return events.find((event) => event.event === "chat.stream.finished")?.payload?.outcome;
+    })
+    .toBe("failed");
 });
 
 test("assistant renders the complete sub-agent status contract", async ({ page }) => {
@@ -1732,8 +2043,18 @@ test("assistant restores a pending approval after refresh", async ({ page }) => 
 });
 
 test("assistant escape cancels delayed stream", async ({ page }) => {
+  await seedClientPrefs(page, { locale: "en-US" });
+  await installClientAuth(page, {
+    user_id: "e2e-assistant-cancel-user",
+    email: "assistant-cancel@example.com",
+    display_name: "Assistant Cancel",
+  });
+  let releaseStream: () => void = () => {};
+  const streamGate = new Promise<void>((resolve) => {
+    releaseStream = resolve;
+  });
   await installAssistantHarness(page, async (route) => {
-    await new Promise((resolve) => setTimeout(resolve, 2500));
+    await streamGate;
     try {
       await route.fulfill({
         status: 200,
@@ -1758,10 +2079,18 @@ test("assistant escape cancels delayed stream", async ({ page }) => {
 
   const stopButton = page.locator('button[aria-keyshortcuts="Escape"]').first();
   await expect(stopButton).toBeVisible();
-  await page.keyboard.press("Escape");
+  try {
+    await page.getByRole("button", { name: /Activity/ }).last().click();
+    await expect(page.getByText(/^Running… ·/)).toBeVisible();
+    await page.keyboard.press("Escape");
+  } finally {
+    releaseStream();
+  }
 
   await expect(stopButton).toBeHidden();
   await expect(page.locator('[role="log"]')).toBeVisible();
+  await expect(page.getByText(/^cancelled ·/)).toBeVisible();
+  await expect(page.getByText(/^completed ·/)).toHaveCount(0);
 
   const events = await readTelemetryEvents(page);
   expect(
@@ -1775,9 +2104,102 @@ test("assistant escape cancels delayed stream", async ({ page }) => {
     events.some(
       (event) =>
         event.event === "chat.stream.finished" &&
-        ["cancelled", "completed"].includes(String(event.payload?.outcome))
+        event.payload?.outcome === "cancelled"
     )
   ).toBeTruthy();
+});
+
+test("assistant new chat invalidates late events from the previous stream", async ({ page }) => {
+  await seedClientPrefs(page, { locale: "en-US" });
+  await installClientAuth(page, {
+    user_id: "e2e-assistant-stream-epoch-user",
+    email: "assistant-stream-epoch@example.com",
+    display_name: "Assistant Stream Epoch",
+  });
+  await installAssistantHarness(page, async (route) => {
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "browser stream interceptor was not installed" }),
+    });
+  });
+  await page.addInitScript(() => {
+    const nativeFetch = window.fetch.bind(window);
+    let streamNumber = 0;
+    window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof Request
+            ? input.url
+            : String(input);
+      if (!url.includes("/api/v1/assistant/chat/stream")) {
+        return nativeFetch(input, init);
+      }
+      streamNumber += 1;
+      (window as typeof window & { __assistantStreamCount?: number }).__assistantStreamCount =
+        streamNumber;
+      const current = streamNumber;
+      const encoder = new TextEncoder();
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            const emit = (event: unknown) =>
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify(event)}\n\n`)
+              );
+            emit({ event_type: "started", data: { stream: current } });
+            if (current === 1) {
+              // Intentionally ignore AbortSignal to emulate a proxy/client
+              // that continues delivering buffered frames after navigation.
+              window.setTimeout(() => {
+                try {
+                  emit({ event_type: "text_delta", data: "stale previous response" });
+                  emit({ event_type: "run_finished", data: { run_id: "stale-run" } });
+                  controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+                  controller.close();
+                } catch {
+                  // Browser stream cancellation is also an acceptable result;
+                  // the epoch guard covers transports that do deliver late.
+                }
+              }, 450);
+              return;
+            }
+            emit({ event_type: "text_delta", data: "fresh current response" });
+            emit({ event_type: "run_finished", data: { run_id: "fresh-run" } });
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            controller.close();
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } }
+      );
+    };
+  });
+
+  await ensureAuthenticatedPage(page, "/assistant");
+  const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
+  await composer.fill("start stale stream");
+  await composer.press("Enter");
+  await expect(page.locator('button[aria-keyshortcuts="Escape"]').first()).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as typeof window & { __assistantStreamCount?: number })
+            .__assistantStreamCount || 0
+      )
+    )
+    .toBe(1);
+
+  await page.keyboard.press(`${modKey()}+Shift+N`);
+  await expect(composer).toBeEnabled();
+  await composer.fill("start fresh stream");
+  await composer.press("Enter");
+
+  await expect(page.getByText("fresh current response")).toBeVisible();
+  await page.waitForTimeout(650);
+  await expect(page.getByText("stale previous response")).toHaveCount(0);
+  await expect(composer).toBeEnabled();
 });
 
 test("playground stream path keeps a11y and performance budget", async ({ page }) => {

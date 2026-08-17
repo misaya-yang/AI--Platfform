@@ -38,7 +38,6 @@ References:
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import json as _json
 import logging
@@ -76,6 +75,44 @@ __all__ = [
 ]
 
 _MAX_PUBLIC_ERROR_CHARS = 200
+_TOOL_CANCEL_GRACE_SECONDS = 0.1
+
+
+def _consume_task_outcome(task: asyncio.Task[Any]) -> None:
+    """Consume a detached task outcome so bounded cancellation stays warning-free."""
+
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except Exception as exc:
+        record_internal_exception(
+            __name__, "assistant.core.tool_invoker.cancelled_child_failure", exc
+        )
+
+
+async def _cancel_task_bounded(task: asyncio.Task[Any] | None) -> None:
+    """Request cancellation without letting a non-cooperative tool block its caller."""
+
+    if task is None or task.done():
+        return
+    task.cancel()
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(task),
+            timeout=_TOOL_CANCEL_GRACE_SECONDS,
+        )
+    except (TimeoutError, asyncio.CancelledError):
+        if not task.done():
+            task.add_done_callback(_consume_task_outcome)
+    except Exception as exc:
+        # The child failed while responding to cancellation.  Its exception is
+        # intentionally not allowed to replace the caller's cancellation or
+        # timeout outcome.
+        record_internal_exception(
+            __name__, "assistant.core.tool_invoker.cancelled_child_failure", exc
+        )
+        return
 
 
 def _safe_public_error(value: Any) -> str:
@@ -1102,6 +1139,16 @@ class RegistryToolInvoker(ToolInvoker):
         # Use tool-specific timeout if defined (e.g. quiz generation needs 120s)
         effective_timeout = context.timeout_ms
         tool_timeout_seconds = getattr(tool_definition, "timeout_seconds", None)
+        if tool_definition is not None:
+            resolved_timeout = execution_registry.effective_execution_timeout(
+                request,
+                tool_definition,
+            )
+            if isinstance(resolved_timeout, (int, float)) and not isinstance(
+                resolved_timeout,
+                bool,
+            ):
+                tool_timeout_seconds = resolved_timeout
         if (
             isinstance(tool_timeout_seconds, (int, float))
             and not isinstance(tool_timeout_seconds, bool)
@@ -1132,7 +1179,11 @@ class RegistryToolInvoker(ToolInvoker):
                     cancel_task: asyncio.Task[bool] | None = None
                     try:
                         if cancel_event is None:
-                            result = await mcp_task
+                            # Shield the child so caller cancellation returns
+                            # control here immediately; direct awaiting lets a
+                            # cancellation-suppressing MCP client hold the
+                            # parent task forever before our grace timer runs.
+                            result = await asyncio.shield(mcp_task)
                         else:
                             cancel_task = asyncio.create_task(cancel_event.wait())
                             done, _pending = await asyncio.wait(
@@ -1142,32 +1193,30 @@ class RegistryToolInvoker(ToolInvoker):
                             if mcp_task in done:
                                 result = mcp_task.result()
                             else:
-                                mcp_task.cancel()
-                                try:
-                                    result = await mcp_task
-                                except asyncio.CancelledError:
+                                await _cancel_task_bounded(mcp_task)
+                                if execution_policy.may_have_external_side_effect:
                                     result = ToolCallResult(
                                         call_id=call_id,
                                         tool_name=tool_name,
                                         success=False,
-                                        error="Cancelled before MCP dispatch",
+                                        error="SIDE_EFFECT_UNKNOWN",
+                                        metadata=self._side_effect_unknown_metadata(
+                                            execution_policy,
+                                            cause="cancelled_after_dispatch",
+                                        ),
+                                    )
+                                else:
+                                    result = ToolCallResult(
+                                        call_id=call_id,
+                                        tool_name=tool_name,
+                                        success=False,
+                                        error="Cancelled during MCP execution",
                                     )
                     except asyncio.CancelledError:
-                        mcp_task.cancel()
-                        try:
-                            result = await mcp_task
-                        except asyncio.CancelledError:
-                            result = ToolCallResult(
-                                call_id=call_id,
-                                tool_name=tool_name,
-                                success=False,
-                                error="Cancelled before MCP dispatch",
-                            )
+                        await _cancel_task_bounded(mcp_task)
+                        raise
                     finally:
-                        if cancel_task is not None and not cancel_task.done():
-                            cancel_task.cancel()
-                            with contextlib.suppress(asyncio.CancelledError):
-                                await cancel_task
+                        await _cancel_task_bounded(cancel_task)
             else:
                 result = await self._execute_with_retry(
                     request=request,
@@ -1178,6 +1227,13 @@ class RegistryToolInvoker(ToolInvoker):
                 )
             if operation_claimed and self._result_has_unknown_side_effect(result):
                 context.uncertain_operation_fingerprints.add(fingerprint)
+        except asyncio.CancelledError:
+            if operation_claimed:
+                # Dispatch may already have crossed the external side-effect
+                # boundary.  Preserve a fence even though cancellation must be
+                # propagated to the run-level deadline owner.
+                context.uncertain_operation_fingerprints.add(fingerprint)
+            raise
         finally:
             if operation_claimed:
                 context.inflight_operation_fingerprints.discard(fingerprint)
@@ -1233,6 +1289,7 @@ class RegistryToolInvoker(ToolInvoker):
                 )
 
             execution_task: asyncio.Task[ToolCallResult] | None = None
+            cancel_task: asyncio.Task[bool] | None = None
             try:
                 # Create execution task
                 execution_task = asyncio.create_task(execution_registry.execute(request))
@@ -1241,20 +1298,15 @@ class RegistryToolInvoker(ToolInvoker):
                 if cancel_event:
                     cancel_task = asyncio.create_task(cancel_event.wait())
 
-                    done, pending = await asyncio.wait(
+                    done, _pending = await asyncio.wait(
                         [execution_task, cancel_task],
                         timeout=timeout_ms / 1000,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
 
-                    # Cancel any pending tasks
-                    for task in pending:
-                        task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await task
-
                     # Check if cancellation won the race
                     if cancel_task in done:
+                        await _cancel_task_bounded(execution_task)
                         if execution_policy.may_have_external_side_effect:
                             return ToolCallResult(
                                 call_id=request.call_id,
@@ -1275,16 +1327,23 @@ class RegistryToolInvoker(ToolInvoker):
 
                     # Check timeout (no tasks in done means timeout)
                     if not done:
+                        await _cancel_task_bounded(execution_task)
                         raise asyncio.TimeoutError()
 
                     # Get the execution result
                     result = execution_task.result()
                 else:
-                    # No cancel event - simple wait_for
-                    result = await asyncio.wait_for(
-                        execution_task,
+                    # asyncio.wait_for waits for a cancelled coroutine to
+                    # finish.  A tool that suppresses CancelledError can thus
+                    # defeat both its own timeout and the run wall budget.
+                    done, _pending = await asyncio.wait(
+                        {execution_task},
                         timeout=timeout_ms / 1000,
                     )
+                    if not done:
+                        await _cancel_task_bounded(execution_task)
+                        raise asyncio.TimeoutError()
+                    result = execution_task.result()
 
                 # A tool-level timeout may have happened after a write was
                 # accepted. Only explicitly read-only/idempotent operations
@@ -1374,27 +1433,8 @@ class RegistryToolInvoker(ToolInvoker):
                     )
 
             except asyncio.CancelledError:
-                if execution_task is not None and not execution_task.done():
-                    execution_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await execution_task
-                if execution_policy.may_have_external_side_effect:
-                    return ToolCallResult(
-                        call_id=request.call_id,
-                        tool_name=request.tool_name,
-                        success=False,
-                        error="SIDE_EFFECT_UNKNOWN",
-                        metadata=self._side_effect_unknown_metadata(
-                            execution_policy,
-                            cause="cancelled_after_dispatch",
-                        ),
-                    )
-                return ToolCallResult(
-                    call_id=request.call_id,
-                    tool_name=request.tool_name,
-                    success=False,
-                    error="Task cancelled",
-                )
+                await _cancel_task_bounded(execution_task)
+                raise
 
             except Exception as exc:
                 record_internal_exception(
@@ -1416,6 +1456,9 @@ class RegistryToolInvoker(ToolInvoker):
                             cause="transport",
                         ),
                     )
+
+            finally:
+                await _cancel_task_bounded(cancel_task)
 
             # Wait before retry (exponential backoff), but check cancellation
             if attempt + 1 < max_attempts:

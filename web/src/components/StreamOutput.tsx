@@ -8,6 +8,7 @@ import "katex/dist/katex.min.css";
 import { useLatexCopy } from "@/hooks/useLatexCopy";
 import { useTranslation } from "react-i18next";
 import { api } from "@/lib/api";
+import { splitStreamingMarkdownBlocks } from "./streamingMarkdown";
 
 /**
  * Custom URL transform that allows data: URLs for base64 images.
@@ -53,6 +54,22 @@ interface StreamOutputProps {
   text: string;
   isStreaming?: boolean;
 }
+
+const MARKDOWN_REMARK_PLUGINS = [
+  remarkGfm,
+  [remarkMath, { singleDollarTextMath: true }],
+] as const;
+const MARKDOWN_REHYPE_PLUGINS = [
+  [rehypeKatex, { throwOnError: false, strict: false, output: "htmlAndMathml" }],
+] as const;
+const MARKDOWN_COMPONENTS = {
+  img: ({ src, alt }: { src?: string; alt?: string }) => (
+    <MarkdownImage src={src} alt={alt} />
+  ),
+  a: ({ href, children }: { href?: string; children?: ReactNode }) => (
+    <MarkdownLink href={href}>{children}</MarkdownLink>
+  ),
+};
 
 /**
  * Custom link renderer that handles download links and external links properly.
@@ -372,6 +389,19 @@ function isRtlText(text: string): boolean {
   return total > 0 && (rtlChars / total) > 0.6;
 }
 
+const MarkdownBlock = memo(function MarkdownBlock({ text }: { text: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+      rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+      urlTransform={allowDataUrlTransform}
+      components={MARKDOWN_COMPONENTS}
+    >
+      {text}
+    </ReactMarkdown>
+  );
+});
+
 /**
  * High-performance streaming markdown renderer.
  *
@@ -396,27 +426,23 @@ export const StreamOutput = memo(function StreamOutput({
 
   // Detect RTL content (Arabic, Persian, Urdu, Hebrew)
   const rtl = useMemo(() => isRtlText(filteredText), [filteredText]);
+  const markdownBlocks = useMemo(
+    () =>
+      isStreaming
+        ? splitStreamingMarkdownBlocks(filteredText)
+        : filteredText
+          ? [filteredText]
+          : [],
+    [filteredText, isStreaming]
+  );
 
   if (!text) return null;
 
   return (
     <div dir={rtl ? "rtl" : undefined} className={`assistant-copy prose prose-slate dark:prose-invert max-w-none wrap-break-word prose-p:my-3 prose-p:leading-7 prose-p:text-[15px] sm:prose-p:text-[16px] prose-headings:mt-7 prose-headings:mb-3 prose-headings:font-semibold prose-headings:tracking-tight prose-ul:my-3 prose-ol:my-3 prose-li:my-1 prose-li:text-[15px] sm:prose-li:text-[16px] prose-pre:my-4 prose-pre:overflow-x-auto prose-pre:max-w-full prose-pre:whitespace-pre-wrap prose-pre:wrap-break-word prose-pre:rounded-xl prose-pre:border prose-pre:border-[hsl(var(--assistant-border))] prose-pre:bg-[hsl(var(--assistant-surface-soft))] prose-code:whitespace-pre-wrap prose-code:wrap-break-word prose-code:text-[14px] prose-blockquote:border-l-[hsl(var(--assistant-border))]${rtl ? " text-right" : ""}${isStreaming ? " streaming-fade-in" : ""}`}>
-      <ReactMarkdown
-        remarkPlugins={[
-          remarkGfm,
-          [remarkMath, { singleDollarTextMath: true }],
-        ]}
-        rehypePlugins={[
-          [rehypeKatex, { throwOnError: false, strict: false, output: "htmlAndMathml" }],
-        ]}
-        urlTransform={allowDataUrlTransform}
-        components={{
-          img: ({ src, alt }) => <MarkdownImage src={src} alt={alt} />,
-          a: ({ href, children }) => <MarkdownLink href={href}>{children}</MarkdownLink>,
-        }}
-      >
-        {filteredText}
-      </ReactMarkdown>
+      {markdownBlocks.map((block, index) => (
+        <MarkdownBlock key={`${index}:${block.length}`} text={block} />
+      ))}
       {/* Streaming cursor - clean blinking bar */}
       {isStreaming && (
         <span className="inline-flex items-center ml-0.5 align-text-bottom">

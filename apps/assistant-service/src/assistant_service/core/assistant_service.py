@@ -86,6 +86,7 @@ from .code_executor import CodeExecutorService
 from .content.structured_output import OutputGuardrail
 from .files.file_processor import ProcessedFiles, create_file_processor
 from .models.model_registry import ChatMessage, ModelRegistry
+from .models.thinking_policy import DEFAULT_THINKING_LEVEL
 from .prompts.system_prompt_v2 import (
     build_system_prompt_v2,
     ensure_external_content_boundary,
@@ -1471,7 +1472,9 @@ Workflow:
                     maximum=2_147_483_647,
                 )
             ),
-            thinking_level=getattr(config, "thinking_level", None) or "off",
+            thinking_level=(
+                getattr(config, "thinking_level", None) or DEFAULT_THINKING_LEVEL
+            ),
             resume_run_id=config.resume_run_id,
             resume_approval_id=config.resume_approval_id,
             previous_context_packet_receipt=self._context_packet_receipts.get(context_cache_key),

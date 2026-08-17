@@ -218,7 +218,7 @@ export function AssistantPage() {
   const [selectedDatasets, setSelectedDatasets] = useState<string[]>([]);
   const [temperature, setTemperature] = useState(0.7);
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
-  const [thinkingLevel, setThinkingLevel] = useState<"off" | "low" | "medium" | "high">("off");
+  const [thinkingLevel, setThinkingLevel] = useState<"off" | "low" | "medium" | "high">("low");
   const [selectedStyle, setSelectedStyle] = useState(DEFAULT_STYLE_ID);
   
   // 3. UI State
@@ -586,6 +586,8 @@ export function AssistantPage() {
         sessionConfig.thinking_level === "high"
       ) {
         setThinkingLevel(sessionConfig.thinking_level);
+      } else {
+        setThinkingLevel("low");
       }
       if (typeof sessionConfig.temperature === "number") setTemperature(sessionConfig.temperature);
       if (sessionConfig.selected_style) setSelectedStyle(sessionConfig.selected_style);
@@ -601,7 +603,7 @@ export function AssistantPage() {
     // Reset feature toggles to defaults
     setSelectedDatasets([]);  // Clear selected knowledge bases
     setWebSearchEnabled(false);  // Disable web search
-    setThinkingLevel("off");
+    setThinkingLevel("low");
     // Keep model and temperature as user preferences
   }, [handleNewChat, cancelImageMode, isMobile, setShowLeftPanel, disableSessionOptIn]);
 

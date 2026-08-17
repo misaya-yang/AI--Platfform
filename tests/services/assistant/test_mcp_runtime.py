@@ -1488,9 +1488,9 @@ async def test_cancelled_dynamic_mcp_write_returns_unknown_and_is_fenced() -> No
         context,
     )
 
-    assert result.error == "MCP_CANCELLED_AFTER_DISPATCH"
-    assert result.metadata["mcp_failure"]["failure_kind"] == "side_effect_unknown"
-    assert result.metadata["mcp_failure"]["side_effect_state"] == "unknown"
+    assert result.error == "SIDE_EFFECT_UNKNOWN"
+    assert result.metadata["tool_failure"]["cause"] == "cancelled_after_dispatch"
+    assert result.metadata["tool_failure"]["side_effect_state"] == "unknown"
     assert repeated.error == "SIDE_EFFECT_UNRESOLVED"
     assert repository.runtime_records[-1]["counts_toward_circuit"] is False
     assert calls == 1

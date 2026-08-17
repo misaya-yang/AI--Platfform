@@ -5270,7 +5270,7 @@ class DatabaseAgentRepository(BaseRepository):
         session_rows = await conn.fetch(
             f"""
             SELECT user_id, agent_version_id, agent_draft_revision
-            FROM sessions
+            FROM assistant.sessions
             WHERE tenant_id = $1 AND agent_id = $2::uuid{session_condition}
             """,
             *session_params,
@@ -6190,7 +6190,7 @@ class DatabaseAgentRepository(BaseRepository):
             session_rows = await conn.fetch(
                 f"""
                 SELECT session_id, user_id, agent_version_id, agent_draft_revision
-                FROM sessions
+                FROM assistant.sessions
                 WHERE tenant_id = $1 AND agent_id = $2::uuid{session_condition}
                 """,
                 *condition_params,
@@ -6276,7 +6276,7 @@ class DatabaseAgentRepository(BaseRepository):
             }
             deleted["sessions"] = await delete_count(
                 f"""
-                DELETE FROM sessions
+                DELETE FROM assistant.sessions
                 WHERE tenant_id = $1 AND agent_id = $2::uuid{session_condition}
                 RETURNING session_id
                 """,
@@ -7143,7 +7143,7 @@ class DatabaseAgentRepository(BaseRepository):
             owns_session = await conn.fetchval(
                 """
                 SELECT EXISTS (
-                    SELECT 1 FROM sessions
+                    SELECT 1 FROM assistant.sessions
                     WHERE session_id = $1 AND tenant_id = $2
                       AND publication_id = $3 AND agent_version_id = $4
                       AND user_id = $5 AND channel = $6 AND status = 'active'

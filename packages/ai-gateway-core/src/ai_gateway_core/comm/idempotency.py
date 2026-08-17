@@ -241,6 +241,10 @@ class IdempotencyMiddleware:
         except _RequestBodyTooLarge:
             await _send_plain(send, 413, b"Idempotency request body is too large")
             return
+        except _RequestDisconnected:
+            # The peer is gone and no idempotency lease has been acquired yet.
+            # Returning prevents a tight receive loop on repeated disconnects.
+            return
 
         request_body_digest = hashlib.sha256(body).hexdigest()
         store_key = _store_key(scope, idem_key)
@@ -282,6 +286,11 @@ class IdempotencyMiddleware:
 
         try:
             await self.app(scope, replay, wrapped_send)
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException, so the generic Exception
+            # branch below cannot release the owned key.
+            await self.store.abort(store_key)
+            raise
         except Exception:
             await self.store.abort(store_key)
             raise
@@ -322,11 +331,17 @@ class _RequestBodyTooLarge(Exception):
     """Raised when an idempotency-protected request exceeds its replay limit."""
 
 
+class _RequestDisconnected(Exception):
+    """Raised when the client disconnects before its request body is complete."""
+
+
 async def _read_body(receive, *, max_body_bytes: int) -> bytes:
     chunks: list[bytes] = []
     total_bytes = 0
     while True:
         message = await receive()
+        if message["type"] == "http.disconnect":
+            raise _RequestDisconnected
         if message["type"] != "http.request":
             continue
         chunk = message.get("body", b"")

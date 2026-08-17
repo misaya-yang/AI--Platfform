@@ -32,7 +32,7 @@
       "file": "phase-02-first-model-turn-advertises-discovery-tools-only.md",
       "depends_on": [],
       "status": "done",
-      "evidence": ["tests/services/assistant/test_tool_selector.py::test_discover_mode_advertises_only_always_bridges"],
+      "evidence": ["tests/services/assistant/test_tool_selector.py::test_discover_mode_plain_question_advertises_only_discovery_bridges"],
       "review": "not_required"
     },
     {
@@ -92,10 +92,10 @@
     {
       "id": "AGA-F003",
       "phase_id": "AGA-02",
-      "description": "The first model turn advertises discovery bridges; spawn/memory stay reachable via tool_search.",
+      "description": "An unmatched ordinary first turn advertises exactly three discovery bridges; relevant or explicitly pinned tools may also be direct.",
       "steps": [
-        "Call select_tools in discover mode with discovery plus spawn/memory/MCP.",
-        "Observe only discovery names are advertised."
+        "Call select_tools in discover mode with discovery plus generation/spawn/memory/MCP for an ordinary question.",
+        "Observe only discovery names, then repeat with a clear relevance match and an explicit pin."
       ],
       "passes": true
     },

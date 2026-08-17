@@ -1,9 +1,9 @@
 """Deterministic, token-aware selection over a dynamic tool catalog.
 
 Selection is a prompt-size optimization, never an authorization mechanism.
-Unknown tools keep a non-zero baseline and the always-visible discovery
-bridges provide access to the authorized catalog when a full schema is not
-selected directly.
+Unknown tools keep a non-zero baseline for budget-mode ordering. In discover
+mode, only discovery bridges, explicit pins, and clear relevance matches are
+advertised directly; deferred tools remain reachable through discovery.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 DEFAULT_TOOL_TOKEN_BUDGET = 2000
+MIN_DIRECT_RELEVANCE_SCORE = 0.4
 
 TIER_ALWAYS = 0
 TIER_BUILTIN = 1
@@ -31,10 +32,6 @@ TIER_MCP = 3
 
 ALWAYS_INCLUDE = {
     *DISCOVERY_TOOL_NAMES,
-    ToolName.GENERATE_DOCUMENT,
-    ToolName.GENERATE_PPTX,
-    ToolName.GENERATE_IMAGE,
-    ToolName.GENERATE_QUIZ,
 }
 
 _FIRST_CLASS_GENERATION = {
@@ -46,7 +43,7 @@ _FIRST_CLASS_GENERATION = {
 
 
 def _canonical_generation_name(name: str) -> str:
-    """Map plugin aliases such as ``mcp_docgen__generate_document`` back to ALWAYS."""
+    """Map plugin aliases to built-in generation relevance keywords."""
 
     value = str(name or "").strip()
     if not value:
@@ -57,8 +54,9 @@ def _canonical_generation_name(name: str) -> str:
 def is_first_class_generation_tool(tool: Any) -> bool:
     """Return whether a registered catalog entry is a first-class generation backend.
 
-    Selection is catalog-based: exact ALWAYS names, MCP/plugin suffixes, or
-    capability metadata that names those backends. User text is not inspected.
+    Classification is catalog-based: exact names, MCP/plugin suffixes, or
+    capability metadata that names those backends. This does not make the tool
+    always-visible; discover mode still requires relevance or an explicit pin.
     """
 
     name = str(getattr(tool, "name", "") or "")
@@ -100,12 +98,9 @@ _TOOL_KEYWORDS: dict[str, list[str]] = {
         "compute",
         "plot",
         "chart",
-        "data",
-        "analyze",
         "代码",
         "运行",
         "计算",
-        "分析",
         "图表",
         "脚本",
     ],
@@ -160,6 +155,36 @@ _TOOL_KEYWORDS: dict[str, list[str]] = {
 }
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+|[\u3400-\u9fff]", re.IGNORECASE)
+_EXECUTE_CODE_DIRECT_KEYWORDS = (
+    "code",
+    "python",
+    "script",
+    "calculate",
+    "compute",
+    "plot",
+    "chart",
+    "代码",
+    "计算",
+    "图表",
+    "脚本",
+)
+
+
+def _alias_matches(phrase: Any, message_lower: str) -> bool:
+    """Match ASCII aliases as complete words/phrases; retain CJK substring matching."""
+
+    normalized = " ".join(str(phrase or "").lower().split())
+    if not normalized:
+        return False
+    if normalized.isascii():
+        tokens = re.findall(r"[a-z0-9]+", normalized)
+        if not tokens:
+            return False
+        pattern = r"(?<![a-z0-9])" + r"[^a-z0-9]+".join(
+            re.escape(token) for token in tokens
+        ) + r"(?![a-z0-9])"
+        return re.search(pattern, message_lower) is not None
+    return normalized in message_lower
 
 
 def _estimate_tool_tokens(tool_def: ToolDefinition, compact: bool = True) -> int:
@@ -200,19 +225,31 @@ def _score_tool(tool_def: ToolDefinition, message_lower: str) -> float:
     if name in ALWAYS_INCLUDE:
         return 1.0
 
+    canonical_name = _canonical_generation_name(name)
     aliases = [
         *list(getattr(tool_def, "relevance_keywords", []) or []),
         *_TOOL_KEYWORDS.get(name, []),
+        *(_TOOL_KEYWORDS.get(canonical_name, []) if canonical_name != name else []),
     ]
     search_text = " ".join(
         [name.lower().replace("_", " ").replace("__", " "), *aliases, *_metadata_values(tool_def)]
     )
-    phrase_hits = sum(1 for phrase in aliases if str(phrase).lower() in message_lower)
+    phrase_hits = sum(1 for phrase in aliases if _alias_matches(phrase, message_lower))
     query_tokens = set(_TOKEN_RE.findall(message_lower))
     catalog_tokens = set(_TOKEN_RE.findall(search_text))
     token_hits = len(query_tokens & catalog_tokens)
     if phrase_hits or token_hits:
-        return min(0.4 + (phrase_hits * 0.2) + (token_hits * 0.08), 1.0)
+        score = min(0.4 + (phrase_hits * 0.2) + (token_hits * 0.08), 1.0)
+        if canonical_name == ToolName.EXECUTE_CODE and not any(
+            _alias_matches(keyword, message_lower)
+            for keyword in _EXECUTE_CODE_DIRECT_KEYWORDS
+        ):
+            # Generic analysis/data prose may overlap the executor's rich
+            # description, while "run"/"execute" alone are ambiguous. Keep
+            # those requests discoverable without placing an approval-bearing
+            # code schema on the first model turn.
+            return min(score, MIN_DIRECT_RELEVANCE_SCORE - 0.01)
+        return score
 
     # Selection only controls which schemas are sent directly. A non-zero
     # baseline plus tool_search means an opaque newly-installed MCP is still
@@ -223,16 +260,11 @@ def _score_tool(tool_def: ToolDefinition, message_lower: str) -> float:
 
 def _is_always_visible(tool_def: ToolDefinition, pinned: set[str]) -> bool:
     name = tool_def.name
-    return (
-        name in ALWAYS_INCLUDE
-        or name in pinned
-        or name == ToolName.SEARCH_KB
-        or is_first_class_generation_tool(tool_def)
-    )
+    return name in ALWAYS_INCLUDE or name in pinned
 
 
 def _get_tier(tool_def: ToolDefinition) -> int:
-    if tool_def.name in ALWAYS_INCLUDE or is_first_class_generation_tool(tool_def):
+    if tool_def.name in ALWAYS_INCLUDE:
         return TIER_ALWAYS
     if tool_def.name.startswith("mcp_"):
         return TIER_MCP
@@ -250,7 +282,13 @@ def select_tools(
     mode: str = "discover",
     extra_always: set[str] | None = None,
 ) -> list[ToolDefinition]:
-    """Select direct schemas. Discover mode only advertises ALWAYS bridges."""
+    """Select direct schemas without changing the authorized catalog.
+
+    Discover mode keeps an unmatched ordinary request to the three discovery
+    bridges. Explicit pins bypass the prompt budget; clear relevance matches
+    are admitted within it. Budget mode retains the broader token-budgeted
+    behavior for callers that explicitly request it.
+    """
 
     if not all_tools:
         return []
@@ -272,12 +310,17 @@ def select_tools(
         )
     )
 
+    # A catalog without discovery bridges has no deferred-call path. Preserve
+    # the bounded direct schemas in that case, otherwise tools used by narrow
+    # agents and approval-resume continuations would become unreachable.
     advertise_budget = mode == "budget" or not has_discovery
     selected: list[ToolDefinition] = []
     used_tokens = 0
     for tool, score, _tier, tokens in scored:
         direct = _is_always_visible(tool, pinned)
-        if direct or (advertise_budget and used_tokens + tokens <= max_tokens):
+        relevance_match = mode == "discover" and score >= MIN_DIRECT_RELEVANCE_SCORE
+        within_budget = used_tokens + tokens <= max_tokens
+        if direct or ((advertise_budget or relevance_match) and within_budget):
             selected.append(tool)
             used_tokens += tokens
         else:

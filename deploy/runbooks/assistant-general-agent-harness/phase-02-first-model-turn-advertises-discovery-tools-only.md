@@ -6,7 +6,9 @@
 
 ## Outcome
 
-Safe profile first turn advertises discovery bridges. Other tools stay callable via `tool_search` / `tool_call`.
+Safe-profile ordinary questions advertise exactly the three discovery bridges.
+Clearly relevant or explicitly pinned tools may also be advertised directly;
+everything else stays callable through `tool_search` / `tool_call`.
 
 ## Scope
 
@@ -16,14 +18,17 @@ Out: approval/policy
 
 ## Done when
 
-- [x] Discover mode hides spawn/memory/MCP schemas
-- [x] Allowlisted and bound skill tools can still be first-turn visible
+- [x] An unmatched ordinary question exposes only the three discovery schemas
+- [x] Existing relevance scoring can surface a clearly matched generation or other tool
+- [x] Explicitly pinned tools can still be first-turn visible
+- [x] Deferred authorized tools remain reachable through discovery
 
 ## Verify
 
 | Check | Command or observation | Proves |
 | --- | --- | --- |
-| Selector | `pytest tests/services/assistant/test_tool_selector.py` | Advertisement |
+| Selector | `uv run --all-packages --extra test pytest -q --no-cov tests/services/assistant/test_tool_selector.py` | Ordinary, relevant, and pinned advertisement |
+| Discovery | `uv run --all-packages --extra test pytest -q --no-cov tests/services/assistant/test_tool_discovery.py` | Deferred authorized tools remain searchable and invokable through the bridges |
 
 ## Stop or confirm
 

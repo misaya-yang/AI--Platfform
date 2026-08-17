@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -1713,6 +1714,56 @@ async def test_current_source_is_not_reopened_as_legacy(tmp_path: Path) -> None:
 
     assert loaded.loaded_sources == 1
     assert legacy_reads == 0
+
+
+@pytest.mark.asyncio
+async def test_request_memory_load_uses_worker_thread_and_skips_unchanged_reindex(
+    tmp_path: Path,
+) -> None:
+    store = MemorySourceStore(tmp_path / "current")
+    store.append_long_term_facts("tenant-a", "user-a", ["stable private fact"])
+    main_thread = threading.get_ident()
+    read_threads: list[int] = []
+    original_read = store._read_source_snapshot
+
+    def record_read(path: Path):
+        read_threads.append(threading.get_ident())
+        return original_read(path)
+
+    store._read_source_snapshot = record_read  # type: ignore[method-assign]
+
+    class _CountingIndexer:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def index_source(self, **_kwargs: object) -> None:
+            self.calls += 1
+
+        async def list_scoped_source_records(self, **_kwargs: object) -> list[object]:
+            return []
+
+    indexer = _CountingIndexer()
+    adapter = build_adapter(store=store, indexer=indexer)
+
+    first = await adapter.load_memory_context(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        query="private",
+        runtime_mode="full",
+        memory_profile="hybrid",
+    )
+    second = await adapter.load_memory_context(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        query="private",
+        runtime_mode="full",
+        memory_profile="hybrid",
+    )
+
+    assert first.loaded_sources == second.loaded_sources == 1
+    assert indexer.calls == 1
+    assert len(read_threads) == 1
+    assert read_threads[0] != main_thread
 
 
 @pytest.mark.asyncio

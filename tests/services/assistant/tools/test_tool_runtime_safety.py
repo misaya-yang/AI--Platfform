@@ -21,6 +21,7 @@ from assistant_service.core.tool_invoker import (
 )
 from assistant_service.core.tools.code_executor_tool import CODE_EXECUTOR_TOOL
 from assistant_service.core.tools.confluence_tool import CONFLUENCE_WRITE_DEFINITION
+from assistant_service.core.tools.tool_discovery import register_tool_discovery_tools
 from assistant_service.core.tools.tool_registry import (
     ToolCallRequest,
     ToolCallResult,
@@ -44,6 +45,17 @@ class _RecordingExecutor(ToolExecutor):
             tool_name=request.tool_name,
             success=True,
             result="executed",
+        )
+
+
+class _DelayedExecutor(ToolExecutor):
+    async def execute(self, request: ToolCallRequest) -> ToolCallResult:
+        await asyncio.sleep(0.03)
+        return ToolCallResult(
+            call_id=request.call_id,
+            tool_name=request.tool_name,
+            success=True,
+            result="delayed execution completed",
         )
 
 
@@ -99,6 +111,33 @@ def test_direct_tool_preserves_subsecond_timeout() -> None:
     )
 
     assert timeout == 0.01
+
+
+@pytest.mark.asyncio
+async def test_tool_invoker_bridge_inherits_target_timeout() -> None:
+    registry = ToolRegistry()
+    target = _definition("slow_document_tool", ToolRiskLevel.LOW)
+    target.timeout_seconds = 0.1  # type: ignore[assignment]
+    registry.register(target, _DelayedExecutor())
+    register_tool_discovery_tools(registry)
+    bridge = registry.get_tool("tool_call")
+    assert bridge is not None
+    bridge.timeout_seconds = 0.01  # type: ignore[assignment]
+    context = _agent_tool_context()
+    context.timeout_ms = 10
+
+    invoker = RegistryToolInvoker(registry)
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
+    invoker.configure_tool_discovery_gateway(gateway)
+
+    result = await gateway.invoke_tool(
+        tool_name="tool_call",
+        arguments={"name": "slow_document_tool", "arguments": {}},
+        context=context,
+    )
+
+    assert result.success is True
+    assert result.result == "delayed execution completed"
 
 
 @pytest.mark.asyncio
@@ -705,6 +744,119 @@ async def test_cancelled_after_dispatch_write_is_unknown_and_fenced() -> None:
     assert result.metadata["tool_failure"]["side_effect_state"] == "unknown"
     assert repeated.error == "SIDE_EFFECT_UNRESOLVED"
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_is_bounded_propagated_and_fences_write() -> None:
+    registry = ToolRegistry()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def stubborn_write(request: ToolCallRequest) -> ToolCallResult:
+        nonlocal calls
+        calls += 1
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            # Simulate a third-party client that suppresses task cancellation
+            # while an already-dispatched write is still in flight.
+            await release.wait()
+        return ToolCallResult(
+            call_id=request.call_id,
+            tool_name=request.tool_name,
+            success=True,
+        )
+
+    definition = _definition("stubborn_external_write", ToolRiskLevel.LOW)
+    definition.capability_metadata = {
+        "external_service": True,
+        "operation_kind": "write",
+    }
+    registry.register(definition, stubborn_write)
+    invoker = RegistryToolInvoker(registry)
+    context = ToolInvocationContext(
+        session_id="stubborn-write-session",
+        user_id="stubborn-write-user",
+        tenant_id="stubborn-write-tenant",
+        request_id="stubborn-write-request",
+    )
+
+    invocation = asyncio.create_task(
+        invoker.invoke("stubborn_external_write", {"value": "same"}, context)
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    invocation.cancel()
+    done, _pending = await asyncio.wait({invocation}, timeout=0.5)
+
+    assert invocation in done
+    with pytest.raises(asyncio.CancelledError):
+        await invocation
+
+    repeated = await invoker.invoke(
+        "stubborn_external_write",
+        {"value": "same"},
+        context,
+    )
+    assert repeated.error == "SIDE_EFFECT_UNRESOLVED"
+    assert calls == 1
+
+    release.set()
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_mcp_caller_cancellation_propagates_and_fences_write() -> None:
+    registry = ToolRegistry()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    definition = _definition("mcp_docs__write", ToolRiskLevel.LOW)
+    definition.capability_metadata = {
+        "external_service": True,
+        "operation_kind": "write",
+    }
+    registry.register(definition, _RecordingExecutor())
+
+    class _StubbornMCPRuntime:
+        async def invoke(self, **_kwargs: Any) -> ToolCallResult:
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                await release.wait()
+            return ToolCallResult(
+                call_id="mcp-write",
+                tool_name="mcp_docs__write",
+                success=True,
+            )
+
+    invoker = RegistryToolInvoker(registry, mcp_runtime=_StubbornMCPRuntime())
+    context = ToolInvocationContext(
+        session_id="mcp-write-session",
+        user_id="mcp-write-user",
+        tenant_id="mcp-write-tenant",
+        request_id="mcp-write-request",
+        capability_allowlist=CapabilityAllowlist(
+            tool_names=frozenset({"mcp_docs__write"}),
+            bindings={"mcp_docs__write": {"type": "mcp", "server": "docs"}},
+        ),
+    )
+
+    invocation = asyncio.create_task(invoker.invoke("mcp_docs__write", {}, context))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    invocation.cancel()
+    done, _pending = await asyncio.wait({invocation}, timeout=0.5)
+
+    assert invocation in done
+    with pytest.raises(asyncio.CancelledError):
+        await invocation
+    repeated = await invoker.invoke("mcp_docs__write", {}, context)
+    assert repeated.error == "SIDE_EFFECT_UNRESOLVED"
+
+    release.set()
+    await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio

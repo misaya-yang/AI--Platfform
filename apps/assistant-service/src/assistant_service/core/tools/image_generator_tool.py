@@ -152,7 +152,8 @@ class DashScopeImageGenerator:
     # ``resolve_dashscope("image")`` returns the native API base ending in
     # ``/api/v1``. Keep only paths relative to that base here so the raw HTTP
     # client and native SDK consumers share one resolver contract.
-    _SUBMIT_PATH = "/services/aigc/text2image/image-synthesis"
+    _LEGACY_SUBMIT_PATH = "/services/aigc/text2image/image-synthesis"
+    _WAN26_SUBMIT_PATH = "/services/aigc/image-generation/generation"
     _TASK_PATH_TPL = "/tasks/{task_id}"
 
     def __init__(
@@ -173,12 +174,16 @@ class DashScopeImageGenerator:
             resolved_key, resolved_base = resolve_dashscope("image")
             self.api_key = resolved_key or None
             self.base_url = resolved_base.rstrip("/")
-        self.model = model or os.getenv("DASHSCOPE_IMAGE_MODEL", "wanx-v1")
+        # ``wanx-v1`` was removed from the international model catalogue and
+        # now fails with ``InvalidParameter: Model not exist``.  Wan 2.6 is
+        # available on the current native text-to-image endpoint in both the
+        # international and global deployment scopes.
+        self.model = model or os.getenv("DASHSCOPE_IMAGE_MODEL", "wan2.6-t2i")
         self._client: httpx.AsyncClient | None = None
 
     @property
     def SUBMIT_URL(self) -> str:  # noqa: N802 — kept for backwards-compat
-        return f"{self.base_url}{self._SUBMIT_PATH}"
+        return self._submit_url_for_model(self.model)
 
     @property
     def TASK_URL(self) -> str:  # noqa: N802 — kept for backwards-compat
@@ -192,6 +197,67 @@ class DashScopeImageGenerator:
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=120.0)
         return self._client
+
+    @staticmethod
+    def _uses_wan26_protocol(model: str) -> bool:
+        return model.strip().lower() == "wan2.6-t2i"
+
+    def _submit_url_for_model(self, model: str) -> str:
+        path = (
+            self._WAN26_SUBMIT_PATH
+            if self._uses_wan26_protocol(model)
+            else self._LEGACY_SUBMIT_PATH
+        )
+        return f"{self.base_url}{path}"
+
+    @classmethod
+    def _build_submit_payload(
+        cls,
+        *,
+        model: str,
+        prompt: str,
+        negative_prompt: str,
+        size: str,
+        style: str,
+        n: int,
+    ) -> dict[str, Any]:
+        if cls._uses_wan26_protocol(model):
+            effective_size = "1280*1280" if size == "1536*1536" else size
+            return {
+                "model": model,
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [{"text": prompt}],
+                        }
+                    ]
+                },
+                "parameters": {
+                    "negative_prompt": negative_prompt,
+                    "size": effective_size,
+                    "n": min(n, 4),
+                    "prompt_extend": True,
+                    # The Assistant artifact pipeline applies its own optional
+                    # watermark after provider generation; avoid double marking.
+                    "watermark": False,
+                },
+            }
+
+        payload: dict[str, Any] = {
+            "model": model,
+            "input": {
+                "prompt": prompt,
+            },
+            "parameters": {
+                "size": size,
+                "n": min(n, 4),
+                "style": style,
+            },
+        }
+        if negative_prompt:
+            payload["input"]["negative_prompt"] = negative_prompt
+        return payload
 
     async def generate(
         self,
@@ -219,25 +285,19 @@ class DashScopeImageGenerator:
                 "X-DashScope-Async": "enable",
             }
 
-            payload = {
-                "model": use_model,
-                "input": {
-                    "prompt": prompt,
-                },
-                "parameters": {
-                    "size": size,
-                    "n": min(n, 4),
-                    "style": style,
-                },
-            }
-
-            if negative_prompt:
-                payload["input"]["negative_prompt"] = negative_prompt
+            payload = self._build_submit_payload(
+                model=use_model,
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                size=size,
+                style=style,
+                n=n,
+            )
 
             logger.info(f"Submitting image generation task: {prompt[:50]}...")
 
             response = await client.post(
-                self.SUBMIT_URL,
+                self._submit_url_for_model(use_model),
                 headers=headers,
                 json=payload,
             )
@@ -304,7 +364,7 @@ class DashScopeImageGenerator:
             logger.debug(f"Task {task_id} status: {task_status}")
 
             if task_status == "SUCCEEDED":
-                return await self._download_images(client, output.get("results", []))
+                return await self._download_images(client, self._extract_image_results(output))
             elif task_status == "FAILED":
                 raise Exception(f"Task failed: {output.get('message', 'Unknown error')}")
             elif task_status in ("PENDING", "RUNNING"):
@@ -314,6 +374,41 @@ class DashScopeImageGenerator:
                 raise Exception(f"Unknown task status: {task_status}")
 
         raise Exception(f"Task timed out after {max_wait}s")
+
+    @staticmethod
+    def _extract_image_results(output: dict[str, Any]) -> list[dict[str, str]]:
+        results: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+
+        def append_url(value: Any) -> None:
+            if isinstance(value, dict):
+                value = value.get("url")
+            if isinstance(value, str) and value and value not in seen_urls:
+                seen_urls.add(value)
+                results.append({"url": value})
+
+        legacy_results = output.get("results")
+        if isinstance(legacy_results, list):
+            for result in legacy_results:
+                if isinstance(result, dict):
+                    append_url(result.get("url"))
+
+        choices = output.get("choices")
+        if isinstance(choices, list):
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    continue
+                message = choice.get("message")
+                if not isinstance(message, dict):
+                    continue
+                content = message.get("content")
+                if not isinstance(content, list):
+                    continue
+                for item in content:
+                    if isinstance(item, dict):
+                        append_url(item.get("image"))
+
+        return results
 
     async def _download_images(
         self,

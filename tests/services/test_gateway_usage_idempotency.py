@@ -105,6 +105,54 @@ class _UsageConn:
         self.aggregate_updates += 1
 
 
+class _BatchUsageConn(_UsageConn):
+    def __init__(self):
+        super().__init__()
+        self.batch_fetch_calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+        self.batch_fetch_calls.append((query, args))
+        assert "INSERT INTO usage_records" in query
+        assert len(args) % 24 == 0
+        returned: list[dict[str, Any]] = []
+        for offset in range(0, len(args), 24):
+            row = args[offset : offset + 24]
+            identity = (
+                str(row[0]),
+                str(row[2] or ""),
+                str(row[3] or ""),
+                str(row[21] or ""),
+            )
+            existing = self.usage_rows.get(identity)
+            inserted = existing is None
+            if inserted:
+                self.usage_rows[identity] = {
+                    "tenant_id": row[0],
+                    "user_id": row[1],
+                    "request_id": row[2],
+                    "service_id": row[3],
+                    "assistant_id": row[4],
+                    "model": row[5],
+                    "provider": row[6],
+                    "input_tokens": row[7],
+                    "output_tokens": row[8],
+                    "status": row[20],
+                    "request_type": row[21],
+                }
+            elif existing["status"] in {"running", "pending"} and row[20] == "success":
+                existing["status"] = "success"
+            returned.append(
+                {
+                    "inserted": inserted,
+                    "tenant_id": row[0],
+                    "request_id_key": str(row[2] or ""),
+                    "service_id_key": str(row[3] or ""),
+                    "request_type_key": str(row[21] or ""),
+                }
+            )
+        return returned
+
+
 def _record(**overrides: Any) -> UsageRecord:
     base = {
         "tenant_id": "tenant-a",
@@ -187,3 +235,40 @@ async def test_reflush_after_success_does_not_double_charge():
 
     assert len(conn.usage_rows) == 1
     assert len(conn.quota_updates) == 1
+
+
+@pytest.mark.asyncio
+async def test_production_usage_flush_batches_unique_rows_into_one_round_trip():
+    conn = _BatchUsageConn()
+    recorder = UsageRecorder(database=None)
+    records = [_record(request_id=f"req-{index}") for index in range(100)]
+
+    accepted = await recorder._write_records(conn, records)
+
+    assert len(accepted) == 100
+    assert len(conn.usage_rows) == 100
+    assert len(conn.batch_fetch_calls) == 1
+    query, arguments = conn.batch_fetch_calls[0]
+    assert "RETURNING" in query
+    assert len(arguments) == 100 * 24
+
+
+@pytest.mark.asyncio
+async def test_batched_usage_flush_collapses_same_identity_without_double_charge():
+    conn = _BatchUsageConn()
+    recorder = UsageRecorder(database=None)
+    first = _record(status="running", input_tokens=100, output_tokens=40)
+    final = _record(
+        status="success",
+        user_id="must-not-replace-original-owner",
+        input_tokens=999,
+        output_tokens=999,
+    )
+
+    accepted = await recorder._write_records(conn, [first, final])
+
+    assert accepted == [first]
+    assert len(conn.usage_rows) == 1
+    assert next(iter(conn.usage_rows.values()))["status"] == "success"
+    assert len(conn.batch_fetch_calls) == 1
+    assert len(conn.batch_fetch_calls[0][1]) == 24

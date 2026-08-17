@@ -266,6 +266,11 @@ async def test_db_less_lifespan_registers_catalog_profiles(
     monkeypatch.setattr(tools_module, "register_document_generation_tool", lambda: False)
     monkeypatch.setattr(tools_module, "register_pptx_generation_tool", lambda: False)
     monkeypatch.setattr(
+        tools_module,
+        "register_quiz_tool",
+        lambda **_kwargs: events.append("quiz-register"),
+    )
+    monkeypatch.setattr(
         image_generator_tool,
         "register_image_generation_tool",
         lambda **_kwargs: False,
@@ -280,7 +285,13 @@ async def test_db_less_lifespan_registers_catalog_profiles(
         assert test_app.state.assistant_runtime_adapter is None
         assert test_app.state._ready is True
 
-    assert events == ["catalog-load", "catalog-load", "database-connect", "tool-register"]
+    assert events == [
+        "catalog-load",
+        "catalog-load",
+        "database-connect",
+        "quiz-register",
+        "tool-register",
+    ]
     assert captured == [
         "community-doublecheck:doublecheck",
         "community-engineering-reviewers:security-reviewer",

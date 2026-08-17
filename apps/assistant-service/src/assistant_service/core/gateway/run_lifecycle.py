@@ -1006,9 +1006,11 @@ class RunLifecycleMixin:
         checkpoint_id = str(uuid.uuid4())
         dimensions = self._agent_dimensions(agent_runtime)
         durability = "database" if self.database else "process"
+        message_digest = self._message_state_digest(messages or [])
         checkpoint_receipt = self._checkpoint_receipt(
             messages=messages,
             durability=durability,
+            message_digest=message_digest,
         )
         bounded_resume_payload = {
             **(resume_payload or {}),
@@ -1022,7 +1024,7 @@ class RunLifecycleMixin:
             session_id=session_id,
             phase=normalized_phase,
             iteration=max(0, int(iteration or 0)),
-            message_state_hash=self._message_state_hash(messages),
+            message_state_hash=self._message_state_hash_from_digest(message_digest),
             pending_tool=self._sanitize_pending_tool(pending_tool),
             approval_id=self._safe_uuid(approval_id),
             idempotency_keys=self._sanitize_checkpoint_value(idempotency_keys or {}),

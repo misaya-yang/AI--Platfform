@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import time
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from ...core.assistant_service import AssistantStreamEvent
 
@@ -237,12 +237,19 @@ class ResponsesStreamProjector:
         )
         return events
 
-    def _close_message(self) -> list[dict[str, Any]]:
-        if self._message_item is None or self._message_item["status"] == "completed":
+    def _close_message(
+        self,
+        *,
+        status: Literal["completed", "incomplete"] = "completed",
+    ) -> list[dict[str, Any]]:
+        if self._message_item is None or self._message_item["status"] in {
+            "completed",
+            "incomplete",
+        }:
             return []
         assert self._message_output_index is not None
         part = {"type": "output_text", "text": self._text, "annotations": []}
-        self._message_item["status"] = "completed"
+        self._message_item["status"] = status
         self._message_item["content"] = [part]
         return [
             self._event(
@@ -424,18 +431,20 @@ class ResponsesStreamProjector:
             raise ResponsesIngressError("duplicate_terminal", status_code=500)
         if not preserve_usage:
             self.usage = _usage({})
+        events = self._close_message(status="incomplete")
         self.terminal = True
         safe_error = {
             "code": code,
             "message": "The response could not be completed.",
             "type": "server_error",
         }
-        return [
+        events.append(
             self._event(
                 "response.failed",
                 response=self._response(status="failed", error=safe_error),
             )
-        ]
+        )
+        return events
 
 
 __all__ = ["ResponsesIngressError", "ResponsesStreamProjector"]

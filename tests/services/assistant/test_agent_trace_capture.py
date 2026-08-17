@@ -317,6 +317,39 @@ async def test_trace_writer_persists_root_span_events_and_terminal_conflict() ->
 
 
 @pytest.mark.asyncio
+async def test_text_delta_trace_events_do_not_repeat_root_and_lifecycle_upserts() -> None:
+    db = RecordingDB()
+    writer = AssistantTraceWriter(db, write_timeout_s=1.0)
+    ctx = _trace_ctx()
+
+    assert writer.start_trace(ctx)
+    for sequence_no in range(1, 26):
+        assert writer.record_event(
+            ctx=ctx,
+            event_type="text_delta",
+            sequence_no=sequence_no,
+            payload={"content": f"chunk-{sequence_no}"},
+            phase="model_generation",
+        )
+    await writer.drain(timeout_s=1.0, strict=True, trace_id=ctx.trace_id)
+
+    root_writes = [query for query, _args in db.calls if "INSERT INTO agent_traces" in query]
+    lifecycle_writes = [
+        query
+        for query, args in db.calls
+        if "INSERT INTO agent_trace_spans" in query and len(args) > 4 and args[4] == "assistant_run"
+    ]
+    event_writes = [
+        query for query, _args in db.calls if "INSERT INTO agent_trace_events" in query
+    ]
+
+    assert len(root_writes) == 1
+    assert len(lifecycle_writes) == 1
+    assert len(event_writes) == 25
+    assert len(db.calls) == 27
+
+
+@pytest.mark.asyncio
 async def test_trace_writer_persists_safe_startup_config_fingerprint_only_in_metadata() -> None:
     from assistant_service.config.startup_fingerprint import resolve_startup_config
 
@@ -468,6 +501,33 @@ async def test_run_checkpoint_and_resume_are_pinned_to_agent_runtime() -> None:
             agent_runtime=other.trace_dimensions(),
         )
 
+
+@pytest.mark.asyncio
+async def test_checkpoint_reuses_one_message_digest_for_hash_and_receipt() -> None:
+    gateway = AssistantExecutionGateway(
+        tool_invoker=object(),  # type: ignore[arg-type]
+        database=None,
+        enabled=True,
+    )
+    digest_calls = 0
+    original_digest = gateway._message_state_digest
+
+    def counting_digest(messages: list[dict[str, object]]) -> list[dict[str, object]]:
+        nonlocal digest_calls
+        digest_calls += 1
+        return original_digest(messages)
+
+    gateway._message_state_digest = counting_digest  # type: ignore[method-assign]
+    await gateway.save_run_checkpoint(
+        run_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab",
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        phase="model_turn_started",
+        messages=[{"role": "user", "content": "large checkpoint input"}],
+    )
+
+    assert digest_calls == 1
 
 @pytest.mark.asyncio
 async def test_agent_run_resume_rejects_missing_or_cross_session_context() -> None:
@@ -892,6 +952,35 @@ async def test_resume_sequence_only_waits_for_pending_writes_in_same_trace() -> 
         await writer.drain(timeout_s=1.0)
 
     assert db.fetchrow_calls[0][1] == (ctx_b.trace_id,)
+
+
+@pytest.mark.asyncio
+async def test_scoped_trace_drain_ignores_continuous_unrelated_submissions() -> None:
+    writer = AssistantTraceWriter(None, write_timeout_s=1.0)
+    target = _trace_ctx()
+    unrelated = _trace_ctx(
+        run_id="22222222-2222-4222-8222-222222222222",
+        request_id="request-b",
+    )
+    stop = asyncio.Event()
+    started = asyncio.Event()
+
+    async def submit_unrelated_traces() -> None:
+        started.set()
+        while not stop.is_set():
+            writer.start_trace(unrelated)
+            await asyncio.sleep(0)
+
+    submitter = asyncio.create_task(submit_unrelated_traces())
+    await started.wait()
+    try:
+        await asyncio.wait_for(
+            writer.drain(timeout_s=0.2, trace_id=target.trace_id),
+            timeout=0.05,
+        )
+    finally:
+        stop.set()
+        await submitter
 
 
 @pytest.mark.asyncio

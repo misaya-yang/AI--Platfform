@@ -10,6 +10,8 @@ The same payload mis-shape reaches ``generate_quiz`` whose executor walks
 
 from __future__ import annotations
 
+import copy
+
 from assistant_service.core.tools.quiz_tool import _coerce_questions
 
 
@@ -20,6 +22,22 @@ class TestCoerceQuestions:
             {"question_text": "Is the sky blue?", "question_type": "true_false"},
         ]
         assert _coerce_questions(questions) == questions
+
+    def test_list_of_dicts_is_detached_from_caller_owned_arguments(self):
+        questions = [
+            {
+                "question_text": "What is 2+2?",
+                "question_type": "mc_single",
+                "options": [{"label": "A", "text": "4"}],
+            }
+        ]
+        original = copy.deepcopy(questions)
+
+        out = _coerce_questions(questions)
+        out[0]["question_num"] = 1
+        out[0]["options"][0]["text"] = "mutated"
+
+        assert questions == original
 
     def test_list_of_strings_lifted_to_dict_shape(self):
         out = _coerce_questions(["What is X?", "Define Y", "Compare Z"])

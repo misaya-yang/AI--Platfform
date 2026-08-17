@@ -604,6 +604,8 @@ class AssistantTraceWriter:
             Coroutine[Any, Any, None],
         ] = {}
         self._failed_outcomes: dict[str, tuple[int, str]] = {}
+        self._initialized_traces: set[str] = set()
+        self._trace_init_locks: dict[str, asyncio.Lock] = {}
         self.dropped_writes = 0
         self.failed_writes = 0
         self.timed_out_writes = 0
@@ -714,19 +716,54 @@ class AssistantTraceWriter:
         strict: bool = False,
         trace_id: str | None = None,
     ) -> None:
-        barrier_generation = self._submission_generation
-        pending_snapshot = tuple(
-            task
-            for task, (generation, pending_trace_id) in self._pending_submissions.items()
-            if generation <= barrier_generation
-            and (trace_id is None or pending_trace_id == trace_id)
-        )
+        def latest_relevant_generation() -> int:
+            if trace_id is None:
+                return self._submission_generation
+            generations = [
+                generation
+                for generation, pending_trace_id in self._pending_submissions.values()
+                if pending_trace_id == trace_id
+            ]
+            failed = self._failed_outcomes.get(trace_id)
+            if failed is not None:
+                generations.append(failed[0])
+            return max(generations, default=0)
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, timeout_s)
+        barrier_generation = latest_relevant_generation()
         done: set[asyncio.Task[str]] = set()
         pending: set[asyncio.Task[str]] = set()
-        if pending_snapshot:
-            done, pending = await asyncio.wait(pending_snapshot, timeout=timeout_s)
-            for task in done:
-                self._finalize_task_outcome(task)
+        while True:
+            pending_snapshot = tuple(
+                task
+                for task, (generation, pending_trace_id) in self._pending_submissions.items()
+                if generation <= barrier_generation
+                and (trace_id is None or pending_trace_id == trace_id)
+            )
+            if pending_snapshot:
+                remaining = max(0.0, deadline - loop.time())
+                done, pending = await asyncio.wait(pending_snapshot, timeout=remaining)
+                for task in done:
+                    self._finalize_task_outcome(task)
+                if pending:
+                    break
+            # A completing producer can synchronously submit its terminal trace
+            # write from a done callback.  Advance the barrier to a fixed point
+            # so resume/finish cannot observe a stale sequence after ``drain``.
+            await asyncio.sleep(0)
+            latest_generation = latest_relevant_generation()
+            if latest_generation <= barrier_generation:
+                break
+            barrier_generation = latest_generation
+            if loop.time() >= deadline:
+                pending = {
+                    task
+                    for task, (generation, pending_trace_id) in self._pending_submissions.items()
+                    if generation <= barrier_generation
+                    and (trace_id is None or pending_trace_id == trace_id)
+                }
+                break
         if not strict:
             return
         if pending:
@@ -889,8 +926,25 @@ class AssistantTraceWriter:
             )
 
     async def _start_trace(self, ctx: AssistantTraceContext) -> None:
-        await self._upsert_trace_root(ctx)
-        await self._upsert_lifecycle_span(ctx, status="running")
+        await self._ensure_trace_started(ctx)
+
+    async def _ensure_trace_started(self, ctx: AssistantTraceContext) -> None:
+        """Persist the immutable root/lifecycle pair once per active trace.
+
+        ``record_event`` tasks are intentionally concurrent.  The per-trace
+        lock prevents each task from paying two defensive upserts while still
+        supporting callers that record an event without an explicit
+        ``start_trace`` submission.
+        """
+        if ctx.trace_id in self._initialized_traces:
+            return
+        lock = self._trace_init_locks.setdefault(ctx.trace_id, asyncio.Lock())
+        async with lock:
+            if ctx.trace_id in self._initialized_traces:
+                return
+            await self._upsert_trace_root(ctx)
+            await self._upsert_lifecycle_span(ctx, status="running")
+            self._initialized_traces.add(ctx.trace_id)
 
     async def _record_event(
         self,
@@ -902,7 +956,7 @@ class AssistantTraceWriter:
         phase: str | None,
         occurred_at: float | None,
     ) -> None:
-        await self._upsert_trace_root(ctx)
+        await self._ensure_trace_started(ctx)
         span_id = await self._record_span_for_event(
             ctx=ctx,
             event_type=event_type,
@@ -976,8 +1030,7 @@ class AssistantTraceWriter:
         attributes: dict[str, Any],
         error_message: Any,
     ) -> None:
-        await self._upsert_trace_root(ctx)
-        await self._upsert_lifecycle_span(ctx, status="running")
+        await self._ensure_trace_started(ctx)
         await self._upsert_span(
             span_id=_span_uuid(ctx.trace_id, span_key),
             trace_id=ctx.trace_id,
@@ -1008,7 +1061,7 @@ class AssistantTraceWriter:
         terminal_envelope: dict[str, Any] | None,
     ) -> None:
         ended_at = time.time()
-        await self._upsert_trace_root(ctx)
+        await self._ensure_trace_started(ctx)
         total = (
             total_latency_ms
             if total_latency_ms is not None
@@ -1103,6 +1156,10 @@ class AssistantTraceWriter:
                 occurred_at=ended_at,
             )
         await self._enqueue_trace_ingested(ctx, status=status)
+        self._initialized_traces.discard(ctx.trace_id)
+        lock = self._trace_init_locks.get(ctx.trace_id)
+        if lock is not None and not lock.locked():
+            self._trace_init_locks.pop(ctx.trace_id, None)
 
     async def _enqueue_trace_ingested(self, ctx: AssistantTraceContext, *, status: str) -> None:
         if not self.database or not hasattr(self.database, "execute"):
@@ -1285,7 +1342,6 @@ class AssistantTraceWriter:
                 error_message=data.get("error") or data.get("message"),
             )
             return _span_uuid(ctx.trace_id, "lifecycle")
-        await self._upsert_lifecycle_span(ctx, status="running")
         if event_type in {
             "rag_retrieval_started",
             "rag_retrieval_completed",

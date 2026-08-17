@@ -215,6 +215,14 @@ print("Chart saved to /workspace/output/revenue_trend.png")
     category=ToolCategory.ANALYSIS,
     risk_level=ToolRiskLevel.MEDIUM,
     requires_confirmation=False,
+    capability_metadata={
+        # Code runs inside an isolated, no-network sandbox.  The tool may
+        # create host-persisted artifacts, so keep write governance, but a
+        # completed process receipt (including a non-zero exit) makes the
+        # outcome known and safe for the model to inspect and correct.
+        "operation_kind": "write",
+        "external_service": False,
+    },
     sandbox_profile="docker-gvisor-no-network",
     audit_shape={
         "input": "code_hash_and_redacted_summary",
@@ -334,6 +342,7 @@ class CodeExecutorToolExecutor(ToolExecutor):
                 tool_name=request.tool_name,
                 success=False,
                 error="Code is required",
+                metadata={"side_effect_state": "not_started"},
             )
 
         if not code.strip():
@@ -342,6 +351,7 @@ class CodeExecutorToolExecutor(ToolExecutor):
                 tool_name=request.tool_name,
                 success=False,
                 error="Code cannot be empty",
+                metadata={"side_effect_state": "not_started"},
             )
 
         # Defense-in-depth: AST-level denylist for sandbox-escape imports.
@@ -362,6 +372,7 @@ class CodeExecutorToolExecutor(ToolExecutor):
                     f"The sandbox does not have network or shell access; "
                     f"use pandas/numpy/matplotlib for data work instead."
                 ),
+                metadata={"side_effect_state": "not_started"},
             )
 
         # Check if Docker is available
@@ -371,6 +382,7 @@ class CodeExecutorToolExecutor(ToolExecutor):
                 tool_name=request.tool_name,
                 success=False,
                 error="Code execution is not available (Docker not running)",
+                metadata={"side_effect_state": "not_started"},
             )
 
         try:
@@ -420,6 +432,7 @@ class CodeExecutorToolExecutor(ToolExecutor):
                     "duration_ms": result.duration_ms,
                     "output_files_count": len(result.output_files),
                     "exit_code": result.exit_code,
+                    "side_effect_state": "known",
                 },
             )
 
@@ -432,6 +445,10 @@ class CodeExecutorToolExecutor(ToolExecutor):
                 tool_name=request.tool_name,
                 success=False,
                 error=str(e),
+                metadata={
+                    "side_effect_state": "known",
+                    "side_effect_scope": "isolated_sandbox",
+                },
             )
 
     def _format_result(self, result: dict[str, Any]) -> str:

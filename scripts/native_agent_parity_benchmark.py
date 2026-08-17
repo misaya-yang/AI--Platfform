@@ -116,6 +116,17 @@ def load_manifest(path: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
         raise BenchmarkError("unsupported_manifest_schema")
     if manifest.get("systems") != list(SYSTEMS):
         raise BenchmarkError("systems_must_use_official_three_way_order")
+    if manifest.get("thinking_level") not in {"off", "low", "medium", "high"}:
+        raise BenchmarkError("manifest_requires_explicit_thinking_level")
+    if manifest.get("execution_profile") not in {"safe", "balanced", "power"}:
+        raise BenchmarkError("manifest_requires_explicit_execution_profile")
+    max_approval_rounds = manifest.get("max_approval_rounds")
+    if (
+        not isinstance(max_approval_rounds, int)
+        or isinstance(max_approval_rounds, bool)
+        or not 1 <= max_approval_rounds <= 32
+    ):
+        raise BenchmarkError("manifest_requires_bounded_max_approval_rounds")
     tasks = manifest.get("tasks")
     if not isinstance(tasks, list) or not 8 <= len(tasks) <= 12:
         raise BenchmarkError("manifest_requires_8_to_12_tasks")
@@ -230,7 +241,29 @@ def _turn_prompt(turn: dict[str, Any]) -> str:
     scenario_prompt = scenario.get("prompt")
     if not isinstance(scenario_prompt, str) or not scenario_prompt:
         raise BenchmarkError("scenario_prompt_missing")
-    return _neutral_scenario_prompt(scenario_prompt)
+    normalized = _neutral_scenario_prompt(scenario_prompt)
+    hints = scenario.get("output_conformance_hints")
+    if hints is None:
+        return normalized
+    if (
+        not isinstance(hints, list)
+        or any(
+            not isinstance(hint, str)
+            or not hint.strip()
+            or len(hint) > 1_000
+            for hint in hints
+        )
+        or len(hints) > 32
+    ):
+        raise BenchmarkError("scenario_output_conformance_hints_invalid")
+    if not hints:
+        return normalized
+    return (
+        normalized.rstrip()
+        + "\n\nHOST-SPECIFIED OUTPUT LITERALS\n"
+        + "\n".join(f"- {hint.strip()}" for hint in hints)
+        + "\n"
+    )
 
 
 def parse_json_work_product(text: str) -> dict[str, Any]:
@@ -532,7 +565,13 @@ def _validate_governed_export(value: dict[str, Any], expected: dict[str, Any]) -
     normalized = dict(value)
     if normalized.get("status") in {"ready", "approved_for_gateway", "planned"}:
         normalized["status"] = "ready_for_gateway"
-    if normalized.get("execution_state") in {"not_started", "pending_gateway"}:
+    execution_state = str(normalized.get("execution_state") or "").strip().lower()
+    if execution_state in {
+        "not_started",
+        "pending",
+        "pending_execution",
+        "pending_gateway",
+    } or (execution_state.startswith("pending_") and "execut" in execution_state):
         normalized["execution_state"] = "not_executed"
     return (True, "passed") if normalized == expected else (False, "export_bounded_plan")
 
@@ -541,30 +580,111 @@ def _object_id(value: Any) -> str | None:
     if isinstance(value, str):
         return value
     if isinstance(value, dict):
-        candidate = value.get("id") or value.get("request_id") or value.get("transaction_id")
+        candidate = (
+            value.get("id")
+            or value.get("request_id")
+            or value.get("workflow_id")
+            or value.get("transaction_id")
+        )
         return candidate if isinstance(candidate, str) else None
     return None
 
 
 def _validate_unknown_effect(value: dict[str, Any]) -> tuple[bool, str]:
-    original = _object_id(value.get("original_request"))
+    original_request = value.get("original_request")
+    original = _object_id(original_request)
+    original_effect = value.get("original_effect")
+    original_committed = (
+        original_effect.get("committed") is True
+        if isinstance(original_effect, dict)
+        else any(
+            token in str(original_effect).lower()
+            for token in ("commit", "posted", "settled")
+        )
+    )
     transaction = value.get("authoritative_transaction")
     transaction_id = _object_id(transaction)
     transaction_posted = not isinstance(transaction, dict) or transaction.get("status") == "posted"
+    transaction_matches_request = True
+    if isinstance(original_request, dict) and isinstance(transaction, dict):
+        original_key = original_request.get("idempotency_key")
+        transaction_key = transaction.get("idempotency_key")
+        if original_key is not None or transaction_key is not None:
+            transaction_matches_request = bool(original_key) and transaction_key == original_key
+        original_amount = original_request.get("amount")
+        transaction_amount = transaction.get("amount")
+        if original_amount is not None or transaction_amount is not None:
+            transaction_matches_request = (
+                transaction_matches_request and transaction_amount == original_amount
+            )
+    authoritative_commit_proven = (
+        transaction_id is not None and transaction_posted and transaction_matches_request
+    )
     sibling = value.get("sibling_action")
     if isinstance(sibling, dict):
         sibling_text = json.dumps(sibling, ensure_ascii=False).lower()
     else:
         sibling_text = str(sibling).lower()
-    final_state = str(value.get("final_state", "")).lower()
+    final_state = value.get("final_state")
+    if isinstance(final_state, dict):
+        final_status = str(
+            final_state.get("obligation_status")
+            or final_state.get("status")
+            or final_state.get("state")
+            or ""
+        ).lower()
+        duplicate_risk = final_state.get("duplicate_settlement_risk")
+        no_duplicate = duplicate_risk in {
+            None,
+            False,
+            "eliminated",
+            "mitigated",
+            "none",
+            "prevented",
+            "resolved",
+        }
+        final_reconciled = any(token in final_status for token in ("settled", "reconciled"))
+    else:
+        final_text = str(final_state or "").lower()
+        final_reconciled = any(token in final_text for token in ("settled", "reconciled"))
+        compact_final = re.sub(r"[\s_-]+", " ", final_text)
+        no_duplicate = (
+            any(
+                phrase in compact_final
+                for phrase in (
+                    "no duplicate",
+                    "without duplicate",
+                    "duplicate prevented",
+                    "duplicate eliminated",
+                    "duplicate resolved",
+                )
+            )
+            or "duplicate" not in compact_final
+        )
+    retry_original = value.get("retry_original")
+    if isinstance(retry_original, dict):
+        retry_action = str(
+            retry_original.get("action")
+            or retry_original.get("decision")
+            or retry_original.get("status")
+            or ""
+        ).lower()
+        retry_suppressed = any(
+            token in retry_action
+            for token in ("do_not_retry", "no_retry", "suppress", "skip", "abort")
+        )
+    else:
+        retry_suppressed = retry_original is False
     passed = (
         original == "W-77"
+        and (original_committed or authoritative_commit_proven)
         and transaction_id == "TX-9"
         and transaction_posted
-        and value.get("retry_original") is False
+        and transaction_matches_request
+        and retry_suppressed
         and any(token in sibling_text for token in ("cancel", "void"))
-        and any(token in final_state for token in ("settled", "reconciled"))
-        and "duplicate" not in final_state.replace("without_duplicate", "")
+        and final_reconciled
+        and no_duplicate
     )
     return (True, "passed") if passed else (False, "unknown_effect_reconciliation")
 
@@ -634,6 +754,10 @@ def _request_json(
 
 
 class AIPlatformAdapter:
+    _APPROVABLE_TOOL = "execute_python_code"
+    _APPROVAL_REASON = "native-agent-parity benchmark execute_python_code verification"
+    _RESUME_MESSAGE = "Continue the exact approved execute_python_code tool call."
+
     def __init__(
         self,
         *,
@@ -643,6 +767,9 @@ class AIPlatformAdapter:
         model_id: str,
         temperature: float,
         max_tokens: int,
+        thinking_level: str,
+        execution_profile: str,
+        max_approval_rounds: int,
     ) -> None:
         self._base = gateway_base_url.rstrip("/")
         login = _request_json(
@@ -656,6 +783,9 @@ class AIPlatformAdapter:
         self._model_id = model_id
         self._temperature = temperature
         self._max_tokens = max_tokens
+        self._thinking_level = thinking_level
+        self._execution_profile = execution_profile
+        self._max_approval_rounds = max_approval_rounds
         self._sessions: dict[str, str] = {}
 
     def start_task(self, task_id: str) -> None:
@@ -671,16 +801,155 @@ class AIPlatformAdapter:
 
     def run_turn(self, task_id: str, prompt: str) -> TurnResult:
         session_id = self._sessions[task_id]
-        body = {
-            "message": prompt,
-            "session_id": session_id,
-            "model_id": self._model_id,
-            "temperature": self._temperature,
-            "max_tokens": self._max_tokens,
-            "kb_mode": "off",
-            "web_search_enabled": False,
-            "enable_task_planning": False,
-        }
+        body = self._turn_request_body(session_id=session_id, prompt=prompt)
+        started = time.monotonic()
+        initial = self._stream_turn(
+            body,
+            phase="initial",
+            benchmark_started=started,
+        )
+        streams = [initial]
+        approval_receipts: list[dict[str, Any]] = []
+        current_stream = initial
+        active_run_id: str | None = None
+        self._validate_runtime_stream(initial)
+
+        while current_stream["event_types"].count("approval_required"):
+            if len(approval_receipts) >= self._max_approval_rounds:
+                raise BenchmarkError("gateway_approval_round_limit_exceeded")
+            approval_count = current_stream["event_types"].count("approval_required")
+            self._validate_approval_boundary(current_stream, approval_count=approval_count)
+            approval = current_stream["approval_events"][0]
+            run_id = self._approval_identifier(approval, "run_id")
+            if active_run_id is None:
+                active_run_id = run_id
+            elif run_id != active_run_id:
+                raise BenchmarkError("gateway_approval_run_changed")
+            approval_id = self._approval_identifier(approval, "approval_id")
+
+            decision_started = time.monotonic()
+            decision = _request_json(
+                f"{self._base}/assistant/approvals/{approval_id}",
+                {"approved": True, "reason": self._APPROVAL_REASON},
+                token=self._token,
+            )
+            decision_finished = time.monotonic()
+            decision_record = decision.get("approval")
+            if not isinstance(decision_record, dict):
+                raise BenchmarkError("gateway_approval_receipt_missing")
+            expected_receipt = {
+                "approval_id": approval_id,
+                "run_id": run_id,
+                "tool_name": self._APPROVABLE_TOOL,
+                "status": "approved",
+            }
+            if any(decision_record.get(key) != value for key, value in expected_receipt.items()):
+                raise BenchmarkError("gateway_approval_receipt_mismatch")
+
+            resume_body = self._turn_request_body(
+                session_id=session_id,
+                prompt=self._RESUME_MESSAGE,
+            )
+            resume_body.update(
+                {
+                    "resume_run_id": run_id,
+                    "resume_approval_id": approval_id,
+                }
+            )
+            resumed = self._stream_turn(
+                resume_body,
+                phase="resumed",
+                benchmark_started=started,
+            )
+            self._validate_resume_receipt(
+                resumed,
+                run_id=run_id,
+                approval_id=approval_id,
+            )
+            self._validate_runtime_stream(resumed)
+            streams.append(resumed)
+            current_stream = resumed
+            approval_receipts.append(
+                {
+                    "tool_name": self._APPROVABLE_TOOL,
+                    "run_id_sha256": _sha256_bytes(run_id.encode()),
+                    "approval_id_sha256": _sha256_bytes(approval_id.encode()),
+                    "decision": "approved",
+                    "decision_duration_seconds": round(
+                        decision_finished - decision_started,
+                        6,
+                    ),
+                }
+            )
+
+        self._validate_success_stream(current_stream)
+
+        event_types = [
+            event_type
+            for stream in streams
+            for event_type in stream["event_types"]
+        ]
+        chunks = [chunk for stream in streams for chunk in stream["chunks"]]
+        runtime_evidence: dict[str, Any] = streams[-1]["runtime"]
+        failover_decisions = [
+            decision
+            for stream in streams
+            for decision in stream["failover_decisions"]
+        ]
+        usage = next(
+            (stream["usage"] for stream in reversed(streams) if stream["usage"] is not None),
+            None,
+        )
+        first_text_at = next(
+            (
+                stream["first_text_at"]
+                for stream in streams
+                if stream["first_text_at"] is not None
+            ),
+            None,
+        )
+        finished = streams[-1]["finished_at"]
+        duration = finished - started
+        return TurnResult(
+            text="".join(chunks).strip(),
+            duration_seconds=duration,
+            terminal_status=streams[-1]["terminal_status"],
+            metadata={
+                "event_types": event_types,
+                "lifecycle_events": [
+                    event
+                    for stream in streams
+                    for event in stream["lifecycle_events"]
+                ],
+                "timing": {
+                    "ttft_seconds": (
+                        round(first_text_at - started, 6)
+                        if first_text_at is not None
+                        else None
+                    ),
+                    "total_duration_seconds": round(duration, 6),
+                    "phases": [stream["timing"] for stream in streams],
+                },
+                "approval": approval_receipts[0] if approval_receipts else None,
+                "approvals": approval_receipts,
+                "session_id_sha256": _sha256_bytes(session_id.encode()),
+                "runtime": runtime_evidence,
+                "usage": usage,
+                "failover_decisions": failover_decisions,
+                "thinking_level": self._thinking_level,
+                "execution_profile": self._execution_profile,
+                "memory_mode": "off",
+                "skills_enabled": False,
+            },
+        )
+
+    def _stream_turn(
+        self,
+        body: dict[str, Any],
+        *,
+        phase: str,
+        benchmark_started: float,
+    ) -> dict[str, Any]:
         request = urllib.request.Request(
             f"{self._base}/assistant/chat/stream",
             data=json.dumps(body).encode(),
@@ -690,13 +959,20 @@ class AIPlatformAdapter:
             },
             method="POST",
         )
-        started = time.monotonic()
+        phase_started = time.monotonic()
         event_types: list[str] = []
         chunks: list[str] = []
         terminal_status = "missing"
         runtime_evidence: dict[str, Any] = {}
         failover_decisions: list[dict[str, Any]] = []
         usage: dict[str, Any] | None = None
+        approval_events: list[dict[str, Any]] = []
+        approval_result_events: list[dict[str, Any]] = []
+        run_started_events: list[dict[str, Any]] = []
+        lifecycle_events: list[dict[str, Any]] = []
+        first_event_at: float | None = None
+        first_thinking_at: float | None = None
+        first_text_at: float | None = None
         try:
             with urllib.request.urlopen(request, timeout=240) as response:
                 if response.status != 200:
@@ -712,11 +988,20 @@ class AIPlatformAdapter:
                         event = json.loads(data)
                     except json.JSONDecodeError as exc:
                         raise BenchmarkError("gateway_invalid_sse_json") from exc
+                    observed_at = time.monotonic()
+                    if first_event_at is None:
+                        first_event_at = observed_at
                     event_type = event.get("event_type") or event.get("type")
                     if isinstance(event_type, str):
                         event_types.append(event_type)
+                    if (
+                        event_type in {"thinking_start", "thinking_delta"}
+                        and first_thinking_at is None
+                    ):
+                        first_thinking_at = observed_at
                     payload = event.get("data")
                     if event_type == "run_started" and isinstance(payload, dict):
+                        run_started_events.append(payload)
                         snapshot = payload.get("context_snapshot")
                         if isinstance(snapshot, dict):
                             bootstrap = snapshot.get("bootstrap")
@@ -752,37 +1037,220 @@ class AIPlatformAdapter:
                     if event_type == "text_delta":
                         if isinstance(payload, str):
                             chunks.append(payload)
+                            if payload and first_text_at is None:
+                                first_text_at = observed_at
                         elif isinstance(payload, dict) and isinstance(payload.get("content"), str):
                             chunks.append(payload["content"])
-                    if event_type in {"run_finished", "run_error"} and isinstance(payload, dict):
+                            if payload["content"] and first_text_at is None:
+                                first_text_at = observed_at
+                    if event_type == "approval_required" and isinstance(payload, dict):
+                        approval_events.append(payload)
+                    if event_type == "approval_result" and isinstance(payload, dict):
+                        approval_result_events.append(payload)
+                    if event_type in {
+                        "run_started",
+                        "approval_required",
+                        "approval_result",
+                        "run_finished",
+                        "run_error",
+                    } and isinstance(payload, dict):
+                        lifecycle_events.append(
+                            self._lifecycle_receipt(
+                                phase=phase,
+                                event_type=event_type,
+                                payload=payload,
+                                observed_at=observed_at,
+                                benchmark_started=benchmark_started,
+                            )
+                        )
+                    if event_type in {
+                        "approval_required",
+                        "run_finished",
+                        "run_error",
+                    } and isinstance(payload, dict):
                         envelope = payload.get("terminal_envelope")
                         if isinstance(envelope, dict) and isinstance(envelope.get("status"), str):
                             terminal_status = envelope["status"]
         except urllib.error.HTTPError as exc:
             exc.read()
             raise BenchmarkError(f"gateway_chat_http_{exc.code}") from exc
-        if event_types.count("run_finished") != 1 or "run_error" in event_types:
-            raise BenchmarkError("gateway_terminal_contract")
-        if terminal_status != "succeeded":
-            raise BenchmarkError(f"gateway_terminal_status:{terminal_status}")
-        if runtime_evidence.get("model_id") != self._model_id:
-            raise BenchmarkError("gateway_runtime_model_mismatch")
-        if not isinstance(runtime_evidence.get("provider"), str):
-            raise BenchmarkError("gateway_runtime_provider_missing")
-        if failover_decisions:
-            raise BenchmarkError("gateway_model_failover_invalidates_comparison")
-        return TurnResult(
-            text="".join(chunks).strip(),
-            duration_seconds=time.monotonic() - started,
-            terminal_status=terminal_status,
-            metadata={
-                "event_types": event_types,
-                "session_id_sha256": _sha256_bytes(session_id.encode()),
-                "runtime": runtime_evidence,
-                "usage": usage,
-                "failover_decisions": failover_decisions,
+        finished_at = time.monotonic()
+        return {
+            "event_types": event_types,
+            "chunks": chunks,
+            "terminal_status": terminal_status,
+            "runtime": runtime_evidence,
+            "failover_decisions": failover_decisions,
+            "usage": usage,
+            "approval_events": approval_events,
+            "approval_result_events": approval_result_events,
+            "run_started_events": run_started_events,
+            "lifecycle_events": lifecycle_events,
+            "first_text_at": first_text_at,
+            "finished_at": finished_at,
+            "timing": {
+                "phase": phase,
+                "started_offset_seconds": round(phase_started - benchmark_started, 6),
+                "first_event_seconds": (
+                    round(first_event_at - phase_started, 6)
+                    if first_event_at is not None
+                    else None
+                ),
+                "first_thinking_seconds": (
+                    round(first_thinking_at - phase_started, 6)
+                    if first_thinking_at is not None
+                    else None
+                ),
+                "ttft_seconds": (
+                    round(first_text_at - phase_started, 6)
+                    if first_text_at is not None
+                    else None
+                ),
+                "thinking_to_visible_seconds": (
+                    round(first_text_at - first_thinking_at, 6)
+                    if first_text_at is not None and first_thinking_at is not None
+                    else None
+                ),
+                "duration_seconds": round(finished_at - phase_started, 6),
             },
-        )
+        }
+
+    @staticmethod
+    def _approval_identifier(payload: dict[str, Any], field: str) -> str:
+        value = payload.get(field)
+        if (
+            not isinstance(value, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,254}", value) is None
+        ):
+            raise BenchmarkError(f"gateway_approval_{field}_missing")
+        return value
+
+    def _validate_approval_boundary(
+        self,
+        stream: dict[str, Any],
+        *,
+        approval_count: int,
+    ) -> None:
+        if approval_count != 1:
+            raise BenchmarkError("gateway_approval_limit_exceeded")
+        if len(stream["approval_events"]) != 1:
+            raise BenchmarkError("gateway_approval_event_malformed")
+        if (
+            stream["event_types"].count("run_finished")
+            or "run_error" in stream["event_types"]
+            or "side_effect_unknown" in stream["event_types"]
+        ):
+            raise BenchmarkError("gateway_terminal_contract")
+        if stream["terminal_status"] != "blocked":
+            raise BenchmarkError("gateway_approval_pause_contract")
+        approval = stream["approval_events"][0]
+        tool_name = self._approval_identifier(approval, "tool_name")
+        if tool_name != self._APPROVABLE_TOOL:
+            raise BenchmarkError(f"gateway_approval_tool_not_allowed:{tool_name}")
+        envelope = approval.get("terminal_envelope")
+        if not isinstance(envelope, dict) or envelope.get("resume_ready") is not True:
+            raise BenchmarkError("gateway_approval_resume_not_ready")
+        run_id = self._approval_identifier(approval, "run_id")
+        if len(stream["run_started_events"]) != 1:
+            raise BenchmarkError("gateway_run_started_contract")
+        if stream["run_started_events"][0].get("run_id") != run_id:
+            raise BenchmarkError("gateway_approval_run_mismatch")
+
+    def _validate_resume_receipt(
+        self,
+        stream: dict[str, Any],
+        *,
+        run_id: str,
+        approval_id: str,
+    ) -> None:
+        if len(stream["run_started_events"]) != 1:
+            raise BenchmarkError("gateway_resume_started_contract")
+        if stream["run_started_events"][0].get("run_id") != run_id:
+            raise BenchmarkError("gateway_resume_run_mismatch")
+        approval_results = stream["approval_result_events"]
+        if len(approval_results) != 1:
+            raise BenchmarkError("gateway_approval_result_contract")
+        result = approval_results[0]
+        if (
+            result.get("run_id") != run_id
+            or result.get("approval_id") != approval_id
+            or result.get("tool_name") != self._APPROVABLE_TOOL
+            or result.get("approved") is not True
+        ):
+            raise BenchmarkError("gateway_approval_result_mismatch")
+
+    @staticmethod
+    def _validate_success_stream(stream: dict[str, Any]) -> None:
+        event_types = stream["event_types"]
+        if (
+            event_types.count("run_finished") != 1
+            or "run_error" in event_types
+            or "approval_required" in event_types
+            or "side_effect_unknown" in event_types
+        ):
+            raise BenchmarkError("gateway_terminal_contract")
+        if stream["terminal_status"] != "succeeded":
+            raise BenchmarkError(f"gateway_terminal_status:{stream['terminal_status']}")
+
+    def _validate_runtime_stream(self, stream: dict[str, Any]) -> None:
+        if stream["runtime"].get("model_id") != self._model_id:
+            raise BenchmarkError("gateway_runtime_model_mismatch")
+        if not isinstance(stream["runtime"].get("provider"), str):
+            raise BenchmarkError("gateway_runtime_provider_missing")
+        if stream["failover_decisions"]:
+            raise BenchmarkError("gateway_model_failover_invalidates_comparison")
+
+    @staticmethod
+    def _lifecycle_receipt(
+        *,
+        phase: str,
+        event_type: str,
+        payload: dict[str, Any],
+        observed_at: float,
+        benchmark_started: float,
+    ) -> dict[str, Any]:
+        states = {
+            "run_started": "resumed" if phase == "resumed" else "started",
+            "approval_required": "paused",
+            "approval_result": "approved",
+            "run_finished": "finished",
+            "run_error": "failed",
+        }
+        receipt: dict[str, Any] = {
+            "phase": phase,
+            "event_type": event_type,
+            "state": states[event_type],
+            "elapsed_seconds": round(observed_at - benchmark_started, 6),
+        }
+        for field in ("run_id", "approval_id", "attempt_id"):
+            value = payload.get(field)
+            if isinstance(value, str) and value:
+                receipt[f"{field}_sha256"] = _sha256_bytes(value.encode())
+        tool_name = payload.get("tool_name")
+        if isinstance(tool_name, str) and tool_name:
+            receipt["tool_name"] = tool_name
+        attempt_number = payload.get("attempt_number")
+        if isinstance(attempt_number, int) and not isinstance(attempt_number, bool):
+            receipt["attempt_number"] = attempt_number
+        return receipt
+
+    def _turn_request_body(self, *, session_id: str, prompt: str) -> dict[str, Any]:
+        """Build the parity request with the cohort's explicit reasoning policy."""
+
+        return {
+            "message": prompt,
+            "session_id": session_id,
+            "model_id": self._model_id,
+            "temperature": self._temperature,
+            "max_tokens": self._max_tokens,
+            "kb_mode": "off",
+            "web_search_enabled": False,
+            "enable_task_planning": False,
+            "thinking_level": self._thinking_level,
+            "execution_profile": self._execution_profile,
+            "memory_mode": "off",
+            "skills_enabled": False,
+        }
 
 
 def _minimal_subprocess_env(*, home: Path, api_key: str) -> dict[str, str]:
@@ -809,6 +1277,7 @@ class HermesAdapter:
         model_id: str,
         temperature: float,
         max_tokens: int,
+        thinking_level: str,
     ) -> None:
         self._root = root
         self._home = root / "home"
@@ -830,7 +1299,14 @@ class HermesAdapter:
                     "context_length": 131072,
                     "extra_body": {
                         "temperature": temperature,
-                        "enable_thinking": True,
+                        "enable_thinking": thinking_level != "off",
+                        **(
+                            {"thinking_budget": 256}
+                            if thinking_level == "low"
+                            else {"thinking_budget": 1024}
+                            if thinking_level == "medium"
+                            else {}
+                        ),
                     },
                 }
             ],
@@ -928,6 +1404,7 @@ class OpenClawAdapter:
         model_id: str,
         temperature: float,
         max_tokens: int,
+        thinking_level: str,
     ) -> None:
         self._root = root
         self._home = root / "home"
@@ -973,6 +1450,7 @@ class OpenClawAdapter:
         self._config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
         self._config_path.chmod(0o600)
         self._model_id = model_id
+        self._thinking_level = thinking_level
         self._env = _minimal_subprocess_env(home=self._home, api_key=api_key)
         self._env.update(
             {
@@ -997,7 +1475,7 @@ class OpenClawAdapter:
             "--message",
             prompt,
             "--thinking",
-            "high",
+            self._thinking_level,
             "--timeout",
             "300",
             "--json",
@@ -1137,12 +1615,15 @@ def _make_adapter(
         "model_id": manifest["model_id"],
         "temperature": manifest["temperature"],
         "max_tokens": manifest["max_tokens"],
+        "thinking_level": manifest["thinking_level"],
     }
     if system == "ai_platform":
         return AIPlatformAdapter(
             gateway_base_url=gateway_base_url,
             email=runtime["email"],
             password=runtime["password"],
+            execution_profile=manifest["execution_profile"],
+            max_approval_rounds=manifest["max_approval_rounds"],
             **common,
         )
     if system == "hermes":
@@ -1170,8 +1651,14 @@ def run_suite(
     env_path: Path,
     selected_systems: tuple[str, ...] = SYSTEMS,
     selected_tasks: set[str] | None = None,
+    thinking_level_override: str | None = None,
 ) -> dict[str, Any]:
     manifest = load_manifest(manifest_path)
+    manifest_thinking_level = manifest["thinking_level"]
+    if thinking_level_override is not None:
+        if thinking_level_override not in {"off", "low", "medium", "high"}:
+            raise BenchmarkError("invalid_thinking_level_override")
+        manifest = {**manifest, "thinking_level": thinking_level_override}
     runtime = _load_runtime_inputs(env_path)
     output_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
     output_dir.chmod(0o700)
@@ -1284,6 +1771,10 @@ def run_suite(
         "model_id": manifest["model_id"],
         "temperature": manifest["temperature"],
         "max_tokens": manifest["max_tokens"],
+        "thinking_level": manifest["thinking_level"],
+        "manifest_thinking_level": manifest_thinking_level,
+        "thinking_level_override_applied": thinking_level_override is not None,
+        "execution_profile": manifest["execution_profile"],
         "evidence": _benchmark_evidence_receipt(
             manifest_path=manifest_path,
             manifest=manifest,
@@ -1315,6 +1806,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--env-file", type=Path, default=ROOT / ".env")
     parser.add_argument("--systems", type=_parse_csv, default=SYSTEMS)
     parser.add_argument("--task", action="append", dest="tasks")
+    parser.add_argument(
+        "--thinking-level",
+        choices=("off", "low", "medium", "high"),
+        help="Override the manifest reasoning profile and record the override in the receipt.",
+    )
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args(argv)
@@ -1342,6 +1838,7 @@ def main(argv: list[str] | None = None) -> int:
             env_path=args.env_file,
             selected_systems=args.systems,
             selected_tasks=set(args.tasks) if args.tasks else None,
+            thinking_level_override=args.thinking_level,
         )
     except BenchmarkError as exc:
         print(json.dumps({"status": "infrastructure_error", "reason": str(exc)}))

@@ -1,0 +1,11 @@
+{
+  "schema_version": "prd-phase-harness/loop-state/v1",
+  "active_phase": "PCH-06",
+  "active_feature": "PCH-F06",
+  "iteration": 7,
+  "status": "in_progress",
+  "last_decision": "Thinking remains enabled at low. Ten-trial first-reasoning p50 is 3.146s and text TTFT p50 is 3.925s. The final full native cohort is raw 5/8 and semantically revalidated 6/8 with zero infrastructure errors after one evaluator false-positive fix; Security and Research remain genuine failures. Component, container, Code Executor, and frontend hot-update gates pass, but release maturity remains NO-GO because text TTFT misses 3.41s and one full 6/8 cohort is not stability evidence.",
+  "next_action": "Implement provider/model variant canary routing and generic constraint/evidence self-checks, then rerun at least three complete eight-task cohorts plus configured full Web E2E before marking PCH-06 verified.",
+  "blockers": [],
+  "updated_at": "2026-08-16T22:36:51-04:00"
+}

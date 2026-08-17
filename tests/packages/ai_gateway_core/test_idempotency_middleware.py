@@ -250,3 +250,66 @@ async def test_idempotency_middleware_does_not_cache_5xx_response() -> None:
     assert second.status_code == 200
     assert second.json() == {"calls": 2}
     assert "x-idempotency-replayed" not in second.headers
+
+
+@pytest.mark.asyncio
+async def test_idempotency_middleware_aborts_owned_key_when_request_is_cancelled() -> None:
+    store = InMemoryIdempotencyStore()
+
+    async def cancelled_app(_scope, _receive, _send) -> None:
+        raise asyncio.CancelledError
+
+    middleware = IdempotencyMiddleware(cancelled_app, store=store, ttl_seconds=60)
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/work",
+        "headers": [(b"idempotency-key", b"cancelled-owner")],
+    }
+    received = False
+
+    async def receive():
+        nonlocal received
+        if received:
+            return {"type": "http.disconnect"}
+        received = True
+        return {"type": "http.request", "body": b"{}", "more_body": False}
+
+    async def send(_message) -> None:
+        return None
+
+    with pytest.raises(asyncio.CancelledError):
+        await middleware(scope, receive, send)
+
+    assert store._records == {}
+
+
+@pytest.mark.asyncio
+async def test_idempotency_middleware_stops_reading_after_client_disconnect() -> None:
+    app_called = False
+    receive_calls = 0
+
+    async def app(_scope, _receive, _send) -> None:
+        nonlocal app_called
+        app_called = True
+
+    middleware = IdempotencyMiddleware(app, store=InMemoryIdempotencyStore())
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/work",
+        "headers": [(b"idempotency-key", b"disconnected-client")],
+    }
+
+    async def receive():
+        nonlocal receive_calls
+        receive_calls += 1
+        return {"type": "http.disconnect"}
+
+    async def send(_message) -> None:
+        raise AssertionError("a disconnected client must not receive a response")
+
+    await asyncio.wait_for(middleware(scope, receive, send), timeout=0.1)
+
+    assert receive_calls == 1
+    assert app_called is False

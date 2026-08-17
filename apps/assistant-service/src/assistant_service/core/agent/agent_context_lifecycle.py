@@ -1294,10 +1294,10 @@ class AgentContextLifecycleMixin:
         allowlist = ctx.config.capability_allowlist
         if allowlist is not None:
             extra_always.update(str(name) for name in getattr(allowlist, "tool_names", ()))
-        if ctx.config.skills_enabled is not False:
-            extra_always.update(
-                tool.name for tool in tool_defs if str(tool.name).startswith("skill_")
-            )
+        # Do not pin every built-in skill schema onto every first model turn.
+        # Skills remain authorized and discoverable, and clear relevance matches
+        # are selected by ``select_tools``.  Only an explicit capability
+        # allowlist is a caller intent strong enough to bypass discovery.
         selector = self._agent_loop_compat().select_tools
         selector_options: dict[str, Any] = {
             "mode": "budget" if str(ctx.config.execution_profile) == "power" else "discover",

@@ -218,17 +218,14 @@ def _validate_openai_tool_call_deltas(
 # a small inter-chunk delay so the UI sees a token-like cadence without
 # materially changing total stream time.
 #
-# Also applies to the OpenAI-compat path (DashScope, DeepSeek, OpenAI itself)
-# as of 2026-04-24 — DashScope Intl's SSE coalesces multiple tokens per frame
-# on slower networks, and without splitting the UI rendered in 2 large bursts
-# instead of a smooth stream. The same smoother works for both providers.
+# Do not apply this to OpenAI-compatible streams (DashScope, DeepSeek, OpenAI).
+# Splitting an already-received provider frame and sleeping between four-character
+# slices is presentation work, not model streaming. It delayed delivery by roughly
+# 20 ms per slice and added tens of seconds to long answers in live measurements.
+# OpenAI-compatible frames are forwarded immediately and verbatim.
 #
-# Operator override: ``GEMINI_SMOOTHER_DISABLED=1`` turns this off for all
-# providers (the provider then yields each upstream frame verbatim). The env
-# name is kept historical — it now gates Google AND OpenAI-compat, renaming
-# would require re-plumbing across prod deploys. Useful for debugging
-# "is the smoother introducing artificial latency?" and nothing else — in
-# production the smoother is always on.
+# Operator override: ``GEMINI_SMOOTHER_DISABLED=1`` turns this off for Google
+# providers (the provider then yields each upstream frame verbatim).
 _SMOOTHER_DISABLED = os.environ.get("GEMINI_SMOOTHER_DISABLED", "").lower() in {"1", "true", "yes"}
 
 
@@ -1217,31 +1214,17 @@ class ModelRegistry(RegistryLifecycleMixin):
                             in_think_block = True
                             content = pre_content
 
-                # SMOOTHER: DashScope Intl (and other OpenAI-compat endpoints on
-                # slower networks) coalesce multiple tokens into a single SSE
-                # frame — observed in prod 2026-04-24 yielding only 2 text
-                # deltas for a "count 1-10" prompt, visible to users as "no
-                # streaming, just one dump." Same remediation as the Google
-                # path (_stream_google below): split a content chunk into
-                # token-sized sub-deltas with a small inter-chunk delay so
-                # the frontend renders a typewriter cadence.
-                #
-                # Only applies when the chunk contains visible content and no
-                # side-channel payload (tool_calls / usage / thinking) —
-                # those ride alone so ordering is preserved. Usage-only /
-                # finish-only events are emitted unchanged.
-                has_meta = bool(tool_calls or finish_reason or usage_data or thinking)
-                if content and not has_meta:
-                    async for _sub in _smooth_text_delta(content):
-                        yield StreamDelta(content=_sub)
-                else:
-                    yield StreamDelta(
-                        content=content,
-                        tool_calls=tool_calls,
-                        finish_reason=finish_reason,
-                        usage=usage_data,
-                        thinking_content=thinking,
-                    )
+                # Forward provider frames immediately.  A previous server-side
+                # "typewriter" smoother split each frame into four-character
+                # chunks and slept for 20 ms between them.  That blocked the
+                # provider reader and made long answers tens of seconds slower.
+                yield StreamDelta(
+                    content=content,
+                    tool_calls=tool_calls,
+                    finish_reason=finish_reason,
+                    usage=usage_data,
+                    thinking_content=thinking,
+                )
         if not saw_terminal_event:
             raise ProviderStreamError("openai-compatible", "incomplete_message")
         if saw_tool_call and terminal_reason not in {"tool_calls", "function_call"}:

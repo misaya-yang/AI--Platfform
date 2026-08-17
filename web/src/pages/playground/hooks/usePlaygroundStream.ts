@@ -1495,6 +1495,24 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
             streamState.toolCalls.length === 0
           ) {
             streamed = false;
+          } else {
+            const message =
+              streamErr instanceof Error
+                ? streamErr.message
+                : "stream_transport_failed";
+            streamState = failStreamTurn(
+              streamState,
+              message,
+              performance.now()
+            );
+            flushAssistant(
+              {
+                status: "failed",
+                isStreaming: false,
+              },
+              true
+            );
+            closeStreamTrace("failed", { error: message });
           }
         }
 

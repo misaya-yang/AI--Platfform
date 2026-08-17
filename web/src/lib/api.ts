@@ -29,7 +29,7 @@ export function getApiBaseUrl(): string {
  * Get auth data from storage (checks both localStorage and sessionStorage)
  * localStorage is used when rememberMe=true, sessionStorage when rememberMe=false
  */
-function getAuthToken(): string | null {
+export function getAuthToken(): string | null {
   const storeToken = useAuthStore.getState().token;
   if (storeToken) {
     return storeToken;

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -134,6 +136,11 @@ class AssistantRuntimeAdapter:
             lifecycle=self.lifecycle,
         )
         self.agent_plugin_status: list[dict[str, Any]] = []
+        self._request_index_freshness: OrderedDict[
+            tuple[str, str, str],
+            tuple[int, int, int, int, int],
+        ] = OrderedDict()
+        self._request_index_freshness_max_entries = 256
         # Compatibility view only: discovery belongs to the process-scoped,
         # DB-independent catalog built by the composition root.
         self.agent_plugin_catalog = agent_plugin_catalog
@@ -305,7 +312,12 @@ class AssistantRuntimeAdapter:
                 fallback_reason="memory_v2_disabled",
             )
 
-        docs = self.memory_store.read_recent_sources(
+        # Source enumeration uses descriptor-based reads, hashing and stat
+        # checks. Keep those synchronous filesystem operations off the request
+        # event loop; MemorySourceStore's identity cache makes unchanged files
+        # an lstat-only hit inside this worker.
+        docs = await asyncio.to_thread(
+            self.memory_store.read_recent_sources,
             tenant_id=tenant_id,
             user_id=user_id,
             include_long_term=True,
@@ -317,6 +329,18 @@ class AssistantRuntimeAdapter:
         for doc in docs:
             if self.memory_turn_sync.source_is_pending(tenant_id, user_id, doc.path):
                 continue
+            freshness_key = (tenant_id, user_id, doc.path)
+            freshness = (
+                int(doc.device),
+                int(doc.inode),
+                int(doc.size_bytes or len(doc.content.encode("utf-8"))),
+                int(doc.mtime_ns or doc.updated_at.timestamp() * 1_000_000_000),
+                int(doc.ctime_ns),
+            )
+            if self._request_index_freshness.get(freshness_key) == freshness:
+                self._request_index_freshness.move_to_end(freshness_key)
+                loaded_sources += 1
+                continue
             try:
                 await self.memory_indexer.index_source(
                     tenant_id=tenant_id,
@@ -327,6 +351,13 @@ class AssistantRuntimeAdapter:
                     metadata={"source_type": doc.source_type},
                     updated_at=doc.updated_at,
                 )
+                self._request_index_freshness[freshness_key] = freshness
+                self._request_index_freshness.move_to_end(freshness_key)
+                while (
+                    len(self._request_index_freshness)
+                    > self._request_index_freshness_max_entries
+                ):
+                    self._request_index_freshness.popitem(last=False)
                 loaded_sources += 1
             except Exception as exc:
                 record_internal_exception(

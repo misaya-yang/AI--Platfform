@@ -1694,6 +1694,8 @@ async def get_image_task_status(
                                     output_id,
                                     "display",
                                     owner_scope=turn.get("owner_scope"),
+                                    tenant_id=user.tenant_id,
+                                    user_id=user.user_id,
                                 )
                             except Exception as exc:
                                 record_internal_exception(
@@ -1834,6 +1836,8 @@ async def get_artifact_download_url(
         variant,
         expiry_seconds=expires_in,
         owner_scope=owner_scope,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
     )
     if url is None or actual_variant is None:
         raise HTTPException(
@@ -1924,6 +1928,8 @@ async def get_image_session_view(
                     oid,
                     "display",
                     owner_scope=requested_owner_scope,
+                    tenant_id=user.tenant_id,
+                    user_id=user.user_id,
                 )
                 output_url = url
             except Exception as exc:

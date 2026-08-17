@@ -14,7 +14,15 @@ interface StreamTrace {
   surface: ChatSurface;
   startedAtMs: number;
   firstTokenMs?: number;
+  firstTextTokenMs?: number;
+  interactionStartedAtMs?: number;
+  interactionToFirstTokenMs?: number;
+  interactionToFirstTextTokenMs?: number;
   attributes?: Record<string, unknown>;
+}
+
+interface StreamTraceTiming {
+  interactionStartedAtMs?: number;
 }
 
 declare global {
@@ -140,17 +148,25 @@ export function trackChatShortcut(
 
 export function startChatStreamTrace(
   surface: ChatSurface,
-  attributes?: Record<string, unknown>
+  attributes?: Record<string, unknown>,
+  timing?: StreamTraceTiming
 ): StreamTrace {
+  const interactionStartedAtMs = timing?.interactionStartedAtMs;
   const trace: StreamTrace = {
     id: generateId("stream-trace"),
     surface,
     startedAtMs: performance.now(),
+    interactionStartedAtMs,
     attributes,
   };
+  const interactionToStreamStartMs =
+    interactionStartedAtMs == null
+      ? undefined
+      : Math.max(0, Math.round(trace.startedAtMs - interactionStartedAtMs));
   emitTelemetry("chat.stream.started", {
     traceId: trace.id,
     surface,
+    ...(interactionToStreamStartMs == null ? {} : { interactionToStreamStartMs }),
     ...attributes,
   });
   return trace;
@@ -159,10 +175,38 @@ export function startChatStreamTrace(
 export function markChatStreamFirstToken(trace: StreamTrace, firstTokenMs: number) {
   if (trace.firstTokenMs != null) return;
   trace.firstTokenMs = firstTokenMs;
+  trace.interactionToFirstTokenMs =
+    trace.interactionStartedAtMs == null
+      ? undefined
+      : Math.max(0, Math.round(performance.now() - trace.interactionStartedAtMs));
   emitTelemetry("chat.stream.first_token", {
     traceId: trace.id,
     surface: trace.surface,
     firstTokenMs,
+    ...(trace.interactionToFirstTokenMs == null
+      ? {}
+      : { interactionToFirstTokenMs: trace.interactionToFirstTokenMs }),
+    ...(trace.attributes || {}),
+  });
+}
+
+export function markChatStreamFirstTextToken(
+  trace: StreamTrace,
+  firstTextTokenMs: number
+) {
+  if (trace.firstTextTokenMs != null) return;
+  trace.firstTextTokenMs = firstTextTokenMs;
+  trace.interactionToFirstTextTokenMs =
+    trace.interactionStartedAtMs == null
+      ? undefined
+      : Math.max(0, Math.round(performance.now() - trace.interactionStartedAtMs));
+  emitTelemetry("chat.stream.first_text_token", {
+    traceId: trace.id,
+    surface: trace.surface,
+    firstTextTokenMs,
+    ...(trace.interactionToFirstTextTokenMs == null
+      ? {}
+      : { interactionToFirstTextTokenMs: trace.interactionToFirstTextTokenMs }),
     ...(trace.attributes || {}),
   });
 }
@@ -179,6 +223,13 @@ export function finishChatStreamTrace(
     outcome,
     durationMs,
     firstTokenMs: trace.firstTokenMs,
+    firstTextTokenMs: trace.firstTextTokenMs,
+    ...(trace.interactionToFirstTokenMs == null
+      ? {}
+      : { interactionToFirstTokenMs: trace.interactionToFirstTokenMs }),
+    ...(trace.interactionToFirstTextTokenMs == null
+      ? {}
+      : { interactionToFirstTextTokenMs: trace.interactionToFirstTextTokenMs }),
     ...(trace.attributes || {}),
     ...(payload || {}),
   });

@@ -1,18 +1,15 @@
-"""Guard: the streaming smoother applied to DashScope / OpenAI-compat
-in 2026-04-24 must stay wired.
+"""Streaming timing contracts for provider adapters.
 
-Source-inspection test (no LLM required). The 2026-04-24 fix wrapped
-content deltas from ``_stream_openai`` in ``_smooth_text_delta`` when
-the chunk has no meta (tool_calls / usage / finish_reason / thinking
-ride atomic). If a future refactor removes the async-for wrap, users
-see DashScope Intl outputs arrive in 2 big bursts again — the exact
-symptom the fix addressed. This test fails loudly in that case.
+Google's coarse-frame smoother remains available, but OpenAI-compatible
+providers must never add server-side presentation sleeps after data has
+already arrived. The latter caused measured tens-of-seconds regressions on
+long DashScope answers.
 """
+
 from __future__ import annotations
 
 import re
 from pathlib import Path
-
 
 _REGISTRY = (
     Path(__file__).resolve().parents[2]
@@ -31,30 +28,31 @@ def _source() -> str:
     return _REGISTRY.read_text()
 
 
-def test_stream_openai_invokes_smoother_for_content_deltas():
+def test_stream_openai_forwards_content_without_server_side_smoother():
     src = _source()
     # Locate the body of _stream_openai. Grab ~180 lines after the def.
     m = re.search(r"async def _stream_openai\b", src)
     assert m, "_stream_openai not found — did someone rename it?"
     body = src[m.start() : m.start() + 9000]  # ample window
 
-    # Must reference _smooth_text_delta inside the function body.
-    assert "_smooth_text_delta(content)" in body, (
-        "_stream_openai no longer invokes _smooth_text_delta on content — "
-        "DashScope Intl streaming will regress to 2-burst output. "
-        "Restore the `async for _sub in _smooth_text_delta(content):` block."
-    )
+    assert "_smooth_text_delta(content)" not in body
+    assert "await _asyncio.sleep" not in body
+    assert "yield StreamDelta(" in body
 
-    # Must guard the smoother with has_meta so tool_calls / finish_reason /
-    # usage / thinking deltas stay atomic (ordering matters).
-    assert "has_meta" in body, "smoother should be gated by has_meta flag"
+
+def test_stream_google_keeps_coarse_frame_smoother():
+    src = _source()
+    match = re.search(r"async def _stream_google\b", src)
+    assert match, "_stream_google not found"
+    body = src[match.start() : match.start() + 26000]
+    assert "_smooth_text_delta(_text)" in body
 
 
 def test_smooth_text_delta_helper_still_exists_and_is_async():
     src = _source()
     assert "async def _smooth_text_delta(" in src, (
         "_smooth_text_delta helper removed — Gemini Vertex streaming will "
-        "also regress (_stream_google depends on the same helper)."
+        "regress (_stream_google depends on the helper)."
     )
 
 

@@ -16,7 +16,7 @@ import logging
 import os
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -860,7 +860,174 @@ class UsageRecorder:
             )
 
     async def _write_records(self, conn: Connection, records: list[UsageRecord]) -> list[UsageRecord]:
-        """Write records to usage_records table."""
+        """Write one flush with one PostgreSQL round trip.
+
+        The production asyncpg connection exposes ``fetch``.  The small
+        ``fetchrow`` fallback keeps compatibility with lightweight adapters,
+        but the live path no longer performs one network round trip per row.
+        Duplicate idempotency identities are collapsed before the INSERT so a
+        single PostgreSQL statement cannot hit the ON CONFLICT cardinality
+        restriction.
+        """
+        if records and hasattr(conn, "fetch"):
+            return await self._write_records_batch(conn, records)
+        return await self._write_records_compat(conn, records)
+
+    @staticmethod
+    def _usage_identity(record: UsageRecord) -> tuple[str, str, str, str] | None:
+        request_id = str(record.request_id or "")
+        if not request_id:
+            return None
+        return (
+            str(record.tenant_id),
+            request_id,
+            str(record.service_id or ""),
+            str(record.request_type or ""),
+        )
+
+    @staticmethod
+    def _merge_usage_status(current: str, incoming: str) -> str:
+        if current in {"running", "pending"} and incoming == "success":
+            return incoming
+        return current
+
+    def _collapse_usage_records(
+        self, records: list[UsageRecord]
+    ) -> list[tuple[UsageRecord, UsageRecord]]:
+        """Return ``(database row, accounting row)`` pairs.
+
+        The database row carries the same status/error/metadata merge that
+        sequential ON CONFLICT updates previously applied.  The accounting row
+        remains the first inserted observation so quota totals do not drift.
+        """
+        collapsed: list[tuple[UsageRecord, UsageRecord]] = []
+        positions: dict[tuple[str, str, str, str], int] = {}
+        for record in records:
+            identity = self._usage_identity(record)
+            if identity is None or identity not in positions:
+                if identity is not None:
+                    positions[identity] = len(collapsed)
+                collapsed.append((record, record))
+                continue
+            index = positions[identity]
+            current, accounting = collapsed[index]
+            collapsed[index] = (
+                replace(
+                    current,
+                    status=self._merge_usage_status(current.status, record.status),
+                    error_type=current.error_type or record.error_type,
+                    metadata={**(current.metadata or {}), **(record.metadata or {})},
+                ),
+                accounting,
+            )
+        return collapsed
+
+    @staticmethod
+    def _usage_record_values(record: UsageRecord) -> tuple[Any, ...]:
+        return (
+            record.tenant_id,
+            record.user_id,
+            record.request_id,
+            record.service_id or None,
+            record.assistant_id or None,
+            record.model,
+            record.provider or None,
+            record.input_tokens,
+            record.output_tokens,
+            record.input_cost_cents,
+            record.output_cost_cents,
+            record.latency_ms,
+            record.first_token_ms,
+            record.request_total_duration_ms or record.latency_ms,
+            record.llm_inference_duration_ms,
+            record.retrieval_duration_ms,
+            record.tool_call_duration_ms,
+            record.agent_or_graph_overhead_ms,
+            json.dumps(record.tool_call_breakdown or {}, ensure_ascii=False),
+            record.error_type,
+            record.status,
+            record.request_type,
+            json.dumps(record.metadata, ensure_ascii=False) if record.metadata else "{}",
+            datetime.utcfromtimestamp(record.timestamp),
+        )
+
+    async def _write_records_batch(
+        self, conn: Connection, records: list[UsageRecord]
+    ) -> list[UsageRecord]:
+        collapsed = self._collapse_usage_records(records)
+        values_sql: list[str] = []
+        arguments: list[Any] = []
+        column_count = 24
+        for database_record, _accounting_record in collapsed:
+            offset = len(arguments)
+            placeholders = [f"${offset + index}" for index in range(1, column_count + 1)]
+            placeholders[18] += "::jsonb"
+            placeholders[22] += "::jsonb"
+            values_sql.append(f"({', '.join(placeholders)})")
+            arguments.extend(self._usage_record_values(database_record))
+
+        rows = await conn.fetch(
+            f"""
+            INSERT INTO usage_records (
+                tenant_id, user_id, request_id,
+                service_id, assistant_id, model, provider,
+                input_tokens, output_tokens,
+                input_cost_cents, output_cost_cents,
+                latency_ms, first_token_ms,
+                request_total_duration_ms,
+                llm_inference_duration_ms, retrieval_duration_ms,
+                tool_call_duration_ms, agent_or_graph_overhead_ms,
+                tool_call_breakdown, error_type, status,
+                request_type, metadata, created_at
+            ) VALUES {', '.join(values_sql)}
+            ON CONFLICT (
+                tenant_id,
+                (COALESCE(request_id, '')),
+                (COALESCE(service_id, '')),
+                (COALESCE(request_type, ''))
+            )
+            WHERE request_id IS NOT NULL AND request_id <> ''
+            DO UPDATE SET
+                status = CASE
+                    WHEN usage_records.status IN ('running', 'pending')
+                         AND EXCLUDED.status = 'success'
+                    THEN EXCLUDED.status
+                    ELSE usage_records.status
+                END,
+                error_type = COALESCE(usage_records.error_type, EXCLUDED.error_type),
+                metadata = COALESCE(usage_records.metadata, '{{}}'::jsonb)
+                    || COALESCE(EXCLUDED.metadata, '{{}}'::jsonb)
+            RETURNING
+                (xmax = 0) AS inserted,
+                tenant_id,
+                COALESCE(request_id, '') AS request_id_key,
+                COALESCE(service_id, '') AS service_id_key,
+                COALESCE(request_type, '') AS request_type_key
+            """,
+            *arguments,
+        )
+
+        inserted_identities = {
+            (
+                str(row["tenant_id"]),
+                str(row["request_id_key"]),
+                str(row["service_id_key"]),
+                str(row["request_type_key"]),
+            )
+            for row in rows
+            if bool(row["inserted"]) and str(row["request_id_key"])
+        }
+        accepted: list[UsageRecord] = []
+        for database_record, accounting_record in collapsed:
+            identity = self._usage_identity(database_record)
+            if identity is None or identity in inserted_identities:
+                accepted.append(accounting_record)
+        return accepted
+
+    async def _write_records_compat(
+        self, conn: Connection, records: list[UsageRecord]
+    ) -> list[UsageRecord]:
+        """Compatibility path for connection adapters without ``fetch``."""
         accepted: list[UsageRecord] = []
         for r in records:
             row = await conn.fetchrow(
@@ -906,30 +1073,7 @@ class UsageRecorder:
                     || COALESCE(EXCLUDED.metadata, '{}'::jsonb)
             RETURNING (xmax = 0) AS inserted
                 """,
-                r.tenant_id,
-                r.user_id,
-                r.request_id,
-                r.service_id or None,
-                r.assistant_id or None,
-                r.model,
-                r.provider or None,
-                r.input_tokens,
-                r.output_tokens,
-                r.input_cost_cents,
-                r.output_cost_cents,
-                r.latency_ms,
-                r.first_token_ms,
-                r.request_total_duration_ms or r.latency_ms,
-                r.llm_inference_duration_ms,
-                r.retrieval_duration_ms,
-                r.tool_call_duration_ms,
-                r.agent_or_graph_overhead_ms,
-                json.dumps(r.tool_call_breakdown or {}, ensure_ascii=False),
-                r.error_type,
-                r.status,
-                r.request_type,
-                json.dumps(r.metadata, ensure_ascii=False) if r.metadata else "{}",
-                datetime.utcfromtimestamp(r.timestamp),
+                *self._usage_record_values(r),
             )
             inserted = False
             if row:

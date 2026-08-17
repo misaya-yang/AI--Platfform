@@ -12,9 +12,9 @@ from assistant_service.core.models.thinking_policy import (
 
 
 def test_normalize_thinking_aliases_and_unknown_are_safe() -> None:
-    assert normalize_thinking_level(None) == "off"
+    assert normalize_thinking_level(None) == "low"
     assert normalize_thinking_level("enabled") == "low"
-    assert normalize_thinking_level("not-a-level") == "off"
+    assert normalize_thinking_level("not-a-level") == "low"
     assert normalize_thinking_level("HIGH") == "high"
 
 
@@ -24,8 +24,8 @@ def test_loop_keeps_session_level_across_model_turns() -> None:
     assert resolve_turn_thinking_level(requested="high", iteration=2) == "high"
 
 
-def test_session_thinking_prefers_request_then_stored_then_off() -> None:
-    assert resolve_session_thinking_level(requested=None, stored=None) == "off"
+def test_session_thinking_prefers_request_then_stored_then_low() -> None:
+    assert resolve_session_thinking_level(requested=None, stored=None) == "low"
     assert resolve_session_thinking_level(requested=None, stored="low") == "low"
     assert resolve_session_thinking_level(requested="high", stored="low") == "high"
     assert resolve_session_thinking_level(requested="  ", stored="medium") == "medium"
@@ -49,7 +49,7 @@ def test_native_search_ignores_message_text() -> None:
     assert should_use_native_search("hello", enabled=True) is True
 
 
-def test_qwen_omitted_thinking_level_is_explicitly_off() -> None:
+def test_qwen_omitted_thinking_level_defaults_to_low() -> None:
     registry = ModelRegistry(use_default_models=False)
     registry.configure_provider(ModelProvider.DASHSCOPE, api_key="test-key")
     body = registry._build_request_body(
@@ -58,8 +58,8 @@ def test_qwen_omitted_thinking_level_is_explicitly_off() -> None:
         [ChatMessage(role="user", content="hello")],
         stream=True,
     )
-    assert body["enable_thinking"] is False
-    assert "thinking_budget" not in body
+    assert body["enable_thinking"] is True
+    assert body["thinking_budget"] == 256
 
 
 def test_qwen_low_thinking_sends_budget() -> None:

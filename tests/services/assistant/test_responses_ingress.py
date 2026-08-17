@@ -39,6 +39,21 @@ def _sse_payload(line: str) -> dict[str, Any]:
     return json.loads(data_line.removeprefix("data: "))
 
 
+def _assert_partial_failure_lifecycle(
+    events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    assert [event["type"] for event in events] == [
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "response.failed",
+    ]
+    failed = events[-1]
+    assert failed["response"]["status"] == "failed"
+    assert failed["response"]["output"][0]["status"] == "incomplete"
+    return failed
+
+
 def test_responses_route_reexports_projector_contract_identity() -> None:
     assert ResponsesIngressError is ProjectorResponsesIngressError
     assert ResponsesStreamProjector is CanonicalResponsesStreamProjector
@@ -384,8 +399,8 @@ def test_stream_projector_accepts_only_authoritative_terminal_after_transport_do
 
     events = projector.accept(event)
 
-    assert [item["type"] for item in events] == ["response.failed"]
-    assert events[0]["response"]["error"]["code"] == "event_after_transport_done"
+    failed = _assert_partial_failure_lifecycle(events)
+    assert failed["response"]["error"]["code"] == "event_after_transport_done"
 
 
 def test_stream_projector_requires_run_id_on_first_run_lifecycle() -> None:
@@ -439,6 +454,38 @@ def test_stream_projector_emits_one_failed_terminal_for_run_error() -> None:
     assert failed["status"] == "failed"
     assert failed["error"]["code"] == "server_error"
     assert "provider request failed" not in failed["error"]["message"]
+
+
+def test_failed_response_closes_partial_message_and_preserves_text() -> None:
+    projector = ResponsesStreamProjector(
+        response_id="resp_test",
+        session_id="session-test",
+        model="qwen3.7-plus",
+        instructions=None,
+    )
+    projector.created()
+    projector.accept(AssistantStreamEvent("run_started", {"run_id": "run-1"}))
+    projector.accept(AssistantStreamEvent("text_delta", "partial"))
+
+    events = projector.fail(code="server_error")
+
+    failed = _assert_partial_failure_lifecycle(events)["response"]
+    assert failed["status"] == "failed"
+    assert failed["output"] == [
+        {
+            "id": projector.output[0]["id"],
+            "type": "message",
+            "status": "incomplete",
+            "role": "assistant",
+            "content": [
+                {"type": "output_text", "text": "partial", "annotations": []}
+            ],
+        }
+    ]
+    from openai.types.responses import Response
+
+    parsed = Response.model_validate(failed)
+    assert parsed.output[0].status == "incomplete"
 
 
 def test_stream_projector_binds_cancelled_run_error_to_authoritative_usage() -> None:
@@ -543,8 +590,8 @@ def test_stream_projector_fails_closed_on_terminal_identity_or_usage_mismatch() 
         )
     )
 
-    assert [event["type"] for event in events] == ["response.failed"]
-    assert events[0]["response"]["error"]["code"] == "terminal_identity_mismatch"
+    failed = _assert_partial_failure_lifecycle(events)
+    assert failed["response"]["error"]["code"] == "terminal_identity_mismatch"
 
 
 def test_stream_projector_fails_closed_on_terminal_usage_mismatch() -> None:
@@ -580,8 +627,8 @@ def test_stream_projector_fails_closed_on_terminal_usage_mismatch() -> None:
         )
     )
 
-    assert [event["type"] for event in events] == ["response.failed"]
-    assert events[0]["response"]["error"]["code"] == "terminal_usage_mismatch"
+    failed = _assert_partial_failure_lifecycle(events)
+    assert failed["response"]["error"]["code"] == "terminal_usage_mismatch"
 
 
 def test_stream_projector_requires_transport_done_before_success() -> None:
@@ -616,8 +663,8 @@ def test_stream_projector_requires_transport_done_before_success() -> None:
         )
     )
 
-    assert [event["type"] for event in events] == ["response.failed"]
-    assert events[0]["response"]["error"]["code"] == "missing_transport_done"
+    failed = _assert_partial_failure_lifecycle(events)
+    assert failed["response"]["error"]["code"] == "missing_transport_done"
 
 
 def test_stream_projector_requires_a_bound_run_identity() -> None:
@@ -634,8 +681,8 @@ def test_stream_projector_requires_a_bound_run_identity() -> None:
     projector.accept(AssistantStreamEvent("usage", {"input_tokens": 5, "output_tokens": 1}))
     events = projector.accept(AssistantStreamEvent("done", {"total_length": 5}))
 
-    assert [event["type"] for event in events] == ["response.failed"]
-    assert events[0]["response"]["error"]["code"] == "missing_run_identity"
+    failed = _assert_partial_failure_lifecycle(events)
+    assert failed["response"]["error"]["code"] == "missing_run_identity"
 
 
 def test_completed_response_validates_with_installed_openai_sdk_model() -> None:
@@ -762,6 +809,9 @@ async def test_responses_stream_internal_failure_is_diagnostic_but_publicly_gene
     assert frames[-1]["response"]["error"]["message"] == (
         "The response could not be completed."
     )
+    if fail_after_first:
+        assert frames[-1]["response"]["output"][0]["status"] == "incomplete"
+        assert frames[-1]["response"]["output"][0]["content"][0]["text"] == "partial"
     assert raw_exception_message not in json.dumps(frames)
     records = [record for record in caplog.records if record.getMessage().startswith(expected_log_event)]
     assert len(records) == 1
@@ -775,57 +825,71 @@ async def test_responses_stream_internal_failure_is_diagnostic_but_publicly_gene
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "tail",
+    ("terminal_type", "terminal_status", "expected_response_type"),
     [
-        AssistantStreamEvent("run_error", {"run_id": "run-1"}),
-        AssistantStreamEvent("text_delta", "late"),
+        ("run_finished", "succeeded", "response.completed"),
+        ("run_error", "failed", "response.failed"),
     ],
 )
-async def test_sse_generator_rejects_any_event_after_authoritative_terminal(
-    tail: AssistantStreamEvent,
+async def test_sse_generator_projects_authoritative_terminal_without_waiting_for_source_exhaustion(
+    terminal_type: str,
+    terminal_status: str,
+    expected_response_type: str,
 ) -> None:
-    class DoubleTerminalAssistant:
+    closed = asyncio.Event()
+
+    class TerminalThenBlockedAssistant:
         async def chat_stream(self, **kwargs: Any):
-            yield AssistantStreamEvent("run_started", {"run_id": "run-1"})
-            yield AssistantStreamEvent("text_delta", "Hello")
-            yield AssistantStreamEvent("usage", {"input_tokens": 4, "output_tokens": 1})
-            yield AssistantStreamEvent("done", {"run_id": "run-1", "total_length": 5})
-            yield AssistantStreamEvent(
-                "run_finished",
-                {
+            try:
+                yield AssistantStreamEvent("run_started", {"run_id": "run-1"})
+                yield AssistantStreamEvent("text_delta", "partial")
+                yield AssistantStreamEvent("usage", {"input_tokens": 4, "output_tokens": 1})
+                if terminal_type == "run_finished":
+                    yield AssistantStreamEvent(
+                        "done", {"run_id": "run-1", "total_length": len("partial")}
+                    )
+                terminal_envelope = {
                     "run_id": "run-1",
-                    "terminal_envelope": {
+                    "session_id": kwargs["session_id"],
+                    "tenant_id": kwargs["user"].tenant_id,
+                    "user_id": kwargs["user"].user_id,
+                    "model_id": kwargs["config"].model_id,
+                    "status": terminal_status,
+                    "usage": {"input_tokens": 4, "output_tokens": 1},
+                }
+                if terminal_type == "run_error":
+                    terminal_envelope["exit_reason"] = "server_error"
+                yield AssistantStreamEvent(
+                    terminal_type,
+                    {
                         "run_id": "run-1",
-                        "session_id": kwargs["session_id"],
-                        "tenant_id": kwargs["user"].tenant_id,
-                        "user_id": kwargs["user"].user_id,
-                        "model_id": kwargs["config"].model_id,
-                        "status": "succeeded",
-                        "usage": {"input_tokens": 4, "output_tokens": 1},
+                        "terminal_envelope": terminal_envelope,
                     },
-                },
-            )
-            yield tail
+                )
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
 
         def clear_session_runtime_state(self, **_kwargs: Any) -> dict[str, Any]:
             return {"cleared": True}
 
     parsed = parse_responses_request({"model": "qwen3.7-plus", "input": "hello", "stream": True})
-    frames = [
-        _sse_payload(frame)
-        async for frame in iter_responses_sse(
-            assistant=DoubleTerminalAssistant(),
-            parsed=parsed,
-            user=_User(),
-            response_id="resp_test",
-            session_id="session-test",
-        )
-    ]
+    stream = iter_responses_sse(
+        assistant=TerminalThenBlockedAssistant(),
+        parsed=parsed,
+        user=_User(),
+        response_id="resp_test",
+        session_id="session-test",
+    )
 
-    assert "response.completed" not in [frame["type"] for frame in frames]
-    assert frames[-1]["type"] == "response.failed"
-    assert frames[-1]["response"]["error"]["code"] == "event_after_terminal"
+    async def collect() -> list[dict[str, Any]]:
+        return [_sse_payload(frame) async for frame in stream]
+
+    frames = await asyncio.wait_for(collect(), timeout=0.5)
+
+    assert frames[-1]["type"] == expected_response_type
     assert [frame["sequence_number"] for frame in frames] == list(range(len(frames)))
+    await asyncio.wait_for(closed.wait(), timeout=0.1)
 
 
 class _ModelRegistry:
@@ -1006,6 +1070,45 @@ def test_internal_route_fails_closed_when_model_registry_is_unavailable(registry
     assert assistant.calls == []
 
 
+@pytest.mark.parametrize(
+    "registry",
+    [
+        None,
+        _ModelRegistry(),
+        type(
+            "UnconfiguredTenantModelRegistry",
+            (),
+            {
+                "get_model": lambda _self, _model_id: type(
+                    "Model",
+                    (),
+                    {"provider": ModelProvider.OPENAI, "max_output_tokens": 4096},
+                )(),
+                "is_provider_configured": lambda _self, _provider: False,
+            },
+        )(),
+    ],
+    ids=["missing-registry", "model-missing", "provider-unconfigured"],
+)
+def test_tenant_resolver_defers_global_preflight_for_exact_tenant_only_model(
+    registry: Any,
+) -> None:
+    assistant = _SuccessfulAssistant()
+    assistant.tenant_model_registry_resolver = object()
+    app = _route_app(assistant)
+    app.state.model_registry = registry
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/responses",
+            json={"model": "tenant-only-model", "input": "hello"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["model"] == "tenant-only-model"
+    assert assistant.calls[0]["config"].model_id == "tenant-only-model"
+
+
 def test_stream_route_uses_strict_sse_event_names_and_sequence() -> None:
     assistant = _SuccessfulAssistant()
 
@@ -1032,6 +1135,40 @@ def test_stream_route_uses_strict_sse_event_names_and_sequence() -> None:
         "response.output_item.done",
         "response.completed",
     ]
+    assert [payload["sequence_number"] for payload in payloads] == list(range(len(payloads)))
+
+
+def test_stream_route_emits_canonical_heartbeat_while_first_event_is_idle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SlowFirstEventAssistant(_SuccessfulAssistant):
+        async def chat_stream(self, **kwargs: Any):
+            await asyncio.sleep(0.04)
+            async for event in super().chat_stream(**kwargs):
+                yield event
+
+    monkeypatch.setattr(
+        responses_route,
+        "_SSE_HEARTBEAT_INTERVAL_S",
+        0.01,
+        raising=False,
+    )
+
+    with (
+        TestClient(_route_app(SlowFirstEventAssistant())) as client,
+        client.stream(
+            "POST",
+            "/responses",
+            json={"model": "qwen3.7-plus", "input": "hello", "stream": True},
+        ) as response,
+    ):
+        body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    assert body.count(": heartbeat\n\n") >= 2
+    assert "event: response.completed" in body
+    event_frames = [frame for frame in body.split("\n\n") if frame.startswith("event: ")]
+    payloads = [_sse_payload(frame) for frame in event_frames]
     assert [payload["sequence_number"] for payload in payloads] == list(range(len(payloads)))
 
 

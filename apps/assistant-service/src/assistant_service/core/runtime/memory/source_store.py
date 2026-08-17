@@ -9,6 +9,7 @@ import re
 import secrets
 import stat as stat_module
 import threading
+from collections import OrderedDict
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -31,6 +32,11 @@ class MemorySourceDocument:
     source_type: str
     content: str
     updated_at: datetime
+    size_bytes: int = 0
+    mtime_ns: int = 0
+    ctime_ns: int = 0
+    device: int = 0
+    inode: int = 0
 
 
 class MemorySourceSecurityError(RuntimeError):
@@ -81,6 +87,12 @@ class MemorySourceStore:
         self.max_source_bytes = max(64 * 1024, min(int(configured_limit), 64 * 1024 * 1024))
         self._lock_registry_guard = threading.Lock()
         self._path_locks: dict[str, threading.Lock] = {}
+        self._document_cache_lock = threading.Lock()
+        self._document_cache: OrderedDict[
+            str,
+            tuple[tuple[int, int, int, int, int], MemorySourceDocument],
+        ] = OrderedDict()
+        self._document_cache_max_entries = 64
 
     @classmethod
     def _safe_component(cls, value: str) -> str:
@@ -713,15 +725,57 @@ class MemorySourceStore:
         return docs
 
     def _to_document(self, path: Path, source_type: str) -> MemorySourceDocument:
+        try:
+            observed = os.lstat(path)
+        except OSError as exc:
+            raise MemorySourceSecurityError("memory_source_unsafe") from exc
+        if stat_module.S_ISLNK(observed.st_mode) or not stat_module.S_ISREG(
+            observed.st_mode
+        ):
+            raise MemorySourceSecurityError("memory_source_unsafe")
+        if observed.st_size > self.max_source_bytes:
+            raise MemorySourceLimitError("memory_source_size_limit_exceeded")
+        cache_key = str(self._lexical_path(path))
+        observed_identity = (
+            observed.st_dev,
+            observed.st_ino,
+            observed.st_size,
+            observed.st_mtime_ns,
+            observed.st_ctime_ns,
+        )
+        with self._document_cache_lock:
+            cached = self._document_cache.get(cache_key)
+            if cached is not None and cached[0] == observed_identity:
+                self._document_cache.move_to_end(cache_key)
+                return cached[1]
+
         content_bytes, source_stat = self._read_source_snapshot(path)
         updated_at = datetime.fromtimestamp(source_stat.st_mtime, tz=timezone.utc)
         content = content_bytes.decode("utf-8", errors="ignore")
-        return MemorySourceDocument(
+        document = MemorySourceDocument(
             path=str(path),
             source_type=source_type,
             content=content,
             updated_at=updated_at,
+            size_bytes=source_stat.st_size,
+            mtime_ns=source_stat.st_mtime_ns,
+            ctime_ns=source_stat.st_ctime_ns,
+            device=source_stat.st_dev,
+            inode=source_stat.st_ino,
         )
+        actual_identity = (
+            source_stat.st_dev,
+            source_stat.st_ino,
+            source_stat.st_size,
+            source_stat.st_mtime_ns,
+            source_stat.st_ctime_ns,
+        )
+        with self._document_cache_lock:
+            self._document_cache[cache_key] = (actual_identity, document)
+            self._document_cache.move_to_end(cache_key)
+            while len(self._document_cache) > self._document_cache_max_entries:
+                self._document_cache.popitem(last=False)
+        return document
 
     def read_owned_source_document(
         self,

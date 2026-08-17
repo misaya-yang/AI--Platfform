@@ -8,7 +8,7 @@
  * SearchStatusDisplay / WebSearchDisplay / Thought Process block.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
 import {
@@ -206,6 +206,14 @@ function StatsBadge({ message }: { message: ChatMessageType }) {
   if (message.firstTokenMs != null) {
     parts.push(`${t("playground.stats.ttft", "TTFT")} ${(message.firstTokenMs / 1000).toFixed(2)}s`);
   }
+  if (
+    message.firstTextTokenMs != null &&
+    message.firstTextTokenMs !== message.firstTokenMs
+  ) {
+    parts.push(
+      `${t("playground.stats.firstText", "text")} ${(message.firstTextTokenMs / 1000).toFixed(2)}s`
+    );
+  }
   if (totalTokens > 0) {
     const compact =
       totalTokens >= 1000 ? `${(totalTokens / 1000).toFixed(1)}k` : String(totalTokens);
@@ -329,7 +337,7 @@ function formatDurationLabel(ms: number): string {
   return `${m}m ${s}s`;
 }
 
-export function ChatMessage({ message }: ChatMessageProps) {
+export const ChatMessage = memo(function ChatMessage({ message }: ChatMessageProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
   const { openActivity, openSubagents } = useRightPanel();
@@ -541,4 +549,4 @@ export function ChatMessage({ message }: ChatMessageProps) {
       )}
     </motion.div>
   );
-}
+});

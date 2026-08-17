@@ -303,7 +303,7 @@ class ArtifactStorageService:
             try:
                 await conn.execute(
                     """
-                    INSERT INTO artifacts (
+                    INSERT INTO assistant.artifacts (
                         artifact_id, session_id, message_id, tenant_id, user_id,
                         type, format, title, filename, storage_key, size_bytes,
                         mime_type, source, metadata, created_at, updated_at,
@@ -364,7 +364,7 @@ class ArtifactStorageService:
                 legacy_metadata["__turn_id"] = artifact.turn_id
                 await conn.execute(
                     """
-                    INSERT INTO artifacts (
+                    INSERT INTO assistant.artifacts (
                         artifact_id, session_id, message_id, tenant_id, user_id,
                         type, format, title, filename, storage_key, size_bytes,
                         mime_type, source, metadata, created_at, updated_at
@@ -395,6 +395,8 @@ class ArtifactStorageService:
         artifact_id: str,
         *,
         owner_scope: str | None = None,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
     ) -> ArtifactInfo | None:
         """Get artifact by ID.
 
@@ -409,7 +411,7 @@ class ArtifactStorageService:
 
         async with self.database._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT * FROM artifacts WHERE artifact_id = $1",
+                "SELECT * FROM assistant.artifacts WHERE artifact_id = $1",
                 artifact_id,
             )
 
@@ -417,13 +419,35 @@ class ArtifactStorageService:
             return None
 
         artifact = self._row_to_artifact(row)
-        if (
-            owner_scope is not None
-            and artifact.owner_scope is not None
-            and artifact.owner_scope != owner_scope
+        if not self._matches_requested_owner(
+            artifact,
+            owner_scope=owner_scope,
+            tenant_id=tenant_id,
+            user_id=user_id,
         ):
             return None
         return artifact
+
+    @staticmethod
+    def _matches_requested_owner(
+        artifact: ArtifactInfo,
+        *,
+        owner_scope: str | None,
+        tenant_id: str | None,
+        user_id: str | None,
+    ) -> bool:
+        """Fail closed for scoped reads, including legacy NULL owner rows."""
+
+        if owner_scope is None:
+            return True
+        if artifact.owner_scope:
+            return artifact.owner_scope == owner_scope
+        return bool(
+            tenant_id
+            and user_id
+            and artifact.tenant_id == tenant_id
+            and artifact.user_id == user_id
+        )
 
     async def read_artifact_scoped(
         self,
@@ -449,7 +473,7 @@ class ArtifactStorageService:
         async with self.database._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT * FROM artifacts
+                SELECT * FROM assistant.artifacts
                 WHERE artifact_id = $1 AND tenant_id = $2
                   AND session_id = $3 AND user_id = $4
                   AND source = $5
@@ -518,7 +542,7 @@ class ArtifactStorageService:
         try:
             async with self.database._pool.acquire() as conn:
                 base = await conn.fetchrow(
-                    "SELECT * FROM artifacts WHERE artifact_id = $1",
+                    "SELECT * FROM assistant.artifacts WHERE artifact_id = $1",
                     parent_or_self_artifact_id,
                 )
                 if not base:
@@ -540,13 +564,13 @@ class ArtifactStorageService:
 
                 if variant == "raw":
                     row = await conn.fetchrow(
-                        "SELECT * FROM artifacts WHERE artifact_id = $1",
+                        "SELECT * FROM assistant.artifacts WHERE artifact_id = $1",
                         raw_id,
                     )
                 else:
                     row = await conn.fetchrow(
                         """
-                        SELECT * FROM artifacts
+                        SELECT * FROM assistant.artifacts
                         WHERE parent_artifact_id = $1 AND variant = $2
                         ORDER BY created_at DESC
                         LIMIT 1
@@ -593,6 +617,8 @@ class ArtifactStorageService:
         expiry_seconds: int = 3600,
         *,
         owner_scope: str | None = None,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
     ) -> tuple[str | None, str | None]:
         """Resolve a presigned download URL for the requested image variant.
 
@@ -621,10 +647,11 @@ class ArtifactStorageService:
             artifact = await self.find_variant(artifact_id, try_variant)
             if artifact is None:
                 continue
-            if (
-                owner_scope is not None
-                and artifact.owner_scope is not None
-                and artifact.owner_scope != owner_scope
+            if not self._matches_requested_owner(
+                artifact,
+                owner_scope=owner_scope,
+                tenant_id=tenant_id,
+                user_id=user_id,
             ):
                 # Owner check fails; treat as not found
                 continue
@@ -646,7 +673,7 @@ class ArtifactStorageService:
             if tenant_id:
                 rows = await conn.fetch(
                     """
-                    SELECT * FROM artifacts
+                    SELECT * FROM assistant.artifacts
                     WHERE session_id = $1 AND tenant_id = $2
                     ORDER BY created_at ASC
                     """,
@@ -656,7 +683,7 @@ class ArtifactStorageService:
             else:
                 rows = await conn.fetch(
                     """
-                    SELECT * FROM artifacts
+                    SELECT * FROM assistant.artifacts
                     WHERE session_id = $1
                     ORDER BY created_at ASC
                     """,
@@ -681,7 +708,7 @@ class ArtifactStorageService:
         if self.database and self.database._pool:
             async with self.database._pool.acquire() as conn:
                 await conn.execute(
-                    "DELETE FROM artifacts WHERE artifact_id = $1",
+                    "DELETE FROM assistant.artifacts WHERE artifact_id = $1",
                     artifact_id,
                 )
 

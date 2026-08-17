@@ -240,9 +240,12 @@ async def test_subagent_preserves_sec_evidence_beyond_2000_characters() -> None:
     model, events = await _run_subagent(evidence)
 
     finished = next(event for event in events if event["event_type"] == "subagent_finished")
+    rendered_evidence = json.loads(model.observed_evidence)
     assert finished["data"]["status"] == "completed"
-    assert model.observed_evidence == evidence
-    assert terminal_citation in model.observed_evidence
+    assert rendered_evidence["schema_version"] == "assistant-external-content/v1"
+    assert rendered_evidence["untrusted"] is True
+    assert rendered_evidence["content"] == evidence
+    assert terminal_citation in rendered_evidence["content"]
 
 
 @pytest.mark.asyncio
