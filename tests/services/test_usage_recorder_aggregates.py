@@ -43,6 +43,20 @@ async def test_pricing_variant_uses_longest_cached_model_prefix_independent_of_o
 
 
 @pytest.mark.asyncio
+async def test_pricing_does_not_reverse_match_shorter_model_to_mini():
+    recorder = UsageRecorder(database=None)
+    recorder._pricing_cache_time = time.time()
+    recorder._pricing_cache = {
+        "gpt-4o-mini": {"input": "0.00015", "output": "0.0006", "provider": "openai"},
+    }
+
+    pricing = await recorder._get_model_pricing("gpt-4o")
+
+    assert pricing is not None
+    assert pricing.get("pricing_status") != "provider_model" or pricing["input"] != "0.00015"
+
+
+@pytest.mark.asyncio
 async def test_update_daily_aggregates_fallback_insert_when_missing_row():
     recorder = UsageRecorder(database=None)
     conn = AsyncMock()

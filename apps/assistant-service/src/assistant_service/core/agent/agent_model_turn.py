@@ -316,6 +316,7 @@ class AgentModelTurnMixin:
         if len(tool_calls) > 1:
             seen: set[tuple[str, str]] = set()
             deduped: list[dict[str, Any]] = []
+            dropped_ids: set[str] = set()
             for tool_call in tool_calls:
                 function = tool_call.get("function") or {}
                 name = str(function.get("name") or "")
@@ -332,6 +333,9 @@ class AgentModelTurnMixin:
                 key = (name, normalized_arguments)
                 if key in seen:
                     allowed_names = {_fmt_tool_schema_name(tool) for tool in (tools_for_call or [])}
+                    dropped_id = str(tool_call.get("id") or "")
+                    if dropped_id:
+                        dropped_ids.add(dropped_id)
                     logger.info(
                         "[STREAMING-FIRST] Dropping duplicate tool call at "
                         "batch-level: name=%s (same name+args as a prior call "
@@ -342,6 +346,16 @@ class AgentModelTurnMixin:
                 seen.add(key)
                 deduped.append(tool_call)
             tool_calls = deduped
+            if dropped_ids and result.provider_content_blocks:
+                result.provider_content_blocks = [
+                    block
+                    for block in result.provider_content_blocks
+                    if not (
+                        isinstance(block, dict)
+                        and block.get("type") == "tool_use"
+                        and str(block.get("id") or "") in dropped_ids
+                    )
+                ]
         result.tool_calls = tool_calls
         if deferred_public_chunks and not tool_calls:
             for text_chunk in deferred_public_chunks:

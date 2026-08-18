@@ -99,7 +99,7 @@ OPENAPI_TAGS = [
     },
     {
         "name": "Quiz",
-        "description": "AI quiz system — generation, submission, scoring, and exam management.",
+        "description": "Quiz share and grading shims. Generation is the in-chat generate_quiz tool.",
     },
     {
         "name": "Dashboard",
@@ -214,6 +214,7 @@ def create_app() -> FastAPI:
         RequestBodyLimitMiddleware,
         max_bytes=8 * 1024 * 1024,
         paths={"/api/v1/assistant/chat", "/api/v1/assistant/chat/stream"},
+        path_prefixes=("/api/v1/public/agents/",),
     )
 
     # 统一鉴权中间件（支持 JWT、API Key、游客会话）- 纯 ASGI

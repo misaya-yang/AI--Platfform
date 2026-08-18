@@ -365,17 +365,33 @@ def _build_config(
                 raise HTTPException(
                     status_code=422, detail=f"Eval model unavailable: {body.model_id}"
                 )
-            available = model_registry.get_available_models()
-            if available:
-                mi = available[0]
-                model_id = mi.id
-                logger.warning(
-                    "chat_requested_model_unavailable_falling_back",
-                    extra={
-                        "requested_model_id": body.model_id,
-                        "fallback_model_id": model_id,
-                    },
+            from ...core.models.defaults import DEFAULT_MODEL
+
+            requested = str(body.model_id or "").strip()
+            if requested and requested != DEFAULT_MODEL:
+                raise HTTPException(
+                    status_code=422, detail=f"Model unavailable: {requested}"
                 )
+            default_mi = model_registry.get_model(DEFAULT_MODEL)
+            default_configured = bool(default_mi) and (
+                tenant_provider_resolution_available
+                or not hasattr(model_registry, "is_provider_configured")
+                or model_registry.is_provider_configured(default_mi.provider)
+            )
+            if default_mi is None or not default_configured:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Deployment default model is unavailable",
+                )
+            mi = default_mi
+            model_id = DEFAULT_MODEL
+            logger.warning(
+                "chat_requested_model_unavailable_falling_back",
+                extra={
+                    "requested_model_id": body.model_id,
+                    "fallback_model_id": model_id,
+                },
+            )
         if mi:
             model_provider = mi.provider
 

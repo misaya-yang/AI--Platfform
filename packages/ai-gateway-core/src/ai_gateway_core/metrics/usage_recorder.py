@@ -632,19 +632,19 @@ class UsageRecorder:
         if now - self._pricing_cache_time > self._pricing_cache_ttl:
             await self._refresh_pricing_cache()
 
-        # Return cached pricing
-        if model in self._pricing_cache:
-            return self._pricing_cache[model]
+        # Return cached pricing (case-insensitive exact key).
+        normalized_model = model.lower()
+        for cached_model, pricing in self._pricing_cache.items():
+            if cached_model.lower() == normalized_model:
+                return pricing
 
         # Try the most-specific partial match (for model variants such as
-        # ``gpt-4o-mini-2024-07-18``). Cache iteration order must not let a
-        # broad prefix such as ``gpt-4o`` win over ``gpt-4o-mini``.
-        normalized_model = model.lower()
+        # ``gpt-4o-mini-2024-07-18``). Only "requested starts with cached"
+        # may match, matching resolve_pricing_with_status.
         candidates = [
             (len(cached_model), cached_model, pricing)
             for cached_model, pricing in self._pricing_cache.items()
             if normalized_model.startswith(cached_model.lower())
-            or cached_model.lower().startswith(normalized_model)
         ]
         if candidates:
             _length, _cached_model, pricing = max(candidates, key=lambda item: item[0])

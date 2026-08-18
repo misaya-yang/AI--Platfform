@@ -554,7 +554,12 @@ class LangGraphAdapter(ProtocolAdapter):
             "config": self._build_base_run_config(request),
         }
         if request.callback_url:
-            payload["webhook"] = request.callback_url
+            from ai_gateway_core.security import SafeFetchError, validate_callback_url
+
+            try:
+                payload["webhook"] = validate_callback_url(request.callback_url)
+            except SafeFetchError as exc:
+                raise ValidationFailedError("callback_url is not allowed") from exc
         if self.service.session_enabled and request.session_id:
             valid_thread_id = await self._ensure_thread(request.session_id, request)
             endpoint = self.thread_invoke_endpoint.format(thread_id=valid_thread_id)

@@ -253,6 +253,16 @@ async def submit_shared_quiz(
         )
     except ValueError as e:
         msg = str(e)
-        status = 409 if "already submitted" in msg else 404
+        lowered = msg.lower()
+        if "already submitted" in lowered:
+            status = 409
+        elif "requires a name" in lowered or "unsupported characters" in lowered:
+            status = 400
+        elif "maximum attempts" in lowered:
+            status = 429
+        elif "time limit" in lowered:
+            status = 400
+        else:
+            status = 404
         raise HTTPException(status, msg)
     return result

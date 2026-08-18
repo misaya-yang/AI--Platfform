@@ -243,7 +243,7 @@ async function restoreLatestRun(
       const active = status === "running" || status === "queued";
       next[targetIndex] = {
         ...current,
-        isStreaming: active,
+        isStreaming: false,
         status: succeeded
           ? "completed"
           : active
@@ -260,7 +260,11 @@ async function restoreLatestRun(
         },
       };
     }
-    return { messages: next };
+    const blocksComposer =
+      (phase === "approval_pending" && Boolean(approvalId)) ||
+      status === "running" ||
+      status === "queued";
+    return { messages: next, blocksComposer };
   } catch {
     console.warn("Assistant run status reconciliation failed");
     const current = next[targetIndex];
@@ -700,6 +704,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     "idle" | "loading" | "ready" | "failed"
   >("idle");
   const [historyRestoreError, setHistoryRestoreError] = useState<string | null>(null);
+  const [serverRunBlocking, setServerRunBlocking] = useState(false);
   
   // Artifacts & Agent State (Managed here as they are tied to session)
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
@@ -726,6 +731,8 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
   // invalidate an in-flight createSession/fetch even before an AbortController
   // exists, and stale finally blocks must never clear a newer stream's refs.
   const streamEpochRef = useRef(0);
+  const restoreEpochRef = useRef(0);
+  const pendingSessionIdRef = useRef<string | undefined>(undefined);
   const lastStreamConfigRef = useRef<{
     config: SessionConfig;
     selectedDatasets: string[];
@@ -826,6 +833,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
           if (sessionExists) {
             // 加载会话历史记录
             try {
+              const restoreEpoch = ++restoreEpochRef.current;
               setHistoryRestoreState("loading");
               setHistoryRestoreError(null);
               const [sessionDetails, history, sessionArtifacts] = await Promise.all([
@@ -860,12 +868,15 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                 restoreMessageMetadata(msg, index, savedSessionId)
               );
               chatMessages = hydrateMessageArtifacts(chatMessages, sessionArtifacts);
+              if (restoreEpoch !== restoreEpochRef.current) return;
               const reconciliation = await restoreLatestRun(
                 chatMessages,
                 sessionDetails.metadata,
                 savedSessionId,
               );
+              if (restoreEpoch !== restoreEpochRef.current) return;
               chatMessages = reconciliation.messages;
+              setServerRunBlocking(Boolean(reconciliation.blocksComposer));
               setMessages(chatMessages);
               hydrateQuizData(chatMessages, setMessages);
               const restoredConfig = sessionDetails.config || {};
@@ -952,6 +963,8 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
   const handleNewChat = useCallback(() => {
     abandonActiveStream();
     setMessages([]);
+    pendingSessionIdRef.current = undefined;
+    setServerRunBlocking(false);
     setActiveSessionId(undefined);  // 清除 AI助手 的活动会话
     setHistoryRestoreState("idle");
     setHistoryRestoreError(null);
@@ -993,6 +1006,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     }
 
     abandonActiveStream();
+    const restoreEpoch = ++restoreEpochRef.current;
     try {
       setHistoryRestoreState("loading");
       setHistoryRestoreError(null);
@@ -1002,6 +1016,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         getSessionHistory(sessionId, { limit: 200 }),
         getSessionArtifacts(sessionId).catch(() => []),
       ]);
+      if (restoreEpoch !== restoreEpochRef.current) return;
 
       // Restore artifacts first (needed for message hydration)
       const loadedArtifacts: Artifact[] = sessionArtifacts.map((a: ArtifactInfo) => ({
@@ -1031,7 +1046,9 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         sessionDetails.metadata,
         sessionId,
       );
+      if (restoreEpoch !== restoreEpochRef.current) return;
       chatMessages = reconciliation.messages;
+      setServerRunBlocking(Boolean(reconciliation.blocksComposer));
       setMessages(chatMessages);
       hydrateQuizData(chatMessages, setMessages);
       const restoredConfig = sessionDetails.config || {};
@@ -1058,6 +1075,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         status: "idle",
         outputFiles: latestRunFiles,
       });
+      pendingSessionIdRef.current = undefined;
       setActiveSessionId(sessionId);
       setHistoryRestoreState("ready");
       setHistoryRestoreError(reconciliation.error || null);
@@ -1217,16 +1235,19 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     } else {
       setMessages((prev) => [...prev, userMessage, assistantMessage]);
     }
+    setServerRunBlocking(false);
     setIsStreaming(true);
 
     // 2. Bind a session id without waiting for createSession. A new chat
     // mints a client id and opens SSE immediately; persistence is background.
-    const preparedSession = beginNewChatSession(activeSessionId || undefined);
+    const preparedSession = beginNewChatSession(
+      pendingSessionIdRef.current || activeSessionId || undefined,
+    );
     const sessionId = preparedSession.sessionId;
     let shouldRefreshSessionsInBackground = preparedSession.isNew;
     if (preparedSession.isNew) {
       const sessionTitle = messageContent.slice(0, 50);
-      setActiveSessionId(sessionId);
+      pendingSessionIdRef.current = sessionId;
       setAssistantLocalTitles((prev: Record<string, string>) => ({
         ...prev,
         [sessionId]: sessionTitle,
@@ -1469,6 +1490,12 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                 sessionId: id,
                 title: sessionTitle,
                 config,
+              }).then((created) => {
+                if (pendingSessionIdRef.current === id) {
+                  setActiveSessionId(created.session_id);
+                  pendingSessionIdRef.current = undefined;
+                }
+                return created;
               }).catch((error) => {
                 console.error("Failed to persist session:", error);
               })
@@ -2985,10 +3012,11 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       } else {
         const finishedAtMs = Date.now();
         streamTurnState = cancelStreamTurn(streamTurnState, finishedAtMs);
+        const cancelledContent = streamTurnState.content || content || "(Cancelled)";
         setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { 
           ...m,
-          content: content || "(Cancelled)",
-          parts: buildTextParts(assistantMessage.id, content || "(Cancelled)", createdAt),
+          content: cancelledContent,
+          parts: buildTextParts(assistantMessage.id, cancelledContent, createdAt),
           isStreaming: false,
           status: "cancelled",
           firstTokenMs: streamTurnState.firstTokenMs ?? firstTokenMs,
@@ -3118,12 +3146,52 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         }
       } catch (error) {
         console.warn("Resume probe after approval failed", error);
+        setMessages((prev) =>
+          prev.map((message) => {
+            if (message.id !== messageId || !message.processSummary) return message;
+            return {
+              ...message,
+              processSummary: {
+                ...message.processSummary,
+                tools: message.processSummary.tools.map((tool) =>
+                  tool.id === toolId
+                    ? {
+                        ...tool,
+                        status: "approval_required" as const,
+                        summary: tool.summary || "Resume not ready",
+                      }
+                    : tool,
+                ),
+              },
+            };
+          }),
+        );
         return;
       }
 
       const streamConfig = lastStreamConfigRef.current;
       if (!streamConfig) {
         console.warn("Approval resume skipped: stream config unavailable");
+        setMessages((prev) =>
+          prev.map((message) => {
+            if (message.id !== messageId || !message.processSummary) return message;
+            return {
+              ...message,
+              processSummary: {
+                ...message.processSummary,
+                tools: message.processSummary.tools.map((tool) =>
+                  tool.id === toolId
+                    ? {
+                        ...tool,
+                        status: "approval_required" as const,
+                        summary: tool.summary || "Resume not ready",
+                      }
+                    : tool,
+                ),
+              },
+            };
+          }),
+        );
         return;
       }
 
@@ -3149,7 +3217,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     activeSessionId,
     messages,
     setMessages,
-    isStreaming,
+    isStreaming: isStreaming || serverRunBlocking,
     sessionsLoading,
     historyRestoreState,
     historyRestoreError,

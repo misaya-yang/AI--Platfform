@@ -157,7 +157,7 @@ async def test_dashboard_websocket_accepts_metrics_read_permission(monkeypatch) 
         return AuthContext(
             user_id="platform-admin",
             tenant_id="platform",
-            roles=["admin"],
+            roles=["platform_admin"],
             permissions=["console:metrics:view"],
             is_authenticated=True,
         )

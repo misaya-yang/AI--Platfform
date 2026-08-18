@@ -85,7 +85,7 @@ class ImageGenerationRequest:
     """Parameters for image generation via smart routing."""
 
     prompt: str
-    model_id: str = "gemini-3.1-flash-image-preview"
+    model_id: str | None = None
     style: str | None = None
     size: str | None = None
     n: int = 1

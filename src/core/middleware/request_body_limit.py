@@ -14,13 +14,26 @@ class RequestBodyLimitExceeded(Exception):
 class RequestBodyLimitMiddleware:
     """Reject oversized bodies before FastAPI buffers or parses them."""
 
-    def __init__(self, app, *, max_bytes: int, paths: Iterable[str]) -> None:
+    def __init__(
+        self,
+        app,
+        *,
+        max_bytes: int,
+        paths: Iterable[str],
+        path_prefixes: Iterable[str] = (),
+    ) -> None:
         self.app = app
         self.max_bytes = max_bytes
         self.paths = frozenset(paths)
+        self.path_prefixes = tuple(path_prefixes)
+
+    def _matches(self, path: str) -> bool:
+        if path in self.paths:
+            return True
+        return any(path.startswith(prefix) for prefix in self.path_prefixes)
 
     async def __call__(self, scope, receive, send) -> None:
-        if scope.get("type") != "http" or scope.get("path") not in self.paths:
+        if scope.get("type") != "http" or not self._matches(str(scope.get("path") or "")):
             await self.app(scope, receive, send)
             return
 

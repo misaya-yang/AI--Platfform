@@ -71,7 +71,6 @@ async def test_oauth_callback_rejects_unissued_state_before_token_exchange() -> 
             code="attacker-code",
             state="tenant:user:github:forgednonce",
             request=_request(),
-            user=_user(),
         )
 
     assert exc_info.value.status_code == 400
@@ -107,7 +106,7 @@ async def test_oauth_state_is_stored_in_redis_with_ttl_and_consumed_once() -> No
 
 
 @pytest.mark.asyncio
-async def test_oauth_callback_rejects_valid_state_before_token_exchange_when_user_mismatch(monkeypatch) -> None:
+async def test_oauth_callback_rejects_state_provider_mismatch_without_user(monkeypatch) -> None:
     token_post = AsyncMock()
     monkeypatch.setattr("src.api.v1.connectors.httpx.AsyncClient.post", token_post)
     redis = _FakeRedis()
@@ -124,14 +123,13 @@ async def test_oauth_callback_rejects_valid_state_before_token_exchange_when_use
 
     with pytest.raises(HTTPException) as exc_info:
         await oauth_callback(
-            provider="github",
+            provider="slack",
             code="provider-code",
             state=state,
             request=request,
-            user=_user(user_id="bob", tenant_id="tenant"),
         )
 
-    assert exc_info.value.status_code == 403
+    assert exc_info.value.status_code == 400
     token_post.assert_not_called()
 
 
@@ -216,10 +214,10 @@ async def test_oauth_callback_decrypts_secret_and_uses_safe_form_post(monkeypatc
         code="provider-code",
         state=state,
         request=request,
-        user=_user(),
     )
 
-    assert result["status"] == "connected"
+    assert result.status_code == 302
+    assert "connected=github" in result.headers["location"]
     call = safe_post.await_args
     assert call.args == ("https://oauth.example/token",)
     assert call.kwargs["data"]["client_secret"] == "synthetic-client-secret"
@@ -249,6 +247,7 @@ async def test_refresh_uses_safe_form_post_with_decrypted_secret(monkeypatch) ->
 
     token = await _refresh_token_if_needed(
         db,
+        request,
         {
             "id": "connector-id",
             "access_token": "expired-token",

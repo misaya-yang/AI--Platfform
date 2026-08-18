@@ -40,6 +40,7 @@ import { createSession, listSessions } from "@/api/sessions";
 import { api as apiClient } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
+import { useAuthStore } from "@/store/useAuthStore";
 
 // Local Components & Hooks
 import {
@@ -208,6 +209,7 @@ class MessageErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 export function AssistantPage() {
   const { t } = useTranslation();
   const { toast } = useToast();
+  const userId = useAuthStore((state) => state.user?.user_id);
 
   // 1. Data Loading State
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -218,7 +220,7 @@ export function AssistantPage() {
   // 2. Settings State
   // Unlock the composer with the last-selected model immediately; the catalog
   // validates the cached id once listModels resolves (W3).
-  const [selectedModel, setSelectedModel] = useState<string>(() => readLastModelId());
+  const [selectedModel, setSelectedModel] = useState<string>(() => readLastModelId(useAuthStore.getState().user?.user_id));
   const [selectedDatasets, setSelectedDatasets] = useState<string[]>([]);
   const [temperature, setTemperature] = useState(0.7);
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
@@ -518,12 +520,12 @@ export function AssistantPage() {
             return fallbackModelId;
           });
           // Validate the cache against the catalog; persist the resolved id.
-          const cached = readLastModelId();
+          const cached = readLastModelId(userId);
           const resolved =
             cached && modelsData.some((m) => m.id === cached)
               ? cached
               : fallbackModelId;
-          writeLastModelId(resolved);
+          writeLastModelId(resolved, userId);
         }
       } catch (error) {
         console.error("Failed to load assistant data:", error);
@@ -532,7 +534,7 @@ export function AssistantPage() {
       }
     }
     loadData();
-  }, []);
+  }, [userId]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia("(max-width: 767px)");
@@ -589,7 +591,7 @@ export function AssistantPage() {
     if (sessionConfig) {
       if (sessionConfig.selected_model && models.some((m) => m.id === sessionConfig.selected_model)) {
         setSelectedModel(sessionConfig.selected_model);
-        writeLastModelId(sessionConfig.selected_model);
+        writeLastModelId(sessionConfig.selected_model, userId);
       }
       setSelectedDatasets(sessionConfig.selected_datasets || []);  // Always reset, even if empty
       if (typeof sessionConfig.web_search_enabled === "boolean") setWebSearchEnabled(sessionConfig.web_search_enabled);
@@ -606,7 +608,7 @@ export function AssistantPage() {
       if (typeof sessionConfig.temperature === "number") setTemperature(sessionConfig.temperature);
       if (sessionConfig.selected_style) setSelectedStyle(sessionConfig.selected_style);
     }
-  }, [handleSelectSession, models, cancelImageMode, isMobile, setShowLeftPanel, disableSessionOptIn]);
+  }, [handleSelectSession, models, cancelImageMode, isMobile, setShowLeftPanel, disableSessionOptIn, userId]);
 
   // Handle new chat - reset all state including feature toggles
   const onNewChat = useCallback(() => {
@@ -844,7 +846,7 @@ export function AssistantPage() {
                 selectedModel={selectedModel}
                 onSelect={(modelId) => {
                   setSelectedModel(modelId);
-                  writeLastModelId(modelId);
+                  writeLastModelId(modelId, userId);
                 }}
                 disabled={isStreaming}
               />
@@ -869,7 +871,7 @@ export function AssistantPage() {
               <div className="flex-1" />
               <RightPanelChip
                 icon={<Network className="h-3.5 w-3.5" />}
-                label="Agents"
+                label={t("assistant.subagents", "Agents")}
                 count={latestSubagentCount}
                 active={rightPanel === "subagents"}
                 disabled={latestSubagentMessageId == null}
@@ -886,10 +888,10 @@ export function AssistantPage() {
                 icon={<MonitorCog className="h-3.5 w-3.5" />}
                 label={
                   localOSState.loadState === "loading"
-                    ? "Local files…"
+                    ? t("assistant.localFilesLoading", "Local files…")
                     : localOSState.loadState === "online"
-                      ? "Local files"
-                      : "Local files offline"
+                      ? t("assistant.localFiles", "Local files")
+                      : t("assistant.localFilesOffline", "Local files offline")
                 }
                 count={localOSState.onlineDeviceCount}
                 active={rightPanel === "local_os"}
@@ -1111,8 +1113,7 @@ export function AssistantPage() {
               isGeneratingImage={isGeneratingImage}
               isImageMode={isImageMode}
               hasAvailableModel={
-                (models.length > 0 && Boolean(selectedModel)) ||
-                (!modelsLoaded && Boolean(selectedModel))
+                modelsLoaded && models.length > 0 && models.some((model) => model.id === selectedModel)
               }
               handleFileSelect={handleFileSelect}
               removeFile={removeFile}

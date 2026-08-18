@@ -557,11 +557,13 @@ async def revoke_share(
 ):
     """Revoke (deactivate) a share link."""
     db = _get_db(request)
-    await db.execute(
+    result = await db.execute(
         "UPDATE conversation_shares SET is_active = FALSE "
-        "WHERE share_code = $1 AND tenant_id = $2 AND user_id = $3",
+        "WHERE share_code = $1 AND tenant_id = $2 AND user_id = $3 AND is_active = TRUE",
         share_code,
         user.tenant_id or "",
         user.user_id,
     )
+    if not result or result.endswith(" 0"):
+        raise HTTPException(status_code=404, detail="Share not found")
     return {"status": "revoked", "share_code": share_code}

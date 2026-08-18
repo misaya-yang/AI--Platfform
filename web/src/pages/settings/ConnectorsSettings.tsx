@@ -58,6 +58,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
+import { useAuthStore } from "@/store/useAuthStore";
 import { getErrorMessage } from "@/lib/utils";
 import {
   connectorQueryKeys,
@@ -138,6 +139,11 @@ export function ConnectorsSettingsPage() {
   const { t } = useTranslation();
   const { toast } = useToast();
   const qc = useQueryClient();
+  const canEditSettings = useAuthStore((state) => state.hasPermission("console:settings:edit"));
+  const isTenantAdmin = useAuthStore((state) =>
+    ["admin", "tenant_admin", "superadmin", "super_admin"].some((role) => state.hasRole(role)),
+  );
+  const canEdit = canEditSettings && isTenantAdmin;
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<ConnectorProvider | null>(null);
@@ -246,10 +252,12 @@ export function ConnectorsSettingsPage() {
           <h1 className="text-2xl font-bold">{t("settings.connectors.title")}</h1>
           <p className="text-muted-foreground">{t("settings.connectors.description")}</p>
         </div>
-        <Button onClick={openCreate}>
-          <Plus className="mr-2 h-4 w-4" />
-          {t("settings.connectors.newConnector")}
-        </Button>
+        {canEdit ? (
+          <Button onClick={openCreate}>
+            <Plus className="mr-2 h-4 w-4" />
+            {t("settings.connectors.newConnector")}
+          </Button>
+        ) : null}
       </div>
 
       <Card>
@@ -284,12 +292,15 @@ export function ConnectorsSettingsPage() {
                     <TableCell>
                       <Switch
                         checked={row.enabled}
-                        onCheckedChange={() => toggleMutation.mutate(row)}
+                        disabled={!canEdit}
+                        onCheckedChange={() => canEdit && toggleMutation.mutate(row)}
                         aria-label={t("settings.connectors.enabled")}
                       />
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-1">
+                        {canEdit ? (
+                        <>
                         <Button variant="ghost" size="sm" onClick={() => openEdit(row)}>
                           <Pencil className="h-4 w-4" />
                         </Button>
@@ -314,6 +325,8 @@ export function ConnectorsSettingsPage() {
                             </AlertDialogFooter>
                           </AlertDialogContent>
                         </AlertDialog>
+                        </>
+                        ) : null}
                       </div>
                     </TableCell>
                   </TableRow>

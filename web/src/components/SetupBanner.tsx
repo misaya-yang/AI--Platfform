@@ -3,15 +3,21 @@ import { Link } from "react-router-dom";
 import { X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useSetupState } from "@/api/setup";
+import { useAuthStore } from "@/store/useAuthStore";
 
-const DISMISS_STORAGE_KEY = "setup-banner-dismissed";
+const DISMISS_STORAGE_PREFIX = "setup-banner-dismissed";
+
+function dismissStorageKey(userId?: string): string {
+  return userId ? `${DISMISS_STORAGE_PREFIX}:${userId}` : DISMISS_STORAGE_PREFIX;
+}
 
 export function SetupBanner() {
   const { t } = useTranslation();
+  const userId = useAuthStore((state) => state.user?.user_id);
   const { data, isLoading, error } = useSetupState();
   const [dismissed, setDismissed] = useState(() => {
     try {
-      return localStorage.getItem(DISMISS_STORAGE_KEY) === "1";
+      return localStorage.getItem(dismissStorageKey(userId)) === "1";
     } catch {
       return false;
     }
@@ -41,7 +47,7 @@ export function SetupBanner() {
         className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
         onClick={() => {
           try {
-            localStorage.setItem(DISMISS_STORAGE_KEY, "1");
+            localStorage.setItem(dismissStorageKey(userId), "1");
           } catch {
             // Storage unavailable (private mode) — banner stays visible.
           }

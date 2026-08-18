@@ -154,6 +154,24 @@ export const useAuthStore = create<AuthState>()(
         // Clear from both storages
         localStorage.removeItem(STORAGE_KEY);
         sessionStorage.removeItem(STORAGE_KEY);
+        try {
+          const stale: string[] = [];
+          for (let i = 0; i < localStorage.length; i += 1) {
+            const key = localStorage.key(i);
+            if (
+              key &&
+              (key === "assistant.lastModelId.v1" ||
+                key.startsWith("assistant.lastModelId.v1:") ||
+                key === "setup-banner-dismissed" ||
+                key.startsWith("setup-banner-dismissed:"))
+            ) {
+              stale.push(key);
+            }
+          }
+          stale.forEach((key) => localStorage.removeItem(key));
+        } catch {
+          // Storage unavailable — auth is still cleared below.
+        }
         set({
           token: null,
           user: null,

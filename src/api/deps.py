@@ -201,7 +201,7 @@ def require_platform_admin(
 
     require_gateway_capability(request, auth, capability)
     subjects = {str(value).strip().lower() for value in [*(auth.roles or []), *(auth.permissions or [])]}
-    if subjects.intersection({"admin", "admin:*", "platform_admin", "superadmin", "super_admin"}):
+    if subjects.intersection({"platform_admin", "superadmin", "super_admin"}):
         return
     _schedule_permission_denied_event(request, auth, capability)
     raise HTTPException(

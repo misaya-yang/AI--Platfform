@@ -89,7 +89,7 @@ class DatabaseSessionManager:
 
         # Client-selected ids must be inserted atomically. A read-before-write
         # check would still allow two tenants to race on the same UUID.
-        if fail_if_exists:
+        if fail_if_exists or session_id is not None:
             created = await self.database.create_session_if_absent(
                 self._session_to_dict(session)
             )

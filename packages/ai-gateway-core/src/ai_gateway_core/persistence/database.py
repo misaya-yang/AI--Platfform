@@ -1377,6 +1377,8 @@ class DatabaseStorage:
                     status = EXCLUDED.status,
                     expires_at = EXCLUDED.expires_at,
                     updated_at = NOW()
+                WHERE assistant.sessions.user_id = EXCLUDED.user_id
+                  AND assistant.sessions.tenant_id IS NOT DISTINCT FROM EXCLUDED.tenant_id
             """,
                 session.get("session_id"),
                 session.get("service_id"),

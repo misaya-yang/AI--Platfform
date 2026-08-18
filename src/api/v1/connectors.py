@@ -28,10 +28,12 @@ from ai_gateway_core.logging import get_logger
 from ai_gateway_core.security import (
     SafeFetchError,
     decrypt_value,
+    encrypt_value,
     is_encrypted,
     safe_form_post,
 )
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from ...core.auth.user_resolver import UserContext
@@ -339,12 +341,55 @@ async def _get_user_connector(db, tenant_id: str, user_id: str, provider: str) -
     return dict(row) if row else None
 
 
+def _connector_user_token_key(request: Request) -> str:
+    injected = getattr(request.app.state, "connector_encryption_key", None)
+    if isinstance(injected, str) and injected:
+        return injected
+    return os.environ.get("GATEWAY_ENCRYPTION_KEY", "")
+
+
+def _encrypt_user_token(request: Request, token: str | None) -> str | None:
+    if not token:
+        return token
+    if is_encrypted(token):
+        return token
+    key = _connector_user_token_key(request)
+    if not key:
+        raise HTTPException(503, "Connector token encryption is not configured")
+    encrypted = encrypt_value(token, key)
+    if not is_encrypted(encrypted):
+        raise HTTPException(500, "Connector token encryption failed")
+    return encrypted
+
+
+def _decrypt_user_token(request: Request, token: str | None) -> str | None:
+    if not token or not is_encrypted(token):
+        return token
+    key = _connector_user_token_key(request)
+    if not key:
+        raise HTTPException(503, "Connector token decryption is not configured")
+    decrypted = decrypt_value(token, key)
+    if not decrypted or is_encrypted(decrypted):
+        raise HTTPException(503, "Connector token cannot be decrypted")
+    return decrypted
+
+
+def _decrypt_user_connector(request: Request, connector: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **connector,
+        "access_token": _decrypt_user_token(request, connector.get("access_token")),
+        "refresh_token": _decrypt_user_token(request, connector.get("refresh_token")),
+    }
+
+
 async def _save_user_connector(
-    db, tenant_id: str, user_id: str, provider: str,
+    db, request: Request, tenant_id: str, user_id: str, provider: str,
     access_token: str, refresh_token: str | None,
     expires_at: datetime | None, scopes: str,
     metadata: dict | None = None,
 ):
+    stored_access = _encrypt_user_token(request, access_token)
+    stored_refresh = _encrypt_user_token(request, refresh_token)
     await db.execute(
         """INSERT INTO user_connectors (tenant_id, user_id, provider, access_token, refresh_token,
            token_expires_at, token_scopes, provider_metadata, status, updated_at)
@@ -353,13 +398,14 @@ async def _save_user_connector(
            DO UPDATE SET access_token = $4, refresh_token = $5, token_expires_at = $6,
                          token_scopes = $7, provider_metadata = COALESCE($8, user_connectors.provider_metadata),
                          status = 'connected', last_error = NULL, updated_at = NOW()""",
-        tenant_id, user_id, provider, access_token, refresh_token,
+        tenant_id, user_id, provider, stored_access, stored_refresh,
         expires_at, scopes, metadata,
     )
 
 
-async def _refresh_token_if_needed(db, connector: dict, config: dict) -> str:
+async def _refresh_token_if_needed(db, request: Request, connector: dict, config: dict) -> str:
     """Refresh OAuth token if expired. Returns valid access_token."""
+    connector = _decrypt_user_connector(request, connector)
     if connector.get("token_expires_at") and connector["token_expires_at"] < datetime.now(timezone.utc):
         if not connector.get("refresh_token"):
             raise HTTPException(400, "Token expired and no refresh token available. Reconnect.")
@@ -386,10 +432,16 @@ async def _refresh_token_if_needed(db, connector: dict, config: dict) -> str:
 
         data = resp.json()
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=data.get("expires_in", 3600))
+        stored_access = _encrypt_user_token(request, data["access_token"])
+        stored_refresh = (
+            _encrypt_user_token(request, data.get("refresh_token"))
+            if data.get("refresh_token")
+            else None
+        )
         await db.execute(
             """UPDATE user_connectors SET access_token = $1, refresh_token = COALESCE($2, refresh_token),
                token_expires_at = $3, status = 'connected', updated_at = NOW() WHERE id = $4""",
-            data["access_token"], data.get("refresh_token"), expires_at, connector["id"],
+            stored_access, stored_refresh, expires_at, connector["id"],
         )
         return data["access_token"]
 
@@ -408,7 +460,11 @@ async def list_available_connectors(
     if not db:
         raise HTTPException(500, "Database not available")
     configs = await db.fetch(
-        "SELECT * FROM connector_configs WHERE (tenant_id = $1 OR tenant_id = '') AND enabled = true",
+        """SELECT * FROM (
+               SELECT DISTINCT ON (provider) * FROM connector_configs
+               WHERE (tenant_id = $1 OR tenant_id = '') AND enabled = true
+               ORDER BY provider, (tenant_id = $1) DESC
+           ) AS effective""",
         user.tenant_id,
     )
     user_conns = await db.fetch(
@@ -496,16 +552,27 @@ async def initiate_oauth(
     return {"auth_url": auth_url, "state": state}
 
 
+def _oauth_console_redirect(provider: str, status: str = "connected") -> RedirectResponse:
+    origins = os.environ.get("CORS_ALLOWED_ORIGINS", "")
+    origin = next((item.strip() for item in origins.split(",") if item.strip()), "")
+    path = (
+        f"/settings/connectors?connected={urllib.parse.quote(provider)}"
+        f"&status={urllib.parse.quote(status)}"
+    )
+    target = f"{origin.rstrip('/')}{path}" if origin else path
+    return RedirectResponse(url=target, status_code=302)
+
+
 @router.get("/callback/{provider}")
 async def oauth_callback(
     provider: str,
     request: Request,
-    user: UserContext = Depends(get_user_context),
     code: str = Query(...),
     state: str = Query(""),
 ):
     """OAuth callback — exchanges authorization code for tokens."""
-    # Parse and validate state parameter
+    # Parse and validate state parameter. The IdP redirects the browser here
+    # without a Bearer token; the one-time Redis state is the CSRF check.
     parts = state.split(":")
     if len(parts) < 4:
         raise HTTPException(400, "Invalid state parameter")
@@ -515,8 +582,6 @@ async def oauth_callback(
         raise HTTPException(400, "State provider mismatch")
     if not tenant_id or not user_id or not nonce:
         raise HTTPException(400, "Incomplete state parameter")
-    if user.tenant_id != tenant_id or user.user_id != user_id:
-        raise HTTPException(403, "OAuth state does not belong to authenticated user")
     issued_state = await _consume_oauth_state(request, state)
     if (
         issued_state["tenant_id"] != tenant_id
@@ -595,15 +660,13 @@ async def oauth_callback(
                     metadata["site_name"] = resources[0].get("name", "")
 
     await _save_user_connector(
-        db, tenant_id, user_id, provider,
+        db, request, tenant_id, user_id, provider,
         access_token, refresh_token, expires_at,
         config["scopes"], metadata,
     )
 
     logger.info(f"Connector connected: {provider} for user {user_id}")
-
-    # Redirect back to frontend
-    return {"status": "connected", "provider": provider, "metadata": metadata}
+    return _oauth_console_redirect(provider)
 
 
 @router.delete("/{provider}")
@@ -647,19 +710,25 @@ async def activate_connector_mcp(
     if provider != "confluence":
         raise HTTPException(400, f"MCP activation not supported for: {provider}")
 
-    # Get Confluence connection from the existing confluence_connections table
     db = _get_db(request)
     if not db:
         raise HTTPException(500, "Database not available")
 
-    row = await db.fetchrow(
-        """SELECT domain, email, api_token FROM confluence_connections
-           WHERE tenant_id = $1 AND status = 'active'
-           ORDER BY created_at DESC LIMIT 1""",
-        user.tenant_id,
-    )
-    if not row:
+    row = await _get_user_connector(db, user.tenant_id, user.user_id, provider)
+    if not row or row.get("status") != "connected":
         raise HTTPException(400, "No active Confluence connection. Connect first via Settings.")
+    row = _decrypt_user_connector(request, row)
+    metadata = row.get("provider_metadata") or {}
+    if isinstance(metadata, str):
+        metadata = json.loads(metadata)
+    site_url = str(metadata.get("site_url") or metadata.get("domain") or "")
+    domain = urllib.parse.urlsplit(site_url).netloc or site_url.replace("https://", "").replace("http://", "").split("/")[0]
+    email = str(metadata.get("email") or "")
+    api_token = str(row.get("access_token") or "")
+    if not domain or not api_token:
+        raise HTTPException(400, "Connector credentials are incomplete. Reconnect.")
+    if not email:
+        email = f"{user.user_id}@oauth.local"
 
     from ai_gateway_core.connectors import get_connector_mcp_service
     mcp = get_connector_mcp_service()
@@ -667,9 +736,9 @@ async def activate_connector_mcp(
     try:
         tools = await mcp.start_confluence(
             tenant_id=user.tenant_id,
-            domain=row["domain"],
-            email=row["email"],
-            api_token=row["api_token"],
+            domain=domain,
+            email=email,
+            api_token=api_token,
         )
         # start_confluence returns list[dict[str, str]] — not ToolDefinition objects
         return {
@@ -721,7 +790,7 @@ async def search_connector(
         raise HTTPException(404, f"Connector not configured: {provider}")
     config = _decrypt_connector_secret(request, config)
 
-    access_token = await _refresh_token_if_needed(db, connector, config)
+    access_token = await _refresh_token_if_needed(db, request, connector, config)
     metadata = connector.get("provider_metadata") or {}
 
     # Provider-specific search

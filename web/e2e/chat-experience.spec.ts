@@ -17,6 +17,7 @@ import {
   completeStreamTurn,
   createStreamTurnState,
   failStreamTurn,
+  reduceNormalizedStreamEvent,
 } from "../src/features/chat/stream/reducer";
 import { splitStreamingMarkdownBlocks } from "../src/components/streamingMarkdown";
 
@@ -81,6 +82,26 @@ test("assistant stream terminal state is first-wins", () => {
   const failed = failStreamTurn(createStreamTurnState(0), "provider failed", 10);
   expect(cancelStreamTurn(failed, 20).status).toBe("failed");
   expect(completeStreamTurn(failed, 20).status).toBe("failed");
+});
+
+test("late stream deltas do not reopen a completed turn", () => {
+  const completed = completeStreamTurn(createStreamTurnState(0), 10);
+  const lateDelta = reduceNormalizedStreamEvent(
+    completed,
+    { type: "message_delta", content: "late" },
+    { autoToolCallCounter: 0 },
+    20,
+  );
+  expect(lateDelta.state.status).toBe("completed");
+  expect(lateDelta.state.content).toBe(completed.content);
+
+  const lateTool = reduceNormalizedStreamEvent(
+    completed,
+    { type: "tool_call_end", metadata: { tool_call_id: "t1" } },
+    { autoToolCallCounter: 0 },
+    20,
+  );
+  expect(lateTool.state.status).toBe("completed");
 });
 
 test("streaming markdown splits completed blocks without breaking code or math", () => {

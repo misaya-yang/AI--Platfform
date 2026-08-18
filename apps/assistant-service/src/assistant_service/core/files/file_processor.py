@@ -477,14 +477,19 @@ The description should be detailed enough for someone who hasn't seen the image 
         raw_path = file_path.strip().lstrip("/")
         parts = PurePosixPath(raw_path).parts
         if (
-            len(parts) < 4
-            or parts[0] != "uploads"
+            parts[0:1] != ("uploads",)
             or "\\" in raw_path
             or any(part in {"", ".", ".."} for part in parts)
-            or parts[1] != user.tenant_id
         ):
             raise FileProcessError("Attachment path is not tenant-scoped", file_path=file_path)
-        owner_id = parts[2]
+        if len(parts) == 3:
+            owner_id = parts[1]
+        elif len(parts) >= 4:
+            if user.tenant_id and parts[1] != user.tenant_id:
+                raise FileProcessError("Attachment path is not tenant-scoped", file_path=file_path)
+            owner_id = parts[2]
+        else:
+            raise FileProcessError("Attachment path is not tenant-scoped", file_path=file_path)
         service_owned = getattr(user, "user_type", "user") == "service" and owner_id.startswith("ar_")
         if owner_id != user.user_id and not service_owned:
             raise FileProcessError("Attachment path is not owned by the caller", file_path=file_path)
@@ -1177,11 +1182,7 @@ The description should be detailed enough for someone who hasn't seen the image 
         )
 
         for api_path in file_paths:
-            try:
-                self._get_storage_key(api_path, user)
-            except FileProcessError as exc:
-                logger.warning("[Security] Rejecting attachment path: %s", exc)
-                continue
+            self._get_storage_key(api_path, user)
             # Try cache first
             cache_key = self._get_cache_key(api_path, model_supports_vision)
             cached = await self._get_cached_result(cache_key)

@@ -85,17 +85,40 @@ def _extract_docx_text_sync(content: bytes) -> str:
     return "\n\n".join(text_parts)
 
 
+def _pdf_page_count_sync(pdf_bytes: bytes) -> int:
+    """Open, count, and close a PDF on one worker thread."""
+    import fitz
+
+    pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        return len(pdf_doc)
+    finally:
+        pdf_doc.close()
+
+
 def _render_pdf_pages_sync(pdf_bytes: bytes, batch_start: int, batch_end: int) -> list[bytes]:
     """Sync page rasterization for VLM OCR (SPO-04 / K2)."""
     import fitz
 
+    from .document_processor import MAX_PDF_PAGE_MARKERS
+
+    max_pixmap_bytes = 8 * 1024 * 1024
     pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     images: list[bytes] = []
     try:
-        for pn in range(batch_start, batch_end):
+        if len(pdf_doc) > MAX_PDF_PAGE_MARKERS:
+            raise ValueError(
+                f"PDF exceeds the {MAX_PDF_PAGE_MARKERS} page marker limit"
+            )
+        for pn in range(batch_start, min(batch_end, MAX_PDF_PAGE_MARKERS)):
             page = pdf_doc[pn]
-            mat = fitz.Matrix(200 / 72, 200 / 72)  # 200 DPI
-            pix = page.get_pixmap(matrix=mat)
+            dpi = 200.0
+            pix = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72))
+            raw = pix.width * pix.height * pix.n
+            if raw > max_pixmap_bytes and raw > 0:
+                scale = (max_pixmap_bytes / raw) ** 0.5
+                dpi = max(36.0, dpi * scale)
+                pix = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72))
             images.append(pix.tobytes("png"))
     finally:
         pdf_doc.close()
@@ -1118,7 +1141,6 @@ class KnowledgeWorker:
         Fallback when VisionPDFProcessor is not available but VLM OCR service is.
         Renders each page to image → VLM OCR → concatenated text → ingest as text.
         """
-        import fitz
         metadata = doc.get("metadata", {})
         original_key = metadata.get("original_file_key")
         if not original_key:
@@ -1137,10 +1159,24 @@ class KnowledgeWorker:
             )
             return
 
-        # SPO-04 / K2: open + rasterize off the event loop.
-        pdf_doc = await asyncio.to_thread(fitz.open, stream=pdf_bytes, filetype="pdf")
-        total_pages = len(pdf_doc)
-        pdf_doc.close()
+        # SPO-04 / K2: open + count + close on one worker thread.
+        from .document_processor import MAX_PDF_PAGE_MARKERS
+
+        try:
+            total_pages = await asyncio.to_thread(_pdf_page_count_sync, pdf_bytes)
+        except Exception as exc:
+            await self.service.db.update_document_status(
+                task.document_id, status="failed", progress=100, error=str(exc)
+            )
+            return
+        if total_pages > MAX_PDF_PAGE_MARKERS:
+            await self.service.db.update_document_status(
+                task.document_id,
+                status="failed",
+                progress=100,
+                error=f"PDF exceeds the {MAX_PDF_PAGE_MARKERS} page marker limit",
+            )
+            return
         logger.info(f"[Worker] VLM OCR processing {total_pages} pages for {task.document_id}")
 
         # Render pages to images and OCR in batches

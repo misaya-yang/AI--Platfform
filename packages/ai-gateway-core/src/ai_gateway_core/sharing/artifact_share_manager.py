@@ -33,10 +33,10 @@ def _sanitize_display_name(name: str | None) -> str | None:
     """Sanitize display_name: strip, length-limit, reject suspicious chars."""
     if not name:
         return None
-    name = html.escape(name.strip())[:MAX_DISPLAY_NAME_LEN]
-    if not name or not DISPLAY_NAME_RE.match(html.unescape(name)):
-        return name  # keep escaped version even if regex fails
-    return name
+    stripped = name.strip()[:MAX_DISPLAY_NAME_LEN]
+    if not stripped or not DISPLAY_NAME_RE.match(stripped):
+        raise ValueError("Display name contains unsupported characters")
+    return html.escape(stripped)
 
 
 class ArtifactShareManager:
@@ -117,8 +117,6 @@ class ArtifactShareManager:
             return None
         if row["expires_at"] and row["expires_at"] < datetime.now(timezone.utc):
             return None
-        if row["max_attempts"] is not None and row["attempt_count"] >= row["max_attempts"]:
-            return None
 
         payload = row["payload"]
         if isinstance(payload, str):
@@ -135,12 +133,17 @@ class ArtifactShareManager:
             "require_name": row["require_name"],
             "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None,
             "time_limit_minutes": row["time_limit_minutes"],
+            "max_attempts": row["max_attempts"],
+            "attempt_count": row["attempt_count"],
+            "created_at": row["created_at"],
         }
 
     async def get_public_artifact(self, share_code: str) -> dict | None:
         """Public snapshot: payload only, never answer keys."""
         share = await self.get_share_by_code(share_code)
         if not share:
+            return None
+        if share["max_attempts"] is not None and share["attempt_count"] >= share["max_attempts"]:
             return None
         return {
             "share_code": share["share_code"],
@@ -162,9 +165,20 @@ class ArtifactShareManager:
         display_name = _sanitize_display_name(display_name)
         share = await self.get_share_by_code(share_code)
         if not share:
-            raise ValueError("Share not found, expired, or max attempts reached")
+            raise ValueError("Share not found or expired")
+        if share["max_attempts"] is not None and share["attempt_count"] >= share["max_attempts"]:
+            raise ValueError("max attempts reached")
         if share["require_name"] and not display_name:
             raise ValueError("This share requires a name before submitting.")
+        if share.get("time_limit_minutes") and share.get("created_at"):
+            created_at = share["created_at"]
+            if isinstance(created_at, str):
+                created_at = datetime.fromisoformat(created_at)
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            deadline = created_at + timedelta(minutes=int(share["time_limit_minutes"]))
+            if datetime.now(timezone.utc) > deadline:
+                raise ValueError("Time limit exceeded")
 
         # Atomically claim display_name for named attempts. A SELECT followed
         # by INSERT races under concurrent submissions, so the migration owns
@@ -264,8 +278,30 @@ class ArtifactShareManager:
         payload = share["payload"]
         quiz_id = payload.get("quiz_id") if isinstance(payload, dict) else None
 
+        payload_questions = payload.get("questions") if isinstance(payload, dict) else None
+        questions_by_id = {
+            str(item.get("id")): item
+            for item in (payload_questions or [])
+            if isinstance(item, dict)
+        }
+        merged_keys: list[dict[str, Any]] = []
+        for item in answer_keys or []:
+            if not isinstance(item, dict):
+                continue
+            source = questions_by_id.get(str(item.get("id")), {})
+            merged_keys.append(
+                {
+                    **item,
+                    "question_type": item.get("question_type")
+                    or source.get("question_type")
+                    or "mc_single",
+                    "question_text": item.get("question_text")
+                    or source.get("question_text")
+                    or "",
+                }
+            )
         grader = QuizGrader()
-        graded = grader.grade(answer_keys or [], answers)
+        graded = grader.grade(merged_keys, answers)
 
         attempt_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc)

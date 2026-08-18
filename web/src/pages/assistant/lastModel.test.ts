@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { readLastModelId, writeLastModelId } from "./lastModel.ts";
+import { clearLastModelId, readLastModelId, writeLastModelId } from "./lastModel.ts";
 
 class MemoryStorage {
   private items = new Map<string, string>();
@@ -12,6 +12,18 @@ class MemoryStorage {
 
   setItem(key: string, value: string): void {
     this.items.set(key, value);
+  }
+
+  removeItem(key: string): void {
+    this.items.delete(key);
+  }
+
+  key(index: number): string | null {
+    return [...this.items.keys()][index] ?? null;
+  }
+
+  get length(): number {
+    return this.items.size;
   }
 }
 
@@ -40,6 +52,17 @@ test("last model cache refuses to write empty ids", () => {
   writeLastModelId("qwen3.7-plus");
   writeLastModelId("");
   assert.equal(readLastModelId(), "qwen3.7-plus");
+});
+
+test("last model cache scopes keys by user and can clear them", () => {
+  installStorage(new MemoryStorage());
+  writeLastModelId("model-a", "user-a");
+  writeLastModelId("model-b", "user-b");
+  assert.equal(readLastModelId("user-a"), "model-a");
+  assert.equal(readLastModelId("user-b"), "model-b");
+  clearLastModelId();
+  assert.equal(readLastModelId("user-a"), "");
+  assert.equal(readLastModelId("user-b"), "");
 });
 
 test("last model cache degrades to empty when storage throws", () => {

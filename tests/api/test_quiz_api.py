@@ -22,6 +22,7 @@ class _QuizDB:
         self.attempts: list[dict] = []
 
     async def fetchrow(self, query: str, *args):  # noqa: ANN201
+        query = query.replace("assistant.", "")
         if "count(*) AS cnt" in query:
             return {"cnt": len(self.attempts)}
         if "SELECT created_by FROM quizzes" in query:
@@ -44,6 +45,7 @@ class _QuizDB:
         return None
 
     async def fetch(self, query: str, *_args):  # noqa: ANN201
+        query = query.replace("assistant.", "")
         if "FROM quiz_questions" in query:
             return [
                 {
@@ -61,6 +63,7 @@ class _QuizDB:
         return []
 
     async def execute(self, query: str, *args):  # noqa: ANN201
+        query = query.replace("assistant.", "")
         if query.lstrip().startswith("INSERT INTO quiz_attempts"):
             self.attempts.append(
                 {

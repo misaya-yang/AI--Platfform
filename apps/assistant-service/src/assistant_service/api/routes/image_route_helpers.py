@@ -781,12 +781,21 @@ async def _run_gemini_multi_turn_impl(
 
     session = await session_manager.get(body.session_id)
     if not session:
-        session = await session_manager.create(
-            user_id=user.user_id,
-            tenant_id=user.tenant_id,
-            session_id=body.session_id,
-            metadata={"image_chat_history": []},
-        )
+        from ai_gateway_core.exceptions import SessionAlreadyExistsError
+
+        try:
+            session = await session_manager.create(
+                user_id=user.user_id,
+                tenant_id=user.tenant_id,
+                session_id=body.session_id,
+                metadata={"image_chat_history": []},
+            )
+        except SessionAlreadyExistsError:
+            session = await session_manager.get(body.session_id)
+            if session and (
+                session.user_id != user.user_id or session.tenant_id != user.tenant_id
+            ):
+                raise PermissionError("Session does not belong to current user")
 
     image_history: list[dict] = []
     locked_preset = StylePreset.DEFAULT

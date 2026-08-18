@@ -44,6 +44,10 @@ export interface StreamReduceResult {
   terminal: boolean;
 }
 
+function isTerminalStatus(status: ChatTurnState): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
+
 function toNumber(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
@@ -408,7 +412,7 @@ export function reduceNormalizedStreamEvent(
       }
       break;
     case "message_delta": {
-      if (shouldSkipBySequence(state, event)) {
+      if (isTerminalStatus(state.status) || shouldSkipBySequence(state, event)) {
         break;
       }
       const delta = event.content || "";
@@ -433,7 +437,7 @@ export function reduceNormalizedStreamEvent(
     case "tool_call_start":
     case "tool_call_delta": {
       const toolCallId = getToolCallId(event, context);
-      if (shouldSkipBySequence(state, event, toolCallId)) {
+      if (isTerminalStatus(state.status) || shouldSkipBySequence(state, event, toolCallId)) {
         break;
       }
       const incomingArgs = extractToolArguments(event);
@@ -466,7 +470,7 @@ export function reduceNormalizedStreamEvent(
     }
     case "tool_call_end": {
       const toolCallId = getToolCallId(event, context);
-      if (shouldSkipBySequence(state, event, toolCallId)) {
+      if (isTerminalStatus(state.status) || shouldSkipBySequence(state, event, toolCallId)) {
         break;
       }
       const rawType = extractRawType(event);

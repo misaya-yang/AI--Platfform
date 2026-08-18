@@ -15,7 +15,7 @@ import os
 import re
 import urllib.parse
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, Literal
 
@@ -967,11 +967,18 @@ def _resolve_runtime(
         "ASSISTANT_CODE_EXECUTOR_IMAGE",
         default="python:3.12-slim",
     )
-    runtime["ASSISTANT_CODE_EXECUTOR_PYTHON"] = _runtime_path(
+    python_setting = _runtime_path(
         environment,
         "ASSISTANT_CODE_EXECUTOR_PYTHON",
         default="python",
     )
+    python_raw = str(python_setting.value or "").strip()
+    if python_raw and (
+        ".." in python_raw
+        or not re.fullmatch(r"[A-Za-z0-9_./-]+", python_raw)
+    ):
+        python_setting = replace(python_setting, valid=False)
+    runtime["ASSISTANT_CODE_EXECUTOR_PYTHON"] = python_setting
     runtime["ASSISTANT_SBX_DOCKER_API_VERSION"] = _runtime_string(
         environment,
         "ASSISTANT_SBX_DOCKER_API_VERSION",

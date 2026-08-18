@@ -46,7 +46,7 @@ class QuizAccessService:
         """Fetch a tenant-scoped quiz with its questions."""
         qid = _quiz_uuid(quiz_id)
         row = await self.db.fetchrow(
-            "SELECT * FROM quizzes WHERE id = $1 AND tenant_id = $2",
+            "SELECT * FROM assistant.quizzes WHERE id = $1 AND tenant_id = $2",
             qid,
             tenant_id,
         )
@@ -54,7 +54,7 @@ class QuizAccessService:
             return None
 
         q_rows = await self.db.fetch(
-            "SELECT * FROM quiz_questions WHERE quiz_id = $1 ORDER BY question_num",
+            "SELECT * FROM assistant.quiz_questions WHERE quiz_id = $1 ORDER BY question_num",
             qid,
         )
 
@@ -103,7 +103,7 @@ class QuizAccessService:
     ) -> tuple[list[dict], int]:
         """List quizzes created by one user in one tenant."""
         total_row = await self.db.fetchrow(
-            "SELECT count(*) AS cnt FROM quizzes WHERE tenant_id = $1 AND created_by = $2",
+            "SELECT count(*) AS cnt FROM assistant.quizzes WHERE tenant_id = $1 AND created_by = $2",
             tenant_id,
             user_id,
         )
@@ -113,7 +113,7 @@ class QuizAccessService:
             """
             SELECT id, title, description, topic, difficulty, question_count,
                    status, created_at
-            FROM quizzes
+            FROM assistant.quizzes
             WHERE tenant_id = $1 AND created_by = $2
             ORDER BY created_at DESC
             LIMIT $3 OFFSET $4
@@ -151,7 +151,7 @@ class QuizAccessService:
         """List attempts; creators see all, other users only see their own."""
         qid = _quiz_uuid(quiz_id)
         quiz_row = await self.db.fetchrow(
-            "SELECT created_by FROM quizzes WHERE id = $1 AND tenant_id = $2",
+            "SELECT created_by FROM assistant.quizzes WHERE id = $1 AND tenant_id = $2",
             qid,
             tenant_id,
         )
@@ -160,14 +160,14 @@ class QuizAccessService:
 
         if quiz_row["created_by"] == user_id:
             count_row = await self.db.fetchrow(
-                "SELECT count(*) AS cnt FROM quiz_attempts WHERE quiz_id = $1",
+                "SELECT count(*) AS cnt FROM assistant.quiz_attempts WHERE quiz_id = $1",
                 qid,
             )
             rows = await self.db.fetch(
                 """
                 SELECT id, user_id, display_name, total_score, correct_count,
                        total_count, started_at, completed_at, status
-                FROM quiz_attempts WHERE quiz_id = $1
+                FROM assistant.quiz_attempts WHERE quiz_id = $1
                 ORDER BY started_at DESC
                 LIMIT $2 OFFSET $3
                 """,
@@ -177,7 +177,7 @@ class QuizAccessService:
             )
         else:
             count_row = await self.db.fetchrow(
-                "SELECT count(*) AS cnt FROM quiz_attempts "
+                "SELECT count(*) AS cnt FROM assistant.quiz_attempts "
                 "WHERE quiz_id = $1 AND user_id = $2",
                 qid,
                 user_id,
@@ -186,7 +186,7 @@ class QuizAccessService:
                 """
                 SELECT id, user_id, display_name, total_score, correct_count,
                        total_count, started_at, completed_at, status
-                FROM quiz_attempts WHERE quiz_id = $1 AND user_id = $2
+                FROM assistant.quiz_attempts WHERE quiz_id = $1 AND user_id = $2
                 ORDER BY started_at DESC
                 LIMIT $3 OFFSET $4
                 """,
@@ -249,7 +249,7 @@ class QuizAccessService:
         now = datetime.now(timezone.utc)
         await self.db.execute(
             """
-            INSERT INTO quiz_attempts (id, quiz_id, user_id, answers,
+            INSERT INTO assistant.quiz_attempts (id, quiz_id, user_id, answers,
                                        total_score, correct_count, total_count,
                                        started_at, completed_at, status)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -283,7 +283,7 @@ class QuizAccessService:
         """Delete a tenant-scoped quiz, restricted to its creator."""
         qid = _quiz_uuid(quiz_id)
         result = await self.db.execute(
-            "DELETE FROM quizzes WHERE id = $1 AND tenant_id = $2 AND created_by = $3",
+            "DELETE FROM assistant.quizzes WHERE id = $1 AND tenant_id = $2 AND created_by = $3",
             qid,
             tenant_id,
             user_id,

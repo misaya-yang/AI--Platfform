@@ -22,6 +22,46 @@ from ai_gateway_core.knowledge import (
 from cachetools import TTLCache
 
 
+async def _await_bounded_thread(
+    fn,
+    /,
+    *args,
+    timeout: float,
+    semaphore: asyncio.Semaphore,
+    **kwargs,
+):
+    """Run ``fn`` in a worker thread with a timeout that does not leak slots.
+
+    ``asyncio.wait_for`` cannot cancel the executor thread. Keep the semaphore
+    until that thread actually finishes so a hung provider cannot spawn more
+    workers than the concurrency cap.
+    """
+    await semaphore.acquire()
+    loop = asyncio.get_running_loop()
+    fut = loop.run_in_executor(None, lambda: fn(*args, **kwargs))
+    released = False
+
+    def _release(_=None) -> None:
+        nonlocal released
+        if not released:
+            released = True
+            semaphore.release()
+
+    try:
+        return await asyncio.wait_for(asyncio.shield(fut), timeout=timeout)
+    except TimeoutError:
+        fut.add_done_callback(_release)
+        raise
+    except Exception:
+        if fut.done():
+            _release()
+        else:
+            fut.add_done_callback(_release)
+        raise
+    else:
+        _release()
+
+
 # =============================================================================
 # Sensitive Data Filtering for Logging
 # =============================================================================
@@ -733,18 +773,16 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
 
     async def _call_text_api(self, text: str) -> list[float]:
         """One bounded multimodal text RPC (timeout + concurrency cap)."""
-        async with self._text_semaphore:
-            resp = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._MultiModalEmbedding.call,
-                    model=self.model,
-                    input=[{"text": text}],
-                    api_key=self.api_key,
-                    base_address=getattr(self, "base_url", None),
-                    dimension=getattr(self, "_requested_dimension", None),
-                ),
-                timeout=getattr(self, "request_timeout_s", 60.0),
-            )
+        resp = await _await_bounded_thread(
+            self._MultiModalEmbedding.call,
+            model=self.model,
+            input=[{"text": text}],
+            api_key=self.api_key,
+            base_address=getattr(self, "base_url", None),
+            dimension=getattr(self, "_requested_dimension", None),
+            timeout=getattr(self, "request_timeout_s", 60.0),
+            semaphore=self._text_semaphore,
+        )
         status_code = int(getattr(resp, "status_code", 0) or 0)
         if status_code and status_code >= 400:
             code = getattr(resp, "code", "") or ""
@@ -849,45 +887,43 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
 
         async def embed_single_image(idx: int, image_bytes: bytes) -> list[float]:
             """Embed a single image with semaphore-based rate limiting."""
-            async with semaphore:
-                try:
-                    # Detect media type and convert to data URI
-                    media_type = self._detect_media_type(image_bytes)
-                    data_uri = self._image_to_base64_data_uri(image_bytes, media_type)
+            try:
+                # Detect media type and convert to data URI
+                media_type = self._detect_media_type(image_bytes)
+                data_uri = self._image_to_base64_data_uri(image_bytes, media_type)
 
-                    # Call DashScope multimodal embedding API
-                    resp = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            self._MultiModalEmbedding.call,
-                            model=self.model,
-                            input=[{"image": data_uri}],
-                            api_key=self.api_key,
-                            base_address=getattr(self, "base_url", None),
-                            dimension=getattr(self, "_requested_dimension", None),
-                        ),
-                        timeout=getattr(self, "request_timeout_s", 60.0),
+                # Call DashScope multimodal embedding API
+                resp = await _await_bounded_thread(
+                    self._MultiModalEmbedding.call,
+                    model=self.model,
+                    input=[{"image": data_uri}],
+                    api_key=self.api_key,
+                    base_address=getattr(self, "base_url", None),
+                    dimension=getattr(self, "_requested_dimension", None),
+                    timeout=getattr(self, "request_timeout_s", 60.0),
+                    semaphore=semaphore,
+                )
+
+                status_code = int(getattr(resp, "status_code", 0) or 0)
+                if status_code and status_code >= 400:
+                    code = getattr(resp, "code", "") or ""
+                    message = getattr(resp, "message", "") or ""
+                    raise EmbeddingError(
+                        f"DashScope multimodal image embedding failed for image {idx}: "
+                        f"{status_code} {code} {message}"
                     )
 
-                    status_code = int(getattr(resp, "status_code", 0) or 0)
-                    if status_code and status_code >= 400:
-                        code = getattr(resp, "code", "") or ""
-                        message = getattr(resp, "message", "") or ""
-                        raise EmbeddingError(
-                            f"DashScope multimodal image embedding failed for image {idx}: "
-                            f"{status_code} {code} {message}"
-                        )
+                output = getattr(resp, "output", None)
+                vectors = self._parse_multimodal_output(output)
+                self._validate_vectors(vectors, expected_count=1)
+                return vectors[0]
 
-                    output = getattr(resp, "output", None)
-                    vectors = self._parse_multimodal_output(output)
-                    self._validate_vectors(vectors, expected_count=1)
-                    return vectors[0]
-
-                except EmbeddingError:
-                    raise
-                except Exception as exc:
-                    raise EmbeddingError(
-                        f"DashScope multimodal image embedding error for image {idx}: {exc}"
-                    ) from exc
+            except EmbeddingError:
+                raise
+            except Exception as exc:
+                raise EmbeddingError(
+                    f"DashScope multimodal image embedding error for image {idx}: {exc}"
+                ) from exc
 
         # Launch all embedding tasks concurrently (limited by semaphore)
         tasks = [embed_single_image(i, img) for i, img in enumerate(images)]
@@ -1538,6 +1574,11 @@ def create_embedding(config: EmbeddingConfig, dimension: int | None = None) -> B
             api_key=config.api_key or "",
             dimension=dimension,
             base_url=config.base_url,
+            request_timeout_s=float(
+                (config.extra or {}).get("request_timeout_s")
+                or config.timeout_seconds
+                or 60.0
+            ),
         )
     elif provider == "unified_multimodal":
         embedding = UnifiedMultimodalEmbedding(
@@ -1546,6 +1587,11 @@ def create_embedding(config: EmbeddingConfig, dimension: int | None = None) -> B
             dimension=dimension,
             base_url=config.base_url,
             max_concurrent=(config.extra or {}).get("max_concurrent", 5),
+            request_timeout_s=float(
+                (config.extra or {}).get("request_timeout_s")
+                or config.timeout_seconds
+                or 60.0
+            ),
         )
     elif provider == "gemini":
         embedding = GeminiEmbedding(
@@ -1752,39 +1798,37 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
 
     async def _call_api(self, input_items: list[dict[str, str]]) -> list[float]:
         """Call DashScope multimodal embedding API."""
-        async with self._semaphore:
-            try:
-                # SPO-04 / K4: bound every RPC so a hung provider cannot
-                # freeze the ingestion task forever.
-                resp = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        self._MultiModalEmbedding.call,
-                        model=self.model,
-                        input=input_items,
-                        api_key=self.api_key,
-                        base_address=getattr(self, "base_url", None),
-                        dimension=self._requested_dimension,
-                    ),
-                    timeout=getattr(self, "request_timeout_s", 60.0),
+        try:
+            resp = await _await_bounded_thread(
+                self._MultiModalEmbedding.call,
+                model=self.model,
+                input=input_items,
+                api_key=self.api_key,
+                base_address=getattr(self, "base_url", None),
+                dimension=self._requested_dimension,
+                timeout=getattr(self, "request_timeout_s", 60.0),
+                semaphore=self._semaphore,
+            )
+
+            status_code = int(getattr(resp, "status_code", 0) or 0)
+            if status_code and status_code >= 400:
+                code = getattr(resp, "code", "") or ""
+                message = getattr(resp, "message", "") or ""
+                raise EmbeddingError(
+                    f"Unified embedding API failed: {status_code} {code} {message}"
                 )
 
-                status_code = int(getattr(resp, "status_code", 0) or 0)
-                if status_code and status_code >= 400:
-                    code = getattr(resp, "code", "") or ""
-                    message = getattr(resp, "message", "") or ""
-                    raise EmbeddingError(
-                        f"Unified embedding API failed: {status_code} {code} {message}"
-                    )
+            output = getattr(resp, "output", None)
+            vectors = self._parse_output(output)
+            self._validate_vectors(vectors, expected_count=1)
+            return vectors[0]
 
-                output = getattr(resp, "output", None)
-                vectors = self._parse_output(output)
-                self._validate_vectors(vectors, expected_count=1)
-                return vectors[0]
-
-            except EmbeddingError:
-                raise
-            except Exception as exc:
-                raise EmbeddingError(f"Unified embedding error: {exc}") from exc
+        except EmbeddingError:
+            raise
+        except TimeoutError as exc:
+            raise EmbeddingError(f"Unified embedding error: {exc}") from exc
+        except Exception as exc:
+            raise EmbeddingError(f"Unified embedding error: {exc}") from exc
 
     def _parse_output(self, output: Any) -> list[list[float]]:
         """Parse API response to extract vectors."""

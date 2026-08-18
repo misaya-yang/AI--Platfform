@@ -289,6 +289,17 @@ def setup_exception_handlers(
     async def validation_exception_handler(request: Request, exc: PydanticValidationError):
         return await handler.handle_pydantic_validation_error(request, exc)
 
+    from ..middleware.request_body_limit import RequestBodyLimitExceeded
+
+    @app.exception_handler(RequestBodyLimitExceeded)
+    async def request_body_limit_handler(request: Request, exc: RequestBodyLimitExceeded):
+        _ = request, exc
+        return JSONResponse(
+            {"detail": "Request body too large"},
+            status_code=413,
+            headers={"Retry-After": "0"},
+        )
+
     # 注册通用异常处理器
     @app.exception_handler(Exception)
     async def generic_exception_handler(request: Request, exc: Exception):

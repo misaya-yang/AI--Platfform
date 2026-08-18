@@ -417,7 +417,10 @@ async def upload_file(
         raise HTTPException(status_code=500, detail="Failed to save file")
 
     # Build response path (relative to uploads root for agent access)
-    relative_path = f"/uploads/{user.user_id}/{safe_filename}"
+    if user.tenant_id:
+        relative_path = f"/uploads/{user.tenant_id}/{user.user_id}/{safe_filename}"
+    else:
+        relative_path = f"/uploads/{user.user_id}/{safe_filename}"
     size_mb = size_bytes / (1024 * 1024)
 
     logger.info(

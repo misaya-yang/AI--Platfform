@@ -370,7 +370,10 @@ async def update_connector_config(
         }
         await _upsert_extra_config(db, tenant_id=tenant_id, provider=provider, extra=extra_merge)
     if extra_update is not None:
-        await _upsert_extra_config(db, tenant_id=tenant_id, provider=provider, extra=extra_update)
+        extra_update = dict(extra_update)
+        extra_update.pop(_MCP_TOOLS_EXTRA_KEY, None)
+        if extra_update:
+            await _upsert_extra_config(db, tenant_id=tenant_id, provider=provider, extra=extra_update)
 
     row = await db.fetchrow(
         """SELECT * FROM connector_configs WHERE tenant_id = $1 AND provider = $2""",

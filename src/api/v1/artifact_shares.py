@@ -106,6 +106,7 @@ async def create_artifact_share(
         answer_keys.append({
             "id": str(qr["id"]),
             "question_num": qr["question_num"],
+            "question_type": qr["question_type"],
             "correct_answer": correct,
             "explanation": qr["explanation"],
         })

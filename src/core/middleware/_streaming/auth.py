@@ -91,10 +91,15 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
         """添加用户信息到响应头"""
         user_info = scope.get("state", {}).get("user_info")
         if user_info and message["type"] == "http.response.start":
-            headers = dict(message.get("headers", []))
-            headers[b"x-user-id"] = user_info.get("user_id", "unknown").encode()
-            headers[b"x-user-type"] = user_info.get("user_type", "unknown").encode()
-            message = {**message, "headers": list(headers.items())}
+            headers = list(message.get("headers", []))
+            headers = [
+                (name, value)
+                for name, value in headers
+                if name.lower() not in {b"x-user-id", b"x-user-type"}
+            ]
+            headers.append((b"x-user-id", user_info.get("user_id", "unknown").encode()))
+            headers.append((b"x-user-type", user_info.get("user_type", "unknown").encode()))
+            message = {**message, "headers": headers}
         return message
 
     def _extract_user_info(self, scope: Scope) -> dict[str, Any]:
