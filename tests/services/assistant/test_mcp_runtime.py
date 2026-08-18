@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1032,6 +1033,207 @@ class _Client:
 
 
 @pytest.mark.asyncio
+async def test_runtime_cache_singleflights_initialize_and_dns_per_tenant() -> None:
+    item = _authorization_item(max_concurrency=20)
+    repository = _Repository(item)
+    counters = {"dns": 0, "initialize": 0}
+    resolver_threads: set[int] = set()
+    owner_thread = threading.get_ident()
+
+    def resolver(_hostname: str, _port: int) -> set[str]:
+        counters["dns"] += 1
+        resolver_threads.add(threading.get_ident())
+        return {"93.184.216.34"}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content or b"{}")
+        method = payload.get("method")
+        if method == "notifications/initialized":
+            return httpx.Response(202)
+        if method == "initialize":
+            counters["initialize"] += 1
+            await asyncio.sleep(0.01)
+            result = {
+                "protocolVersion": "2025-11-25",
+                "serverInfo": {"name": "cached", "version": "1"},
+            }
+        else:
+            result = {
+                "content": [{"type": "text", "text": "ok"}],
+                "isError": False,
+            }
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "2.0", "id": payload["id"], "result": result},
+        )
+
+    def factory(config: MCPServerConfig) -> MCPClient:
+        config.dns_resolver = resolver
+        http = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url=config.url,
+        )
+        client = MCPClient(config, http_client=http)
+        client._owns_http = True
+        return client
+
+    runtime = MCPRuntimeService(
+        repository=repository,
+        secret_resolver=MappingSecretResolver(),
+        client_factory=factory,
+        client_cache_ttl_seconds=60,
+        client_cache_max_entries=4,
+    )
+    values = {
+        "tool_name": item["runtime_name"],
+        "arguments": {"query": "cached"},
+        "binding": _binding(item),
+        "context": _context(),
+    }
+    results = await asyncio.gather(
+        *(runtime.invoke(**values, call_id=f"cached-{index}") for index in range(20))
+    )
+
+    assert all(result.success for result in results)
+    assert counters == {"dns": 1, "initialize": 1}
+    assert resolver_threads and owner_thread not in resolver_threads
+
+    tenant_b = _context()
+    tenant_b.tenant_id = "tenant-b"
+    tenant_b.user.tenant_id = "tenant-b"
+    cross_tenant = await runtime.invoke(
+        **{**values, "context": tenant_b},
+        call_id="tenant-b",
+    )
+    assert cross_tenant.success is True
+    assert counters == {"dns": 2, "initialize": 2}
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_cache_invalidates_revisions_and_session_failures() -> None:
+    item = _authorization_item(
+        credential_revision="credential-1",
+        server_updated_at="server-1",
+        dns_pin_revision="pin-1",
+    )
+    repository = _Repository(item)
+    counters = {"initialize": 0, "close": 0}
+    failure: MCPError | None = None
+
+    class CacheClient(_Client):
+        async def initialize(self) -> dict[str, Any]:
+            counters["initialize"] += 1
+            return {}
+
+        async def call_tool(
+            self,
+            _name: str,
+            _arguments: dict[str, Any],
+            *,
+            invocation_policy: MCPInvocationPolicy | None = None,
+        ) -> MCPToolResult:
+            del invocation_policy
+            if failure is not None:
+                raise failure
+            return MCPToolResult(content=[{"type": "text", "text": "ok"}])
+
+        async def close(self) -> None:
+            counters["close"] += 1
+
+    runtime = MCPRuntimeService(
+        repository=repository,
+        secret_resolver=MappingSecretResolver(),
+        client_factory=lambda config: CacheClient(config),
+        client_cache_ttl_seconds=60,
+    )
+
+    async def invoke(call_id: str):  # noqa: ANN202
+        return await runtime.invoke(
+            tool_name=item["runtime_name"],
+            arguments={"query": call_id},
+            binding=_binding(item),
+            context=_context(),
+            call_id=call_id,
+        )
+
+    assert (await invoke("initial")).success is True
+    repository.item["credential_revision"] = "credential-2"
+    assert (await invoke("credential-revision")).success is True
+    repository.item["server_updated_at"] = "server-2"
+    assert (await invoke("config-revision")).success is True
+    repository.item["dns_pin_revision"] = "pin-2"
+    assert (await invoke("pin-revision")).success is True
+    assert counters == {"initialize": 4, "close": 3}
+
+    failure = MCPError(404, "session not found", stable_code="MCP_UPSTREAM_REJECTED")
+    rejected = await invoke("session-404")
+    assert rejected.success is False
+    assert counters == {"initialize": 4, "close": 4}
+
+    failure = None
+    assert (await invoke("after-session-404")).success is True
+    assert counters["initialize"] == 5
+
+    failure = MCPError(-21, "session invalid", stable_code="MCP_SESSION_INVALID")
+    invalid_session = await invoke("session-invalid")
+    assert invalid_session.success is False
+    assert counters["close"] == 5
+
+    failure = None
+    assert (await invoke("after-session-invalid")).success is True
+    assert counters["initialize"] == 6
+    await runtime.close()
+    assert counters["close"] == 6
+
+
+@pytest.mark.asyncio
+async def test_runtime_cache_expires_and_enforces_capacity() -> None:
+    item = _authorization_item()
+    repository = _Repository(item)
+    counters = {"initialize": 0, "close": 0}
+    now = 0.0
+
+    class CacheClient(_Client):
+        async def initialize(self) -> dict[str, Any]:
+            counters["initialize"] += 1
+            return {}
+
+        async def close(self) -> None:
+            counters["close"] += 1
+
+    runtime = MCPRuntimeService(
+        repository=repository,
+        secret_resolver=MappingSecretResolver(),
+        client_factory=lambda config: CacheClient(config),
+        circuit_clock=lambda: now,
+        client_cache_ttl_seconds=1,
+        client_cache_max_entries=1,
+    )
+
+    async def invoke(call_id: str) -> None:
+        result = await runtime.invoke(
+            tool_name=repository.item["runtime_name"],
+            arguments={"query": call_id},
+            binding=_binding(repository.item),
+            context=_context(),
+            call_id=call_id,
+        )
+        assert result.success is True
+
+    await invoke("first")
+    now = 2.0
+    await invoke("expired")
+    assert counters == {"initialize": 2, "close": 1}
+
+    repository.item["connection_id"] = "44444444-4444-4444-8444-444444444444"
+    await invoke("second-connection")
+    assert counters == {"initialize": 3, "close": 2}
+    await runtime.close()
+    assert counters["close"] == 3
+
+
+@pytest.mark.asyncio
 async def test_agent_binding_exposes_and_invokes_only_the_exact_dynamic_tool() -> None:
     item = _authorization_item()
     repository = _Repository(item)
@@ -1325,6 +1527,7 @@ async def test_client_close_failure_does_not_rewrite_result_or_log_exception_pay
             context=_context(),
             call_id="close-failure",
         )
+        await runtime.close()
 
     assert result.success is True
     assert result.error is None

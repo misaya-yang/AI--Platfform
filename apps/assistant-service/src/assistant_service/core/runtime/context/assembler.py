@@ -814,21 +814,33 @@ class ContextAssemblerV2:
             ("Recent Artifacts", "artifact", "artifact_store", artifact_summaries),
         ):
             for index, item in enumerate(items or []):
+                summary_text = cls._summary_item_text(item)
+                if kind == "tool_result" and "UNTRUSTED_EVIDENCE_LEDGER" in summary_text:
+                    from ...agent.tool_result_formatter import (
+                        compact_evidence_ledger_for_context,
+                    )
+
+                    summary_text = compact_evidence_ledger_for_context(
+                        summary_text,
+                        max_chars=6000,
+                    )
+                    summary_limit = 6000
+                else:
+                    summary_limit = 360
                 add(
                     kind=kind,
                     heading=heading,
-                    value=cls._summary_item_text(item),
+                    value=summary_text,
                     freshness=(
                         str(item.get("freshness") or "request_time")
                         if isinstance(item, dict)
                         else "request_time"
                     ),
                     owner=owner,
-                    # These inputs are already summaries. Keep the legacy
-                    # 360-character bound after adding per-source trust
-                    # envelopes so wrapper metadata cannot inflate a compact
-                    # request beyond the previous public behavior.
-                    max_chars=360,
+                    # Ordinary summaries keep the legacy 360-character cap.
+                    # Bounded evidence ledgers already enforce their own hard
+                    # frame limit and need enough room for the citation manifest.
+                    max_chars=summary_limit,
                     included_by_source_limit=index < 5,
                 )
 

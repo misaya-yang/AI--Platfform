@@ -7,10 +7,12 @@ Migrated from KnowledgeService as part of Phase 2 refactoring.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import math
 import os
 import time
 from dataclasses import dataclass
+from functools import wraps
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -54,6 +56,32 @@ logger = get_logger(__name__)
 _INTERACTIVE_DEFAULT_VECTOR_K = 12
 _INTERACTIVE_DEFAULT_KEYWORD_K = 12
 _INTERACTIVE_DEFAULT_CANDIDATE_K = 24
+
+
+def _with_interactive_qdrant_budget(fn):
+    """Apply one absolute Qdrant deadline to a complete retrieval entrypoint."""
+
+    @wraps(fn)
+    async def wrapped(self, *args, **kwargs):
+        vector_store = getattr(self, "vector_store", None)
+        # Static lookup avoids invoking a defensive/mock __getattr__ before
+        # the entrypoint's own request and release-fence validation runs.
+        if (
+            inspect.getattr_static(vector_store, "begin_interactive_budget", None) is None
+            or inspect.getattr_static(vector_store, "end_interactive_budget", None) is None
+        ):
+            return await fn(self, *args, **kwargs)
+        begin = getattr(vector_store, "begin_interactive_budget", None)
+        end = getattr(vector_store, "end_interactive_budget", None)
+        if not callable(begin) or not callable(end):
+            return await fn(self, *args, **kwargs)
+        token = begin()
+        try:
+            return await fn(self, *args, **kwargs)
+        finally:
+            end(token)
+
+    return wrapped
 
 MULTI_QUERY_TOP_K = {1: 5, 2: 6, 3: 8, 4: 9, 5: 10}
 _SERVER_OWNED_RERANK_FIELD_ALIASES = frozenset(
@@ -594,6 +622,7 @@ class RetrievalService:
     # Core Retrieval — the main hybrid retrieval pipeline
     # ========================================================================
 
+    @_with_interactive_qdrant_budget
     async def retrieve(
         self,
         user: UserContext,
@@ -642,7 +671,89 @@ class RetrievalService:
             mmr_threshold=mmr_threshold,
             rrf_weights=rrf_weights,
         )
-        return await self._retrieve_queries(
+        dataset = await self._ks.require_dataset_access(
+            user,
+            dataset_id,
+            required="viewer",
+        )
+        retrieval_generation = dataset_retrieval_generation(dataset)
+        from .dataset_service import _dataset_revision_fingerprint
+
+        dataset_revision_fingerprint = _dataset_revision_fingerprint(dataset)
+        user_id = str(getattr(user, "user_id", "") or "").strip()
+        cache_get = getattr(self._ks, "_get_cached_retrieval", None)
+        cache_set = getattr(self._ks, "_set_cached_retrieval", None)
+        cache_fingerprint = ""
+        cache_key = ""
+        cache_enabled = bool(
+            user_id
+            and dataset_revision_fingerprint is not None
+            and callable(cache_get)
+            and callable(cache_set)
+        )
+        if cache_enabled:
+            cache_fingerprint = self._ks._compute_retrieval_query_fingerprint(
+                {
+                    "contract": "standard-v1",
+                    "user_id": user_id,
+                    "dataset_id": dataset_id,
+                    "dataset_revision_fingerprint": dataset_revision_fingerprint,
+                    "query": " ".join((query or "").strip().split()),
+                    "top_k": top_k,
+                    "mode": mode,
+                    "document_id": document_id,
+                    "dense_weight": dense_weight,
+                    "bm25_weight": bm25_weight,
+                    "fusion_method": fusion_method,
+                    "rrf_k": rrf_k,
+                    "alpha": alpha,
+                    "score_threshold": score_threshold,
+                    "vector_top_k": vector_top_k,
+                    "keyword_top_k": keyword_top_k,
+                    "candidate_top_k": candidate_top_k,
+                    "keyword_candidate_k": keyword_candidate_k,
+                    "fusion": fusion,
+                    "rrf_weights": rrf_weights,
+                    "rerank": rerank,
+                    "rerank_model": rerank_model,
+                    "rerank_top_n": rerank_top_n,
+                    "mmr": mmr,
+                    "mmr_lambda": mmr_lambda,
+                    "mmr_threshold": mmr_threshold,
+                    "source_type_filter": source_type_filter,
+                    "language_filter": language_filter,
+                    "metadata_filter": metadata_filter,
+                }
+            )
+            cache_key = f"standard:{user_id}:{dataset_id}:{cache_fingerprint}"
+            await self._require_collection_readable(dataset, dataset_id)
+            cached_response = await cache_get(cache_key)
+            if cached_response is not None:
+                cached_results, cached_meta = cached_response
+                cached_ids = [
+                    str(result.segment_id or "").strip()
+                    for result in cached_results
+                    if str(result.segment_id or "").strip()
+                ]
+                active_ids = await self._active_segment_ids(
+                    dataset_id=dataset_id,
+                    tenant_id=str(dataset.get("tenant_id") or ""),
+                    segment_ids=cached_ids,
+                )
+                if active_ids == set(cached_ids):
+                    await self._require_unchanged_retrieval_generation(
+                        user,
+                        dataset_id,
+                        retrieval_generation,
+                    )
+                    cached_meta["retrieval_cache_hit"] = True
+                    cached_meta["retrieval_query_fingerprint"] = cache_fingerprint
+                    cached_meta["dataset_revision_fingerprint"] = (
+                        dataset_revision_fingerprint
+                    )
+                    return cached_results, cached_meta
+
+        results, meta = await self._retrieve_queries(
             user=user,
             dataset_id=dataset_id,
             query=query,
@@ -670,7 +781,14 @@ class RetrievalService:
             source_type_filter=source_type_filter,
             language_filter=language_filter,
             metadata_filter=metadata_filter,
+            _dataset=dataset,
         )
+        meta["retrieval_cache_hit"] = False
+        if cache_enabled:
+            meta["retrieval_query_fingerprint"] = cache_fingerprint
+            meta["dataset_revision_fingerprint"] = dataset_revision_fingerprint
+            await cache_set(cache_key, results, meta)
+        return results, meta
 
     async def _retrieve_queries(
         self,
@@ -1368,28 +1486,6 @@ class RetrievalService:
         qvec: list[float] | None = None
         embedder: BaseEmbedding | None = None
         dense_prepare_started = time.perf_counter()
-        if need_query_vector and dense_queries:
-            # Fail-fast health check to avoid long retries when Qdrant is down.
-            # In hybrid mode we can degrade to BM25-only; in dense mode we return an explicit error.
-            try:
-                vector_store_ok = await self.vector_store.ping(timeout_seconds=1.0)
-            except Exception:
-                vector_store_ok = False
-            if not vector_store_ok:
-                dense_disabled_reason = (
-                    f"Vector store unavailable (url={getattr(self.vector_store, 'url', '')})"
-                )
-                logger.warning(dense_disabled_reason)
-                if effective_mode == "dense" and not is_multi_query:
-                    raise ValidationFailedError(dense_disabled_reason)
-                for query_text in dense_queries:
-                    recall_errors.setdefault(query_text, {})["dense"] = dense_disabled_reason
-                dense_queries = []
-                query_vectors.clear()
-                qvec = None
-                embedder = None
-                collection = ""
-
         if need_query_vector and dense_queries:
             try:
                 # Use cached embedder to reduce first-call latency (connection reuse)
@@ -2535,6 +2631,7 @@ class RetrievalService:
     # Multimodal Retrieval v1
     # ========================================================================
 
+    @_with_interactive_qdrant_budget
     async def retrieve_with_images(
         self,
         user: UserContext,
@@ -2873,6 +2970,7 @@ class RetrievalService:
     # Multimodal Retrieval v2 — hierarchical with intent-aware VLM reranking
     # ========================================================================
 
+    @_with_interactive_qdrant_budget
     async def retrieve_with_images_v2(
         self,
         user: UserContext,
@@ -3258,6 +3356,7 @@ class RetrievalService:
     # Batch Retrieval
     # ========================================================================
 
+    @_with_interactive_qdrant_budget
     async def retrieve_batch(
         self,
         user: UserContext,

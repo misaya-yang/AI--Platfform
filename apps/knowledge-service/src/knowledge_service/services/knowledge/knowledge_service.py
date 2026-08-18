@@ -9,9 +9,6 @@ from ...config.settings import Settings
 from ...core.auth.user_resolver import UserContext
 from ...core.exceptions import ValidationFailedError
 from ...core.observability.logging import get_logger
-
-logger = get_logger(__name__)
-
 from ...persistence.database import (
     DOCUMENT_UPLOAD_FAILED_KEY,
     DatabaseStorage,
@@ -24,6 +21,7 @@ from .chunking import (
     ContentType,
     merge_small_chunks,
 )
+from .common import ensure_dict as _ensure_dict
 from .embedding import (
     BaseEmbedding,
     DashScopeMultimodalEmbedding,
@@ -36,6 +34,8 @@ from .retrieval_service import RetrieveResult
 from .structured_document_parser import StructuredDocumentParser
 from .vector_store import VectorStore
 
+logger = get_logger(__name__)
+
 if TYPE_CHECKING:
     from ..storage.image_storage import ImageStorageService
     from .embedding import UnifiedMultimodalEmbedding
@@ -45,10 +45,6 @@ if TYPE_CHECKING:
 # This prevents overwhelming the VLM API when multiple documents are processed simultaneously
 _global_vlm_semaphore: asyncio.Semaphore | None = None
 _global_vlm_max_concurrent: int = 10  # Default, updated from settings on first use
-
-
-from .common import ensure_dict as _ensure_dict  # noqa: E402
-
 
 class KnowledgeService:
     """Main knowledge base service - coordinates specialized sub-services.
@@ -119,6 +115,11 @@ class KnowledgeService:
             url=settings.knowledge.qdrant.url,
             api_key=settings.knowledge.qdrant.api_key,
             timeout_seconds=settings.knowledge.qdrant.timeout_seconds,
+            interactive_deadline_seconds=getattr(
+                settings.knowledge.qdrant,
+                "interactive_deadline_seconds",
+                3.0,
+            ),
             prefer_grpc=settings.knowledge.qdrant.prefer_grpc,
             max_retries=getattr(settings.knowledge.qdrant, "max_retries", 3),
             retry_base_delay=getattr(settings.knowledge.qdrant, "retry_base_delay", 0.5),
@@ -170,6 +171,9 @@ class KnowledgeService:
         self._retrieval_cache_lock = self.cache_manager._lock
 
     async def close(self) -> None:
+        close_ingestion = getattr(self.ingestion_service, "close", None)
+        if callable(close_ingestion):
+            await close_ingestion()
         await self.vector_store.close()
 
     # -- Cache delegation (implementation in CacheManager) --
@@ -1478,13 +1482,9 @@ class KnowledgeService:
             normalized_distance = position_distance / max(total_segments, 1)
             position_score = max(0.0, 0.3 - normalized_distance)
 
-        # Combine scores
-        if score > 0:
-            # If we have page info, weight it more heavily
-            final_score = 0.6 * score + 0.4 * position_score
-        else:
-            # Position-only scoring
-            final_score = position_score
+        # If page information exists, weight it more heavily; otherwise use
+        # the bounded position-only score.
+        final_score = 0.6 * score + 0.4 * position_score if score > 0 else position_score
 
         return min(1.0, max(0.0, final_score))
 

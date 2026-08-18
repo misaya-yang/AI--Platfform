@@ -291,6 +291,29 @@ class RequestMetrics:
         )
     )
 
+    telemetry_background_backlog: Gauge = field(
+        default_factory=lambda: Gauge(
+            "gateway_telemetry_background_backlog",
+            "Non-critical request telemetry writes currently in flight",
+        )
+    )
+
+    telemetry_records_dropped_total: Counter = field(
+        default_factory=lambda: Counter(
+            "gateway_telemetry_records_dropped_total",
+            "Non-critical request telemetry records dropped before recording",
+            labels=["reason"],
+        )
+    )
+
+    telemetry_record_failures_total: Counter = field(
+        default_factory=lambda: Counter(
+            "gateway_telemetry_record_failures_total",
+            "Request telemetry writes that failed or exceeded their deadline",
+            labels=["priority", "reason"],
+        )
+    )
+
     def record_request(
         self,
         method: str,
@@ -431,8 +454,11 @@ class MetricsCollector:
         self.register_counter(request_metrics.rate_limit_decisions_total)
         self.register_counter(request_metrics.billing_flush_failures_total)
         self.register_counter(request_metrics.billing_records_dropped_total)
+        self.register_counter(request_metrics.telemetry_records_dropped_total)
+        self.register_counter(request_metrics.telemetry_record_failures_total)
         self.register_gauge(request_metrics.circuit_breaker_state)
         self.register_gauge(request_metrics.active_connections)
+        self.register_gauge(request_metrics.telemetry_background_backlog)
         self.register_histogram(request_metrics.request_duration_ms)
 
     def to_prometheus(self) -> str:

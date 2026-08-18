@@ -62,8 +62,7 @@ class SSEParser {
               final event = _flush(currentEventField, currentDataLines);
               if (event != null) {
                 yield event;
-                // If this was a done event, we're finished
-                if (event.isDone) return;
+                if (event.isTerminal) return;
               }
             }
             currentEventField = null;
@@ -141,9 +140,22 @@ class SSEParser {
             : double.tryParse(timestamp.toString()))
         : DateTime.now().millisecondsSinceEpoch / 1000.0;
 
+    final hasInner = payload.containsKey('data');
+    final inner = payload.remove('data');
+    final Map<String, dynamic> data;
+    if (!hasInner) {
+      data = payload;
+    } else if (inner is String) {
+      data = {'content': inner};
+    } else if (inner is Map) {
+      data = Map<String, dynamic>.from(inner);
+    } else {
+      data = {'value': inner};
+    }
+
     return StreamEvent(
       eventType: eventType,
-      data: payload,
+      data: data,
       timestamp: ts,
     );
   }

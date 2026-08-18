@@ -43,6 +43,7 @@ from .subagent_dispatch_runtime import (
 )
 from .subagent_types import SubAgentConfig
 from .tool_dedup import KB_REUSE_MESSAGE
+from .tool_result_formatter import extract_evidence_manifest
 
 if TYPE_CHECKING:
     from ai_gateway_core.auth import UserContextLike
@@ -62,6 +63,7 @@ class StreamingToolExecutionMixin:
         *,
         current_status: str,
         reason: str,
+        stop_before_tool_index: int | None = None,
     ) -> list[str]:
         """Close every unresolved call in the provider-visible assistant batch.
 
@@ -81,7 +83,13 @@ class StreamingToolExecutionMixin:
             if isinstance(record, dict) and str(record.get("id") or "")
         }
         appended: list[str] = []
-        unresolved_calls = frame.tool_calls_batch[max(0, frame.tool_index - 1) :]
+        start_index = max(0, frame.tool_index - 1)
+        stop_index = (
+            len(frame.tool_calls_batch)
+            if stop_before_tool_index is None
+            else max(start_index, stop_before_tool_index - 1)
+        )
+        unresolved_calls = frame.tool_calls_batch[start_index:stop_index]
         for offset, tool_call in enumerate(unresolved_calls):
             if not isinstance(tool_call, dict):
                 continue
@@ -557,13 +565,16 @@ class StreamingToolExecutionMixin:
                         retrieval_configs=frame.kb_rag_retrieval_configs,
                     ),
                 )
-            frame.result = await self._invoke_tool(
-                ctx=ctx,
-                user=user,
-                tool_name=frame.tool_name,
-                arguments=frame.tool_args,
-                logical_operation_id=frame.tool_id,
-            )
+            if frame.preinvoke_error is not None:
+                raise frame.preinvoke_error
+            if not frame.preinvoked:
+                frame.result = await self._invoke_tool(
+                    ctx=ctx,
+                    user=user,
+                    tool_name=frame.tool_name,
+                    arguments=frame.tool_args,
+                    logical_operation_id=frame.tool_id,
+                )
             # Let result middleware pass through or replace the result.
             try:
                 frame.result = await self.middleware_chain.run_on_tool_result(
@@ -1481,9 +1492,8 @@ class StreamingToolExecutionMixin:
         )
         # Bound persisted tool previews while retaining activity status.
         frame.turn_call_record["status"] = "completed" if frame.tool_success else "error"
-        _stored_result: Any = frame.tool_result_preview
-        if isinstance(frame.tool_result_text, str):
-            _stored_result = frame.tool_result_text[:4000]
+        _stored_result: Any = str(frame.tool_result_for_model or frame.tool_result_preview)[:4000]
+        evidence_manifest = extract_evidence_manifest(frame.tool_result_text)
         state.turn_tool_results.append(
             {
                 "tool_call_id": frame.tool_id,
@@ -1492,6 +1502,11 @@ class StreamingToolExecutionMixin:
                 "error": tool_error_for_event,
                 "duration_ms": frame.tool_duration_ms,
                 "side_effect_state": side_effect_state,
+                **(
+                    {"evidence_manifest": evidence_manifest}
+                    if evidence_manifest is not None
+                    else {}
+                ),
             }
         )
         frame.step_success = frame.tool_success

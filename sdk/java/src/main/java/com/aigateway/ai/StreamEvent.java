@@ -41,12 +41,22 @@ public record StreamEvent(String eventType, Map<String, Object> data) {
 
     /** True if this is a {@code done} event signalling end of stream. */
     public boolean isDone() {
-        return EventType.DONE.equals(eventType);
+        return EventType.DONE.equals(eventType) || EventType.RUN_FINISHED.equals(eventType);
     }
 
     /** True if this is an {@code error} event. */
     public boolean isError() {
-        return EventType.ERROR.equals(eventType);
+        return EventType.ERROR.equals(eventType) || EventType.RUN_ERROR.equals(eventType);
+    }
+
+    /** True if the stream was cancelled. */
+    public boolean isCancelled() {
+        return EventType.CANCELLED.equals(eventType);
+    }
+
+    /** True for all canonical terminal stream events. */
+    public boolean isTerminal() {
+        return isDone() || isError() || isCancelled();
     }
 
     /** Return the raw value for any key, or null. */

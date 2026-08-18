@@ -236,3 +236,38 @@ async def test_usage_summary_provider_path_uses_half_open_interval() -> None:
     assert "created_at::date" not in sql
     assert "created_at >= $2::date" in sql
     assert "created_at < ($3::date + interval '1 day')" in sql
+
+
+@pytest.mark.asyncio
+async def test_trace_sampling_p95_reads_latest_nonzero_daily_aggregate() -> None:
+    captured: dict[str, Any] = {}
+
+    class _Conn:
+        async def fetchval(self, sql: str, *args: Any) -> int:
+            captured["sql"] = sql
+            captured["args"] = args
+            return 4321
+
+    recorder = UsageRecorder(database=None, default_trace_p95_threshold_ms=9999)
+    threshold = await recorder._get_trace_p95_threshold_ms(_Conn(), "tenant-a")
+
+    sql = captured["sql"]
+    assert threshold == 4321
+    assert captured["args"] == ("tenant-a",)
+    assert "FROM usage_daily_aggregates" in sql
+    assert "p95_latency_ms > 0" in sql
+    assert "ORDER BY date DESC, p95_latency_ms DESC" in sql
+    assert "LIMIT 1" in sql
+    assert "usage_records" not in sql
+    assert "PERCENTILE_CONT" not in sql
+
+
+@pytest.mark.asyncio
+async def test_trace_sampling_p95_uses_default_when_daily_aggregate_is_missing() -> None:
+    class _Conn:
+        async def fetchval(self, _sql: str, *_args: Any) -> None:
+            return None
+
+    recorder = UsageRecorder(database=None, default_trace_p95_threshold_ms=9876)
+
+    assert await recorder._get_trace_p95_threshold_ms(_Conn(), "tenant-empty") == 9876

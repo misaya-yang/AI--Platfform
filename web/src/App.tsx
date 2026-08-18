@@ -1,7 +1,5 @@
-import { useEffect } from 'react';
-import { ConfigProvider, App as AntApp, theme } from 'antd';
-import zhCN from 'antd/locale/zh_CN';
-import enUS from 'antd/locale/en_US';
+import { useEffect, useState } from 'react';
+import { ConfigProvider, App as AntApp, theme, type ConfigProviderProps } from 'antd';
 import { useTranslation } from 'react-i18next';
 import { AppRouter } from "@/router";
 import { useAppStore } from "@/store/useAppStore";
@@ -25,9 +23,20 @@ export default function App() {
     document.documentElement.dir = "ltr";
   }, [i18n.language, i18n.resolvedLanguage]);
 
-  // Select Ant Design locale based on current i18n language
   const locale = resolveAppLocale(i18n.resolvedLanguage || i18n.language);
-  const antdLocale = locale === 'en-US' ? enUS : zhCN;
+  const [antdLocale, setAntdLocale] = useState<ConfigProviderProps["locale"]>();
+  useEffect(() => {
+    let active = true;
+    const loader = locale === "en-US"
+      ? import("antd/locale/en_US")
+      : import("antd/locale/zh_CN");
+    void loader.then((module) => {
+      if (active) setAntdLocale(module.default);
+    });
+    return () => {
+      active = false;
+    };
+  }, [locale]);
 
   return (
     <ConfigProvider

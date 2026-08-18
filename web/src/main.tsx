@@ -6,7 +6,7 @@ import { AxiosError } from "axios";
 import "./index.css";
 import "./styles/tokens.css";
 import "./styles/themes.css";
-import "./i18n"; // 初始化i18n国际化
+import { initializeI18n } from "./i18n";
 import App from "./App";
 import { RootErrorBoundary } from "@/components/RootErrorBoundary";
 import { initInteractionTelemetry } from "@/features/chat/telemetry";
@@ -68,16 +68,20 @@ const queryClient = new QueryClient({
   },
 });
 
-initInteractionTelemetry();
+async function bootstrap() {
+  await initializeI18n();
+  initInteractionTelemetry();
+  createRoot(document.getElementById("root")!).render(
+    <StrictMode>
+      <RootErrorBoundary>
+        <QueryClientProvider client={queryClient}>
+          <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+            <App />
+          </BrowserRouter>
+        </QueryClientProvider>
+      </RootErrorBoundary>
+    </StrictMode>
+  );
+}
 
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <RootErrorBoundary>
-      <QueryClientProvider client={queryClient}>
-        <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
-          <App />
-        </BrowserRouter>
-      </QueryClientProvider>
-    </RootErrorBoundary>
-  </StrictMode>
-);
+void bootstrap();

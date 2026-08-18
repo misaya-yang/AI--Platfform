@@ -1403,6 +1403,7 @@ Workflow:
             model_provider_id=config.model_provider_id,
             temperature=config.temperature,
             max_tokens=config.max_tokens or 4096,
+            output_format=config.output_format,
             system_prompt=config.system_prompt,
             eval_system_prompt_override=config.eval_system_prompt_override,
             trusted_agent_instructions=config.trusted_agent_instructions,

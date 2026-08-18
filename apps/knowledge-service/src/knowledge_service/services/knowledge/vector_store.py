@@ -10,6 +10,7 @@ import re
 import time
 import uuid
 from collections.abc import Sequence
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import Any
 
@@ -33,6 +34,10 @@ from .vector_store_metrics import vector_store_metrics
 logger = logging.getLogger(__name__)
 
 _EMPTY_SPARSE_INDEX = 0
+_INTERACTIVE_DEADLINE: ContextVar[float | None] = ContextVar(
+    "knowledge_qdrant_interactive_deadline",
+    default=None,
+)
 
 try:
     from qdrant_client.async_qdrant_client import AsyncQdrantClient
@@ -107,12 +112,26 @@ class VectorStore:
         bm25_v2_enabled: bool = True,
         bm25_v2_capability_ttl_seconds: float = 300.0,
         dataset_write_lease: Any | None = None,
+        interactive_deadline_seconds: float = 3.0,
+        interactive_max_retries: int = 2,
+        health_receipt_ttl_seconds: float = 2.0,
     ):
         if not HAS_QDRANT:
             raise VectorStoreError("qdrant-client is not installed. Run: pip install qdrant-client")
         self.url = url
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
+        self.interactive_deadline_seconds = max(
+            float(interactive_deadline_seconds or 3.0), 0.1
+        )
+        self.interactive_max_retries = min(
+            max(int(interactive_max_retries or 1), 1), 2
+        )
+        self.health_receipt_ttl_seconds = max(
+            float(health_receipt_ttl_seconds or 0.0), 0.0
+        )
+        self._health_success_until = 0.0
+        self._health_failure_until = 0.0
         self.prefer_grpc = prefer_grpc
         self.max_retries = max(1, int(max_retries or 1))
         self.retry_base_delay = float(retry_base_delay or 0.5)
@@ -157,7 +176,12 @@ class VectorStore:
         self._collection_info_cache.pop(normalized, None)
         self._collection_dims.pop(normalized, None)
 
-    async def _cached_get_collection(self, collection_name: str) -> Any:
+    async def _cached_get_collection(
+        self,
+        collection_name: str,
+        *,
+        interactive: bool = False,
+    ) -> Any:
         """get_collection with a short TTL cache (SPO-04 / K1).
 
         Collection scope metadata is immutable after creation; lexical
@@ -170,7 +194,10 @@ class VectorStore:
         cached = self._collection_info_cache.get(normalized)
         if cached is not None and cached[0] > now:
             return cached[1]
-        info = await self._call(lambda: self._client.get_collection(normalized))
+        info = await self._call(
+            lambda: self._client.get_collection(normalized),
+            interactive=interactive,
+        )
         vector_store_metrics.get_collection_calls += 1
         self._collection_info_cache[normalized] = (
             now + self._collection_info_ttl_s,
@@ -178,29 +205,110 @@ class VectorStore:
         )
         return info
 
-    async def _call(self, coro_or_factory):
+    @staticmethod
+    def _is_transient_error(exc: BaseException) -> bool:
+        if isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError)):
+            return True
+        status_code = getattr(exc, "status_code", None)
+        if status_code is None:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        try:
+            normalized_status = int(status_code)
+        except (TypeError, ValueError):
+            normalized_status = 0
+        if normalized_status == 429 or 500 <= normalized_status < 600:
+            return True
+        name = type(exc).__name__.lower()
+        return any(
+            marker in name
+            for marker in ("timeout", "transport", "connection", "network")
+        )
+
+    def _record_interactive_health(self, *, success: bool) -> None:
+        now = time.monotonic()
+        if success:
+            self._health_success_until = now + self.health_receipt_ttl_seconds
+            self._health_failure_until = 0.0
+        else:
+            self._health_failure_until = now + self.health_receipt_ttl_seconds
+            self._health_success_until = 0.0
+
+    def begin_interactive_budget(self) -> Token[float | None]:
+        """Start one absolute budget shared by every nested Qdrant read."""
+
+        deadline = time.monotonic() + self.interactive_deadline_seconds
+        inherited = _INTERACTIVE_DEADLINE.get()
+        if inherited is not None:
+            deadline = min(deadline, inherited)
+        return _INTERACTIVE_DEADLINE.set(deadline)
+
+    @staticmethod
+    def end_interactive_budget(token: Token[float | None]) -> None:
+        _INTERACTIVE_DEADLINE.reset(token)
+
+    async def _call(self, coro_or_factory, *, interactive: bool = False):
         is_factory = callable(coro_or_factory)
         retries = self.max_retries if is_factory else 1
+        deadline: float | None = None
+        if interactive:
+            now = time.monotonic()
+            if self._health_failure_until > now:
+                raise VectorStoreError(
+                    f"Qdrant interactive circuit is open (url={self.url})"
+                )
+            retries = min(retries, self.interactive_max_retries)
+            local_deadline = now + self.interactive_deadline_seconds
+            request_deadline = _INTERACTIVE_DEADLINE.get()
+            deadline = (
+                min(local_deadline, request_deadline)
+                if request_deadline is not None
+                else local_deadline
+            )
         last_exc: Exception | None = None
         for attempt in range(retries):
+            timeout_seconds = float(self.timeout_seconds)
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    if last_exc is not None and self._is_transient_error(last_exc):
+                        self._record_interactive_health(success=False)
+                    raise VectorStoreError(
+                        "Qdrant interactive request exceeded its total "
+                        f"{self.interactive_deadline_seconds}s deadline (url={self.url})"
+                    ) from last_exc
+                timeout_seconds = min(timeout_seconds, remaining)
             try:
                 coro = coro_or_factory() if is_factory else coro_or_factory
-                return await asyncio.wait_for(coro, timeout=float(self.timeout_seconds))
+                result = await asyncio.wait_for(coro, timeout=timeout_seconds)
+                if interactive:
+                    self._record_interactive_health(success=True)
+                return result
             except asyncio.TimeoutError as exc:
                 last_exc = exc
                 if attempt >= retries - 1:
+                    if interactive:
+                        self._record_interactive_health(success=False)
                     raise VectorStoreError(
-                        f"Qdrant request timed out after {self.timeout_seconds}s (url={self.url})"
+                        f"Qdrant request timed out after {timeout_seconds}s (url={self.url})"
                     ) from exc
             except Exception as exc:
                 last_exc = exc
-                if attempt >= retries - 1:
+                transient = self._is_transient_error(exc)
+                if attempt >= retries - 1 or (
+                    interactive and not transient
+                ):
+                    if interactive and transient:
+                        self._record_interactive_health(success=False)
                     raise VectorStoreError(
                         f"Qdrant request failed (url={self.url}): {exc}"
                     ) from exc
 
             # Exponential backoff before retry
             delay = self.retry_base_delay * (2**attempt)
+            if deadline is not None:
+                delay = min(delay, max(deadline - time.monotonic(), 0.0))
+                if delay <= 0:
+                    continue
             await asyncio.sleep(delay)
 
         raise VectorStoreError(f"Qdrant request failed (url={self.url}): {last_exc}") from last_exc
@@ -287,7 +395,10 @@ class VectorStore:
                 "collection_name is required for retrieval"
             )
 
-        info = await self._cached_get_collection(normalized_collection)
+        info = await self._cached_get_collection(
+            normalized_collection,
+            interactive=True,
+        )
         metadata = self._collection_metadata(info)
 
         try:
@@ -776,7 +887,10 @@ class VectorStore:
     ) -> None:
         """Fail closed on dynamic filters when collection-wide strict mode is on."""
 
-        info = await self._call(lambda: self._client.get_collection(collection_name))
+        info = await self._call(
+            lambda: self._client.get_collection(collection_name),
+            interactive=True,
+        )
         if not self._strict_filtering_is_ready(info):
             return
         if custom_filter is not None:
@@ -1781,7 +1895,10 @@ class VectorStore:
 
         if not requests:
             return []
-        if not await self._is_sparse_ready(collection_name):
+        if not await self._is_sparse_ready(
+            collection_name,
+            interactive=True,
+        ):
             raise VectorStoreError(
                 f"collection '{collection_name}' requires sparse-vector backfill"
             )
@@ -1790,7 +1907,8 @@ class VectorStore:
             lambda: self._client.query_batch_points(
                 collection_name=collection_name,
                 requests=requests,
-            )
+            ),
+            interactive=True,
         )
 
         return [
@@ -1812,6 +1930,7 @@ class VectorStore:
         *,
         config: LexicalConfig | None = None,
         info: Any | None = None,
+        interactive: bool = False,
     ) -> bool:
         """Verify legacy sparse-vector readiness."""
         _ = (config, info)
@@ -1824,7 +1943,8 @@ class VectorStore:
             return True
 
         total_result = await self._call(
-            lambda: self._client.count(collection_name=collection_name, exact=True)
+            lambda: self._client.count(collection_name=collection_name, exact=True),
+            interactive=interactive,
         )
         total_count = int(getattr(total_result, "count", 0) or 0)
         if total_count == 0:
@@ -1839,7 +1959,8 @@ class VectorStore:
                     must=[qmodels.HasVectorCondition(has_vector=sparse_field)]
                 ),
                 exact=True,
-            )
+            ),
+            interactive=interactive,
         )
         is_ready = int(getattr(sparse_result, "count", 0) or 0) == total_count
         if is_ready and sparse_field == LEXICAL_V1_FIELD:
@@ -1937,7 +2058,11 @@ class VectorStore:
         flt = qmodels.Filter(must=conditions)
 
         sparse_field = selected_lexical.active_field
-        if not await self._is_sparse_ready(collection_name, sparse_field):
+        if not await self._is_sparse_ready(
+            collection_name,
+            sparse_field,
+            interactive=True,
+        ):
             raise VectorStoreError(
                 f"collection '{collection_name}' requires {sparse_field} backfill"
             )
@@ -1950,7 +2075,8 @@ class VectorStore:
                 limit=int(top_k),
                 query_filter=flt,
                 with_payload=with_payload,
-            )
+            ),
+            interactive=True,
         )
 
         hits = list(getattr(resp, "points", None) or [])
@@ -3064,7 +3190,8 @@ class VectorStore:
                 with_vectors=with_vectors,
                 query_filter=flt,
                 score_threshold=score_threshold,
-            )
+            ),
+            interactive=True,
         )
         hits = list(getattr(resp, "points", None) or [])
 
@@ -3127,7 +3254,8 @@ class VectorStore:
                 limit=len(ids),
                 with_payload=True,
                 with_vectors=True,
-            )
+            ),
+            interactive=True,
         )
         records = scroll_result[0] if isinstance(scroll_result, tuple) else scroll_result
         vectors: dict[str, list[float]] = {}

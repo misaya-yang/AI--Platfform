@@ -31,6 +31,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ...auth import UserContext, get_user_context
+from ...core.content.structured_output import OutputFormat
 from ...core.models.defaults import DEFAULT_MODEL
 from ..deps import get_assistant_service, get_model_registry
 
@@ -163,6 +164,7 @@ class ChatRequest(BaseModel):
     resume_run_id: str | None = None
     resume_approval_id: str | None = None
     stream: bool = False
+    output_format: Literal["text", "json"] = "text"
 
     @field_validator("file_paths")
     @classmethod
@@ -427,6 +429,7 @@ def _build_config(
         otel_trace_id=otel_trace_id or _otel_trace_id_from_traceparent(traceparent),
         resume_run_id=body.resume_run_id,
         resume_approval_id=body.resume_approval_id,
+        output_format=OutputFormat(body.output_format),
     )
 
 
@@ -1244,6 +1247,9 @@ _PUBLIC_TOOL_STATUSES = frozenset(
 _PUBLIC_AGENT_LIFECYCLE_ID_FIELDS = (
     "run_id",
     "session_id",
+    # Owner-scoped cancellation handle consumed by the Web client. The
+    # cancellation endpoint revalidates tenant/user/session ownership.
+    "task_id",
     "request_id",
     "tool_id",
     "tool_call_id",

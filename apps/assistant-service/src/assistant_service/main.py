@@ -356,6 +356,7 @@ async def _initialize_model_registry(
 async def _shutdown_assistant_service(
     *,
     agent_plugin_mcp_manager,
+    mcp_runtime,
     database,
     redis_client,
 ) -> None:
@@ -370,6 +371,8 @@ async def _shutdown_assistant_service(
 
     if agent_plugin_mcp_manager is not None:
         await agent_plugin_mcp_manager.shutdown()
+    if mcp_runtime is not None:
+        await mcp_runtime.close()
     if database:
         await database.close()
     if redis_client:
@@ -528,6 +531,12 @@ async def lifespan(app: FastAPI):
             mcp_runtime = MCPRuntimeService(
                 repository=mcp_repository,
                 secret_resolver=mcp_secret_resolver,
+                client_cache_ttl_seconds=_STARTUP_CONFIG.int_value(
+                    "ASSISTANT_MCP_CLIENT_CACHE_TTL_SECONDS"
+                ),
+                client_cache_max_entries=_STARTUP_CONFIG.int_value(
+                    "ASSISTANT_MCP_CLIENT_CACHE_MAX_ENTRIES"
+                ),
             )
             app.state.mcp_repository = mcp_repository
             app.state.mcp_runtime = mcp_runtime
@@ -1056,6 +1065,7 @@ async def lifespan(app: FastAPI):
 
     await _shutdown_assistant_service(
         agent_plugin_mcp_manager=agent_plugin_mcp_manager,
+        mcp_runtime=mcp_runtime,
         database=database,
         redis_client=redis_client,
     )

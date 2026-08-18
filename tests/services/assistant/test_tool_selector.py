@@ -150,13 +150,20 @@ def test_discover_mode_advertises_relevant_generation_backend() -> None:
     [
         "run Python code to verify the totals",
         "calculate this with python",
+        "repair and test this function against edge cases",
     ],
 )
 def test_discover_mode_advertises_explicit_code_request(user_message: str) -> None:
     tools = [
         *tool_discovery_definitions(),
-        FakeToolDefinition("execute_python_code"),
-        FakeToolDefinition("update_user_memory"),
+        FakeToolDefinition(
+            "execute_python_code",
+            description="Execute Python code to test and verify behavior.",
+        ),
+        FakeToolDefinition(
+            "update_user_memory",
+            description="Store a durable user preference.",
+        ),
     ]
 
     selected = select_tools(tools, user_message=user_message, max_tokens=10_000)

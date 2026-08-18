@@ -17,6 +17,7 @@ import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 from ..auth.user_resolver import UserContext
@@ -268,14 +269,64 @@ class MultiDimensionRateLimiter:
         dimension: str,
     ) -> RateLimitResult:
         """Check a custom explicit limit rule (used by service-level overrides)."""
-        safe_limit = max(int(limit or 0), 1)
-        safe_window = max(int(window or 0), 1)
-        return await self._sliding_window_check(
-            key=key,
-            limit=safe_limit,
-            window=safe_window,
-            dimension=dimension,
+        results = await self.check_custom_limits(
+            policies=[
+                SimpleNamespace(
+                    key=key,
+                    requests=max(int(limit or 0), 1),
+                    window=max(int(window or 0), 1),
+                    dimension=dimension,
+                )
+            ]
         )
+        return results[-1]
+
+    async def check_custom_limits(self, *, policies: list[Any]) -> list[RateLimitResult]:
+        """Atomically check custom policies sharing one window.
+
+        Callers group policies by window so Redis performs at most one script
+        round trip per distinct window. Results retain input order and stop at
+        the first rejected policy, matching the historical sequential checks.
+        """
+        if not policies:
+            return []
+        windows = {max(int(policy.window or 0), 1) for policy in policies}
+        if len(windows) != 1:
+            raise ValueError("custom rate-limit batch must share one window")
+
+        window = next(iter(windows))
+        normalized = [
+            SimpleNamespace(
+                key=str(policy.key),
+                limit=max(int(policy.requests or 0), 1),
+                dimension=str(policy.dimension),
+            )
+            for policy in policies
+        ]
+        now = time.time()
+        window_start = now - window
+        if self.redis:
+            return await self._redis_sliding_window_many(
+                policies=normalized,
+                window=window,
+                now=now,
+                window_start=window_start,
+            )
+
+        results: list[RateLimitResult] = []
+        for policy in normalized:
+            result = await self._memory_sliding_window(
+                policy.key,
+                policy.limit,
+                window,
+                policy.dimension,
+                now,
+                window_start,
+            )
+            results.append(result)
+            if not result.allowed:
+                break
+        return results
 
     async def _check_global(self, _context: RateLimitContext) -> RateLimitResult:
         """检查全局限流"""
@@ -420,54 +471,99 @@ class MultiDimensionRateLimiter:
         window_start: float,
     ) -> RateLimitResult:
         """Redis 滑动窗口（单 EVAL 原子检查，SPO-02 消除 TOCTOU）"""
+        results = await self._redis_sliding_window_many(
+            policies=[SimpleNamespace(key=key, limit=limit, dimension=dimension)],
+            window=window,
+            now=now,
+            window_start=window_start,
+        )
+        return results[-1]
+
+    async def _redis_sliding_window_many(
+        self,
+        *,
+        policies: list[Any],
+        window: int,
+        now: float,
+        window_start: float,
+    ) -> list[RateLimitResult]:
+        """Check one same-window policy batch in a single Redis script."""
         try:
             result = await eval_script(
                 self.redis,
                 SLIDING_WINDOW_CHECK_LUA,
-                keys=[key],
+                keys=[policy.key for policy in policies],
                 args=[
                     now,
                     window_start,
                     window + 1,
                     f"{now}:{time.time_ns()}",
-                    limit,
+                    *(policy.limit for policy in policies),
                 ],
             )
             gateway_hot_path_metrics.redis_round_trips += 1
             rejected_index, earliest_score = int(result[0]), float(result[1])
 
             reset_at = int(now + window)
-            if rejected_index >= 0:
-                retry_after = (
-                    int(earliest_score - window_start) + 1
-                    if earliest_score > window_start
-                    else window
-                )
-                return RateLimitResult(
-                    allowed=False,
-                    dimension=dimension,
-                    limit=limit,
-                    remaining=0,
-                    reset_at=reset_at,
-                    retry_after=retry_after,
-                )
+            results: list[RateLimitResult] = []
+            for index, policy in enumerate(policies):
+                if rejected_index >= 0 and index > rejected_index:
+                    break
+                if index == rejected_index:
+                    retry_after = (
+                        int(earliest_score - window_start) + 1
+                        if earliest_score > window_start
+                        else window
+                    )
+                    results.append(
+                        RateLimitResult(
+                            allowed=False,
+                            dimension=policy.dimension,
+                            limit=policy.limit,
+                            remaining=0,
+                            reset_at=reset_at,
+                            retry_after=retry_after,
+                        )
+                    )
+                    break
 
-            return RateLimitResult(
-                allowed=True,
-                dimension=dimension,
-                limit=limit,
-                remaining=(
-                    max(int(result[2]), 0)
-                    if len(result) > 2
-                    else max(limit - 1, 0)
-                ),
-                reset_at=reset_at,
-            )
+                remaining_index = 3 + index
+                remaining = (
+                    max(int(result[remaining_index]), 0)
+                    if len(result) > remaining_index
+                    and int(result[remaining_index]) >= 0
+                    else (
+                        max(int(result[2]), 0)
+                        if len(result) > 2
+                        else max(policy.limit - 1, 0)
+                    )
+                )
+                results.append(
+                    RateLimitResult(
+                        allowed=True,
+                        dimension=policy.dimension,
+                        limit=policy.limit,
+                        remaining=remaining,
+                        reset_at=reset_at,
+                    )
+                )
+            return results
         except Exception:
             # Redis 不可用时回退到内存限流
-            return await self._memory_sliding_window(
-                key, limit, window, dimension, now, window_start
-            )
+            results = []
+            for policy in policies:
+                fallback = await self._memory_sliding_window(
+                    policy.key,
+                    policy.limit,
+                    window,
+                    policy.dimension,
+                    now,
+                    window_start,
+                )
+                results.append(fallback)
+                if not fallback.allowed:
+                    break
+            return results
 
 
 class RateLimitHeaders:

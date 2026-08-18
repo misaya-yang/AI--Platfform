@@ -106,6 +106,7 @@ redis_container()  { echo "${REDIS_CONTAINER:-ai-gateway-redis}"; }
 qdrant_container() { echo "${QDRANT_CONTAINER:-ai-gateway-qdrant}"; }
 assistant_container() { echo "${ASSISTANT_CONTAINER:-ai-gateway-assistant-service}"; }
 knowledge_container() { echo "${KNOWLEDGE_CONTAINER:-ai-gateway-knowledge-service}"; }
+knowledge_worker_container() { echo "${KNOWLEDGE_WORKER_CONTAINER:-ai-gateway-knowledge-worker}"; }
 gateway_container()   { echo "${GATEWAY_CONTAINER:-ai-gateway-backend}"; }
 frontend_container()  { echo "${FRONTEND_CONTAINER:-ai-gateway-frontend}"; }
 
@@ -120,6 +121,7 @@ assert_compose_owner() {
         "$(frontend_container)"
         "$(assistant_container)"
         "$(knowledge_container)"
+        "$(knowledge_worker_container)"
         # Legacy/other-checkout names that have caused local stack confusion.
         ai-gateway-mcp-docgen-server
         assistant-service
@@ -248,6 +250,10 @@ check_frontend_health() {
 
 check_knowledge_health() {
     docker exec "$(knowledge_container)" curl -sf "http://127.0.0.1:8092/health/ready" &>/dev/null
+}
+
+check_knowledge_worker_health() {
+    docker exec "$(knowledge_worker_container)" curl -sf "http://127.0.0.1:8092/health/ready" &>/dev/null
 }
 
 check_assistant_health() {

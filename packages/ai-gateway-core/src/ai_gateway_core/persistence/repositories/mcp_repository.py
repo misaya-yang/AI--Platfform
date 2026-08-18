@@ -1017,8 +1017,10 @@ class DatabaseMCPRepository(BaseRepository):
                    srv.oauth_audience, srv.allowed_origins, srv.timeout_ms,
                    srv.max_concurrency, srv.response_limit_bytes,
                    srv.health_status, srv.circuit_state, srv.circuit_open_until,
+                   srv.updated_at AS server_updated_at,
                    c.connection_id, c.principal_type, c.owner_user_id,
-                   c.secret_ref, c.scopes, c.audience, c.expires_at
+                   c.secret_ref, c.scopes, c.audience, c.expires_at,
+                   c.updated_at AS credential_updated_at
             FROM mcp_tools t
             JOIN mcp_tool_snapshots s
               ON s.tenant_id = t.tenant_id

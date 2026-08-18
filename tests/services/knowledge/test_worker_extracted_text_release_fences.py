@@ -263,6 +263,10 @@ async def test_direct_hierarchical_rejects_extracted_text_before_status_or_index
 
 
 class _Pixmap:
+    width = 1
+    height = 1
+    n = 3
+
     @staticmethod
     def tobytes(format_: str) -> bytes:
         assert format_ == "png"

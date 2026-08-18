@@ -852,6 +852,7 @@ validate_runtime() {
     fi
 
     wait_for_healthy "Knowledge service" "check_knowledge_health" 60 || fail "Knowledge service runtime check failed."
+    wait_for_healthy "Knowledge worker" "check_knowledge_worker_health" 60 || fail "Knowledge worker runtime check failed."
     wait_for_healthy "Assistant service" "check_assistant_health" 60 || fail "Assistant service runtime check failed."
     wait_for_healthy "Bundled docgen plugin" "check_docgen_health" 60 || fail "Bundled docgen runtime check failed."
     wait_for_healthy "Gateway readiness" "check_gateway_health" 60 || fail "Gateway runtime check failed."

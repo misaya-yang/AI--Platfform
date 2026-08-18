@@ -817,20 +817,19 @@ class UsageRecorder:
         try:
             value = await conn.fetchval(
                 """
-                SELECT
-                    PERCENTILE_CONT(0.95) WITHIN GROUP (
-                        ORDER BY COALESCE(NULLIF(request_total_duration_ms, 0), latency_ms, 0)
-                    )
-                FROM usage_records
+                SELECT p95_latency_ms
+                FROM usage_daily_aggregates
                 WHERE tenant_id = $1
-                  AND created_at >= NOW() - INTERVAL '24 hours'
+                  AND p95_latency_ms > 0
+                ORDER BY date DESC, p95_latency_ms DESC
+                LIMIT 1
                 """,
                 tenant_id,
             )
             if value is not None:
                 threshold = max(int(float(value)), 1)
         except Exception as e:
-            logger.debug(f"Failed to calculate P95 threshold for tenant {tenant_id}: {e}")
+            logger.debug(f"Failed to load P95 threshold for tenant {tenant_id}: {e}")
 
         self._trace_p95_cache[cache_key] = (threshold, now)
         return threshold

@@ -18,12 +18,13 @@ from ..rag.context_engine import (
     estimate_tokens,
     format_long_term_memory,
 )
-from ..runtime.context import ContextAssemblerV2, envelope_external_content
+from ..runtime.context import ContextAssemblerV2
 from ..runtime.memory.lifecycle import memory_policy_enabled
 from ..runtime.memory.working_state import bounded_working_memory_context
 from ..tasks.task_planner import TaskPlanner
 from ..trace_payloads import build_rag_trace_payload
 from .agent_loop_helpers import (
+    _envelope_tool_result,
     _redact_trace_text,
     _trim_history_for_streaming,
 )
@@ -727,13 +728,17 @@ class StreamingPreparationMixin:
                     data=compact_context,
                 )
             raw_auto_knowledge_context = str(auto_result.result or "").strip()
-            ctx.run_budget.observe_tool_result(raw_auto_knowledge_context)
-            auto_knowledge_context = envelope_external_content(
-                raw_auto_knowledge_context,
-                source="knowledge_base:auto_retrieval",
-                scope="request",
-                source_id=auto_tool_id,
+            compact_auto_knowledge_context = _fmt_compact_tool_result_for_model(
+                "search_knowledge_base",
+                auto_result.result,
+                auto_metadata,
             )
+            auto_knowledge_context = _envelope_tool_result(
+                compact_auto_knowledge_context,
+                tool_name="search_knowledge_base",
+                tool_id=auto_tool_id,
+            )
+            ctx.run_budget.observe_tool_result(auto_knowledge_context)
             auto_duration_ms = round((time.time() - auto_started_at) * 1000, 2)
             yield AgentLoopEvent(
                 phase=phase,

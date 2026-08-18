@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
+
+from ai_gateway_core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -13,6 +20,14 @@ class RatePolicy:
     window: int
     burst: int = 0
     strategy: str = "sliding_window"
+
+
+@dataclass(frozen=True)
+class _RuleSnapshot:
+    cache_key: tuple[int, int]
+    expires_at: float
+    stale_until: float
+    rules: tuple[Mapping[str, Any], ...]
 
 
 class RatePolicyResolver:
@@ -28,18 +43,28 @@ class RatePolicyResolver:
     }
     _BURST_STRATEGIES = {"token_bucket", "sliding_window_with_burst"}
 
-    def __init__(self, *, cache_ttl_seconds: float = 1.0) -> None:
+    def __init__(
+        self,
+        *,
+        cache_ttl_seconds: float = 1.0,
+        max_stale_seconds: float = 5.0,
+    ) -> None:
         self.cache_ttl_seconds = max(float(cache_ttl_seconds), 0.0)
-        self._cache_key: tuple[int, int] | None = None
-        self._cache_expires_at = 0.0
-        self._cached_rules: list[dict[str, Any]] = []
+        self.max_stale_seconds = max(float(max_stale_seconds), 0.0)
+        self._snapshot: _RuleSnapshot | None = None
+        self._refresh_lock = asyncio.Lock()
+        self._refresh_task: asyncio.Task[None] | None = None
+        self._refresh_failure: tuple[tuple[int, int], float, Exception] | None = None
+        self._refresh_failure_retry_seconds = 1.0
         self._epoch = 0
 
     def invalidate(self) -> None:
         self._epoch += 1
-        self._cache_key = None
-        self._cached_rules = []
-        self._cache_expires_at = 0.0
+        self._snapshot = None
+        self._refresh_failure = None
+        if self._refresh_task is not None:
+            self._refresh_task.cancel()
+            self._refresh_task = None
 
     async def resolve(
         self,
@@ -61,7 +86,7 @@ class RatePolicyResolver:
 
         rules = await self._load_rules(request)
         policies: list[RatePolicy] = []
-        for rule in sorted(rules, key=self._rule_sort_key):
+        for rule in rules:
             policy = self._policy_from_rule(
                 rule,
                 request=request,
@@ -106,36 +131,116 @@ class RatePolicyResolver:
             strategy="sliding_window",
         )
 
-    async def _load_rules(self, request: Any) -> list[dict[str, Any]]:
+    async def _load_rules(self, request: Any) -> tuple[Mapping[str, Any], ...]:
         app_state = getattr(getattr(request, "app", None), "state", None)
         db = getattr(app_state, "database", None)
         cache_key = (id(db), self._epoch)
         now = time.monotonic()
-        if (
-            self.cache_ttl_seconds > 0
-            and self._cache_key == cache_key
-            and now < self._cache_expires_at
-        ):
-            return [dict(rule) for rule in self._cached_rules]
+        snapshot = self._snapshot
+        if snapshot is not None and snapshot.cache_key == cache_key:
+            if now < snapshot.expires_at:
+                return snapshot.rules
+            if now <= snapshot.stale_until:
+                self._schedule_stale_refresh(request=request, cache_key=cache_key)
+                return snapshot.rules
+            # The stale safety budget is exhausted. Refresh synchronously via
+            # the same singleflight lock; DB failure propagates so an obsolete
+            # permissive policy cannot be served indefinitely.
+            return await self._refresh_rules(request=request, cache_key=cache_key)
 
-        rules: list[dict[str, Any]] = []
-        if db and getattr(db, "enabled", False) and hasattr(db, "get_rate_limits"):
-            raw_rules = await db.get_rate_limits()
-            rules = [self._coerce_rule(rule) for rule in raw_rules or []]
-        else:
-            runtime_rules = getattr(app_state, "rate_limit_rules", None)
-            if runtime_rules is None:
-                runtime_rules = []
-            rules = [self._coerce_rule(rule) for rule in runtime_rules or []]
+        return await self._refresh_rules(request=request, cache_key=cache_key)
 
-        self._cache_key = cache_key
-        self._cache_expires_at = now + self.cache_ttl_seconds
-        self._cached_rules = [dict(rule) for rule in rules]
-        return rules
+    def _schedule_stale_refresh(
+        self,
+        *,
+        request: Any,
+        cache_key: tuple[int, int],
+    ) -> None:
+        task = self._refresh_task
+        if task is not None and not task.done():
+            return
+
+        async def _refresh() -> None:
+            try:
+                await self._refresh_rules(request=request, cache_key=cache_key)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug("Failed to refresh rate policies: %s", exc)
+            finally:
+                if self._refresh_task is asyncio.current_task():
+                    self._refresh_task = None
+
+        try:
+            loop = asyncio.get_running_loop()
+            self._refresh_task = loop.create_task(_refresh())
+        except RuntimeError as exc:
+            logger.debug("Failed to schedule rate policy refresh: %s", exc)
+
+    async def _refresh_rules(
+        self,
+        *,
+        request: Any,
+        cache_key: tuple[int, int],
+    ) -> tuple[Mapping[str, Any], ...]:
+        async with self._refresh_lock:
+            snapshot = self._snapshot
+            now = time.monotonic()
+            if (
+                snapshot is not None
+                and snapshot.cache_key == cache_key
+                and now < snapshot.expires_at
+            ):
+                return snapshot.rules
+            failure = self._refresh_failure
+            if (
+                failure is not None
+                and failure[0] == cache_key
+                and now < failure[1]
+            ):
+                raise failure[2]
+
+            app_state = getattr(getattr(request, "app", None), "state", None)
+            db = getattr(app_state, "database", None)
+            rules: list[dict[str, Any]] = []
+            if db and getattr(db, "enabled", False) and hasattr(db, "get_rate_limits"):
+                try:
+                    raw_rules = await db.get_rate_limits()
+                except Exception as exc:
+                    if cache_key == (id(db), self._epoch):
+                        self._refresh_failure = (
+                            cache_key,
+                            time.monotonic() + self._refresh_failure_retry_seconds,
+                            exc,
+                        )
+                    raise
+                rules = [self._coerce_rule(rule) for rule in raw_rules or []]
+            else:
+                runtime_rules = getattr(app_state, "rate_limit_rules", None) or []
+                rules = [self._coerce_rule(rule) for rule in runtime_rules]
+
+            compiled = tuple(
+                MappingProxyType(dict(rule))
+                for rule in sorted(rules, key=self._rule_sort_key)
+            )
+            if cache_key == (id(db), self._epoch):
+                self._refresh_failure = None
+                refreshed_at = time.monotonic()
+                self._snapshot = _RuleSnapshot(
+                    cache_key=cache_key,
+                    expires_at=refreshed_at + self.cache_ttl_seconds,
+                    stale_until=(
+                        refreshed_at
+                        + self.cache_ttl_seconds
+                        + self.max_stale_seconds
+                    ),
+                    rules=compiled,
+                )
+            return compiled
 
     def _policy_from_rule(
         self,
-        rule: dict[str, Any],
+        rule: Mapping[str, Any],
         *,
         request: Any,
         user: Any,
@@ -246,7 +351,7 @@ class RatePolicyResolver:
         target = self._safe_segment(scope_id or dimension)
         return f"ratelimit:{scope}:{target}:{tenant}:{subject}:{safe_operation}"
 
-    def _rule_sort_key(self, rule: dict[str, Any]) -> tuple[int, int]:
+    def _rule_sort_key(self, rule: Mapping[str, Any]) -> tuple[int, int]:
         scope = str(rule.get("scope") or "").strip().lower()
         priority = int(rule.get("priority") or 0)
         return (self._SCOPE_PRECEDENCE.get(scope, 999), priority)

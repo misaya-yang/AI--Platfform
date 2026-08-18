@@ -19,7 +19,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 
 from .config import Settings
-from .db.connection import DatabasePool
 
 # ---------------------------------------------------------------------------
 # Structured logging
@@ -107,6 +106,24 @@ async def _init_qdrant(settings: Settings) -> Any:
     return qdrant
 
 
+async def _database_is_ready(database: Any, *, timeout_seconds: float = 1.0) -> bool:
+    """Run bounded authority-backed readiness instead of checking object presence."""
+
+    fetchval = getattr(database, "fetchval", None)
+    if not callable(fetchval):
+        return False
+    try:
+        return (
+            await asyncio.wait_for(
+                fetchval("SELECT 1"),
+                timeout=max(float(timeout_seconds), 0.05),
+            )
+            == 1
+        )
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # FastAPI app factory
 # ---------------------------------------------------------------------------
@@ -152,30 +169,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         install_signal_handlers(asyncio.get_running_loop())
 
         # --- startup ---
-        db = DatabasePool()
-        await db.init(
-            resolved.database.dsn,
-            min_size=resolved.database.pool_min_size,
-            max_size=resolved.database.pool_max_size,
-        )
-        app.state.db = db
-
-        qdrant = await _init_qdrant(resolved)
-        app.state.qdrant = qdrant
-
         app.state.settings = resolved
 
         # --- Initialize KnowledgeService + Worker ---
         knowledge_service = None
         knowledge_worker = None
         db_storage = None
+        qdrant = None
         try:
             from .persistence.database import DatabaseStorage as FullDatabaseStorage
             from .services.knowledge.knowledge_service import KnowledgeService
             from .services.knowledge.tenant_provider import (
                 TenantEmbeddingCredentialResolver,
             )
-            from .services.knowledge.worker import KnowledgeWorker
+            from .services.knowledge.worker import DurableEnqueueProxy, KnowledgeWorker
 
             db_storage = FullDatabaseStorage(
                 dsn=resolved.database.dsn,
@@ -185,6 +192,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 pool_max_size=resolved.database.pool_max_size,
             )
             await db_storage.connect()
+            app.state.db = db_storage
+
+            qdrant = await _init_qdrant(resolved)
+            app.state.qdrant = qdrant
 
             # KnowledgeService expects gateway-style settings with settings.knowledge.*
             # Create a compatibility wrapper that maps KB Service flat config
@@ -200,6 +211,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "url": s.qdrant.url,
                             "api_key": s.qdrant.api_key,
                             "timeout_seconds": s.qdrant.timeout_seconds,
+                            "interactive_deadline_seconds": (
+                                s.qdrant_interactive_deadline_seconds
+                            ),
                             "prefer_grpc": s.qdrant.prefer_grpc,
                             "max_retries": getattr(s.qdrant, "max_retries", 3),
                             "retry_base_delay": getattr(s.qdrant, "retry_base_delay", 1.0),
@@ -350,16 +364,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except Exception as e:
                 logger.warning("document_detector_init_failed", error=str(e))
 
-            knowledge_worker = KnowledgeWorker(
-                knowledge_service,
-                detector=doc_detector,
-                vlm_ocr_service=vlm_ocr_service,
-            )
-            await knowledge_worker.start()
+            if resolved.runtime_role in {"all", "worker"}:
+                knowledge_worker = KnowledgeWorker(
+                    knowledge_service,
+                    detector=doc_detector,
+                    vlm_ocr_service=vlm_ocr_service,
+                )
+                await knowledge_worker.start()
+            else:
+                knowledge_worker = DurableEnqueueProxy(knowledge_service)
             app.state.knowledge_worker = knowledge_worker
 
-            logger.info("knowledge_service_initialized",
-                        worker_running=knowledge_worker.is_running if hasattr(knowledge_worker, 'is_running') else True)
+            logger.info(
+                "knowledge_service_initialized",
+                runtime_role=resolved.runtime_role,
+                worker_running=bool(getattr(knowledge_worker, "_running", False)),
+            )
         except Exception as e:
             app.state._ready = False
             logger.exception("knowledge_service_init_failed", error=str(e))
@@ -391,7 +411,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "knowledge_database_startup_cleanup_failed",
                         error=str(cleanup_error),
                     )
-            if hasattr(qdrant, "close"):
+            if qdrant is not None and hasattr(qdrant, "close"):
                 try:
                     await qdrant.close()
                 except Exception as cleanup_error:
@@ -399,13 +419,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "qdrant_startup_cleanup_failed",
                         error=str(cleanup_error),
                     )
-            try:
-                await db.close()
-            except Exception as cleanup_error:
-                logger.warning(
-                    "database_pool_startup_cleanup_failed",
-                    error=str(cleanup_error),
-                )
             raise
 
         app.state._ready = True
@@ -426,10 +439,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         if knowledge_worker:
             with suppress(Exception):
-                await knowledge_worker.stop()
-        if hasattr(qdrant, "close"):
+                stop_worker = getattr(knowledge_worker, "stop", None)
+                if callable(stop_worker):
+                    await stop_worker()
+        if knowledge_service:
+            with suppress(Exception):
+                await knowledge_service.close()
+        if qdrant is not None and hasattr(qdrant, "close"):
             await qdrant.close()
-        await db.close()
+        if db_storage:
+            await db_storage.close()
         logger.info("knowledge_service_stopped")
 
     app = FastAPI(
@@ -605,7 +624,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         from ai_gateway_core.proxy.drain import DRAIN
 
         startup_ready = bool(getattr(request.app.state, "_ready", False))
-        db_ready = getattr(request.app.state, "db", None) is not None
+        db_ready = await _database_is_ready(
+            getattr(request.app.state, "db", None),
+            timeout_seconds=1.0,
+        )
         qdrant_ready = getattr(request.app.state, "qdrant", None) is not None
         ready = startup_ready and db_ready and qdrant_ready and not DRAIN.draining
         checks = {
@@ -627,12 +649,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # These routers are part of the service's required API surface.  Import
     # failures must abort application construction so the process cannot
     # become ready while serving only a reduced placeholder API.
-    from .api.routes.eval import router as kb_eval_router
-    from .api.routes.knowledge import router as full_knowledge_router
+    if resolved.runtime_role != "worker":
+        from .api.routes.eval import router as kb_eval_router
+        from .api.routes.knowledge import router as full_knowledge_router
 
-    app.include_router(full_knowledge_router, prefix="/api/v1")
-    app.include_router(kb_eval_router, prefix="/api/v1")
-    logger.info("knowledge_routes_loaded", mode="full", endpoints=51)
+        app.include_router(full_knowledge_router, prefix="/api/v1")
+        app.include_router(kb_eval_router, prefix="/api/v1")
+        logger.info("knowledge_routes_loaded", mode="full", endpoints=51)
+    else:
+        logger.info("knowledge_routes_loaded", mode="worker", endpoints=0)
 
     app.state.settings = resolved
     return app

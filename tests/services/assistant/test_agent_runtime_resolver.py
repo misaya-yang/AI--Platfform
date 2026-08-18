@@ -1019,6 +1019,7 @@ def test_agent_runtime_event_projection_is_closed_by_event_type() -> None:
             "run_id": "run-a",
             "thread_id": "private-thread-alias",
             "session_id": "session-a",
+            "task_id": "task-a",
             "request_id": "request-a",
             "attempt_id": "attempt-a",
             "context_snapshot": {"secret": "synthetic-private-context"},
@@ -1026,6 +1027,7 @@ def test_agent_runtime_event_projection_is_closed_by_event_type() -> None:
     ) == {
         "run_id": "run-a",
         "session_id": "session-a",
+        "task_id": "task-a",
         "request_id": "request-a",
         "attempt_id": "attempt-a",
         "status": "running",

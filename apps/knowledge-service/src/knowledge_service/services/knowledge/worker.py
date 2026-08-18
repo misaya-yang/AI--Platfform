@@ -131,6 +131,34 @@ class KnowledgeIngestTask:
     document_id: str
 
 
+class DurableEnqueueProxy:
+    """API-role producer that publishes only the durable PostgreSQL generation."""
+
+    def __init__(self, service: KnowledgeService) -> None:
+        self.service = service
+        self.queue: asyncio.Queue[KnowledgeIngestTask] = asyncio.Queue()
+        self._running = False
+        self._workers: list[asyncio.Task] = []
+
+    async def enqueue(self, dataset_id: str, document_id: str) -> bool:
+        dataset = await self.service.db.get_dataset(dataset_id)
+        if not dataset:
+            raise RuntimeError("dataset was deleted before enqueue")
+        index_config = dataset.get("index_config") or {}
+        if not isinstance(index_config, dict):
+            raise RuntimeError("dataset index_config is invalid")
+        validate_persisted_chunking_config(index_config.get("chunking", {}))
+        claim = getattr(self.service.db, "claim_document_for_enqueue", None)
+        if not callable(claim):
+            raise RuntimeError("durable document enqueue is unavailable")
+        return bool(await claim(dataset_id, document_id))
+
+    async def enqueue_claimed(self, dataset_id: str, document_id: str) -> None:
+        _ = (dataset_id, document_id)
+        # The caller already committed a queued row. The worker-role process
+        # discovers it through its bounded durable dispatcher.
+
+
 class KnowledgeWorker:
     """
     Knowledge base document ingestion worker.
@@ -158,6 +186,8 @@ class KnowledgeWorker:
         self.queue: asyncio.Queue[KnowledgeIngestTask] = asyncio.Queue()
         self._workers: list[asyncio.Task] = []
         self._recovery_task: asyncio.Task | None = None
+        self._durable_dispatch_task: asyncio.Task | None = None
+        self._scheduled_tasks: set[tuple[str, str]] = set()
         self._running = False
         knowledge_settings = getattr(self.service.settings, "knowledge", None)
         self.large_file_threshold = getattr(
@@ -190,6 +220,26 @@ class KnowledgeWorker:
                 )
             ),
             1,
+        )
+        self._durable_poll_interval_seconds = max(
+            float(
+                getattr(
+                    knowledge_settings,
+                    "durable_queue_poll_interval_seconds",
+                    1.0,
+                )
+            ),
+            0.1,
+        )
+        self._shutdown_drain_timeout_seconds = max(
+            float(
+                getattr(
+                    knowledge_settings,
+                    "worker_shutdown_drain_timeout_seconds",
+                    10.0,
+                )
+            ),
+            0.1,
         )
 
         # allow KnowledgeService.enqueue_ingest() convenience
@@ -234,8 +284,31 @@ class KnowledgeWorker:
         for _ in range(num_workers):
             self._workers.append(asyncio.create_task(self._run()))
         self._recovery_task = asyncio.create_task(self._recovery_loop())
+        self._durable_dispatch_task = asyncio.create_task(
+            self._durable_dispatch_loop()
+        )
 
     async def stop(self) -> None:
+        # Stop discovery first so the bounded drain has a stable queue tail.
+        if self._durable_dispatch_task is not None:
+            self._durable_dispatch_task.cancel()
+            await asyncio.gather(
+                self._durable_dispatch_task,
+                return_exceptions=True,
+            )
+            self._durable_dispatch_task = None
+
+        try:
+            await asyncio.wait_for(
+                self.queue.join(),
+                timeout=self._shutdown_drain_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Knowledge worker drain timed out; cancelling owned generations",
+                extra={"queue_size": self.queue.qsize()},
+            )
+
         self._running = False
         tasks = [*self._workers]
         if self._recovery_task is not None:
@@ -246,6 +319,35 @@ class KnowledgeWorker:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._workers = []
         self._recovery_task = None
+        self._scheduled_tasks.clear()
+
+    async def _durable_dispatch_loop(self) -> None:
+        list_queued = getattr(self.service.db, "list_queued_documents", None)
+        if not callable(list_queued):
+            raise RuntimeError("durable queued-document discovery is unavailable")
+        while self._running:
+            try:
+                for row in await list_queued(limit=100):
+                    dataset_id = str(row.get("dataset_id") or "").strip()
+                    document_id = str(row.get("document_id") or "").strip()
+                    key = (dataset_id, document_id)
+                    if not all(key) or key in self._scheduled_tasks:
+                        continue
+                    self._scheduled_tasks.add(key)
+                    await self.queue.put(
+                        KnowledgeIngestTask(
+                            dataset_id=dataset_id,
+                            document_id=document_id,
+                        )
+                    )
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("Knowledge durable queue discovery failed")
+            try:
+                await asyncio.sleep(self._durable_poll_interval_seconds)
+            except asyncio.CancelledError:
+                return
 
     async def _recovery_loop(self) -> None:
         """Periodically replay atomically claimed durable ingestion rows."""
@@ -348,6 +450,23 @@ class KnowledgeWorker:
                                 "document processor returned without a completed generation"
                             )
                     except asyncio.CancelledError:
+                        requeue = getattr(
+                            self.service.db,
+                            "requeue_cancelled_document_generation",
+                            None,
+                        )
+                        if callable(requeue):
+                            requeue_task = asyncio.create_task(
+                                requeue(
+                                    task.dataset_id,
+                                    task.document_id,
+                                    connection=lease_connection,
+                                )
+                            )
+                            try:
+                                await asyncio.shield(requeue_task)
+                            except asyncio.CancelledError:
+                                await requeue_task
                         raise
                     except Exception as exc:
                         # The document owner lease is still held here. Only a
@@ -433,6 +552,7 @@ class KnowledgeWorker:
                     extra={"dataset_id": task.dataset_id, "document_id": task.document_id},
                 )
             finally:
+                self._scheduled_tasks.discard((task.dataset_id, task.document_id))
                 self.queue.task_done()
 
     @staticmethod

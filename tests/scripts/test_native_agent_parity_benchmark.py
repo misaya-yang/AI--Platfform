@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -357,6 +358,62 @@ def test_result_oracles_accept_equivalent_representations_but_reject_wrong_actio
         )[0]
         is False
     )
+
+    equivalent_recovery = {
+        "original_request": {
+            "id": "W-77",
+            "amount": 12500,
+            "currency": "USD",
+            "idempotency_key": "PAY-77",
+        },
+        "original_effect": "Transfer submitted; authoritative readback is controlling",
+        "retry_original": False,
+        "authoritative_transaction": {
+            "id": "TX-9",
+            "amount": 12500,
+            "currency": "USD",
+            "idempotency_key": "PAY-77",
+            "status": "posted",
+        },
+        "sibling_action": {
+            "id": "W-78",
+            "action": "cancel",
+            "reason": "Prevent duplicate settlement",
+        },
+        "final_state": {
+            "obligation": "settled",
+            "settled_by": "TX-9",
+            "duplicate_prevention": True,
+        },
+    }
+    assert benchmark.validate_turn(
+        validator="unknown_effect",
+        text=json.dumps(equivalent_recovery),
+        expected=recovery["expected"],
+    )[:2] == (True, "passed")
+
+    wrong_key = copy.deepcopy(equivalent_recovery)
+    wrong_key["authoritative_transaction"]["idempotency_key"] = "PAY-OTHER"
+    retry = copy.deepcopy(equivalent_recovery)
+    retry["retry_original"] = True
+    sibling_submit = copy.deepcopy(equivalent_recovery)
+    sibling_submit["sibling_action"] = {
+        "action": "submit",
+        "reason": "Cancel only if duplicate is later confirmed",
+    }
+    duplicate_allowed = copy.deepcopy(equivalent_recovery)
+    duplicate_allowed["final_state"]["duplicate_prevention"] = False
+    no_prevention = copy.deepcopy(equivalent_recovery)
+    no_prevention["final_state"]["duplicate_prevention"] = "none"
+    for rejected in (wrong_key, retry, sibling_submit, duplicate_allowed, no_prevention):
+        assert (
+            benchmark.validate_turn(
+                validator="unknown_effect",
+                text=json.dumps(rejected),
+                expected=recovery["expected"],
+            )[0]
+            is False
+        )
 
 
 def test_governed_export_accepts_equivalent_non_execution_state_only() -> None:

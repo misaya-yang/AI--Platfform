@@ -521,7 +521,8 @@ INSERT INTO rbac_roles (role_name, permissions, is_system) VALUES
     ('guest', ARRAY['service:invoke:public']::VARCHAR(100)[], TRUE),
     ('user', ARRAY['service:invoke', 'task:read']::VARCHAR(100)[], TRUE),
     ('developer', ARRAY['service:invoke', 'task:read', 'task:write', 'service:manage']::VARCHAR(100)[], TRUE),
-    ('admin', ARRAY['admin:*']::VARCHAR(100)[], TRUE)
+    ('admin', ARRAY['admin:*']::VARCHAR(100)[], TRUE),
+    ('platform_admin', ARRAY['admin:*']::VARCHAR(100)[], TRUE)
 ON CONFLICT (role_name) DO NOTHING;
 
 -- ============================================================
@@ -1340,6 +1341,24 @@ CREATE TABLE IF NOT EXISTS user_roles (
 );
 
 COMMENT ON TABLE user_roles IS '用户-角色关联表：用户与角色的多对多映射';
+
+-- Only the bootstrap operator created by the system is a platform admin.
+-- Tenant administrators retain the tenant-scoped `admin` role.
+UPDATE users
+SET roles = CASE
+        WHEN 'platform_admin' = ANY(roles) THEN roles
+        ELSE array_append(roles, 'platform_admin'::VARCHAR(50))
+    END,
+    updated_at = NOW()
+WHERE user_id = 'admin'
+  AND created_by = 'system';
+
+INSERT INTO user_roles (user_id, role_name, granted_by)
+SELECT user_id, 'platform_admin', 'system'
+FROM users
+WHERE user_id = 'admin'
+  AND created_by = 'system'
+ON CONFLICT (user_id, role_name) DO NOTHING;
 
 -- 用户-权限直接授权表
 CREATE TABLE IF NOT EXISTS user_permissions (

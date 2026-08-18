@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { clearLastModelId, readLastModelId, writeLastModelId } from "./lastModel.ts";
+import {
+  clearLastModelId,
+  readHydratedLastModelId,
+  readLastModelId,
+  writeLastModelId,
+} from "./lastModel.ts";
 
 class MemoryStorage {
   private items = new Map<string, string>();
@@ -63,6 +68,28 @@ test("last model cache scopes keys by user and can clear them", () => {
   clearLastModelId();
   assert.equal(readLastModelId("user-a"), "");
   assert.equal(readLastModelId("user-b"), "");
+});
+
+test("legacy last model is migrated once and removed from the shared key", () => {
+  const storage = new MemoryStorage();
+  installStorage(storage);
+  storage.setItem("assistant.lastModelId.v1", "legacy-model");
+
+  assert.equal(readLastModelId("user-a"), "legacy-model");
+  assert.equal(storage.getItem("assistant.lastModelId.v1"), null);
+  assert.equal(storage.getItem("assistant.lastModelId.v1:user-a"), "legacy-model");
+  assert.equal(readLastModelId("user-b"), "");
+});
+
+test("legacy cache is not consumed before auth hydration", () => {
+  const storage = new MemoryStorage();
+  installStorage(storage);
+  storage.setItem("assistant.lastModelId.v1", "legacy-model");
+
+  assert.equal(readHydratedLastModelId(false, "user-a"), "");
+  assert.equal(storage.getItem("assistant.lastModelId.v1"), "legacy-model");
+  assert.equal(readHydratedLastModelId(true, "user-a"), "legacy-model");
+  assert.equal(storage.getItem("assistant.lastModelId.v1"), null);
 });
 
 test("last model cache degrades to empty when storage throws", () => {

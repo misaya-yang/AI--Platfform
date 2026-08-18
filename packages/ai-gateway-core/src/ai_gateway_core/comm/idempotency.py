@@ -267,7 +267,7 @@ class IdempotencyMiddleware:
             await _send_plain(send, 409, b"Idempotency request still in progress")
             return
 
-        replay = _ReplayReceive(body)
+        replay = _ReplayReceive(body, receive)
         status_code = 500
         response_headers: list[tuple[bytes, bytes]] = []
         chunks: list[bytes] = []
@@ -316,13 +316,14 @@ class IdempotencyMiddleware:
 
 
 class _ReplayReceive:
-    def __init__(self, body: bytes) -> None:
+    def __init__(self, body: bytes, upstream_receive) -> None:
         self._body = body
+        self._upstream_receive = upstream_receive
         self._sent = False
 
     async def __call__(self):
         if self._sent:
-            return {"type": "http.disconnect"}
+            return await self._upstream_receive()
         self._sent = True
         return {"type": "http.request", "body": self._body, "more_body": False}
 

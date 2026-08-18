@@ -167,6 +167,7 @@ async def test_idempotency_middleware_does_not_cache_streaming_response() -> Non
         calls += 1
 
         async def chunks():
+            await asyncio.sleep(0.01)
             yield f"data: {calls}\n\n".encode()
 
         return StreamingResponse(chunks(), media_type="text/event-stream")

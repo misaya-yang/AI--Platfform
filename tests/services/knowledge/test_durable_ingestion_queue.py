@@ -248,6 +248,38 @@ async def test_lifecycle_lease_contention_leaves_durable_queued_without_failed_w
 
 
 @pytest.mark.asyncio
+async def test_shutdown_drains_then_requeues_cancelled_owned_generation() -> None:
+    worker, database, _service = make_worker(status="queued")
+    worker._shutdown_drain_timeout_seconds = 0.02
+    started = asyncio.Event()
+
+    async def process(_task: Any) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    async def requeue(_dataset_id: str, _document_id: str, *, connection: Any) -> bool:
+        assert connection is not None
+        assert database.document_lock.locked()
+        assert database.status == "processing"
+        database.status = "queued"
+        database.events.append("requeued-cancelled")
+        return True
+
+    database.requeue_cancelled_document_generation = requeue
+    worker._process_task = process  # type: ignore[method-assign]
+    worker._running = True
+    await worker.enqueue_claimed("dataset-a", "document-a")
+    worker._workers = [asyncio.create_task(worker._run())]
+
+    await asyncio.wait_for(started.wait(), timeout=1)
+    await worker.stop()
+
+    assert database.status == "queued"
+    assert "requeued-cancelled" in database.events
+    assert not database.document_lock.locked()
+
+
+@pytest.mark.asyncio
 async def test_queue_publish_cancellation_keeps_durable_queued_for_recovery() -> None:
     worker, database, _service = make_worker()
 

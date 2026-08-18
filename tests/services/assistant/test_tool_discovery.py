@@ -11,6 +11,7 @@ from assistant_service.core.tool_invoker import (
     ToolInvocationContext,
     ToolPolicySnapshot,
 )
+from assistant_service.core.tools.code_executor_tool import CODE_EXECUTOR_TOOL
 from assistant_service.core.tools.tool_discovery import (
     TOOL_CALL,
     TOOL_DESCRIBE,
@@ -170,8 +171,27 @@ async def test_tool_call_runs_underlying_tool_through_real_gateway() -> None:
     )
 
     assert result.success is True
-    assert result.result == {"value": "ok"}
+    projection = json.loads(result.result)
+    assert projection == {
+        "invoked_tool": "tenant_alpha",
+        "status": "success",
+        "result": {"value": "ok"},
+        "error": None,
+        "execution": {},
+    }
     assert result.metadata["discovered_tool_name"] == "tenant_alpha"
+
+
+def test_code_execution_is_discoverable_for_generic_verification_work() -> None:
+    other = _tool("spawn_subagent", "Delegate a broad research task")
+
+    matches = rank_authorized_tools(
+        [other, CODE_EXECUTOR_TOOL],
+        "verify and test a repaired Python function",
+    )
+
+    assert matches[0].name == "execute_python_code"
+    assert "test and verify code behavior" in matches[0].description
 
 
 @pytest.mark.asyncio

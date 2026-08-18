@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from contextlib import AbstractAsyncContextManager
 import json
+from contextlib import AbstractAsyncContextManager
 from typing import Any
 
 import pytest
@@ -9,8 +9,8 @@ from knowledge_service.persistence.database import (
     CONFLUENCE_SYNC_GENERATION_KEY,
     DOCUMENT_LIFECYCLE_REINDEX_KEY,
     DOCUMENT_UPLOAD_GENERATION_KEY,
-    DatabaseStorage,
     SOURCE_OWNED_DOCUMENT_METADATA_KEYS,
+    DatabaseStorage,
 )
 
 
@@ -85,6 +85,16 @@ def normalized(query: str) -> str:
     return " ".join(query.split())
 
 
+@pytest.mark.asyncio
+async def test_fetchval_uses_authoritative_pool() -> None:
+    database, connection, pool = make_database()
+    connection.fetchval_behaviors = [1]
+
+    assert await database.fetchval("SELECT 1") == 1
+    assert pool.acquire_calls == 1
+    assert connection.fetchval_calls == [("SELECT 1", ())]
+
+
 ACTIVE_SQL_FRAGMENTS = (
     "JOIN documents AS d",
     "JOIN datasets AS ds",
@@ -123,8 +133,13 @@ async def test_fts_requires_exact_tenant_dataset_and_active_document() -> None:
 @pytest.mark.asyncio
 async def test_ilike_fallback_preserves_active_scope_predicates() -> None:
     database, connection, _pool = make_database()
+
+    class UndefinedTextSearchColumnError(RuntimeError):
+        sqlstate = "42703"
+        column_name = "text_search"
+
     connection.fetch_behaviors = [
-        RuntimeError("column text_search does not exist"),
+        UndefinedTextSearchColumnError("column text_search does not exist"),
         [{"segment_id": "segment-a", "text": "needle"}],
     ]
 
@@ -337,9 +352,9 @@ async def test_document_enqueue_claim_uses_dataset_then_document_lock_and_active
 
     lock_queries = [normalized(query) for query, _args in connection.fetchval_calls]
     assert "pg_try_advisory_lock_shared" in lock_queries[0]
-    assert "knowledge-dataset-index:dataset-a" == connection.fetchval_calls[0][1][0]
+    assert connection.fetchval_calls[0][1][0] == "knowledge-dataset-index:dataset-a"
     assert "pg_try_advisory_lock" in lock_queries[1]
-    assert "knowledge-document-index:dataset-a:document-a" == connection.fetchval_calls[1][1][0]
+    assert connection.fetchval_calls[1][1][0] == "knowledge-document-index:dataset-a:document-a"
     update_query, update_args = connection.fetchrow_calls[1]
     compact = normalized(update_query)
     assert "SET status = 'queued'" in compact

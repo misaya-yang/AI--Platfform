@@ -58,7 +58,7 @@ from .request_safety import (
     _raise_for_status_without_query_secrets,
     _safe_request_error,
     _validate_anthropic_tool_exchange_pairs,
-    _validate_openai_tool_exchange_pairs,
+    _validate_chat_tool_exchange_pairs,
 )
 from .request_safety import (
     _request_without_query_secrets as _request_without_query_secrets,
@@ -402,7 +402,7 @@ class ModelRegistry(RegistryLifecycleMixin):
                 m["content"] = content_parts
             formatted_messages.append(m)
 
-        _validate_openai_tool_exchange_pairs(formatted_messages)
+        _validate_chat_tool_exchange_pairs(formatted_messages)
 
         body: dict[str, Any] = {
             "model": model_id,

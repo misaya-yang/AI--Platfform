@@ -72,6 +72,7 @@ public class SSEParser {
                         StreamEvent event = flush(eventField, dataLines);
                         if (event != null) {
                             handler.accept(event);
+                            if (event.isTerminal()) return;
                         }
                     }
                     eventField = null;
@@ -148,6 +149,23 @@ public class SSEParser {
             eventType = et != null ? et.toString() : "message";
         }
 
-        return new StreamEvent(eventType, payload);
+        boolean hasInner = payload.containsKey("data");
+        Object inner = payload.remove("data");
+        Map<String, Object> data;
+        if (!hasInner) {
+            payload.remove("timestamp");
+            data = payload;
+        } else if (inner instanceof String text) {
+            data = new HashMap<>();
+            data.put("content", text);
+        } else if (inner instanceof Map<?, ?> innerMap) {
+            data = new HashMap<>();
+            innerMap.forEach((key, value) -> data.put(key.toString(), value));
+        } else {
+            data = new HashMap<>();
+            data.put("value", inner);
+        }
+
+        return new StreamEvent(eventType, data);
     }
 }

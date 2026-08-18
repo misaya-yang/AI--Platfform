@@ -38,11 +38,21 @@ import {
   type StreamTurnState,
 } from "@/features/chat/stream";
 import {
+  acceptPendingRunSession,
   beginNewChatSession,
   persistNewChatSession,
   startChatWithoutAwaitingSessionCreate,
 } from "@/features/chat/newChatStream";
 import { createActivityFlushQueue } from "@/features/chat/coalesceUpdates";
+import { updateMessageById } from "@/features/chat/messageRenderPerformance";
+import {
+  ACTIVE_RUN_METADATA_KEY,
+  shouldBlockDuringRunRestore,
+} from "@/features/chat/sessionRestoreWindow";
+import {
+  createStreamTerminalLatch,
+  type StreamTerminalOutcome,
+} from "@/features/chat/stream/terminalLatch";
 import { reduceSubAgentEvent } from "../subagentEventReducer";
 import type {
   ChatMessage as ChatMessageType,
@@ -145,7 +155,7 @@ function mergeUsageWithTurnState(
   };
 }
 
-const ASSISTANT_ACTIVE_RUN_METADATA_KEY = "assistant_active_run";
+const ASSISTANT_ACTIVE_RUN_METADATA_KEY = ACTIVE_RUN_METADATA_KEY;
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -161,7 +171,7 @@ async function restoreLatestRun(
   messages: ChatMessageType[],
   metadata: Record<string, unknown> | null | undefined,
   sessionId: string,
-): Promise<{ messages: ChatMessageType[]; error?: string }> {
+): Promise<{ messages: ChatMessageType[]; error?: string; blocksComposer?: boolean }> {
   const marker = asRecord(metadata?.[ASSISTANT_ACTIVE_RUN_METADATA_KEY]);
   const runId = nonEmptyString(marker?.run_id);
   if (!marker || !runId) return { messages };
@@ -807,78 +817,48 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     isInitialized.current = true;
     
     async function loadSessionsAndRestore() {
-      try {
-        // 使用保留的 service_id，避免与用户在服务管理中注册的服务冲突
-        const data = await listSessions({ service_id: "__builtin_assistant__", limit: 100 });
-        setSessions(data);
-        
-        // 从服务器返回的 metadata.title 初始化 assistantLocalTitles
-        setAssistantLocalTitles((prev: Record<string, string>) => {
-          const updated = { ...prev };
-          for (const s of data) {
-            const serverTitle = (s.metadata?.title as string | undefined);
-            if (serverTitle && !updated[s.session_id]) {
-              updated[s.session_id] = serverTitle;
-            }
-          }
-          return updated;
-        });
-        
-        // 获取当前保存的活动会话 ID（从 zustand store）
-        const savedSessionId = useAppStore.getState().assistantActiveSessionId;
-        
-        // 如果有已保存的活动会话，且该会话存在于列表中，则恢复它
-        if (savedSessionId) {
-          const sessionExists = data.some(s => s.session_id === savedSessionId);
-          if (sessionExists) {
-            // 加载会话历史记录
-            try {
-              const restoreEpoch = ++restoreEpochRef.current;
-              setHistoryRestoreState("loading");
-              setHistoryRestoreError(null);
-              const [sessionDetails, history, sessionArtifacts] = await Promise.all([
-                getSession(savedSessionId),
-                getSessionHistory(savedSessionId, { limit: 200 }),
-                getSessionArtifacts(savedSessionId).catch(() => []),
-              ]);
-              
-              // Restore artifacts first (needed for message hydration)
-              const loadedArtifacts: Artifact[] = sessionArtifacts.map((a: ArtifactInfo) => ({
-                id: a.artifact_id,
-                type: a.type as any,
-                format: a.format,
-                title: a.title,
-                url: a.download_url || getArtifactDownloadUrl(a.artifact_id),
-                createdAt: new Date(a.created_at),
-                filename: a.filename,
-                mimeType: a.mime_type,
-                sizeBytes: a.size_bytes,
-                source: a.source as any,
-              }));
-              setArtifacts(loadedArtifacts);
-              // Do NOT force-open the drawer on reload. The top-bar
-              // Artifacts chip (gated by artifacts.length +
-              // codeExecution.outputFiles.length) is the user-initiated
-              // entry point; auto-opening covered the chat for sessions
-              // with any past artifact, which was jarring on refresh.
-              setShowArtifacts(false);
+      const savedSessionId = useAppStore.getState().assistantActiveSessionId;
+      const restoreEpoch = savedSessionId ? ++restoreEpochRef.current : 0;
 
-              // Restore messages with artifact hydration
-              let chatMessages = history.map((msg, index) =>
-                restoreMessageMetadata(msg, index, savedSessionId)
-              );
-              chatMessages = hydrateMessageArtifacts(chatMessages, sessionArtifacts);
+      const listTask = listSessions({ service_id: "__builtin_assistant__", limit: 100 })
+        .then((data) => {
+          setSessions(data);
+          setAssistantLocalTitles((prev: Record<string, string>) => {
+            const updated = { ...prev };
+            for (const session of data) {
+              const serverTitle = session.metadata?.title as string | undefined;
+              if (serverTitle && !updated[session.session_id]) {
+                updated[session.session_id] = serverTitle;
+              }
+            }
+            return updated;
+          });
+        })
+        .catch((error) => {
+          console.error("Failed to load sessions:", error);
+        })
+        .finally(() => setSessionsLoading(false));
+
+      const restoreTask = savedSessionId
+        ? (async () => {
+            setHistoryRestoreState("loading");
+            setHistoryRestoreError(null);
+            const detailsPromise = getSession(savedSessionId);
+            const historyPromise = getSessionHistory(savedSessionId, { limit: 200 });
+            const artifactsPromise = getSessionArtifacts(savedSessionId).catch(() => []);
+            try {
+              const [sessionDetails, history] = await Promise.all([
+                detailsPromise,
+                historyPromise,
+              ]);
               if (restoreEpoch !== restoreEpochRef.current) return;
-              const reconciliation = await restoreLatestRun(
-                chatMessages,
-                sessionDetails.metadata,
-                savedSessionId,
+
+              let chatMessages = history.map((message, index) =>
+                restoreMessageMetadata(message, index, savedSessionId)
               );
-              if (restoreEpoch !== restoreEpochRef.current) return;
-              chatMessages = reconciliation.messages;
-              setServerRunBlocking(Boolean(reconciliation.blocksComposer));
               setMessages(chatMessages);
               hydrateQuizData(chatMessages, setMessages);
+              setHistoryRestoreState("ready");
               const restoredConfig = sessionDetails.config || {};
               lastStreamConfigRef.current = {
                 config: restoredConfig,
@@ -886,16 +866,38 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                 models: [],
                 datasets: [],
               };
-
-              // Rehydrate "Current run" (most-recent assistant message's
-              // code-executor output) so the drawer's split view works
-              // after reload. Without this, sessionArtifacts would show
-              // but the "Current run" section stays empty even for a
-              // session that just finished streaming before refresh.
-              const latestRunFiles = buildLatestRunOutputFilesFromArtifacts(
+              setServerRunBlocking(shouldBlockDuringRunRestore(sessionDetails.metadata));
+              const reconciliationPromise = restoreLatestRun(
                 chatMessages,
+                sessionDetails.metadata,
+                savedSessionId,
+              );
+
+              const [sessionArtifacts, reconciliation] = await Promise.all([
+                artifactsPromise,
+                reconciliationPromise,
+              ]);
+              if (restoreEpoch !== restoreEpochRef.current) return;
+              const loadedArtifacts: Artifact[] = sessionArtifacts.map((artifact: ArtifactInfo) => ({
+                id: artifact.artifact_id,
+                type: artifact.type as any,
+                format: artifact.format,
+                title: artifact.title,
+                url: artifact.download_url || getArtifactDownloadUrl(artifact.artifact_id),
+                createdAt: new Date(artifact.created_at),
+                filename: artifact.filename,
+                mimeType: artifact.mime_type,
+                sizeBytes: artifact.size_bytes,
+                source: artifact.source as any,
+              }));
+              setArtifacts(loadedArtifacts);
+              setShowArtifacts(false);
+              chatMessages = hydrateMessageArtifacts(
+                reconciliation.messages,
                 sessionArtifacts,
               );
+              setServerRunBlocking(Boolean(reconciliation.blocksComposer));
+              setMessages(chatMessages);
               setCodeExecution({
                 isExecuting: false,
                 executionId: null,
@@ -903,19 +905,28 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                 output: "",
                 executionTimeMs: null,
                 status: "idle",
-                outputFiles: latestRunFiles,
+                outputFiles: buildLatestRunOutputFilesFromArtifacts(
+                  chatMessages,
+                  sessionArtifacts,
+                ),
               });
-              setHistoryRestoreState("ready");
               setHistoryRestoreError(reconciliation.error || null);
               trackChatHistoryRestored("assistant", {
                 sessionId: savedSessionId,
                 messageCount: chatMessages.length,
                 restored: true,
               });
-            } catch (err) {
-              console.error("Failed to restore active session:", err);
-              const reason =
-                err instanceof Error ? err.message : "restore_failed";
+            } catch (error) {
+              if (restoreEpoch !== restoreEpochRef.current) return;
+              const status = (error as { response?: { status?: number } })?.response?.status;
+              if (status === 403 || status === 404) {
+                setActiveSessionId(undefined);
+                setHistoryRestoreState("idle");
+                setHistoryRestoreError(null);
+                return;
+              }
+              console.error("Failed to restore active session:", error);
+              const reason = error instanceof Error ? error.message : "restore_failed";
               setHistoryRestoreState("failed");
               setHistoryRestoreError(reason);
               trackChatHistoryRestored("assistant", {
@@ -925,18 +936,10 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                 reason,
               });
             }
-          } else {
-            // 会话不存在于列表中（可能已被删除），清除它
-            setActiveSessionId(undefined);
-            setHistoryRestoreState("idle");
-            setHistoryRestoreError(null);
-          }
-        }
-      } catch (error) {
-        console.error("Failed to load sessions:", error);
-      } finally {
-        setSessionsLoading(false);
-      }
+          })()
+        : Promise.resolve();
+
+      await Promise.allSettled([listTask, restoreTask]);
     }
     loadSessionsAndRestore();
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -961,6 +964,9 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
   }, [clearCancelFallback, requestTaskCancellation]);
 
   const handleNewChat = useCallback(() => {
+    // Invalidate every in-flight history restore before clearing UI state.
+    // Otherwise a late restore can repopulate the newly opened blank chat.
+    restoreEpochRef.current += 1;
     abandonActiveStream();
     setMessages([]);
     pendingSessionIdRef.current = undefined;
@@ -1011,14 +1017,43 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       setHistoryRestoreState("loading");
       setHistoryRestoreError(null);
       setMessages([]);
-      const [sessionDetails, history, sessionArtifacts] = await Promise.all([
-        getSession(sessionId),
-        getSessionHistory(sessionId, { limit: 200 }),
-        getSessionArtifacts(sessionId).catch(() => []),
+      const detailsPromise = getSession(sessionId);
+      const historyPromise = getSessionHistory(sessionId, { limit: 200 });
+      const artifactsPromise = getSessionArtifacts(sessionId).catch(() => []);
+      const [sessionDetails, history] = await Promise.all([
+        detailsPromise,
+        historyPromise,
       ]);
       if (restoreEpoch !== restoreEpochRef.current) return;
 
-      // Restore artifacts first (needed for message hydration)
+      let chatMessages = history.map((message, index) =>
+        restoreMessageMetadata(message, index, sessionId)
+      );
+      setMessages(chatMessages);
+      hydrateQuizData(chatMessages, setMessages);
+      pendingSessionIdRef.current = undefined;
+      setActiveSessionId(sessionId);
+      setHistoryRestoreState("ready");
+      const restoredConfig = sessionDetails.config || {};
+      lastStreamConfigRef.current = {
+        config: restoredConfig,
+        selectedDatasets: restoredConfig.selected_datasets || [],
+        models: [],
+        datasets: [],
+      };
+      setServerRunBlocking(shouldBlockDuringRunRestore(sessionDetails.metadata));
+      const reconciliationPromise = restoreLatestRun(
+        chatMessages,
+        sessionDetails.metadata,
+        sessionId,
+      );
+
+      const [sessionArtifacts, reconciliation] = await Promise.all([
+        artifactsPromise,
+        reconciliationPromise,
+      ]);
+      if (restoreEpoch !== restoreEpochRef.current) return;
+
       const loadedArtifacts: Artifact[] = sessionArtifacts.map((a: ArtifactInfo) => ({
         id: a.artifact_id,
         type: a.type as any,
@@ -1032,40 +1067,13 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         source: a.source as any,
       }));
       setArtifacts(loadedArtifacts);
-      // Mirror the reload path: keep the drawer closed; the top-bar chip
-      // is the user-initiated open affordance.
       setShowArtifacts(false);
-
-      // Restore messages with artifact hydration
-      let chatMessages = history.map((msg, index) =>
-        restoreMessageMetadata(msg, index, sessionId)
-      );
-      chatMessages = hydrateMessageArtifacts(chatMessages, sessionArtifacts);
-      const reconciliation = await restoreLatestRun(
-        chatMessages,
-        sessionDetails.metadata,
-        sessionId,
-      );
-      if (restoreEpoch !== restoreEpochRef.current) return;
-      chatMessages = reconciliation.messages;
-      setServerRunBlocking(Boolean(reconciliation.blocksComposer));
-      setMessages(chatMessages);
-      hydrateQuizData(chatMessages, setMessages);
-      const restoredConfig = sessionDetails.config || {};
-      lastStreamConfigRef.current = {
-        config: restoredConfig,
-        selectedDatasets: restoredConfig.selected_datasets || [],
-        models: [],
-        datasets: [],
-      };
-
-      // Rehydrate "Current run" from the most-recent assistant message's
-      // persisted artifact IDs so the drawer's split view matches live
-      // streaming behaviour after switching into a historical session.
-      const latestRunFiles = buildLatestRunOutputFilesFromArtifacts(
-        chatMessages,
+      chatMessages = hydrateMessageArtifacts(
+        reconciliation.messages,
         sessionArtifacts,
       );
+      setServerRunBlocking(Boolean(reconciliation.blocksComposer));
+      setMessages(chatMessages);
       setCodeExecution({
         isExecuting: false,
         executionId: null,
@@ -1073,11 +1081,11 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         output: "",
         executionTimeMs: null,
         status: "idle",
-        outputFiles: latestRunFiles,
+        outputFiles: buildLatestRunOutputFilesFromArtifacts(
+          chatMessages,
+          sessionArtifacts,
+        ),
       });
-      pendingSessionIdRef.current = undefined;
-      setActiveSessionId(sessionId);
-      setHistoryRestoreState("ready");
       setHistoryRestoreError(reconciliation.error || null);
       trackChatHistoryRestored("assistant", {
         sessionId,
@@ -1089,8 +1097,9 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       setWorkingMemory(null);
       setShowTaskPanel(false);
 
-      return sessionDetails.config; // Return config for parent to update settings
+      return sessionDetails.config;
     } catch (error) {
+      if (restoreEpoch !== restoreEpochRef.current) return;
       console.error("Failed to load session:", error);
       const reason =
         error instanceof Error ? error.message : "load_session_failed";
@@ -1174,6 +1183,12 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     if (!isResume && !messageContent.trim() && attachments.length === 0) {
       return;
     }
+    // Sending or resuming takes ownership from any in-flight history restore.
+    // Bump before publishing optimistic messages so a late restore cannot
+    // replace the user's new turn.
+    restoreEpochRef.current += 1;
+    setHistoryRestoreState("idle");
+    setHistoryRestoreError(null);
     const interactionStartedAtMs = performance.now();
     const streamEpoch = streamEpochRef.current + 1;
     streamEpochRef.current = streamEpoch;
@@ -1359,9 +1374,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
 
     const updateAssistantMessage = (updater: (m: ChatMessageType) => ChatMessageType) => {
       if (!isCurrentStream()) return;
-      setMessages((prev) =>
-        prev.map((m) => (m.id === assistantMessage.id ? updater(m) : m))
-      );
+      setMessages((prev) => updateMessageById(prev, assistantMessage.id, updater));
     };
 
     // RAF-batched sync: buffer turn state updates and flush once per frame
@@ -1383,9 +1396,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       usage = mergeUsageWithTurnState(usage, streamTurnState);
 
       setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantMessage.id
-            ? {
+        updateMessageById(prev, assistantMessage.id, (m) => ({
                 ...m,
                 content,
                 parts: buildTextParts(assistantMessage.id, content, createdAt),
@@ -1398,9 +1409,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                     ? "streaming"
                     : streamTurnState.status,
                 isStreaming: streamTurnState.status === "streaming",
-              }
-            : m
-        )
+              }))
       );
     };
 
@@ -1412,6 +1421,66 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
           flushTurnStateToMessage();
         });
       }
+    };
+
+    const terminalLatch = createStreamTerminalLatch();
+    const settleRunTerminal = (
+      outcome: StreamTerminalOutcome,
+      timestampMs: number,
+      options: {
+        error?: string;
+        runId?: string;
+        showInterruptionNotice?: boolean;
+      } = {},
+    ): boolean => {
+      if (!terminalLatch.accept(outcome)) return false;
+
+      if (outcome === "succeeded") {
+        streamTurnState = completeStreamTurn(streamTurnState, timestampMs);
+      } else if (outcome === "cancelled") {
+        streamTurnState = cancelStreamTurn(streamTurnState, timestampMs);
+      } else if (options.showInterruptionNotice === false) {
+        streamTurnState = failStreamTurn(
+          streamTurnState,
+          options.error || "assistant_run_failed",
+          timestampMs,
+        );
+      } else {
+        failVisibleStream(options.error || "assistant_run_failed", timestampMs);
+      }
+      syncTurnStateToMessage();
+
+      if (outcome !== "succeeded") {
+        setWorkingMemory((prev) =>
+          prev
+            ? {
+                ...prev,
+                error:
+                  options.error ||
+                  (outcome === "cancelled" ? "cancelled" : "assistant_run_failed"),
+              }
+            : null,
+        );
+      }
+      updateAssistantMessage((message) => {
+        const previous = message.processSummary;
+        const seeded = previous
+          ? {
+              ...previous,
+              runId: options.runId || previous.runId,
+            }
+          : initProcessSummary(options.runId, timestampMs);
+        return {
+          ...message,
+          processSummary: finalizeProcessSummary(
+            seeded,
+            outcome,
+            timestampMs,
+            true,
+          ),
+        };
+      });
+      return true;
     };
 
     const activityQueue = createActivityFlushQueue({
@@ -1486,7 +1555,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         isNew: preparedSession.isNew,
         persistSession: preparedSession.isNew
           ? (id) =>
-              persistNewChatSession(createSession, {
+              persistNewChatSession(createSession, updateSession, {
                 sessionId: id,
                 title: sessionTitle,
                 config,
@@ -1890,34 +1959,13 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
 
           case SSEEventType.SIDE_EFFECT_UNKNOWN:
             const sideEffectData = (event.data || {}) as Record<string, unknown>;
-            streamTurnState = failStreamTurn(
-              streamTurnState,
-              "side_effect_unknown",
-              now,
-            );
-            syncTurnStateToMessage();
-            setWorkingMemory((prev) => prev ? {
-              ...prev,
+            settleRunTerminal("failed", now, {
               error: "side_effect_unknown",
-            } : null);
-            updateAssistantMessage((m) => {
-              const prev = m.processSummary ?? initProcessSummary(undefined, now);
-              return {
-                ...m,
-                processSummary: {
-                  ...prev,
-                  runId:
-                    typeof sideEffectData.run_id === "string"
-                      ? sideEffectData.run_id
-                      : prev.runId,
-                  status: "failed",
-                  collapsed: false,
-                  isErrorExpanded: true,
-                  totalDurationMs: prev.startedAt
-                    ? now - prev.startedAt
-                    : prev.totalDurationMs,
-                },
-              };
+              runId:
+                typeof sideEffectData.run_id === "string"
+                  ? sideEffectData.run_id
+                  : undefined,
+              showInterruptionNotice: false,
             });
             await persistAssistantRunId(sideEffectData.run_id);
             if (!isCurrentStream()) return;
@@ -2019,9 +2067,19 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
             // Agent execution started - initialize working memory if needed
             const runStartedData = event.data as {
               run_id?: string;
+              session_id?: string;
               task_id?: string | null;
               timestamp?: number;
             };
+            const acceptedSessionId = acceptPendingRunSession({
+              requestedSessionId: sessionId,
+              pendingSessionId: pendingSessionIdRef.current,
+              eventSessionId: runStartedData?.session_id,
+            });
+            if (acceptedSessionId && isCurrentStream()) {
+              setActiveSessionId(acceptedSessionId);
+              pendingSessionIdRef.current = undefined;
+            }
             if (runStartedData?.task_id) {
               activeTaskIdRef.current = runStartedData.task_id;
               if (cancelRequestedRef.current) {
@@ -2052,18 +2110,11 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
           case SSEEventType.RUN_FINISHED:
             // Agent execution completed
             // Working memory stays visible for user reference
-            streamTurnState = completeStreamTurn(streamTurnState, now);
-            syncTurnStateToMessage();
-            updateAssistantMessage((m) => {
-              const prev = m.processSummary ?? initProcessSummary(undefined, now);
-              return {
-                ...m,
-                processSummary: {
-                  ...prev,
-                  status: "succeeded",
-                  totalDurationMs: prev.startedAt ? now - prev.startedAt : prev.totalDurationMs,
-                },
-              };
+            settleRunTerminal("succeeded", now, {
+              runId:
+                typeof (event.data as { run_id?: unknown } | null)?.run_id === "string"
+                  ? (event.data as { run_id: string }).run_id
+                  : undefined,
             });
             break;
 
@@ -2080,40 +2131,19 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
             const runWasCancelled =
               runErrorData.status === "cancelled" ||
               runErrorData.terminal_envelope?.status === "cancelled";
-            if (runWasCancelled) {
-              streamTurnState = cancelStreamTurn(streamTurnState, now);
-            } else {
-              failVisibleStream(
-                runErrorData.error || runErrorData.message || "assistant_run_failed",
-                now
-              );
-            }
-            syncTurnStateToMessage();
-            setWorkingMemory((prev) => prev ? {
-              ...prev,
-              error: runErrorData.error || runErrorData.message || "assistant_run_failed",
-            } : null);
-            updateAssistantMessage((m) => {
-              const prev = m.processSummary ?? initProcessSummary(runErrorData.run_id, now);
-              return {
-                ...m,
-                processSummary: {
-                  ...prev,
-                  runId: runErrorData.run_id || prev.runId,
-                  status: runWasCancelled ? "cancelled" : "failed",
-                  collapsed: false,
-                  isErrorExpanded: true,
-                  totalDurationMs: prev.startedAt ? now - prev.startedAt : prev.totalDurationMs,
-                },
-              };
+            settleRunTerminal(runWasCancelled ? "cancelled" : "failed", now, {
+              error:
+                runErrorData.error ||
+                runErrorData.message ||
+                (runWasCancelled ? "cancelled" : "assistant_run_failed"),
+              runId: runErrorData.run_id,
             });
             await persistAssistantRunId(runErrorData.run_id);
             if (!isCurrentStream()) return;
             break;
 
           case SSEEventType.CANCELLED:
-            streamTurnState = cancelStreamTurn(streamTurnState, now);
-            syncTurnStateToMessage();
+            settleRunTerminal("cancelled", now, { error: "cancelled" });
             break;
 
           // === AG-UI Step Events (Manus-style) ===
@@ -2886,19 +2916,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
             const errData = event.data as any;
             const streamErrorMessage =
               errData?.message || "Unknown error";
-            failVisibleStream(streamErrorMessage, now);
-            // A provider can disconnect after already streaming useful text.
-            // Keep that partial answer, but make the terminal failure visible
-            // instead of leaving a sentence cut off with no explanation.
-            updateAssistantMessage((m) => ({
-              ...m,
-              processSummary: finalizeProcessSummary(
-                m.processSummary,
-                "failed",
-                now
-              ),
-            }));
-            syncTurnStateToMessage();
+            settleRunTerminal("failed", now, { error: streamErrorMessage });
             break;
         }
       }
@@ -2909,12 +2927,14 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       }
       const streamFinishedAtMs = Date.now();
       if (cancelRequestedRef.current || streamAbortController.signal.aborted) {
-        streamTurnState = cancelStreamTurn(streamTurnState, streamFinishedAtMs);
+        settleRunTerminal("cancelled", streamFinishedAtMs, { error: "cancelled" });
       } else if (
         streamTurnState.status === "idle" ||
         streamTurnState.status === "streaming"
       ) {
-        failVisibleStream("stream_ended_without_terminal", streamFinishedAtMs);
+        settleRunTerminal("failed", streamFinishedAtMs, {
+          error: "stream_ended_without_terminal",
+        });
       }
 
       // Cancel pending RAF and flush before final update
@@ -2977,6 +2997,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
 
     } catch (error: any) {
       if (syncRafId !== null) { cancelAnimationFrame(syncRafId); syncRafId = null; }
+      flushTurnStateToMessage();
       if (!isCurrentStream()) {
         closeStreamTrace("cancelled", { reason: "session_epoch_changed" });
         return;
@@ -2986,50 +3007,64 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         (error.name === "AbortError" && streamAbortController.signal.aborted === true);
       if (!userCancelled) {
         const finishedAtMs = Date.now();
-        failVisibleStream(error.message || "Unknown error", finishedAtMs);
-        setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { 
-          ...m,
-          content: streamTurnState.content,
-          parts: buildTextParts(
-            assistantMessage.id,
-            streamTurnState.content,
-            createdAt
-          ),
-          isStreaming: false,
-          status: "failed",
-          firstTokenMs: streamTurnState.firstTokenMs ?? firstTokenMs,
-          firstTextTokenMs,
-          toolCalls: mapStreamToolCallsToAssistant(streamTurnState),
-          processSummary: finalizeProcessSummary(
-            m.processSummary,
-            "failed",
-            finishedAtMs
-          ),
-        } : m));
+        const accepted = settleRunTerminal("failed", finishedAtMs, {
+          error: error.message || "Unknown error",
+        });
+        if (accepted) {
+          setMessages(prev => prev.map(m => m.id === assistantMessage.id ? {
+            ...m,
+            content: streamTurnState.content,
+            parts: buildTextParts(
+              assistantMessage.id,
+              streamTurnState.content,
+              createdAt
+            ),
+            isStreaming: false,
+            status: "failed",
+            firstTokenMs: streamTurnState.firstTokenMs ?? firstTokenMs,
+            firstTextTokenMs,
+            toolCalls: mapStreamToolCallsToAssistant(streamTurnState),
+            processSummary: finalizeProcessSummary(
+              m.processSummary,
+              "failed",
+              finishedAtMs
+            ),
+          } : m));
+        }
+      } else {
+        const finishedAtMs = Date.now();
+        const accepted = settleRunTerminal("cancelled", finishedAtMs, {
+          error: "cancelled",
+        });
+        if (accepted) {
+          const cancelledContent = streamTurnState.content || content || "(Cancelled)";
+          setMessages(prev => prev.map(m => m.id === assistantMessage.id ? {
+            ...m,
+            content: cancelledContent,
+            parts: buildTextParts(assistantMessage.id, cancelledContent, createdAt),
+            isStreaming: false,
+            status: "cancelled",
+            firstTokenMs: streamTurnState.firstTokenMs ?? firstTokenMs,
+            firstTextTokenMs,
+            toolCalls: mapStreamToolCallsToAssistant(streamTurnState),
+            processSummary: finalizeProcessSummary(
+              m.processSummary,
+              "cancelled",
+              finishedAtMs,
+              true
+            ),
+          } : m));
+        }
+      }
+      const caughtOutcome = terminalLatch.current();
+      if (caughtOutcome === "failed") {
         closeStreamTrace("failed", {
           error: streamTurnState.error || error.message,
         });
-      } else {
-        const finishedAtMs = Date.now();
-        streamTurnState = cancelStreamTurn(streamTurnState, finishedAtMs);
-        const cancelledContent = streamTurnState.content || content || "(Cancelled)";
-        setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { 
-          ...m,
-          content: cancelledContent,
-          parts: buildTextParts(assistantMessage.id, cancelledContent, createdAt),
-          isStreaming: false,
-          status: "cancelled",
-          firstTokenMs: streamTurnState.firstTokenMs ?? firstTokenMs,
-          firstTextTokenMs,
-          toolCalls: mapStreamToolCallsToAssistant(streamTurnState),
-          processSummary: finalizeProcessSummary(
-            m.processSummary,
-            "cancelled",
-            finishedAtMs,
-            true
-          ),
-        } : m));
+      } else if (caughtOutcome === "cancelled") {
         closeStreamTrace("cancelled", { reason: "abort_signal" });
+      } else if (caughtOutcome === "succeeded") {
+        closeStreamTrace("completed");
       }
     } finally {
       activityQueue.flushNow();

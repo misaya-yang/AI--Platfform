@@ -34,6 +34,55 @@ logger = get_logger(__name__)
 T = TypeVar("T", bound=BaseModel)
 
 
+def canonical_json_object_text(text: str) -> str | None:
+    """Return one canonical JSON object from an explicit structured response.
+
+    A provider may wrap the object in a JSON fence or a short prose preamble.
+    Nested objects are preserved, while arrays, malformed JSON, and multiple
+    top-level work products are rejected.
+    """
+    candidate = str(text or "").strip()
+    if not candidate:
+        return None
+
+    def parse_object(raw: str) -> dict[str, Any] | None:
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return value if isinstance(value, dict) else None
+
+    parsed = parse_object(candidate)
+    if parsed is None:
+        fenced = re.findall(r"```(?:json)?\s*([\s\S]*?)\s*```", candidate, re.I)
+        if len(fenced) == 1:
+            parsed = parse_object(fenced[0].strip())
+        elif fenced:
+            return None
+    if parsed is None:
+        decoder = json.JSONDecoder()
+        start = candidate.find("{")
+        if start < 0:
+            return None
+        try:
+            value, end = decoder.raw_decode(candidate, start)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(value, dict):
+            return None
+        suffix = candidate[end:]
+        next_start = suffix.find("{")
+        if next_start >= 0:
+            try:
+                extra, _ = decoder.raw_decode(suffix, next_start)
+            except json.JSONDecodeError:
+                extra = None
+            if isinstance(extra, dict):
+                return None
+        parsed = value
+    return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+
+
 class OutputFormat(str, Enum):
     """Output format options."""
 

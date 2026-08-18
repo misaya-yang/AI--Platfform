@@ -1,10 +1,13 @@
 import { lazy, Suspense, type ComponentType } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 
-import { AppLayout } from "@/layouts/AppLayout";
 import { ProtectedRoute, ForbiddenPage } from "@/components/ProtectedRoute";
 import { NotFoundPage } from "@/components/SystemStatusPage";
 import { isAgentStudioEnabled } from "@/config/runtime";
+import {
+  loadTranslationNamespace,
+  type DeferredTranslationNamespace,
+} from "@/i18n";
 
 function lazyNamed<TModule, TKey extends keyof TModule>(
   loader: () => Promise<TModule>,
@@ -16,7 +19,22 @@ function lazyNamed<TModule, TKey extends keyof TModule>(
   });
 }
 
+function lazyNamedWithNamespace<TModule, TKey extends keyof TModule>(
+  loader: () => Promise<TModule>,
+  exportName: TKey,
+  namespace: DeferredTranslationNamespace,
+) {
+  return lazy(async () => {
+    const [, module] = await Promise.all([
+      loadTranslationNamespace(namespace),
+      loader(),
+    ]);
+    return { default: module[exportName] as ComponentType<object> };
+  });
+}
+
 const LoginPage = lazyNamed(() => import("@/pages/Login"), "LoginPage");
+const AppLayout = lazyNamed(() => import("@/layouts/AppLayout"), "AppLayout");
 const SharePage = lazyNamed(() => import("@/pages/SharePage"), "SharePage");
 const QuizPage = lazyNamed(() => import("@/pages/QuizPage"), "QuizPage");
 const EnterpriseDashboard = lazyNamed(
@@ -37,12 +55,12 @@ const KnowledgeDatasetsPage = lazyNamed(() => import("@/pages/knowledge"), "Know
 const KnowledgeDatasetDetailPage = lazyNamed(() => import("@/pages/knowledge"), "KnowledgeDatasetDetailPage");
 const DatasetCreatePage = lazy(() => import("@/pages/knowledge/DatasetCreate"));
 const AssistantPage = lazyNamed(() => import("@/pages/assistant"), "AssistantPage");
-const EvalPage = lazyNamed(() => import("@/pages/eval"), "EvalPage");
-const AgentListPage = lazyNamed(() => import("@/pages/agents"), "AgentListPage");
-const AgentCreatePage = lazyNamed(() => import("@/pages/agents"), "AgentCreatePage");
-const AgentStudioPage = lazyNamed(() => import("@/pages/agents"), "AgentStudioPage");
-const AgentAnalyticsPage = lazyNamed(() => import("@/pages/agents"), "AgentAnalyticsPage");
-const AgentHostedPage = lazyNamed(() => import("@/pages/agent-public"), "AgentHostedPage");
+const EvalPage = lazyNamedWithNamespace(() => import("@/pages/eval"), "EvalPage", "eval");
+const AgentListPage = lazyNamedWithNamespace(() => import("@/pages/agents"), "AgentListPage", "agents");
+const AgentCreatePage = lazyNamedWithNamespace(() => import("@/pages/agents"), "AgentCreatePage", "agents");
+const AgentStudioPage = lazyNamedWithNamespace(() => import("@/pages/agents"), "AgentStudioPage", "agents");
+const AgentAnalyticsPage = lazyNamedWithNamespace(() => import("@/pages/agents"), "AgentAnalyticsPage", "agents");
+const AgentHostedPage = lazyNamedWithNamespace(() => import("@/pages/agent-public"), "AgentHostedPage", "agents");
 
 function RouteFallback() {
   return (

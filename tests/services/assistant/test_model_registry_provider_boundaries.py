@@ -675,6 +675,49 @@ async def test_chat_stream_rejects_invalid_tool_transcript_without_http(
     assert client.streams == 0
 
 
+@pytest.mark.parametrize(
+    ("messages", "match"),
+    [
+        (_unpaired_messages(), "unpaired tool exchange"),
+        (_duplicate_call_messages(), "duplicate tool call"),
+        (
+            [
+                ChatMessage(role="user", content="run the tool"),
+                ChatMessage(
+                    role="tool",
+                    content="private result",
+                    name="slow_tool",
+                    tool_call_id="private-orphan-call",
+                ),
+            ],
+            "orphan tool result",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_responses_v1_stream_rejects_invalid_tool_transcript_without_http(
+    monkeypatch: pytest.MonkeyPatch,
+    messages: list[ChatMessage],
+    match: str,
+) -> None:
+    registry = _registry_with_providers()
+    registry.configure_provider(
+        ModelProvider.OPENAI,
+        api_key="test-only-provider-key",
+        wire_protocol="responses_v1",
+    )
+    client = _RecordingProviderClient()
+    monkeypatch.setattr(registry, "_get_client", AsyncMock(return_value=client))
+
+    with pytest.raises(ValueError, match=match) as exc_info:
+        async for _delta in registry.chat_stream("gpt-test", messages, temperature=0):
+            pass
+
+    assert "private-" not in str(exc_info.value)
+    assert client.posts == 0
+    assert client.streams == 0
+
+
 @pytest.mark.parametrize("builder_name", ["_build_anthropic_body", "_build_openai_body"])
 def test_provider_body_accepts_complete_tool_pair(builder_name: str) -> None:
     registry = ModelRegistry(use_default_models=False)

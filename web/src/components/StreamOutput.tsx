@@ -1,10 +1,7 @@
-import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
+import { lazy, memo, Suspense, useEffect, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
 import { ImageIcon, Download, ExternalLink, FileDown } from "lucide-react";
-import "katex/dist/katex.min.css";
 import { useLatexCopy } from "@/hooks/useLatexCopy";
 import { useTranslation } from "react-i18next";
 import { api } from "@/lib/api";
@@ -55,13 +52,11 @@ interface StreamOutputProps {
   isStreaming?: boolean;
 }
 
-const MARKDOWN_REMARK_PLUGINS = [
-  remarkGfm,
-  [remarkMath, { singleDollarTextMath: true }],
-] as const;
-const MARKDOWN_REHYPE_PLUGINS = [
-  [rehypeKatex, { throwOnError: false, strict: false, output: "htmlAndMathml" }],
-] as const;
+const MARKDOWN_REMARK_PLUGINS = [remarkGfm] as const;
+const MathMarkdownBlock = lazy(async () => {
+  const module = await import("./MathMarkdownBlock");
+  return { default: module.MathMarkdownBlock };
+});
 const MARKDOWN_COMPONENTS = {
   img: ({ src, alt }: { src?: string; alt?: string }) => (
     <MarkdownImage src={src} alt={alt} />
@@ -393,7 +388,6 @@ const MarkdownBlock = memo(function MarkdownBlock({ text }: { text: string }) {
   return (
     <ReactMarkdown
       remarkPlugins={MARKDOWN_REMARK_PLUGINS}
-      rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
       urlTransform={allowDataUrlTransform}
       components={MARKDOWN_COMPONENTS}
     >
@@ -418,8 +412,11 @@ export const StreamOutput = memo(function StreamOutput({
   text,
   isStreaming = false,
 }: StreamOutputProps) {
-  // Enable LaTeX copy support - copies original LaTeX source when selecting formulas
-  useLatexCopy();
+  const hasMath = useMemo(
+    () => /(^|[^\\])\$\$?[\s\S]*?\$\$?/.test(text),
+    [text],
+  );
+  useLatexCopy(hasMath);
 
   // Filter out accidental JSON tool output before parsing
   const filteredText = useMemo(() => filterToolJsonOutput(text), [text]);
@@ -441,7 +438,13 @@ export const StreamOutput = memo(function StreamOutput({
   return (
     <div dir={rtl ? "rtl" : undefined} className={`assistant-copy prose prose-slate dark:prose-invert max-w-none wrap-break-word prose-p:my-3 prose-p:leading-7 prose-p:text-[15px] sm:prose-p:text-[16px] prose-headings:mt-7 prose-headings:mb-3 prose-headings:font-semibold prose-headings:tracking-tight prose-ul:my-3 prose-ol:my-3 prose-li:my-1 prose-li:text-[15px] sm:prose-li:text-[16px] prose-pre:my-4 prose-pre:overflow-x-auto prose-pre:max-w-full prose-pre:whitespace-pre-wrap prose-pre:wrap-break-word prose-pre:rounded-xl prose-pre:border prose-pre:border-[hsl(var(--assistant-border))] prose-pre:bg-[hsl(var(--assistant-surface-soft))] prose-code:whitespace-pre-wrap prose-code:wrap-break-word prose-code:text-[14px] prose-blockquote:border-l-[hsl(var(--assistant-border))]${rtl ? " text-right" : ""}${isStreaming ? " streaming-fade-in" : ""}`}>
       {markdownBlocks.map((block, index) => (
-        <MarkdownBlock key={`${index}:${block.length}`} text={block} />
+        hasMath ? (
+          <Suspense key={`${index}:${block.length}`} fallback={<MarkdownBlock text={block} />}>
+            <MathMarkdownBlock text={block} components={MARKDOWN_COMPONENTS} />
+          </Suspense>
+        ) : (
+          <MarkdownBlock key={`${index}:${block.length}`} text={block} />
+        )
       ))}
       {/* Streaming cursor - clean blinking bar */}
       {isStreaming && (

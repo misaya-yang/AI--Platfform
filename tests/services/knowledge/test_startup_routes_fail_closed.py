@@ -71,13 +71,6 @@ async def test_core_worker_startup_failure_never_marks_service_ready(
 
     events: list[str] = []
 
-    class FakeDatabasePool:
-        async def init(self, *_args, **_kwargs) -> None:
-            events.append("gateway-db-open")
-
-        async def close(self) -> None:
-            events.append("gateway-db-close")
-
     class FakeDatabaseStorage:
         def __init__(self, *_args, **_kwargs) -> None:
             pass
@@ -116,7 +109,6 @@ async def test_core_worker_startup_failure_never_marks_service_ready(
         events.append("qdrant-open")
         return FakeQdrant()
 
-    monkeypatch.setattr(main, "DatabasePool", FakeDatabasePool)
     monkeypatch.setattr(main, "_init_qdrant", fake_init_qdrant)
     monkeypatch.setattr(database_module, "DatabaseStorage", FakeDatabaseStorage)
     monkeypatch.setattr(service_module, "KnowledgeService", FakeKnowledgeService)
@@ -132,15 +124,13 @@ async def test_core_worker_startup_failure_never_marks_service_ready(
 
     assert getattr(app.state, "_ready", False) is False
     assert events == [
-        "gateway-db-open",
-        "qdrant-open",
         "knowledge-db-open",
+        "qdrant-open",
         "worker-start",
         "worker-stop",
         "knowledge-service-close",
         "knowledge-db-close",
         "qdrant-close",
-        "gateway-db-close",
     ]
 
 

@@ -4,7 +4,7 @@
  * Refactored modular architecture.
  */
 
-import { useEffect, useState, useRef, useCallback, useMemo, Component, type ErrorInfo, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useState, useRef, useCallback, useMemo, useLayoutEffect, Component, type ErrorInfo, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
@@ -35,7 +35,6 @@ import {
   type DatasetInfo,
   type AssistantConfig,
 } from "@/api/assistant";
-import { ArtifactsPanel } from "@/components/artifacts";
 import { createSession, listSessions } from "@/api/sessions";
 import { api as apiClient } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -50,23 +49,23 @@ import {
   type AgentTask,
 } from "./components";
 import { ChatInputArea } from "./components/ChatInputArea";
-import { readLastModelId, writeLastModelId } from "./lastModel";
-import { ShareDialog } from "./components/ShareDialog";
-import ConnectorsPanel from "./components/ConnectorsPanel";
+import {
+  readHydratedLastModelId,
+  readLastModelId,
+  writeLastModelId,
+} from "./lastModel";
 import { WelcomeScreen } from "./components/WelcomeScreen";
-import { ActivityPanel } from "./components/ActivityPanel";
-import { SubAgentWorkspacePanel } from "./components/SubAgentWorkspacePanel";
-import { LocalOSPanel, useLocalOSControl } from "./local-os";
+import { useLocalOSControl } from "./local-os/useLocalOSControl";
 import {
   RightPanelContext,
   type RightPanel,
   type RightPanelState,
 } from "./components/rightPanelContext";
-import { buildTimeline } from "./components/buildTimeline";
 import { useChatSession } from "./hooks/useChatSession";
 import { useFileHandler } from "./hooks/useFileHandler";
 import { useImageGeneration } from "./hooks/useImageGeneration";
 import { DEFAULT_STYLE_ID } from "./styles";
+import { ASSISTANT_COMPACT_MEDIA_QUERY } from "./layout";
 import i18n from "@/i18n";
 import { useChatShortcuts } from "@/features/chat/shortcuts";
 import { useAppStore } from "@/store/useAppStore";
@@ -74,6 +73,35 @@ import { trackChatHistoryEmptyState } from "@/features/chat/telemetry";
 
 const ASSISTANT_UI_V2 = import.meta.env.VITE_ASSISTANT_UI_V2 !== "false";
 const ASSISTANT_COMPOSER_ID = "assistant-chat-composer";
+const ActivityPanel = lazy(async () => {
+  const module = await import("./components/ActivityPanel");
+  return { default: module.ActivityPanel };
+});
+const ArtifactsPanel = lazy(async () => {
+  const module = await import("@/components/artifacts/ArtifactsPanel");
+  return { default: module.ArtifactsPanel };
+});
+const SubAgentWorkspacePanel = lazy(async () => {
+  const module = await import("./components/SubAgentWorkspacePanel");
+  return { default: module.SubAgentWorkspacePanel };
+});
+const LocalOSPanel = lazy(async () => {
+  const module = await import("./local-os/LocalOSPanel");
+  return { default: module.LocalOSPanel };
+});
+const ShareDialog = lazy(async () => {
+  const module = await import("./components/ShareDialog");
+  return { default: module.ShareDialog };
+});
+const ConnectorsPanel = lazy(() => import("./components/ConnectorsPanel"));
+
+function LazyPanelFallback() {
+  return (
+    <div className="flex h-full min-h-32 items-center justify-center text-sm text-[hsl(var(--assistant-text-secondary))]">
+      Loading…
+    </div>
+  );
+}
 
 function countUniqueArtifactAffordances(
   artifacts: Array<{ id?: string | null }>,
@@ -114,6 +142,7 @@ function RightPanelChip({
   count,
   active,
   disabled,
+  compact = false,
   onClick,
 }: {
   icon: ReactNode;
@@ -121,6 +150,7 @@ function RightPanelChip({
   count?: number;
   active: boolean;
   disabled?: boolean;
+  compact?: boolean;
   onClick: () => void;
 }) {
   return (
@@ -129,8 +159,10 @@ function RightPanelChip({
       onClick={onClick}
       disabled={disabled}
       aria-pressed={active}
+      aria-label={typeof count === "number" && count > 0 ? `${label} (${count})` : label}
       className={cn(
         "act-btn relative inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md",
+        compact && "w-8 justify-center gap-0 px-0",
         "text-[12.5px] transition-colors",
         "disabled:opacity-40 disabled:cursor-not-allowed",
         active
@@ -147,9 +179,12 @@ function RightPanelChip({
       >
         {icon}
       </span>
-      <span>{label}</span>
+      <span className={compact ? "sr-only" : undefined}>{label}</span>
       {typeof count === "number" && count > 0 && (
-        <span className="font-mono tabular-nums text-[11px] text-[hsl(var(--assistant-text-tertiary))]">
+        <span className={cn(
+          "font-mono tabular-nums text-[11px] text-[hsl(var(--assistant-text-tertiary))]",
+          compact && "sr-only",
+        )}>
           {count}
         </span>
       )}
@@ -210,6 +245,7 @@ export function AssistantPage() {
   const { t } = useTranslation();
   const { toast } = useToast();
   const userId = useAuthStore((state) => state.user?.user_id);
+  const authHydrated = useAuthStore((state) => state.hydrated);
 
   // 1. Data Loading State
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -220,7 +256,7 @@ export function AssistantPage() {
   // 2. Settings State
   // Unlock the composer with the last-selected model immediately; the catalog
   // validates the cached id once listModels resolves (W3).
-  const [selectedModel, setSelectedModel] = useState<string>(() => readLastModelId(useAuthStore.getState().user?.user_id));
+  const [selectedModel, setSelectedModel] = useState<string>("");
   const [selectedDatasets, setSelectedDatasets] = useState<string[]>([]);
   const [temperature, setTemperature] = useState(0.7);
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
@@ -238,6 +274,7 @@ export function AssistantPage() {
   const [isMobile, setIsMobile] = useState(false);
   const shouldReduceMotion = useReducedMotion();
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const wasCompactLayoutRef = useRef(false);
   const showLeftPanel = useAppStore((state) => state.assistantSidebarOpen);
   const setShowLeftPanel = useAppStore((state) => state.setAssistantSidebarOpen);
 
@@ -421,15 +458,14 @@ export function AssistantPage() {
 
   const latestActivitySteps = useMemo(() => {
     if (!latestActivityMessageId) return 0;
-    const m = messages.find((msg) => msg.id === latestActivityMessageId);
-    if (!m) return 0;
-    try {
-      const { steps } = buildTimeline(m, t);
-      return steps.length;
-    } catch {
-      return 0;
-    }
-  }, [latestActivityMessageId, messages, t]);
+    const message = messages.find((candidate) => candidate.id === latestActivityMessageId);
+    if (!message) return 0;
+    return (
+      (message.processSummary?.steps.length || 0) +
+      (message.processSummary?.tools.length || 0) +
+      (message.activeSubAgents?.length || 0)
+    );
+  }, [latestActivityMessageId, messages]);
   const uniqueArtifactCount = useMemo(
     () => countUniqueArtifactAffordances(artifacts, codeExecution.outputFiles),
     [artifacts, codeExecution.outputFiles]
@@ -490,8 +526,19 @@ export function AssistantPage() {
     { selected_style: selectedStyle, web_search_enabled: webSearchEnabled }
   );
 
+  // Resolve browser state only after auth hydration identifies its owner.
+  // Layout timing prevents an interactive frame from retaining the previous
+  // account's selection while a new account is being applied.
+  useLayoutEffect(() => {
+    setModelsLoaded(false);
+    setSelectedModel(readHydratedLastModelId(authHydrated, userId));
+  }, [authHydrated, userId]);
+
   // Load initial data
   useEffect(() => {
+    if (!authHydrated) return;
+    let cancelled = false;
+
     async function loadData() {
       try {
         const [modelsData, datasetsData, configData, connectionsData] = await Promise.all([
@@ -505,6 +552,7 @@ export function AssistantPage() {
           })),
           apiClient.get("/api/v1/connectors/available").catch(() => ({ data: [] })),
         ]);
+        if (cancelled) return;
         setModels(modelsData);
         setDatasets(datasetsData);
         setConfig(configData);
@@ -514,35 +562,41 @@ export function AssistantPage() {
           const defaultId = configData.default_model_id || modelsData[0].id;
           const exists = modelsData.some((m) => m.id === defaultId);
           const fallbackModelId = exists ? defaultId : modelsData[0].id;
-          setSelectedModel((current) => {
-            // Validate current model exists in available list; fallback if not
-            if (current && modelsData.some((m) => m.id === current)) return current;
-            return fallbackModelId;
-          });
           // Validate the cache against the catalog; persist the resolved id.
           const cached = readLastModelId(userId);
           const resolved =
             cached && modelsData.some((m) => m.id === cached)
               ? cached
               : fallbackModelId;
+          setSelectedModel(resolved);
           writeLastModelId(resolved, userId);
         }
       } catch (error) {
         console.error("Failed to load assistant data:", error);
       } finally {
-        setModelsLoaded(true);
+        if (!cancelled) setModelsLoaded(true);
       }
     }
     loadData();
-  }, [userId]);
+    return () => {
+      cancelled = true;
+    };
+  }, [authHydrated, userId]);
 
   useEffect(() => {
-    const mediaQuery = window.matchMedia("(max-width: 767px)");
+    const mediaQuery = window.matchMedia(ASSISTANT_COMPACT_MEDIA_QUERY);
     const sync = () => setIsMobile(mediaQuery.matches);
     sync();
     mediaQuery.addEventListener("change", sync);
     return () => mediaQuery.removeEventListener("change", sync);
   }, []);
+
+  useEffect(() => {
+    if (isMobile && !wasCompactLayoutRef.current && showLeftPanel) {
+      setShowLeftPanel(false);
+    }
+    wasCompactLayoutRef.current = isMobile;
+  }, [isMobile, setShowLeftPanel, showLeftPanel]);
 
   useEffect(() => {
     if (!isMobile || !showLeftPanel) return;
@@ -552,6 +606,11 @@ export function AssistantPage() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isMobile, setShowLeftPanel, showLeftPanel]);
+
+  useEffect(() => {
+    if (!isMobile || !rightPanel || !showLeftPanel) return;
+    setShowLeftPanel(false);
+  }, [isMobile, rightPanel, setShowLeftPanel, showLeftPanel]);
 
   useEffect(() => {
     if (sessionsLoading || messages.length > 0) return;
@@ -875,6 +934,7 @@ export function AssistantPage() {
                 count={latestSubagentCount}
                 active={rightPanel === "subagents"}
                 disabled={latestSubagentMessageId == null}
+                compact={isMobile}
                 onClick={() => {
                   if (!latestSubagentMessageId) return;
                   if (rightPanel === "subagents") {
@@ -895,6 +955,7 @@ export function AssistantPage() {
                 }
                 count={localOSState.onlineDeviceCount}
                 active={rightPanel === "local_os"}
+                compact={isMobile}
                 onClick={() => {
                   if (rightPanel === "local_os") {
                     setShowLocalOS(false);
@@ -1140,14 +1201,16 @@ export function AssistantPage() {
           {/* Right-side sheet: Activity OR Artifacts. Mutex enforced via
               rightPanelState; never both. ActivityPanel is mounted first
               so it takes priority when the user explicitly opens it. */}
-          {!isMobile && (
-            <ActivityPanel
-              open={rightPanel === "activity"}
-              onClose={closeActivity}
-              message={activeActivityMessage}
-              width={380}
-              onToolApproval={handleToolApproval}
-            />
+          {!isMobile && rightPanel === "activity" && activeActivityMessage && (
+            <Suspense fallback={<LazyPanelFallback />}>
+              <ActivityPanel
+                open
+                onClose={closeActivity}
+                message={activeActivityMessage}
+                width={380}
+                onToolApproval={handleToolApproval}
+              />
+            </Suspense>
           )}
 
           <AnimatePresence>
@@ -1158,12 +1221,14 @@ export function AssistantPage() {
                 exit={shouldReduceMotion ? { opacity: 0 } : { width: 0, opacity: 0 }}
                 className="shrink-0 overflow-hidden"
               >
-                <SubAgentWorkspacePanel
-                  open
-                  onClose={closeSubagents}
-                  message={activeSubagentMessage}
-                  width={420}
-                />
+                <Suspense fallback={<LazyPanelFallback />}>
+                  <SubAgentWorkspacePanel
+                    open
+                    onClose={closeSubagents}
+                    message={activeSubagentMessage}
+                    width={420}
+                  />
+                </Suspense>
               </motion.aside>
             )}
           </AnimatePresence>
@@ -1189,13 +1254,15 @@ export function AssistantPage() {
                   aria-modal="true"
                   aria-label={t("playground.activity.title", "Activity")}
                 >
-                  <ActivityPanel
-                    open
-                    onClose={closeActivity}
-                    message={activeActivityMessage}
-                    width={mobilePanelWidth}
-                    onToolApproval={handleToolApproval}
-                  />
+                  <Suspense fallback={<LazyPanelFallback />}>
+                    <ActivityPanel
+                      open
+                      onClose={closeActivity}
+                      message={activeActivityMessage}
+                      width={mobilePanelWidth}
+                      onToolApproval={handleToolApproval}
+                    />
+                  </Suspense>
                 </motion.div>
               </motion.div>
             )}
@@ -1223,13 +1290,15 @@ export function AssistantPage() {
                   aria-modal="true"
                   aria-label="Sub-agent workbench"
                 >
-                  <SubAgentWorkspacePanel
-                    open
-                    onClose={closeSubagents}
-                    message={activeSubagentMessage}
-                    width={typeof window === "undefined" ? 430 : window.innerWidth}
-                    className="rounded-t-2xl"
-                  />
+                  <Suspense fallback={<LazyPanelFallback />}>
+                    <SubAgentWorkspacePanel
+                      open
+                      onClose={closeSubagents}
+                      message={activeSubagentMessage}
+                      width={typeof window === "undefined" ? 430 : window.innerWidth}
+                      className="rounded-t-2xl"
+                    />
+                  </Suspense>
                 </motion.div>
               </motion.div>
               )}
@@ -1243,16 +1312,18 @@ export function AssistantPage() {
             {showArtifacts && !isMobile && rightPanel === "artifacts" && (
               <motion.aside initial={shouldReduceMotion ? false : { width: 0, opacity: 0 }} animate={{ width: 380, opacity: 1 }} exit={shouldReduceMotion ? { opacity: 0 } : { width: 0, opacity: 0 }} className="shrink-0 overflow-hidden">
                 <div className="h-full w-[380px]">
-                  <ArtifactsPanel
-                    isOpen={showArtifacts}
-                    onClose={() => setShowArtifacts(false)}
-                    artifacts={artifacts}
-                    executionStatus={codeExecution.status}
-                    executionOutput={codeExecution.output}
-                    currentCode={codeExecution.code || undefined} // Fixed type mismatch
-                    executionTimeMs={codeExecution.executionTimeMs || undefined} // Fixed type mismatch
-                    outputFiles={codeExecution.outputFiles}
-                  />
+                  <Suspense fallback={<LazyPanelFallback />}>
+                    <ArtifactsPanel
+                      isOpen={showArtifacts}
+                      onClose={() => setShowArtifacts(false)}
+                      artifacts={artifacts}
+                      executionStatus={codeExecution.status}
+                      executionOutput={codeExecution.output}
+                      currentCode={codeExecution.code || undefined}
+                      executionTimeMs={codeExecution.executionTimeMs || undefined}
+                      outputFiles={codeExecution.outputFiles}
+                    />
+                  </Suspense>
                 </div>
               </motion.aside>
             )}
@@ -1279,17 +1350,19 @@ export function AssistantPage() {
                   aria-modal="true"
                   aria-label={t("assistant.artifacts", "Artifacts")}
                 >
-                  <ArtifactsPanel
-                    isOpen={showArtifacts}
-                    onClose={() => setShowArtifacts(false)}
-                    artifacts={artifacts}
-                    executionStatus={codeExecution.status}
-                    executionOutput={codeExecution.output}
-                    currentCode={codeExecution.code || undefined}
-                    executionTimeMs={codeExecution.executionTimeMs || undefined}
-                    outputFiles={codeExecution.outputFiles}
-                    className="h-full rounded-t-2xl"
-                  />
+                  <Suspense fallback={<LazyPanelFallback />}>
+                    <ArtifactsPanel
+                      isOpen={showArtifacts}
+                      onClose={() => setShowArtifacts(false)}
+                      artifacts={artifacts}
+                      executionStatus={codeExecution.status}
+                      executionOutput={codeExecution.output}
+                      currentCode={codeExecution.code || undefined}
+                      executionTimeMs={codeExecution.executionTimeMs || undefined}
+                      outputFiles={codeExecution.outputFiles}
+                      className="h-full rounded-t-2xl"
+                    />
+                  </Suspense>
                 </motion.div>
               </motion.div>
             )}
@@ -1303,12 +1376,14 @@ export function AssistantPage() {
                 exit={shouldReduceMotion ? { opacity: 0 } : { width: 0, opacity: 0 }}
                 className="shrink-0 overflow-hidden"
               >
-                <LocalOSPanel
-                  open
-                  onClose={() => setShowLocalOS(false)}
-                  state={localOSState}
-                  width={560}
-                />
+                <Suspense fallback={<LazyPanelFallback />}>
+                  <LocalOSPanel
+                    open
+                    onClose={() => setShowLocalOS(false)}
+                    state={localOSState}
+                    width={560}
+                  />
+                </Suspense>
               </motion.aside>
             )}
           </AnimatePresence>
@@ -1338,13 +1413,15 @@ export function AssistantPage() {
                   aria-modal="true"
                   aria-label="Local files"
                 >
-                  <LocalOSPanel
-                    open
-                    onClose={() => setShowLocalOS(false)}
-                    state={localOSState}
-                    width={typeof window === "undefined" ? 430 : window.innerWidth}
-                    className="rounded-t-2xl"
-                  />
+                  <Suspense fallback={<LazyPanelFallback />}>
+                    <LocalOSPanel
+                      open
+                      onClose={() => setShowLocalOS(false)}
+                      state={localOSState}
+                      width={typeof window === "undefined" ? 430 : window.innerWidth}
+                      className="rounded-t-2xl"
+                    />
+                  </Suspense>
                 </motion.div>
               </motion.div>
             )}
@@ -1355,20 +1432,28 @@ export function AssistantPage() {
     </TooltipProvider>
 
     {/* Share Dialog */}
-    <ShareDialog
-      sessionId={activeSessionId || ""}
-      messageCount={messages.length}
-      artifactCount={uniqueArtifactCount}
-      isOpen={showShareDialog}
-      onClose={() => setShowShareDialog(false)}
-    />
+    {showShareDialog && (
+      <Suspense fallback={null}>
+        <ShareDialog
+          sessionId={activeSessionId || ""}
+          messageCount={messages.length}
+          artifactCount={uniqueArtifactCount}
+          isOpen
+          onClose={() => setShowShareDialog(false)}
+        />
+      </Suspense>
+    )}
 
     {/* Connectors Panel */}
-    <ConnectorsPanel
-      open={showConnectors}
-      onClose={() => setShowConnectors(false)}
-      onCountChange={setConnectorCount}
-    />
+    {showConnectors && (
+      <Suspense fallback={null}>
+        <ConnectorsPanel
+          open
+          onClose={() => setShowConnectors(false)}
+          onCountChange={setConnectorCount}
+        />
+      </Suspense>
+    )}
     </RightPanelContext.Provider>
     </>
   );

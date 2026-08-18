@@ -10,6 +10,7 @@ is designed.
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import logging
@@ -26,17 +27,71 @@ logger = logging.getLogger(__name__)
 
 SHARE_CODE_LENGTH = 12
 MAX_DISPLAY_NAME_LEN = 100
+UNTIMED_ATTEMPT_TOKEN_TTL_MINUTES = 60
+ATTEMPT_TOKEN_RETENTION_HOURS = 24
+ATTEMPT_TOKEN_CLEANUP_BATCH_SIZE = 100
 DISPLAY_NAME_RE = re.compile(r"^[\w\s一-鿿؀-ۿ.\-@]+$", re.UNICODE)
+
+
+class ArtifactShareError(ValueError):
+    """Base class for stable artifact-share failures."""
+
+    code = "artifact_share_error"
+
+
+class ShareUnavailableError(ArtifactShareError):
+    """The public share is missing, inactive, or expired."""
+
+    code = "share_unavailable"
+
+
+class AttemptLimitReachedError(ArtifactShareError):
+    """The share has no remaining attempt slots."""
+
+    code = "attempt_limit_reached"
+
+
+class AttemptInputError(ArtifactShareError):
+    """The attempt input or token is invalid."""
+
+    code = "attempt_input_invalid"
+
+
+class AttemptConflictError(ArtifactShareError):
+    """The attempt conflicts with an already consumed identity or token."""
+
+    code = "attempt_conflict"
+
+
+_SQLSTATE_ERRORS: dict[str, type[ArtifactShareError]] = {
+    "P4040": ShareUnavailableError,
+    "P4290": AttemptLimitReachedError,
+    "P4000": AttemptInputError,
+    "P4090": AttemptConflictError,
+}
 
 
 def _sanitize_display_name(name: str | None) -> str | None:
     """Sanitize display_name: strip, length-limit, reject suspicious chars."""
     if not name:
         return None
-    stripped = name.strip()[:MAX_DISPLAY_NAME_LEN]
+    stripped = name.strip()
+    if len(stripped) > MAX_DISPLAY_NAME_LEN:
+        raise AttemptInputError("Display name is too long")
     if not stripped or not DISPLAY_NAME_RE.match(stripped):
-        raise ValueError("Display name contains unsupported characters")
+        raise AttemptInputError("Display name contains unsupported characters")
     return html.escape(stripped)
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _raise_typed_database_error(exc: Exception) -> None:
+    error_type = _SQLSTATE_ERRORS.get(str(getattr(exc, "sqlstate", "")))
+    if error_type is not None:
+        raise error_type(str(exc)) from None
+    raise exc
 
 
 class ArtifactShareManager:
@@ -154,53 +209,123 @@ class ArtifactShareManager:
             **share["payload"],
         }
 
+    async def start_attempt(self, share_code: str) -> dict[str, Any]:
+        """Issue a short-lived, opaque token whose clock starts now.
+
+        Tokens are stored only as SHA-256 digests. Starting an attempt does not
+        consume a capped attempt slot; the atomic submission transaction owns
+        that decision so abandoned starts do not reduce the remaining quota.
+        """
+        share = await self.get_share_by_code(share_code)
+        if not share:
+            raise ShareUnavailableError("Share not found or expired")
+        if (
+            share["max_attempts"] is not None
+            and share["attempt_count"] >= share["max_attempts"]
+        ):
+            raise AttemptLimitReachedError("Maximum attempts reached")
+
+        started_at = datetime.now(timezone.utc)
+        ttl_minutes = int(
+            share.get("time_limit_minutes") or UNTIMED_ATTEMPT_TOKEN_TTL_MINUTES
+        )
+        expires_at = started_at + timedelta(minutes=ttl_minutes)
+        share_expires_at = share.get("expires_at")
+        if isinstance(share_expires_at, str):
+            share_expires_at = datetime.fromisoformat(share_expires_at)
+        if share_expires_at is not None:
+            if share_expires_at.tzinfo is None:
+                share_expires_at = share_expires_at.replace(tzinfo=timezone.utc)
+            expires_at = min(expires_at, share_expires_at)
+
+        token = secrets.token_urlsafe(32)
+        inserted = await self.db.execute(
+            """
+            WITH stale_tokens AS (
+                SELECT id
+                FROM assistant.artifact_share_attempt_tokens
+                WHERE expires_at < NOW() - ($6 * INTERVAL '1 hour')
+                   OR consumed_at < NOW() - ($6 * INTERVAL '1 hour')
+                ORDER BY LEAST(expires_at, COALESCE(consumed_at, expires_at))
+                LIMIT $7
+            ), cleanup AS (
+                DELETE FROM assistant.artifact_share_attempt_tokens
+                WHERE id IN (SELECT id FROM stale_tokens)
+            )
+            INSERT INTO assistant.artifact_share_attempt_tokens
+                (id, share_id, token_hash, started_at, expires_at)
+            SELECT $1, id, $2, $3, $4
+            FROM assistant.artifact_shares
+            WHERE share_code = $5
+              AND is_active = TRUE
+              AND (expires_at IS NULL OR expires_at > NOW())
+              AND (max_attempts IS NULL OR attempt_count < max_attempts)
+            """,
+            uuid.uuid4(),
+            _token_hash(token),
+            started_at,
+            expires_at,
+            share_code,
+            ATTEMPT_TOKEN_RETENTION_HOURS,
+            ATTEMPT_TOKEN_CLEANUP_BATCH_SIZE,
+        )
+        if "INSERT 0 1" not in str(inserted):
+            # State may have changed after the read (revocation, expiry, or a
+            # concurrent final submission). Re-read only to preserve the
+            # public 404-vs-429 contract; submission remains authoritative.
+            current = await self.get_share_by_code(share_code)
+            if (
+                current
+                and current["max_attempts"] is not None
+                and current["attempt_count"] >= current["max_attempts"]
+            ):
+                raise AttemptLimitReachedError("Maximum attempts reached")
+            raise ShareUnavailableError("Share not found or expired")
+        return {
+            "attempt_token": token,
+            "started_at": started_at,
+            "expires_at": expires_at,
+        }
+
     async def submit_attempt(
         self,
         share_code: str,
         answers: dict[str, str],
         display_name: str | None = None,
         client_ip: str | None = None,
+        attempt_token: str | None = None,
     ) -> dict:
         """Submit an anonymous attempt against a shared artifact."""
         display_name = _sanitize_display_name(display_name)
         share = await self.get_share_by_code(share_code)
         if not share:
-            raise ValueError("Share not found or expired")
+            raise ShareUnavailableError("Share not found or expired")
         if share["max_attempts"] is not None and share["attempt_count"] >= share["max_attempts"]:
-            raise ValueError("max attempts reached")
+            raise AttemptLimitReachedError("Maximum attempts reached")
         if share["require_name"] and not display_name:
-            raise ValueError("This share requires a name before submitting.")
-        if share.get("time_limit_minutes") and share.get("created_at"):
-            created_at = share["created_at"]
-            if isinstance(created_at, str):
-                created_at = datetime.fromisoformat(created_at)
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=timezone.utc)
-            deadline = created_at + timedelta(minutes=int(share["time_limit_minutes"]))
-            if datetime.now(timezone.utc) > deadline:
-                raise ValueError("Time limit exceeded")
+            raise AttemptInputError("This share requires a name before submitting")
+        if share.get("time_limit_minutes") and not attempt_token:
+            raise AttemptInputError("An attempt token is required for timed shares")
+        if attempt_token is not None and not attempt_token.strip():
+            raise AttemptInputError("Attempt token is invalid")
 
-        # Atomically claim display_name for named attempts. A SELECT followed
-        # by INSERT races under concurrent submissions, so the migration owns
-        # a primary-key reservation table. No IP dedup: shared networks route
-        # many users through one IP; max_attempts bounds spam.
-        share_uuid = uuid.UUID(share["share_id"])
-        display_name_claimed = False
-        if display_name:
-            await self._claim_display_name(share_uuid, display_name)
-            display_name_claimed = True
-
-        try:
-            result: dict[str, Any] = {}
-            if share["kind"] == "quiz":
-                result = await self._grade_quiz(share, answers, display_name, client_ip)
-            else:
-                # Generic kinds: record the attempt without grading.
-                await self._reserve_attempt_slot(share)
-        except Exception:
-            if display_name_claimed:
-                await self._release_display_name(share_uuid, display_name)
-            raise
+        result: dict[str, Any] = {}
+        if share["kind"] == "quiz":
+            graded = await self._grade_quiz(share, answers)
+            result = await self._record_quiz_attempt(
+                share=share,
+                answers=answers,
+                graded=graded,
+                display_name=display_name,
+                client_ip=client_ip,
+                attempt_token=attempt_token,
+            )
+        else:
+            # Generic shares do not yet have a per-kind attempt table. Their
+            # untimed compatibility path keeps the existing atomic cap update.
+            if attempt_token is not None or share.get("time_limit_minutes"):
+                raise AttemptInputError("Attempt tokens are only supported for quiz shares")
+            await self._reserve_attempt_slot(share)
 
         logger.info(
             "Public attempt on %s share %s: %s",
@@ -221,7 +346,7 @@ class ArtifactShareManager:
             display_name,
         )
         if "INSERT 0 1" not in claimed:
-            raise ValueError(
+            raise AttemptConflictError(
                 f"You have already submitted as '{html.unescape(display_name)}'."
             )
 
@@ -260,14 +385,12 @@ class ArtifactShareManager:
             uuid.UUID(share["share_id"]),
         )
         if "UPDATE 1" not in reserved:
-            raise ValueError("Share not found, expired, or max attempts reached")
+            raise AttemptLimitReachedError("Maximum attempts reached")
 
     async def _grade_quiz(
         self,
         share: dict,
         answers: dict[str, str],
-        display_name: str | None,
-        client_ip: str | None,
     ) -> dict:
         from ai_gateway_core.quiz.quiz_grader import QuizGrader
 
@@ -276,8 +399,6 @@ class ArtifactShareManager:
             answer_keys = json.loads(answer_keys)
 
         payload = share["payload"]
-        quiz_id = payload.get("quiz_id") if isinstance(payload, dict) else None
-
         payload_questions = payload.get("questions") if isinstance(payload, dict) else None
         questions_by_id = {
             str(item.get("id")): item
@@ -301,39 +422,49 @@ class ArtifactShareManager:
                 }
             )
         grader = QuizGrader()
-        graded = grader.grade(merged_keys, answers)
+        return grader.grade(merged_keys, answers)
 
-        attempt_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc)
-        await self.db.execute(
-            """
-            INSERT INTO assistant.quiz_attempts (id, quiz_id, user_id, share_id, display_name,
-                                       answers, total_score, correct_count, total_count,
-                                       started_at, completed_at, status, client_ip, exam_id)
-            VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $9, 'completed', $10, NULL)
-            """,
-            uuid.UUID(attempt_id),
-            uuid.UUID(quiz_id) if quiz_id else None,
-            uuid.UUID(share["share_id"]),
-            display_name,
-            json.dumps(answers),
-            graded["total_score"],
-            graded["correct_count"],
-            graded["total_count"],
-            now,
-            client_ip,
-        )
+    async def _record_quiz_attempt(
+        self,
+        *,
+        share: dict[str, Any],
+        answers: dict[str, str],
+        graded: dict[str, Any],
+        display_name: str | None,
+        client_ip: str | None,
+        attempt_token: str | None,
+    ) -> dict[str, Any]:
+        """Atomically consume identity/token/slot and persist the graded row."""
+        payload = share.get("payload") or {}
+        quiz_id = payload.get("quiz_id") if isinstance(payload, dict) else None
+        if not quiz_id:
+            raise AttemptInputError("Shared quiz is missing its quiz id")
+
+        attempt_id = uuid.uuid4()
         try:
-            await self._reserve_attempt_slot(share)
-        except ValueError:
-            # Lost a concurrent race for the last slot: keep the attempt row
-            # for history but mark it rejected so creators don't count it.
-            await self.db.execute(
-                "UPDATE assistant.quiz_attempts SET status = 'rejected' WHERE id = $1",
-                uuid.UUID(attempt_id),
+            row = await self.db.fetchrow(
+                """
+                SELECT attempt_id, started_at
+                FROM assistant.record_artifact_share_quiz_attempt(
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+                )
+                """,
+                share["share_code"],
+                _token_hash(attempt_token) if attempt_token is not None else None,
+                display_name,
+                attempt_id,
+                uuid.UUID(str(quiz_id)),
+                json.dumps(answers),
+                graded["total_score"],
+                graded["correct_count"],
+                graded["total_count"],
+                client_ip,
             )
-            raise
-        return {"attempt_id": attempt_id, **graded}
+        except Exception as exc:
+            _raise_typed_database_error(exc)
+        if not row:
+            raise ShareUnavailableError("Share not found or expired")
+        return {"attempt_id": str(row["attempt_id"]), **graded}
 
     async def revoke_share(
         self,

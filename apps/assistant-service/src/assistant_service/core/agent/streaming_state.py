@@ -145,6 +145,10 @@ class StreamingToolCallState:
     tool_call: dict[str, Any]
     tool_calls_batch: list[dict[str, Any]]
     subagent_results: dict[str, str] = field(default_factory=dict)
+    validation_complete: bool = False
+    execution_initialized: bool = False
+    preinvoked: bool = False
+    preinvoke_error: Exception | None = None
     stop_processing: bool = False
     tool_id: str = ""
     tool_name: str = "unknown"

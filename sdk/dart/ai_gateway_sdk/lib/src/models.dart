@@ -110,10 +110,18 @@ class StreamEvent {
   bool get isText => eventType == EventType.textDelta;
 
   /// Whether this signals end-of-stream.
-  bool get isDone => eventType == EventType.done;
+  bool get isDone =>
+      eventType == EventType.done || eventType == EventType.runFinished;
 
   /// Whether this is an error event.
-  bool get isError => eventType == EventType.error;
+  bool get isError =>
+      eventType == EventType.error || eventType == EventType.runError;
+
+  /// Whether the stream was cancelled.
+  bool get isCancelled => eventType == EventType.cancelled;
+
+  /// Whether this event terminates the stream.
+  bool get isTerminal => isDone || isError || isCancelled;
 
   /// Convenience accessor for the text content of a `text_delta` event.
   String get textContent =>

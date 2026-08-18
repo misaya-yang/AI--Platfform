@@ -106,6 +106,41 @@ def test_startup_config_marks_invalid_values_and_hides_fallback_model_ids() -> N
     assert hidden_model not in json.dumps(summary, sort_keys=True)
 
 
+def test_mcp_cache_settings_are_bounded_in_the_startup_snapshot() -> None:
+    from assistant_service.config.startup_fingerprint import resolve_startup_config
+
+    invalid = resolve_startup_config(
+        {
+            "ASSISTANT_MCP_CLIENT_CACHE_TTL_SECONDS": "not-an-int",
+            "ASSISTANT_MCP_CLIENT_CACHE_MAX_ENTRIES": "100000",
+        }
+    )
+    underflow = resolve_startup_config(
+        {
+            "ASSISTANT_MCP_CLIENT_CACHE_TTL_SECONDS": "0",
+            "ASSISTANT_MCP_CLIENT_CACHE_MAX_ENTRIES": "-5",
+        }
+    )
+
+    assert invalid.int_value("ASSISTANT_MCP_CLIENT_CACHE_TTL_SECONDS") == 60
+    assert invalid.int_value("ASSISTANT_MCP_CLIENT_CACHE_MAX_ENTRIES") == 1000
+    assert underflow.int_value("ASSISTANT_MCP_CLIENT_CACHE_TTL_SECONDS") == 1
+    assert underflow.int_value("ASSISTANT_MCP_CLIENT_CACHE_MAX_ENTRIES") == 1
+    for snapshot in (invalid, underflow):
+        summary = snapshot.safe_summary()["settings"]
+        assert summary["ASSISTANT_MCP_CLIENT_CACHE_TTL_SECONDS"]["valid"] is False
+        assert summary["ASSISTANT_MCP_CLIENT_CACHE_MAX_ENTRIES"]["valid"] is False
+
+
+def test_main_injects_fingerprinted_mcp_cache_settings() -> None:
+    source = Path("apps/assistant-service/src/assistant_service/main.py").read_text()
+
+    assert 'client_cache_ttl_seconds=_STARTUP_CONFIG.int_value(' in source
+    assert '"ASSISTANT_MCP_CLIENT_CACHE_TTL_SECONDS"' in source
+    assert 'client_cache_max_entries=_STARTUP_CONFIG.int_value(' in source
+    assert '"ASSISTANT_MCP_CLIENT_CACHE_MAX_ENTRIES"' in source
+
+
 @pytest.mark.parametrize(
     ("name", "first", "second"),
     [

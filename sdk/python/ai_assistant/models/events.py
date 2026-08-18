@@ -27,10 +27,16 @@ class StreamEvent:
         return self.event_type == EventType.TEXT_DELTA
 
     def is_done(self) -> bool:
-        return self.event_type == EventType.DONE
+        return self.event_type in {EventType.DONE, EventType.RUN_FINISHED}
 
     def is_error(self) -> bool:
-        return self.event_type == EventType.ERROR
+        return self.event_type in {EventType.ERROR, EventType.RUN_ERROR}
+
+    def is_cancelled(self) -> bool:
+        return self.event_type == EventType.CANCELLED
+
+    def is_terminal(self) -> bool:
+        return self.is_done() or self.is_error() or self.is_cancelled()
 
     @property
     def text(self) -> str:

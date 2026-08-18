@@ -97,6 +97,7 @@ def _tool_name_log_label(value: Any, allowed_names: set[str]) -> str:
 # prior tool output. BOTH sides import this constant so the framing remains
 # stable across the storage and runtime compatibility paths.
 PRIOR_TOOL_RESULTS_MARKER = "[Previous tool results"
+_MAX_FINAL_TOOL_FRAME_BYTES = 64 * 1024
 
 # Redaction lives in ai_gateway_core.security so trace_writer.py and agent_loop.py
 # share one pattern set instead of maintaining copies that can drift out of sync.
@@ -115,12 +116,44 @@ def _external_tool_source(tool_name: str) -> str:
 
 
 def _envelope_tool_result(content: object, *, tool_name: str, tool_id: str) -> str:
-    return envelope_external_content(
-        content,
-        source=f"{_external_tool_source(tool_name)}:{tool_name}",
-        scope="session",
-        source_id=tool_id,
-    )
+    source = f"{_external_tool_source(tool_name)}:{tool_name}"
+
+    def envelop(value: object) -> str:
+        return envelope_external_content(
+            value,
+            source=source,
+            scope="session",
+            source_id=tool_id,
+        )
+
+    frame = envelop(content)
+    if len(frame.encode("utf-8")) <= _MAX_FINAL_TOOL_FRAME_BYTES:
+        return frame
+
+    from .tool_result_formatter import compact_evidence_ledger_for_context
+
+    original = str(content or "")
+    target_chars = min(len(original), 48_000)
+    while target_chars >= 512:
+        compact = compact_evidence_ledger_for_context(
+            original,
+            max_chars=target_chars,
+        )
+        frame = envelop(compact)
+        if len(frame.encode("utf-8")) <= _MAX_FINAL_TOOL_FRAME_BYTES:
+            return frame
+        target_chars = int(target_chars * 0.75)
+
+    receipt = {
+        "status": "partial",
+        "reason": "final_untrusted_envelope_byte_limit",
+        "original_utf8_bytes": len(original.encode("utf-8")),
+        "original_sha256": hashlib.sha256(original.encode("utf-8")).hexdigest(),
+    }
+    frame = envelop(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
+    if len(frame.encode("utf-8")) > _MAX_FINAL_TOOL_FRAME_BYTES:
+        raise ValueError("final_tool_result_envelope_exceeds_64k")
+    return frame
 
 
 def _streaming_tool_step_info(name: str, args: dict[str, Any]) -> dict[str, str]:
@@ -195,10 +228,17 @@ def _compact_forced_synthesis_messages(
         tool_name = message.get("name") or "tool"
         content = str(message.get("content") or "").strip()
         if content:
+            if "UNTRUSTED_EVIDENCE_LEDGER" in content:
+                from .tool_result_formatter import compact_evidence_ledger_for_context
+
+                content = compact_evidence_ledger_for_context(content, max_chars=6000)
+                summary_limit = 6000
+            else:
+                summary_limit = 1200
             tool_summaries.append(
                 {
                     "name": str(tool_name),
-                    "summary": content[:1200],
+                    "summary": content[:summary_limit],
                 }
             )
     system_messages = [message for message in messages if message.get("role") == "system"]

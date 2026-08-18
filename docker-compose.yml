@@ -211,6 +211,7 @@ services:
       GATEWAY_AUTHENTICATION__JWT__ALGORITHMS: '["HS256"]'
       GATEWAY_AUTHENTICATION__API_KEY__ENABLED: "${GATEWAY_AUTHENTICATION__API_KEY__ENABLED:-false}"
       AUTH_ALLOWED_EMAIL_DOMAIN: "${AUTH_ALLOWED_EMAIL_DOMAIN:-example.com}"
+      CONSOLE_PUBLIC_BASE_URL: "${CONSOLE_PUBLIC_BASE_URL:-}"
       DEFAULT_USER_PASSWORD: "${DEFAULT_USER_PASSWORD:?DEFAULT_USER_PASSWORD is required}"
 
       # Local quickstart rate limits. Keep configurable so production can
@@ -390,8 +391,10 @@ services:
   knowledge-service:
     image: "${KNOWLEDGE_IMAGE:-ghcr.io/misaya-yang/ai-gateway-knowledge-service:2.0.0}"
     container_name: ai-gateway-knowledge-service
-    environment:
+    environment: &knowledge-service-environment
       <<: *container-proxy-env
+      KNOWLEDGE_RUNTIME_ROLE: "api"
+      KNOWLEDGE_QDRANT_INTERACTIVE_DEADLINE_SECONDS: "${KNOWLEDGE_QDRANT_INTERACTIVE_DEADLINE_SECONDS:-3}"
       KNOWLEDGE_CORS__ALLOW_ORIGINS: '${KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON:-["http://localhost:80","http://localhost:3000","http://localhost:8081"]}'
       KNOWLEDGE_APP__HOST: "0.0.0.0"
       KNOWLEDGE_APP__PORT: "8092"
@@ -484,6 +487,36 @@ services:
     mem_limit: "${KNOWLEDGE_MEMORY_LIMIT:-512m}"
     init: true
 
+  # Knowledge durable ingestion worker. It shares the API image and database,
+  # exposes health only, and discovers queued generations from PostgreSQL.
+  knowledge-worker:
+    image: "${KNOWLEDGE_IMAGE:-ghcr.io/misaya-yang/ai-gateway-knowledge-service:2.0.0}"
+    container_name: ai-gateway-knowledge-worker
+    environment:
+      <<: *knowledge-service-environment
+      KNOWLEDGE_RUNTIME_ROLE: "worker"
+    command: ["python", "-m", "uvicorn", "knowledge_service.main:app", "--host", "0.0.0.0", "--port", "8092", "--workers", "1"]
+    volumes:
+      - kb-data:/app/data
+    networks:
+      - ai-gateway-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8092/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    mem_limit: "${KNOWLEDGE_WORKER_MEMORY_LIMIT:-512m}"
+    init: true
+
   # ===========================================================================
   # Assistant Service (extracted microservice)
   # ===========================================================================
@@ -517,6 +550,8 @@ services:
       ASSISTANT_E2E_STUB_LLM: "${ASSISTANT_E2E_STUB_LLM:-false}"
       AGENT_STUDIO_RUNTIME_ENABLED: "${AGENT_STUDIO_RUNTIME_ENABLED:-true}"
       AGENT_STUDIO_MCP_ENABLED: "${AGENT_STUDIO_MCP_ENABLED:-true}"
+      ASSISTANT_MCP_CLIENT_CACHE_TTL_SECONDS: "${ASSISTANT_MCP_CLIENT_CACHE_TTL_SECONDS:-60}"
+      ASSISTANT_MCP_CLIENT_CACHE_MAX_ENTRIES: "${ASSISTANT_MCP_CLIENT_CACHE_MAX_ENTRIES:-100}"
       AGENT_STUDIO_SKILLS_ENABLED: "${AGENT_STUDIO_SKILLS_ENABLED:-true}"
       ASSISTANT_RUNTIME_MEMORY_DIR: "${ASSISTANT_RUNTIME_MEMORY_DIR:-/app/data/assistant-memory}"
       ASSISTANT_RUNTIME_LEGACY_MEMORY_DIR: "${ASSISTANT_RUNTIME_LEGACY_MEMORY_DIR:-/app/legacy-data/assistant-memory}"
@@ -540,6 +575,7 @@ services:
       ASSISTANT_TOOL_ARTIFACT_READ_MAX_TOKENS: "${ASSISTANT_TOOL_ARTIFACT_READ_MAX_TOKENS:-8000}"
       ASSISTANT_STAGED_COMPACTION_ENABLED: "${ASSISTANT_STAGED_COMPACTION_ENABLED:-false}"
       ASSISTANT_STAGED_COMPACTION_MIN_SOURCE_TOKENS: "${ASSISTANT_STAGED_COMPACTION_MIN_SOURCE_TOKENS:-4000}"
+      ASSISTANT_READ_ONLY_TOOL_PARALLELISM: "${ASSISTANT_READ_ONLY_TOOL_PARALLELISM:-4}"
       ASSISTANT_SUBAGENTS_ENABLED: "${ASSISTANT_SUBAGENTS_ENABLED:-false}"
       # Shared HMAC for gateway↔assistant-service. Both services MUST
       # have the same value; a mismatch yields 401 at the middleware.

@@ -1,18 +1,17 @@
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
-
-import evalEnUS from "./locales/eval-en-US.json";
-import evalZhCN from "./locales/eval-zh-CN.json";
-import agentsEnUS from "./locales/agents-en-US.json";
-import agentsZhCN from "./locales/agents-zh-CN.json";
-import zhCN from "./locales/zh-CN.json";
-import enUS from "./locales/en-US.json";
+import { loadForFinalLocale, LocaleOperationQueue } from "./localeOperationQueue";
 
 export const APP_LOCALES = ["zh-CN", "en-US"] as const;
 export type AppLocale = (typeof APP_LOCALES)[number];
+export type DeferredTranslationNamespace = "eval" | "agents";
 
 const DEFAULT_LOCALE: AppLocale = "en-US";
 const APP_LOCALE_SET = new Set<string>(APP_LOCALES);
+const activeDeferredNamespaces = new Set<DeferredTranslationNamespace>();
+const loadedBundles = new Set<string>();
+let initialization: Promise<typeof i18n> | undefined;
+const localeOperations = new LocaleOperationQueue();
 
 export function resolveAppLocale(input?: string): AppLocale {
   if (!input) return DEFAULT_LOCALE;
@@ -27,47 +26,115 @@ export function resolveAppLocale(input?: string): AppLocale {
   return DEFAULT_LOCALE;
 }
 
-const resources = {
-  "zh-CN": {
-    translation: { ...zhCN, eval: evalZhCN, agents: agentsZhCN },
-  },
-  "en-US": {
-    translation: { ...enUS, eval: evalEnUS, agents: agentsEnUS },
-  },
-};
+async function loadMainLocale(locale: AppLocale): Promise<Record<string, unknown>> {
+  const module = locale === "zh-CN"
+    ? await import("./locales/zh-CN.json")
+    : await import("./locales/en-US.json");
+  return module.default;
+}
 
-// Deterministic language init — NO LanguageDetector.
-// LanguageDetector has too many implicit sources (navigator, htmlTag, querystring)
-// that override the intended default. Instead: read localStorage directly.
-const savedLng = typeof window !== "undefined"
-  ? localStorage.getItem("i18nextLng")
-  : null;
-const initialLng = savedLng && APP_LOCALE_SET.has(savedLng)
-  ? savedLng as AppLocale
-  : DEFAULT_LOCALE;
+async function loadDeferredLocale(
+  locale: AppLocale,
+  namespace: DeferredTranslationNamespace,
+): Promise<Record<string, unknown>> {
+  if (namespace === "eval") {
+    const module = locale === "zh-CN"
+      ? await import("./locales/eval-zh-CN.json")
+      : await import("./locales/eval-en-US.json");
+    return module.default;
+  }
+  const module = locale === "zh-CN"
+    ? await import("./locales/agents-zh-CN.json")
+    : await import("./locales/agents-en-US.json");
+  return module.default;
+}
 
-i18n
-  .use(initReactI18next)
-  .init({
-    lng: initialLng,
-    resources,
-    fallbackLng: DEFAULT_LOCALE,
-    supportedLngs: [...APP_LOCALES],
-    debug: false,
-    showSupportNotice: false,
-    nonExplicitSupportedLngs: false,
-    load: "currentOnly",
-    cleanCode: true,
-    returnNull: false,
-    returnEmptyString: false,
-    appendNamespaceToMissingKey: false,
-    saveMissing: false,
-    interpolation: {
-      escapeValue: false,
-    },
+async function ensureMainLocale(locale: AppLocale): Promise<void> {
+  const key = `${locale}:main`;
+  if (loadedBundles.has(key)) return;
+  i18n.addResourceBundle(locale, "translation", await loadMainLocale(locale), true, true);
+  loadedBundles.add(key);
+}
+
+async function ensureDeferredLocale(
+  locale: AppLocale,
+  namespace: DeferredTranslationNamespace,
+): Promise<void> {
+  const key = `${locale}:${namespace}`;
+  if (loadedBundles.has(key)) return;
+  const resources = await loadDeferredLocale(locale, namespace);
+  i18n.addResourceBundle(locale, "translation", { [namespace]: resources }, true, true);
+  loadedBundles.add(key);
+}
+
+export function initializeI18n(): Promise<typeof i18n> {
+  if (initialization) return initialization;
+  initialization = (async () => {
+    const savedLng = typeof window !== "undefined"
+      ? localStorage.getItem("i18nextLng")
+      : null;
+    const initialLng = resolveAppLocale(savedLng || undefined);
+    const mainResources = await loadMainLocale(initialLng);
+    loadedBundles.add(`${initialLng}:main`);
+    await i18n
+      .use(initReactI18next)
+      .init({
+        lng: initialLng,
+        resources: { [initialLng]: { translation: mainResources } },
+        fallbackLng: DEFAULT_LOCALE,
+        supportedLngs: [...APP_LOCALES],
+        debug: false,
+        showSupportNotice: false,
+        nonExplicitSupportedLngs: false,
+        load: "currentOnly",
+        cleanCode: true,
+        returnNull: false,
+        returnEmptyString: false,
+        appendNamespaceToMissingKey: false,
+        saveMissing: false,
+        interpolation: { escapeValue: false },
+      });
+    return i18n;
+  })();
+  return initialization;
+}
+
+export async function loadTranslationNamespace(
+  namespace: DeferredTranslationNamespace,
+): Promise<void> {
+  await localeOperations.run(async () => {
+    await initializeI18n();
+    activeDeferredNamespaces.add(namespace);
+    const initialLocale = resolveAppLocale(i18n.resolvedLanguage || i18n.language);
+    await loadForFinalLocale(
+      initialLocale,
+      () => resolveAppLocale(i18n.resolvedLanguage || i18n.language),
+      async (locale) => ensureDeferredLocale(resolveAppLocale(locale), namespace),
+    );
   });
+}
 
-// When user switches language via UI, persist to localStorage so it sticks.
+export async function changeAppLanguage(input: string): Promise<void> {
+  await localeOperations.run(async () => {
+    await initializeI18n();
+    const locale = resolveAppLocale(input);
+    await Promise.all([
+      ensureMainLocale(locale),
+      ...[...activeDeferredNamespaces].map((namespace) =>
+        ensureDeferredLocale(locale, namespace),
+      ),
+    ]);
+    await i18n.changeLanguage(locale);
+    const finalLocale = resolveAppLocale(i18n.resolvedLanguage || i18n.language);
+    await Promise.all([
+      ensureMainLocale(finalLocale),
+      ...[...activeDeferredNamespaces].map((namespace) =>
+        ensureDeferredLocale(finalLocale, namespace),
+      ),
+    ]);
+  });
+}
+
 i18n.on("languageChanged", (lng) => {
   if (typeof window !== "undefined") {
     localStorage.setItem("i18nextLng", lng);
@@ -77,7 +144,6 @@ i18n.on("languageChanged", (lng) => {
 
 export default i18n;
 
-// 支持的语言列表
 export const languages = [
   { code: "zh-CN", nameKey: "language.zhCN", nativeName: "简体中文", flag: "🇨🇳" },
   { code: "en-US", nameKey: "language.enUS", nativeName: "English", flag: "🇺🇸" },

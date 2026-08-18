@@ -1,11 +1,17 @@
 package com.aigateway.ai;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -15,6 +21,11 @@ import static org.junit.jupiter.api.Assertions.*;
 class SSEParserTest {
 
     private final SSEParser parser = new SSEParser();
+
+    private Map<String, Map<String, Object>> sharedFixture() throws IOException {
+        String json = Files.readString(Path.of("..", "fixtures", "sse_inner_envelopes.json"));
+        return new ObjectMapper().readValue(json, new TypeReference<>() {});
+    }
 
     private List<StreamEvent> parse(String sseText) {
         var events = new ArrayList<StreamEvent>();
@@ -34,6 +45,32 @@ class SSEParserTest {
         assertEquals(1, events.size());
         assertEquals(EventType.TEXT_DELTA, events.get(0).eventType());
         assertEquals("Hello", events.get(0).textContent());
+    }
+
+    @Test
+    void parseSharedInnerEnvelopeFixture() throws IOException {
+        var fixture = sharedFixture();
+
+        var text = parse(fixture.get("text_delta").get("sse").toString()).get(0);
+        assertEquals(EventType.TEXT_DELTA, text.eventType());
+        assertEquals("Hi", text.textContent());
+
+        for (String name : List.of("done", "error", "cancelled", "run_finished", "run_error")) {
+            var event = parse(fixture.get(name).get("sse").toString()).get(0);
+            assertEquals(fixture.get(name).get("event_type"), event.eventType());
+            assertTrue(event.isTerminal());
+            if ("error".equals(name)) assertEquals("boom", event.data().get("message"));
+            if ("cancelled".equals(name)) assertEquals("user_stop", event.data().get("reason"));
+            if ("run_error".equals(name)) {
+                assertTrue(event.isError());
+                assertEquals("run failed", event.data().get("message"));
+            }
+        }
+
+        for (String name : List.of("null_data", "number_data", "boolean_data", "array_data")) {
+            var event = parse(fixture.get(name).get("sse").toString()).get(0);
+            assertEquals(fixture.get(name).get("value"), event.data().get("value"));
+        }
     }
 
     @Test

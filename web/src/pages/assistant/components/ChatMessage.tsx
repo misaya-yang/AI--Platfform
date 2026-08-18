@@ -8,7 +8,7 @@
  * SearchStatusDisplay / WebSearchDisplay / Thought Process block.
  */
 
-import { memo, useEffect, useMemo, useState } from "react";
+import { lazy, memo, Suspense, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
 import {
@@ -28,21 +28,27 @@ import {
   Network,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { StreamOutput } from "@/components/StreamOutput";
 import { ContextDisplay } from "./ContextDisplay";
 import { CitationDisplay } from "./CitationDisplay";
-import { DocumentPreview } from "./DocumentPreview";
 import type { ChatMessage as ChatMessageType, AgentPhaseStatus } from "../types";
 import { QuizCard } from "./Quiz";
 import { ActivityPill } from "./ActivityPill";
 import { useRightPanel } from "./rightPanelContext";
-import { buildTimeline } from "./buildTimeline";
+import { messageContainmentStyle } from "@/features/chat/messageRenderPerformance";
 
 interface ChatMessageProps {
   message: ChatMessageType;
 }
 
 const ASSISTANT_UI_V2 = import.meta.env.VITE_ASSISTANT_UI_V2 !== "false";
+const StreamOutput = lazy(async () => {
+  const module = await import("@/components/StreamOutput");
+  return { default: module.StreamOutput };
+});
+const DocumentPreview = lazy(async () => {
+  const module = await import("./DocumentPreview");
+  return { default: module.DocumentPreview };
+});
 
 function InlineArtifactCard({
   artifact,
@@ -351,13 +357,12 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
     return () => window.clearInterval(id);
   }, [message.isStreaming]);
 
-  // Pre-compute the timeline so we can decide whether to show the chip at all
-  // and to pass totals to the panel/chip. Safe for user messages too — builder
-  // returns 0 steps for non-assistant turns.
-  const { steps: timelineSteps, totalDurationMs } = useMemo(
-    () => (isUser ? { steps: [], totalDurationMs: 0 } : buildTimeline(message, t)),
-    [message, t, isUser],
-  );
+  const timelineStepCount = isUser
+    ? 0
+    : (message.processSummary?.steps.length || 0) +
+      (message.processSummary?.tools.length || 0) +
+      (message.activeSubAgents?.length || 0);
+  const totalDurationMs = message.processSummary?.totalDurationMs || message.durationMs || 0;
 
   // Always surface the activity entry point on assistant turns. Earlier we
   // gated on `timelineSteps.length > 0 || isStreaming`, but messages reloaded
@@ -373,13 +378,14 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
     !isUser &&
     !!message.isStreaming &&
     !message.content &&
-    timelineSteps.length === 0;
+    timelineStepCount === 0;
 
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, ease: [0.25, 0.1, 0.25, 1] }}
+      style={messageContainmentStyle(Boolean(message.isStreaming))}
       className={cn("group w-full", isUser ? "flex justify-end" : "")}
     >
       {isUser ? (
@@ -420,7 +426,7 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
               : t("playground.activity.title", { defaultValue: "Activity" });
             return (
               <ActivityPill
-                steps={timelineSteps.length}
+                steps={timelineStepCount}
                 durationLabel={durationLabel}
                 running={!!message.isStreaming}
                 onOpen={() => openActivity(message.id)}
@@ -481,11 +487,13 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
             <ImageGeneratingPlaceholder prompt={message.imageGenerationPrompt} />
           ) : message.content ? (
             <div className="text-[hsl(var(--assistant-text-primary))] text-[15px] leading-[1.75]">
-              <StreamOutput
-                text={message.content}
-                isStreaming={!!message.isStreaming}
-                id={`msg-${message.id}`}
-              />
+              <Suspense fallback={<div className="whitespace-pre-wrap">{message.content}</div>}>
+                <StreamOutput
+                  text={message.content}
+                  isStreaming={!!message.isStreaming}
+                  id={`msg-${message.id}`}
+                />
+              </Suspense>
             </div>
           ) : !showTypingDots && !message.isStreaming && (
             <span className="text-[hsl(var(--assistant-text-secondary))] italic text-sm">
@@ -519,19 +527,20 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
             ) : (
               <div className="mt-4 space-y-3">
                 {message.generatedArtifacts.map((artifact) => (
-                  <DocumentPreview
-                    key={artifact.id}
-                    title={artifact.title || artifact.filename || "Document"}
-                    content={artifact.content || ""}
-                    format={
-                      artifact.format === "md" || artifact.format === "markdown"
-                        ? "markdown"
-                        : "text"
-                    }
-                    downloadUrl={artifact.url}
-                    defaultExpanded={false}
-                    maxHeight={300}
-                  />
+                  <Suspense key={artifact.id} fallback={null}>
+                    <DocumentPreview
+                      title={artifact.title || artifact.filename || "Document"}
+                      content={artifact.content || ""}
+                      format={
+                        artifact.format === "md" || artifact.format === "markdown"
+                          ? "markdown"
+                          : "text"
+                      }
+                      downloadUrl={artifact.url}
+                      defaultExpanded={false}
+                      maxHeight={300}
+                    />
+                  </Suspense>
                 ))}
               </div>
             ))}

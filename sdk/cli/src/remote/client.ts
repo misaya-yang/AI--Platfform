@@ -119,10 +119,10 @@ export class GatewayClient {
 
           if (!line) {
             if (bufDataLines.length > 0) {
-              const event = this.flush(bufEvent, bufDataLines);
+              const event = parseSSEEvent(bufEvent, bufDataLines);
               if (event) {
                 yield event;
-                if (event.eventType === EventType.DONE) return;
+                if (isTerminalEvent(event)) return;
               }
             }
             bufEvent = null;
@@ -140,7 +140,7 @@ export class GatewayClient {
 
       // Flush trailing
       if (bufDataLines.length > 0) {
-        const event = this.flush(bufEvent, bufDataLines);
+        const event = parseSSEEvent(bufEvent, bufDataLines);
         if (event) yield event;
       }
     } finally {
@@ -149,43 +149,54 @@ export class GatewayClient {
     }
   }
 
-  private flush(
-    eventField: string | null,
-    dataLines: string[],
-  ): StreamEvent | null {
-    const raw = dataLines.join("\n");
+}
 
-    if (raw.trim() === "[DONE]") {
-      return { eventType: EventType.DONE, data: {}, timestamp: Date.now() / 1000 };
-    }
+export function isTerminalEvent(event: StreamEvent): boolean {
+  return (
+    event.eventType === EventType.DONE ||
+    event.eventType === EventType.RUN_FINISHED ||
+    event.eventType === EventType.ERROR ||
+    event.eventType === EventType.RUN_ERROR ||
+    event.eventType === EventType.CANCELLED
+  );
+}
 
-    let payload: Record<string, any>;
-    try {
-      payload = JSON.parse(raw);
-    } catch {
-      payload = { raw };
-    }
+export function parseSSEEvent(
+  eventField: string | null,
+  dataLines: string[],
+): StreamEvent | null {
+  const raw = dataLines.join("\n");
 
-    const eventType =
-      eventField ?? payload.event_type ?? payload.event ?? "message";
-    delete payload.event_type;
-    delete payload.event;
-
-    const timestamp = payload.timestamp ?? Date.now() / 1000;
-    delete payload.timestamp;
-
-    // Unwrap nested "data" — can be string (text_delta) or object
-    const inner = payload.data !== undefined ? payload.data : payload;
-
-    let data: Record<string, any>;
-    if (typeof inner === "string") {
-      data = { content: inner };
-    } else if (typeof inner === "object" && inner !== null) {
-      data = inner;
-    } else {
-      data = { value: inner };
-    }
-
-    return { eventType, data, timestamp: Number(timestamp) };
+  if (raw.trim() === "[DONE]") {
+    return { eventType: EventType.DONE, data: {}, timestamp: Date.now() / 1000 };
   }
+
+  let payload: Record<string, any>;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    payload = { raw };
+  }
+
+  const eventType =
+    eventField ?? payload.event_type ?? payload.event ?? "message";
+  delete payload.event_type;
+  delete payload.event;
+
+  const timestamp = payload.timestamp ?? Date.now() / 1000;
+  delete payload.timestamp;
+
+  // Unwrap nested "data" — can be string (text_delta) or object
+  const inner = payload.data !== undefined ? payload.data : payload;
+
+  let data: Record<string, any>;
+  if (typeof inner === "string") {
+    data = { content: inner };
+  } else if (typeof inner === "object" && inner !== null && !Array.isArray(inner)) {
+    data = inner;
+  } else {
+    data = { value: inner };
+  }
+
+  return { eventType, data, timestamp: Number(timestamp) };
 }

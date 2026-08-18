@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import sys
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -72,8 +73,6 @@ async def with_sse_heartbeat(
     producer task is cancelled cleanly. Exceptions raised inside the
     upstream propagate to the consumer.
     """
-    queue: asyncio.Queue[Any] = asyncio.Queue()
-    sentinel_done = object()
     heartbeat_payload: Any = _HEARTBEAT_FRAME_STR if as_str else _HEARTBEAT_FRAME_BYTES
     at_sse_frame_boundary = True
     trailing_bytes = b""
@@ -95,38 +94,47 @@ async def with_sse_heartbeat(
                 "\r\n\r\n"
             )
 
-    async def _producer() -> None:
-        try:
-            async for chunk in upstream:
-                await queue.put(chunk)
-        except BaseException as exc:  # noqa: BLE001 — propagate to consumer
-            await queue.put(exc)
-        else:
-            await queue.put(sentinel_done)
-
-    task = asyncio.create_task(_producer())
+    # Keep exactly one upstream read in flight. Unlike wait_for(anext(...)),
+    # asyncio.wait does not cancel the read when the heartbeat deadline fires.
+    # Starting the following read only after the downstream asks for another
+    # item also prevents a slow client from accumulating queued chunks.
+    next_item: asyncio.Task[Any] | None = asyncio.create_task(anext(upstream))
 
     try:
         while True:
-            try:
-                item = await asyncio.wait_for(queue.get(), timeout=interval_seconds)
-            except asyncio.TimeoutError:
+            assert next_item is not None
+            done, _ = await asyncio.wait({next_item}, timeout=interval_seconds)
+            if not done:
                 if at_sse_frame_boundary:
                     yield heartbeat_payload
                 continue
 
-            if item is sentinel_done:
+            completed = next_item
+            next_item = None
+            try:
+                item = completed.result()
+            except StopAsyncIteration:
                 return
-            if isinstance(item, BaseException):
-                raise item
 
             _update_frame_boundary(item)
             yield item
+            next_item = asyncio.create_task(anext(upstream))
     finally:
-        if not task.done():
-            task.cancel()
+        primary_exception = sys.exc_info()[1]
+        if next_item is not None and not next_item.done():
+            next_item.cancel()
             with contextlib.suppress(asyncio.CancelledError, BaseException):
-                await task
+                await next_item
+        close = getattr(upstream, "aclose", None)
+        if callable(close):
+            try:
+                await close()
+            except (asyncio.CancelledError, RuntimeError):
+                pass
+            except BaseException:
+                # Preserve the provider/root failure when cleanup also fails.
+                if primary_exception is None:
+                    raise
 
 
 __all__ = [

@@ -46,11 +46,11 @@ def _request() -> SimpleNamespace:
     return request
 
 
-def _auth(*permissions: str) -> AuthContext:
+def _auth(*permissions: str, roles: list[str] | None = None) -> AuthContext:
     return AuthContext(
         user_id="user-capability",
         tenant_id="tenant-a",
-        roles=["user"],
+        roles=roles or ["user"],
         permissions=list(permissions),
         is_authenticated=True,
     )
@@ -110,7 +110,7 @@ async def test_metrics_read_accepts_gateway_metrics_permission(monkeypatch) -> N
 
     result = await metrics_routes.get_metrics_summary(
         request=_request(),
-        auth=_auth("console:metrics:view"),
+        auth=_auth("console:metrics:view", roles=["platform_admin"]),
     )
 
     assert result.total_requests == 0

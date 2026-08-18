@@ -114,6 +114,27 @@ _SETTING_SPECS = (
     ),
     _SettingSpec("ASSISTANT_SKILL_CANDIDATE_HARD_LIMIT", 64, "int", minimum=1),
     _SettingSpec(
+        "ASSISTANT_READ_ONLY_TOOL_PARALLELISM",
+        4,
+        "int",
+        minimum=1,
+        maximum=8,
+    ),
+    _SettingSpec(
+        "ASSISTANT_MCP_CLIENT_CACHE_TTL_SECONDS",
+        60,
+        "int",
+        minimum=1,
+        maximum=3_600,
+    ),
+    _SettingSpec(
+        "ASSISTANT_MCP_CLIENT_CACHE_MAX_ENTRIES",
+        100,
+        "int",
+        minimum=1,
+        maximum=1_000,
+    ),
+    _SettingSpec(
         "ASSISTANT_PARENT_HARD_TOOL_ITERATIONS",
         32,
         "int",

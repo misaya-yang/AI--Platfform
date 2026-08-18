@@ -8,6 +8,7 @@ permission and Agent capability filters as a direct tool call.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import json
 import re
@@ -319,11 +320,40 @@ class ToolDiscoveryExecutor:
                 error="TOOL_DISCOVERY_CALL_UNAVAILABLE",
             )
         underlying = await caller(name, arguments, context)
+        projected_result: Any = underlying.result
+        if isinstance(projected_result, str):
+            with contextlib.suppress(json.JSONDecodeError):
+                projected_result = json.loads(projected_result)
+        projected_metadata = {
+            key: value
+            for key, value in dict(underlying.metadata or {}).items()
+            if key
+            in {
+                "execution_id",
+                "status",
+                "exit_code",
+                "duration_ms",
+                "output_files_count",
+                "side_effect_state",
+            }
+            and isinstance(value, (str, int, float, bool, type(None)))
+        }
         return ToolCallResult(
             call_id=request.call_id,
             tool_name=request.tool_name,
             success=underlying.success,
-            result=underlying.result,
+            result=json.dumps(
+                {
+                    "invoked_tool": name,
+                    "status": "success" if underlying.success else "error",
+                    "result": projected_result,
+                    "error": underlying.error,
+                    "execution": projected_metadata,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ),
             error=underlying.error,
             metadata={
                 **dict(underlying.metadata or {}),

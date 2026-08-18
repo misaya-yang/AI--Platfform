@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from ai_gateway_core.auth.gateway_secret import GatewaySecret
 from ai_gateway_core.auth.gateway_secret_middleware import (
@@ -7,6 +9,7 @@ from ai_gateway_core.auth.gateway_secret_middleware import (
     validate_gateway_auth_configuration,
 )
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
@@ -162,3 +165,44 @@ def test_gateway_secret_middleware_v2_verifies_and_replays_request_body() -> Non
 
     assert response.status_code == 200
     assert response.json() == {"query": "hello"}
+
+
+def test_gateway_secret_middleware_v2_preserves_stream_until_first_chunk() -> None:
+    secret = GatewaySecret(
+        secret="shared-secret-for-tests",
+        version="v2",
+        key_id="local",
+        keys={"local": "shared-secret-for-tests"},
+    )
+    app = FastAPI()
+    app.add_middleware(
+        GatewaySecretAuthMiddleware,
+        gateway_secret=secret,
+        allow_anonymous=False,
+    )
+
+    @app.post("/stream")
+    async def stream(payload: Payload):
+        async def events():
+            await asyncio.sleep(0.01)
+            yield f"data: {payload.query}\n\n"
+
+        return StreamingResponse(events(), media_type="text/event-stream")
+
+    body = b'{"query":"hello"}'
+    header = secret.sign(
+        request_id="middleware-v2-stream",
+        method="POST",
+        path="/stream",
+        query="",
+        body=body,
+    )
+
+    response = TestClient(app).post(
+        "/stream",
+        content=body,
+        headers={secret.header_name: header, "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 200
+    assert response.text == "data: hello\n\n"

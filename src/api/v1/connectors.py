@@ -552,9 +552,36 @@ async def initiate_oauth(
     return {"auth_url": auth_url, "state": state}
 
 
+def _console_public_base_url() -> str:
+    """Return the explicitly configured console origin or a safe relative fallback.
+
+    CORS is an authorization allowlist, not a routing preference.  Selecting its
+    first entry made OAuth completion depend on configuration order and could
+    redirect a user to a different allowed deployment.  Keep callback routing
+    explicit and fail closed to a same-origin relative path when it is absent or
+    malformed.
+    """
+
+    configured = os.environ.get("CONSOLE_PUBLIC_BASE_URL", "").strip()
+    if not configured:
+        return ""
+    parsed = urllib.parse.urlsplit(configured)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        logger.warning("Ignoring invalid CONSOLE_PUBLIC_BASE_URL")
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
 def _oauth_console_redirect(provider: str, status: str = "connected") -> RedirectResponse:
-    origins = os.environ.get("CORS_ALLOWED_ORIGINS", "")
-    origin = next((item.strip() for item in origins.split(",") if item.strip()), "")
+    origin = _console_public_base_url()
     path = (
         f"/settings/connectors?connected={urllib.parse.quote(provider)}"
         f"&status={urllib.parse.quote(status)}"

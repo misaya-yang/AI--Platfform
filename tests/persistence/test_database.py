@@ -253,6 +253,76 @@ class TestBootstrapAdminPassword:
 
         assert await db._account_permission_schema_missing() is False
 
+    @pytest.mark.asyncio
+    async def test_platform_admin_check_requires_role_and_strict_bootstrap_assignment(self):
+        db = DatabaseStorage.__new__(DatabaseStorage)
+        mock_conn = AsyncMock()
+        mock_conn.fetchval = AsyncMock(side_effect=[1, None])
+        mock_pool = AsyncMock()
+        mock_pool.acquire = MagicMock(
+            return_value=AsyncMock(
+                __aenter__=AsyncMock(return_value=mock_conn), __aexit__=AsyncMock()
+            )
+        )
+        db._pool = mock_pool
+
+        assert await db._platform_admin_schema_missing() is True
+        assignment_query = mock_conn.fetchval.await_args_list[1].args[0]
+        assert "u.user_id = 'admin'" in assignment_query
+        assert "u.created_by = 'system'" in assignment_query
+        assert "ur.role_name = 'platform_admin'" in assignment_query
+
+
+@pytest.mark.asyncio
+async def test_connect_orders_platform_admin_after_bootstrap_account(monkeypatch):
+    db = DatabaseStorage.__new__(DatabaseStorage)
+    db.enabled = True
+    db.dsn = "postgresql://unused"
+    db._pool_min_size = 1
+    db._pool_max_size = 1
+    db._command_timeout_s = 30
+    db._api_key_usage_flush_interval_seconds = 0
+    db._api_key_usage_flush_batch_size = 0
+    db._api_key_usage_task = None
+    db.auto_init = True
+
+    fake_pool = AsyncMock()
+    monkeypatch.setattr(database_module.asyncpg, "create_pool", AsyncMock(return_value=fake_pool))
+
+    ordered_methods = [
+        "_auto_initialize_schema",
+        "_auto_apply_account_permission_migration",
+        "_auto_apply_platform_admin_migration",
+    ]
+    remaining_methods = [
+        "_auto_apply_user_extra_permissions_migration",
+        "_auto_apply_api_keys_migration",
+        "_auto_apply_assistant_memory_migration",
+        "_auto_apply_fts_migration",
+        "_auto_apply_source_metadata_migration",
+        "_auto_apply_openai_embedding_migration",
+        "_auto_apply_observability_governance_migration",
+        "_auto_apply_assistant_gateway_migration",
+        "_auto_apply_assistant_memory_sot_migration",
+        "_auto_apply_assistant_queue_lane_migration",
+        "_auto_apply_assistant_skills_migration",
+        "_auto_apply_assistant_scheduler_audit_migration",
+        "_auto_apply_assistant_context_metrics_migration",
+        "_auto_apply_tenant_isolation_migration",
+        "_auto_apply_conversation_shares_migration",
+        "_ensure_bootstrap_admin_password_hash",
+    ]
+    calls: list[str] = []
+
+    for name in ordered_methods:
+        setattr(db, name, AsyncMock(side_effect=lambda name=name: calls.append(name)))
+    for name in remaining_methods:
+        setattr(db, name, AsyncMock())
+
+    await db.connect()
+
+    assert calls == ordered_methods
+
 
 @pytest.mark.asyncio
 async def test_schema_check_failure_uses_bounded_exception_logger(monkeypatch):

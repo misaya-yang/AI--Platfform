@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from fastapi import HTTPException
 
 from src.api.v1.proxy import check_proxy_rate_limit
 from src.core.auth.user_resolver import UserContext
 from src.core.gateway.multi_dimension_rate_limiter import RateLimitResult
+from src.core.gateway.rate_policy import RatePolicy
 from src.proxy.config_loader import ProxyServiceConfig
 
 
@@ -133,3 +136,102 @@ async def test_service_rate_limit_rejects_with_429() -> None:
     assert exc.value.headers["Retry-After"] == "30"
     assert exc.value.headers["X-RateLimit-Limit"] == "5"
     assert exc.value.detail["error"]["code"] == "RATE_LIMIT_EXCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_dynamic_policy_batches_preserve_noncontiguous_window_order() -> None:
+    policies = [
+        RatePolicy(key="a", dimension="global", requests=100, window=60),
+        RatePolicy(key="b", dimension="tenant", requests=50, window=10),
+        RatePolicy(key="c", dimension="user", requests=25, window=60),
+    ]
+
+    class Resolver:
+        async def resolve(self, **_kwargs):
+            return policies
+
+    class Limiter:
+        def __init__(self) -> None:
+            self.batch_calls: list[list[RatePolicy]] = []
+
+        async def check_custom_limits(self, *, policies):
+            self.batch_calls.append(list(policies))
+            return [
+                RateLimitResult(
+                    allowed=True,
+                    dimension=policy.dimension,
+                    limit=policy.requests,
+                    remaining=policy.requests - 1,
+                )
+                for policy in policies
+            ]
+
+    limiter = Limiter()
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(rate_policy_resolver=Resolver()))
+    )
+
+    headers = await check_proxy_rate_limit(
+        user=_make_user(),
+        rate_limiter=limiter,
+        service_name="agent",
+        operation="run_wait",
+        service_config=_make_service_config(False),
+        request=request,
+    )
+
+    assert len(limiter.batch_calls) == 3
+    assert [[policy.key for policy in batch] for batch in limiter.batch_calls] == [
+        ["a"],
+        ["b"],
+        ["c"],
+    ]
+    assert headers["X-RateLimit-Dimension"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_dynamic_policy_rejection_stops_at_original_priority_position() -> None:
+    policies = [
+        RatePolicy(key="a", dimension="global", requests=100, window=60),
+        RatePolicy(key="b", dimension="tenant", requests=1, window=10),
+        RatePolicy(key="c", dimension="user", requests=25, window=60),
+    ]
+
+    class Resolver:
+        async def resolve(self, **_kwargs):
+            return policies
+
+    class Limiter:
+        def __init__(self) -> None:
+            self.checked: list[str] = []
+
+        async def check_custom_limits(self, *, policies):
+            policy = policies[0]
+            self.checked.append(policy.key)
+            return [
+                RateLimitResult(
+                    allowed=policy.key != "b",
+                    dimension=policy.dimension,
+                    limit=policy.requests,
+                    remaining=0,
+                    retry_after=10 if policy.key == "b" else 0,
+                )
+            ]
+
+    limiter = Limiter()
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(rate_policy_resolver=Resolver()))
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await check_proxy_rate_limit(
+            user=_make_user(),
+            rate_limiter=limiter,
+            service_name="agent",
+            operation="run_wait",
+            service_config=_make_service_config(False),
+            request=request,
+        )
+
+    assert exc.value.status_code == 429
+    assert limiter.checked == ["a", "b"]

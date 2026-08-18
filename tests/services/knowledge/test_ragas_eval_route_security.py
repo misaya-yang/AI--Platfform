@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -81,12 +82,20 @@ def test_internal_ragas_endpoint_accepts_only_middleware_verified_request(
         allow_anonymous=False,
     )
     payload = {"query": "refund policy", "contexts": ["30 day refunds"]}
+    body = json.dumps(payload, separators=(",", ":")).encode()
 
     unsigned = TestClient(app).post("/internal/eval/ragas", json=payload)
     signed = TestClient(app).post(
         "/internal/eval/ragas",
-        json=payload,
-        headers={secret.header_name: secret.sign()},
+        content=body,
+        headers={
+            "content-type": "application/json",
+            secret.header_name: secret.sign(
+                method="POST",
+                path="/internal/eval/ragas",
+                body=body,
+            ),
+        },
     )
 
     assert unsigned.status_code == 401
@@ -117,10 +126,19 @@ def test_internal_ragas_defaults_off_before_provider_or_service_resolution(
         allow_anonymous=False,
     )
 
+    payload = {"query": "refund policy", "contexts": ["30 day refunds"]}
+    body = json.dumps(payload, separators=(",", ":")).encode()
     response = TestClient(app).post(
         "/internal/eval/ragas",
-        json={"query": "refund policy", "contexts": ["30 day refunds"]},
-        headers={secret.header_name: secret.sign()},
+        content=body,
+        headers={
+            "content-type": "application/json",
+            secret.header_name: secret.sign(
+                method="POST",
+                path="/internal/eval/ragas",
+                body=body,
+            ),
+        },
     )
 
     assert response.status_code == 403

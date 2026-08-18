@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,14 @@ def _request(*, rules: list[dict], api_key_hash: str = "hash-a") -> SimpleNamesp
     request.state = SimpleNamespace(api_key_hash=api_key_hash)
     request.app = SimpleNamespace()
     request.app.state = SimpleNamespace(database=None, rate_limit_rules=rules)
+    return request
+
+
+def _database_request(database: object) -> SimpleNamespace:
+    request = SimpleNamespace(state=SimpleNamespace(api_key_hash="hash-a"))
+    request.app = SimpleNamespace(
+        state=SimpleNamespace(database=database, rate_limit_rules=[])
+    )
     return request
 
 
@@ -215,3 +224,183 @@ async def test_burst_only_increases_effective_limit_for_burst_strategies() -> No
     by_dimension = {policy.dimension: policy for policy in policies}
     assert by_dimension["global"].requests == 10
     assert by_dimension["operation:run_wait"].requests == 15
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cold_load_is_singleflight_and_warm_load_uses_snapshot() -> None:
+    class Database:
+        enabled = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def get_rate_limits(self) -> list[dict]:
+            self.calls += 1
+            await asyncio.sleep(0)
+            return [
+                {
+                    "scope": "global",
+                    "requests": 50,
+                    "window": 60,
+                    "enabled": True,
+                }
+            ]
+
+    database = Database()
+    request = _database_request(database)
+    resolver = RatePolicyResolver(cache_ttl_seconds=60)
+
+    results = await asyncio.gather(
+        *(
+            resolver.resolve(
+                request=request,
+                user=_user(),
+                service_name="agent",
+                operation="run_wait",
+                service_config=_service_config(),
+            )
+            for _ in range(100)
+        )
+    )
+    warm = await resolver.resolve(
+        request=request,
+        user=_user(),
+        service_name="agent",
+        operation="run_wait",
+        service_config=_service_config(),
+    )
+
+    assert database.calls == 1
+    assert all(result[0].requests == 50 for result in results)
+    assert warm[0].requests == 50
+    assert resolver._snapshot is not None
+    with pytest.raises(TypeError):
+        resolver._snapshot.rules[0]["requests"] = 999
+
+
+@pytest.mark.asyncio
+async def test_expired_snapshot_is_served_while_single_refresh_runs() -> None:
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+
+    class Database:
+        enabled = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def get_rate_limits(self) -> list[dict]:
+            self.calls += 1
+            if self.calls > 1:
+                refresh_started.set()
+                await release_refresh.wait()
+            return [
+                {
+                    "scope": "global",
+                    "requests": 10 if self.calls == 1 else 20,
+                    "window": 60,
+                    "enabled": True,
+                }
+            ]
+
+    database = Database()
+    request = _database_request(database)
+    resolver = RatePolicyResolver(cache_ttl_seconds=0.001)
+    initial = await resolver.resolve(
+        request=request,
+        user=_user(),
+        service_name="agent",
+        operation="run_wait",
+        service_config=_service_config(),
+    )
+    assert initial[0].requests == 10
+    await asyncio.sleep(0.01)
+
+    stale_results = await asyncio.gather(
+        *(
+            resolver.resolve(
+                request=request,
+                user=_user(),
+                service_name="agent",
+                operation="run_wait",
+                service_config=_service_config(),
+            )
+            for _ in range(20)
+        )
+    )
+    await asyncio.wait_for(refresh_started.wait(), timeout=1)
+
+    assert all(result[0].requests == 10 for result in stale_results)
+    assert database.calls == 2
+
+    release_refresh.set()
+    refresh_task = resolver._refresh_task
+    assert refresh_task is not None
+    await refresh_task
+    fresh = await resolver.resolve(
+        request=request,
+        user=_user(),
+        service_name="agent",
+        operation="run_wait",
+        service_config=_service_config(),
+    )
+    assert fresh[0].requests == 20
+
+
+@pytest.mark.asyncio
+async def test_snapshot_fails_closed_after_max_stale_when_database_refresh_fails() -> None:
+    class Database:
+        enabled = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def get_rate_limits(self) -> list[dict]:
+            self.calls += 1
+            if self.calls > 1:
+                raise RuntimeError("rate policy database unavailable")
+            return [
+                {
+                    "scope": "global",
+                    "requests": 10_000,
+                    "window": 60,
+                    "enabled": True,
+                }
+            ]
+
+    database = Database()
+    request = _database_request(database)
+    resolver = RatePolicyResolver(
+        cache_ttl_seconds=0.001,
+        max_stale_seconds=0.001,
+    )
+    initial = await resolver.resolve(
+        request=request,
+        user=_user(),
+        service_name="agent",
+        operation="run_wait",
+        service_config=_service_config(),
+    )
+    assert initial[0].requests == 10_000
+    await asyncio.sleep(0.01)
+
+    failures = await asyncio.gather(
+        *(
+            resolver.resolve(
+                request=request,
+                user=_user(),
+                service_name="agent",
+                operation="run_wait",
+                service_config=_service_config(),
+            )
+            for _ in range(20)
+        ),
+        return_exceptions=True,
+    )
+
+    assert all(
+        isinstance(failure, RuntimeError)
+        and "database unavailable" in str(failure)
+        for failure in failures
+    )
+    assert database.calls == 2

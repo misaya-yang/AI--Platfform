@@ -25,6 +25,13 @@ from typing import Any
 
 from ai_gateway_core.quiz import QuizAccessService, QuizGrader
 from ai_gateway_core.sharing import ArtifactShareManager
+from ai_gateway_core.sharing.artifact_share_manager import (
+    ArtifactShareError,
+    AttemptConflictError,
+    AttemptInputError,
+    AttemptLimitReachedError,
+    ShareUnavailableError,
+)
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
@@ -48,6 +55,16 @@ class QuizSubmitRequest(BaseModel):
 class PublicQuizSubmitRequest(BaseModel):
     answers: dict[str, str] = Field(..., description="question_id → selected option label")
     display_name: str | None = Field(None, description="Anonymous user's name")
+    attempt_token: str | None = Field(
+        None,
+        description="Opaque token returned by the public attempt-start endpoint",
+    )
+
+
+class PublicQuizAttemptStartResponse(BaseModel):
+    attempt_token: str
+    started_at: datetime
+    expires_at: datetime
 
 
 class QuizAttemptResponse(BaseModel):
@@ -142,6 +159,27 @@ def _shuffle_options(questions: list[dict]) -> list[dict]:
     return shuffled
 
 
+def _share_http_error(error: ArtifactShareError) -> HTTPException:
+    status_code = 400
+    if isinstance(error, ShareUnavailableError):
+        status_code = 404
+        message = "Quiz not found or expired"
+    elif isinstance(error, AttemptLimitReachedError):
+        status_code = 429
+        message = "Maximum attempts reached"
+    elif isinstance(error, AttemptConflictError):
+        status_code = 409
+        message = str(error)
+    elif isinstance(error, AttemptInputError):
+        message = str(error)
+    else:
+        message = "Quiz attempt could not be submitted"
+    return HTTPException(
+        status_code=status_code,
+        detail={"code": error.code, "message": message},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Authenticated endpoints
 # ---------------------------------------------------------------------------
@@ -216,10 +254,10 @@ async def delete_quiz(
 # Public endpoints (no auth required) — aliases over artifact_shares kind='quiz'
 # ---------------------------------------------------------------------------
 
-public_router = APIRouter(prefix="/quiz/shared", tags=["quiz-public"])
+public_router = APIRouter(prefix="/quiz", tags=["quiz-public"])
 
 
-@public_router.get("/{share_code}", response_model=PublicQuizResponse)
+@public_router.get("/shared/{share_code}", response_model=PublicQuizResponse)
 async def get_shared_quiz(share_code: str, request: Request):
     """Get a quiz for public taking (no auth required). Returns questions without answers."""
     mgr = _get_share_manager(request)
@@ -232,7 +270,20 @@ async def get_shared_quiz(share_code: str, request: Request):
     return artifact
 
 
-@public_router.post("/{share_code}/submit", response_model=QuizAttemptResponse)
+@public_router.post(
+    "/public/{share_code}/attempts/start",
+    response_model=PublicQuizAttemptStartResponse,
+)
+async def start_shared_quiz_attempt(share_code: str, request: Request):
+    """Start the per-attempt clock and return a single-use opaque token."""
+    await enforce_rate_limit(request, user=None, operation="quiz_attempt_start_public")
+    try:
+        return await _get_share_manager(request).start_attempt(share_code)
+    except ArtifactShareError as exc:
+        raise _share_http_error(exc) from exc
+
+
+@public_router.post("/shared/{share_code}/submit", response_model=QuizAttemptResponse)
 async def submit_shared_quiz(
     share_code: str,
     body: PublicQuizSubmitRequest,
@@ -250,19 +301,8 @@ async def submit_shared_quiz(
             answers=body.answers,
             display_name=body.display_name,
             client_ip=client_ip,
+            attempt_token=body.attempt_token,
         )
-    except ValueError as e:
-        msg = str(e)
-        lowered = msg.lower()
-        if "already submitted" in lowered:
-            status = 409
-        elif "requires a name" in lowered or "unsupported characters" in lowered:
-            status = 400
-        elif "maximum attempts" in lowered:
-            status = 429
-        elif "time limit" in lowered:
-            status = 400
-        else:
-            status = 404
-        raise HTTPException(status, msg)
+    except ArtifactShareError as exc:
+        raise _share_http_error(exc) from exc
     return result

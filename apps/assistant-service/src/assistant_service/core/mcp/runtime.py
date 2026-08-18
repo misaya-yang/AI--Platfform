@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -10,6 +11,7 @@ import os
 import re
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from ai_gateway_core.logging import get_logger, record_internal_exception
@@ -24,7 +26,7 @@ from ..tools.tool_registry import (
     ToolParameter,
     ToolRiskLevel,
 )
-from .client import MCPClient, MCPError, MCPServerConfig
+from .client import MCP_PROTOCOL_VERSION, MCPClient, MCPError, MCPServerConfig
 from .resilience import (
     MCPCircuitBreaker,
     MCPCircuitLease,
@@ -105,6 +107,19 @@ class ConfiguredEnvironmentSecretResolver:
 
 
 MCPClientFactory = Callable[[MCPServerConfig], MCPClient]
+MCPClientCacheKey = tuple[str, str, str, str]
+
+
+@dataclass
+class _CachedMCPClient:
+    key: MCPClientCacheKey
+    client: Any
+    config_fingerprint: str
+    pin_revision: str
+    expires_at: float
+    last_used_at: float
+    in_use: int = 0
+    invalidated: bool = False
 
 
 def _default_client_factory(config: MCPServerConfig) -> MCPClient:
@@ -243,6 +258,8 @@ class MCPRuntimeService:
         secret_resolver: MCPSecretResolver,
         client_factory: MCPClientFactory = _default_client_factory,
         circuit_clock: Callable[[], float] = time.monotonic,
+        client_cache_ttl_seconds: float | None = None,
+        client_cache_max_entries: int | None = None,
     ) -> None:
         self._repository = repository
         self._secret_resolver = secret_resolver
@@ -253,6 +270,249 @@ class MCPRuntimeService:
             str,
             tuple[int, float, MCPCircuitBreaker],
         ] = {}
+        self._client_cache_ttl_seconds = max(
+            1.0,
+            min(
+                3600.0,
+                float(
+                    client_cache_ttl_seconds
+                    if client_cache_ttl_seconds is not None
+                    else 60
+                ),
+            ),
+        )
+        self._client_cache_max_entries = max(
+            1,
+            min(
+                1000,
+                int(
+                    client_cache_max_entries
+                    if client_cache_max_entries is not None
+                    else 100
+                ),
+            ),
+        )
+        self._client_cache: dict[MCPClientCacheKey, _CachedMCPClient] = {}
+        self._client_initializers: dict[
+            MCPClientCacheKey,
+            asyncio.Task[_CachedMCPClient],
+        ] = {}
+        self._client_cache_lock = asyncio.Lock()
+
+    @staticmethod
+    def _credential_revision(item: dict[str, Any], credential: str | None) -> str:
+        explicit = item.get("credential_revision") or item.get("credential_updated_at")
+        if explicit is not None:
+            return str(explicit)
+        if credential is None:
+            return "none"
+        return "sha256:" + hashlib.sha256(credential.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _client_config_fingerprint(item: dict[str, Any], config: MCPServerConfig) -> str:
+        values = {
+            "server_revision": str(item.get("server_updated_at") or ""),
+            "url": config.url,
+            "transport": config.transport,
+            "timeout": config.timeout,
+            "host_deadline": config.host_deadline,
+            "max_concurrent": config.max_concurrent,
+            "response_limit_bytes": config.response_limit_bytes,
+            "auth_method": config.auth_method,
+            "oauth_resource": config.oauth_resource,
+            "oauth_audience": config.oauth_audience,
+            "credential_audience": config.credential_audience,
+            "origin": config.origin,
+            "allowed_origins": sorted(config.allowed_origins),
+        }
+        encoded = json.dumps(values, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _pin_revision(item: dict[str, Any]) -> str:
+        return str(item.get("dns_pin_revision") or item.get("pin_revision") or "")
+
+    async def _initialize_cached_client(
+        self,
+        *,
+        key: MCPClientCacheKey,
+        config: MCPServerConfig,
+        config_fingerprint: str,
+        pin_revision: str,
+    ) -> _CachedMCPClient:
+        client = self._client_factory(config)
+        try:
+            await client.initialize()
+        except BaseException:
+            try:
+                await client.close()
+            except Exception as exc:
+                record_internal_exception(
+                    __name__, "mcp.runtime.client_initialize_cleanup_failed", exc
+                )
+            raise
+        now = self._circuit_clock()
+        return _CachedMCPClient(
+            key=key,
+            client=client,
+            config_fingerprint=config_fingerprint,
+            pin_revision=pin_revision,
+            expires_at=now + self._client_cache_ttl_seconds,
+            last_used_at=now,
+        )
+
+    @staticmethod
+    async def _close_clients(clients: list[Any]) -> None:
+        for client in clients:
+            try:
+                await client.close()
+            except Exception as exc:
+                record_internal_exception(__name__, "mcp.runtime.client_close_failed", exc)
+
+    async def _acquire_cached_client(
+        self,
+        *,
+        tenant_id: str,
+        connection_id: str,
+        credential_revision: str,
+        config: MCPServerConfig,
+        config_fingerprint: str,
+        pin_revision: str,
+    ) -> _CachedMCPClient:
+        key = (tenant_id, connection_id, credential_revision, MCP_PROTOCOL_VERSION)
+        now = self._circuit_clock()
+        close_now: list[Any] = []
+        entry: _CachedMCPClient | None = None
+        async with self._client_cache_lock:
+            for cached_key, cached in list(self._client_cache.items()):
+                same_connection = cached_key[:2] == key[:2]
+                mismatched = same_connection and (
+                    cached_key != key
+                    or cached.config_fingerprint != config_fingerprint
+                    or cached.pin_revision != pin_revision
+                )
+                if cached.expires_at <= now or mismatched:
+                    self._client_cache.pop(cached_key, None)
+                    cached.invalidated = True
+                    if cached.in_use == 0:
+                        close_now.append(cached.client)
+
+            entry = self._client_cache.get(key)
+            if entry is not None:
+                entry.in_use += 1
+                entry.last_used_at = now
+                initializer = None
+            else:
+                initializer = self._client_initializers.get(key)
+                if initializer is None:
+                    initializer = asyncio.create_task(
+                        self._initialize_cached_client(
+                            key=key,
+                            config=config,
+                            config_fingerprint=config_fingerprint,
+                            pin_revision=pin_revision,
+                        )
+                    )
+                    self._client_initializers[key] = initializer
+
+        await self._close_clients(close_now)
+        if entry is not None:
+            return entry
+
+        assert initializer is not None
+        try:
+            initialized = await asyncio.shield(initializer)
+        except asyncio.CancelledError:
+            # Keep the singleflight task discoverable. A later caller can
+            # adopt the initialized client, and shutdown will cancel/close it.
+            raise
+        except BaseException:
+            async with self._client_cache_lock:
+                if self._client_initializers.get(key) is initializer:
+                    self._client_initializers.pop(key, None)
+            raise
+
+        evicted: list[Any] = []
+        async with self._client_cache_lock:
+            if self._client_initializers.get(key) is initializer:
+                self._client_initializers.pop(key, None)
+            entry = self._client_cache.get(key)
+            if entry is None:
+                entry = initialized
+                self._client_cache[key] = entry
+            entry.in_use += 1
+            entry.last_used_at = self._circuit_clock()
+            while len(self._client_cache) > self._client_cache_max_entries:
+                candidate = min(
+                    (
+                        cached
+                        for cached in self._client_cache.values()
+                        if cached.in_use == 0 and cached is not entry
+                    ),
+                    key=lambda cached: cached.last_used_at,
+                    default=None,
+                )
+                if candidate is None:
+                    break
+                self._client_cache.pop(candidate.key, None)
+                candidate.invalidated = True
+                evicted.append(candidate.client)
+        await self._close_clients(evicted)
+        return entry
+
+    async def _release_cached_client(
+        self,
+        entry: _CachedMCPClient,
+        *,
+        invalidate: bool,
+    ) -> None:
+        close_clients: list[Any] = []
+        async with self._client_cache_lock:
+            entry.in_use = max(0, entry.in_use - 1)
+            entry.last_used_at = self._circuit_clock()
+            expired = entry.expires_at <= self._circuit_clock()
+            if invalidate or expired:
+                if self._client_cache.get(entry.key) is entry:
+                    self._client_cache.pop(entry.key, None)
+                entry.invalidated = True
+            if entry.invalidated and entry.in_use == 0:
+                close_clients.append(entry.client)
+            while len(self._client_cache) > self._client_cache_max_entries:
+                candidate = min(
+                    (cached for cached in self._client_cache.values() if cached.in_use == 0),
+                    key=lambda cached: cached.last_used_at,
+                    default=None,
+                )
+                if candidate is None:
+                    break
+                self._client_cache.pop(candidate.key, None)
+                candidate.invalidated = True
+                close_clients.append(candidate.client)
+        await self._close_clients(close_clients)
+
+    @staticmethod
+    def _invalidates_cached_client(exc: MCPError) -> bool:
+        return exc.code == 404 or exc.stable_code in {
+            "MCP_SESSION_INVALID",
+            "MCP_SESSION_CONFUSION_BLOCKED",
+            "MCP_DNS_REBINDING_BLOCKED",
+        }
+
+    async def close(self) -> None:
+        """Close all initialized dynamic clients during service shutdown."""
+        async with self._client_cache_lock:
+            initializers = list(self._client_initializers.values())
+            self._client_initializers.clear()
+            clients = [entry.client for entry in self._client_cache.values()]
+            self._client_cache.clear()
+        for task in initializers:
+            task.cancel()
+        if initializers:
+            results = await asyncio.gather(*initializers, return_exceptions=True)
+            clients.extend(
+                result.client for result in results if isinstance(result, _CachedMCPClient)
+            )
+        await self._close_clients(clients)
 
     async def _record_runtime_result_best_effort(
         self,
@@ -706,6 +966,9 @@ class MCPRuntimeService:
             credential = await _resolved_credential(item, self._secret_resolver)
             config = _config_from_authorization(item, credential=credential)
             tenant_id = str(getattr(context, "tenant_id", ""))
+            credential_revision = self._credential_revision(item, credential)
+            config_fingerprint = self._client_config_fingerprint(item, config)
+            pin_revision = self._pin_revision(item)
             semaphore = self._connection_semaphore(
                 tenant_id=tenant_id,
                 connection_id=str(item["connection_id"]),
@@ -723,19 +986,27 @@ class MCPRuntimeService:
                 # latest open/half-open state. Circuit outcome is recorded
                 # before this semaphore is released.
                 lease = await breaker.acquire()
-                client: Any | None = None
+                client_entry: _CachedMCPClient | None = None
+                invalidate_client = False
                 try:
-                    client = self._client_factory(config)
-                    await client.initialize()
+                    client_entry = await self._acquire_cached_client(
+                        tenant_id=tenant_id,
+                        connection_id=str(item["connection_id"]),
+                        credential_revision=credential_revision,
+                        config=config,
+                        config_fingerprint=config_fingerprint,
+                        pin_revision=pin_revision,
+                    )
                     operation_started = True
                     try:
                         result = await self._call_client_tool(
-                            client,
+                            client_entry.client,
                             str(item["upstream_name"]),
                             arguments,
                             policy,
                         )
                     except MCPError as exc:
+                        invalidate_client = self._invalidates_cached_client(exc)
                         failure = exc.failure or decide_mcp_failure(
                             exc.stable_code,
                             policy,
@@ -802,13 +1073,11 @@ class MCPRuntimeService:
                     circuit_recorded = True
                     raise
                 finally:
-                    if client is not None:
-                        try:
-                            await client.close()
-                        except Exception as exc:
-                            record_internal_exception(
-                                __name__, "mcp.runtime.client_close_failed", exc
-                            )
+                    if client_entry is not None:
+                        await self._release_cached_client(
+                            client_entry,
+                            invalidate=invalidate_client,
+                        )
                 await breaker.record_success(lease)
                 circuit_recorded = True
             circuit = await breaker.snapshot()

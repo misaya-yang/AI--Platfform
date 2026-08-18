@@ -4,7 +4,10 @@ Tests for Code Executor Tool
 Tests the CODE_EXECUTOR_TOOL definition and CodeExecutorToolExecutor class.
 """
 
-from datetime import datetime
+import contextlib
+import io
+import json
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -188,8 +191,72 @@ class TestCodeExecutorToolExecutor:
         assert result.tool_name == sample_request.tool_name
         assert result.error is None
         assert "Hello, World!" in result.result
+        receipt = json.loads(result.result)
+        assert receipt["schema_version"] == "code_execution_receipt/v1"
+        assert receipt["exit_code"] == 0
         assert result.metadata["execution_id"] == "exec-123"
         assert result.metadata["status"] == "success"
+
+    @pytest.mark.asyncio
+    async def test_executes_function_repair_cases_and_returns_structured_receipt(self):
+        class FixtureExecutor:
+            @staticmethod
+            def is_docker_available() -> bool:
+                return True
+
+            @staticmethod
+            async def execute(*, code: str) -> CodeExecutionResult:
+                output = io.StringIO()
+                started = datetime.now(timezone.utc)
+                with contextlib.redirect_stdout(output):
+                    exec(compile(code, "<fixture-code-executor>", "exec"), {})
+                completed = datetime.now(timezone.utc)
+                return CodeExecutionResult(
+                    execution_id="fixture-reserve",
+                    status=ExecutionStatus.SUCCESS,
+                    stdout=output.getvalue(),
+                    stderr="",
+                    output_files=[],
+                    started_at=started,
+                    completed_at=completed,
+                    duration_ms=(completed - started).total_seconds() * 1000,
+                    exit_code=0,
+                )
+
+        source = '''def reserve(stock: int, requested: int):
+    if not isinstance(stock, int) or isinstance(stock, bool):
+        raise TypeError("stock must be an integer")
+    if not isinstance(requested, int) or isinstance(requested, bool):
+        raise TypeError("requested must be an integer")
+    if requested < 0:
+        raise ValueError("requested must be non-negative")
+    accepted = requested <= stock
+    return {"accepted": accepted, "remaining": stock - requested if accepted else stock}
+'''
+        verification = source + '''
+import json
+cases = []
+for stock, requested in [(5, 5), (5, 6), (5, 0)]:
+    cases.append({"stock": stock, "requested": requested, "result": reserve(stock, requested)})
+try:
+    reserve(5, -1)
+except ValueError:
+    cases.append({"stock": 5, "requested": -1, "raised": "ValueError"})
+print(json.dumps({"all_passed": len(cases) == 4, "cases": cases}))
+'''
+        executor = CodeExecutorToolExecutor(FixtureExecutor())  # type: ignore[arg-type]
+        result = await executor.execute(
+            ToolCallRequest(
+                call_id="reserve-verification",
+                tool_name=CODE_EXECUTOR_TOOL.name,
+                arguments={"code": verification},
+            )
+        )
+
+        receipt = json.loads(result.result)
+        assert result.success is True
+        assert receipt["structured_stdout"]["all_passed"] is True
+        assert len(receipt["structured_stdout"]["cases"]) == 4
 
     @pytest.mark.asyncio
     async def test_execute_failure(

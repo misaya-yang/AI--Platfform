@@ -177,6 +177,81 @@ def test_request_uses_responses_shape_and_replays_tool_history() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("messages", "match"),
+    [
+        (
+            [
+                ChatMessage(role="user", content="run"),
+                ChatMessage(
+                    role="assistant",
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "private-unpaired-call",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{}"},
+                        }
+                    ],
+                ),
+            ],
+            "unpaired tool exchange",
+        ),
+        (
+            [
+                ChatMessage(role="user", content="run"),
+                ChatMessage(
+                    role="tool",
+                    content="private-orphan-result",
+                    name="lookup",
+                    tool_call_id="private-orphan-call",
+                ),
+            ],
+            "orphan tool result",
+        ),
+        (
+            [
+                ChatMessage(role="user", content="run"),
+                ChatMessage(
+                    role="assistant",
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "private-duplicate-call",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{}"},
+                        },
+                        {
+                            "id": "private-duplicate-call",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{}"},
+                        },
+                    ],
+                ),
+            ],
+            "duplicate tool call",
+        ),
+    ],
+)
+def test_request_rejects_invalid_tool_exchange_without_sensitive_error_text(
+    messages: list[ChatMessage],
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match) as exc_info:
+        build_responses_request(
+            model_id="gpt-test",
+            messages=messages,
+            temperature=0,
+            max_output_tokens=100,
+            tools=[_tool_schema()],
+            stream=True,
+        )
+
+    error_text = str(exc_info.value)
+    assert "private-" not in error_text
+    assert "lookup" not in error_text
+
+
 def test_nonstream_parser_normalizes_text_tools_and_usage() -> None:
     result = parse_responses_response(
         _completed_response(

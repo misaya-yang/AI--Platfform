@@ -578,8 +578,9 @@ def test_default_complete_stack_memory_ceiling_stays_below_3_5_gib() -> None:
     compose = (ROOT / "docker-compose.yml").read_text()
     limits = [int(value) for value in re.findall(r'mem_limit: "\$\{[A-Z0-9_]+:-(\d+)m\}"', compose)]
 
-    assert len(limits) == 7
+    assert len(limits) == 8
     assert sum(limits) <= 3_584
+    assert 'mem_limit: "${KNOWLEDGE_WORKER_MEMORY_LIMIT:-512m}"' in compose
     assert 'REDIS_MAXMEMORY: "${REDIS_MAXMEMORY:-192mb}"' in compose
     assert 'GATEWAY_TASK_WORKER_CONCURRENCY: "${GATEWAY_TASK_WORKER_CONCURRENCY:-1}"' in compose
     assert (

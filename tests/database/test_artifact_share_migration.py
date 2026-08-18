@@ -10,9 +10,13 @@ from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
 import pytest
+from ai_gateway_core.sharing.artifact_share_manager import ArtifactShareManager
 
 ROOT = Path(__file__).resolve().parents[2]
 ROOT_MIGRATION = ROOT / "database" / "migrations" / "083_artifact_shares.sql"
+ATTEMPT_LIFECYCLE_MIGRATION = (
+    ROOT / "database" / "migrations" / "087_artifact_share_attempt_lifecycle.sql"
+)
 SERVICE_MIGRATION = (
     ROOT
     / "database"
@@ -36,6 +40,25 @@ def test_artifact_share_migrations_preserve_legacy_width_and_schema_ownership() 
     assert "VARCHAR(20)" in service_sql
     assert "DROP TABLE" not in service_sql.upper()
     assert "TRUNCATE" not in service_sql.upper()
+
+
+def test_attempt_lifecycle_migration_is_atomic_and_digest_only() -> None:
+    sql = ATTEMPT_LIFECYCLE_MIGRATION.read_text(encoding="utf-8")
+
+    assert "assistant.artifact_share_attempt_tokens" in sql
+    assert "token_hash" in sql
+    assert "record_artifact_share_quiz_attempt" in sql
+    assert "FOR UPDATE" in sql
+    assert "consumed_at" in sql
+    assert "attempt_count = attempt_count + 1" in sql
+    assert "INSERT INTO assistant.quiz_attempts" in sql
+    assert "P4040" in sql
+    assert "P4290" in sql
+    assert "P4090" in sql
+    assert "idx_artifact_share_attempt_tokens_expiry" in sql
+    assert "idx_artifact_share_attempt_tokens_consumed" in sql
+    assert "DROP TABLE" not in sql.upper()
+    assert "TRUNCATE" not in sql.upper()
 
 
 def _dsn_for_database(dsn: str, database_name: str) -> str:
@@ -120,8 +143,18 @@ async def test_artifact_share_migration_upgrades_split_postgres_idempotently() -
             CREATE TABLE assistant.quiz_attempts (
                 id UUID PRIMARY KEY,
                 quiz_id UUID NOT NULL REFERENCES assistant.quizzes(id),
+                user_id VARCHAR(128),
                 share_id UUID,
-                display_name VARCHAR(200)
+                display_name VARCHAR(200),
+                answers JSONB NOT NULL DEFAULT '{}'::jsonb,
+                total_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+                correct_count INT NOT NULL DEFAULT 0,
+                total_count INT NOT NULL DEFAULT 0,
+                started_at TIMESTAMPTZ,
+                completed_at TIMESTAMPTZ,
+                status VARCHAR(32),
+                client_ip VARCHAR(128),
+                exam_id UUID
             );
 
             INSERT INTO assistant.quizzes
@@ -155,6 +188,9 @@ async def test_artifact_share_migration_upgrades_split_postgres_idempotently() -
         sql = SERVICE_MIGRATION.read_text(encoding="utf-8")
         await connection.execute(sql)
         await connection.execute(sql)
+        attempt_sql = ATTEMPT_LIFECYCLE_MIGRATION.read_text(encoding="utf-8")
+        await connection.execute(attempt_sql)
+        await connection.execute(attempt_sql)
 
         row = await connection.fetchrow(
             "SELECT * FROM assistant.artifact_shares WHERE share_code = $1",
@@ -181,6 +217,145 @@ async def test_artifact_share_migration_upgrades_split_postgres_idempotently() -
         assert await connection.fetchval(
             "SELECT count(*) FROM assistant.artifact_share_submitters"
         ) == 1
+        assert await connection.fetchval(
+            "SELECT to_regclass('assistant.artifact_share_attempt_tokens') IS NOT NULL"
+        ) is True
+        assert await connection.fetchval(
+            "SELECT to_regprocedure("
+            "'assistant.record_artifact_share_quiz_attempt(character varying,character,character varying,uuid,uuid,jsonb,double precision,integer,integer,character varying)'"
+            ") IS NOT NULL"
+        ) is True
+
+        token_hash = "a" * 64
+        await connection.execute(
+            """
+            INSERT INTO assistant.artifact_share_attempt_tokens
+                (share_id, token_hash, started_at, expires_at)
+            VALUES ($1, $2, NOW(), NOW() + INTERVAL '5 minutes')
+            """,
+            row["id"],
+            token_hash,
+        )
+        attempt_id = uuid.uuid4()
+        recorded = await connection.fetchrow(
+            """
+            SELECT * FROM assistant.record_artifact_share_quiz_attempt(
+                $1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10
+            )
+            """,
+            "abcdefghijklmnopqrst",
+            token_hash,
+            "New User",
+            attempt_id,
+            uuid.UUID("11111111-1111-4111-8111-111111111111"),
+            '{}',
+            1.0,
+            1,
+            1,
+            "127.0.0.1",
+        )
+        assert recorded["attempt_id"] == attempt_id
+        assert await connection.fetchval(
+            "SELECT attempt_count FROM assistant.artifact_shares WHERE id = $1",
+            row["id"],
+        ) == 2
+        assert await connection.fetchval(
+            "SELECT consumed_at IS NOT NULL FROM assistant.artifact_share_attempt_tokens "
+            "WHERE token_hash = $1",
+            token_hash,
+        ) is True
+        with pytest.raises(asyncpg.PostgresError) as replay_error:
+            await connection.fetchrow(
+                """
+                SELECT * FROM assistant.record_artifact_share_quiz_attempt(
+                    $1, $2, $3, $4, $5, '{}'::jsonb, 1.0, 1, 1, NULL
+                )
+                """,
+                "abcdefghijklmnopqrst",
+                token_hash,
+                "Replay User",
+                uuid.uuid4(),
+                uuid.UUID("11111111-1111-4111-8111-111111111111"),
+            )
+        assert replay_error.value.sqlstate == "P4090"
+
+        with pytest.raises(asyncpg.PostgresError) as malformed_error:
+            await connection.fetchrow(
+                """
+                SELECT * FROM assistant.record_artifact_share_quiz_attempt(
+                    $1, $2, $3, $4, $5, '{}'::jsonb, 1.0, 1, 1, NULL
+                )
+                """,
+                "abcdefghijklmnopqrst",
+                "b" * 64,
+                "Malformed User",
+                uuid.uuid4(),
+                uuid.UUID("11111111-1111-4111-8111-111111111111"),
+            )
+        assert malformed_error.value.sqlstate == "P4000"
+
+        expired_hash = "c" * 64
+        await connection.execute(
+            """
+            INSERT INTO assistant.artifact_share_attempt_tokens
+                (share_id, token_hash, started_at, expires_at)
+            VALUES ($1, $2, NOW() - INTERVAL '2 minutes', NOW() - INTERVAL '1 minute')
+            """,
+            row["id"],
+            expired_hash,
+        )
+        with pytest.raises(asyncpg.PostgresError) as expired_error:
+            await connection.fetchrow(
+                """
+                SELECT * FROM assistant.record_artifact_share_quiz_attempt(
+                    $1, $2, $3, $4, $5, '{}'::jsonb, 1.0, 1, 1, NULL
+                )
+                """,
+                "abcdefghijklmnopqrst",
+                expired_hash,
+                "Expired User",
+                uuid.uuid4(),
+                uuid.UUID("11111111-1111-4111-8111-111111111111"),
+            )
+        assert expired_error.value.sqlstate == "P4000"
+
+        await connection.executemany(
+            """
+            INSERT INTO assistant.artifact_share_attempt_tokens
+                (share_id, token_hash, started_at, expires_at)
+            VALUES ($1, $2, NOW() - INTERVAL '26 hours', NOW() - INTERVAL '25 hours')
+            """,
+            [(row["id"], f"{index:064x}") for index in range(101)],
+        )
+        await connection.execute(
+            """
+            INSERT INTO assistant.artifact_share_attempt_tokens
+                (share_id, token_hash, started_at, expires_at, consumed_at)
+            VALUES (
+                $1, $2, NOW() - INTERVAL '31 hours', NOW() + INTERVAL '1 hour',
+                NOW() - INTERVAL '30 hours'
+            )
+            """,
+            row["id"],
+            "d" * 64,
+        )
+        started = await ArtifactShareManager(db=connection).start_attempt(
+            "abcdefghijklmnopqrst"
+        )
+        assert started["attempt_token"]
+        assert await connection.fetchval(
+            """
+            SELECT count(*)
+            FROM assistant.artifact_share_attempt_tokens
+            WHERE expires_at < NOW() - INTERVAL '24 hours'
+               OR consumed_at < NOW() - INTERVAL '24 hours'
+            """
+        ) == 2
+        assert await connection.fetchval(
+            "SELECT count(*) FROM assistant.artifact_share_attempt_tokens "
+            "WHERE token_hash = $1",
+            "d" * 64,
+        ) == 0
     finally:
         if connection is not None:
             await connection.close()

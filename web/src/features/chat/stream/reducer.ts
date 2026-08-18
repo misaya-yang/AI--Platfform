@@ -1,6 +1,6 @@
 import type { StreamChunk } from "@/types/gateway";
-import { normalizeLegacyStreamChunk } from "./normalizers";
-import type { ChatTurnState, NormalizedStreamEvent } from "./types";
+import { normalizeLegacyStreamChunk } from "./normalizers.ts";
+import type { ChatTurnState, NormalizedStreamEvent } from "./types.ts";
 
 export type StreamToolCallStatus = "pending" | "running" | "completed" | "error";
 
@@ -406,7 +406,7 @@ export function reduceNormalizedStreamEvent(
 
   switch (event.type) {
     case "message_start":
-      if (state.status !== "streaming") {
+      if (!isTerminalStatus(state.status) && state.status !== "streaming") {
         next = { ...state, status: "streaming" };
         changed = true;
       }

@@ -229,6 +229,7 @@ class AgentLoopConfig:
     model_provider_id: str | None = field(default=None, repr=False)
     temperature: float = 0.5  # Lower for more deterministic answers (was 0.7)
     max_tokens: int = 4096
+    output_format: Any = "text"
 
     # Feature flags
     # Task planning disabled by default - only needed for complex multi-step tasks.

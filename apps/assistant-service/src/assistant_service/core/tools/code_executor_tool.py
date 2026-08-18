@@ -13,6 +13,7 @@ Features:
 from __future__ import annotations
 
 import ast
+import json
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.logging import get_logger, record_internal_exception
@@ -114,7 +115,7 @@ def _scan_code_for_denied_imports(code: str) -> str | None:
 
 CODE_EXECUTOR_TOOL = ToolDefinition(
     name="execute_python_code",
-    description="""Execute Python code in a secure Docker sandbox for data analysis and visualization.
+    description="""Execute Python code in a bounded, secure no-network Docker sandbox. Use it to test and verify code behavior with concrete cases, debug pure functions, perform precise calculations, conduct data analysis, and create visualizations. The result includes a machine-readable execution receipt with status, exit code, stdout, stderr, and generated-file metadata.
 
 ## Language — Python ONLY
 This tool runs **Python**. MATLAB, R, Julia, Octave, Mathematica, and any
@@ -133,6 +134,8 @@ data is unavailable after a reasonable search, say so explicitly rather
 than silently substituting placeholder data.
 
 ## When to Use (MUST use for these scenarios)
+- Testing or verifying a code repair against explicit examples and edge cases
+- Debugging pure Python functions with reproducible assertions
 - Analyzing Excel/CSV data files (calculations, statistics, growth rates, trends)
 - Creating charts and visualizations (line, bar, pie, scatter, heatmap)
 - Complex mathematical computations that require precision
@@ -411,6 +414,7 @@ class CodeExecutorToolExecutor(ToolExecutor):
                 "stderr": result.stderr,
                 "output_files": output_files_info,
                 "duration_ms": result.duration_ms,
+                "exit_code": result.exit_code,
             }
 
             if result.error_message:
@@ -461,37 +465,35 @@ class CodeExecutorToolExecutor(ToolExecutor):
         Returns:
             Formatted string representation of the result.
         """
-        parts = []
-
-        # Execution status
-        status = result.get("status", "unknown")
-        duration = result.get("duration_ms", 0)
-        parts.append(f"Execution Status: {status} (took {duration:.1f}ms)")
-
-        # Standard output
-        stdout = result.get("stdout", "").strip()
+        stdout = str(result.get("stdout") or "").strip()
+        stderr = str(result.get("stderr") or "").strip()
+        structured_stdout: Any | None = None
         if stdout:
-            parts.append(f"\n--- Output ---\n{stdout}")
-
-        # Standard error (if any)
-        stderr = result.get("stderr", "").strip()
-        if stderr:
-            parts.append(f"\n--- Errors/Warnings ---\n{stderr}")
-
-        # Output files
+            try:
+                structured_stdout = json.loads(stdout)
+            except json.JSONDecodeError:
+                structured_stdout = None
         output_files = result.get("output_files", [])
-        if output_files:
-            parts.append(f"\n--- Generated Files ({len(output_files)}) ---")
-            for f in output_files:
-                size_kb = f.get("size_bytes", 0) / 1024
-                parts.append(f"- {f['filename']} ({f['mime_type']}, {size_kb:.1f}KB)")
-
-        # Error message
-        error_message = result.get("error_message")
-        if error_message:
-            parts.append(f"\n--- Error ---\n{error_message}")
-
-        return "\n".join(parts)
+        receipt = {
+            "schema_version": "code_execution_receipt/v1",
+            "status": result.get("status", "unknown"),
+            "exit_code": result.get("exit_code"),
+            "duration_ms": result.get("duration_ms", 0),
+            "stdout": stdout,
+            "stderr": stderr,
+            "structured_stdout": structured_stdout,
+            "output_files": [
+                {
+                    "filename": item.get("filename"),
+                    "mime_type": item.get("mime_type"),
+                    "size_bytes": item.get("size_bytes"),
+                }
+                for item in output_files
+                if isinstance(item, dict)
+            ],
+            "error": result.get("error_message"),
+        }
+        return json.dumps(receipt, ensure_ascii=False, separators=(",", ":"))
 
 
 # =============================================================================

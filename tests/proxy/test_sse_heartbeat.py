@@ -109,17 +109,34 @@ async def test_producer_exception_propagates():
     assert pieces == [b"data: a\n\n"]
 
 
-async def test_consumer_disconnect_cancels_producer_cleanly():
-    cancelled = asyncio.Event()
+async def test_close_failure_does_not_mask_upstream_failure():
+    class BrokenIterator:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise ValueError("primary provider failure")
+
+        async def aclose(self):
+            raise OSError("secondary close failure")
+
+    with pytest.raises(ValueError, match="primary provider failure"):
+        await _drain(with_sse_heartbeat(BrokenIterator(), interval_seconds=1.0))
+
+
+async def test_consumer_disconnect_closes_upstream_cleanly_once():
+    closed = asyncio.Event()
+    close_count = 0
 
     async def long_gen():
+        nonlocal close_count
         try:
             for _ in range(100):
                 await asyncio.sleep(0.02)
                 yield b"data: x\n\n"
-        except asyncio.CancelledError:
-            cancelled.set()
-            raise
+        finally:
+            close_count += 1
+            closed.set()
 
     it = with_sse_heartbeat(long_gen(), interval_seconds=10.0)
     # Pull the first event then close the iterator (simulates client disconnect).
@@ -128,4 +145,29 @@ async def test_consumer_disconnect_cancels_producer_cleanly():
     await it.aclose()
     # Allow the producer task to settle.
     await asyncio.sleep(0.05)
-    assert cancelled.is_set()
+    assert closed.is_set()
+    assert close_count == 1
+
+
+async def test_slow_consumer_never_allows_upstream_to_run_more_than_one_chunk_ahead():
+    produced = 0
+    consumed = 0
+    maximum_ahead = 0
+
+    async def large_gen():
+        nonlocal produced, maximum_ahead
+        for index in range(5_000):
+            produced += 1
+            maximum_ahead = max(maximum_ahead, produced - consumed)
+            yield f"data: {index}\n\n".encode()
+
+    iterator = with_sse_heartbeat(large_gen(), interval_seconds=10.0)
+    try:
+        for _ in range(5):
+            await iterator.__anext__()
+            consumed += 1
+            await asyncio.sleep(0.01)
+        assert maximum_ahead <= 1
+        assert produced == consumed
+    finally:
+        await iterator.aclose()

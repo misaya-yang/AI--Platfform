@@ -21,6 +21,8 @@ from ai_gateway_core.logging import record_internal_exception
 from ai_gateway_core.models import ChatMessage
 from ai_gateway_core.models import normalize_chat_message as _normalize_message
 
+from .request_safety import _validate_chat_tool_exchange_pairs
+
 CHAT_COMPLETIONS_WIRE_PROTOCOL = "chat_completions"
 RESPONSES_V1_WIRE_PROTOCOL = "responses_v1"
 SUPPORTED_WIRE_PROTOCOLS = frozenset({CHAT_COMPLETIONS_WIRE_PROTOCOL, RESPONSES_V1_WIRE_PROTOCOL})
@@ -117,6 +119,22 @@ def _tool_call_from_chat(raw_call: Any) -> dict[str, Any]:
         "name": name,
         "arguments": arguments,
     }
+
+
+def _validate_responses_tool_exchange_pairs(messages: list[ChatMessage]) -> None:
+    """Validate the logical chat transcript before projecting Responses items."""
+
+    projected: list[dict[str, Any]] = []
+    for raw_message in messages:
+        message = _normalize_message(raw_message)
+        projected.append(
+            {
+                "role": message.role,
+                "tool_calls": message.tool_calls,
+                "tool_call_id": message.tool_call_id,
+            }
+        )
+    _validate_chat_tool_exchange_pairs(projected)
 
 
 def _responses_input(
@@ -319,6 +337,7 @@ def build_responses_request(
     }:
         raise ResponsesAPIError("invalid_reasoning_effort")
 
+    _validate_responses_tool_exchange_pairs(messages)
     body: dict[str, Any] = {
         "model": model_id,
         "input": _responses_input(messages, local_runtime=local_runtime),

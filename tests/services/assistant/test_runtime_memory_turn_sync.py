@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -131,6 +132,50 @@ async def test_slow_derivative_index_never_blocks_source_commit(tmp_path) -> Non
     flushed = await sync.flush_pending()
     assert flushed["status"] == "completed"
     assert sync.status(result.background_operation_id or "")["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_source_commit_and_snapshot_run_in_one_worker_thread(tmp_path) -> None:
+    owner_thread = threading.get_ident()
+    worker_threads: list[int] = []
+    indexed: list[str] = []
+
+    class _TrackingStore(MemorySourceStore):
+        def append_daily_entry_and_read_result(self, *args, **kwargs):
+            worker_threads.append(threading.get_ident())
+            return super().append_daily_entry_and_read_result(*args, **kwargs)
+
+        def append_daily_entry_result(self, *_args, **_kwargs):
+            raise AssertionError("turn sync must use the combined source transaction")
+
+        def read_owned_source_document(self, *_args, **_kwargs):
+            raise AssertionError("turn sync must not reopen the source on the event loop")
+
+    class _Indexer:
+        async def index_source(self, **kwargs):
+            indexed.append(kwargs["content"])
+            return SimpleNamespace(fallback_reason=None)
+
+    sync = CompletedTurnMemorySync(
+        memory_store=_TrackingStore(tmp_path),
+        memory_indexer=_Indexer(),
+        pii_filter=_NoPII(),
+        lifecycle=MemoryProviderLifecycle(),
+    )
+    result = await sync.sync(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        user_message="immediately visible fact",
+        assistant_message="saved",
+        terminal_envelope=_completed("run-thread"),
+    )
+    await sync.flush_pending()
+
+    assert result.source_committed is True
+    assert len(worker_threads) == 1
+    assert worker_threads[0] != owner_thread
+    assert "immediately visible fact" in indexed[0]
 
 
 @pytest.mark.asyncio

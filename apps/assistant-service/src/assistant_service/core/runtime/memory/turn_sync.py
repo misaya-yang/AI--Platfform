@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -103,16 +104,11 @@ class CompletedTurnMemorySync:
         snapshot = f"User: {user_text}\n\nAssistant: {assistant_text}"[:6000]
         secret_redacted = redact_trace_text(snapshot)
         redacted_text, findings = self.pii_filter.redact(secret_redacted)
-        write = self.memory_store.append_daily_entry_result(
+        write, source_document, source_handle = await asyncio.to_thread(
+            self.memory_store.append_daily_entry_and_read_result,
             tenant_id,
             user_id,
             redacted_text,
-        )
-        source_document, source_handle = self.memory_store.read_owned_source_document(
-            tenant_id,
-            user_id,
-            write.path,
-            source_type=write.source_type,
         )
         operation_id = f"memsync_{uuid.uuid4().hex[:16]}"
         metadata = {

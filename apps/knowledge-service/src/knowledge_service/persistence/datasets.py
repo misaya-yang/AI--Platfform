@@ -647,6 +647,55 @@ class DatasetPersistenceMixin:
             )
             return row is not None
 
+    async def list_queued_documents(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Return bounded durable work for worker-role dispatch.
+
+        This is discovery only. The consumer still performs the authoritative
+        queued-to-processing CAS while holding the document owner lease, so
+        concurrent worker replicas may observe the same row but cannot process
+        the same generation twice.
+        """
+
+        if not self._pool:
+            return []
+        bounded_limit = min(max(int(limit), 1), 1000)
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT d.dataset_id, d.document_id
+                FROM documents AS d
+                JOIN datasets AS ds ON ds.dataset_id = d.dataset_id
+                WHERE d.status = 'queued'
+                  AND ds.is_deleted = FALSE
+                  AND NOT (
+                        COALESCE(d.metadata, '{{}}'::jsonb)
+                        ? '{DOCUMENT_UPLOAD_GENERATION_KEY}'
+                  )
+                  AND NOT (
+                        COALESCE(d.metadata, '{{}}'::jsonb)
+                        ? '{DOCUMENT_UPLOAD_FAILED_KEY}'
+                  )
+                  AND NOT (
+                        COALESCE(d.metadata, '{{}}'::jsonb)
+                        ? '{CONFLUENCE_SYNC_GENERATION_KEY}'
+                  )
+                  AND NOT COALESCE(
+                        COALESCE(ds.index_config, '{{}}'::jsonb)
+                            -> 'retrieval' ? '{INDEX_DELETION_FENCE_KEY}',
+                        FALSE
+                  )
+                  AND COALESCE(
+                        ds.index_config -> 'retrieval' -> 'lexical'
+                            ->> 'active_version',
+                        'lexical_v1'
+                  ) = 'lexical_v1'
+                ORDER BY d.updated_at ASC, d.document_id ASC
+                LIMIT $1
+                """,
+                bounded_limit,
+            )
+        return [self._row_to_dict(row) for row in rows]
+
     async def claim_queued_document_for_processing(
         self,
         dataset_id: str,
@@ -718,6 +767,38 @@ class DatasetPersistenceMixin:
             return await _claim(connection)
         async with self.document_index_update_lease(dataset_id, document_id) as conn:
             return await _claim(conn)
+
+    async def requeue_cancelled_document_generation(
+        self,
+        dataset_id: str,
+        document_id: str,
+        *,
+        connection: Any,
+    ) -> bool:
+        """Return one owned processing generation to the durable queue."""
+
+        row = await connection.fetchrow(
+            """
+            UPDATE documents
+            SET status = 'queued',
+                progress = 0,
+                error = NULL,
+                updated_at = NOW()
+            WHERE document_id = $1
+              AND dataset_id = $2
+              AND status IN (
+                    'processing',
+                    'parsing',
+                    'segmenting',
+                    'embedding',
+                    'embedding_images'
+              )
+            RETURNING document_id
+            """,
+            document_id,
+            dataset_id,
+        )
+        return row is not None
 
     async def next_segment_position(
         self,

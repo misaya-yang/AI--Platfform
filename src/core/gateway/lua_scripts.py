@@ -17,6 +17,9 @@ and rejected dimensions return enough state for ``Retry-After`` headers.
 from __future__ import annotations
 
 from typing import Any
+from weakref import WeakKeyDictionary
+
+_REGISTERED_SCRIPTS: WeakKeyDictionary[Any, dict[str, Any]] = WeakKeyDictionary()
 
 # KEYS[1] = shared capacity key, KEYS[2] = tenant capacity key
 # ARGV[1] = now_ms, ARGV[2] = expires_at_ms, ARGV[3] = member,
@@ -64,6 +67,7 @@ return #KEYS
 # Returns {rejected_dimension_index, earliest_score_s, min_remaining}.
 SLIDING_WINDOW_CHECK_LUA = """
 local min_remaining = nil
+local remaining_values = {}
 for i = 1, #KEYS do
   redis.call('ZREMRANGEBYSCORE', KEYS[i], 0, ARGV[2])
   local count = redis.call('ZCARD', KEYS[i])
@@ -73,16 +77,25 @@ for i = 1, #KEYS do
     if earliest[2] then
       earliest_score = tonumber(earliest[2])
     end
-    return {i - 1, earliest_score, 0}
+    local response = {i - 1, earliest_score, 0}
+    for j = 1, #KEYS do
+      table.insert(response, remaining_values[j] or -1)
+    end
+    return response
   end
   redis.call('ZADD', KEYS[i], ARGV[1], ARGV[4])
   redis.call('EXPIRE', KEYS[i], ARGV[3])
   local remaining = tonumber(ARGV[4 + i]) - count - 1
+  remaining_values[i] = remaining
   if min_remaining == nil or remaining < min_remaining then
     min_remaining = remaining
   end
 end
-return {-1, 0, min_remaining or 0}
+local response = {-1, 0, min_remaining or 0}
+for i = 1, #KEYS do
+  table.insert(response, remaining_values[i] or 0)
+end
+return response
 """
 
 
@@ -93,5 +106,22 @@ async def eval_script(
     keys: list[str],
     args: list[Any],
 ) -> Any:
-    """Evaluate a Lua script in one Redis round trip."""
+    """Evaluate a cached Redis script in one round trip.
+
+    redis-py registered scripts use ``EVALSHA`` on the warm path and
+    transparently recover from ``NOSCRIPT``. Minimal Redis-compatible clients
+    without ``register_script`` retain the existing ``EVAL`` fallback.
+    """
+    register_script = getattr(redis, "register_script", None)
+    if callable(register_script):
+        try:
+            scripts = _REGISTERED_SCRIPTS.setdefault(redis, {})
+        except TypeError:
+            scripts = None
+        if scripts is not None:
+            registered = scripts.get(script)
+            if registered is None:
+                registered = register_script(script)
+                scripts[script] = registered
+            return await registered(keys=keys, args=args)
     return await redis.eval(script, len(keys), *keys, *args)

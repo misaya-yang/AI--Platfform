@@ -170,19 +170,25 @@ public class ChatClient {
             @SuppressWarnings("unchecked")
             Map<String, Integer>[] usage = new Map[]{Collections.emptyMap()};
             double[] durationMs = {0.0};
+            boolean[] unsuccessfulTerminal = {false};
 
             sseParser.parse(response.body(), event -> {
+                if (event.isError() || event.isCancelled()) {
+                    unsuccessfulTerminal[0] = true;
+                }
                 dispatchEvent(event, handler, contentBuilder, sessionId, modelId, usage, durationMs);
             });
 
             // Send final accumulated response via onDone
-            handler.onDone(new ChatResponse(
-                    contentBuilder.toString(),
-                    sessionId[0],
-                    modelId[0],
-                    usage[0],
-                    durationMs[0]
-            ));
+            if (!unsuccessfulTerminal[0]) {
+                handler.onDone(new ChatResponse(
+                        contentBuilder.toString(),
+                        sessionId[0],
+                        modelId[0],
+                        usage[0],
+                        durationMs[0]
+                ));
+            }
 
         } catch (GatewayAIException e) {
             handler.onError(e);
@@ -310,7 +316,7 @@ public class ChatClient {
                 if (dur instanceof Number n) durationMs[0] = n.doubleValue();
             }
 
-            case EventType.ERROR -> {
+            case EventType.ERROR, EventType.RUN_ERROR -> {
                 String msg = stringOr(data, "message", stringOr(data, "error", "Unknown stream error"));
                 handler.onError(new GatewayAIException(msg));
                 return; // Don't dispatch to onEvent after error

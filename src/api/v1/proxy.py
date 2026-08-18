@@ -38,6 +38,7 @@ from ...core.gateway.multi_dimension_rate_limiter import (
     MultiDimensionRateLimiter,
     RateLimitContext,
     RateLimitHeaders,
+    RateLimitResult,
 )
 from ...core.gateway.rate_policy import RatePolicyResolver
 from ...core.observability.metrics import get_metrics
@@ -434,40 +435,58 @@ async def check_proxy_rate_limit(
             operation=operation,
             service_config=service_config,
         )
-        admitted_headers: dict[str, str] = {}
+        admitted_results: dict[int, RateLimitResult] = {}
+        policy_groups: list[list[Any]] = []
         for policy in policies:
-            result = await rate_limiter.check_custom_limit(
-                key=policy.key,
-                limit=policy.requests,
-                window=policy.window,
-                dimension=policy.dimension,
-            )
-            _record_rate_limit_decision(
-                result.dimension or policy.dimension, service_name, result.allowed
-            )
-            if not result.allowed:
-                await _record_security_event(
-                    event_type="rate_limited",
-                    tenant_id=user.tenant_id,
-                    user_id=user.user_id,
-                    service_id=service_name,
-                    metadata={
-                        "permission_check": {
-                            "dimension": result.dimension,
-                            "limit": result.limit,
-                            "remaining": result.remaining,
-                            "retry_after": result.retry_after,
-                        }
-                    },
+            if policy_groups and policy_groups[-1][0].window == policy.window:
+                policy_groups[-1].append(policy)
+            else:
+                policy_groups.append([policy])
+
+        for window_policies in policy_groups:
+            batch_check = getattr(rate_limiter, "check_custom_limits", None)
+            if callable(batch_check):
+                results = await batch_check(policies=window_policies)
+            else:
+                results = []
+                for policy in window_policies:
+                    result = await rate_limiter.check_custom_limit(
+                        key=policy.key,
+                        limit=policy.requests,
+                        window=policy.window,
+                        dimension=policy.dimension,
+                    )
+                    results.append(result)
+                    if not result.allowed:
+                        break
+
+            for policy, result in zip(window_policies, results, strict=False):
+                _record_rate_limit_decision(
+                    result.dimension or policy.dimension, service_name, result.allowed
                 )
-                raise HTTPException(
-                    status_code=429,
-                    detail=RateLimitHeaders.build_exceeded_response(result),
-                    headers=RateLimitHeaders.build(result),
-                )
-            admitted_headers = RateLimitHeaders.build(result)
+                if not result.allowed:
+                    await _record_security_event(
+                        event_type="rate_limited",
+                        tenant_id=user.tenant_id,
+                        user_id=user.user_id,
+                        service_id=service_name,
+                        metadata={
+                            "permission_check": {
+                                "dimension": result.dimension,
+                                "limit": result.limit,
+                                "remaining": result.remaining,
+                                "retry_after": result.retry_after,
+                            }
+                        },
+                    )
+                    raise HTTPException(
+                        status_code=429,
+                        detail=RateLimitHeaders.build_exceeded_response(result),
+                        headers=RateLimitHeaders.build(result),
+                    )
+                admitted_results[id(policy)] = result
         if policies:
-            return admitted_headers
+            return RateLimitHeaders.build(admitted_results[id(policies[-1])])
     elif (
         service_config
         and service_config.rate_limit_enabled

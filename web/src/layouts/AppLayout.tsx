@@ -36,7 +36,7 @@ import { PasswordChangeModal } from "@/components/PasswordChangeModal";
 import { ProfileModal } from "@/components/ProfileModal";
 import { SetupBanner } from "@/components/SetupBanner";
 import { Logo } from "@/components/Logo";
-import { languages } from "@/i18n";
+import { changeAppLanguage, languages } from "@/i18n";
 import { isAgentStudioEnabled } from "@/config/runtime";
 
 const { Sider, Content, Header } = Layout;
@@ -131,7 +131,7 @@ function getInitials(name?: string): string {
 }
 
 export function AppLayout() {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   const [helpModalOpen, setHelpModalOpen] = useState(false);
@@ -150,7 +150,9 @@ export function AppLayout() {
     queryClient.invalidateQueries({ queryKey: ["setup-state"] });
   }, [location.pathname, queryClient]);
 
-  const handleLanguageChange = (langCode: string) => { i18n.changeLanguage(langCode); };
+  const handleLanguageChange = (langCode: string) => {
+    void changeAppLanguage(langCode);
+  };
 
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 1024px)");

@@ -162,6 +162,10 @@ def test_quiz_openapi_has_typed_success_responses() -> None:
         ("/assistant/quiz/{quiz_id}/attempts", "get"): "QuizAttemptListResponse",
         ("/quiz/shared/{share_code}", "get"): "PublicQuizResponse",
         ("/quiz/shared/{share_code}/submit", "post"): "QuizAttemptResponse",
+        (
+            "/quiz/public/{share_code}/attempts/start",
+            "post",
+        ): "PublicQuizAttemptStartResponse",
     }
     for (path, method), model in expected.items():
         schema = paths[path][method]["responses"]["200"]["content"][

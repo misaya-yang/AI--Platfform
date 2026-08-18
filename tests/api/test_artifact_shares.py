@@ -7,15 +7,23 @@ quiz routes alias over the same rows.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from ai_gateway_core.sharing.artifact_share_manager import ArtifactShareManager
+from ai_gateway_core.sharing.artifact_share_manager import (
+    ArtifactShareManager,
+    AttemptConflictError,
+    AttemptInputError,
+    AttemptLimitReachedError,
+    ShareUnavailableError,
+)
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.api.v1.artifact_shares import router as artifact_shares_router
+from src.api.v1.quiz import public_router as quiz_public_router
 
 
 class _FakeDB:
@@ -26,9 +34,61 @@ class _FakeDB:
         self.quiz_rows: dict[str, dict] = {}
         self.attempts: list[dict] = []
         self.submitters: set[tuple[str, str]] = set()
+        self.tokens: dict[str, dict] = {}
 
     async def fetchrow(self, query: str, *args):  # noqa: ANN201
         query = query.replace("assistant.", "")
+        if "record_artifact_share_quiz_attempt" in query:
+            (
+                share_code,
+                token_hash,
+                display_name,
+                attempt_id,
+                _quiz_id,
+                _answers,
+                _score,
+                _correct,
+                _total,
+                _client_ip,
+            ) = args
+            row = next(
+                (s for s in self.shares.values() if s["share_code"] == share_code),
+                None,
+            )
+            now = datetime.now(timezone.utc)
+            if not row or not row["is_active"] or (
+                row["expires_at"] is not None and row["expires_at"] <= now
+            ):
+                raise ShareUnavailableError("Share not found or expired")
+            if row["max_attempts"] is not None and row["attempt_count"] >= row["max_attempts"]:
+                raise AttemptLimitReachedError("Maximum attempts reached")
+            if row["require_name"] and not display_name:
+                raise AttemptInputError("This share requires a name before submitting")
+            started_at = now
+            if token_hash is not None:
+                token = self.tokens.get(token_hash)
+                if (
+                    not token
+                    or token["share_id"] != str(row["id"])
+                ):
+                    raise AttemptInputError("Attempt token is invalid or expired")
+                if token["consumed_at"] is not None:
+                    raise AttemptConflictError("Attempt token has already been consumed")
+                if token["expires_at"] <= now:
+                    raise AttemptInputError("Attempt token is invalid or expired")
+                started_at = token["started_at"]
+            elif row["time_limit_minutes"] is not None:
+                raise AttemptInputError("An attempt token is required for timed shares")
+            if display_name:
+                key = (str(row["id"]), display_name)
+                if key in self.submitters:
+                    raise AttemptConflictError("This display name has already submitted")
+                self.submitters.add(key)
+            row["attempt_count"] += 1
+            if token_hash is not None:
+                self.tokens[token_hash]["consumed_at"] = now
+            self.attempts.append({"attempt_id": attempt_id, "status": "completed"})
+            return {"attempt_id": attempt_id, "started_at": started_at}
         if "FROM quizzes" in query:
             quiz_id = str(args[0])
             row = self.quiz_rows.get(quiz_id)
@@ -51,6 +111,51 @@ class _FakeDB:
 
     async def execute(self, query: str, *args):  # noqa: ANN201
         query = query.replace("assistant.", "")
+        if "INSERT INTO ARTIFACT_SHARE_ATTEMPT_TOKENS" in query.upper():
+            (
+                token_id,
+                token_hash,
+                started_at,
+                expires_at,
+                share_code,
+                retention_hours,
+                cleanup_batch_size,
+            ) = args
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=retention_hours)
+            stale = sorted(
+                (
+                    key
+                    for key, token in self.tokens.items()
+                    if token["expires_at"] < cutoff
+                    or (
+                        token["consumed_at"] is not None
+                        and token["consumed_at"] < cutoff
+                    )
+                ),
+                key=lambda key: min(
+                    self.tokens[key]["expires_at"],
+                    self.tokens[key]["consumed_at"]
+                    or self.tokens[key]["expires_at"],
+                ),
+            )[:cleanup_batch_size]
+            for key in stale:
+                self.tokens.pop(key)
+            row = next(
+                (s for s in self.shares.values() if s["share_code"] == share_code),
+                None,
+            )
+            if not row or not row["is_active"]:
+                return "INSERT 0 0"
+            if row["max_attempts"] is not None and row["attempt_count"] >= row["max_attempts"]:
+                return "INSERT 0 0"
+            self.tokens[token_hash] = {
+                "id": token_id,
+                "share_id": str(row["id"]),
+                "started_at": started_at,
+                "expires_at": expires_at,
+                "consumed_at": None,
+            }
+            return "INSERT 0 1"
         if query.lstrip().upper().startswith("INSERT INTO ARTIFACT_SHARE_SUBMITTERS"):
             key = (str(args[0]), args[1])
             if key in self.submitters:
@@ -165,7 +270,7 @@ async def test_manager_submit_enforces_max_attempts(fake_db: _FakeDB) -> None:
     share = await mgr.create_share(
         kind="quiz",
         title="Capped",
-        payload={"quiz_id": None},
+        payload={"quiz_id": str(uuid.uuid4())},
         answer_keys=[],
         tenant_id="tenant-a",
         user_id="alex",
@@ -176,7 +281,7 @@ async def test_manager_submit_enforces_max_attempts(fake_db: _FakeDB) -> None:
     assert first["correct_count"] == 0
     assert fake_db.shares[share["share_id"]]["attempt_count"] == 1
 
-    with pytest.raises(ValueError, match="max attempts"):
+    with pytest.raises(AttemptLimitReachedError):
         await mgr.submit_attempt(share["share_code"], answers={})
 
 
@@ -190,36 +295,31 @@ async def test_reserve_attempt_slot_is_atomic_at_the_cap(fake_db: _FakeDB) -> No
     row = fake_db.shares[share["share_id"]]
     row["attempt_count"] = 1  # consumed concurrently after the read-side check
 
-    with pytest.raises(ValueError, match="max attempts"):
+    with pytest.raises(AttemptLimitReachedError):
         await mgr._reserve_attempt_slot({"share_id": share["share_id"]})
 
 
 @pytest.mark.asyncio
-async def test_grade_quiz_marks_attempt_rejected_when_slot_lost(fake_db: _FakeDB) -> None:
-    """An attempt that loses the slot race is kept but marked 'rejected'."""
+async def test_atomic_quiz_attempt_does_not_persist_when_slot_is_lost(
+    fake_db: _FakeDB,
+) -> None:
     mgr = ArtifactShareManager(db=fake_db)
     share = await mgr.create_share(
         kind="quiz",
         title="Raced",
-        payload={"quiz_id": None},
+        payload={"quiz_id": str(uuid.uuid4())},
         answer_keys=[],
         max_attempts=1,
         require_name=False,
     )
     fake_db.shares[share["share_id"]]["attempt_count"] = 1
 
-    with pytest.raises(ValueError, match="max attempts"):
-        await mgr._grade_quiz(
-            {
-                "share_id": share["share_id"],
-                "answer_keys": [],
-                "payload": {"quiz_id": None},
-            },
+    with pytest.raises(AttemptLimitReachedError):
+        await mgr.submit_attempt(
+            share["share_code"],
             answers={},
-            display_name=None,
-            client_ip=None,
         )
-    assert fake_db.attempts[-1]["status"] == "rejected"
+    assert fake_db.attempts == []
 
 
 @pytest.mark.asyncio
@@ -230,15 +330,110 @@ async def test_display_name_claim_is_atomic(
     share = await mgr.create_share(
         kind="quiz",
         title="Named",
-        payload={"quiz_id": None},
+        payload={"quiz_id": str(uuid.uuid4())},
         answer_keys=[],
         max_attempts=2,
         require_name=True,
     )
 
     await mgr.submit_attempt(share["share_code"], answers={}, display_name="Alex")
-    with pytest.raises(ValueError, match="already submitted"):
+    with pytest.raises(AttemptConflictError):
         await mgr.submit_attempt(share["share_code"], answers={}, display_name="Alex")
+
+
+@pytest.mark.asyncio
+async def test_timed_attempt_uses_single_use_start_token(fake_db: _FakeDB) -> None:
+    mgr = ArtifactShareManager(db=fake_db)
+    share = await mgr.create_share(
+        kind="quiz",
+        title="Timed",
+        payload={"quiz_id": str(uuid.uuid4())},
+        answer_keys=[],
+        require_name=False,
+        time_limit_minutes=5,
+    )
+
+    with pytest.raises(AttemptInputError):
+        await mgr.submit_attempt(share["share_code"], answers={})
+
+    started = await mgr.start_attempt(share["share_code"])
+    result = await mgr.submit_attempt(
+        share["share_code"],
+        answers={},
+        attempt_token=started["attempt_token"],
+    )
+    assert result["attempt_id"]
+
+    with pytest.raises(AttemptConflictError):
+        await mgr.submit_attempt(
+            share["share_code"],
+            answers={},
+            attempt_token=started["attempt_token"],
+        )
+
+    with pytest.raises(AttemptInputError):
+        await mgr.submit_attempt(
+            share["share_code"],
+            answers={},
+            attempt_token="malformed-token",
+        )
+
+    expired = await mgr.start_attempt(share["share_code"])
+    expired_hash = next(
+        key
+        for key, token in fake_db.tokens.items()
+        if token["consumed_at"] is None
+    )
+    fake_db.tokens[expired_hash]["expires_at"] = datetime.now(timezone.utc) - timedelta(
+        seconds=1
+    )
+    with pytest.raises(AttemptInputError):
+        await mgr.submit_attempt(
+            share["share_code"],
+            answers={},
+            attempt_token=expired["attempt_token"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_start_attempt_prunes_only_a_bounded_stale_batch(fake_db: _FakeDB) -> None:
+    mgr = ArtifactShareManager(db=fake_db)
+    share = await mgr.create_share(
+        kind="quiz",
+        title="Cleanup",
+        payload={"quiz_id": str(uuid.uuid4())},
+        answer_keys=[],
+        require_name=False,
+    )
+    now = datetime.now(timezone.utc)
+    for index in range(150):
+        fake_db.tokens[f"stale-{index}"] = {
+            "id": uuid.uuid4(),
+            "share_id": share["share_id"],
+            "started_at": now - timedelta(hours=26),
+            "expires_at": now - timedelta(hours=25),
+            "consumed_at": None,
+        }
+    fake_db.tokens["live"] = {
+        "id": uuid.uuid4(),
+        "share_id": share["share_id"],
+        "started_at": now,
+        "expires_at": now + timedelta(minutes=30),
+        "consumed_at": None,
+    }
+    fake_db.tokens["consumed-old"] = {
+        "id": uuid.uuid4(),
+        "share_id": share["share_id"],
+        "started_at": now - timedelta(hours=26),
+        "expires_at": now + timedelta(minutes=30),
+        "consumed_at": now - timedelta(hours=30),
+    }
+
+    await mgr.start_attempt(share["share_code"])
+
+    assert sum(key.startswith("stale-") for key in fake_db.tokens) == 51
+    assert "consumed-old" not in fake_db.tokens
+    assert "live" in fake_db.tokens
 
 
 @pytest.mark.asyncio
@@ -396,8 +591,9 @@ def test_artifact_share_manager_uses_canonical_assistant_schema() -> None:
     import inspect
 
     source = inspect.getsource(ArtifactShareManager)
-    for table in ("artifact_shares", "artifact_share_submitters", "quiz_attempts"):
+    for table in ("artifact_shares", "artifact_share_submitters"):
         assert f"assistant.{table}" in source
+    assert "assistant.record_artifact_share_quiz_attempt" in source
 
 
 def test_revoke_share_endpoint_returns_503_without_database(fake_db: _FakeDB) -> None:
@@ -420,3 +616,94 @@ def test_revoke_share_endpoint_returns_503_without_database(fake_db: _FakeDB) ->
 
     resp = client.delete(f"/artifact-shares/{uuid.uuid4()}")
     assert resp.status_code == 503
+
+
+def test_public_attempt_start_and_timed_submit_contract(fake_db: _FakeDB) -> None:
+    mgr = ArtifactShareManager(db=fake_db)
+
+    async def _create():
+        return await mgr.create_share(
+            kind="quiz",
+            title="Timed endpoint",
+            payload={"quiz_id": str(uuid.uuid4()), "questions": []},
+            answer_keys=[],
+            require_name=False,
+            time_limit_minutes=5,
+        )
+
+    share = asyncio.run(_create())
+    app = FastAPI()
+    app.include_router(quiz_public_router, prefix="/api/v1")
+    app.state.database = fake_db
+    app.state.multi_rate_limiter = None
+    client = TestClient(app)
+
+    missing_token = client.post(
+        f"/api/v1/quiz/shared/{share['share_code']}/submit",
+        json={"answers": {}},
+    )
+    assert missing_token.status_code == 400
+    assert missing_token.json()["detail"]["code"] == "attempt_input_invalid"
+
+    started = client.post(
+        f"/api/v1/quiz/public/{share['share_code']}/attempts/start"
+    )
+    assert started.status_code == 200
+    attempt_token = started.json()["attempt_token"]
+    assert attempt_token
+    assert all(attempt_token not in stored_hash for stored_hash in fake_db.tokens)
+
+    submitted = client.post(
+        f"/api/v1/quiz/shared/{share['share_code']}/submit",
+        json={"answers": {}, "attempt_token": attempt_token},
+    )
+    assert submitted.status_code == 200
+
+    replayed = client.post(
+        f"/api/v1/quiz/shared/{share['share_code']}/submit",
+        json={"answers": {}, "attempt_token": attempt_token},
+    )
+    assert replayed.status_code == 409
+    assert replayed.json()["detail"]["code"] == "attempt_conflict"
+
+
+def test_public_attempt_errors_use_stable_codes(fake_db: _FakeDB) -> None:
+    app = FastAPI()
+    app.include_router(quiz_public_router, prefix="/api/v1")
+    app.state.database = fake_db
+    app.state.multi_rate_limiter = None
+    client = TestClient(app)
+
+    missing = client.post("/api/v1/quiz/public/missing/attempts/start")
+    assert missing.status_code == 404
+    assert missing.json()["detail"] == {
+        "code": "share_unavailable",
+        "message": "Quiz not found or expired",
+    }
+
+    mgr = ArtifactShareManager(db=fake_db)
+
+    async def _create():
+        return await mgr.create_share(
+            kind="quiz",
+            title="Capped endpoint",
+            payload={"quiz_id": str(uuid.uuid4()), "questions": []},
+            answer_keys=[],
+            max_attempts=1,
+            require_name=True,
+        )
+
+    share = asyncio.run(_create())
+    invalid_name = client.post(
+        f"/api/v1/quiz/shared/{share['share_code']}/submit",
+        json={"answers": {}, "display_name": "<script>"},
+    )
+    assert invalid_name.status_code == 400
+    assert invalid_name.json()["detail"]["code"] == "attempt_input_invalid"
+
+    fake_db.shares[share["share_id"]]["attempt_count"] = 1
+    capped = client.post(
+        f"/api/v1/quiz/public/{share['share_code']}/attempts/start"
+    )
+    assert capped.status_code == 429
+    assert capped.json()["detail"]["code"] == "attempt_limit_reached"

@@ -7,8 +7,11 @@ required by the Assistant UI (Manus-style task/tool/artifact visualization).
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import contextlib
 import copy
+import io
 import json
 import logging
 import re
@@ -237,6 +240,79 @@ class ScriptedToolInvoker(FakeToolInvoker):
         )
 
 
+class TimedCapabilityToolInvoker(FakeToolInvoker):
+    def __init__(
+        self,
+        metadata_by_name: dict[str, dict[str, Any]],
+        *,
+        delay_seconds: float = 0.25,
+        wait_for_cancel: bool = False,
+    ) -> None:
+        super().__init__({name: {"result": name} for name in metadata_by_name})
+        self.tool_registry = self
+        self.metadata_by_name = copy.deepcopy(metadata_by_name)
+        self.delay_seconds = delay_seconds
+        self.wait_for_cancel = wait_for_cancel
+        self.started_at: dict[str, float] = {}
+        self.ended_at: dict[str, float] = {}
+        self.active = 0
+        self.peak_active = 0
+        self.all_entered = asyncio.Event()
+
+    def get_tool(self, tool_name: str) -> Any:
+        metadata = self.metadata_by_name.get(tool_name)
+        if metadata is None:
+            return None
+        return SimpleNamespace(
+            name=tool_name,
+            requires_confirmation=False,
+            sandbox_profile="none",
+            capability_metadata=copy.deepcopy(metadata),
+        )
+
+    async def invoke(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        context: Any,
+        cancel_event: Any = None,
+    ) -> Any:
+        from assistant_service.core.tools.tool_registry import ToolCallResult
+
+        del arguments, context
+        loop = asyncio.get_running_loop()
+        self.invocation_count += 1
+        self.active += 1
+        self.peak_active = max(self.peak_active, self.active)
+        self.started_at[tool_name] = loop.time()
+        if self.active == len(self.metadata_by_name):
+            self.all_entered.set()
+        try:
+            if self.wait_for_cancel:
+                assert cancel_event is not None
+                await cancel_event.wait()
+                return ToolCallResult(
+                    call_id=f"internal-{tool_name}",
+                    tool_name=tool_name,
+                    success=False,
+                    result=None,
+                    error="cancelled",
+                    duration_ms=1.0,
+                    metadata={"cancelled": True, "side_effect_state": "not_started"},
+                )
+            await asyncio.sleep(self.delay_seconds)
+            return ToolCallResult(
+                call_id=f"internal-{tool_name}",
+                tool_name=tool_name,
+                success=True,
+                result=tool_name,
+                duration_ms=self.delay_seconds * 1000,
+            )
+        finally:
+            self.ended_at[tool_name] = loop.time()
+            self.active -= 1
+
+
 class RecordingTraceWriter:
     write_timeout_s = 0.5
 
@@ -374,6 +450,108 @@ def test_streaming_error_redaction_keeps_exception_type_and_redacts_provider_key
 
 
 @pytest.mark.asyncio
+async def test_code_verification_turn_finishes_as_one_canonical_json_object() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.code_executor import CodeExecutionResult, ExecutionStatus
+    from assistant_service.core.content.structured_output import OutputFormat
+    from assistant_service.core.tool_invoker import RegistryToolInvoker
+    from assistant_service.core.tools.code_executor_tool import (
+        CODE_EXECUTOR_TOOL,
+        CodeExecutorToolExecutor,
+    )
+    from assistant_service.core.tools.tool_registry import ToolRegistry
+
+    patched_source = '''def reserve(stock: int, requested: int):
+    if not isinstance(stock, int) or isinstance(stock, bool):
+        raise TypeError("stock must be an integer")
+    if not isinstance(requested, int) or isinstance(requested, bool):
+        raise TypeError("requested must be an integer")
+    if requested < 0:
+        raise ValueError("requested must be non-negative")
+    accepted = requested <= stock
+    return {"accepted": accepted, "remaining": stock - requested if accepted else stock}
+'''
+    verification_code = patched_source + '''
+import json
+cases = []
+for stock, requested in [(5, 5), (5, 6), (5, 0)]:
+    cases.append({"stock": stock, "requested": requested, "result": reserve(stock, requested)})
+try:
+    reserve(5, -1)
+except ValueError:
+    cases.append({"stock": 5, "requested": -1, "raised": "ValueError"})
+print(json.dumps({"all_passed": len(cases) == 4, "cases": cases}))
+'''
+
+    class FixtureExecutor:
+        @staticmethod
+        def is_docker_available() -> bool:
+            return True
+
+        @staticmethod
+        async def execute(*, code: str) -> CodeExecutionResult:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exec(compile(code, "<agent-code-fixture>", "exec"), {})
+            return CodeExecutionResult(
+                execution_id="agent-reserve-verification",
+                status=ExecutionStatus.SUCCESS,
+                stdout=output.getvalue(),
+                stderr="",
+                output_files=[],
+                duration_ms=1.0,
+                exit_code=0,
+            )
+
+    tool_call = {
+        "id": "verify-reserve",
+        "function": {
+            "name": "execute_python_code",
+            "arguments": json.dumps({"code": verification_code}),
+        },
+    }
+    final_candidate = "Verified all cases.\n```json\n" + json.dumps(
+        {"patched_source": patched_source}
+    ) + "\n```"
+    model = FakeModelRegistry(
+        scripted=[
+            [{"content": "I will verify it.", "tool_calls": [tool_call], "finish_reason": "tool_calls"}],
+            [{"content": final_candidate, "finish_reason": "stop"}],
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(
+        CODE_EXECUTOR_TOOL,
+        CodeExecutorToolExecutor(FixtureExecutor()),  # type: ignore[arg-type]
+    )
+    loop = AgentLoop(model_registry=model, tool_invoker=RegistryToolInvoker(registry))
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="structured-code-verification",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="Repair and verify this function, then return one JSON object.",
+            config=AgentLoopConfig(
+                model_id="test",
+                max_tool_iterations=4,
+                output_format=OutputFormat.JSON,
+                persist_messages=False,
+            ),
+            history=[],
+        )
+    ]
+
+    public_text = "".join(
+        str(event.data) for event in events if event.event_type == "text_delta"
+    )
+    parsed = json.loads(public_text)
+    assert parsed == {"patched_source": patched_source}
+    assert public_text == json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+    assert "all_passed" in json.dumps(model.messages_history[1], ensure_ascii=False)
+
+
+@pytest.mark.asyncio
 async def test_plain_first_turn_does_not_pin_every_builtin_skill_schema() -> None:
     from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
 
@@ -437,7 +615,8 @@ async def test_run_budget_hard_stops_hidden_second_model_turn() -> None:
         max_tool_calls=3,
         max_parallel_tool_calls=2,
         max_wall_time_seconds=10,
-        max_tool_result_bytes=100,
+        # Tool-result accounting includes the final untrusted envelope.
+        max_tool_result_bytes=1000,
     )
 
     events = [
@@ -5838,6 +6017,358 @@ async def test_streaming_first_batch_dedup_preserves_distinct_tool_calls() -> No
     # Both distinct calls should execute — dedup only collapses same-args.
     assert tool_invoker.invocation_count == 2
     assert events.count("tool_call_started") == 2
+
+
+@pytest.mark.asyncio
+async def test_read_only_tool_batch_invokes_in_parallel_and_commits_in_call_order() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    tool_calls = [
+        {
+            "id": "read-a",
+            "type": "function",
+            "function": {"name": "read_a", "arguments": "{}"},
+        },
+        {
+            "id": "read-b",
+            "type": "function",
+            "function": {"name": "read_b", "arguments": "{}"},
+        },
+    ]
+    model = FakeModelRegistry(
+        scripted=[
+            [{"tool_calls": tool_calls, "finish_reason": "tool_calls"}],
+            [{"content": "done", "finish_reason": "stop"}],
+        ]
+    )
+    invoker = TimedCapabilityToolInvoker(
+        {
+            "read_a": {"operation_kind": "read", "read_only": True},
+            "read_b": {"operation_kind": "read", "read_only": True},
+        }
+    )
+    loop = AgentLoop(model_registry=model, tool_invoker=invoker)  # type: ignore[arg-type]
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="parallel-read-batch",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="read both",
+            config=AgentLoopConfig(
+                model_id="test",
+                max_tool_iterations=3,
+                max_concurrent_tools=4,
+                persist_messages=False,
+            ),
+            history=[],
+        )
+    ]
+
+    durations = [
+        invoker.ended_at[name] - invoker.started_at[name]
+        for name in ("read_a", "read_b")
+    ]
+    batch_wall = max(invoker.ended_at.values()) - min(invoker.started_at.values())
+    assert invoker.peak_active == 2
+    assert batch_wall <= max(durations) * 1.2
+    assert [
+        event.data["tool_call_id"]
+        for event in events
+        if event.event_type == "tool_call_result"
+    ] == ["read-a", "read-b"]
+    assert [
+        message["tool_call_id"]
+        for message in model.messages_history[1]
+        if message.get("role") == "tool"
+    ] == ["read-a", "read-b"]
+
+
+@pytest.mark.asyncio
+async def test_write_unknown_and_process_tools_remain_serial() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    names = ("write_tool", "unknown_tool", "process_tool")
+    tool_calls = [
+        {
+            "id": f"call-{name}",
+            "type": "function",
+            "function": {"name": name, "arguments": "{}"},
+        }
+        for name in names
+    ]
+    model = FakeModelRegistry(
+        scripted=[
+            [{"tool_calls": tool_calls, "finish_reason": "tool_calls"}],
+            [{"content": "done", "finish_reason": "stop"}],
+        ]
+    )
+    invoker = TimedCapabilityToolInvoker(
+        {
+            "write_tool": {"operation_kind": "write", "read_only": False},
+            "unknown_tool": {},
+            "process_tool": {
+                "operation_kind": "read",
+                "read_only": True,
+                "execution_surface": "process",
+            },
+        },
+        delay_seconds=0.1,
+    )
+    loop = AgentLoop(model_registry=model, tool_invoker=invoker)  # type: ignore[arg-type]
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="serial-risk-batch",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="run in order",
+            config=AgentLoopConfig(
+                model_id="test",
+                max_tool_iterations=3,
+                max_concurrent_tools=4,
+                persist_messages=False,
+            ),
+            history=[],
+        )
+    ]
+
+    durations = [invoker.ended_at[name] - invoker.started_at[name] for name in names]
+    batch_wall = max(invoker.ended_at.values()) - min(invoker.started_at.values())
+    assert invoker.peak_active == 1
+    assert batch_wall >= sum(durations) * 0.9
+    assert [
+        event.data["tool_call_id"]
+        for event in events
+        if event.event_type == "tool_call_result"
+    ] == [f"call-{name}" for name in names]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_parallel_read_batch_pairs_every_call_before_terminal() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    tool_calls = [
+        {
+            "id": "read-cancel-a",
+            "type": "function",
+            "function": {"name": "read_a", "arguments": "{}"},
+        },
+        {
+            "id": "read-cancel-b",
+            "type": "function",
+            "function": {"name": "read_b", "arguments": "{}"},
+        },
+    ]
+    model = FakeModelRegistry(
+        scripted=[
+            [{"tool_calls": tool_calls, "finish_reason": "tool_calls"}],
+            [{"content": "must not run", "finish_reason": "stop"}],
+        ]
+    )
+    invoker = TimedCapabilityToolInvoker(
+        {
+            "read_a": {"operation_kind": "read", "read_only": True},
+            "read_b": {"operation_kind": "read", "read_only": True},
+        },
+        wait_for_cancel=True,
+    )
+    loop = AgentLoop(model_registry=model, tool_invoker=invoker)  # type: ignore[arg-type]
+    events: list[Any] = []
+
+    async def consume() -> None:
+        async for event in loop.execute(
+            session_id="cancel-parallel-read-batch",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="read both",
+            config=AgentLoopConfig(
+                model_id="test",
+                max_tool_iterations=3,
+                max_concurrent_tools=4,
+                persist_messages=False,
+            ),
+            history=[],
+        ):
+            events.append(event)
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.wait_for(invoker.all_entered.wait(), timeout=1)
+    started = next(event.data for event in events if event.event_type == "run_started")
+    assert await loop.task_manager.cancel_task(
+        "cancel-parallel-read-batch",
+        started["task_id"],
+    )
+    await asyncio.wait_for(consumer, timeout=2)
+
+    public_results = {
+        event.data["tool_call_id"]: event.data["status"]
+        for event in events
+        if event.event_type == "tool_call_result"
+    }
+    assert set(public_results) == {"read-cancel-a", "read-cancel-b"}
+    assert set(public_results.values()) <= {"cancelled", "not_executed"}
+    terminal = next(event for event in events if event.event_type == "run_error")
+    assert terminal.data["terminal_envelope"]["status"] == "cancelled"
+    assert model._call_index == 1
+
+
+@pytest.mark.asyncio
+async def test_parallel_read_group_closes_prior_call_before_dynamic_approval() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.agent.middlewares.permission import (
+        PermissionMiddleware,
+        policy_from_sets,
+    )
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+    from assistant_service.core.rag.context_engine import _history_units
+
+    tool_calls = [
+        {
+            "id": "read-before-approval",
+            "type": "function",
+            "function": {"name": "read_a", "arguments": "{}"},
+        },
+        {
+            "id": "read-needs-approval",
+            "type": "function",
+            "function": {"name": "read_b", "arguments": "{}"},
+        },
+    ]
+    invoker = TimedCapabilityToolInvoker(
+        {
+            "read_a": {"operation_kind": "read", "read_only": True},
+            "read_b": {"operation_kind": "read", "read_only": True},
+        },
+        delay_seconds=0.01,
+    )
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
+    initial_loop = AgentLoop(
+        model_registry=FakeModelRegistry(
+            scripted=[[{"tool_calls": tool_calls, "finish_reason": "tool_calls"}]]
+        ),
+        tool_invoker=invoker,  # type: ignore[arg-type]
+        execution_gateway=gateway,
+    )
+    initial_loop.middleware_chain.add(
+        PermissionMiddleware(policy_from_sets(confirm={"read_b"}))
+    )
+
+    initial_events = [
+        event
+        async for event in initial_loop.execute(
+            session_id="parallel-read-approval",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="read both",
+            config=AgentLoopConfig(
+                model_id="test",
+                max_tool_iterations=3,
+                max_concurrent_tools=4,
+                persist_messages=False,
+            ),
+            history=[],
+        )
+    ]
+
+    approval_index = next(
+        index
+        for index, event in enumerate(initial_events)
+        if event.event_type == "approval_required"
+    )
+    prior_lifecycle = [
+        (index, event.event_type, event.data.get("status"))
+        for index, event in enumerate(initial_events)
+        if isinstance(event.data, dict)
+        and event.data.get("tool_call_id") == "read-before-approval"
+        and event.event_type in {"tool_call_start", "tool_call_result", "tool_call_end"}
+    ]
+    assert [(event_type, status) for _, event_type, status in prior_lifecycle] == [
+        ("tool_call_start", None),
+        ("tool_call_result", "not_executed"),
+        ("tool_call_end", "not_executed"),
+    ]
+    assert max(index for index, _, _ in prior_lifecycle) < approval_index
+    assert invoker.invocation_count == 0
+
+    run_id = next(
+        event.data["run_id"]
+        for event in initial_events
+        if event.event_type == "run_started"
+    )
+    approval = next(
+        event.data
+        for event in initial_events
+        if event.event_type == "approval_required"
+    )
+    approval_checkpoints = [
+        checkpoint
+        for checkpoint in gateway._checkpoints[run_id]
+        if checkpoint.phase == "approval_pending"
+    ]
+    repaired = approval_checkpoints[-1]
+    assert repaired.checkpoint_id == approval["checkpoint_id"]
+    assert repaired.resume_payload["parallel_read_only_group_repaired"] is True
+    assert repaired.resume_payload["paired_prior_tool_call_ids"] == [
+        "read-before-approval"
+    ]
+    assert repaired.resume_payload["_checkpoint_receipt"]["message_state"][
+        "input_message_count"
+    ] == 4
+
+    approved = await gateway.approve(
+        approval_id=approval["approval_id"],
+        tenant_id="tenant1",
+        user_id="u1",
+        approved=True,
+        approver_user_id="u1",
+    )
+    assert approved is not None
+    resume_model = FakeModelRegistry(
+        scripted=[[{"content": "done", "finish_reason": "stop"}]]
+    )
+    resume_loop = AgentLoop(
+        model_registry=resume_model,
+        tool_invoker=invoker,  # type: ignore[arg-type]
+        execution_gateway=gateway,
+    )
+    resume_loop.middleware_chain.add(
+        PermissionMiddleware(policy_from_sets(confirm={"read_b"}))
+    )
+    resume_events = [
+        event
+        async for event in resume_loop.execute(
+            session_id="parallel-read-approval",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="continue",
+            config=AgentLoopConfig(
+                model_id="test",
+                max_tool_iterations=3,
+                max_concurrent_tools=4,
+                persist_messages=False,
+                resume_run_id=run_id,
+                resume_approval_id=approval["approval_id"],
+            ),
+            history=[],
+        )
+    ]
+
+    provider_messages = resume_model.messages_history[0]
+    tool_result_ids = [
+        message["tool_call_id"]
+        for message in provider_messages
+        if message.get("role") == "tool"
+    ]
+    provider_call_ids = [
+        call["id"]
+        for message in provider_messages
+        if message.get("role") == "assistant"
+        for call in message.get("tool_calls") or []
+    ]
+    _, invalid_tool_messages = _history_units(
+        [message for message in provider_messages if message.get("role") != "system"]
+    )
+    assert tool_result_ids == provider_call_ids == ["read-needs-approval"]
+    assert invalid_tool_messages == 0
+    assert any(event.event_type == "run_finished" for event in resume_events)
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  acceptPendingRunSession,
   beginNewChatSession,
   persistNewChatSession,
   resetStreamStartMetrics,
@@ -69,6 +70,7 @@ test("openStream and persist share the minted session id", async () => {
           createdBodies.push({ session_id: body.session_id });
           return { session_id: body.session_id };
         },
+        async () => undefined,
         { sessionId: id, title: "hello" },
       );
       return persistDone;
@@ -82,6 +84,95 @@ test("openStream and persist share the minted session id", async () => {
   assert.equal(persisted.session_id, minted);
   assert.equal(createdBodies[0]?.session_id, minted);
   assert.equal(openedWith, persisted.session_id);
+});
+
+test("session create conflict is accepted only after owner-checked patch", async () => {
+  const patched: Array<{ sessionId: string; body: Record<string, unknown> }> = [];
+  const result = await persistNewChatSession(
+    async () => {
+      throw { response: { status: 409 } };
+    },
+    async (sessionId, body) => {
+      patched.push({ sessionId, body });
+    },
+    {
+      sessionId: "stream-created-session",
+      title: "hello",
+      config: { selected_model: "model-a" },
+    },
+  );
+
+  assert.deepEqual(result, { session_id: "stream-created-session" });
+  assert.deepEqual(patched, [
+    {
+      sessionId: "stream-created-session",
+      body: {
+        metadata: { title: "hello" },
+        config: { selected_model: "model-a" },
+      },
+    },
+  ]);
+});
+
+test("session create conflict is not swallowed when owner check fails", async () => {
+  const ownerError = new Error("not owned");
+  await assert.rejects(
+    persistNewChatSession(
+      async () => {
+        throw { response: { status: 409 } };
+      },
+      async () => {
+        throw ownerError;
+      },
+      { sessionId: "foreign-session", title: "hello" },
+    ),
+    ownerError,
+  );
+});
+
+test("non-conflict create failures do not attempt patch recovery", async () => {
+  let patchCalls = 0;
+  const createError = { response: { status: 500 } };
+  await assert.rejects(
+    persistNewChatSession(
+      async () => {
+        throw createError;
+      },
+      async () => {
+        patchCalls += 1;
+      },
+      { sessionId: "failed-session", title: "hello" },
+    ),
+    (error) => error === createError,
+  );
+  assert.equal(patchCalls, 0);
+});
+
+test("run_started binds only the current pending session", () => {
+  assert.equal(
+    acceptPendingRunSession({
+      requestedSessionId: "current-session",
+      pendingSessionId: "current-session",
+      eventSessionId: "current-session",
+    }),
+    "current-session",
+  );
+  assert.equal(
+    acceptPendingRunSession({
+      requestedSessionId: "current-session",
+      pendingSessionId: "stale-session",
+      eventSessionId: "current-session",
+    }),
+    undefined,
+  );
+  assert.equal(
+    acceptPendingRunSession({
+      requestedSessionId: "current-session",
+      pendingSessionId: "current-session",
+      eventSessionId: "foreign-session",
+    }),
+    undefined,
+  );
 });
 
 test("thinking and sub-agent events flush as one batch", () => {

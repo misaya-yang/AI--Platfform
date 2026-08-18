@@ -167,7 +167,7 @@ class HTTPTransport:
 
                 async for event in self._sse_parser.parse(response):
                     yield event
-                    if event.event_type == "done":
+                    if event.is_terminal():
                         return
 
         except AssistantError:

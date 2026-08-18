@@ -13,5 +13,3 @@ export { CompactModelSelector } from "./CompactModelSelector";
 // Manus-style agentic components
 export { AgentTaskTimeline } from "./AgentTaskTimeline";
 export type { AgentTask, SubTask, AgentTaskTimelineProps } from "./AgentTaskTimeline";
-export { DocumentPreview } from "./DocumentPreview";
-export type { DocumentPreviewProps } from "./DocumentPreview";

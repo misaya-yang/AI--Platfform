@@ -555,6 +555,22 @@ class MCPClient:
         self._pinned_addresses = current
         return current
 
+    def _current_dns_pin(self) -> frozenset[str]:
+        """Return the initialize-time pin without repeating synchronous DNS.
+
+        Requests connect to an IP literal from this immutable set, so DNS
+        rebinding cannot redirect an established client. A fresh runtime cache
+        generation resolves and validates DNS again after TTL or revision
+        invalidation.
+        """
+        if not self._pinned_addresses:
+            raise MCPError(
+                -1,
+                "MCP client is not initialized",
+                stable_code="MCP_NOT_CONNECTED",
+            )
+        return self._pinned_addresses
+
     def _build_pinned_request(
         self,
         method: str,
@@ -568,7 +584,7 @@ class MCPClient:
                 "MCP client is not connected",
                 stable_code="MCP_NOT_CONNECTED",
             )
-        addresses = self._validate_dns_pin()
+        addresses = self._current_dns_pin()
         target, host_header, sni_hostname = self._pinned_request_target(
             self.config.url,
             addresses,
@@ -585,8 +601,13 @@ class MCPClient:
         return request
 
     async def initialize(self) -> dict[str, Any]:
+        if self._initialized:
+            return {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "serverInfo": dict(self._server_info),
+            }
         self._validate_origin_and_audience()
-        self._validate_dns_pin()
+        await asyncio.to_thread(self._validate_dns_pin)
         # Client-generated protocol and authorization headers take precedence
         # over visible package configuration as required by Agent Plugins v1.
         generated_headers = {
@@ -868,6 +889,8 @@ class MCPClient:
                 "MCP client is not connected",
                 stable_code="MCP_NOT_CONNECTED",
             )
+        if not self._pinned_addresses:
+            await asyncio.to_thread(self._validate_dns_pin)
         try:
             base = urllib.parse.urlsplit(self.config.url)
             resource = urllib.parse.urlsplit(resource_url)
@@ -919,7 +942,7 @@ class MCPClient:
                 stable_code="MCP_RESOURCE_ORIGIN_MISMATCH",
             )
 
-        addresses = self._validate_dns_pin()
+        addresses = self._current_dns_pin()
         target, host_header, sni_hostname = self._pinned_request_target(
             resource_url,
             addresses,

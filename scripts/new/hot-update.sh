@@ -32,7 +32,7 @@ Usage: scripts/new/hot-update.sh [OPTIONS]
 Options:
   --gateway       Copy gateway src/config/database and shared core, restart gateway
   --assistant     Copy assistant-service src and shared core, restart assistant
-  --knowledge     Copy knowledge-service package and shared core, restart knowledge
+  --knowledge     Copy knowledge-service package and shared core, restart API and worker
   --docgen        Copy bundled docgen/plugin source into Assistant, restart Assistant
   --frontend      Build web/dist locally and copy it into the nginx container
   --python        Update all Python services (gateway, assistant, knowledge, bundled docgen)
@@ -196,10 +196,14 @@ fi
 
 if [ "$UPDATE_KNOWLEDGE" = true ]; then
     knowledge="$(knowledge_container)"
+    knowledge_worker="$(knowledge_worker_container)"
     knowledge_site="$(site_packages "$knowledge")"
+    knowledge_worker_site="$(site_packages "$knowledge_worker")"
     copy_dir "apps/knowledge-service/src/knowledge_service" "$knowledge" "$knowledge_site/knowledge_service"
     copy_dir "packages/ai-gateway-core/src/ai_gateway_core" "$knowledge" "$knowledge_site/ai_gateway_core"
-    restart_services+=("knowledge-service")
+    copy_dir "apps/knowledge-service/src/knowledge_service" "$knowledge_worker" "$knowledge_worker_site/knowledge_service"
+    copy_dir "packages/ai-gateway-core/src/ai_gateway_core" "$knowledge_worker" "$knowledge_worker_site/ai_gateway_core"
+    restart_services+=("knowledge-service" "knowledge-worker")
 fi
 
 if [ "$UPDATE_DOCGEN" = true ]; then
@@ -238,6 +242,7 @@ fi
 log_step "Runtime health checks"
 if [ "$UPDATE_KNOWLEDGE" = true ]; then
     wait_for_healthy "Knowledge service" "check_knowledge_health" 60 || log_warn "Knowledge service may still be starting"
+    wait_for_healthy "Knowledge worker" "check_knowledge_worker_health" 60 || log_warn "Knowledge worker may still be starting"
 fi
 if [ "$UPDATE_ASSISTANT" = true ]; then
     wait_for_healthy "Assistant service" "check_assistant_health" 60 || log_warn "Assistant service may still be starting"

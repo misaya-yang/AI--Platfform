@@ -137,7 +137,10 @@ async def test_tool_invoker_bridge_inherits_target_timeout() -> None:
     )
 
     assert result.success is True
-    assert result.result == "delayed execution completed"
+    projection = json.loads(result.result)
+    assert projection["invoked_tool"] == "slow_document_tool"
+    assert projection["status"] == "success"
+    assert projection["result"] == "delayed execution completed"
 
 
 @pytest.mark.asyncio

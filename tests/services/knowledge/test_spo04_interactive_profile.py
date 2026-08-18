@@ -36,7 +36,7 @@ async def test_default_interactive_profile_uses_12_plus_12_hybrid(monkeypatch) -
 
     class FakeVectorStore:
         async def ping(self, **_kwargs):
-            return True
+            pytest.fail("interactive retrieval must not issue a separate Qdrant ping")
 
         async def require_collection_readable(self, *_args, **_kwargs):
             return {"tenant_id": "tenant-a", "dataset_id": "kb-demo"}

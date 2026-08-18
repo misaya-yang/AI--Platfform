@@ -31,14 +31,46 @@ export function persistNewChatSession(
     metadata?: Record<string, unknown>;
     config?: unknown;
   }) => Promise<{ session_id: string }>,
+  updateSession: (
+    sessionId: string,
+    body: { metadata?: Record<string, unknown>; config?: unknown },
+  ) => Promise<unknown>,
   input: { sessionId: string; title: string; config?: unknown },
 ): Promise<{ session_id: string }> {
-  return createSession({
+  const body = {
     session_id: input.sessionId,
     service_id: "__builtin_assistant__",
     metadata: { title: input.title },
     config: input.config,
+  };
+  return createSession(body).catch(async (error: unknown) => {
+    const status = (error as { response?: { status?: unknown } } | null)?.response?.status;
+    if (status !== 409) {
+      throw error;
+    }
+
+    // The stream can win the create race because both paths use the same
+    // client-minted id. PATCH is deliberately required here: the backend
+    // re-checks ownership, so a collision with another tenant/user is not
+    // mistaken for a successfully persisted session.
+    await updateSession(input.sessionId, {
+      metadata: body.metadata,
+      config: body.config,
+    });
+    return { session_id: input.sessionId };
   });
+}
+
+export function acceptPendingRunSession(args: {
+  requestedSessionId: string;
+  pendingSessionId: string | undefined;
+  eventSessionId?: string;
+}): string | undefined {
+  if (args.pendingSessionId !== args.requestedSessionId) return undefined;
+  if (args.eventSessionId && args.eventSessionId !== args.requestedSessionId) {
+    return undefined;
+  }
+  return args.requestedSessionId;
 }
 
 export function startChatWithoutAwaitingSessionCreate<TStream>(args: {

@@ -231,17 +231,16 @@ class DatabaseStorage(DatasetPersistenceMixin):
             rows = [(key_hash, count) for key_hash, count in pending.items() if count > 0]
             if not rows:
                 return
-            async with self._pool.acquire() as conn:
-                async with conn.transaction():
-                    await conn.executemany(
-                        """
-                        UPDATE api_keys SET
-                            last_used_at = NOW(),
-                            use_count = use_count + $2
-                        WHERE key_hash = $1
-                    """,
-                        rows,
-                    )
+            async with self._pool.acquire() as conn, conn.transaction():
+                await conn.executemany(
+                    """
+                    UPDATE api_keys SET
+                        last_used_at = NOW(),
+                        use_count = use_count + $2
+                    WHERE key_hash = $1
+                """,
+                    rows,
+                )
         except Exception:
             # Put counts back to buffer to avoid silently losing stats.
             async with self._api_key_usage_lock:
@@ -372,6 +371,13 @@ class DatabaseStorage(DatasetPersistenceMixin):
             return None
         async with self._pool.acquire() as conn:
             return await conn.fetchrow(query, *args)
+
+    async def fetchval(self, query: str, *args) -> Any | None:
+        """Execute a query and return its first scalar value."""
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval(query, *args)
 
     async def fetch(self, query: str, *args) -> list[Any]:
         """执行查询并返回多行结果"""
@@ -3230,24 +3236,21 @@ class DatabaseStorage(DatasetPersistenceMixin):
         if not cleaned:
             return []
 
-        # Try FTS first (fast GIN index), fall back to ILIKE
-        try:
-            result = await self._search_segments_fts(
-                dataset_id,
-                tenant_id,
-                cleaned,
-                document_id,
-                source_type,
-                language,
-                limit,
-                metadata_filter,
-            )
-            if result is not None:
-                return result
-        except Exception as exc:
-            logger.warning(
-                "FTS query failed (%s), falling back to ILIKE for dataset=%s", exc, dataset_id
-            )
+        # Try FTS first (fast GIN index). Only a verified pre-migration schema
+        # may use the O(N) ILIKE compatibility path; operational failures must
+        # remain visible instead of silently doubling database work.
+        result = await self._search_segments_fts(
+            dataset_id,
+            tenant_id,
+            cleaned,
+            document_id,
+            source_type,
+            language,
+            limit,
+            metadata_filter,
+        )
+        if result is not None:
+            return result
 
         return await self._search_segments_ilike(
             dataset_id,
@@ -3391,6 +3394,7 @@ class DatabaseStorage(DatasetPersistenceMixin):
         Note: Actual vector search should use VectorStore.search() directly.
         This method exists for API compatibility.
         """
+        _ = (dataset_id, query_embedding, top_k)
         # Return empty - retrieval_service should use VectorStore
         return []
 
@@ -3480,15 +3484,20 @@ class DatabaseStorage(DatasetPersistenceMixin):
                 rows = await conn.fetch(query, *params)
                 return [self._row_to_dict(row) for row in rows]
         except Exception as e:
+            sqlstate = str(getattr(e, "sqlstate", "") or "")
+            column_name = str(getattr(e, "column_name", "") or "").lower()
             err_str = str(e).lower()
-            if "text_search" in err_str or "column" in err_str:
+            missing_text_search = sqlstate == "42703" and (
+                column_name == "text_search" or "text_search" in err_str
+            )
+            if missing_text_search:
                 # Column doesn't exist yet — signal caller to use ILIKE fallback
                 logger.warning(
                     "text_search column missing, falling back to ILIKE for dataset=%s", dataset_id
                 )
                 return None
-            logger.error(f"FTS search error: {e}")
-            return None
+            logger.error("FTS search error for dataset=%s: %s", dataset_id, e)
+            raise
 
     async def _search_segments_ilike(
         self,
@@ -7831,12 +7840,9 @@ class DatabaseStorage(DatasetPersistenceMixin):
 
         # Parse JSON fields
         for field in ("value", "metadata"):
-            if field in result and result[field] is not None:
-                if isinstance(result[field], str):
-                    try:
-                        result[field] = json.loads(result[field])
-                    except (json.JSONDecodeError, TypeError):
-                        pass  # Keep original value if parsing fails
+            if field in result and isinstance(result[field], str):
+                with contextlib.suppress(json.JSONDecodeError, TypeError):
+                    result[field] = json.loads(result[field])
 
         # Convert datetime fields to ISO format strings
         for field in ("created_at", "updated_at", "last_accessed_at"):

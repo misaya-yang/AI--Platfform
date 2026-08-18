@@ -1440,13 +1440,13 @@ class SubAgentManager:
                     if result.success
                     else (result.error or "Error")
                 )
-                if run_budget is not None:
-                    run_budget.observe_tool_result(result_str)
                 result_for_model = _envelope_tool_result(
                     result_str,
                     tool_name=tool_name,
                     tool_id=call_id,
                 )
+                if run_budget is not None:
+                    run_budget.observe_tool_result(result_for_model)
                 progress_summary = result_for_model[:200]
 
                 yield {

@@ -13,6 +13,7 @@ from src.api.v1.connectors import (
     OAUTH_STATE_TTL_SECONDS,
     _consume_oauth_state,
     _decrypt_connector_secret,
+    _oauth_console_redirect,
     _refresh_token_if_needed,
     _store_oauth_state,
     initiate_oauth,
@@ -61,6 +62,29 @@ def _user(user_id: str = "user", tenant_id: str = "tenant") -> UserContext:
         tenant_id=tenant_id,
         is_authenticated=True,
     )
+
+
+def test_oauth_console_redirect_uses_explicit_console_origin(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "CORS_ALLOWED_ORIGINS",
+        "https://wrong-allowed.example,https://console.example",
+    )
+    monkeypatch.setenv("CONSOLE_PUBLIC_BASE_URL", "https://console.example/")
+
+    response = _oauth_console_redirect("google drive", status="connected")
+
+    assert response.headers["location"] == (
+        "https://console.example/settings/connectors?connected=google%20drive&status=connected"
+    )
+
+
+def test_oauth_console_redirect_is_relative_without_valid_explicit_origin(monkeypatch) -> None:
+    monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "https://wrong-allowed.example")
+    monkeypatch.setenv("CONSOLE_PUBLIC_BASE_URL", "https://user:secret@example.com/path")
+
+    response = _oauth_console_redirect("github")
+
+    assert response.headers["location"] == "/settings/connectors?connected=github&status=connected"
 
 
 @pytest.mark.asyncio

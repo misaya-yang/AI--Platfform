@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 
 from src.core.gateway.admission import CapacityAdmissionController, CapacityRejected
 from src.core.gateway.capacity import CapacityBudget
+from src.core.gateway.lua_scripts import SLIDING_WINDOW_CHECK_LUA, eval_script
 from src.core.gateway.multi_dimension_rate_limiter import (
     MultiDimensionRateLimitConfig,
     MultiDimensionRateLimiter,
@@ -129,6 +130,59 @@ async def test_allowed_redis_limit_reports_real_remaining_capacity() -> None:
 
     assert first.allowed and first.remaining == 2
     assert second.allowed and second.remaining == 1
+
+
+@pytest.mark.asyncio
+async def test_same_window_custom_policies_use_one_redis_round_trip() -> None:
+    redis = _LuaFakeRedis()
+    limiter = MultiDimensionRateLimiter(
+        MultiDimensionRateLimitConfig(),
+        redis_client=redis,
+    )
+    policies = [
+        SimpleNamespace(key="rate:a", requests=10, window=60, dimension="a"),
+        SimpleNamespace(key="rate:b", requests=5, window=60, dimension="b"),
+        SimpleNamespace(key="rate:c", requests=3, window=60, dimension="c"),
+    ]
+
+    results = await limiter.check_custom_limits(policies=policies)
+
+    assert redis.round_trips == 1
+    assert len(redis.eval_calls) == 1
+    assert redis.eval_calls[0][1] == ["rate:a", "rate:b", "rate:c"]
+    assert [result.dimension for result in results] == ["a", "b", "c"]
+    assert all(result.allowed for result in results)
+
+
+@pytest.mark.asyncio
+async def test_registered_lua_script_is_reused_on_warm_path() -> None:
+    class RegisteredRedis:
+        def __init__(self) -> None:
+            self.register_calls = 0
+            self.evalsha_calls = 0
+
+        def register_script(self, _script: str):
+            self.register_calls += 1
+
+            async def execute(*, keys, args):
+                self.evalsha_calls += 1
+                return [-1, 0, int(args[4]) - 1, int(args[4]) - 1]
+
+            return execute
+
+        async def eval(self, *_args):
+            raise AssertionError("registered clients must not send raw EVAL")
+
+    redis = RegisteredRedis()
+    kwargs = {
+        "keys": ["rate:a"],
+        "args": [1, 0, 61, "member", 10],
+    }
+    await eval_script(redis, SLIDING_WINDOW_CHECK_LUA, **kwargs)
+    await eval_script(redis, SLIDING_WINDOW_CHECK_LUA, **kwargs)
+
+    assert redis.register_calls == 1
+    assert redis.evalsha_calls == 2
 
     async def zrem(self, key: str, member: str) -> int:
         self.round_trips += 1

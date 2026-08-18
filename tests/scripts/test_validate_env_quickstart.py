@@ -917,6 +917,7 @@ def test_deploy_app_includes_application_microservices() -> None:
         "gateway",
         "frontend",
         "knowledge-service",
+        "knowledge-worker",
         "assistant-service",
     }.issubset(services)
     assert "mcp-docgen-server" not in services
@@ -1032,6 +1033,39 @@ def test_runtime_checks_microservice_readiness_not_only_liveness() -> None:
     assert "127.0.0.1:8765" not in common
     assert 'http://127.0.0.1:8092/health" &>/dev/null' not in common
     assert 'http://127.0.0.1:8093/health" &>/dev/null' not in common
+
+
+def test_knowledge_worker_is_first_class_in_runtime_scripts() -> None:
+    common = Path("scripts/new/common.sh").read_text()
+    deploy = Path("scripts/new/deploy.sh").read_text()
+    hot_update = Path("scripts/new/hot-update.sh").read_text()
+    status = Path("scripts/new/status.sh").read_text()
+
+    assert "knowledge_worker_container()" in common
+    assert '"$(knowledge_worker_container)"' in common
+    assert "check_knowledge_worker_health()" in common
+    assert "knowledge-worker" in re.search(
+        r'FULL_APP_SERVICES="([^"]+)"', deploy
+    ).group(1).split()
+    assert 'SERVICES="gateway frontend knowledge-service knowledge-worker assistant-service"' in deploy
+    assert 'wait_for_healthy "Knowledge worker" "check_knowledge_worker_health"' in deploy
+    assert (
+        'wait_for_healthy "Knowledge worker" "check_knowledge_worker_health" 60 '
+        '|| fail "Knowledge worker runtime check failed."'
+        in Path("scripts/new/validate-env.sh").read_text()
+    )
+    assert 'knowledge_worker="$(knowledge_worker_container)"' in hot_update
+    assert 'restart_services+=("knowledge-service" "knowledge-worker")' in hot_update
+    assert hot_update.count('copy_dir "apps/knowledge-service/src/knowledge_service"') >= 2
+    assert 'wait_for_healthy "Knowledge worker" "check_knowledge_worker_health"' in hot_update
+    assert 'check_and_report "Knowledge worker" check_knowledge_worker_health' in status
+    makefile = Path("Makefile").read_text(encoding="utf-8")
+    assert re.search(r"dev-compose:.*?knowledge-service knowledge-worker frontend", makefile, re.S)
+    assert re.search(
+        r"dev-compose-logs:.*?knowledge-service knowledge-worker frontend",
+        makefile,
+        re.S,
+    )
 
 
 def test_migrate_auto_stops_on_failed_pending_migration(tmp_path: Path) -> None:

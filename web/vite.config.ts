@@ -39,6 +39,7 @@ export default defineConfig(({ mode }) => {
 
     build: {
       outDir: "dist",
+      manifest: true,
       sourcemap: mode === "development",
       // Optimize chunk splitting
       rollupOptions: {

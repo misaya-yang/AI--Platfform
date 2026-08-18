@@ -85,26 +85,44 @@ def test_tenant_urls_require_tls_and_cannot_use_userinfo() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dns_rebinding_is_rejected_before_network_io() -> None:
-    resolutions = iter([{"1.1.1.1"}, {"8.8.8.8"}])
+async def test_initialize_resolves_once_and_connects_only_to_the_pinned_ip() -> None:
+    resolutions = 0
     network_calls = 0
 
     def resolver(_hostname: str, _port: int) -> set[str]:
-        return next(resolutions)
+        nonlocal resolutions
+        resolutions += 1
+        return {"1.1.1.1"}
 
-    async def handler(_request: httpx.Request) -> httpx.Response:
+    async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal network_calls
         network_calls += 1
-        return httpx.Response(500)
+        assert request.url.host == "1.1.1.1"
+        payload = json.loads(request.content or b"{}")
+        if "id" not in payload:
+            return httpx.Response(202)
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": payload["id"],
+                "result": {
+                    "protocolVersion": "2025-11-25",
+                    "serverInfo": {"name": "pinned", "version": "1"},
+                },
+            },
+        )
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://mcp.example")
     client = MCPClient(_config(dns_resolver=resolver), http_client=http)
-    with pytest.raises(MCPError) as exc_info:
+    try:
         await client.initialize()
-    await http.aclose()
+    finally:
+        await client.close()
+        await http.aclose()
 
-    assert exc_info.value.stable_code == "MCP_DNS_REBINDING_BLOCKED"
-    assert network_calls == 0
+    assert resolutions == 1
+    assert network_calls == 2
 
 
 @pytest.mark.asyncio

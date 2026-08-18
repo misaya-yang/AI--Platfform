@@ -107,6 +107,11 @@ artifacts go. `make harness-check` fails when a spec, a config, or a screenshot 
 - `pnpm -C web e2e` — full stack E2E via `scripts/dev/start_e2e_stack.sh`.
 - `pnpm -C web e2e:headed` — same, with a visible browser.
 
+SDK SSE contract:
+
+- `make sdk-sse-contract` — runs the shared Python and CLI SSE fixture contract; also runs Java
+  and Dart native tests when Maven or Dart is installed, otherwise prints an explicit skip.
+
 ## 7. Gates
 
 Run the gate that matches what you touched. These are the same commands CI runs.
@@ -122,6 +127,7 @@ Run the gate that matches what you touched. These are the same commands CI runs.
 | Assistant OpenAPI | `make snapshot-assistant-openapi` then `make test-isolation` |
 | RAG retrieval | `make rag-eval-regression-gate` |
 | Deploy scripts, `.env.example`, Compose | `make validate-example-config` |
+| Python / CLI / Java / Dart SDK streaming | `make sdk-sse-contract` |
 
 ## 8. What CI runs
 

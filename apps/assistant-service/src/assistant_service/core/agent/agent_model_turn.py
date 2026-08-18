@@ -12,6 +12,7 @@ from typing import Any
 from ai_gateway_core.enums import StreamEventType
 from ai_gateway_core.logging import get_logger, record_internal_exception
 
+from ..content.structured_output import canonical_json_object_text
 from ..models.model_registry import should_use_native_search
 from ..quality.cache_optimizer import (
     normalize_provider_cache_usage,
@@ -42,6 +43,11 @@ from .tool_result_formatter import (
 )
 
 logger = get_logger(__name__)
+
+
+def _requires_json_object(ctx: AgentLoopContext) -> bool:
+    output_format = getattr(ctx.config, "output_format", "text")
+    return str(getattr(output_format, "value", output_format)) in {"json", "json_schema"}
 
 
 def _resolve_model_turn_thinking_level(*, requested: str | None, iteration: int) -> str:
@@ -358,6 +364,12 @@ class AgentModelTurnMixin:
                 ]
         result.tool_calls = tool_calls
         if deferred_public_chunks and not tool_calls:
+            if _requires_json_object(ctx):
+                canonical = canonical_json_object_text("".join(deferred_public_chunks))
+                if canonical is None:
+                    raise RuntimeError("provider_structured_output_invalid")
+                deferred_public_chunks = [canonical]
+                result.content = canonical
             for text_chunk in deferred_public_chunks:
                 ctx.generated_content += text_chunk
                 if not result.first_token_emitted:
@@ -473,6 +485,11 @@ class AgentModelTurnMixin:
                 raise RuntimeError("provider_turn_incomplete")
             if not forced_chunks:
                 raise RuntimeError("provider_synthesis_returned_no_text")
+            if _requires_json_object(ctx):
+                canonical = canonical_json_object_text("".join(forced_chunks))
+                if canonical is None:
+                    raise RuntimeError("provider_structured_output_invalid")
+                forced_chunks = [canonical]
             for text_chunk in forced_chunks:
                 ctx.generated_content += text_chunk
                 if not first_token_emitted:

@@ -10,6 +10,8 @@ import asyncio
 import contextlib
 import hashlib
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from ...config.settings import Settings
@@ -122,6 +124,57 @@ def _ingestion_dataset_identity(dataset: dict[str, Any]) -> str:
     return dataset_ingestion_identity(dataset)
 
 
+def _process_standard_chunks(
+    text: str,
+    chunking_config: ChunkingConfig,
+    document_id: str,
+    document_name: str,
+    dataset_id: str,
+) -> list[Any]:
+    """Run CPU-heavy chunking and normalization outside the API event loop."""
+    chunk_objects = process_document(text, chunking_config, document_id)
+    flat_chunks = flatten_chunks(chunk_objects)
+    if chunking_config.mode not in (
+        ChunkingMode.FIXED_SIZE,
+        ChunkingMode.HIERARCHICAL,
+    ):
+        flat_chunks = merge_small_chunks(
+            flat_chunks,
+            min_size=chunking_config.min_chunk_size,
+            max_size=chunking_config.max_chunk_size,
+            min_tokens=None,
+            max_tokens=None,
+        )
+    if chunking_config.mode == ChunkingMode.FIXED_SIZE and chunking_config.use_token_count:
+        token_limit = int(chunking_config.token_limit or 0)
+        if token_limit > 0:
+            flat_chunks = enforce_token_limits(
+                flat_chunks,
+                token_limit,
+                min_tokens=None,
+            )
+    if chunking_config.mode not in (
+        ChunkingMode.FIXED_SIZE,
+        ChunkingMode.HIERARCHICAL,
+    ):
+        flat_chunks = merge_small_chunks(
+            flat_chunks,
+            min_size=chunking_config.min_chunk_size,
+            max_size=chunking_config.max_chunk_size,
+            min_tokens=None,
+            max_tokens=None,
+        )
+    for index, chunk in enumerate(flat_chunks):
+        chunk.index = index
+        chunk.metadata["chunk_index"] = index
+        chunk.metadata["paragraph_index"] = index
+        chunk.metadata["source_document"] = document_name
+        chunk.metadata["source_document_id"] = document_id
+        chunk.metadata["source_dataset_id"] = dataset_id
+    require_chunk_output_budget(flat_chunks)
+    return flat_chunks
+
+
 class IngestionService:
     """Service for ingesting documents into knowledge base.
 
@@ -143,6 +196,36 @@ class IngestionService:
         self.db = database
         self.vector_store = vector_store
         self._ks = None  # Set post-init by KnowledgeService
+        knowledge_settings = getattr(settings, "knowledge", None)
+        cpu_workers = max(
+            int(getattr(knowledge_settings, "worker_concurrency", 2) or 2),
+            1,
+        )
+        self._cpu_executor = ThreadPoolExecutor(
+            max_workers=cpu_workers,
+            thread_name_prefix="knowledge-ingestion-cpu",
+        )
+        self._cpu_semaphore = asyncio.Semaphore(cpu_workers)
+
+    async def _run_cpu(self, fn, /, *args):
+        if not hasattr(self, "_cpu_semaphore") or not hasattr(
+            self,
+            "_cpu_executor",
+        ):
+            # Compatibility for narrow unit fixtures that intentionally bypass
+            # __init__. Production instances always use the dedicated pool.
+            return await asyncio.to_thread(fn, *args)
+        async with self._cpu_semaphore:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                self._cpu_executor,
+                partial(fn, *args),
+            )
+
+    async def close(self) -> None:
+        executor = getattr(self, "_cpu_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     # ========================================================================
     # Main Ingestion Pipeline
@@ -541,59 +624,17 @@ class IngestionService:
                 )
             else:
                 # Standard chunking flow
-                # Use the new configurable chunking module
-                chunk_objects = process_document(text, chunking_config, document_id)
-                logger.info(f"Generated {len(chunk_objects)} chunks for document {document_id}")
-
-                # Flatten hierarchical chunks if needed
-                flat_chunks = flatten_chunks(chunk_objects)
-
-                # Merge undersized chunks AFTER flattening (must operate on leaf chunks)
-                if chunking_config.mode not in (
-                    ChunkingMode.FIXED_SIZE,
-                    ChunkingMode.HIERARCHICAL,
-                ):
-                    flat_chunks = merge_small_chunks(
-                        flat_chunks,
-                        min_size=chunking_config.min_chunk_size,
-                        max_size=chunking_config.max_chunk_size,
-                        min_tokens=None,
-                        max_tokens=None,
-                    )
-
-                # Enforce strict token limits only for fixed-size mode (exact token_limit)
-                if (
-                    chunking_config.mode == ChunkingMode.FIXED_SIZE
-                    and chunking_config.use_token_count
-                ):
-                    token_limit = int(chunking_config.token_limit or 0)
-                    if token_limit > 0:
-                        flat_chunks = enforce_token_limits(
-                            flat_chunks,
-                            token_limit,
-                            min_tokens=None,
-                        )
-                # Re-merge tiny fragments after strict splitting (avoid micro-chunks)
-                if chunking_config.mode not in (
-                    ChunkingMode.FIXED_SIZE,
-                    ChunkingMode.HIERARCHICAL,
-                ):
-                    flat_chunks = merge_small_chunks(
-                        flat_chunks,
-                        min_size=chunking_config.min_chunk_size,
-                        max_size=chunking_config.max_chunk_size,
-                        min_tokens=None,
-                        max_tokens=None,
-                    )
-
-                # Inject source traceability metadata into every chunk
-                for i, c in enumerate(flat_chunks):
-                    c.index = i
-                    c.metadata["chunk_index"] = i
-                    c.metadata["paragraph_index"] = i
-                    c.metadata["source_document"] = doc_name
-                    c.metadata["source_document_id"] = document_id
-                    c.metadata["source_dataset_id"] = dataset_id
+                flat_chunks = await self._run_cpu(
+                    _process_standard_chunks,
+                    text,
+                    chunking_config,
+                    document_id,
+                    doc_name,
+                    dataset_id,
+                )
+                logger.info(
+                    f"Generated {len(flat_chunks)} chunks for document {document_id}"
+                )
 
             require_chunk_output_budget(flat_chunks)
 
@@ -692,7 +733,6 @@ class IngestionService:
                 )
 
             embedder: BaseEmbedding | None = None
-            embed_timeout = 60.0  # Default timeout for embedding operations
             embedding_provider_used = ""
             try:
                 if is_multimodal:
@@ -705,14 +745,12 @@ class IngestionService:
                             dataset, embedding_config
                         )
                     )
-                    embed_timeout = 90.0  # Longer timeout for multimodal
                     embedding_provider_used = "dashscope_multimodal"
                 else:
                     # Use dataset-configured text embedder
                     embedder = await maybe_await(
                         self._ks._get_text_embedder(dataset, embedding_config)
                     )
-                    embed_timeout = 60.0
                     embedding_provider_used = str(
                         dataset.get("embedding_provider") or getattr(embedder, "provider", "local")
                     )
@@ -723,10 +761,7 @@ class IngestionService:
 
                 # If dimension is unknown, dry-run to fetch it.
                 if embedder._dimension is None:
-                    await asyncio.wait_for(
-                        embedder.embed_query("test"),
-                        timeout=35.0,
-                    )
+                    await embedder.embed_query("test")
 
                 dim = embedder._dimension or 1024  # fallback
                 await self._require_ingestion_identity(
@@ -795,43 +830,19 @@ class IngestionService:
                     async def embed_single_batch(
                         batch_idx: int, batch: list
                     ) -> tuple[int, list, list]:
-                        """Embed one batch with retry, return (index, vectors, batch_data)"""
+                        """Embed one batch; the provider owns retry and deadline."""
                         texts = [text for _, text, _, _, _ in batch]
-                        MAX_EMBED_RETRIES = 3
 
                         async with semaphore:
-                            for retry in range(MAX_EMBED_RETRIES):
-                                try:
-                                    vectors = await asyncio.wait_for(
-                                        embedder.embed_documents(texts),
-                                        timeout=embed_timeout,
-                                    )
-                                    return (batch_idx, vectors, batch)
-                                except asyncio.TimeoutError:
-                                    if retry < MAX_EMBED_RETRIES - 1:
-                                        wait_time = 2**retry  # 1s, 2s
-                                        logger.warning(
-                                            f"Embedding batch {batch_idx + 1} timeout (attempt {retry + 1}), "
-                                            f"retrying in {wait_time}s..."
-                                        )
-                                        await asyncio.sleep(wait_time)
-                                    else:
-                                        text_lengths = [len(t) for t in texts]
-                                        logger.error(
-                                            f"Embedding failed for batch {batch_idx + 1} after {MAX_EMBED_RETRIES} attempts. "
-                                            f"Text lengths: {text_lengths}, Provider: {embedding_provider_used}"
-                                        )
-                                        # Return empty vectors for failed batch instead of crashing
-                                        return (batch_idx, [None] * len(batch), batch)
-                                except Exception as embed_err:
-                                    text_lengths = [len(t) for t in texts]
-                                    logger.error(
-                                        f"Embedding failed for batch {batch_idx + 1}: {embed_err}. "
-                                        f"Text lengths: {text_lengths}, Provider: {embedding_provider_used}"
-                                    )
-                                    # Return empty vectors for failed batch instead of crashing
-                                    return (batch_idx, [None] * len(batch), batch)
-                            # Should not reach here, but just in case
+                            try:
+                                vectors = await embedder.embed_documents(texts)
+                                return (batch_idx, vectors, batch)
+                            except Exception as embed_err:
+                                text_lengths = [len(t) for t in texts]
+                                logger.error(
+                                    f"Embedding failed for batch {batch_idx + 1}: {embed_err}. "
+                                    f"Text lengths: {text_lengths}, Provider: {embedding_provider_used}"
+                                )
                             return (batch_idx, [None] * len(batch), batch)
 
                     # Launch all embedding tasks concurrently

@@ -14,12 +14,33 @@ function lastModelStorageKey(userId?: string): string {
 
 export function readLastModelId(userId?: string): string {
   try {
-    const scoped = userId ? window.localStorage.getItem(lastModelStorageKey(userId)) : null;
+    if (!userId) {
+      return window.localStorage.getItem(LAST_MODEL_STORAGE_PREFIX) ?? "";
+    }
+
+    const scopedKey = lastModelStorageKey(userId);
+    const scoped = window.localStorage.getItem(scopedKey);
     if (scoped) return scoped;
-    return window.localStorage.getItem(LAST_MODEL_STORAGE_PREFIX) ?? "";
+
+    // One-time migration from the pre-user-scoped cache. Moving (rather than
+    // repeatedly falling back to) the legacy value prevents the next account
+    // using this browser from inheriting another user's model selection.
+    const legacy = window.localStorage.getItem(LAST_MODEL_STORAGE_PREFIX) ?? "";
+    if (legacy) {
+      window.localStorage.setItem(scopedKey, legacy);
+      window.localStorage.removeItem(LAST_MODEL_STORAGE_PREFIX);
+    }
+    return legacy;
   } catch {
     return "";
   }
+}
+
+export function readHydratedLastModelId(
+  hydrated: boolean,
+  userId?: string,
+): string {
+  return hydrated ? readLastModelId(userId) : "";
 }
 
 export function writeLastModelId(modelId: string, userId?: string): void {

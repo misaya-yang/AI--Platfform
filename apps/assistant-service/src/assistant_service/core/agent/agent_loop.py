@@ -279,6 +279,15 @@ class AgentLoop(
             if startup_config is not None
             else None
         )
+        configured_read_parallelism = (
+            startup_config.int_value("ASSISTANT_READ_ONLY_TOOL_PARALLELISM")
+            if startup_config is not None
+            else None
+        )
+        self.read_only_tool_parallelism = max(
+            1,
+            min(8, int(configured_read_parallelism or 4)),
+        )
         self.assistant_runtime = runtime_adapter
         # Optional trusted control-plane adapter.  Definitions are never
         # registered globally; StreamingPreparation resolves a fresh run-local
@@ -389,7 +398,11 @@ class AgentLoop(
     @staticmethod
     def _format_subagent_model_result(result: dict[str, Any]) -> str:
         """Format sub-agent result for the model's context."""
-        payload = json.dumps(result, ensure_ascii=False, sort_keys=True)
+        payload = _fmt_compact_tool_result_for_model(
+            "spawn_subagent",
+            result,
+            {},
+        )
         return (
             f"[Sub-agent result]\n{payload}\n\n"
             "[IMPORTANT: Use this sub-agent's findings to build your comprehensive "
@@ -954,15 +967,19 @@ class AgentLoop(
         )
         tool_result_for_model = _fmt_compact_tool_result_for_model(
             tool_name=tool_name,
-            tool_result_text=tool_result_text,
+            tool_result_text=(
+                raw_tool_result
+                if raw_tool_result is not None
+                else str(tool_error or "Tool execution failed")
+            ),
             tool_metadata=tool_metadata,
         )
-        ctx.run_budget.observe_tool_result(tool_result_for_model)
         tool_result_for_model = _envelope_tool_result(
             tool_result_for_model,
             tool_name=tool_name,
             tool_id=tool_id,
         )
+        ctx.run_budget.observe_tool_result(tool_result_for_model)
         tool_result_preview = _redact_trace_text(tool_result_text[:2000])
         ctx.generated_content = ""
         output_files_for_events = _artifact_sanitize_output_files(persisted_output_files)

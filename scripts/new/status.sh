@@ -56,6 +56,7 @@ check_and_report "PostgreSQL" check_postgres_status
 check_and_report "Redis" check_redis_status
 check_and_report "Qdrant" check_qdrant_health
 check_and_report "Knowledge" check_knowledge_health
+check_and_report "Knowledge worker" check_knowledge_worker_health
 check_and_report "Assistant" check_assistant_health
 check_and_report "Docgen plugin" check_docgen_health
 check_and_report "Gateway" check_gateway_health

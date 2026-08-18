@@ -89,7 +89,7 @@ class GatewaySecretAuthMiddleware:
             body = None
             if header.startswith("v2:"):
                 body = await _read_body(receive)
-                replay_receive = _make_replay_receive(body)
+                replay_receive = _make_replay_receive(body, receive)
             self._gateway_secret.verify(
                 header,
                 method=scope.get("method", ""),
@@ -127,7 +127,7 @@ async def _read_body(receive) -> bytes:
     return b"".join(chunks)
 
 
-def _make_replay_receive(body: bytes):
+def _make_replay_receive(body: bytes, upstream_receive):
     sent = False
 
     async def receive() -> dict:
@@ -135,7 +135,11 @@ def _make_replay_receive(body: bytes):
         if not sent:
             sent = True
             return {"type": "http.request", "body": body, "more_body": False}
-        return {"type": "http.request", "body": b"", "more_body": False}
+        # Once the buffered body has been replayed, preserve the real client
+        # receive channel. StreamingResponse listens here for disconnects; a
+        # synthetic request or disconnect would either raise in Starlette or
+        # cancel the response before its first SSE chunk is sent.
+        return await upstream_receive()
 
     return receive
 

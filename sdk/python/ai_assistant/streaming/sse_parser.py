@@ -105,10 +105,16 @@ class SSEParser:
 
         # Unwrap nested "data" field from gateway's SSE format:
         # {"event_type": "...", "data": {actual_payload}, "timestamp": ...}
-        inner = payload.get("data", payload)
+        inner = payload.pop("data", payload)
+        if isinstance(inner, str):
+            data = {"content": inner}
+        elif isinstance(inner, dict):
+            data = inner
+        else:
+            data = {"value": inner}
 
         return StreamEvent(
             event_type=event_type,
-            data=inner,
+            data=data,
             timestamp=float(timestamp),
         )

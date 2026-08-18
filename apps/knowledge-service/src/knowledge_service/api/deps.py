@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from fastapi import Request
 
-from ..auth.user_context import UserContext, get_user_context as _get_user_context
+from ..auth.user_context import UserContext
+from ..auth.user_context import get_user_context as _get_user_context
 from ..config import Settings
-from ..db.connection import DatabasePool
+from ..persistence.database import DatabaseStorage
 
 
 def get_settings(request: Request) -> Settings:
@@ -19,7 +20,7 @@ def get_settings(request: Request) -> Settings:
     return request.app.state.settings
 
 
-def get_db(request: Request) -> DatabasePool:
+def get_db(request: Request) -> DatabaseStorage:
     """Return the asyncpg database pool."""
     return request.app.state.db
 

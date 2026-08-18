@@ -36,9 +36,13 @@ async def _await_bounded_thread(
     until that thread actually finishes so a hung provider cannot spawn more
     workers than the concurrency cap.
     """
-    await semaphore.acquire()
     loop = asyncio.get_running_loop()
-    fut = loop.run_in_executor(None, lambda: fn(*args, **kwargs))
+    started_at = loop.time()
+    await asyncio.wait_for(semaphore.acquire(), timeout=timeout)
+    remaining = timeout - (loop.time() - started_at)
+    if remaining <= 0:
+        semaphore.release()
+        raise asyncio.TimeoutError
     released = False
 
     def _release(_=None) -> None:
@@ -48,18 +52,17 @@ async def _await_bounded_thread(
             semaphore.release()
 
     try:
-        return await asyncio.wait_for(asyncio.shield(fut), timeout=timeout)
-    except TimeoutError:
-        fut.add_done_callback(_release)
-        raise
-    except Exception:
-        if fut.done():
-            _release()
-        else:
-            fut.add_done_callback(_release)
-        raise
-    else:
+        fut = loop.run_in_executor(None, lambda: fn(*args, **kwargs))
+    except BaseException:
         _release()
+        raise
+
+    # Register before awaiting so every terminal path, including caller
+    # cancellation, releases exactly once when the executor work is truly done.
+    # A timed-out or cancelled await must not make capacity available while its
+    # non-cancellable provider thread is still running.
+    fut.add_done_callback(_release)
+    return await asyncio.wait_for(asyncio.shield(fut), timeout=remaining)
 
 
 # =============================================================================
@@ -525,6 +528,8 @@ class DashScopeEmbedding(BaseEmbedding):
         api_key: str,
         dimension: int | None = None,
         base_url: str | None = None,
+        request_timeout_s: float = 60.0,
+        max_concurrent: int = 5,
     ):
         # Try to lookup dimension, fallback to 1024 if model not recognized
         dim = (
@@ -539,6 +544,8 @@ class DashScopeEmbedding(BaseEmbedding):
             raise EmbeddingError("DashScope api_key is required")
         self.api_key = api_key
         self.base_url = _effective_embedding_endpoint("dashscope", base_url)
+        self.request_timeout_s = max(float(request_timeout_s), 1.0)
+        self._semaphore = asyncio.Semaphore(max(int(max_concurrent), 1))
         self.max_chars = (
             self.MODEL_MAX_CHARS.get(model) or self.MODEL_MAX_CHARS.get(model.lower()) or 6000
         )
@@ -598,21 +605,24 @@ class DashScopeEmbedding(BaseEmbedding):
         logger = logging.getLogger(__name__)
 
         last_error: Exception | None = None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.request_timeout_s
 
         for attempt in range(self.MAX_RETRIES):
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
             try:
-                # Use asyncio.wait_for to enforce timeout on the thread call
-                resp = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        self._TextEmbedding.call,
-                        model=self.model,
-                        input=batch,
-                        api_key=self.api_key,
-                        base_address=self.base_url,
-                        dimension=self._requested_dimension,
-                        **kwargs,
-                    ),
-                    timeout=float(self.REQUEST_TIMEOUT),
+                resp = await _await_bounded_thread(
+                    self._TextEmbedding.call,
+                    model=self.model,
+                    input=batch,
+                    api_key=self.api_key,
+                    base_address=self.base_url,
+                    dimension=self._requested_dimension,
+                    **kwargs,
+                    timeout=remaining,
+                    semaphore=self._semaphore,
                 )
 
                 status_code = int(getattr(resp, "status_code", 0) or 0)
@@ -635,7 +645,8 @@ class DashScopeEmbedding(BaseEmbedding):
 
             except asyncio.TimeoutError:
                 last_error = EmbeddingError(
-                    f"DashScope embedding timeout ({batch_info}): exceeded {self.REQUEST_TIMEOUT}s"
+                    f"DashScope embedding timeout ({batch_info}): "
+                    f"exceeded {self.request_timeout_s}s total deadline"
                 )
                 logger.warning(
                     f"DashScope embedding timeout on attempt {attempt + 1}/{self.MAX_RETRIES} "
@@ -660,7 +671,12 @@ class DashScopeEmbedding(BaseEmbedding):
 
             # Exponential backoff before retry
             if attempt < self.MAX_RETRIES - 1:
-                delay = self.RETRY_BASE_DELAY * (2**attempt)
+                delay = min(
+                    self.RETRY_BASE_DELAY * (2**attempt),
+                    max(deadline - loop.time(), 0.0),
+                )
+                if delay <= 0:
+                    break
                 await asyncio.sleep(delay)
 
         # All retries exhausted
@@ -1567,6 +1583,12 @@ def create_embedding(config: EmbeddingConfig, dimension: int | None = None) -> B
             api_key=config.api_key or "",
             dimension=dimension,
             base_url=config.base_url,
+            request_timeout_s=float(
+                (config.extra or {}).get("request_timeout_s")
+                or config.timeout_seconds
+                or 60.0
+            ),
+            max_concurrent=int((config.extra or {}).get("max_concurrent") or 5),
         )
     elif provider == "dashscope_multimodal":
         embedding = DashScopeMultimodalEmbedding(

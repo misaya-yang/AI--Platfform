@@ -622,27 +622,64 @@ def _validate_unknown_effect(value: dict[str, Any]) -> tuple[bool, str]:
     )
     sibling = value.get("sibling_action")
     if isinstance(sibling, dict):
-        sibling_text = json.dumps(sibling, ensure_ascii=False).lower()
+        sibling_action = str(
+            sibling.get("action")
+            or sibling.get("decision")
+            or sibling.get("status")
+            or ""
+        ).lower()
     else:
-        sibling_text = str(sibling).lower()
+        sibling_action = str(sibling).lower()
+    sibling_cancelled = any(
+        token in sibling_action for token in ("cancel", "void", "supersed")
+    ) and not any(token in sibling_action for token in ("submit", "send", "execute"))
     final_state = value.get("final_state")
     if isinstance(final_state, dict):
+        obligation = final_state.get("obligation")
+        obligation_status = (
+            obligation.get("status") or obligation.get("state")
+            if isinstance(obligation, dict)
+            else obligation
+        )
         final_status = str(
             final_state.get("obligation_status")
+            or obligation_status
             or final_state.get("status")
             or final_state.get("state")
             or ""
         ).lower()
-        duplicate_risk = final_state.get("duplicate_settlement_risk")
-        no_duplicate = duplicate_risk in {
-            None,
-            False,
-            "eliminated",
-            "mitigated",
-            "none",
-            "prevented",
-            "resolved",
-        }
+        duplicate_entry = next(
+            (
+                (key, final_state[key])
+                for key in (
+                    "duplicate_settlement_risk",
+                    "duplicate_risk",
+                    "duplicate_prevention",
+                )
+                if key in final_state
+            ),
+            (None, None),
+        )
+        duplicate_key, duplicate_signal = duplicate_entry
+        if duplicate_key == "duplicate_prevention":
+            no_duplicate = duplicate_signal is True or str(duplicate_signal).lower() in {
+                "true",
+                "enabled",
+                "enforced",
+                "prevented",
+                "yes",
+            }
+        elif isinstance(duplicate_signal, bool):
+            no_duplicate = not duplicate_signal
+        else:
+            no_duplicate = duplicate_signal in {
+                None,
+                "eliminated",
+                "mitigated",
+                "none",
+                "prevented",
+                "resolved",
+            }
         final_reconciled = any(token in final_status for token in ("settled", "reconciled"))
     else:
         final_text = str(final_state or "").lower()
@@ -682,7 +719,7 @@ def _validate_unknown_effect(value: dict[str, Any]) -> tuple[bool, str]:
         and transaction_posted
         and transaction_matches_request
         and retry_suppressed
-        and any(token in sibling_text for token in ("cancel", "void"))
+        and sibling_cancelled
         and final_reconciled
         and no_duplicate
     )

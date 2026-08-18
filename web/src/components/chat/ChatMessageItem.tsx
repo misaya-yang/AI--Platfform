@@ -1,8 +1,7 @@
 import { motion } from "framer-motion";
-import { memo, useState, forwardRef } from "react";
+import { lazy, memo, Suspense, useState, forwardRef } from "react";
 import { useTranslation } from "react-i18next";
 import { cn, getSafePlaygroundAssistantContent } from "@/lib/utils";
-import { StreamOutput } from "@/components/StreamOutput";
 import type { ChatMessage } from "@/components/ChatWindow";
 import { MessageAvatar } from "./MessageAvatar";
 import { StatsBadge } from "./StatsBadge";
@@ -10,6 +9,12 @@ import { TimelineSection } from "./TimelineSection";
 import { ArtifactsSection } from "./ArtifactsSection";
 import { WorkflowBeat } from "./WorkflowBeat";
 import { Copy, Share2, RefreshCw, Check } from "lucide-react";
+import { messageContainmentStyle } from "@/features/chat/messageRenderPerformance";
+
+const StreamOutput = lazy(async () => {
+  const module = await import("@/components/StreamOutput");
+  return { default: module.StreamOutput };
+});
 
 /**
  * Remove internal "Process (brief)" execution traces from assistant output.
@@ -104,6 +109,7 @@ export const ChatMessageItem = memo(
             ease: "easeOut",
             delay: index * 0.04,
           }}
+          style={messageContainmentStyle(isStreaming)}
           className={cn(
             "flex w-full gap-4",
             isUser ? "flex-row-reverse" : "flex-row"
@@ -211,11 +217,13 @@ export const ChatMessageItem = memo(
                       {message.content}
                     </div>
                   ) : (
-                    <StreamOutput
-                      text={assistantDisplayContent}
-                      isStreaming={isStreaming}
-                      id={message.id || `msg-${index}`}
-                    />
+                    <Suspense fallback={<div className="whitespace-pre-wrap">{assistantDisplayContent}</div>}>
+                      <StreamOutput
+                        text={assistantDisplayContent}
+                        isStreaming={isStreaming}
+                        id={message.id || `msg-${index}`}
+                      />
+                    </Suspense>
                   )}
                 </div>
               ) : null}

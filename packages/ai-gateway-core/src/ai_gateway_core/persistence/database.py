@@ -365,6 +365,7 @@ class DatabaseStorage:
         if self.auto_init:
             await self._auto_initialize_schema()
             await self._auto_apply_account_permission_migration()
+            await self._auto_apply_platform_admin_migration()
             await self._auto_apply_user_extra_permissions_migration()
             await self._auto_apply_api_keys_migration()
             await self._auto_apply_assistant_memory_migration()
@@ -511,6 +512,58 @@ class DatabaseStorage:
             / "migrations"
             / "005_account_permission_system.sql"
         )
+        if not migration_path.exists():
+            raise RuntimeError(f"Migration not found: {migration_path}")
+
+        await self.execute_schema(str(migration_path))
+
+    async def _platform_admin_schema_missing(self) -> bool:
+        """Check the strict bootstrap platform-admin role and assignment."""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            platform_role = await conn.fetchval(
+                """
+                SELECT 1
+                FROM rbac_roles
+                WHERE role_name = 'platform_admin'
+                  AND is_system = TRUE
+                  AND 'admin:*' = ANY(permissions)
+                LIMIT 1
+                """
+            )
+            bootstrap_assignment = await conn.fetchval(
+                """
+                SELECT 1
+                FROM users AS u
+                JOIN user_roles AS ur
+                  ON ur.user_id = u.user_id
+                 AND ur.role_name = 'platform_admin'
+                WHERE u.user_id = 'admin'
+                  AND u.created_by = 'system'
+                  AND 'platform_admin' = ANY(u.roles)
+                LIMIT 1
+                """
+            )
+            return platform_role is None or bootstrap_assignment is None
+
+    async def _auto_apply_platform_admin_migration(self) -> None:
+        """Apply the platform-admin migration after bootstrap account setup."""
+        if not self._pool:
+            return
+        try:
+            missing = await self._platform_admin_schema_missing()
+        except (asyncpg.PostgresError, OSError) as exc:
+            record_internal_exception(
+                logger,
+                "assistant.database.platform_admin_check_failed",
+                exc,
+            )
+            return
+        if not missing:
+            return
+
+        migration_path = _SCHEMA_ROOT / "migrations" / "086_platform_admin_role.sql"
         if not migration_path.exists():
             raise RuntimeError(f"Migration not found: {migration_path}")
 

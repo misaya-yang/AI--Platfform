@@ -54,13 +54,34 @@ export COMPOSE_PARALLEL_LIMIT
 
 # -- Quick Start --------------------------------------------------------------
 
-.PHONY: doctor harness-check quickstart quickstart-build validate-config validate-example-config validate seed-demo seed-demo-apply
+.PHONY: doctor harness-check sdk-sse-contract quickstart quickstart-build validate-config validate-example-config validate seed-demo seed-demo-apply
 
 doctor:                     ## 环境体检: 工具/Docker/内存/端口/compose 归属 (只读)
 	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/doctor.sh --env "$(ENV_FILE)"
 
 harness-check:              ## 校验 harness.yml 契约: 命令存在、必备文档、指令文件行数预算
 	@python3 scripts/harness/check_harness.py
+
+sdk-sse-contract:           ## 验证四端 SSE 合同；发布 CI 要求 Maven/Dart 必须存在
+	@uv run --all-packages --extra test pytest -q --no-cov \
+		sdk/python/tests/test_sse_inner_envelopes.py \
+		tests/contract/test_sdk_sse_fixture_contract.py
+	@npm --prefix sdk/cli run typecheck
+	@npm --prefix sdk/cli test
+	@if command -v mvn >/dev/null 2>&1; then \
+		mvn -q -f sdk/java/pom.xml test; \
+	elif [ "$${SDK_SSE_CONTRACT_REQUIRE_ALL:-0}" = "1" ]; then \
+		echo "ERROR Java SDK SSE contract requires mvn" >&2; exit 1; \
+	else \
+		echo "SKIP Java SDK SSE contract: mvn not installed"; \
+	fi
+	@if command -v dart >/dev/null 2>&1; then \
+		cd sdk/dart/ai_gateway_sdk && dart pub get && dart test; \
+	elif [ "$${SDK_SSE_CONTRACT_REQUIRE_ALL:-0}" = "1" ]; then \
+		echo "ERROR Dart SDK SSE contract requires dart" >&2; exit 1; \
+	else \
+		echo "SKIP Dart SDK SSE contract: dart not installed"; \
+	fi
 
 quickstart:                 ## 拉取版本化多架构镜像并一键部署 (仅需模型配置)
 	@bash $(SCRIPTS)/init-env.sh --env "$(ENV_FILE)" --if-missing
@@ -178,11 +199,11 @@ dev-status:                 ## 查看开发环境状态
 
 dev-compose:                ## 从源码构建并挂载后端服务，启用热重载
 	@bash $(SCRIPTS)/validate-env.sh --env "$(ENV_FILE)" --config-only
-	@$(DEV_COMPOSE) --env-file "$(ENV_FILE)" up -d --build --remove-orphans gateway assistant-service knowledge-service frontend
+	@$(DEV_COMPOSE) --env-file "$(ENV_FILE)" up -d --build --remove-orphans gateway assistant-service knowledge-service knowledge-worker frontend
 	@echo "Development compose is running with backend source mounts and uvicorn reload."
 
 dev-compose-logs:           ## 查看源码挂载开发服务日志
-	@$(DEV_COMPOSE) --env-file "$(ENV_FILE)" logs -f gateway assistant-service knowledge-service frontend
+	@$(DEV_COMPOSE) --env-file "$(ENV_FILE)" logs -f gateway assistant-service knowledge-service knowledge-worker frontend
 
 # -- Agent Trace / Eval Development Gates ------------------------------------
 

@@ -224,6 +224,7 @@ def _schedule_permission_denied_event(
     try:
         from ..services.metrics import get_security_event_recorder
 
+        loop = asyncio.get_running_loop()
         recorder = get_security_event_recorder()
         service_id = _extract_service_id_from_path(request.url.path) if hasattr(request, "url") else None
         metadata = {
@@ -232,7 +233,7 @@ def _schedule_permission_denied_event(
             "required_capability": capability.value,
             "status": "denied",
         }
-        task = asyncio.create_task(
+        task = loop.create_task(
             recorder.record_event(
                 tenant_id=auth.tenant_id or "public",
                 user_id=auth.user_id or None,
@@ -241,9 +242,18 @@ def _schedule_permission_denied_event(
                 metadata=metadata,
             )
         )
-        task.add_done_callback(lambda done: done.exception())
+        task.add_done_callback(_consume_permission_event_result)
     except Exception:
         return
+
+
+def _consume_permission_event_result(task: asyncio.Task[Any]) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        logger.debug("Failed to record permission-denied event: %s", exc)
 
 
 def _derive_api_key_user_id(api_key: str) -> str:

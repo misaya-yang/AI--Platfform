@@ -71,6 +71,29 @@ def _bound_parent_tool_content(
 class StreamingToolCallMixin(StreamingToolValidationMixin, StreamingToolExecutionMixin):
     """Validate, execute, persist, and ingest one model-proposed tool call."""
 
+    @staticmethod
+    def _initialize_streaming_tool_execution(
+        ctx: AgentLoopContext,
+        frame: StreamingToolCallState,
+    ) -> None:
+        if frame.execution_initialized:
+            return
+        frame.result = None
+        frame.tool_metadata = {}
+        frame.tool_duration_ms = None
+        frame.tool_error = None
+        frame.tool_success = False
+        frame.tool_output_files = []
+        frame.tool_result_for_model = ""
+        frame.kb_rag_started_at = None
+        frame.kb_rag_query = ""
+        frame.kb_rag_dataset_ids = []
+        frame.kb_rag_top_k = ctx.config.kb_top_k
+        frame.kb_rag_score_threshold = ctx.config.kb_min_relevance
+        frame.kb_rag_include_images = False
+        frame.kb_rag_retrieval_configs = None
+        frame.execution_initialized = True
+
     async def _process_streaming_tool_call(
         self,
         ctx: AgentLoopContext,
@@ -81,15 +104,17 @@ class StreamingToolCallMixin(StreamingToolValidationMixin, StreamingToolExecutio
         frame: StreamingToolCallState,
         out: StreamingLoopResult,
     ) -> AsyncGenerator[AgentLoopEvent, None]:
-        async for event in self._validate_streaming_tool_call(
-            ctx,
-            user,
-            phase=phase,
-            state=state,
-            frame=frame,
-            out=out,
-        ):
-            yield event
+        if not frame.validation_complete:
+            async for event in self._validate_streaming_tool_call(
+                ctx,
+                user,
+                phase=phase,
+                state=state,
+                frame=frame,
+                out=out,
+            ):
+                yield event
+            frame.validation_complete = True
         if frame.stop_processing:
             return
 
@@ -175,20 +200,7 @@ class StreamingToolCallMixin(StreamingToolValidationMixin, StreamingToolExecutio
                 )
 
             # Invoke tool
-            frame.result = None
-            frame.tool_metadata: dict[str, Any] = {}
-            frame.tool_duration_ms: float | None = None
-            frame.tool_error: str | None = None
-            frame.tool_success = False
-            frame.tool_output_files: list[dict[str, Any]] = []
-            frame.tool_result_for_model = ""
-            frame.kb_rag_started_at: float | None = None
-            frame.kb_rag_query = ""
-            frame.kb_rag_dataset_ids: list[str] = []
-            frame.kb_rag_top_k = ctx.config.kb_top_k
-            frame.kb_rag_score_threshold = ctx.config.kb_min_relevance
-            frame.kb_rag_include_images = False
-            frame.kb_rag_retrieval_configs: dict[str, dict[str, Any]] | None = None
+            self._initialize_streaming_tool_execution(ctx, frame)
 
             async for event in self._invoke_streaming_tool(
                 ctx,
@@ -405,12 +417,12 @@ class StreamingToolCallMixin(StreamingToolValidationMixin, StreamingToolExecutio
 
         if ctx.run_budget is None:
             raise RuntimeError("run_budget_not_initialized")
-        ctx.run_budget.observe_tool_result(_tool_content)
         _tool_content = _envelope_tool_result(
             _tool_content,
             tool_name=frame.tool_name,
             tool_id=frame.tool_id,
         )
+        ctx.run_budget.observe_tool_result(_tool_content)
 
         tool_message: dict[str, Any] = {
             "role": "tool",

@@ -88,6 +88,9 @@ commands:
   harness_check:
     make: harness-check
     purpose: Verify this contract still matches the repository.
+  sdk_sse_contract:
+    make: sdk-sse-contract
+    purpose: Verify the shared Python, CLI, Java, and Dart SSE envelope contract.
 
 # -- Gates: what to run for what you changed ----------------------------------
 gates:
@@ -121,6 +124,9 @@ gates:
   frontend:
     shell: "pnpm -C web type-check && pnpm -C web lint && pnpm -C web build"
     triggers: ["web/**"]
+  sdk_sse:
+    make: sdk-sse-contract
+    triggers: ["sdk/**", "tests/contract/test_sdk_sse_fixture_contract.py"]
 
 # -- Workspace hygiene --------------------------------------------------------
 # Agents drop test files and screenshots wherever they happen to be standing.

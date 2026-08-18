@@ -523,6 +523,58 @@ class MemorySourceStore:
             metadata={"entry_timestamp": ts.isoformat(), "bounded": True},
         )
 
+    def append_daily_entry_and_read_result(
+        self,
+        tenant_id: str,
+        user_id: str,
+        text: str,
+        *,
+        now: datetime | None = None,
+    ) -> tuple[MemoryWriteResult, MemorySourceDocument, str]:
+        """Commit and snapshot one daily source under a single file lock.
+
+        Completed-turn sync runs this whole synchronous method in one worker
+        thread. The returned generation is therefore the exact source state
+        visible immediately after the atomic write and fsync.
+        """
+        ts = now or datetime.now(timezone.utc)
+        path = self._daily_path(tenant_id, user_id, ts.date())
+        clean_text = bounded_memory_text(text)
+        entry = f"\n## {ts.isoformat()}\n{clean_text}\n"
+        with self._exclusive_path_lock(path):
+            existing = self._read_existing(path)
+            duplicate = self._contains_entry(existing, clean_text)
+            if not duplicate:
+                self._atomic_write(path, existing + entry)
+            content_bytes, source_stat = self._read_source_snapshot(path)
+            document = MemorySourceDocument(
+                path=str(path),
+                source_type="daily",
+                content=content_bytes.decode("utf-8", errors="ignore"),
+                updated_at=datetime.fromtimestamp(source_stat.st_mtime, tz=timezone.utc),
+                size_bytes=source_stat.st_size,
+                mtime_ns=source_stat.st_mtime_ns,
+                ctime_ns=source_stat.st_ctime_ns,
+                device=source_stat.st_dev,
+                inode=source_stat.st_ino,
+            )
+            root = self._lexical_path(self._user_root(tenant_id, user_id))
+            relative = path.relative_to(root).as_posix()
+            handle = self._source_handle(
+                relative,
+                self._source_generation_from_snapshot(content_bytes, source_stat),
+            )
+        write = MemoryWriteResult(
+            path=str(path),
+            source_type="daily",
+            written=not duplicate,
+            duplicate=duplicate,
+            content_hash=memory_content_hash(clean_text),
+            threat_scan=scan_memory_text(clean_text),
+            metadata={"entry_timestamp": ts.isoformat(), "bounded": True},
+        )
+        return write, document, handle
+
     def append_long_term_facts(
         self,
         tenant_id: str,

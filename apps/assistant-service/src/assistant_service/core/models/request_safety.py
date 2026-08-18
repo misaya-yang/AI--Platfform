@@ -12,48 +12,90 @@ def _bounded_call_id(value: Any) -> str:
     return str(value or "").strip()[:100]
 
 
-def _validate_openai_tool_exchange_pairs(messages: Sequence[Mapping[str, Any]]) -> None:
-    """Reject provider-invalid assistant/tool transcripts before network I/O."""
+def _validate_tool_exchange_pairs(
+    exchanges: Sequence[tuple[str, Sequence[Any], bool]],
+) -> None:
+    """Validate a provider-neutral tool-call/result transcript.
+
+    Each exchange is ``(kind, ids, complete_batch)`` where ``kind`` is one of
+    ``calls``, ``results`` or ``other``.  Anthropic returns a whole result batch
+    in one user message, while Chat Completions returns one tool message per
+    result; ``complete_batch`` preserves that wire difference without
+    duplicating the pairing state machine.
+
+    Error text is intentionally constant and never includes call IDs, tool
+    arguments, message content, or provider response bodies.
+    """
 
     pending: set[str] = set()
     seen: set[str] = set()
-    for message in messages:
-        role = str(message.get("role") or "")
-        if pending:
-            if role != "tool":
+    for kind, raw_identifiers, complete_batch in exchanges:
+        identifiers = [_bounded_call_id(value) for value in raw_identifiers]
+        if kind == "calls":
+            if pending:
                 raise ValueError("provider request contains an unpaired tool exchange")
-            tool_call_id = _bounded_call_id(message.get("tool_call_id"))
-            if not tool_call_id or tool_call_id not in pending:
-                raise ValueError("provider request contains an orphan tool result")
-            pending.remove(tool_call_id)
+            if not identifiers or any(not call_id for call_id in identifiers):
+                raise ValueError("provider request contains an invalid tool exchange")
+            if len(set(identifiers)) != len(identifiers) or any(
+                call_id in seen for call_id in identifiers
+            ):
+                raise ValueError("provider request contains duplicate tool call IDs")
+            pending = set(identifiers)
+            seen.update(identifiers)
             continue
 
-        if role == "tool":
-            raise ValueError("provider request contains an orphan tool result")
-        if role != "assistant":
+        if kind == "results":
+            if not pending:
+                raise ValueError("provider request contains an orphan tool result")
+            if (
+                not identifiers
+                or any(not call_id or call_id not in pending for call_id in identifiers)
+                or len(set(identifiers)) != len(identifiers)
+            ):
+                raise ValueError("provider request contains an orphan tool result")
+            if complete_batch and set(identifiers) != pending:
+                raise ValueError("provider request contains an unpaired tool exchange")
+            pending.difference_update(identifiers)
             continue
-        raw_calls = message.get("tool_calls")
-        if not isinstance(raw_calls, list) or not raw_calls:
-            continue
-        identifiers = [_bounded_call_id(call.get("id")) for call in raw_calls if isinstance(call, dict)]
-        if len(identifiers) != len(raw_calls) or any(not call_id for call_id in identifiers):
+
+        if kind != "other":
             raise ValueError("provider request contains an invalid tool exchange")
-        if len(set(identifiers)) != len(identifiers) or any(
-            call_id in seen for call_id in identifiers
-        ):
-            raise ValueError("provider request contains duplicate tool call IDs")
-        pending = set(identifiers)
-        seen.update(identifiers)
+        if pending:
+            raise ValueError("provider request contains an unpaired tool exchange")
 
     if pending:
         raise ValueError("provider request contains an unpaired tool exchange")
 
 
+def _validate_chat_tool_exchange_pairs(messages: Sequence[Mapping[str, Any]]) -> None:
+    """Validate Chat Completions-style assistant/tool message adjacency."""
+
+    exchanges: list[tuple[str, Sequence[Any], bool]] = []
+    for message in messages:
+        role = str(message.get("role") or "")
+        raw_calls = message.get("tool_calls")
+        if role == "assistant" and isinstance(raw_calls, list) and raw_calls:
+            identifiers = [call.get("id") for call in raw_calls if isinstance(call, dict)]
+            if len(identifiers) != len(raw_calls):
+                identifiers.append("")
+            exchanges.append(("calls", identifiers, False))
+        elif role == "tool":
+            exchanges.append(("results", [message.get("tool_call_id")], False))
+        else:
+            exchanges.append(("other", (), False))
+    _validate_tool_exchange_pairs(exchanges)
+
+
+def _validate_openai_tool_exchange_pairs(messages: Sequence[Mapping[str, Any]]) -> None:
+    """Backward-compatible name for the shared Chat transcript validator."""
+
+    _validate_chat_tool_exchange_pairs(messages)
+
+
 def _validate_anthropic_tool_exchange_pairs(messages: Sequence[Mapping[str, Any]]) -> None:
     """Validate Anthropic client tool_use/tool_result adjacency and identity."""
 
-    pending: set[str] = set()
-    seen: set[str] = set()
+    exchanges: list[tuple[str, Sequence[Any], bool]] = []
     for message in messages:
         role = str(message.get("role") or "")
         raw_content = message.get("content")
@@ -69,33 +111,19 @@ def _validate_anthropic_tool_exchange_pairs(messages: Sequence[Mapping[str, Any]
             if isinstance(block, dict) and block.get("type") == "tool_result"
         ]
 
-        if pending:
-            if role != "user" or not tool_result_ids:
-                raise ValueError("provider request contains an unpaired tool exchange")
-            if (
-                any(not call_id or call_id not in pending for call_id in tool_result_ids)
-                or len(set(tool_result_ids)) != len(tool_result_ids)
-            ):
-                raise ValueError("provider request contains an orphan tool result")
-            if set(tool_result_ids) != pending:
-                raise ValueError("provider request contains an unpaired tool exchange")
-            pending.clear()
-        elif tool_result_ids:
-            raise ValueError("provider request contains an orphan tool result")
-
-        if not tool_use_ids:
-            continue
-        if role != "assistant" or any(not call_id for call_id in tool_use_ids):
+        if tool_use_ids and tool_result_ids:
             raise ValueError("provider request contains an invalid tool exchange")
-        if len(set(tool_use_ids)) != len(tool_use_ids) or any(
-            call_id in seen for call_id in tool_use_ids
-        ):
-            raise ValueError("provider request contains duplicate tool call IDs")
-        pending = set(tool_use_ids)
-        seen.update(tool_use_ids)
-
-    if pending:
-        raise ValueError("provider request contains an unpaired tool exchange")
+        if tool_use_ids:
+            if role != "assistant":
+                raise ValueError("provider request contains an invalid tool exchange")
+            exchanges.append(("calls", tool_use_ids, False))
+        elif tool_result_ids:
+            if role != "user":
+                raise ValueError("provider request contains an invalid tool exchange")
+            exchanges.append(("results", tool_result_ids, True))
+        else:
+            exchanges.append(("other", (), False))
+    _validate_tool_exchange_pairs(exchanges)
 
 
 def _request_without_query_secrets(request: httpx.Request) -> httpx.Request:

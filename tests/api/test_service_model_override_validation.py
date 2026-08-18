@@ -46,8 +46,17 @@ def _auth() -> AuthContext:
     return AuthContext(
         user_id="admin-1",
         tenant_id="tenant-a",
+        roles=["platform_admin"],
+        permissions=["admin:*"],
+    )
+
+
+def _tenant_admin_auth() -> AuthContext:
+    return AuthContext(
+        user_id="tenant-admin-1",
+        tenant_id="tenant-a",
         roles=["admin"],
-        permissions=[],
+        permissions=["admin:*"],
     )
 
 
@@ -115,6 +124,24 @@ def _definition(model_override: dict[str, Any]) -> dict[str, Any]:
         "output_content_types": ["text"],
         "metadata": {"adapter_type": "langgraph"},
     }
+
+
+@pytest.mark.asyncio
+async def test_register_service_rejects_tenant_admin() -> None:
+    registry = ServiceRegistry(MemoryRegistryStorage())
+    request = _request()
+
+    with pytest.raises(HTTPException) as exc:
+        await register_service(
+            request=request,
+            definition=_definition({"enabled": False}),
+            registry=registry,
+            auth=_tenant_admin_auth(),
+        )
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail["reason"] == "platform_admin_required"
+    assert await registry.get("langgraph-agent") is None
 
 
 @pytest.mark.asyncio

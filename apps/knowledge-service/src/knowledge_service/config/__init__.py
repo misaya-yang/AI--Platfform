@@ -6,7 +6,7 @@ and double-underscore nesting (e.g. ``KNOWLEDGE_QDRANT__URL``).
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -87,13 +87,12 @@ class EmbeddingSettings(BaseModel):
 
     def get_api_key_for_provider(self, provider: str) -> str:
         """Get the correct API key for a given embedding provider."""
-        if provider == "gemini":
-            return self.google_api_key or self.api_key
-        elif provider == "dashscope":
-            return self.dashscope_api_key or self.api_key
-        elif provider == "siliconflow":
-            return self.siliconflow_api_key or self.api_key
-        return self.api_key
+        provider_key = {
+            "gemini": self.google_api_key,
+            "dashscope": self.dashscope_api_key,
+            "siliconflow": self.siliconflow_api_key,
+        }.get(provider)
+        return provider_key or self.api_key
 
 
 class MultimodalEmbeddingSettings(BaseModel):
@@ -300,11 +299,13 @@ class Settings(BaseSettings):
         populate_by_name=True,
     )
 
+    runtime_role: Literal["all", "api", "worker"] = "all"
     cors: CORSSettings = Field(default_factory=CORSSettings)
     app: AppSettings = Field(default_factory=AppSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     qdrant: QdrantSettings = Field(default_factory=QdrantSettings)
+    qdrant_interactive_deadline_seconds: float = Field(default=3.0, ge=0.1, le=30.0)
     embeddings: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     multimodal: MultimodalEmbeddingSettings = Field(
         default_factory=MultimodalEmbeddingSettings,

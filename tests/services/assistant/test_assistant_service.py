@@ -233,9 +233,16 @@ class TestAssistantConfig:
             None,
             traceparent=traceparent,
         )
-
         assert config.traceparent == traceparent
         assert config.otel_trace_id == "4bf92f3577b34da6a3ce929d0e0e4736"
+
+    def test_route_config_carries_explicit_json_output_contract(self):
+        from assistant_service.api.routes.chat import ChatRequest, _build_config
+        from assistant_service.core.content.structured_output import OutputFormat
+
+        config = _build_config(ChatRequest(message="hello", output_format="json"), None)
+
+        assert config.output_format is OutputFormat.JSON
 
     def test_eval_run_allows_internal_candidate_without_prompt_override(self):
         from assistant_service.api.routes.chat import (
