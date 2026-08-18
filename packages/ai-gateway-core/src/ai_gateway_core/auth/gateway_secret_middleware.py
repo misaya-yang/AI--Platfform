@@ -22,6 +22,7 @@ def validate_gateway_auth_configuration(
     secret: str,
     allow_anonymous: bool,
     allow_anonymous_setting: str,
+    environment: str | None = None,
 ) -> None:
     """Reject a configured trust boundary that can silently bypass itself."""
 
@@ -32,6 +33,13 @@ def validate_gateway_auth_configuration(
             "gateway signature and must only be used when the shared secret "
             "is intentionally unset for local development."
         )
+    if allow_anonymous and environment is not None:
+        normalized_environment = environment.strip().lower()
+        if normalized_environment not in {"local", "dev", "development", "test", "testing"}:
+            raise RuntimeError(
+                f"{allow_anonymous_setting}=true is restricted to local development/test "
+                f"environments; got {normalized_environment or 'unset'}"
+            )
 
 
 class GatewaySecretAuthMiddleware:
@@ -88,6 +96,7 @@ class GatewaySecretAuthMiddleware:
                 path=path,
                 query=_query_string(scope),
                 body=body,
+                identity_headers=headers,
             )
         except InvalidGatewaySecret as exc:
             logger.warning(

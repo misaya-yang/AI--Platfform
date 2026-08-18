@@ -12,7 +12,10 @@ from knowledge_service.auth.user_context import UserContext
 from knowledge_service.core.exceptions import ValidationFailedError
 from knowledge_service.services.knowledge import document_processor as processor_module
 from knowledge_service.services.knowledge.document_processor import DocumentProcessor
-from knowledge_service.services.knowledge.document_service import DocumentService
+from knowledge_service.services.knowledge.document_service import (
+    DocumentService,
+    _redacted_source_url,
+)
 from knowledge_service.services.knowledge.ingestion_service import (
     MAX_EXTRACTED_TEXT_BYTES as INGESTION_MAX_BYTES,
 )
@@ -42,6 +45,22 @@ def _zip_bytes(entries: dict[str, bytes], *, compression: int = zipfile.ZIP_STOR
         for name, value in entries.items():
             archive.writestr(name, value)
     return stream.getvalue()
+
+
+def test_source_url_redaction_removes_reusable_credentials() -> None:
+    redacted = _redacted_source_url(
+        "https://example.test/doc?token=secret-value&visible=1#fragment-secret"
+    )
+
+    assert "secret-value" not in redacted
+    assert "fragment-secret" not in redacted
+    assert "token=%2A%2A%2A" in redacted
+    assert "visible=1" in redacted
+
+
+def test_source_url_rejects_userinfo() -> None:
+    with pytest.raises(ValidationFailedError, match="userinfo"):
+        _redacted_source_url("https://user:password@example.test/doc")
 
 
 def test_document_processor_budget_defaults_match_ingestion_contract() -> None:

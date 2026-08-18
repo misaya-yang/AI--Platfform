@@ -7,9 +7,11 @@ Migrated from KnowledgeService as part of Phase 2 refactoring (Step 3).
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from ...config.settings import Settings
 from ...core.auth.user_resolver import UserContext
@@ -36,6 +38,32 @@ if TYPE_CHECKING:
     from .knowledge_service import KnowledgeService
 
 logger = get_logger(__name__)
+
+_SENSITIVE_URL_QUERY_KEY = re.compile(
+    r"(?:token|secret|password|passwd|credential|api[_-]?key|signature|sig|auth|code)",
+    re.IGNORECASE,
+)
+
+
+def _redacted_source_url(raw_url: str) -> str:
+    """Return a display/persistence URL without reusable credential material."""
+
+    parsed = urlsplit(raw_url)
+    if parsed.username or parsed.password:
+        raise ValidationFailedError("URL userinfo is not allowed")
+    query = [
+        (key, "***" if _SENSITIVE_URL_QUERY_KEY.search(key) else value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+    ]
+    return urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            urlencode(query, doseq=True),
+            "",
+        )
+    )
 
 
 def _lexical_ensure_kwargs(index_config: Any) -> dict[str, Any]:
@@ -482,6 +510,7 @@ class DocumentService:
         raw_url = (url or "").strip()
         if not raw_url:
             raise ValidationFailedError("url is required")
+        source_url = _redacted_source_url(raw_url)
 
         max_bytes = 10 * 1024 * 1024  # 10MB safety limit
 
@@ -515,9 +544,9 @@ class DocumentService:
         doc = {
             "document_id": doc_id,
             "dataset_id": dataset_id,
-            "title": (title or "").strip() or raw_url,
+            "title": (title or "").strip() or source_url,
             "source_type": "url",
-            "source_uri": raw_url,
+            "source_uri": source_url,
             "mime_type": detected_mime or content_type or "text/html",
             "size_bytes": len(content_bytes),
             "status": "uploaded",
@@ -1385,6 +1414,7 @@ class DocumentService:
         batch_name: str | None = None,
     ) -> dict[str, Any]:
         """Batch create documents from text."""
+        _ = process_rule
         await self._ks.require_dataset_access(user, dataset_id, required="editor")
 
         batch_id = batch_name or f"batch_{uuid.uuid4().hex[:8]}"

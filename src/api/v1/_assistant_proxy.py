@@ -11,6 +11,7 @@ Public entry point: ``proxy_to_assistant_service(request, user, ...)``.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from typing import Final
 
 import httpx
@@ -111,6 +112,7 @@ def _sign_request(
     *,
     upstream_path: str = "",
     body: bytes | None = None,
+    identity_headers: Mapping[str, str] | None = None,
 ) -> tuple[str, str] | None:
     if _signer is None:
         return None
@@ -121,6 +123,7 @@ def _sign_request(
             path=upstream_path or request.url.path,
             query=request.url.query,
             body=body,
+            identity_headers=identity_headers,
         ),
     )
 

@@ -25,13 +25,13 @@ from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ai_gateway_core.logging import get_logger
+from ai_gateway_core.storage import FileStorageService, get_file_storage
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from ...core.auth.user_resolver import UserContext
 from ...core.file_cleanup import get_cleanup_service
-from ai_gateway_core.logging import get_logger
-from ai_gateway_core.storage import FileStorageService, get_file_storage
 from ..deps import get_user_context
 
 logger = get_logger(__name__)
@@ -218,7 +218,7 @@ def get_uploads_path() -> Path:
     return path
 
 
-def get_user_uploads_path(user_id: str) -> Path:
+def get_user_uploads_path(user_id: str, tenant_id: str = "") -> Path:
     """Get user-specific uploads directory with validation.
 
     Implements defense-in-depth with both input validation and path verification.
@@ -226,7 +226,8 @@ def get_user_uploads_path(user_id: str) -> Path:
     # Validate user_id to prevent path traversal
     validated_id = validate_user_id(user_id)
     base_path = get_uploads_path()
-    path = base_path / validated_id
+    validated_tenant = validate_user_id(tenant_id) if tenant_id else ""
+    path = base_path / validated_tenant / validated_id if validated_tenant else base_path / validated_id
 
     # Defense-in-depth: Verify resolved path doesn't escape base directory
     try:
@@ -320,6 +321,7 @@ async def upload_file(
         try:
             file_info = await storage_service.upload_file_streaming(
                 user_id=user.user_id,
+                tenant_id=user.tenant_id,
                 filename=file.filename,
                 content_iterator=_stream_upload_file(file),
                 content_type=get_mime_type(ext),
@@ -327,7 +329,7 @@ async def upload_file(
             )
 
             # Build response path (API-facing path format)
-            relative_path = f"/uploads/{user.user_id}/{file_info.filename}"
+            relative_path = file_info.file_path
             size_mb = file_info.size_bytes / (1024 * 1024)
 
             logger.info(
@@ -374,7 +376,7 @@ async def upload_file(
     safe_filename = f"{file_id}_{timestamp}{ext}"
 
     # Create user directory and prepare file path
-    user_dir = get_user_uploads_path(user.user_id)
+    user_dir = get_user_uploads_path(user.user_id, user.tenant_id)
     file_path = user_dir / safe_filename
     temp_path = file_path.with_suffix(file_path.suffix + ".tmp")
 
@@ -470,7 +472,7 @@ async def list_files(
 ) -> FilesListResponse:
     """List files uploaded by the current user."""
 
-    user_dir = get_user_uploads_path(user.user_id)
+    user_dir = get_user_uploads_path(user.user_id, user.tenant_id)
 
     files = []
     if user_dir.exists():
@@ -488,7 +490,7 @@ async def list_files(
                 files.append(
                     FileInfo(
                         file_id=file_id,
-                        file_path=f"/uploads/{user.user_id}/{file_path.name}",
+                        file_path=f"/uploads/{user.tenant_id}/{user.user_id}/{file_path.name}",
                         filename=file_path.name,
                         size_bytes=stat.st_size,
                         mime_type=get_mime_type(ext),
@@ -514,7 +516,7 @@ async def get_file_info(
 
     # Validate file_id format (exactly 8 hex chars)
     validated_file_id = validate_file_id(file_id)
-    user_dir = get_user_uploads_path(user.user_id)
+    user_dir = get_user_uploads_path(user.user_id, user.tenant_id)
 
     # Find file by exact ID match (file_id followed by underscore)
     # Format: {file_id}_{timestamp}.{ext}
@@ -524,7 +526,7 @@ async def get_file_info(
             ext = file_path.suffix.lower()
             return FileInfo(
                 file_id=validated_file_id,
-                file_path=f"/uploads/{user.user_id}/{file_path.name}",
+                file_path=f"/uploads/{user.tenant_id}/{user.user_id}/{file_path.name}",
                 filename=file_path.name,
                 size_bytes=stat.st_size,
                 mime_type=get_mime_type(ext),
@@ -553,7 +555,7 @@ async def delete_file(
     if storage_service:
         # Build storage key pattern to find the file
         # Key format: uploads/{user_id}/{file_id}_{timestamp}.{ext}
-        prefix = f"uploads/{user.user_id}/{validated_file_id}_"
+        prefix = f"uploads/{user.tenant_id}/{user.user_id}/{validated_file_id}_"
 
         # Use public delete_by_prefix API to delete matching files
         deleted = await storage_service.delete_by_prefix(prefix)
@@ -568,7 +570,7 @@ async def delete_file(
         raise HTTPException(status_code=404, detail="File not found")
 
     # Fallback to direct local storage
-    user_dir = get_user_uploads_path(user.user_id)
+    user_dir = get_user_uploads_path(user.user_id, user.tenant_id)
 
     # Find file by exact ID match (file_id followed by underscore)
     for file_path in user_dir.iterdir():
@@ -647,6 +649,7 @@ async def trigger_cleanup(
 )
 async def delete_user_files(
     target_user_id: str,
+    target_tenant_id: str | None = Query(None),
     user: UserContext = Depends(get_user_context),
 ) -> dict:
     """Delete all files for a specific user."""
@@ -655,7 +658,7 @@ async def delete_user_files(
 
     # Validate target user_id format
     validate_user_id(target_user_id)
-    user_dir = get_user_uploads_path(target_user_id)
+    user_dir = get_user_uploads_path(target_user_id, target_tenant_id or user.tenant_id)
 
     if not user_dir.exists():
         raise HTTPException(status_code=404, detail="User directory not found")

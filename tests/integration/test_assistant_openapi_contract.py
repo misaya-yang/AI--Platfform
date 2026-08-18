@@ -63,6 +63,7 @@ def _load_inprocess_spec() -> dict[str, Any] | None:
         env_patch = {}
         if not os.environ.get("GATEWAY_ASSISTANT_SHARED_SECRET"):
             env_patch["ASSISTANT_APP__ALLOW_ANONYMOUS"] = "true"
+            env_patch["ENVIRONMENT"] = "development"
         with patch.dict(os.environ, env_patch, clear=False):
             from assistant_service.main import app  # type: ignore[import-not-found]
 

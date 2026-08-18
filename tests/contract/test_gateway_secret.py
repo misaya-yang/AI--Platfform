@@ -60,8 +60,8 @@ def test_tampered_signature_rejected(signer: GatewaySecret, verifier: GatewaySec
     header = signer.sign()
     parts = header.split(":")
     # Flip one hex nibble in the signature
-    bad_sig = parts[3][:-1] + ("0" if parts[3][-1] != "0" else "1")
-    tampered = ":".join(parts[:3] + [bad_sig])
+    bad_sig = parts[5][:-1] + ("0" if parts[5][-1] != "0" else "1")
+    tampered = ":".join(parts[:5] + [bad_sig])
     with pytest.raises(InvalidGatewaySecret, match="signature"):
         verifier.verify(tampered)
 
@@ -106,9 +106,9 @@ def test_malformed_header_rejected(verifier: GatewaySecret) -> None:
     with pytest.raises(InvalidGatewaySecret, match="malformed"):
         verifier.verify("not-a-valid-header")
     with pytest.raises(InvalidGatewaySecret, match="malformed"):
-        verifier.verify("v2:rid:1234:abc")  # wrong version
-    with pytest.raises(InvalidGatewaySecret, match="malformed"):
-        verifier.verify("v1:only:three")  # missing segment
+        verifier.verify("v2:rid:1234:abc")  # malformed v2
+    with pytest.raises(InvalidGatewaySecret, match="version"):
+        verifier.verify("v1:only:three")  # rejected downgrade
 
 
 def test_replay_rejected(signer: GatewaySecret) -> None:
@@ -200,6 +200,60 @@ def test_v2_signature_binds_method_path_query_and_body() -> None:
             query="top_k=5",
             body=body,
         )
+
+
+def test_v2_signature_binds_forwarded_identity_headers() -> None:
+    signer = GatewaySecret(
+        secret=SECRET,
+        version="v2",
+        replay_store=InMemoryReplayStore(),
+    )
+    verifier = GatewaySecret(
+        secret=SECRET,
+        version="v2",
+        replay_store=InMemoryReplayStore(),
+    )
+    identity = {"X-User-Id": "user-a", "X-Tenant-Id": "tenant-a", "X-User-Roles": "user"}
+    header = signer.sign(
+        request_id="identity-bound",
+        method="POST",
+        path="/api/v1/assistant/chat",
+        body=b"{}",
+        identity_headers=identity,
+    )
+
+    assert verifier.verify(
+        header,
+        method="POST",
+        path="/api/v1/assistant/chat",
+        body=b"{}",
+        identity_headers=identity,
+    ) == "identity-bound"
+
+    with pytest.raises(InvalidGatewaySecret, match="signature"):
+        verifier.verify(
+            header,
+            method="POST",
+            path="/api/v1/assistant/chat",
+            body=b"{}",
+            identity_headers={**identity, "X-Tenant-Id": "tenant-b"},
+        )
+
+
+def test_v1_header_is_rejected_by_v2_verifier() -> None:
+    legacy = GatewaySecret(
+        secret=SECRET,
+        version="v1",
+        replay_store=InMemoryReplayStore(),
+    )
+    verifier = GatewaySecret(
+        secret=SECRET,
+        version="v2",
+        replay_store=InMemoryReplayStore(),
+    )
+
+    with pytest.raises(InvalidGatewaySecret, match="version"):
+        verifier.verify(legacy.sign(request_id="legacy"))
 
 
 def test_v2_signature_uses_key_id_for_rotation() -> None:

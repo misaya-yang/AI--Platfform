@@ -31,11 +31,12 @@ export interface PublicAgentAttachment {
   request_id: string;
 }
 
-function authHeaders(embedToken?: string): Record<string, string> {
+function authHeaders(embedToken?: string, embedOrigin?: string): Record<string, string> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   const token = useAuthStore.getState().token;
   if (token) headers.Authorization = `Bearer ${token}`;
   if (embedToken) headers["X-Agent-Embed-Token"] = embedToken;
+  if (embedOrigin) headers["X-Agent-Embed-Origin"] = embedOrigin;
   return headers;
 }
 
@@ -43,10 +44,11 @@ export async function getPublicAgent(
   publicId: string,
   channel: PublicAgentChannel = "hosted",
   embedToken?: string,
+  embedOrigin?: string,
 ): Promise<PublicAgentConfig> {
   const { data } = await api.get<PublicAgentConfig>(`/api/v1/public/agents/${publicId}`, {
     params: { channel },
-    headers: embedToken ? { "X-Agent-Embed-Token": embedToken } : undefined,
+    headers: embedToken ? authHeaders(embedToken, embedOrigin) : undefined,
   });
   return data;
 }
@@ -55,11 +57,12 @@ export async function createPublicAgentSession(
   publicId: string,
   channel: PublicAgentChannel = "hosted",
   embedToken?: string,
+  embedOrigin?: string,
 ): Promise<AgentRuntimeSession> {
   const { data } = await api.post<AgentRuntimeSession>(
     `/api/v1/public/agents/${publicId}/sessions`,
     { channel },
-    { headers: embedToken ? { "X-Agent-Embed-Token": embedToken } : undefined },
+    { headers: embedToken ? authHeaders(embedToken, embedOrigin) : undefined },
   );
   return data;
 }
@@ -69,6 +72,7 @@ export async function uploadPublicAgentAttachment(input: {
   file: File;
   channel?: PublicAgentChannel;
   embedToken?: string;
+  embedOrigin?: string;
 }): Promise<PublicAgentAttachment> {
   const form = new FormData();
   form.append("file", input.file);
@@ -77,7 +81,7 @@ export async function uploadPublicAgentAttachment(input: {
     form,
     {
       params: { channel: input.channel ?? "hosted" },
-      headers: input.embedToken ? { "X-Agent-Embed-Token": input.embedToken } : undefined,
+      headers: input.embedToken ? authHeaders(input.embedToken, input.embedOrigin) : undefined,
     },
   );
   return data;
@@ -87,6 +91,7 @@ export async function* streamPublicAgent(input: {
   publicId: string;
   channel?: PublicAgentChannel;
   embedToken?: string;
+  embedOrigin?: string;
   sessionId: string;
   message: string;
   attachments?: Array<Pick<PublicAgentAttachment, "artifact_id" | "filename" | "mime_type">>;
@@ -97,7 +102,7 @@ export async function* streamPublicAgent(input: {
     `/api/v1/public/agents/${input.publicId}/chat/stream`,
     {
       method: "POST",
-      headers: authHeaders(input.embedToken),
+      headers: authHeaders(input.embedToken, input.embedOrigin),
       body: JSON.stringify({
         message: input.message,
         session_id: input.sessionId,
@@ -122,6 +127,7 @@ export async function submitPublicAgentFeedback(input: {
   publicId: string;
   channel?: PublicAgentChannel;
   embedToken?: string;
+  embedOrigin?: string;
   sessionId: string;
   rating: -1 | 1;
   comment?: string;
@@ -134,6 +140,6 @@ export async function submitPublicAgentFeedback(input: {
       comment: input.comment ?? "",
       channel: input.channel ?? "hosted",
     },
-    { headers: input.embedToken ? { "X-Agent-Embed-Token": input.embedToken } : undefined },
+    { headers: input.embedToken ? authHeaders(input.embedToken, input.embedOrigin) : undefined },
   );
 }

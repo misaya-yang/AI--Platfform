@@ -125,13 +125,13 @@ async def cancel_task(
 
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(..., min_length=1, max_length=200_000)
     session_id: str | None = None
-    history: list[dict[str, str]] | None = None
+    history: list[dict[str, str]] | None = Field(default=None, max_length=200)
     model_id: str = DEFAULT_MODEL
     temperature: float = 0.7
-    max_tokens: int | None = None
-    system_prompt: str | None = None
+    max_tokens: int | None = Field(default=None, ge=1, le=32_768)
+    system_prompt: str | None = Field(default=None, max_length=100_000)
     eval_run: bool = False
     eval_system_prompt_override: str | None = None
     kb_dataset_ids: list[str] | None = Field(default=None, max_length=8)
@@ -141,7 +141,7 @@ class ChatRequest(BaseModel):
     kb_include_images: bool | None = None
     web_search_enabled: bool = False
     web_search_max_results: int | None = None
-    file_paths: list[str] | None = None
+    file_paths: list[str] | None = Field(default=None, max_length=20)
     execution_profile: str | None = None
     memory_mode: str | None = None
     os_agent_enabled: bool | None = None
@@ -163,6 +163,13 @@ class ChatRequest(BaseModel):
     resume_run_id: str | None = None
     resume_approval_id: str | None = None
     stream: bool = False
+
+    @field_validator("file_paths")
+    @classmethod
+    def validate_file_paths(cls, value: list[str] | None) -> list[str] | None:
+        if value is not None and any(len(path) > 1024 for path in value):
+            raise ValueError("Each attachment path must be at most 1024 characters")
+        return value
 
     @model_validator(mode="before")
     @classmethod

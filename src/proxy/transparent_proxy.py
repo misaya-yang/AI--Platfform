@@ -282,7 +282,7 @@ class TransparentProxy:
                     )
                     self._clients[client_key] = httpx.AsyncClient(
                         timeout=timeout,
-                        follow_redirects=True,
+                        follow_redirects=False,
                         http2=True,  # 启用 HTTP/2
                         limits=limits,
                     )

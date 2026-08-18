@@ -59,6 +59,7 @@ from .core.middleware.streaming import (
     StreamingTracingConfig,
     StreamingTracingMiddleware,
 )
+from .core.middleware.request_body_limit import RequestBodyLimitMiddleware
 from ai_gateway_core.logging import configure_structured_logging, get_logger
 from .core.observability.metrics import get_metrics
 from .services.metrics.metrics_recorder import init_metrics_recorder
@@ -208,6 +209,12 @@ def create_app() -> FastAPI:
         ],
     )
     app.add_middleware(StreamingRateLimitMiddleware, config=rate_limit_config)
+
+    app.add_middleware(
+        RequestBodyLimitMiddleware,
+        max_bytes=8 * 1024 * 1024,
+        paths={"/api/v1/assistant/chat", "/api/v1/assistant/chat/stream"},
+    )
 
     # 统一鉴权中间件（支持 JWT、API Key、游客会话）- 纯 ASGI
     auth_config = StreamingAuthConfig(
@@ -390,7 +397,8 @@ def create_app() -> FastAPI:
                     checks["database"] = "not_connected"
                     healthy = False
             except Exception as e:
-                checks["database"] = f"error: {e}"
+                logger.warning("Readiness database check failed: %s", type(e).__name__)
+                checks["database"] = "error: database_unavailable"
                 healthy = False
         else:
             checks["database"] = "disabled"
@@ -405,7 +413,8 @@ def create_app() -> FastAPI:
                     checks["redis"] = "not_responding"
                     healthy = False
             except Exception as e:
-                checks["redis"] = f"error: {e}"
+                logger.warning("Readiness Redis check failed: %s", type(e).__name__)
+                checks["redis"] = "error: redis_unavailable"
                 healthy = False
         else:
             checks["redis"] = "disabled"

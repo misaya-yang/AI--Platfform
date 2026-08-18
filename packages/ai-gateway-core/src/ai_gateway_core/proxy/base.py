@@ -680,9 +680,16 @@ class ServiceProxy:
 
         if self._signer is not None:
             try:
-                sig = self._signer(request, upstream_path=upstream_path, body=body)
+                sig = self._signer(
+                    request,
+                    upstream_path=upstream_path,
+                    body=body,
+                    identity_headers=user_headers,
+                )
             except TypeError:
-                sig = self._signer(request)
+                # Preserve compatibility with older custom signers while all
+                # built-in signers receive the trusted identity envelope.
+                sig = self._signer(request, upstream_path=upstream_path, body=body)
             if sig is not None:
                 name, value = sig
                 out[name] = value

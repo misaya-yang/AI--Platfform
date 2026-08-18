@@ -575,6 +575,7 @@ async def test_production_composition_wires_current_resource_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ASSISTANT_APP__ALLOW_ANONYMOUS", "true")
+    monkeypatch.setenv("ENVIRONMENT", "development")
     monkeypatch.delenv("GATEWAY_ASSISTANT_SHARED_SECRET", raising=False)
     from assistant_service.main import _configure_agent_runtime_resource_policies
 

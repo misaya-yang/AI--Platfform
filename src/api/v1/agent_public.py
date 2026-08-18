@@ -8,6 +8,7 @@ import hmac
 import html
 import json
 import os
+import secrets
 import time
 import uuid
 from dataclasses import replace
@@ -118,7 +119,13 @@ def _allowed_origins(descriptor: dict[str, Any]) -> list[str]:
     return normalized
 
 
-def _issue_embed_token(request: Request, *, public_id: str, origin: str) -> str:
+def _issue_embed_token(
+    request: Request,
+    *,
+    public_id: str,
+    origin: str,
+    nonce: str,
+) -> str:
     abuse_identity = hmac.new(
         _embed_secret(request),
         f"{public_id}\n{origin}\n{get_client_ip_from_request(request)}".encode(),
@@ -128,6 +135,7 @@ def _issue_embed_token(request: Request, *, public_id: str, origin: str) -> str:
         "v": _EMBED_PROTOCOL_VERSION,
         "public_id": public_id,
         "origin": origin,
+        "nonce": nonce,
         "sub": _b64encode(abuse_identity),
         "exp": int(time.time()) + _EMBED_TOKEN_TTL_SECONDS,
     }
@@ -147,11 +155,18 @@ def _verify_embed_token(request: Request, *, token: str | None, public_id: str) 
         if prefix != "e1" or not hmac.compare_digest(_b64decode(signature), expected):
             raise ValueError
         payload = json.loads(_b64decode(encoded))
+        presented_origin = _normalized_origin(
+            request.headers.get("X-Agent-Embed-Origin", "")
+        )
+        session_nonce = request.cookies.get("ag_embed_session", "")
         if (
             payload.get("v") != _EMBED_PROTOCOL_VERSION
             or payload.get("public_id") != public_id
             or int(payload.get("exp", 0)) < int(time.time())
             or _normalized_origin(str(payload.get("origin") or "")) != payload.get("origin")
+            or presented_origin != payload.get("origin")
+            or not payload.get("nonce")
+            or session_nonce != payload.get("nonce")
             or not str(payload.get("sub") or "")
         ):
             raise ValueError
@@ -231,7 +246,13 @@ async def agent_embed_document(public_id: str, request: Request) -> HTMLResponse
             "AGENT_EMBED_ORIGIN_FORBIDDEN",
             "Parent origin is not allowed",
         )
-    token = _issue_embed_token(request, public_id=public_id, origin=parent_origin)
+    nonce = secrets.token_urlsafe(32)
+    token = _issue_embed_token(
+        request,
+        public_id=public_id,
+        origin=parent_origin,
+        nonce=nonce,
+    )
     body = (
         "<!doctype html><html><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
@@ -243,6 +264,17 @@ async def agent_embed_document(public_id: str, request: Request) -> HTMLResponse
         "<script type=\"module\" src=\"/agent-embed.js\"></script></body></html>"
     )
     response = HTMLResponse(body)
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    secure_cookie = forwarded_proto == "https" or request.url.scheme == "https"
+    response.set_cookie(
+        "ag_embed_session",
+        nonce,
+        max_age=_EMBED_TOKEN_TTL_SECONDS,
+        httponly=True,
+        secure=secure_cookie,
+        samesite="none" if secure_cookie else "lax",
+        path="/",
+    )
     ancestors = " ".join(allowed)
     response.headers["Content-Security-Policy"] = (
         "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; "

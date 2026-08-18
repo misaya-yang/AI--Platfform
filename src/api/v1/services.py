@@ -22,7 +22,13 @@ from ...core.auth.service_access_resolver import (
 )
 from ...core.auth.user_resolver import UserContext
 from ...services.registry.service_registry import ServiceRegistry
-from ..deps import AuthContext, get_auth_context, get_registry, get_user_context
+from ..deps import (
+    AuthContext,
+    get_auth_context,
+    get_registry,
+    get_user_context,
+    require_platform_admin,
+)
 from ._assistant_status import get_assistant_health
 from ._langgraph_connector_config import _normalize_langgraph_connector_config
 from ._langgraph_model_policy import _validate_langgraph_model_override
@@ -250,7 +256,7 @@ async def register_service(
     auth: AuthContext = Depends(get_auth_context),
 ):
     # 权限：ServiceConfigWrite capability
-    _require_capability(request, auth, Capability.SERVICE_CONFIG_WRITE)
+    require_platform_admin(request, auth, Capability.SERVICE_CONFIG_WRITE)
     try:
         normalized_definition = dict(definition)
         if isinstance(definition.get("connector_config"), dict):
@@ -440,7 +446,7 @@ async def update_service(
     auth: AuthContext = Depends(get_auth_context),
 ):
     # 权限：ServiceConfigWrite capability
-    _require_capability(request, auth, Capability.SERVICE_CONFIG_WRITE)
+    require_platform_admin(request, auth, Capability.SERVICE_CONFIG_WRITE)
 
     service = await registry.get(service_id)
     if not service:
@@ -487,7 +493,7 @@ async def delete_service(
     auth: AuthContext = Depends(get_auth_context),
 ):
     # 权限：ServiceConfigWrite capability
-    _require_capability(request, auth, Capability.SERVICE_CONFIG_WRITE)
+    require_platform_admin(request, auth, Capability.SERVICE_CONFIG_WRITE)
 
     deleted = False
     if hasattr(registry.storage, "delete"):

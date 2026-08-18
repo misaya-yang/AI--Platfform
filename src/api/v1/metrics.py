@@ -13,7 +13,12 @@ from datetime import date, datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from ...api.deps import AuthContext, get_auth_context, require_gateway_capability
+from ...api.deps import (
+    AuthContext,
+    get_auth_context,
+    require_gateway_capability,
+    require_platform_admin,
+)
 from ...core.auth.permissions import Capability
 from ...services.billing.pricing_catalog import microcents_to_usd
 from ...services.metrics import compute_data_status, get_metrics_recorder
@@ -183,7 +188,7 @@ async def get_metrics_summary(
     - active_services: 活跃服务数
     - requests_by_hour: 24小时请求趋势
     """
-    require_gateway_capability(request, auth, Capability.GATEWAY_METRICS_READ)
+    require_platform_admin(request, auth, Capability.GATEWAY_METRICS_READ)
 
     # 从 MetricsRecorder 获取今日摘要
     metrics_recorder = get_metrics_recorder()
@@ -250,7 +255,7 @@ async def get_metrics_timeseries(
     - errors: 错误数
     - runs: LangGraph 执行数
     """
-    require_gateway_capability(request, auth, Capability.GATEWAY_METRICS_READ)
+    require_platform_admin(request, auth, Capability.GATEWAY_METRICS_READ)
 
     redis = getattr(request.app.state, "redis", None)
     data = []
@@ -325,7 +330,7 @@ async def get_token_usage(
     返回指定日期范围内的 Token 消耗情况
     """
     # 权限检查：仅管理员或运营角色可查看 metrics
-    require_gateway_capability(request, auth, Capability.GATEWAY_METRICS_READ)
+    require_platform_admin(request, auth, Capability.GATEWAY_METRICS_READ)
 
     redis = getattr(request.app.state, "redis", None)
 
@@ -402,7 +407,7 @@ async def get_metrics_breakdown(
     按维度分解指标，返回 Top N 项目
     """
     # 权限检查：仅管理员或运营角色可查看 metrics
-    require_gateway_capability(request, auth, Capability.GATEWAY_METRICS_READ)
+    require_platform_admin(request, auth, Capability.GATEWAY_METRICS_READ)
 
     redis = getattr(request.app.state, "redis", None)
     items = []

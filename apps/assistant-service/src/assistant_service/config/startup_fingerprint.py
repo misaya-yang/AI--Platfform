@@ -870,7 +870,7 @@ def _resolve_runtime(
     runtime["INTERNAL_COMM_STATE_BACKEND"] = _runtime_enum(
         environment,
         "INTERNAL_COMM_STATE_BACKEND",
-        default="memory",
+        default="redis",
         choices=frozenset({"memory", "redis"}),
     )
     runtime["INTERNAL_IDEMPOTENCY_BACKEND"] = _runtime_enum(
@@ -888,7 +888,7 @@ def _resolve_runtime(
     runtime["INTERNAL_AUTH_VERSION"] = _runtime_enum(
         environment,
         "INTERNAL_AUTH_VERSION",
-        default="v1",
+        default="v2",
         choices=frozenset({"v1", "v2"}),
     )
     runtime["INTERNAL_AUTH_ACTIVE_KEY_ID"] = _runtime_string(

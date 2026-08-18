@@ -575,9 +575,14 @@ async def transparent_proxy_handler(
     5. 执行代理并返回响应
     """
     if path == "_health":
+        await check_service_authorization(request, service_name, user, auth)
         return await proxy_service_health(
             service_name=service_name,
+            request=request,
             proxy=proxy,
+            config_loader=config_loader,
+            user=user,
+            auth=auth,
         )
     if path == "_selftest":
         return await proxy_service_selftest(
@@ -972,11 +977,15 @@ async def list_proxy_services(
 )
 async def proxy_service_health(
     service_name: str,
+    request: Request,
     proxy: TransparentProxy = Depends(get_transparent_proxy),
     config_loader: ProxyConfigLoader = Depends(get_proxy_config_loader),
+    user: UserContext = Depends(get_user_context),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """检查服务健康状态"""
-    healthy, message = await proxy.health_check(service_name)
+    await check_service_authorization(request, service_name, user, auth)
+    healthy, _message = await proxy.health_check(service_name)
     config = await config_loader.get_config(service_name)
     snapshot = await proxy.get_service_availability(config) if config else {}
 
@@ -984,7 +993,7 @@ async def proxy_service_health(
         return {
             "status": "healthy",
             "service": service_name,
-            "message": message,
+            "message": "HEALTHY",
             "availability_status": snapshot.get("availability_status"),
             "last_health_check_at": snapshot.get("last_health_check_at"),
             "last_health_error": snapshot.get("last_health_error"),
@@ -993,9 +1002,9 @@ async def proxy_service_health(
         raise HTTPException(
             status_code=503,
             detail={
-                "status": "unhealthy",
-                "service": service_name,
-                "message": message,
+            "status": "unhealthy",
+            "service": service_name,
+            "message": "UNAVAILABLE",
                 "availability_status": snapshot.get("availability_status"),
                 "last_health_check_at": snapshot.get("last_health_check_at"),
                 "last_health_error": snapshot.get("last_health_error"),

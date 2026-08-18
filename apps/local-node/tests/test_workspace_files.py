@@ -115,6 +115,10 @@ def test_multi_file_analysis_rejects_escape_and_duplicate_before_returning_conte
         "\\\\server\\share",
         ".env",
         ".ssh/id_rsa",
+        ".npmrc",
+        ".netrc",
+        ".git-credentials",
+        "application_default_credentials.json",
         "wallet/seed-phrase.txt",
     ],
 )

@@ -114,7 +114,10 @@ def _request() -> Request:
             "method": "GET",
             "path": f"/embed/agents/{PUBLIC_ID}",
             "query_string": b"",
-            "headers": [],
+            "headers": [
+                (b"x-agent-embed-origin", b"https://allowed.example"),
+                (b"cookie", b"ag_embed_session=nonce-1"),
+            ],
             "app": SimpleNamespace(state=SimpleNamespace()),
         }
     )
@@ -130,6 +133,7 @@ def test_embed_token_is_signed_short_lived_and_bound_to_publication_and_origin(
         request,
         public_id=PUBLIC_ID,
         origin="https://allowed.example",
+        nonce="nonce-1",
     )
     claim = agent_public._verify_embed_token(request, token=token, public_id=PUBLIC_ID)
     assert claim["origin"] == "https://allowed.example"
@@ -140,6 +144,7 @@ def test_embed_token_is_signed_short_lived_and_bound_to_publication_and_origin(
         request,
         public_id=PUBLIC_ID,
         origin="https://allowed.example",
+        nonce="nonce-1",
     )
     renewed_claim = agent_public._verify_embed_token(
         request,

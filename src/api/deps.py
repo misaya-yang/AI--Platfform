@@ -187,6 +187,35 @@ def require_gateway_capability(
     )
 
 
+def require_platform_admin(
+    request: Request,
+    auth: AuthContext,
+    capability: Capability,
+) -> None:
+    """Require a capability plus an explicit platform-admin identity.
+
+    Some capabilities expose global state (metrics and service routing) rather
+    than tenant-owned resources. A tenant role must not be able to satisfy
+    those capability checks by itself.
+    """
+
+    require_gateway_capability(request, auth, capability)
+    subjects = {str(value).strip().lower() for value in [*(auth.roles or []), *(auth.permissions or [])]}
+    if subjects.intersection({"admin", "admin:*", "platform_admin", "superadmin", "super_admin"}):
+        return
+    _schedule_permission_denied_event(request, auth, capability)
+    raise HTTPException(
+        status_code=403,
+        detail={
+            **build_permission_denied_detail(
+                capability=capability,
+                trace_id=_request_trace_id(request),
+            ),
+            "reason": "platform_admin_required",
+        },
+    )
+
+
 def _schedule_permission_denied_event(
     request: Request,
     auth: AuthContext,
@@ -243,6 +272,7 @@ def _normalize_permissions(raw_permissions) -> list[str]:
 
 
 def _extract_service_id_from_path(path: str) -> str | None:
+    path = str(path or "")
     for prefix in ("/api/v1/proxy/", "/proxy/"):
         if path.startswith(prefix):
             remainder = path[len(prefix) :]

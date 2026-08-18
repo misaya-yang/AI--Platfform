@@ -60,7 +60,7 @@ class AuthConfigUpdate(BaseModel):
     jwt_issuer: str | None = None
     api_key_enabled: bool = False
     api_key_header: str = "X-API-Key"
-    api_keys: list[str] = []
+    api_keys: list[str] | None = None
 
 
 class ApiKeyCreate(BaseModel):
@@ -93,6 +93,20 @@ _runtime_config: dict[str, Any] = {
     "rate_limits": [],
     "api_keys": [],
 }
+
+
+def _auth_config_summary(config: dict[str, Any]) -> dict[str, Any]:
+    """Return the non-secret runtime auth projection for API/cache/audit use."""
+
+    return {
+        "jwt_enabled": bool(config.get("jwt_enabled")),
+        "jwt_secret_configured": bool(config.get("jwt_secret")),
+        "jwt_algorithms": list(config.get("jwt_algorithms") or []),
+        "jwt_issuer": config.get("jwt_issuer"),
+        "api_key_enabled": bool(config.get("api_key_enabled")),
+        "api_key_header": config.get("api_key_header") or "X-API-Key",
+        "api_keys_count": len(config.get("api_keys") or []),
+    }
 
 
 def _get_rate_policy_resolver(request: Request) -> RatePolicyResolver:
@@ -324,7 +338,7 @@ async def get_auth_config(
             "header_name": settings.authentication.api_key.header_name,
             "key_count": len(settings.authentication.api_key.keys),
         },
-        "runtime": _runtime_config["auth"],
+        "runtime": _auth_config_summary(_runtime_config["auth"]),
     }
 
 
@@ -338,20 +352,21 @@ async def update_auth_config(
     # 权限检查：仅管理员可修改鉴权配置
     request.app.state.dispatcher.rbac.require(auth.roles, "admin")
 
+    current_auth = _runtime_config["auth"]
     _runtime_config["auth"] = {
         "jwt_enabled": body.jwt_enabled,
-        "jwt_secret": body.jwt_secret or "",
+        "jwt_secret": body.jwt_secret or current_auth.get("jwt_secret", ""),
         "jwt_algorithms": body.jwt_algorithms,
         "jwt_issuer": body.jwt_issuer,
         "api_key_enabled": body.api_key_enabled,
         "api_key_header": body.api_key_header,
-        "api_keys": body.api_keys,
+        "api_keys": body.api_keys if body.api_keys is not None else current_auth.get("api_keys", []),
     }
 
     # 如果 Redis 可用，缓存配置
     redis = getattr(request.app.state, "redis", None)
     if redis and redis.enabled:
-        await redis.cache_config("auth", _runtime_config["auth"])
+        await redis.cache_config("auth", _auth_config_summary(_runtime_config["auth"]))
 
     await record_config_change(
         request=request,
@@ -360,7 +375,7 @@ async def update_auth_config(
         resource_id="gateway-auth",
         action="update",
         before=None,
-        after=_runtime_config["auth"],
+        after=_auth_config_summary(_runtime_config["auth"]),
     )
 
     return {"status": "success", "message": "鉴权配置已更新"}

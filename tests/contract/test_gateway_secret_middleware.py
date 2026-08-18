@@ -81,7 +81,14 @@ def test_valid_signature_accepted() -> None:
     client = TestClient(app)
     r = client.get(
         "/api/v1/assistant/ping",
-        headers={"X-Gateway-Secret": signer.sign()},
+        headers={
+            "X-Gateway-Secret": signer.sign(
+                method="GET",
+                path="/api/v1/assistant/ping",
+                query="",
+                body=b"",
+            )
+        },
     )
     assert r.status_code == 200
 

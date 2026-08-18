@@ -49,11 +49,17 @@ def test_helm_preserves_dynamic_embed_route_to_gateway() -> None:
 
 
 def test_gateway_security_middleware_exempts_only_dedicated_embed_document() -> None:
-    source = (ROOT / "src" / "main.py").read_text(encoding="utf-8")
-    assert 'request.url.path.startswith("/embed/agents/")' in source
-    assert 'response.headers["X-Frame-Options"] = "DENY"' in source
-    assert 'del response.headers["X-Frame-Options"]' in source
-    assert 'app.include_router(agent_embed_document_router)' in source
+    source = (
+        ROOT / "src" / "core" / "middleware" / "_streaming" / "security_headers.py"
+    ).read_text(encoding="utf-8")
+    assert '_EMBED_PREFIX = "/embed/agents/"' in source
+    assert "allow_embed_frame = path.startswith(_EMBED_PREFIX)" in source
+    assert 'b"x-frame-options"' in source
+    assert 'b"DENY"' in source
+
+    main_source = (ROOT / "src" / "main.py").read_text(encoding="utf-8")
+    assert "SecurityHeadersMiddleware" in main_source
+    assert "app.include_router(agent_embed_document_router)" in main_source
 
 
 def test_header_script_has_ownership_guard_and_built_image_mode() -> None:

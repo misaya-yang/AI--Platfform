@@ -4,6 +4,11 @@ if (root) {
   const publicId = root.dataset.publicId || "";
   const parentOrigin = root.dataset.parentOrigin || "";
   const embedToken = root.dataset.embedToken || "";
+  const embedHeaders = {
+    "Content-Type": "application/json",
+    "X-Agent-Embed-Token": embedToken,
+    "X-Agent-Embed-Origin": parentOrigin,
+  };
   const protocol = "agent-embed/v1";
   root.removeAttribute("data-embed-token");
   let config = null;
@@ -143,7 +148,7 @@ if (root) {
         const sessionResponse = await fetch(`/api/v1/public/agents/${encodeURIComponent(publicId)}/sessions`, {
           method: "POST",
           credentials: "include",
-          headers: { "Content-Type": "application/json", "X-Agent-Embed-Token": embedToken },
+          headers: embedHeaders,
           body: JSON.stringify({ channel: "embed" }),
         });
         if (!sessionResponse.ok) throw new Error(`Session failed (${sessionResponse.status})`);
@@ -152,7 +157,7 @@ if (root) {
       const response = await fetch(`/api/v1/public/agents/${encodeURIComponent(publicId)}/chat/stream`, {
         method: "POST",
         credentials: "include",
-        headers: { "Content-Type": "application/json", "X-Agent-Embed-Token": embedToken },
+        headers: embedHeaders,
         body: JSON.stringify({ channel: "embed", session_id: sessionId, message, attachments: [] }),
       });
       // Terminal runtime failures arrive as {event_type:"error"|"run_error",
@@ -213,7 +218,7 @@ if (root) {
 
   fetch(`/api/v1/public/agents/${encodeURIComponent(publicId)}?channel=embed`, {
     credentials: "include",
-    headers: { "X-Agent-Embed-Token": embedToken },
+    headers: { "X-Agent-Embed-Token": embedToken, "X-Agent-Embed-Origin": parentOrigin },
   })
     .then((response) => {
       if (!response.ok) throw new Error(`Agent unavailable (${response.status})`);

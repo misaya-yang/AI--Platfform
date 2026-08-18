@@ -9,15 +9,13 @@ Header format
 -------------
 One header, one value::
 
-    X-Gateway-Secret: v1:<request_id>:<epoch_ms>:<hmac_hex>
-
-where ``hmac_hex = HMAC_SHA256(secret, f"{request_id}:{epoch_ms}")``.
+    X-Gateway-Secret: v2:<key_id>:<request_id>:<epoch_ms>:<body_hash>:<hmac_hex>
 
 Verification rules
 ------------------
-1. Shape: 4 colon-separated segments with ``v1`` prefix.
-2. Signature must match a constant-time ``hmac.compare_digest`` of the
-   computed HMAC over ``f"{request_id}:{epoch_ms}"``.
+1. Shape: 6 colon-separated segments with ``v2`` prefix.
+2. Signature binds method, path, query, body hash, trusted identity headers,
+   request ID, timestamp, and key ID.
 3. Timestamp must be within ``max_skew_ms`` of the verifier's clock
    (default ±60s).
 4. Replay protection: ``request_id`` is remembered in a seen-ids store
@@ -38,6 +36,7 @@ import secrets
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Protocol
@@ -47,6 +46,19 @@ logger = logging.getLogger(__name__)
 _SIG_PREFIX = "v1"
 _DEFAULT_MAX_SKEW_MS = 60_000
 _DEFAULT_REPLAY_TTL_MS = 120_000  # 2× max skew — covers worst-case window
+_SIGNED_IDENTITY_HEADERS = frozenset(
+    {
+        "x-user-id",
+        "x-tenant-id",
+        "x-user-tier",
+        "x-user-type",
+        "x-user-roles",
+        "x-user-email",
+        "x-user-name",
+        "x-app-user-id",
+        "x-app-tenant-id",
+    }
+)
 
 
 class InvalidGatewaySecret(Exception):
@@ -167,7 +179,7 @@ class GatewaySecret:
                 "GATEWAY_ASSISTANT_SHARED_SECRET must be at least 16 chars"
             )
         self.version = (
-            self.version or os.getenv("INTERNAL_AUTH_VERSION", "v1")
+            self.version or "v2"
         ).strip().lower()
         if self.version not in {"v1", "v2"}:
             raise ValueError("INTERNAL_AUTH_VERSION must be 'v1' or 'v2'")
@@ -209,6 +221,7 @@ class GatewaySecret:
         path: str | None = None,
         query: str | None = "",
         body: bytes | str | None = None,
+        identity_headers: Mapping[str, str] | None = None,
     ) -> str:
         """Produce a fresh header value. ``request_id`` auto-generated if omitted."""
         rid = request_id or secrets.token_hex(16)
@@ -224,6 +237,7 @@ class GatewaySecret:
                 path=path or "",
                 query=query or "",
                 body_hash=body_hash,
+                identity_headers=identity_headers,
             )
             return f"v2:{kid}:{rid}:{ts}:{body_hash}:{sig}"
 
@@ -240,6 +254,7 @@ class GatewaySecret:
         path: str | None = None,
         query: str | None = "",
         body: bytes | str | None = None,
+        identity_headers: Mapping[str, str] | None = None,
     ) -> str:
         """Verify ``header_value``. Returns the ``request_id`` on success.
 
@@ -252,6 +267,10 @@ class GatewaySecret:
         parts = header_value.split(":")
         if not parts:
             raise InvalidGatewaySecret("malformed header")
+        if parts[0] not in {"v1", "v2"}:
+            raise InvalidGatewaySecret("malformed header")
+        if parts[0] != self.version:
+            raise InvalidGatewaySecret("version mismatch")
         if parts[0] == "v2":
             return self._verify_v2(
                 parts,
@@ -259,6 +278,7 @@ class GatewaySecret:
                 path=path or "",
                 query=query or "",
                 body=body,
+                identity_headers=identity_headers,
             )
         if len(parts) != 4 or parts[0] != _SIG_PREFIX:
             raise InvalidGatewaySecret("malformed header")
@@ -308,6 +328,7 @@ class GatewaySecret:
         path: str,
         query: str,
         body: bytes | str | None,
+        identity_headers: Mapping[str, str] | None,
     ) -> str:
         if len(parts) != 6:
             raise InvalidGatewaySecret("malformed header")
@@ -333,6 +354,7 @@ class GatewaySecret:
             path=path,
             query=query,
             body_hash=body_hash,
+            identity_headers=identity_headers,
         )
         if not hmac.compare_digest(expected, sig):
             raise InvalidGatewaySecret("signature mismatch")
@@ -356,6 +378,7 @@ class GatewaySecret:
         path: str,
         query: str,
         body_hash: str,
+        identity_headers: Mapping[str, str] | None,
     ) -> str:
         keys = self.keys or {}
         secret = keys.get(key_id)
@@ -367,6 +390,7 @@ class GatewaySecret:
                 path,
                 query,
                 body_hash,
+                _canonical_identity_headers(identity_headers),
                 request_id,
                 ts,
                 key_id,
@@ -374,6 +398,19 @@ class GatewaySecret:
         )
         mac = hmac.new(secret.encode("utf-8"), canonical.encode("utf-8"), sha256)
         return mac.hexdigest()
+
+
+def _canonical_identity_headers(headers: Mapping[str, str] | None) -> str:
+    """Canonicalize only gateway-owned identity headers for HMAC v2."""
+
+    if not headers:
+        return ""
+    normalized = {
+        str(key).lower(): str(value)
+        for key, value in headers.items()
+        if str(key).lower() in _SIGNED_IDENTITY_HEADERS
+    }
+    return "\n".join(f"{key}:{normalized[key]}" for key in sorted(normalized))
 
 
 def _epoch_ms() -> int:
@@ -405,15 +442,20 @@ def _parse_internal_auth_keys(raw: str) -> dict[str, str]:
 
 
 def _default_replay_store() -> ReplayStore:
-    backend = os.getenv("INTERNAL_COMM_STATE_BACKEND", "memory").strip().lower()
+    environment = os.getenv("ENVIRONMENT", "").strip().lower()
+    local_test = environment in {"local", "dev", "development", "test", "testing"}
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        local_test = True
+    backend = os.getenv(
+        "INTERNAL_COMM_STATE_BACKEND",
+        "memory" if local_test else "redis",
+    ).strip().lower()
     if backend == "redis":
         redis_url = os.getenv("INTERNAL_COMM_REDIS_URL", "").strip()
         if not redis_url:
-            logger.warning(
-                "INTERNAL_COMM_STATE_BACKEND=redis but INTERNAL_COMM_REDIS_URL is unset; "
-                "falling back to in-memory replay store"
+            raise RuntimeError(
+                "INTERNAL_COMM_STATE_BACKEND=redis requires INTERNAL_COMM_REDIS_URL"
             )
-            return InMemoryReplayStore()
         return RedisReplayStore.from_url(redis_url)
     return InMemoryReplayStore()
 

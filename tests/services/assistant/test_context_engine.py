@@ -442,8 +442,8 @@ class TestRAGSourceScope:
                 )
                 return {"dataset_id": "session-kb-1"}
 
-        uploads_dir = tmp_path / "uploads"
-        uploads_dir.mkdir()
+        uploads_dir = tmp_path / "uploads" / "tenant-a" / "user-a"
+        uploads_dir.mkdir(parents=True)
         long_doc = uploads_dir / "long.md"
         long_doc.write_text(("alpha beta gamma\n" * 20), encoding="utf-8")
 
@@ -466,7 +466,7 @@ class TestRAGSourceScope:
         processor._process_document = fake_process_document
 
         result = await processor.process_files(
-            file_paths=["uploads/long.md"],
+            file_paths=["uploads/tenant-a/user-a/long.md"],
             session_id="session-a",
             user=user,
             model_supports_vision=False,
@@ -475,7 +475,7 @@ class TestRAGSourceScope:
 
         assert result.requires_rag is True
         assert result.session_kb_id == "session-kb-1"
-        assert kb.calls[0]["documents"] == ["uploads/long.md"]
+        assert kb.calls[0]["documents"] == ["uploads/tenant-a/user-a/long.md"]
         assert kb.calls[0]["metadata"]["source_type"] == "session_file"
         assert kb.calls[0]["metadata"]["scope"] == {
             "tenant_id": "tenant-a",

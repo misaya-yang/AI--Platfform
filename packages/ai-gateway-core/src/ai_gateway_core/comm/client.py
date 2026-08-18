@@ -281,6 +281,7 @@ class InternalServiceClient:
                 path=path,
                 query=query,
                 body=body,
+                identity_headers=out,
             )
         return out
 

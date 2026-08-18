@@ -129,23 +129,24 @@ async def test_list_services_uses_remote_assistant_health(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_register_service_accepts_legacy_service_manage_alias() -> None:
+async def test_register_service_rejects_tenant_service_manage_alias() -> None:
     request = _make_request()
     registry = MagicMock()
     registry._service_from_dict.return_value = SimpleNamespace(service_id="svc_legacy")
     registry.register = AsyncMock()
 
-    result = await register_service(
-        request=request,
-        definition={"service_id": "svc_legacy", "name": "Legacy Service"},
-        registry=registry,
-        auth=AuthContext(
-            user_id="dev_1",
-            tenant_id="t1",
-            roles=["service:manage"],
-            permissions=[],
-        ),
-    )
+    with pytest.raises(HTTPException) as exc:
+        await register_service(
+            request=request,
+            definition={"service_id": "svc_legacy", "name": "Legacy Service"},
+            registry=registry,
+            auth=AuthContext(
+                user_id="dev_1",
+                tenant_id="t1",
+                roles=["service:manage"],
+                permissions=[],
+            ),
+        )
 
-    assert result["status"] == "registered"
-    assert result["service_id"] == "svc_legacy"
+    assert exc.value.status_code == 403
+    registry.register.assert_not_awaited()

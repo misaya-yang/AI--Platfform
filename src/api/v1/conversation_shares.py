@@ -65,6 +65,8 @@ def _get_artifact_storage(request: Request):
 async def _collect_quiz_payloads(
     db,
     messages: list[dict[str, Any]],
+    *,
+    tenant_id: str,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     """Freeze quiz content referenced by ``metadata.quiz_id`` on assistant messages.
 
@@ -101,8 +103,10 @@ async def _collect_quiz_payloads(
         except (ValueError, TypeError):
             continue
         quiz_row = await db.fetchrow(
-            "SELECT id, title, description, topic, difficulty, question_count FROM quizzes WHERE id = $1",
+            "SELECT id, title, description, topic, difficulty, question_count "
+            "FROM quizzes WHERE id = $1 AND tenant_id = $2",
             quiz_uuid,
+            tenant_id,
         )
         if not quiz_row:
             continue
@@ -192,13 +196,13 @@ async def create_share(
 
     session = await db.fetchrow(
         "SELECT session_id, history, metadata, user_id, tenant_id "
-        "FROM assistant.sessions WHERE session_id = $1",
+        "FROM assistant.sessions WHERE session_id = $1 AND user_id = $2 AND tenant_id = $3",
         session_id,
+        user.user_id,
+        user.tenant_id or "",
     )
     if not session:
         raise HTTPException(404, "Session not found")
-    if not session["user_id"] or session["user_id"] != user.user_id:
-        raise HTTPException(403, "Not your session")
 
     history = (
         session["history"]
@@ -235,7 +239,11 @@ async def create_share(
     # underlying quiz rows are later edited or deleted. Public quiz payload is
     # attached to the owning assistant message; grading answer keys are kept
     # separately on the snapshot root and stripped before public GET.
-    public_quizzes, answer_keys = await _collect_quiz_payloads(db, history)
+    public_quizzes, answer_keys = await _collect_quiz_payloads(
+        db,
+        history,
+        tenant_id=user.tenant_id or "",
+    )
     if public_quizzes:
         for msg in history:
             if not isinstance(msg, dict):
@@ -529,7 +537,9 @@ async def list_shares(
         """SELECT share_code, title, message_count, artifact_count, view_count,
                   is_active, created_at, expires_at
            FROM conversation_shares
-           WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2""",
+           WHERE tenant_id = $1 AND user_id = $2
+           ORDER BY created_at DESC LIMIT $3""",
+        user.tenant_id or "",
         user.user_id,
         limit,
     )
@@ -548,8 +558,10 @@ async def revoke_share(
     """Revoke (deactivate) a share link."""
     db = _get_db(request)
     await db.execute(
-        "UPDATE conversation_shares SET is_active = FALSE WHERE share_code = $1 AND user_id = $2",
+        "UPDATE conversation_shares SET is_active = FALSE "
+        "WHERE share_code = $1 AND tenant_id = $2 AND user_id = $3",
         share_code,
+        user.tenant_id or "",
         user.user_id,
     )
     return {"status": "revoked", "share_code": share_code}

@@ -44,6 +44,16 @@ def test_gateway_secret_and_anonymous_mode_are_mutually_exclusive() -> None:
         )
 
 
+def test_anonymous_mode_is_restricted_to_local_environment() -> None:
+    with pytest.raises(RuntimeError, match="local development/test"):
+        validate_gateway_auth_configuration(
+            secret="",
+            allow_anonymous=True,
+            allow_anonymous_setting="SERVICE_APP__ALLOW_ANONYMOUS",
+            environment="production",
+        )
+
+
 @pytest.mark.parametrize(
     ("secret", "allow_anonymous"),
     [("configured-shared-secret", False), ("", True), ("", False)],
@@ -85,7 +95,14 @@ def test_gateway_secret_middleware_accepts_valid_signature() -> None:
 
     response = TestClient(app).get(
         "/protected",
-        headers={secret.header_name: secret.sign()},
+        headers={
+            secret.header_name: secret.sign(
+                method="GET",
+                path="/protected",
+                query="",
+                body=b"",
+            )
+        },
     )
 
     assert response.status_code == 200

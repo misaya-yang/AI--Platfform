@@ -153,8 +153,14 @@ async def test_dashboard_websocket_accepts_metrics_read_permission(monkeypatch) 
     manager.disconnect = AsyncMock()
     monkeypatch.setattr(dashboard_routes, "manager", manager)
 
-    async def _authenticated(_websocket, _token=None):
-        return _auth("console:metrics:view")
+    async def _authenticated(_websocket):
+        return AuthContext(
+            user_id="platform-admin",
+            tenant_id="platform",
+            roles=["admin"],
+            permissions=["console:metrics:view"],
+            is_authenticated=True,
+        )
 
     monkeypatch.setattr(dashboard_routes, "authenticate_websocket", _authenticated)
     monkeypatch.setattr(
@@ -172,7 +178,7 @@ async def test_dashboard_websocket_accepts_metrics_read_permission(monkeypatch) 
     websocket.send_json = AsyncMock()
 
     with contextlib.suppress(Exception):
-        await dashboard_routes.websocket_dashboard(websocket, token="token")
+        await dashboard_routes.websocket_dashboard(websocket)
 
     websocket.close.assert_not_awaited()
     manager.connect.assert_awaited_once_with(websocket)
@@ -184,12 +190,12 @@ async def test_dashboard_websocket_closes_without_metrics_permission(monkeypatch
     websocket.app = SimpleNamespace(state=SimpleNamespace())
     websocket.close = AsyncMock()
 
-    async def _authenticated(_websocket, _token=None):
+    async def _authenticated(_websocket):
         return _auth_without_metrics()
 
     monkeypatch.setattr(dashboard_routes, "authenticate_websocket", _authenticated)
 
-    await dashboard_routes.websocket_dashboard(websocket, token="token")
+    await dashboard_routes.websocket_dashboard(websocket)
 
     websocket.close.assert_awaited_once_with(
         code=4003,

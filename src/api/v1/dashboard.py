@@ -10,6 +10,7 @@ Provides:
 """
 
 import hashlib
+import inspect
 import logging
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -25,7 +26,12 @@ from fastapi import (
 )
 from pydantic import BaseModel
 
-from ...api.deps import AuthContext, get_auth_context, require_gateway_capability
+from ...api.deps import (
+    AuthContext,
+    get_auth_context,
+    require_gateway_capability,
+    require_platform_admin,
+)
 from ...core.auth.jwt import decode_jwt_token
 from ...core.auth.jwt_config import get_jwt_algorithms, get_jwt_secret
 from ...core.auth.permissions import Capability
@@ -37,6 +43,13 @@ from ...services.metrics.usage_recorder import get_usage_recorder
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
+
+
+def _require_platform_metrics(request: Request | WebSocket, auth: AuthContext) -> None:
+    """Keep the structural capability guard and enforce global scope."""
+
+    require_gateway_capability(request, auth, Capability.GATEWAY_METRICS_READ)
+    require_platform_admin(request, auth, Capability.GATEWAY_METRICS_READ)
 
 
 # ============ Response Models ============
@@ -254,17 +267,15 @@ async def _merge_db_permissions_for_user(
 
 async def authenticate_websocket(
     websocket: WebSocket,
-    token: str | None = None,
 ) -> AuthContext | None:
     """
-    Authenticate WebSocket connection using token from query parameter or header.
+    Authenticate WebSocket connection using credentials from handshake headers.
 
     WebSocket connections don't support standard FastAPI Depends for auth,
     so we need to manually extract and verify the token.
 
     Args:
         websocket: The WebSocket connection
-        token: Optional token from query parameter
 
     Returns:
         AuthContext if authenticated, None if auth fails
@@ -280,20 +291,15 @@ async def authenticate_websocket(
     if not auth_cfg.jwt.enabled and not auth_cfg.api_key.enabled:
         return AuthContext(user_id="guest", tenant_id="public", roles=["guest"])
 
-    # Try to get token from query param first, then from header
-    if not token:
-        token = websocket.query_params.get("token")
-
-    if not token:
-        # Try Authorization header (websocket headers are available)
-        auth_header = websocket.headers.get("authorization", "")
-        if auth_header.lower().startswith("bearer "):
-            token = auth_header.split(" ", 1)[1].strip()
+    # Credentials must stay in the WebSocket handshake headers. Query strings
+    # are routinely captured by access logs, browser history, and telemetry.
+    token = None
+    auth_header = websocket.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1].strip()
 
     # Also check for API key
-    api_key = websocket.query_params.get("api_key") or websocket.headers.get(
-        auth_cfg.api_key.header_name
-    )
+    api_key = websocket.headers.get(auth_cfg.api_key.header_name)
 
     # JWT authentication
     if token and auth_cfg.jwt.enabled:
@@ -308,6 +314,16 @@ async def authenticate_websocket(
                 audience=auth_cfg.jwt.audience,
                 issuer=auth_cfg.jwt.issuer,
             )
+
+            token_id = payload.get("jti")
+            redis = getattr(app.state, "redis", None)
+            if (
+                token_id
+                and redis
+                and getattr(redis, "enabled", False)
+                and not await redis.validate_token(str(token_id))
+            ):
+                return None
 
             user_id = str(payload.get("sub") or payload.get("user_id") or "")
             if not user_id:
@@ -420,7 +436,7 @@ async def get_realtime_dashboard(
     - Token consumption and cost
     - LangGraph run statistics
     """
-    require_gateway_capability(request, auth, Capability.GATEWAY_METRICS_READ)
+    _require_platform_metrics(request, auth)
     realtime = get_realtime_metrics()
     snapshot = await realtime.get_realtime_snapshot()
 
@@ -472,18 +488,17 @@ async def get_realtime_dashboard(
 @router.websocket("/ws")
 async def websocket_dashboard(
     websocket: WebSocket,
-    token: str | None = Query(None, description="JWT token for authentication"),
 ):
     """
     WebSocket endpoint for real-time dashboard updates
 
     Sends metrics snapshot every 5 seconds.
 
-    Authentication: Pass JWT token via query parameter `token` or `Authorization` header.
+    Authentication: Pass JWT or API-key credentials via handshake headers.
     For tenant isolation, metrics are filtered by tenant_id from the authenticated user.
     """
     # Authenticate the WebSocket connection
-    auth = await authenticate_websocket(websocket, token)
+    auth = await authenticate_websocket(websocket)
 
     # Check if authentication is required
     settings = getattr(websocket.app.state, "settings", None)
@@ -499,7 +514,7 @@ async def websocket_dashboard(
         await websocket.close(code=4001, reason="Authentication configuration unavailable")
         return
     try:
-        require_gateway_capability(websocket, auth, Capability.GATEWAY_METRICS_READ)
+        _require_platform_metrics(websocket, auth)
     except HTTPException:
         await websocket.close(code=4003, reason="Metrics permission required")
         return
@@ -542,9 +557,13 @@ async def websocket_dashboard(
                 pass  # Normal timeout, continue loop
 
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
+        disconnected = manager.disconnect(websocket)
+        if inspect.isawaitable(disconnected):
+            await disconnected
     except Exception:
-        manager.disconnect(websocket)
+        disconnected = manager.disconnect(websocket)
+        if inspect.isawaitable(disconnected):
+            await disconnected
 
 
 @router.get("/timeseries/{metric}")
@@ -568,7 +587,7 @@ async def get_timeseries(
     - cost: Token cost (USD)
     - runs: LangGraph runs
     """
-    require_gateway_capability(request, auth, Capability.GATEWAY_METRICS_READ)
+    _require_platform_metrics(request, auth)
     # Default to last 24 hours
     if not end:
         end = datetime.now()
@@ -776,7 +795,7 @@ async def get_alerts(
     auth: AuthContext = Depends(get_auth_context),
 ) -> AlertsResponse:
     """Get current alert status"""
-    require_gateway_capability(request, auth, Capability.GATEWAY_METRICS_READ)
+    _require_platform_metrics(request, auth)
     realtime = get_realtime_metrics()
     snapshot = await realtime.get_realtime_snapshot()
 
@@ -857,7 +876,7 @@ async def get_dashboard_summary(
 
     Returns key metrics for the specified period.
     """
-    require_gateway_capability(request, auth, Capability.GATEWAY_METRICS_READ)
+    _require_platform_metrics(request, auth)
     recorder = get_metrics_recorder()
     realtime = get_realtime_metrics()
     usage_recorder = get_usage_recorder()

@@ -529,15 +529,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         secret=_gateway_secret_env,
         allow_anonymous=resolved.app.allow_anonymous,
         allow_anonymous_setting="KNOWLEDGE_APP__ALLOW_ANONYMOUS",
+        environment=os.environ.get("ENVIRONMENT", ""),
     )
     if _gateway_secret_env:
-        from ai_gateway_core.auth.gateway_secret import GatewaySecret
+        from ai_gateway_core.auth.gateway_secret import (
+            GatewaySecret,
+            InMemoryReplayStore,
+            RedisReplayStore,
+        )
 
         from .auth import GatewaySecretAuthMiddleware
 
+        auth_version = os.environ.get("INTERNAL_AUTH_VERSION", "v2").strip().lower()
+        if auth_version != "v2":
+            raise RuntimeError("INTERNAL_AUTH_VERSION must be v2 for private service traffic")
+        environment = os.environ.get("ENVIRONMENT", "").strip().lower()
+        replay_backend = os.environ.get("INTERNAL_COMM_STATE_BACKEND", "redis").strip().lower()
+        if environment not in {"local", "dev", "development", "test", "testing"} and replay_backend != "redis":
+            raise RuntimeError("INTERNAL_COMM_STATE_BACKEND must be redis outside local development/test")
+        replay_store = InMemoryReplayStore()
+        if replay_backend == "redis":
+            redis_url = os.environ.get("INTERNAL_COMM_REDIS_URL", "").strip()
+            if not redis_url:
+                if not os.environ.get("PYTEST_CURRENT_TEST") and environment not in {"local", "dev", "development", "test", "testing"}:
+                    raise RuntimeError("Redis replay protection is configured without a URL")
+            else:
+                replay_store = RedisReplayStore.from_url(redis_url)
+
         app.add_middleware(
             GatewaySecretAuthMiddleware,
-            gateway_secret=GatewaySecret(secret=_gateway_secret_env),
+            gateway_secret=GatewaySecret(
+                secret=_gateway_secret_env,
+                version=auth_version,
+                replay_store=replay_store,
+            ),
             allow_anonymous=resolved.app.allow_anonymous,
         )
         logger.info(

@@ -158,17 +158,29 @@ def _gateway_secret_from_snapshot(
     active_key_id = str(
         startup_config.runtime_value("INTERNAL_AUTH_ACTIVE_KEY_ID")
     )
+    auth_version = str(startup_config.runtime_value("INTERNAL_AUTH_VERSION"))
+    if auth_version != "v2":
+        raise RuntimeError("INTERNAL_AUTH_VERSION must be v2 for private service traffic")
+    environment = str(startup_config.runtime_value("ENVIRONMENT")).strip().lower()
+    replay_backend = str(startup_config.runtime_value("INTERNAL_COMM_STATE_BACKEND")).lower()
+    test_mode = bool(startup_config.runtime_value("PYTEST_CURRENT_TEST"))
+    if (
+        environment not in {"local", "dev", "development", "test", "testing"}
+        and not test_mode
+        and replay_backend != "redis"
+    ):
+        raise RuntimeError("INTERNAL_COMM_STATE_BACKEND must be redis outside local development/test")
     replay_store = InMemoryReplayStore()
-    if replay_protection and startup_config.runtime_value(
-        "INTERNAL_COMM_STATE_BACKEND"
-    ) == "redis":
+    if replay_protection and replay_backend == "redis":
         redis_url = str(startup_config.runtime_value("INTERNAL_COMM_REDIS_URL"))
         if not redis_url:
-            raise RuntimeError("Redis replay protection is configured without a URL")
-        replay_store = RedisReplayStore.from_url(redis_url)
+            if not test_mode and environment not in {"local", "dev", "development", "test", "testing"}:
+                raise RuntimeError("Redis replay protection is configured without a URL")
+        else:
+            replay_store = RedisReplayStore.from_url(redis_url)
     return GatewaySecret(
         secret=secret,
-        version=str(startup_config.runtime_value("INTERNAL_AUTH_VERSION")),
+        version=auth_version,
         key_id=active_key_id,
         keys=keys or {active_key_id: secret},
         replay_store=replay_store,
@@ -1152,6 +1164,7 @@ validate_gateway_auth_configuration(
     secret=_gateway_secret_env,
     allow_anonymous=_STARTUP_CONFIG.bool_value("ASSISTANT_APP__ALLOW_ANONYMOUS"),
     allow_anonymous_setting="ASSISTANT_APP__ALLOW_ANONYMOUS",
+    environment=str(_STARTUP_CONFIG.runtime_value("ENVIRONMENT")),
 )
 if _gateway_secret_env:
     from .auth import GatewaySecretAuthMiddleware

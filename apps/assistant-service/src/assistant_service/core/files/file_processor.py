@@ -26,7 +26,7 @@ import os
 import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.auth import UserContext
@@ -212,7 +212,10 @@ class FileProcessor:
     Example:
         processor = FileProcessor(vlm_service=vlm)
         result = await processor.process_files(
-            file_paths=["/uploads/user123/abc123_doc.pdf", "/uploads/user123/def456_image.png"],
+            file_paths=[
+                "/uploads/tenant-a/user123/abc123_doc.pdf",
+                "/uploads/tenant-a/user123/def456_image.png",
+            ],
             session_id="session_123",
             user=user_context,
             model_supports_vision=True,
@@ -333,7 +336,7 @@ The description should be detailed enough for someone who hasn't seen the image 
 
         This is designed to be called by a background task immediately after upload.
         """
-        _ = user
+        self._get_storage_key(file_path, user)
         cache_key = self._get_cache_key(file_path, model_supports_vision)
 
         # Check cache first
@@ -349,7 +352,7 @@ The description should be detailed enough for someone who hasn't seen the image 
 
         try:
             # Resolve path (supports remote storage download)
-            actual_path = await self._resolve_path_async(file_path)
+            actual_path = await self._resolve_path_async(file_path, user)
             file_type = self._detect_file_type(actual_path)
             is_pdf = actual_path.suffix.lower() == ".pdf"
 
@@ -464,19 +467,30 @@ The description should be detailed enough for someone who hasn't seen the image 
         """Async context manager exit - cleanup temp resources."""
         self.cleanup()
 
-    def _get_storage_key(self, file_path: str) -> str:
+    def _get_storage_key(self, file_path: str, user: UserContext) -> str:
         """
-        Convert API path to storage key.
+        Convert an owner-scoped API path to a storage key.
 
-        API path format: /uploads/{user_id}/{file_id}_{timestamp}.{ext}
-        Storage key format: uploads/{user_id}/{file_id}_{timestamp}.{ext}
+        API path format: /uploads/{tenant_id}/{user_id}/{file_id}_{timestamp}.{ext}
+        Storage key format: uploads/{tenant_id}/{user_id}/{file_id}_{timestamp}.{ext}
         """
-        file_path = file_path.strip()
-        if file_path.startswith("/"):
-            return file_path[1:]  # Remove leading /
-        return file_path
+        raw_path = file_path.strip().lstrip("/")
+        parts = PurePosixPath(raw_path).parts
+        if (
+            len(parts) < 4
+            or parts[0] != "uploads"
+            or "\\" in raw_path
+            or any(part in {"", ".", ".."} for part in parts)
+            or parts[1] != user.tenant_id
+        ):
+            raise FileProcessError("Attachment path is not tenant-scoped", file_path=file_path)
+        owner_id = parts[2]
+        service_owned = getattr(user, "user_type", "user") == "service" and owner_id.startswith("ar_")
+        if owner_id != user.user_id and not service_owned:
+            raise FileProcessError("Attachment path is not owned by the caller", file_path=file_path)
+        return "/".join(parts)
 
-    async def _download_from_remote(self, file_path: str) -> Path | None:
+    async def _download_from_remote(self, file_path: str, user: UserContext) -> Path | None:
         """
         Download file from remote storage to a temporary local path.
 
@@ -490,7 +504,10 @@ The description should be detailed enough for someone who hasn't seen the image 
             logger.warning("[FileProcessor] Cannot download: file_storage is None")
             return None
 
-        storage_key = self._get_storage_key(file_path)
+        try:
+            storage_key = self._get_storage_key(file_path, user)
+        except FileProcessError:
+            return None
         logger.info(
             f"[FileProcessor] Attempting remote download: "
             f"api_path={file_path}, storage_key={storage_key}, "
@@ -529,7 +546,7 @@ The description should be detailed enough for someone who hasn't seen the image 
             )
             return None
 
-    async def _resolve_path_async(self, file_path: str) -> Path:
+    async def _resolve_path_async(self, file_path: str, user: UserContext) -> Path:
         """
         Resolve API file path to actual disk path, downloading from remote if needed.
 
@@ -544,30 +561,11 @@ The description should be detailed enough for someone who hasn't seen the image 
         Raises:
             FileProcessError: If the path is invalid or file doesn't exist
         """
-        file_path = file_path.strip()
-
         # Reject obviously dangerous inputs early
-        if not file_path:
+        if not file_path or "\x00" in file_path:
             raise FileProcessError("Empty file path", file_path=file_path)
-        if "\x00" in file_path:
-            raise FileProcessError("Invalid file path: null byte", file_path=file_path)
-
-        # Handle paths that start with /uploads/
-        if file_path.startswith("/uploads/"):
-            relative_path = file_path[1:]  # Remove leading /
-            actual_path = self.storage_base_path / relative_path
-        elif file_path.startswith("uploads/"):
-            actual_path = self.storage_base_path / file_path
-        else:
-            candidate = Path(file_path)
-            if candidate.is_absolute():
-                # Reject absolute paths from untrusted input — they bypass
-                # storage_base_path confinement and can read host files.
-                raise FileProcessError(
-                    "Absolute file paths are not permitted",
-                    file_path=file_path,
-                )
-            actual_path = self.storage_base_path / file_path
+        relative_path = self._get_storage_key(file_path, user)
+        actual_path = self.storage_base_path / relative_path
 
         # Canonicalize, then verify containment within storage_base_path.
         # Without this check, ".." components can escape storage_base_path
@@ -607,7 +605,7 @@ The description should be detailed enough for someone who hasn't seen the image 
                 f"[FileProcessor] File not found locally, trying remote storage: "
                 f"backend={self.file_storage.config.backend.value}"
             )
-            downloaded_path = await self._download_from_remote(file_path)
+            downloaded_path = await self._download_from_remote(file_path, user)
             if downloaded_path and downloaded_path.exists():
                 return downloaded_path
             logger.warning(
@@ -1143,7 +1141,8 @@ The description should be detailed enough for someone who hasn't seen the image 
            - Long (>= max_text_chars): Mark for RAG retrieval
 
         Args:
-            file_paths: List of file paths from API (e.g., /uploads/user123/abc123.pdf)
+            file_paths: List of owner-scoped paths from API
+                (e.g., /uploads/tenant-a/user123/abc123.pdf)
             session_id: Current session ID (for session KB if needed)
             user: User context for permission checks
             model_supports_vision: Whether the target model supports vision
@@ -1155,7 +1154,10 @@ The description should be detailed enough for someone who hasn't seen the image 
 
         Example:
             result = await processor.process_files(
-                file_paths=["/uploads/user/doc.pdf", "/uploads/user/img.png"],
+                file_paths=[
+                    "/uploads/tenant-a/user/doc.pdf",
+                    "/uploads/tenant-a/user/img.png",
+                ],
                 session_id="sess_123",
                 user=user_context,
                 model_supports_vision=True,
@@ -1175,6 +1177,11 @@ The description should be detailed enough for someone who hasn't seen the image 
         )
 
         for api_path in file_paths:
+            try:
+                self._get_storage_key(api_path, user)
+            except FileProcessError as exc:
+                logger.warning("[Security] Rejecting attachment path: %s", exc)
+                continue
             # Try cache first
             cache_key = self._get_cache_key(api_path, model_supports_vision)
             cached = await self._get_cached_result(cache_key)
@@ -1202,7 +1209,7 @@ The description should be detailed enough for someone who hasn't seen the image 
             # Cache miss, process normally
             try:
                 # Resolve path (supports remote storage download)
-                actual_path = await self._resolve_path_async(api_path)
+                actual_path = await self._resolve_path_async(api_path, user)
                 file_type = self._detect_file_type(actual_path)
                 is_pdf = actual_path.suffix.lower() == ".pdf"
 

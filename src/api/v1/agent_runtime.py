@@ -1016,6 +1016,7 @@ async def _store_runtime_attachment(
     try:
         uploaded = await storage.upload_file_streaming(
             user_id=storage_owner,
+            tenant_id=user.tenant_id,
             filename=filename,
             content_iterator=_stream_upload_file(file),
             content_type=get_mime_type(extension),

@@ -47,10 +47,13 @@ class FileInfo:
     content_type: str
     uploaded_at: datetime
     metadata: dict[str, str] | None = None
+    tenant_id: str | None = None
 
     @property
     def file_path(self) -> str:
         """Get API-facing file path."""
+        if self.tenant_id:
+            return f"/uploads/{self.tenant_id}/{self.user_id}/{self.filename}"
         return f"/uploads/{self.user_id}/{self.filename}"
 
 
@@ -117,6 +120,11 @@ class FileStorageService:
         """Generate a unique file ID (8 hex characters)."""
         return str(uuid.uuid4())[:8]
 
+    @staticmethod
+    def _validate_scope_id(value: str, label: str) -> None:
+        if not value or not value.replace("_", "").replace("-", "").isalnum():
+            raise ValueError(f"Invalid {label}: {value}")
+
     def _generate_key(
         self,
         user_id: str,
@@ -173,8 +181,9 @@ class FileStorageService:
             FileInfo with upload details
         """
         # Validate user_id
-        if not user_id or not user_id.replace("_", "").replace("-", "").isalnum():
-            raise ValueError(f"Invalid user_id: {user_id}")
+        self._validate_scope_id(user_id, "user_id")
+        if tenant_id:
+            self._validate_scope_id(tenant_id, "tenant_id")
 
         # Get extension from original filename
         ext = Path(filename).suffix.lower()
@@ -221,6 +230,7 @@ class FileStorageService:
             content_type=content_type,
             uploaded_at=uploaded_at,
             metadata=file_metadata,
+            tenant_id=tenant_id,
         )
 
     async def upload_file_streaming(
@@ -232,6 +242,7 @@ class FileStorageService:
         max_size_bytes: int = 50 * 1024 * 1024,  # 50MB default
         metadata: dict[str, str] | None = None,
         file_id: str | None = None,
+        tenant_id: str | None = None,
     ) -> FileInfo:
         """
         Upload a file using streaming to handle large files.
@@ -255,15 +266,21 @@ class FileStorageService:
             ValueError: If file exceeds max size
         """
         # Validate user_id
-        if not user_id or not user_id.replace("_", "").replace("-", "").isalnum():
-            raise ValueError(f"Invalid user_id: {user_id}")
+        self._validate_scope_id(user_id, "user_id")
+        if tenant_id:
+            self._validate_scope_id(tenant_id, "tenant_id")
 
         ext = Path(filename).suffix.lower() or ".bin"
 
         if not file_id:
             file_id = self.generate_file_id()
 
-        storage_key, safe_filename = self._generate_key(user_id, file_id, ext)
+        storage_key, safe_filename = self._generate_key(
+            user_id,
+            file_id,
+            ext,
+            tenant_id=tenant_id,
+        )
 
         # For local storage, stream directly to disk
         if self.config.backend == StorageBackend.LOCAL:
@@ -277,6 +294,7 @@ class FileStorageService:
                 content_type=content_type,
                 max_size_bytes=max_size_bytes,
                 metadata=metadata,
+                tenant_id=tenant_id,
             )
 
         # For cloud storage, collect chunks then upload
@@ -300,6 +318,7 @@ class FileStorageService:
             content_type=content_type,
             metadata=metadata,
             file_id=file_id,
+            tenant_id=tenant_id,
         )
 
     async def _upload_local_streaming(
@@ -313,6 +332,7 @@ class FileStorageService:
         content_type: str,
         max_size_bytes: int,
         metadata: dict[str, str] | None = None,
+        tenant_id: str | None = None,
     ) -> FileInfo:
         """Stream upload to local filesystem."""
         assert isinstance(self._backend, LocalStorageBackend)
@@ -376,6 +396,7 @@ class FileStorageService:
             content_type=content_type,
             uploaded_at=uploaded_at,
             metadata=file_metadata,
+            tenant_id=tenant_id,
         )
 
     async def download_file(self, storage_key: str) -> bytes:
@@ -408,7 +429,7 @@ class FileStorageService:
             )
         return result
 
-    async def delete_user_files(self, user_id: str) -> int:
+    async def delete_user_files(self, user_id: str, tenant_id: str | None = None) -> int:
         """
         Delete all files for a user.
 
@@ -418,7 +439,11 @@ class FileStorageService:
         Returns:
             Number of deleted files
         """
-        prefix = f"{self.KEY_PREFIX}/{user_id}/"
+        prefix = (
+            f"{self.KEY_PREFIX}/{tenant_id}/{user_id}/"
+            if tenant_id
+            else f"{self.KEY_PREFIX}/{user_id}/"
+        )
         deleted = await self._backend.delete_prefix(prefix)
         logger.info(f"[FileStorage] Deleted {deleted} files for user {user_id}")
         return deleted
@@ -483,9 +508,8 @@ class FileStorageService:
             Presigned URL or direct URL
         """
         # S3 backend supports presigned URLs
-        if self.config.backend == StorageBackend.S3:
-            if isinstance(self._backend, S3StorageBackend):
-                return await self._backend.generate_presigned_download_url(
+        if self.config.backend == StorageBackend.S3 and isinstance(self._backend, S3StorageBackend):
+            return await self._backend.generate_presigned_download_url(
                     key=storage_key,
                     expiry_seconds=expiry_seconds,
                     filename=filename,
@@ -564,9 +588,8 @@ class FileStorageService:
         Returns:
             Path to the file or None if not local storage
         """
-        if self.config.backend == StorageBackend.LOCAL:
-            if isinstance(self._backend, LocalStorageBackend):
-                return self._backend._get_full_path(storage_key)
+        if self.config.backend == StorageBackend.LOCAL and isinstance(self._backend, LocalStorageBackend):
+            return self._backend._get_full_path(storage_key)
         return None
 
     async def close(self) -> None:

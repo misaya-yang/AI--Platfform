@@ -125,10 +125,11 @@ class AssistantMessage(BaseModel):
 class AssistantChatRequest(BaseModel):
     """Request body for chat endpoint."""
 
-    message: str = Field(..., description="User's message", min_length=1)
+    message: str = Field(..., description="User's message", min_length=1, max_length=200_000)
     session_id: str | None = Field(default=None, description="Session ID for conversation tracking")
     history: list[AssistantMessage] | None = Field(
         default=None,
+        max_length=200,
         description="Previous conversation history. If None and session_id provided, auto-loads from session.",
     )
 
@@ -138,7 +139,12 @@ class AssistantChatRequest(BaseModel):
         description="Model ID to use; omit for the server-side default model",
     )
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="Sampling temperature")
-    max_tokens: int | None = Field(default=None, description="Maximum tokens to generate")
+    max_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        le=32_768,
+        description="Maximum tokens to generate",
+    )
 
     # Knowledge base settings
     kb_dataset_ids: list[str] = Field(
@@ -164,11 +170,24 @@ class AssistantChatRequest(BaseModel):
 
     # File attachments
     file_paths: list[str] = Field(
-        default_factory=list, description="Paths to uploaded files for multimodal input"
+        default_factory=list,
+        max_length=20,
+        description="Paths to uploaded files for multimodal input (maximum 20)",
     )
 
     # System prompt
-    system_prompt: str | None = Field(default=None, description="Custom system prompt")
+    system_prompt: str | None = Field(
+        default=None,
+        max_length=100_000,
+        description="Custom system prompt",
+    )
+
+    @field_validator("file_paths")
+    @classmethod
+    def validate_file_paths(cls, value: list[str]) -> list[str]:
+        if any(len(path) > 1024 for path in value):
+            raise ValueError("Each attachment path must be at most 1024 characters")
+        return value
 
     # Task planning settings
     enable_task_planning: bool = Field(

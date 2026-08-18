@@ -13,7 +13,7 @@ import io
 import os
 import threading
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import Final
 
@@ -186,6 +186,7 @@ def _sign_request(
     *,
     upstream_path: str = "",
     body: bytes | None = None,
+    identity_headers: Mapping[str, str] | None = None,
 ) -> tuple[str, str] | None:
     if _signer is None:
         return None
@@ -196,6 +197,7 @@ def _sign_request(
             path=upstream_path or request.url.path,
             query=request.url.query,
             body=body,
+            identity_headers=identity_headers,
         ),
     )
 
