@@ -479,7 +479,7 @@
 
 /* Button micro-interactions: scale(0.98) on active, color-deepen on hover */
 .ant-btn {
-  transition: all var(--transition-normal) var(--ease-out) !important;
+  transition: color var(--transition-normal) var(--ease-out), background-color var(--transition-normal) var(--ease-out), border-color var(--transition-normal) var(--ease-out), box-shadow var(--transition-normal) var(--ease-out), transform var(--transition-fast) var(--ease-out), opacity var(--transition-normal) var(--ease-out) !important;
   border-radius: var(--radius-sm) !important;
   transform-origin: center;
 }
@@ -520,13 +520,35 @@
   border-color: hsl(var(--destructive) / 0.25) !important;
 }
 
-/* Card — subtle border, hover darken */
+/* Card — subtle border, hover darken.
+   No !important on background/color: antd Card users must be able to
+   override them per-card (selection states, highlights). */
 .ant-card {
   transition: border-color var(--transition-fast) var(--ease-out) !important;
   border-radius: var(--radius-md) !important;
   box-shadow: none;
+  background: hsl(var(--card));
+  color: hsl(var(--card-foreground));
 }
 .ant-card:hover { border-color: hsl(var(--primary) / 0.15) !important; }
+
+/* Descriptions — table contrast & theme sync */
+.ant-descriptions-bordered {
+  border-color: hsl(var(--border)) !important;
+  border-radius: var(--radius-md) !important;
+  overflow: hidden;
+}
+.ant-descriptions-bordered .ant-descriptions-item-label {
+  background: hsl(var(--muted) / 0.45) !important;
+  color: hsl(var(--muted-foreground)) !important;
+  border-color: hsl(var(--border)) !important;
+  font-weight: 500;
+}
+.ant-descriptions-bordered .ant-descriptions-item-content {
+  background: hsl(var(--card)) !important;
+  color: hsl(var(--foreground)) !important;
+  border-color: hsl(var(--border)) !important;
+}
 
 /* Input — steel focus glow matching product chrome */
 .ant-input, .ant-input-affix-wrapper, .ant-select-selector { border-radius: var(--radius-sm) !important; }
@@ -569,7 +591,7 @@
 .ant-message-notice-content { border-radius: var(--radius-md) !important; }
 
 /* Switch */
-.ant-switch { transition: all 0.2s var(--ease-out) !important; }
+.ant-switch { transition: background-color 0.2s var(--ease-out), border-color 0.2s var(--ease-out), box-shadow 0.2s var(--ease-out) !important; }
 
 /* Tabs */
 .ant-tabs-ink-bar { transition: left 0.2s var(--ease-out), width 0.2s var(--ease-out) !important; }
@@ -579,8 +601,13 @@
    ═══════════════════════════════════════════ */
 
 :focus-visible {
-  outline: 2px solid hsl(var(--ring) / 0.35);
+  outline: 2px solid hsl(var(--primary));
   outline-offset: 2px;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
 }
 
 /* ═══════════════════════════════════════════

@@ -37,7 +37,7 @@
   box-shadow: 0 8px 22px color-mix(in srgb, var(--agent-accent) 22%, transparent);
 }
 .agent-public-brand img { width: 42px; height: 42px; object-fit: cover; border-radius: 14px; }
-.agent-public-brand h1 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: -.01em; }
+.agent-public-brand h1 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: 0; }
 .agent-public-brand p { margin: 3px 0 0; color: var(--agent-public-muted); font-size: 12px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; max-width: 54vw; }
 .agent-public-header > button { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 14px; border: 1px solid var(--agent-public-line); border-radius: 12px; color: var(--agent-public-ink); background: white; cursor: pointer; }
 .agent-public-header button svg { width: 17px; }
@@ -46,10 +46,12 @@
 .agent-public-welcome, .agent-public-messages { width: min(760px, 100%); margin: 0 auto; }
 .agent-public-welcome { min-height: 48vh; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; }
 .agent-public-welcome > span { width: 56px; height: 56px; border-radius: 18px; }
-.agent-public-welcome h2 { max-width: 620px; margin: 22px 0 0; font-size: clamp(24px, 4vw, 38px); line-height: 1.14; letter-spacing: -.035em; }
+.agent-public-welcome h2 { max-width: 620px; margin: 22px 0 0; font-size: clamp(24px, 4vw, 38px); line-height: 1.25; letter-spacing: 0; }
 .agent-public-suggestions { width: min(620px, 100%); display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 30px; }
 .agent-public-suggestions button { padding: 15px 17px; border: 1px solid var(--agent-public-line); border-radius: 15px; color: var(--agent-public-ink); background: color-mix(in srgb, white 88%, transparent); text-align: left; cursor: pointer; transition: border-color .16s ease, transform .16s ease; }
-.agent-public-suggestions button:hover { border-color: color-mix(in srgb, var(--agent-accent) 42%, var(--agent-public-line)); transform: translateY(-1px); }
+@media (hover: hover) and (pointer: fine) {
+  .agent-public-suggestions button:hover { border-color: color-mix(in srgb, var(--agent-accent) 42%, var(--agent-public-line)); transform: translateY(-1px); }
+}
 
 .agent-public-messages { display: flex; flex-direction: column; gap: 22px; }
 .agent-public-message { max-width: 86%; }
@@ -71,6 +73,7 @@
 .agent-public-composer { padding: 10px 18px 18px; background: linear-gradient(transparent, var(--agent-public-canvas) 24%); }
 .agent-public-composer form { width: min(780px, 100%); min-height: 58px; display: flex; align-items: flex-end; gap: 8px; margin: 0 auto; padding: 8px; border: 1px solid var(--agent-public-line); border-radius: 18px; background: white; box-shadow: 0 16px 45px rgba(34, 42, 67, .09); }
 .agent-public-composer textarea { flex: 1; min-height: 40px; max-height: 144px; padding: 10px 4px; resize: none; border: 0; outline: 0; color: var(--agent-public-ink); background: transparent; font: inherit; line-height: 1.4; }
+.agent-public-composer textarea:focus-visible { outline: 2px solid var(--agent-accent); outline-offset: 1px; }
 .agent-public-composer button { width: 40px; height: 40px; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 12px; color: var(--agent-public-muted); background: transparent; cursor: pointer; }
 .agent-public-composer button:disabled { opacity: .36; cursor: not-allowed; }
 .agent-public-composer .agent-public-send { color: white; background: var(--agent-accent); }

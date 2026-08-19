@@ -172,9 +172,8 @@
     "viewerDescription": "你可以查看配置和运行预览，但只有所有者和编辑者能保存草稿更改。",
     "validation": {
       "instructionsRequired": "必须填写 Instructions",
-      "modelRequired": "必须选择模型",
-      "iconInvalid": "图标 URL 必须是无凭证、查询参数和片段的公开 HTTPS 地址"
-      ,"toolsUnsupported": "所选模型不支持当前已配置能力",
+      "iconInvalid": "图标 URL 必须是无凭证、查询参数和片段的公开 HTTPS 地址",
+      "toolsUnsupported": "所选模型不支持当前已配置能力",
       "visionUnsupported": "所选模型不支持图片检索"
     },
     "draftSaved": "草稿已保存",
@@ -204,7 +203,6 @@
       "suggestedPlaceholder": "总结退款政策\n分类这个支持请求",
       "runtimeSummary": "运行时摘要",
       "model": "模型",
-      "notSet": "未设置",
       "capabilities": "能力",
       "knowledgeSources": "知识库来源",
       "memory": "记忆"
@@ -225,15 +223,14 @@
       "catalogErrorDescription": "仍可编辑当前已保存模型。",
       "provider": "提供商",
       "label": "模型",
-      "required": "请选择模型。",
       "temperature": "Temperature · {{value}}",
       "maxTokens": "最大输出 Token",
       "thinking": "思考模式",
       "thinkingHelp": "是否可用取决于模型和提供商。",
       "providerDefault": "提供商默认值",
       "enabled": "启用",
-      "disabled": "禁用"
-      ,"capabilityTitle": "模型实际能力",
+      "disabled": "禁用",
+      "capabilityTitle": "模型实际能力",
       "capabilityDescription": "工具：{{tools}} · 视觉：{{vision}}。网页搜索始终是单独授权的平台能力，绝不会因模型选择而隐式开启。",
       "supported": "支持",
       "unsupported": "不支持"
@@ -268,8 +265,8 @@
       "unknown": "未知",
       "none": "无",
       "current": "当前",
-      "unavailable": "不可用"
-      ,"restrictionTitle": "渠道限制立即生效",
+      "unavailable": "不可用",
+      "restrictionTitle": "渠道限制立即生效",
       "restrictionDescription": "预览默认阻断高风险工具。服务账户和可写资源在任何公开渠道使用前都必须再次通过明确策略检查。"
     },
     "knowledge": {
@@ -300,8 +297,8 @@
       "session": "仅会话",
       "user": "用户级",
       "credentialsTitle": "Agent spec 从不存储凭证",
-      "credentialsDescription": "MCP 和 Connector 绑定只引用服务端托管的凭证主体，并在每次运行时重新授权。"
-      ,"attachments": "附件",
+      "credentialsDescription": "MCP 和 Connector 绑定只引用服务端托管的凭证主体，并在每次运行时重新授权。",
+      "attachments": "附件",
       "attachmentsValue": "仅在服务端解析出的渠道策略允许时可用",
       "retention": "内容保留",
       "retentionValue": "由租户策略强制执行；不会作为浏览器凭证存储",
@@ -311,15 +308,24 @@
       "publicPolicyValue": "发布 Version 和渠道策略前不可用"
     },
     "eval": {
-      "description": "评测精确的已保存草稿、检查服务端证据，并提升为不可变 Version。",
-      "readiness": "草稿就绪状态",
-      "ready": "草稿字段已可进入校验。",
-      "boundary": "只有服务端判定通过且仍为当前 revision 的评测才能发布；Hosted、Embed 和 Runtime 的外部交付仍由后续依赖阶段实现。"
+      "description": "评测精确的已保存草稿、检查服务端证据，并提升为不可变 Version。"
     },
     "channels": {
-      "description": "查看不可变 Version、当前渠道指针、提升证据和带审计的回滚。",
-      "emptyTitle": "当前没有活跃渠道",
-      "emptyDescription": "尚无渠道指向活跃 Version。发布只创建渠道指针；外部交付由后续依赖阶段实现。"
+      "description": "发布不可变 Version、管理发布渠道与 Runtime API Token，并可回滚到历史版本。",
+      "openHosted": "打开 Hosted 页面",
+      "tokensTitle": "Runtime API Token",
+      "hashed": "仅哈希存储",
+      "tokenName": "Token 名称",
+      "createToken": "创建 Token",
+      "noTokens": "暂无 Runtime API Token",
+      "revoked": "已撤销",
+      "active": "有效",
+      "rotate": "轮换",
+      "revoke": "撤销 Token",
+      "copyTokenTitle": "立即复制新 Token",
+      "copyTokenWarning": "原始 Token 仅显示一次，之后无法找回。",
+      "copied": "我已复制",
+      "copySuccess": "Token 已复制"
     },
     "release": {
       "ownerOnlyTitle": "需要所有者权限",
@@ -457,24 +463,7 @@
     "drawerTitle": "Agent 分区",
     "closeSections": "关闭 Agent 分区",
     "loadForbidden": "你无法查看此 Agent",
-    "loadError": "无法加载 Agent Studio",
-    "channels": {
-      "description": "发布不可变 Version、管理发布渠道与 Runtime API Token，并可回滚到历史版本。",
-      "openHosted": "打开 Hosted 页面",
-      "tokensTitle": "Runtime API Token",
-      "hashed": "仅哈希存储",
-      "tokenName": "Token 名称",
-      "createToken": "创建 Token",
-      "noTokens": "暂无 Runtime API Token",
-      "revoked": "已撤销",
-      "active": "有效",
-      "rotate": "轮换",
-      "revoke": "撤销 Token",
-      "copyTokenTitle": "立即复制新 Token",
-      "copyTokenWarning": "原始 Token 仅显示一次，之后无法找回。",
-      "copied": "我已复制",
-      "copySuccess": "Token 已复制"
-    }
+    "loadError": "无法加载 Agent Studio"
   },
   "preview": {
     "subtitle": "与 Assistant 会话隔离",
@@ -516,8 +505,8 @@
       "model": "模型不可用：{{message}}",
       "capability": "能力不可用：{{message}}",
       "knowledge": "知识库不可用：{{message}}",
-      "configuration": "已保存配置发生变化：{{message}}"
-      ,"permission": "权限不足：{{message}}",
+      "configuration": "已保存配置发生变化：{{message}}",
+      "permission": "权限不足：{{message}}",
       "provider": "提供商不可用：{{message}}",
       "runtime": "运行时失败：{{message}}"
     }

@@ -518,7 +518,6 @@ export function ServiceConfigDialog({
   );
 
   // 当配置加载后更新表单
-  /* eslint-disable react-hooks/set-state-in-effect -- Intentional: form initialization from props */
   useEffect(() => {
     if (config) {
       const effectiveUpstreamGroup = upstreamGroupFromBudget(upstreamBudget);
@@ -592,7 +591,6 @@ export function ServiceConfigDialog({
     open,
     seedDefaultFailover,
   ]);
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   // 更新配置
   const updateMutation = useMutation({

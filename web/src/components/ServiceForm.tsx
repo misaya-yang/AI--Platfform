@@ -61,8 +61,8 @@ interface LangGraphFormData {
 }
 
 export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
-  const { t, i18n } = useTranslation();
-  const defaultYaml = useMemo(() => buildDefaultYaml(t), [t, i18n.language]);
+  const { t } = useTranslation();
+  const defaultYaml = useMemo(() => buildDefaultYaml(t), [t]);
   const defaultYamlRef = useRef(defaultYaml);
   const [tab, setTab] = useState<string>("simple");
   const [yamlText, setYamlText] = useState(defaultYaml);

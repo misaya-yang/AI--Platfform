@@ -159,13 +159,10 @@ export function TaskQueryTab() {
 
       {/* Loading state */}
       {isLoading && (
-        <Card className="border-dashed">
+        <Card className="border-dashed bg-card/40">
           <CardContent className="flex flex-col items-center justify-center py-16">
-            <div className="relative">
-              <div className="absolute inset-0 rounded-full bg-primary/10 animate-ping" />
-              <div className="relative rounded-full bg-primary/10 p-4">
-                <Loader2 className="h-8 w-8 text-primary animate-spin" />
-              </div>
+            <div className="rounded-xl bg-primary/10 p-4 border border-primary/20">
+              <Loader2 className="h-7 w-7 text-primary animate-spin" />
             </div>
             <p className="mt-4 text-sm font-medium text-foreground">
               {t("tasks.states.loading")}

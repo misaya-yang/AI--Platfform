@@ -348,7 +348,61 @@ export function ServicesPage() {
   };
 
   return (
-    <div className="space-y-4 p-1 pt-3">
+    <div className="space-y-4 p-1 pt-2">
+      {/* 基础设施运行态概览条 */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 p-3 rounded-xl border border-border/70 bg-card/60">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-500 shrink-0">
+            <span className="relative flex h-2.5 w-2.5">
+              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+            </span>
+          </div>
+          <div className="min-w-0">
+            <div className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">{t("services.overview.gatewayState")}</div>
+            <div className="text-sm font-bold tabular-nums text-foreground flex items-center gap-1.5">
+              {services.length > 0 ? t("services.overview.onlineCount", { count: services.length }) : t("services.overview.offlineCount")}
+              <span className="text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 px-1 py-0.2 rounded-xs">{t("services.overview.available")}</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 text-primary shrink-0">
+            <Cloud className="h-4.5 w-4.5" />
+          </div>
+          <div className="min-w-0">
+            <div className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">{t("services.overview.providers")}</div>
+            <div className="text-sm font-bold tabular-nums text-foreground">
+              {providers.length} <span className="text-xs font-normal text-muted-foreground">{t("services.overview.connected")}</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-500 shrink-0">
+            <Cpu className="h-4.5 w-4.5" />
+          </div>
+          <div className="min-w-0">
+            <div className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">{t("services.overview.models")}</div>
+            <div className="text-sm font-bold tabular-nums text-foreground">
+              {(modelsQuery.data || []).length} <span className="text-xs font-normal text-muted-foreground">{t("services.overview.activeModels")}</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-amber-500/10 text-amber-500 shrink-0">
+            <Server className="h-4.5 w-4.5" />
+          </div>
+          <div className="min-w-0">
+            <div className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">{t("services.overview.dispatch")}</div>
+            <div className="text-sm font-bold text-foreground truncate">
+              {t("services.overview.fallback")}
+            </div>
+          </div>
+        </div>
+      </div>
+
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
         <div className="flex flex-col items-stretch justify-between gap-3 border-b border-border/40 pb-3 sm:flex-row sm:items-center">
           <div className="ui-scroll-affordance w-full pb-1 sm:w-auto sm:pb-0">

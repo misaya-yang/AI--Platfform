@@ -424,7 +424,7 @@ export function PlaygroundPage() {
             <div className="mb-5 flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 text-primary">
               <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" /></svg>
             </div>
-            <h2 className="text-xl font-semibold tracking-tight">{t("playground.welcomeTitle", "How can I help you today?")}</h2>
+            <h2 className="text-xl font-semibold tracking-tight text-foreground">{t("playground.welcomeTitle", "How can I help you today?")}</h2>
             <p className="mt-2 text-sm text-muted-foreground max-w-md">{t("playground.welcomeDescription", "Select an agent service from the dropdown above to start a conversation.")}</p>
           </div>
         ) : historyLoading ? (

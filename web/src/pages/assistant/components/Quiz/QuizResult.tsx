@@ -102,7 +102,6 @@ export function QuizResult({
         </div>
         <p className="mt-2 text-[13px] text-[hsl(var(--assistant-text-secondary))] tabular-nums">
           {t("assistant.quiz.correctOf", {
-            defaultValue: "答对 {{correct}}/{{total}} 题",
             correct: Math.round(animatedCorrect),
             total: result.total_count,
           })}
@@ -148,8 +147,8 @@ export function QuizResult({
           className="inline-flex items-center gap-1.5 rounded-md border border-[hsl(var(--destructive)/0.4)] bg-[hsl(var(--destructive)/0.06)] px-2.5 py-1 text-[12px] font-medium text-[hsl(var(--destructive))] hover:bg-[hsl(var(--destructive)/0.12)] transition-colors duration-150"
         >
           <XCircle className="w-[13px] h-[13px]" />
-          {t("assistant.quiz.wrongCountChip", "错题")}：{incorrectCount}{" "}
-          {t("assistant.quiz.countQ", "道")}
+          {t("assistant.quiz.wrongCountChip")}{t("assistant.quiz.wrongCountSep")}{incorrectCount}{" "}
+          {t("assistant.quiz.countQ")}
         </button>
       )}
 
@@ -161,7 +160,7 @@ export function QuizResult({
             onClick={onReview}
             className="act-btn act-hover inline-flex items-center h-8 px-2.5 rounded-md text-[13px] font-medium text-[hsl(var(--assistant-text-secondary))] hover:text-[hsl(var(--assistant-text-primary))]"
           >
-            {t("assistant.quiz.reviewAnswers", "复查")}
+            {t("assistant.quiz.reviewAnswers")}
           </button>
         )}
         {onRetake && (
@@ -171,7 +170,7 @@ export function QuizResult({
             className="act-btn inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md text-[13px] font-medium bg-[hsl(var(--assistant-accent)/0.15)] text-[hsl(var(--assistant-accent))] hover:bg-[hsl(var(--assistant-accent)/0.25)] transition-colors duration-150"
           >
             <RefreshCw className="w-[13px] h-[13px]" />
-            {t("assistant.quiz.retake", "重做")}
+            {t("assistant.quiz.retake")}
           </button>
         )}
         {quizId && (

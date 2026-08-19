@@ -28,7 +28,7 @@ export function SegmentCard({
   // Image segment rendering
   if (isImage) {
     return (
-      <div className="group border border-border/60 rounded-xl hover:border-primary/30 hover:shadow-md transition-all duration-200 bg-card overflow-hidden">
+      <div className="group border border-border/60 rounded-xl hover:border-primary/30 hover:shadow-xs transition-[border-color,box-shadow,background-color] duration-150 bg-card overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-2.5 bg-primary/3 dark:bg-primary/6 border-b border-border/60">
           <div className="flex items-center gap-3">
@@ -151,7 +151,7 @@ export function SegmentCard({
 
   // Text segment rendering (original)
   return (
-    <div className="group border border-border/60 rounded-xl hover:border-primary/30 hover:shadow-md transition-all duration-200 bg-card overflow-hidden">
+    <div className="group border border-border/60 rounded-xl hover:border-primary/30 hover:shadow-xs transition-[border-color,box-shadow,background-color] duration-150 bg-card overflow-hidden">
       <div className="flex items-center justify-between px-4 py-2.5 bg-linear-to-r from-muted/70 to-card border-b border-border/60">
         <div className="flex items-center gap-3">
           <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-linear-to-br from-primary to-accent text-primary-foreground text-xs font-bold shadow-xs">

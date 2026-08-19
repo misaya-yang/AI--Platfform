@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useNavigate } from "react-router-dom";
 import type { HealthStatus, ServiceDefinition, ServiceType } from "@/types/gateway";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -60,6 +61,7 @@ export function ServiceCard({
   onSelect?: () => void;
 }) {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const [configOpen, setConfigOpen] = useState(false);
   const isHealthy = health?.status === "healthy";
   const isVirtual = service.metadata?.is_virtual === true;
@@ -80,7 +82,7 @@ export function ServiceCard({
     <>
       <Card
         className={cn(
-          "relative overflow-hidden cursor-pointer group transition-all duration-200 border bg-card hover:shadow-md hover:border-primary/30",
+          "relative overflow-hidden cursor-pointer group transition-[border-color,box-shadow,background-color] duration-150 border bg-card hover:shadow-sm hover:border-primary/30",
           selected && "ring-1 ring-primary/50 border-primary/40 shadow-xs bg-primary/2 dark:bg-primary/4"
         )}
         onClick={onSelect}
@@ -88,7 +90,7 @@ export function ServiceCard({
         <CardContent className="p-4 relative">
           <div className="flex items-center gap-4">
             {/* Icon */}
-            <div className="shrink-0 p-2.5 rounded-lg bg-primary/10 text-primary group-hover:bg-primary group-hover:text-primary-foreground transition-colors duration-300 border border-primary/20">
+            <div className="shrink-0 p-2.5 rounded-lg bg-primary/10 text-primary group-hover:bg-primary group-hover:text-primary-foreground transition-[color,background-color] duration-200 border border-primary/20">
               <ServiceIcon serviceType={service.service_type} />
             </div>
 
@@ -127,19 +129,32 @@ export function ServiceCard({
             </div>
 
             {/* Actions */}
-            <div className="shrink-0 flex items-center gap-1">
+            <div className="shrink-0 flex items-center gap-1.5">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 px-2 text-xs text-muted-foreground hover:text-primary transition-[color,background-color] duration-150"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  navigate(`/playground`);
+                }}
+                title={t("services.actions.debugInPlayground", "Debug in Playground")}
+              >
+                <MessageSquare className="h-3.5 w-3.5 mr-1" />
+                <span>{t("common.debug", "调试")}</span>
+              </Button>
               {!isVirtual && (
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-200"
+                  className="h-7 w-7 text-muted-foreground hover:text-foreground hover:bg-muted transition-[color,background-color] duration-150"
                   onClick={(e) => {
                     e.stopPropagation();
                     setConfigOpen(true);
                   }}
                   title={t("common.configure")}
                 >
-                  <Settings className="h-4 w-4" />
+                  <Settings className="h-3.5 w-3.5" />
                 </Button>
               )}
             </div>

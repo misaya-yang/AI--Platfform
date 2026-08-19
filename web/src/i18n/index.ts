@@ -92,10 +92,19 @@ export function initializeI18n(): Promise<typeof i18n> {
         returnEmptyString: false,
         appendNamespaceToMissingKey: false,
         saveMissing: false,
+        // escapeValue is disabled because every t() result is rendered through
+        // React (JSX escapes by default); the only dangerouslySetInnerHTML sink
+        // sanitizes with DOMPurify first. Keep t() output out of non-JSX sinks.
         interpolation: { escapeValue: false },
       });
     return i18n;
   })();
+  // A failed init (e.g. a locale chunk fetch error) must not poison the cache —
+  // reset so the next call can retry.
+  initialization = initialization.catch((err) => {
+    initialization = undefined;
+    throw err;
+  });
   return initialization;
 }
 
@@ -104,13 +113,15 @@ export async function loadTranslationNamespace(
 ): Promise<void> {
   await localeOperations.run(async () => {
     await initializeI18n();
-    activeDeferredNamespaces.add(namespace);
     const initialLocale = resolveAppLocale(i18n.resolvedLanguage || i18n.language);
     await loadForFinalLocale(
       initialLocale,
       () => resolveAppLocale(i18n.resolvedLanguage || i18n.language),
       async (locale) => ensureDeferredLocale(resolveAppLocale(locale), namespace),
     );
+    // Only mark the namespace active once its bundle actually loaded — a failed
+    // load must not cause every future changeAppLanguage to retry a broken import.
+    activeDeferredNamespaces.add(namespace);
   });
 }
 
@@ -124,14 +135,9 @@ export async function changeAppLanguage(input: string): Promise<void> {
         ensureDeferredLocale(locale, namespace),
       ),
     ]);
+    // Bundles are pre-loaded before switching, so the language change is
+    // synchronous-safe for every active namespace. No second ensure pass needed.
     await i18n.changeLanguage(locale);
-    const finalLocale = resolveAppLocale(i18n.resolvedLanguage || i18n.language);
-    await Promise.all([
-      ensureMainLocale(finalLocale),
-      ...[...activeDeferredNamespaces].map((namespace) =>
-        ensureDeferredLocale(finalLocale, namespace),
-      ),
-    ]);
   });
 }
 

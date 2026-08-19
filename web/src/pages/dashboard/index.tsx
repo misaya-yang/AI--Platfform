@@ -313,7 +313,7 @@ function DashboardContent() {
           display: inline-flex; align-items: center; justify-content: center;
           color: ${c.textSecondary};
           cursor: pointer;
-          transition: all .14s cubic-bezier(0.16, 1, 0.3, 1);
+          transition: color .14s cubic-bezier(0.16, 1, 0.3, 1), background-color .14s cubic-bezier(0.16, 1, 0.3, 1);
         }
         .dash-icon-btn:hover {
           background: ${c.cardHover};

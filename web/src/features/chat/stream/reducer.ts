@@ -184,7 +184,10 @@ function normalizeString(value: unknown): string {
   }
 }
 
-function markFirstToken(state: StreamTurnState, nowMs: number): StreamTurnState {
+export function markStreamFirstToken(
+  state: StreamTurnState,
+  nowMs: number,
+): StreamTurnState {
   if (state.firstTokenMs != null) return state;
   return {
     ...state,
@@ -329,7 +332,7 @@ export function applyUsageToTurnState(
     next = { ...next, durationMs: timing.durationMs };
   }
   // Only apply server-reported firstTokenMs if we haven't already measured it
-  // client-side. The client markFirstToken fires on the first tool_call or text
+  // client-side. The client marker fires on the first thought, tool call, or text
   // event (~2s), but the server may report a later value that only counts the
   // first *text* token after tool execution (~5-8s), which misleads the user.
   if (timing.firstTokenMs != null && next.firstTokenMs == null) {
@@ -417,7 +420,7 @@ export function reduceNormalizedStreamEvent(
       }
       const delta = event.content || "";
       next = recordSequence(state, event);
-      next = markFirstToken(
+      next = markStreamFirstToken(
         {
           ...next,
           status: "streaming",
@@ -442,7 +445,7 @@ export function reduceNormalizedStreamEvent(
       }
       const incomingArgs = extractToolArguments(event);
       next = recordSequence(state, event, toolCallId);
-      next = markFirstToken(
+      next = markStreamFirstToken(
         upsertToolCall(next, toolCallId, (tool) => {
           const resolvedArgs = resolveToolArguments(
             tool.arguments,

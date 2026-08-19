@@ -34,6 +34,7 @@ import {
   createStreamReducerContext,
   createStreamTurnState,
   failStreamTurn,
+  markStreamFirstToken,
   reduceLegacyStreamChunk,
   type StreamTurnState,
 } from "@/features/chat/stream";
@@ -1352,7 +1353,8 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     };
     const markFirstResponse = (timestampMs: number) => {
       if (firstTokenMs === undefined) {
-        firstTokenMs = timestampMs - startTime;
+        streamTurnState = markStreamFirstToken(streamTurnState, timestampMs);
+        firstTokenMs = streamTurnState.firstTokenMs;
         markChatStreamFirstToken(streamTrace, firstTokenMs);
       }
     };

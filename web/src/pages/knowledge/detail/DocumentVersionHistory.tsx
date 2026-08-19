@@ -81,13 +81,7 @@ export function DocumentVersionHistory({
   const [restoreVersion, setRestoreVersion] = useState<number | null>(null);
   const [restoring, setRestoring] = useState(false);
 
-  useEffect(() => {
-    if (open && datasetId && documentId) {
-      loadVersions();
-    }
-  }, [open, datasetId, documentId]);
-
-  async function loadVersions() {
+  const loadVersions = useCallback(async () => {
     setLoading(true);
     try {
       const result = await listDocumentVersions(datasetId, documentId);
@@ -103,7 +97,13 @@ export function DocumentVersionHistory({
     } finally {
       setLoading(false);
     }
-  }
+  }, [datasetId, documentId, t]);
+
+  useEffect(() => {
+    if (open && datasetId && documentId) {
+      loadVersions();
+    }
+  }, [open, datasetId, documentId, loadVersions]);
 
   function handleSelectForCompare(versionNumber: number) {
     if (selectedForCompare.includes(versionNumber)) {

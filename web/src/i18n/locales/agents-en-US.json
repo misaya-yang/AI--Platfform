@@ -44,8 +44,8 @@
     "emptyWhy": "Agents package your prompts, tools, and knowledge into a reusable runtime.",
     "clearFilters": "Clear filters",
     "createBlank": "Create blank agent",
-    "supportTemplate": "Support template",
-    "knowledgeTemplate": "Knowledge template",
+    "supportTemplate": "Support triage template",
+    "knowledgeTemplate": "Knowledge guide template",
     "columns": {
       "agent": "Agent",
       "status": "Status",
@@ -60,7 +60,7 @@
     "copySuccess": "Agent copied as a new Draft.",
     "copyError": "Agent could not be copied.",
     "archiveConfirmTitle": "Archive {{name}}?",
-    "archiveConfirmDescription": "The Agent becomes read-only and remains available for audit and rollback. No publication is disabled in AS-05.",
+    "archiveConfirmDescription": "The Agent becomes read-only and remains available for audit and rollback. AS-05 does not disable any publication.",
     "archiveConfirm": "Archive Agent",
     "archiveSuccess": "Agent archived.",
     "archiveError": "Agent could not be archived.",
@@ -145,13 +145,13 @@
       "skills": "Skills",
       "connectors": "Connectors",
       "knowledge": "Knowledge",
-      "unavailable": "{{label}} catalog is unavailable. Existing choices are preserved.",
+      "unavailable": "{{label}} catalog is unavailable. Existing selections are preserved.",
       "connectCredential": "Connect a credential principal first",
       "skillVersion": "Version {{version}}",
       "skillNoVersion": "No immutable version available",
-      "connectorReady": "Read through the explicit Preview credential principal",
+      "connectorReady": "Reads via the explicit Preview credential principal",
       "connectorSetup": "Connect an Agent credential principal first",
-      "workspaceDataset": "Workspace dataset"
+      "workspaceDataset": "Workspace Dataset"
     },
     "nothingPublished": "Nothing is published until you create a version.",
     "saveAsDraft": "Save as draft"
@@ -172,9 +172,8 @@
     "viewerDescription": "You can inspect configuration and run Preview, but only Owners and Editors can save Draft changes.",
     "validation": {
       "instructionsRequired": "Instructions are required",
-      "modelRequired": "A model is required",
-      "iconInvalid": "Icon URL must be public HTTPS without credentials, query, or fragment"
-      ,"toolsUnsupported": "The selected model does not support the configured capabilities",
+      "iconInvalid": "Icon URL must be public HTTPS without credentials, query, or fragment",
+      "toolsUnsupported": "The selected model does not support the configured capabilities",
       "visionUnsupported": "The selected model does not support image retrieval"
     },
     "draftSaved": "Draft saved",
@@ -204,7 +203,6 @@
       "suggestedPlaceholder": "Summarize the refund policy\nClassify this support request",
       "runtimeSummary": "Runtime summary",
       "model": "Model",
-      "notSet": "Not set",
       "capabilities": "Capabilities",
       "knowledgeSources": "Knowledge sources",
       "memory": "Memory"
@@ -225,15 +223,14 @@
       "catalogErrorDescription": "The current saved model remains available for editing.",
       "provider": "Provider",
       "label": "Model",
-      "required": "Select a model.",
       "temperature": "Temperature · {{value}}",
       "maxTokens": "Max output tokens",
       "thinking": "Thinking mode",
       "thinkingHelp": "Availability remains model- and provider-dependent.",
       "providerDefault": "Provider default",
       "enabled": "Enabled",
-      "disabled": "Disabled"
-      ,"capabilityTitle": "Effective model capability",
+      "disabled": "Disabled",
+      "capabilityTitle": "Effective model capability",
       "capabilityDescription": "Tools: {{tools}} · Vision: {{vision}}. Web search remains a separately authorized Platform capability and is never implied by the model.",
       "supported": "supported",
       "unsupported": "not supported"
@@ -266,10 +263,10 @@
       "previewBlocked": "Preview blocked",
       "connectorMeta": "Connector · {{connection}} · {{principal}} principal · health {{health}} · permission {{permission}} · {{preview}} · low risk",
       "unknown": "unknown",
-      "none": "No",
+      "none": "None",
       "current": "current",
-      "unavailable": "unavailable"
-      ,"restrictionTitle": "Channel restrictions apply immediately",
+      "unavailable": "unavailable",
+      "restrictionTitle": "Channel restrictions apply immediately",
       "restrictionDescription": "Preview blocks high-risk tools by default. Service-account and write-capable resources require explicit policy checks again before any public channel can use them."
     },
     "knowledge": {
@@ -300,8 +297,8 @@
       "session": "Session only",
       "user": "User-scoped",
       "credentialsTitle": "Credentials are never stored in Agent specs",
-      "credentialsDescription": "MCP and Connector bindings reference server-owned credential principals and are re-authorized for every run."
-      ,"attachments": "Attachments",
+      "credentialsDescription": "MCP and Connector bindings reference server-owned credential principals and are re-authorized for every run.",
+      "attachments": "Attachments",
       "attachmentsValue": "Allowed only when the server-resolved channel policy permits them",
       "retention": "Content retention",
       "retentionValue": "Enforced by tenant policy; not stored as a browser credential",
@@ -311,15 +308,24 @@
       "publicPolicyValue": "Unavailable until a Version and channel policy are published"
     },
     "eval": {
-      "description": "Evaluate the exact saved Draft, inspect server evidence, and promote an immutable Version.",
-      "readiness": "Draft readiness",
-      "ready": "Draft fields are ready for validation.",
-      "boundary": "Only a passed, current server-owned evaluation can publish. Hosted, Embed, and Runtime delivery remain unavailable until their dependent phase."
+      "description": "Evaluate the exact saved Draft, inspect server evidence, and promote an immutable Version."
     },
     "channels": {
-      "description": "Inspect immutable Versions, current channel pointers, promotion evidence, and audited rollback.",
-      "emptyTitle": "No channel is active",
-      "emptyDescription": "No channel has an active Version. Publishing creates a pointer only; external delivery arrives in the dependent phase."
+      "description": "Publish immutable Versions, manage release channels and Runtime API tokens, and roll back to prior versions.",
+      "openHosted": "Open Hosted page",
+      "tokensTitle": "Runtime API tokens",
+      "hashed": "Hashed at rest",
+      "tokenName": "Token name",
+      "createToken": "Create token",
+      "noTokens": "No Runtime API tokens",
+      "revoked": "Revoked",
+      "active": "Active",
+      "rotate": "Rotate",
+      "revoke": "Revoke token",
+      "copyTokenTitle": "Copy the new token now",
+      "copyTokenWarning": "This raw token is displayed once and cannot be recovered.",
+      "copied": "I have copied it",
+      "copySuccess": "Token copied"
     },
     "release": {
       "ownerOnlyTitle": "Owner permission required",
@@ -327,10 +333,10 @@
       "rollbackOwnerOnly": "Release history is read-only for this role. Only an Owner can roll back a channel.",
       "saveFirstTitle": "Save the Draft first",
       "saveFirstDescription": "Evaluation is bound to an exact saved revision. Save or discard local changes before continuing.",
-      "noDatasetTitle": "No production dataset is configured",
+      "noDatasetTitle": "No production evaluation dataset is configured",
       "noDatasetDescription": "The default offline profile checks integrity, authorization, resources, secret safety, and release policy. It does not claim model quality.",
       "noDatasetShort": "No dataset · offline checks",
-      "providerFreeTitle": "Provider-free release profile",
+      "providerFreeTitle": "Model-free release profile",
       "providerFreeDescription": "This server-owned profile performs deterministic release checks without calling a model. Model quality remains unevaluated unless an approved production profile is configured.",
       "operationFailed": "Release operation failed",
       "runnerLabel": "Agent release evaluation",
@@ -358,7 +364,7 @@
       "blockingFindings": "Blocking findings",
       "nonBlockingFindings": "Non-blocking findings",
       "modelQualityEvaluated": "Model quality was evaluated by the configured server profile.",
-      "providerFreeScope": "Provider-free integrity checks only · model quality not evaluated",
+      "providerFreeScope": "Model-free integrity checks only · model quality not evaluated",
       "reviewPublish": "Review and publish",
       "retryEval": "Run again",
       "cancelEval": "Cancel evaluation",
@@ -457,24 +463,7 @@
     "drawerTitle": "Agent sections",
     "closeSections": "Close Agent sections",
     "loadForbidden": "You cannot view this Agent",
-    "loadError": "Agent Studio could not be loaded",
-    "channels": {
-      "description": "Publish immutable versions, manage release channels and Runtime API tokens, and roll back to prior versions.",
-      "openHosted": "Open Hosted page",
-      "tokensTitle": "Runtime API tokens",
-      "hashed": "Hashed at rest",
-      "tokenName": "Token name",
-      "createToken": "Create token",
-      "noTokens": "No Runtime API tokens",
-      "revoked": "Revoked",
-      "active": "Active",
-      "rotate": "Rotate",
-      "revoke": "Revoke token",
-      "copyTokenTitle": "Copy the new token now",
-      "copyTokenWarning": "This raw token is displayed once and cannot be recovered.",
-      "copied": "I have copied it",
-      "copySuccess": "Token copied"
-    }
+    "loadError": "Agent Studio could not be loaded"
   },
   "preview": {
     "subtitle": "Isolated from Assistant sessions",
@@ -516,14 +505,14 @@
       "model": "Model unavailable: {{message}}",
       "capability": "Capability unavailable: {{message}}",
       "knowledge": "Knowledge unavailable: {{message}}",
-      "configuration": "Saved configuration changed: {{message}}"
-      ,"permission": "Permission denied: {{message}}",
+      "configuration": "Saved configuration changed: {{message}}",
+      "permission": "Permission denied: {{message}}",
       "provider": "Provider unavailable: {{message}}",
       "runtime": "Runtime failed: {{message}}"
     }
   },
   "analytics": {
-    "title": "Analytics",
+    "title": "Analytics & Governance",
     "subtitle": "Runtime health, traces, audit, quotas, and data governance",
     "back": "Back to Agent Studio",
     "refresh": "Refresh",
@@ -534,8 +523,8 @@
     "status": "Status",
     "allVersions": "All Versions",
     "allPublications": "All Publications",
-    "allChannels": "All channels",
-    "allStatuses": "All statuses",
+    "allChannels": "All Channels",
+    "allStatuses": "All Statuses",
     "startedAfter": "Started after",
     "startedBefore": "Started before",
     "reset": "Reset filters",
@@ -548,7 +537,7 @@
     "totalTokens": "Tokens",
     "toolSuccess": "Tool success rate",
     "knowledgeHit": "Knowledge hit rate",
-    "positiveFeedback": "Positive feedback",
+    "positiveFeedback": "Positive feedback rate",
     "totalCost": "Cost",
     "channelBreakdown": "Runs by channel",
     "retentionLimited": "Results are retention-limited",
@@ -573,7 +562,7 @@
     "policyError": "Governance policy could not be loaded",
     "policySaved": "Governance policy saved",
     "retentionTitle": "Retention and legal hold",
-    "retentionDescription": "Durable history stays intact; these settings control runtime and derived data.",
+    "retentionDescription": "Immutable history stays intact; these settings control only runtime and derived data.",
     "savePolicy": "Save policy",
     "traceRetention": "Trace retention (days)",
     "runtimeRetention": "Session and run retention (days)",
@@ -593,7 +582,7 @@
     "maxStorageBytes": "Attachment storage bytes",
     "alertThreshold": "Alert threshold (%)",
     "operationsTitle": "Operational controls",
-    "operationsDescription": "Each sensitive operation is audited and preserves immutable release history.",
+    "operationsDescription": "Each sensitive operation is audited, and immutable release history is preserved.",
     "invalidateCache": "Invalidate Agent cache",
     "cacheInvalidated": "Cache invalidated; {{count}} rows removed",
     "revokeCredentials": "Revoke tokens and delegated grants",
@@ -627,7 +616,7 @@
   "public": {
     "loading": "Loading agent…",
     "unavailableTitle": "This agent is unavailable",
-    "unavailable": "The publication may be private, disabled, or no longer available.",
+    "unavailable": "The publication may be private, disabled, or withdrawn.",
     "signIn": "Sign in to continue",
     "newChat": "New chat",
     "conversation": "Agent conversation",

@@ -31,8 +31,8 @@ export function ProtectedRoute({
   // Show loading while waiting for hydration
   if (!hydrated || sessionValidation === "checking") {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="text-gray-500">Loading...</div>
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="text-muted-foreground text-sm">Loading...</div>
       </div>
     );
   }

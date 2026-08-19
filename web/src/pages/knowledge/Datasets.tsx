@@ -177,13 +177,7 @@ function DatasetCard({
       }}
       role="link"
       tabIndex={0}
-      style={{
-        borderRadius: 12,
-        border: `1px solid ${darkMode ? colors.neutral[700] : colors.neutral[200]}`,
-        background: darkMode ? colors.neutral[800] : "#ffffff",
-        cursor: "pointer",
-        overflow: "hidden",
-      }}
+      className="border border-border bg-card text-foreground rounded-xl transition-[border-color,box-shadow] hover:border-primary/40 hover:shadow-xs overflow-hidden"
       styles={{
         body: { padding: 0 },
       }}
@@ -249,11 +243,11 @@ function DatasetCard({
         </div>
 
         {/* 标题和描述 */}
-        <div style={{ marginBottom: 16 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+        <div className="mb-3.5">
+          <div className="flex items-center gap-2 mb-1">
             <span
               style={{
-                fontSize: 20,
+                fontSize: 18,
                 color: kbTypeColor.color,
                 display: "flex",
                 alignItems: "center",
@@ -261,165 +255,61 @@ function DatasetCard({
             >
               {getKBTypeIcon(dataset.kb_type)}
             </span>
-            <Title
-              level={5}
-              style={{
-                margin: 0,
-                fontSize: 16,
-                fontWeight: 600,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-                flex: 1,
-              }}
-            >
+            <h3 className="text-[15px] font-semibold text-foreground truncate flex-1 m-0">
               {dataset.name}
-            </Title>
+            </h3>
           </div>
-          <Paragraph
-            type="secondary"
-            ellipsis={{ rows: 2 }}
-            style={{
-              fontSize: 13,
-              margin: 0,
-              minHeight: 40,
-              lineHeight: "20px",
-            }}
-          >
+          <p className="text-xs text-muted-foreground m-0 min-h-[36px] line-clamp-2 leading-relaxed">
             {dataset.description || t("knowledge.datasets.noDescription")}
-          </Paragraph>
+          </p>
         </div>
 
         {/* 统计数据 - 清晰的水平布局 */}
-        <div
-          style={{
-            display: "flex",
-            gap: 24,
-            padding: "12px 0",
-            borderTop: `1px solid ${darkMode ? colors.neutral[700] : colors.neutral[100]}`,
-            borderBottom: `1px solid ${darkMode ? colors.neutral[700] : colors.neutral[100]}`,
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <FileTextOutlined style={{ fontSize: 16, color: colors.neutral[400] }} />
-            <div>
-              <Text strong style={{ fontSize: 18, lineHeight: 1 }}>{docCount}</Text>
-              <Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>{t("knowledge.datasets.documents")}</Text>
+        <div className="flex items-center gap-6 py-2.5 border-y border-border/60">
+          <div className="flex items-center gap-2">
+            <FileTextOutlined className="text-muted-foreground" style={{ fontSize: 14 }} />
+            <div className="flex items-baseline gap-1">
+              <span className="text-sm font-bold text-foreground tabular-nums">{docCount}</span>
+              <span className="text-[11px] text-muted-foreground">{t("knowledge.datasets.documents")}</span>
             </div>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <NodeIndexOutlined style={{ fontSize: 16, color: colors.neutral[400] }} />
-            <div>
-              <Text strong style={{ fontSize: 18, lineHeight: 1 }}>{segCount}</Text>
-              <Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>{t("knowledge.datasets.segments")}</Text>
+          <div className="flex items-center gap-2">
+            <NodeIndexOutlined className="text-muted-foreground" style={{ fontSize: 14 }} />
+            <div className="flex items-baseline gap-1">
+              <span className="text-sm font-bold text-foreground tabular-nums">{segCount}</span>
+              <span className="text-[11px] text-muted-foreground">{t("knowledge.datasets.segments")}</span>
             </div>
           </div>
         </div>
 
         {/* 底部：ID + 可见性 */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            paddingTop: 12,
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <Text
-              type="secondary"
-              style={{
-                fontSize: 11,
-                fontFamily: "monospace",
-              }}
-            >
+        <div className="flex items-center justify-between pt-2.5">
+          <div className="flex items-center gap-1">
+            <code className="text-[11px] text-muted-foreground font-mono">
               {dataset.dataset_id.slice(0, 10)}...
-            </Text>
+            </code>
             <Tooltip title={copied ? t("knowledge.datasets.copied") : t("knowledge.datasets.copyId")}>
               <button
                 type="button"
                 onClick={(event) => void copyId(event)}
                 aria-label={copied ? t("knowledge.datasets.copied") : t("knowledge.datasets.copyId")}
-                style={{ cursor: "pointer", display: "flex", padding: 2, border: 0, background: "transparent" }}
+                className="cursor-pointer flex p-0.5 border-0 bg-transparent text-muted-foreground hover:text-foreground transition-colors duration-140"
               >
                 {copied ? (
                   <CheckOutlined style={{ fontSize: 11, color: colors.primary[500] }} />
                 ) : (
-                  <CopyOutlined style={{ fontSize: 11, color: colors.neutral[400] }} />
+                  <CopyOutlined style={{ fontSize: 11 }} />
                 )}
               </button>
             </Tooltip>
           </div>
-          <Tag
-            style={{
-              borderRadius: 4,
-              padding: "1px 6px",
-              fontSize: 10,
-              border: "none",
-              background: darkMode ? colors.neutral[700] : colors.neutral[100],
-              color: darkMode ? colors.neutral[300] : colors.neutral[500],
-            }}
-          >
+          <span className="rounded px-1.5 py-0.5 text-[10px] font-medium border border-border/50 bg-muted/60 text-muted-foreground">
             {dataset.visibility === "private"
               ? t("knowledge.datasets.visPrivate")
               : dataset.visibility === "tenant"
                 ? t("knowledge.datasets.visTenant")
                 : t("knowledge.datasets.visPublic")}
-          </Tag>
-        </div>
-      </div>
-    </Card>
-  );
-}
-
-// 统计卡片组件 - 扁平设计
-function StatCard({
-  title,
-  value,
-  icon,
-  color,
-}: {
-  title: string;
-  value: number;
-  icon: React.ReactNode;
-  color: string;
-  gradient?: string;
-  index: number;
-}) {
-  const { darkMode } = useAppStore();
-
-  return (
-    <Card
-      style={{
-        borderRadius: 8,
-        border: `1px solid ${darkMode ? colors.neutral[700] : colors.neutral[200]}`,
-        background: darkMode ? colors.neutral[800] : "#ffffff",
-      }}
-      styles={{ body: { padding: "16px 20px" } }}
-    >
-      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <div
-          style={{
-            width: 40,
-            height: 40,
-            borderRadius: 8,
-            background: darkMode ? colors.neutral[700] : colors.neutral[100],
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          <span style={{ fontSize: 18, color }}>{icon}</span>
-        </div>
-        <div>
-          <Text type="secondary" style={{ fontSize: 13 }}>
-            {title}
-          </Text>
-          <div
-            style={{ fontSize: 24, fontWeight: 600, lineHeight: 1.2 }}
-          >
-            {value.toLocaleString()}
-          </div>
+          </span>
         </div>
       </div>
     </Card>
@@ -458,18 +348,55 @@ function EmptyState({ onCreateClick }: { onCreateClick: () => void }) {
         />
       </div>
 
-      <Title level={4} style={{ marginBottom: 8 }}>
+      <Title level={4} style={{ marginBottom: 6 }}>
         {t("knowledge.datasets.emptyTitle")}
       </Title>
       <Paragraph
         type="secondary"
         style={{
-          maxWidth: 400,
-          margin: "0 auto 24px",
+          maxWidth: 480,
+          margin: "0 auto 20px",
         }}
       >
         {t("knowledge.datasets.emptyDesc")}
       </Paragraph>
+
+      {/* RAG 拓扑链路指示 */}
+      <div
+        style={{
+          maxWidth: 720,
+          margin: "0 auto 28px",
+          padding: "16px 20px",
+          borderRadius: 10,
+          background: darkMode ? "rgba(255,255,255,0.02)" : "rgba(0,0,0,0.02)",
+          border: `1px dashed ${darkMode ? colors.neutral[700] : colors.neutral[200]}`,
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
+          gap: 12,
+          textAlign: "left",
+        }}
+      >
+        <div style={{ padding: "8px 10px" }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: colors.primary[500], marginBottom: 4 }}>{t("knowledge.datasets.emptyTopology.step1")}</div>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>{t("knowledge.datasets.emptyTopology.step1Formats")}</div>
+          <div style={{ fontSize: 11, color: colors.neutral[400], marginTop: 2 }}>{t("knowledge.datasets.emptyTopology.step1Desc")}</div>
+        </div>
+        <div style={{ padding: "8px 10px" }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: colors.primary[500], marginBottom: 4 }}>{t("knowledge.datasets.emptyTopology.step2")}</div>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>{t("knowledge.datasets.emptyTopology.step2Formats")}</div>
+          <div style={{ fontSize: 11, color: colors.neutral[400], marginTop: 2 }}>{t("knowledge.datasets.emptyTopology.step2Desc")}</div>
+        </div>
+        <div style={{ padding: "8px 10px" }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: colors.primary[500], marginBottom: 4 }}>{t("knowledge.datasets.emptyTopology.step3")}</div>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>{t("knowledge.datasets.emptyTopology.step3Formats")}</div>
+          <div style={{ fontSize: 11, color: colors.neutral[400], marginTop: 2 }}>{t("knowledge.datasets.emptyTopology.step3Desc")}</div>
+        </div>
+        <div style={{ padding: "8px 10px" }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: colors.primary[500], marginBottom: 4 }}>{t("knowledge.datasets.emptyTopology.step4")}</div>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>{t("knowledge.datasets.emptyTopology.step4Formats")}</div>
+          <div style={{ fontSize: 11, color: colors.neutral[400], marginTop: 2 }}>{t("knowledge.datasets.emptyTopology.step4Desc")}</div>
+        </div>
+      </div>
 
       <Space size={12} wrap style={{ justifyContent: "center" }}>
         <Button
@@ -480,7 +407,7 @@ function EmptyState({ onCreateClick }: { onCreateClick: () => void }) {
           style={{
             borderRadius: 6,
             height: 40,
-            paddingInline: 20,
+            paddingInline: 24,
           }}
         >
           {t("knowledge.datasets.create")}
@@ -584,7 +511,7 @@ export function KnowledgeDatasetsPage() {
   const nav = useNavigate();
   const qc = useQueryClient();
   const datasetsQuery = useDatasets();
-  const datasets = datasetsQuery.data || [];
+  const datasets = useMemo(() => datasetsQuery.data || [], [datasetsQuery.data]);
   const { darkMode } = useAppStore();
   const { t } = useTranslation();
 
@@ -688,45 +615,96 @@ export function KnowledgeDatasetsPage() {
         </div>
       </div>
 
-      {/* 统计卡片 */}
-      <Row className="knowledge-stats-row" gutter={[16, 16]} style={{ marginBottom: 24 }}>
-        <Col xs={24} sm={8}>
-          <StatCard
-            title={t("knowledge.datasets.totalKB")}
-            value={stats.total}
-            icon={<DatabaseOutlined />}
-            color={colors.primary[500]}
-            index={0}
-          />
-        </Col>
-        <Col xs={24} sm={8}>
-          <StatCard
-            title={t("knowledge.datasets.totalDocs")}
-            value={stats.documents}
-            icon={<FileTextOutlined />}
-            color={colors.primary[400]}
-            index={1}
-          />
-        </Col>
-        <Col xs={24} sm={8}>
-          <StatCard
-            title={t("knowledge.datasets.totalSegments")}
-            value={stats.segments}
-            icon={<NodeIndexOutlined />}
-            color={colors.primary[600]}
-            index={2}
-          />
-        </Col>
-      </Row>
+      {/* 统计指标区 - 统一结构化横幅 */}
+      <div className="knowledge-stats-strip mb-5 p-4 rounded-xl border border-border bg-card text-foreground grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <div
+            style={{
+              width: 40,
+              height: 40,
+              borderRadius: 8,
+              background: darkMode ? "rgba(91,91,214,0.14)" : colors.primary[50],
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+            }}
+          >
+            <DatabaseOutlined style={{ fontSize: 18, color: colors.primary[500] }} />
+          </div>
+          <div>
+            <Text type="secondary" style={{ fontSize: 12.5, fontWeight: 500 }}>
+              {t("knowledge.datasets.totalKB")}
+            </Text>
+            <div
+              className="tabular-nums"
+              style={{ fontSize: 24, fontWeight: 700, lineHeight: 1.2, fontVariantNumeric: "tabular-nums" }}
+            >
+              {stats.total.toLocaleString()}
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <div
+            style={{
+              width: 40,
+              height: 40,
+              borderRadius: 8,
+              background: darkMode ? "rgba(91,91,214,0.14)" : colors.primary[50],
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+            }}
+          >
+            <FileTextOutlined style={{ fontSize: 18, color: colors.primary[400] }} />
+          </div>
+          <div>
+            <Text type="secondary" style={{ fontSize: 12.5, fontWeight: 500 }}>
+              {t("knowledge.datasets.totalDocs")}
+            </Text>
+            <div
+              className="tabular-nums"
+              style={{ fontSize: 24, fontWeight: 700, lineHeight: 1.2, fontVariantNumeric: "tabular-nums" }}
+            >
+              {stats.documents.toLocaleString()}
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <div
+            style={{
+              width: 40,
+              height: 40,
+              borderRadius: 8,
+              background: darkMode ? "rgba(91,91,214,0.14)" : colors.primary[50],
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+            }}
+          >
+            <NodeIndexOutlined style={{ fontSize: 18, color: colors.primary[600] }} />
+          </div>
+          <div>
+            <Text type="secondary" style={{ fontSize: 12.5, fontWeight: 500 }}>
+              {t("knowledge.datasets.totalSegments")}
+            </Text>
+            <div
+              className="tabular-nums"
+              style={{ fontSize: 24, fontWeight: 700, lineHeight: 1.2, fontVariantNumeric: "tabular-nums" }}
+            >
+              {stats.segments.toLocaleString()}
+            </div>
+          </div>
+        </div>
+      </div>
 
       {/* 搜索和筛选栏 */}
       <Card
-        style={{
-          marginBottom: 24,
-          borderRadius: 8,
-          border: `1px solid ${darkMode ? colors.neutral[700] : colors.neutral[200]}`,
-          background: darkMode ? colors.neutral[800] : "#ffffff",
-        }}
+        className="mb-6 rounded-xl border border-border bg-card text-foreground"
         styles={{ body: { padding: "12px 16px" } }}
       >
         <div

@@ -1,4 +1,4 @@
-export function Logo({ collapsed }: { collapsed: boolean }) {
+export function Logo({ collapsed, textClassName }: { collapsed: boolean; textClassName?: string }) {
     return (
         <div className="flex items-center gap-3 select-none group">
             <div className="relative flex items-center justify-center w-9 h-9">
@@ -12,7 +12,7 @@ export function Logo({ collapsed }: { collapsed: boolean }) {
             {!collapsed && (
                 <div className="flex flex-col justify-center animate-in fade-in slide-in-from-left-2 duration-300 ml-1">
                     <span
-                        className="text-[15px] font-semibold text-foreground leading-none"
+                        className={textClassName || "text-[15px] font-semibold text-foreground dark:text-white leading-none"}
                         style={{ letterSpacing: "-0.2px" }}
                     >
                         AI Gateway

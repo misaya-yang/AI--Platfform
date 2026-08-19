@@ -84,7 +84,7 @@ function ChildChunkCard({
         <div className="absolute -left-5 top-5 w-1.5 h-1.5 rounded-full bg-blue-400" />
         
         <div className={cn(
-          "rounded-lg border transition-all duration-200",
+          "rounded-lg border transition-[border-color,box-shadow,background-color] duration-150",
           "bg-blue-50/30 dark:bg-blue-950/20",
           "border-blue-200/60 dark:border-blue-900/40",
           "hover:border-blue-300 dark:hover:border-blue-700"
@@ -183,7 +183,7 @@ export function ChunkCard({
     
     return (
       <div className={cn(
-        "rounded-xl border transition-all duration-200",
+        "rounded-xl border transition-[border-color,box-shadow,background-color] duration-150",
         "bg-card border-border/60",
         "hover:border-primary/30 hover:shadow-xs"
       )}>
@@ -268,7 +268,7 @@ export function ChunkCard({
   // Parent chunk with children
   return (
     <div className={cn(
-      "rounded-xl border-2 transition-all duration-200",
+      "rounded-xl border-2 transition-[border-color,box-shadow,background-color] duration-150",
       "bg-card border-border",
       "hover:border-slate-300 dark:hover:border-slate-800"
     )}>

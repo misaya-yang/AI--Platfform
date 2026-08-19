@@ -28,7 +28,7 @@ export const DATASET_EMBEDDING_MODELS = [
     model: "text-embedding-v4",
     label: "DashScope text-embedding-v4",
     dimension: 1024,
-    badge: "推荐",
+    badge: "knowledge.upload.recommended",
   },
   {
     provider: "dashscope",

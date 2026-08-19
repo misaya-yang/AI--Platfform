@@ -385,7 +385,7 @@ export function usePlaygroundSessions({
         pendingSessionInitRef.current = null;
       }
     }
-  }, [serviceId, refreshSessions, setActiveSessionId, invalidatePendingHistoryLoad]);
+  }, [serviceId, services, refreshSessions, setActiveSessionId, invalidatePendingHistoryLoad]);
 
   const handleStopStreaming = useCallback(() => {
     if (abortControllerRef.current) {

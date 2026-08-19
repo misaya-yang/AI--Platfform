@@ -370,7 +370,7 @@ export function QuizCard({
     setReviewFilter("all");
     setReviewIndex(0);
     setViewMode("idle");
-  }, [quizData.quiz_id]);
+  }, [quizData.quiz_id, scopeId]);
 
   const getQuestionResult = (questionId: string) => {
     if (!result) return undefined;

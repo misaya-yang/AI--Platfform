@@ -308,7 +308,7 @@ export function UserEditPage() {
       </nav>
 
       <header className="mb-5">
-        <h1 className="text-xl font-semibold tracking-tight">{t("users.editUser")}</h1>
+        <h1 className="text-xl font-semibold tracking-tight text-foreground">{t("users.editUser")}</h1>
         <p className="mt-1 break-all text-sm text-muted-foreground">{user.email}</p>
       </header>
 
@@ -321,7 +321,7 @@ export function UserEditPage() {
                 <UserOutlined className="text-xl" aria-hidden="true" />
               </div>
               <div className="min-w-0">
-                <h2 id="user-profile-heading" className="break-words text-base font-semibold">
+                <h2 id="user-profile-heading" className="break-words text-base font-semibold text-foreground">
                   {user.display_name || user.email}
                 </h2>
                 <p className="break-all text-xs text-muted-foreground">{user.email}</p>
@@ -334,7 +334,7 @@ export function UserEditPage() {
                 <MailOutlined className="mt-0.5 text-muted-foreground" aria-hidden="true" />
                 <div className="min-w-0 flex-1">
                   <dt className="text-xs text-muted-foreground">{t("users.fields.email")}</dt>
-                  <dd className="break-all text-sm font-medium">{user.email}</dd>
+                  <dd className="break-all text-sm font-medium text-foreground">{user.email}</dd>
                 </div>
               </div>
 
@@ -342,7 +342,7 @@ export function UserEditPage() {
                 <TeamOutlined className="mt-0.5 text-muted-foreground" aria-hidden="true" />
                 <div className="min-w-0 flex-1">
                   <dt className="text-xs text-muted-foreground">{t("users.fields.department")}</dt>
-                  <dd className="text-sm font-medium">{dept?.label || t("common.notSet")}</dd>
+                  <dd className="text-sm font-medium text-foreground">{dept?.label || t("common.notSet")}</dd>
                 </div>
               </div>
 

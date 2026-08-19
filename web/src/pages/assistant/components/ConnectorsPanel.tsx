@@ -12,6 +12,7 @@
  */
 
 import { useState, useEffect, useCallback } from "react";
+import { useTranslation } from "react-i18next";
 import { api } from "@/lib/api";
 
 interface ConnectorsPanelProps {
@@ -53,6 +54,7 @@ function apiErrorMessage(error: unknown, fallback: string): string {
 }
 
 export default function ConnectorsPanel({ open, onClose, onCountChange }: ConnectorsPanelProps) {
+  const { t } = useTranslation();
   const [connectors, setConnectors] = useState<ConnectorInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [mcpByProvider, setMcpByProvider] = useState<Record<string, ConnectorMcpStatus>>({});
@@ -93,7 +95,7 @@ export default function ConnectorsPanel({ open, onClose, onCountChange }: Connec
       const { data } = await api.get<{ auth_url: string }>(`/api/v1/connectors/auth/${provider}`);
       window.location.href = data.auth_url;
     } catch (err: unknown) {
-      setError(apiErrorMessage(err, "发起授权失败"));
+      setError(apiErrorMessage(err, t("connectors.authFailed")));
       setBusyProvider(null);
     }
   };
@@ -105,15 +107,15 @@ export default function ConnectorsPanel({ open, onClose, onCountChange }: Connec
         `/api/v1/connectors/${provider}/activate`,
       );
       setMcpByProvider((prev) => ({ ...prev, [provider]: data }));
-      alert(`✅ AI 工具已激活！发现 ${data.tool_count ?? data.tools?.length ?? 0} 个工具`);
+      alert(t("connectors.activatedToast", { count: data.tool_count ?? data.tools?.length ?? 0 }));
     } catch (err: unknown) {
-      alert(`激活失败: ${apiErrorMessage(err, "未知错误")}`);
+      alert(t("connectors.activateFailed", { error: apiErrorMessage(err, t("connectors.unknownError")) }));
     }
     setBusyProvider(null);
   };
 
   const handleDisconnect = async (provider: string) => {
-    if (!confirm("确定要断开此连接？")) return;
+    if (!confirm(t("connectors.disconnectConfirm"))) return;
     setBusyProvider(provider);
     try {
       await api.delete(`/api/v1/connectors/${provider}`);
@@ -124,7 +126,7 @@ export default function ConnectorsPanel({ open, onClose, onCountChange }: Connec
       });
       void loadConnectors();
     } catch (err: unknown) {
-      setError(apiErrorMessage(err, "断开连接失败"));
+      setError(apiErrorMessage(err, t("connectors.disconnectFailed")));
     }
     setBusyProvider(null);
   };
@@ -138,10 +140,10 @@ export default function ConnectorsPanel({ open, onClose, onCountChange }: Connec
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200 dark:border-zinc-700">
           <div>
-            <h2 className="text-lg font-semibold">连接器</h2>
-            <p className="text-sm text-zinc-500">连接第三方数据源，AI 可搜索和引用其中内容</p>
+            <h2 className="text-lg font-semibold">{t("connectors.title")}</h2>
+            <p className="text-sm text-zinc-500">{t("connectors.subtitle")}</p>
           </div>
-          <button type="button" onClick={onClose} className="p-2 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 transition" aria-label="关闭连接器面板">
+          <button type="button" onClick={onClose} className="p-2 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 transition" aria-label={t("connectors.closeAria")}>
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
               <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
             </svg>
@@ -151,10 +153,10 @@ export default function ConnectorsPanel({ open, onClose, onCountChange }: Connec
         {/* Content */}
         <div className="px-6 py-4 space-y-4 overflow-y-auto max-h-[60vh]">
           {loading ? (
-            <div className="text-sm text-zinc-500 py-4 text-center">加载中...</div>
+            <div className="text-sm text-zinc-500 py-4 text-center">{t("connectors.loading")}</div>
           ) : connectors.length === 0 ? (
             <div className="text-sm text-zinc-500 py-4 text-center">
-              暂无可用连接器，请先在「设置 → 连接器」配置数据源
+              {t("connectors.empty")}
             </div>
           ) : (
             connectors.map((conn) => {
@@ -175,8 +177,8 @@ export default function ConnectorsPanel({ open, onClose, onCountChange }: Connec
                       <>
                         <span className="text-xs text-green-600 dark:text-green-400">
                           {mcp?.mcp_active
-                            ? `AI 工具已激活 · ${mcp.tools?.length ?? 0} 个工具可用`
-                            : "已连接但 AI 工具未激活"}
+                            ? t("connectors.activated", { count: mcp.tools?.length ?? 0 })
+                            : t("connectors.connectedNoTools")}
                         </span>
                         <div className="flex gap-2">
                           {!mcp?.mcp_active && (
@@ -185,7 +187,7 @@ export default function ConnectorsPanel({ open, onClose, onCountChange }: Connec
                               disabled={busyProvider === conn.provider}
                               className="px-3 py-1 text-xs font-medium text-white bg-violet-600 hover:bg-violet-700 rounded-lg transition disabled:opacity-50"
                             >
-                              {busyProvider === conn.provider ? "处理中..." : "激活 AI 工具"}
+                              {busyProvider === conn.provider ? t("connectors.processing") : t("connectors.activate")}
                             </button>
                           )}
                           <button
@@ -193,19 +195,19 @@ export default function ConnectorsPanel({ open, onClose, onCountChange }: Connec
                             disabled={busyProvider === conn.provider}
                             className="px-2 py-1 text-xs text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition"
                           >
-                            断开
+                            {t("connectors.disconnect")}
                           </button>
                         </div>
                       </>
                     ) : (
                       <>
-                        <span className="text-xs text-zinc-400">尚未连接</span>
+                        <span className="text-xs text-zinc-400">{t("connectors.notConnected")}</span>
                         <button
                           onClick={() => handleConnect(conn.provider)}
                           disabled={busyProvider === conn.provider}
                           className="px-3 py-1 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition disabled:opacity-50"
                         >
-                          {busyProvider === conn.provider ? "跳转中..." : "连接"}
+                          {busyProvider === conn.provider ? t("connectors.redirecting") : t("connectors.connect")}
                         </button>
                       </>
                     )}
@@ -220,7 +222,7 @@ export default function ConnectorsPanel({ open, onClose, onCountChange }: Connec
 
         {/* Footer */}
         <div className="px-6 py-3 border-t border-zinc-200 dark:border-zinc-700 flex items-center justify-between">
-          <span className="text-xs text-zinc-400">连接后，AI 可通过 MCP 工具检索其中内容</span>
+          <span className="text-xs text-zinc-400">{t("connectors.footer")}</span>
         </div>
       </div>
     </div>

@@ -11,6 +11,7 @@
 import { lazy, memo, Suspense, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
+import { liveThinkingLabel } from "../thinkingPreview";
 import {
   Clock,
   MessageSquare,
@@ -421,8 +422,11 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
               ? Math.max(totalDurationMs, liveElapsed)
               : totalDurationMs;
             const durationLabel = formatDurationLabel(effectiveMs);
+            const thinkingLabel = t("playground.activity.thinking", {
+              defaultValue: "Thinking",
+            });
             const label = message.isStreaming
-              ? t("playground.activity.thinking", { defaultValue: "Thinking" })
+              ? liveThinkingLabel(message.streamingThinkingContent, thinkingLabel)
               : t("playground.activity.title", { defaultValue: "Activity" });
             return (
               <ActivityPill
@@ -497,7 +501,9 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
             </div>
           ) : !showTypingDots && !message.isStreaming && (
             <span className="text-[hsl(var(--assistant-text-secondary))] italic text-sm">
-              {t("assistant.emptyResponse", "(No response)")}
+              {message.status === "cancelled"
+                ? t("assistant.cancelled", "(Cancelled)")
+                : t("assistant.emptyResponse", "(No response)")}
             </span>
           )}
 

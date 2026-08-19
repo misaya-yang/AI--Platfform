@@ -92,7 +92,7 @@ function FolderDialog({
               if (e.key === "Escape") handleClose();
             }}
             placeholder={t("assistant.folderPlaceholder", "e.g. Product Research")}
-            className="w-full rounded-xl border border-border bg-background px-3.5 py-2.5 text-sm outline-hidden focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all"
+            className="w-full rounded-xl border border-border bg-background px-3.5 py-2.5 text-sm outline-hidden focus:border-primary focus:ring-2 focus:ring-primary/20 transition-[border-color,box-shadow] duration-150"
             autoFocus
           />
         </div>
@@ -104,7 +104,7 @@ function FolderDialog({
                 key={f}
                 type="button"
                 className={cn(
-                  "px-2.5 py-1 rounded-lg text-xs transition-all",
+                  "px-2.5 py-1 rounded-lg text-xs transition-[background-color,color] duration-150",
                   value === f
                     ? "bg-primary text-primary-foreground"
                     : "bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground"

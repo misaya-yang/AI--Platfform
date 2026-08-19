@@ -277,7 +277,7 @@ export function AppLayout() {
           position: 'fixed', left: isMobile ? siderOffset : 0, top: 0, bottom: 0, zIndex: 40,
           borderRight: '1px solid hsl(var(--border))',
           background: 'hsl(var(--sidebar-bg))',
-          transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
+          transition: 'left 0.3s cubic-bezier(0.16, 1, 0.3, 1), width 0.3s cubic-bezier(0.16, 1, 0.3, 1), min-width 0.3s cubic-bezier(0.16, 1, 0.3, 1), max-width 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
         }}
         theme={resolvedTheme}
       >
@@ -339,7 +339,7 @@ export function AppLayout() {
                         </span>
                       )}
                       {collapsed && (
-                        <div className="absolute left-full ml-2 px-2 py-1 bg-popover text-popover-foreground text-xs rounded-md shadow-lg opacity-0 scale-95 group-hover:opacity-100 group-hover:scale-100 group-focus-visible:opacity-100 group-focus-visible:scale-100 transition-all duration-100 pointer-events-none whitespace-nowrap z-50 border border-border/50">
+                        <div className="absolute left-full ml-2 px-2 py-1 bg-popover text-popover-foreground text-xs rounded-md shadow-lg opacity-0 scale-95 group-hover:opacity-100 group-hover:scale-100 group-focus-visible:opacity-100 group-focus-visible:scale-100 transition-[opacity,transform] duration-100 pointer-events-none whitespace-nowrap z-50 border border-border/50">
                           {t(item.labelKey)}
                         </div>
                       )}
@@ -369,7 +369,7 @@ export function AppLayout() {
               {!collapsed && (
                 <>
                   <span className="app-nav-label flex-1 text-left truncate">
-                    {darkMode ? t("theme.mode.dark", "深色模式") : t("theme.mode.light", "浅色模式")}
+                    {darkMode ? t("theme.mode.dark", "Dark") : t("theme.mode.light", "Light")}
                   </span>
                   <svg width="10" height="10" viewBox="0 0 10 10" fill="none" style={{ color: 'hsl(var(--muted-foreground) / 0.5)', transform: 'rotate(-90deg)' }}>
                     <path d="M2.5 3.8l2.5 2.5 2.5-2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
@@ -385,18 +385,18 @@ export function AppLayout() {
                 collapsed ? 'justify-center py-[10px]' : 'gap-[10px] px-[10px] py-[10px]'
               }`}
             >
-              <span className="app-nav-icon shrink-0" style={{ transform: collapsed ? 'rotate(180deg)' : 'none', transition: '.18s' }}>
+              <span className="app-nav-icon shrink-0" style={{ transform: collapsed ? 'rotate(180deg)' : 'none', transition: 'transform .18s ease' }}>
                 {collapsed ? <PanelLeft size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} /> : <PanelLeftClose size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />}
               </span>
               {!collapsed && (
-                <span className="app-nav-label truncate">{t('nav.collapseSidebar', '收起侧栏')}</span>
+                <span className="app-nav-label truncate">{t('nav.collapseSidebar', 'Collapse sidebar')}</span>
               )}
             </button>
           </div>
         </div>
       </Sider>
 
-      <Layout style={{ marginLeft: contentMarginLeft, transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)', background: 'transparent', minHeight: '100dvh' }}>
+      <Layout style={{ marginLeft: contentMarginLeft, transition: 'margin-left 0.3s cubic-bezier(0.16, 1, 0.3, 1)', background: 'transparent', minHeight: '100dvh' }}>
         {/* Header */}
         <Header style={{
           padding: isMobile ? '0 10px' : '0 16px',

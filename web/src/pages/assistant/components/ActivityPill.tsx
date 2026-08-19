@@ -47,6 +47,8 @@ export function ActivityPill({
     <button
       type="button"
       onClick={onOpen}
+      title={label}
+      aria-label={label}
       className="act-pill-link"
       style={{
         display: "inline-flex",
@@ -77,7 +79,17 @@ export function ActivityPill({
           <span className="act-dot" />
         </span>
       )}
-      <span style={{ fontWeight: 500 }}>{label}</span>
+      <span
+        style={{
+          fontWeight: 500,
+          maxWidth: "min(60vw, 36rem)",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {label}
+      </span>
       {subtitle && (
         <span
           style={{

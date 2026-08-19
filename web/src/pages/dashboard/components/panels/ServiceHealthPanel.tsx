@@ -209,23 +209,27 @@ export function ServiceHealthPanel() {
         style={{
           display: "grid",
           gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-          gap: 10,
-          marginBottom: 12,
+          gap: 12,
+          paddingBottom: 14,
+          marginBottom: 14,
+          borderBottom: `1px solid ${colors.divider}`,
         }}
       >
         {summary.map((item) => (
-          <div
-            key={item.label}
-            style={{
-              minHeight: 58,
-              padding: "8px 10px",
-              borderRadius: 8,
-              border: `1px solid ${colors.borderSoft}`,
-              background: colors.innerBg,
-            }}
-          >
-            <div style={{ color: colors.textMuted, fontSize: 11, marginBottom: 5 }}>{item.label}</div>
-            <div style={{ color: item.color, fontSize: 18, fontWeight: 750, fontFeatureSettings: '"tnum"' }}>
+          <div key={item.label} style={{ minWidth: 0, padding: "2px 4px" }}>
+            <div style={{ color: colors.textMuted, fontSize: 11.5, fontWeight: 500, marginBottom: 4 }}>
+              {item.label}
+            </div>
+            <div
+              className="tabular-nums"
+              style={{
+                color: item.color,
+                fontSize: 20,
+                fontWeight: 700,
+                letterSpacing: 0,
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
               {item.value}
             </div>
           </div>

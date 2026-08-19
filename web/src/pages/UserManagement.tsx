@@ -444,7 +444,7 @@ export function UserManagementPage() {
     <div className="space-y-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center">
-          <h1 className="text-xl font-semibold tracking-tight">{t('users.title')}</h1>
+          <h1 className="text-xl font-semibold tracking-tight text-foreground">{t('users.title')}</h1>
           {canDelete && selectedUserIds.size > 0 && (
             <Button
               variant="destructive"
@@ -453,7 +453,7 @@ export function UserManagementPage() {
               onClick={() => setShowBatchDeleteDialog(true)}
             >
               <Trash2 className="mr-1.5 h-4 w-4" aria-hidden="true" />
-              {t('users.actions.batchDelete', `Delete (${selectedUserIds.size})`)}
+              {t('users.actions.batchDelete', { count: selectedUserIds.size })}
             </Button>
           )}
         </div>

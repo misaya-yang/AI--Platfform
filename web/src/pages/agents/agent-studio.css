@@ -45,7 +45,7 @@
 .agent-create-heading h2 {
   margin-bottom: 2px;
   font-size: 28px;
-  letter-spacing: -0.025em;
+  letter-spacing: 0;
 }
 
 .agent-directory,
@@ -126,6 +126,46 @@
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
+}
+
+.dark .agent-page-heading h2,
+.dark .agent-create-heading h2,
+.dark .agent-studio-header h1 {
+  color: hsl(var(--foreground)) !important;
+}
+
+.dark .agent-directory {
+  background: hsl(var(--card)) !important;
+  border-color: hsl(var(--border)) !important;
+}
+
+.dark .agent-toolbar {
+  border-bottom-color: hsl(var(--border)) !important;
+}
+
+.dark .agent-directory .ant-table {
+  background: transparent !important;
+  color: hsl(var(--card-foreground)) !important;
+}
+
+.dark .agent-directory .ant-table-thead > tr > th {
+  background: hsl(var(--muted) / 0.3) !important;
+  color: hsl(var(--muted-foreground)) !important;
+  border-bottom: 1px solid hsl(var(--border)) !important;
+}
+
+.dark .agent-directory .ant-table-tbody > tr > td {
+  background: transparent !important;
+  color: hsl(var(--foreground)) !important;
+  border-bottom: 1px solid hsl(var(--border) / 0.6) !important;
+}
+
+.dark .agent-name-link {
+  color: hsl(var(--foreground)) !important;
+}
+
+.dark .agent-row-description {
+  color: hsl(var(--muted-foreground)) !important;
 }
 
 .agent-directory .ant-table-tbody > tr > td {

@@ -4,6 +4,7 @@
 
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { Modal, Table, Tag } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import dayjs from "dayjs";
@@ -308,20 +309,20 @@ function formatPrice(value: number | string | null | undefined) {
   return `$${num.toFixed(4)}`;
 }
 
-function endpointStateLabel(item: EndpointDiagnostic, isZh: boolean) {
-  if (item.state === "loading") return isZh ? "检查中" : "checking";
-  if (item.state === "ok") return `${item.count ?? 0} ${isZh ? "条记录" : "records"}`;
-  if (item.state === "empty") return isZh ? "空结果" : "empty";
-  if (item.state === "unauthorized") return item.detail ? `${isZh ? "无权限" : "unauthorized"} (${item.detail})` : (isZh ? "无权限" : "unauthorized");
-  return item.detail ? `${isZh ? "请求失败" : "error"} (${item.detail})` : (isZh ? "请求失败" : "error");
+function endpointStateLabel(item: EndpointDiagnostic, t: TFunction) {
+  if (item.state === "loading") return t("services.providersStatus.endpointStates.checking");
+  if (item.state === "ok") return t("services.providersStatus.endpointStates.records", { count: item.count ?? 0 });
+  if (item.state === "empty") return t("services.providersStatus.endpointStates.empty");
+  if (item.state === "unauthorized") return item.detail ? `${t("services.providersStatus.endpointStates.unauthorized")} (${item.detail})` : t("services.providersStatus.endpointStates.unauthorized");
+  return item.detail ? `${t("services.providersStatus.endpointStates.error")} (${item.detail})` : t("services.providersStatus.endpointStates.error");
 }
 
-function providerSourceLabel(sources: ProviderDataSource[], isZh: boolean) {
-  if (sources.includes("health")) return isZh ? "健康接口" : "health";
-  if (sources.includes("assistant_models")) return isZh ? "Assistant 模型目录" : "assistant catalog";
-  if (sources.includes("models")) return isZh ? "模型配置" : "model config";
-  if (sources.includes("providers")) return isZh ? "厂商配置" : "provider config";
-  return isZh ? "未知来源" : "unknown source";
+function providerSourceLabel(sources: ProviderDataSource[], t: TFunction) {
+  if (sources.includes("health")) return t("services.providersStatus.sources.health");
+  if (sources.includes("assistant_models")) return t("services.providersStatus.sources.assistantModels");
+  if (sources.includes("models")) return t("services.providersStatus.sources.models");
+  if (sources.includes("providers")) return t("services.providersStatus.sources.providers");
+  return t("services.providersStatus.sources.unknown");
 }
 
 // ── HealthBar: 10 small vertical bars ──────────────────────────────
@@ -662,8 +663,6 @@ export function ProviderStatusCard() {
   const integrationGaps = list.length - readyProviders + (unattributedUsage ? 1 : 0);
   const cols = "2fr 0.9fr 0.9fr 1fr 1.6fr 1.1fr 0.9fr 0.9fr";
   const pad = "13px 18px";
-  const isZh = i18n.language.startsWith("zh");
-
   if (list.length === 0) {
     return (
       <section style={{
@@ -701,28 +700,24 @@ export function ProviderStatusCard() {
           <div style={{ padding: 14, borderRadius: 8, background: c.innerBg, border: `1px solid ${c.warning}33` }}>
             <div style={{ color: c.warning, fontSize: 12, fontWeight: 700, marginBottom: 6 }}>
               {isLoadingAny
-                ? (isZh ? "正在检查模型与厂商端点" : "Checking provider and model endpoints")
-                : (isZh ? "没有可展示的模型或厂商记录" : "No provider or model records returned")}
+                ? t("services.providersStatus.diagnostic.checking")
+                : t("services.providersStatus.diagnostic.noRecords")}
             </div>
             <div style={{ color: c.textSecondary, fontSize: 12, lineHeight: 1.6 }}>
               {isLoadingAny
-                ? (isZh
-                  ? "前端正在并行读取健康、厂商配置、模型配置和 Assistant 运行时模型目录。"
-                  : "The frontend is reading health, provider config, model config, and assistant runtime model catalog endpoints.")
-                : (isZh
-                  ? "所有真实端点都没有返回可用记录，或当前用户无权读取。这里不会伪造 Gemini、Qwen 或其他模型。"
-                  : "All real endpoints returned no usable records, or this user is not authorized to read them. The UI will not invent Gemini, Qwen, or other models.")}
+                ? t("services.providersStatus.diagnostic.checkingDesc")
+                : t("services.providersStatus.diagnostic.noRecordsDesc")}
             </div>
             {unattributedUsage && (
               <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 6, background: c.warningBg, color: c.warning, fontSize: 12, fontWeight: 650 }}>
-                {isZh ? "已检测到未归因请求" : "Unattributed usage detected"} · {unattributedUsage.requests} req · ${Number(unattributedUsage.cost_usd || 0).toFixed(4)}
+                {t("services.providersStatus.diagnostic.unattributed")} · {unattributedUsage.requests} req · ${Number(unattributedUsage.cost_usd || 0).toFixed(4)}
               </div>
             )}
           </div>
 
           <div style={{ padding: 14, borderRadius: 8, background: c.innerBg, border: `1px solid ${c.borderSoft}` }}>
             <div style={{ color: c.textPrimary, fontSize: 12, fontWeight: 700, marginBottom: 10 }}>
-              {isZh ? "端点诊断" : "Endpoint diagnostics"}
+              {t("services.providersStatus.diagnostic.endpointTitle")}
             </div>
             <div style={{ display: "grid", gap: 8 }}>
               {endpointDiagnostics.map((item) => (
@@ -749,7 +744,7 @@ export function ProviderStatusCard() {
                     fontWeight: 650,
                     whiteSpace: "nowrap",
                   }}>
-                    {endpointStateLabel(item, isZh)}
+                    {endpointStateLabel(item, t)}
                   </span>
                 </div>
               ))}
@@ -791,7 +786,7 @@ export function ProviderStatusCard() {
             fontWeight: 600, fontSize: 11,
           }}>
             <span style={{ width: 5, height: 5, borderRadius: "50%", background: c.success }} />
-            {configuredProviders}/{list.length} {i18n.language.startsWith("zh") ? "已配置" : "configured"}
+            {configuredProviders}/{list.length} {t("services.providersStatus.configuredCount")}
           </span>
           <span style={{
             display: "inline-flex", alignItems: "center", gap: 5,
@@ -810,7 +805,7 @@ export function ProviderStatusCard() {
               fontWeight: 650, fontSize: 11,
             }}>
               <span style={{ width: 5, height: 5, borderRadius: "50%", background: c.warning }} />
-              {integrationGaps} {i18n.language.startsWith("zh") ? "个接入缺口" : "gaps"}
+              {integrationGaps} {t("services.providersStatus.gaps")}
             </span>
           )}
           <button
@@ -822,7 +817,7 @@ export function ProviderStatusCard() {
               background: c.cardBg,
               color: c.textSecondary,
               display: "flex", alignItems: "center", justifyContent: "center",
-              cursor: "pointer", transition: "all .12s",
+              cursor: "pointer", transition: "color .12s ease-out, background-color .12s ease-out, border-color .12s ease-out",
             }}
             onMouseEnter={(e) => {
               e.currentTarget.style.background = c.cardHover;
@@ -901,7 +896,7 @@ export function ProviderStatusCard() {
                 <span>
                   <span style={{ display: "block", fontWeight: 500 }}>{p.name}</span>
                   <span style={{ display: "block", marginTop: 2, color: c.textMuted, fontSize: 11 }}>
-                    {providerSourceLabel(p.sources, isZh)}
+                    {providerSourceLabel(p.sources, t)}
                   </span>
                 </span>
               </div>
@@ -924,7 +919,7 @@ export function ProviderStatusCard() {
                     ready
                       ? t("services.providersStatus.table.enabled", "已启用")
                       : on
-                      ? (i18n.language.startsWith("zh") ? "无模型" : "No models")
+                      ? t("services.providersStatus.noModels")
                       : t("services.providersStatus.unconfigured", i18n.language.startsWith("zh") ? "未配置" : "Unconfigured")
                   }
                 />
@@ -991,6 +986,6 @@ function rowBtn(c: ReturnType<typeof getColors>) {
     background: c.cardBg,
     display: "flex", alignItems: "center", justifyContent: "center",
     color: c.textSecondary, cursor: "pointer",
-    transition: "all .12s",
+    transition: "color .12s ease-out, background-color .12s ease-out, border-color .12s ease-out",
   } as React.CSSProperties;
 }

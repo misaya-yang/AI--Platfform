@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   createStreamReducerContext,
   createStreamTurnState,
+  markStreamFirstToken,
   reduceNormalizedStreamEvent,
 } from "./reducer.ts";
 import type { ChatTurnState } from "./types.ts";
@@ -39,4 +40,18 @@ test("message_start still opens an idle turn", () => {
 
   assert.equal(result.state.status, "streaming");
   assert.equal(result.changed, true);
+});
+
+test("first reasoning token remains TTFT when answer text arrives later", () => {
+  const context = createStreamReducerContext();
+  const thinkingState = markStreamFirstToken(createStreamTurnState(1_000), 4_500);
+  const result = reduceNormalizedStreamEvent(
+    thinkingState,
+    { type: "message_delta", content: "200" },
+    context,
+    6_000,
+  );
+
+  assert.equal(result.state.firstTokenMs, 3_500);
+  assert.equal(result.state.content, "200");
 });

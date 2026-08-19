@@ -70,7 +70,7 @@ export function RetrievalResultCard({
 
   return (
     <div
-      className={`bg-card rounded-xl border p-4 hover:border-primary/30 hover:shadow-md transition-all ${
+      className={`bg-card rounded-xl border p-4 hover:border-primary/30 hover:shadow-xs transition-[border-color,box-shadow,background-color] duration-150 ${
         !hasText
           ? "border-rose-500/30 bg-rose-500/10"
           : hasExactMatch

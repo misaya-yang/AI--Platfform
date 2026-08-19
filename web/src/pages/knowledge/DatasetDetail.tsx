@@ -1249,7 +1249,7 @@ export function KnowledgeDatasetDetailPage() {
             {[
               { key: "documents", label: t("knowledge.detail.tabDocuments"), icon: FileText },
               { key: "retrieval", label: t("knowledge.detail.tabRetrieval"), icon: Search },
-              { key: "eval", label: t("knowledge.detail.tabEval", "评测"), icon: FlaskConical },
+              { key: "eval", label: t("knowledge.detail.tabEval"), icon: FlaskConical },
               { key: "qa", label: t("knowledge.detail.tabQA"), icon: MessageSquare },
               { key: "sources", label: t("knowledge.detail.tabSources"), icon: Cloud },
               { key: "settings", label: t("knowledge.detail.tabSettings"), icon: Sliders },
@@ -1281,7 +1281,7 @@ export function KnowledgeDatasetDetailPage() {
       <div className="max-w-[1600px] mx-auto px-4 py-4 sm:px-6 sm:py-6">
         {(dsQuery.isError || docsQuery.isError) && (
           <div role="alert" className="mb-4 flex flex-col gap-3 rounded-xl border border-destructive/25 bg-destructive/5 p-4 text-sm sm:flex-row sm:items-center sm:justify-between">
-            <span>{t("common.loadFailed", { defaultValue: "Unable to load the latest knowledge base data." })}</span>
+            <span>{t("common.loadFailed")}</span>
             <Button
               variant="outline"
               size="sm"
@@ -1309,7 +1309,7 @@ export function KnowledgeDatasetDetailPage() {
                   key={tab.key}
                   onClick={() => setContentTypeFilter(tab.key)}
                   className={`
-                    flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm transition-all
+                    flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm transition-[background-color,color,box-shadow] duration-150
                     ${contentTypeFilter === tab.key
                       ? "bg-background shadow-xs text-foreground font-medium"
                       : "text-muted-foreground hover:text-foreground"
@@ -1557,7 +1557,7 @@ export function KnowledgeDatasetDetailPage() {
                   <div className="flex items-center gap-4">
                     <button
                       onClick={() => setSelectedDocId(undefined)}
-                      className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-muted-foreground hover:text-primary bg-card hover:bg-primary/5 border border-border hover:border-primary/20 rounded-lg transition-all shadow-xs"
+                      className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-muted-foreground hover:text-primary bg-card hover:bg-primary/5 border border-border hover:border-primary/20 rounded-lg transition-[color,background-color,border-color] duration-150 shadow-xs"
                     >
                       <ArrowLeft className="h-4 w-4" />
                       <span>{t("knowledge.detail.backToList")}</span>
@@ -1622,7 +1622,7 @@ export function KnowledgeDatasetDetailPage() {
                   {/* Retrieval presets are explicit opt-in starting points. */}
                   <div>
                     <Label className="text-sm text-muted-foreground flex items-center gap-1">
-                      {t("knowledge.detail.retrievalPreset", "检索预设")} · API 投影
+                      {t("knowledge.detail.retrievalPreset")} {t("knowledge.detail.apiProjection")}
                       <HelpCircle className="h-3.5 w-3.5 text-muted-foreground/70" aria-hidden="true" />
                     </Label>
                     <Select
@@ -1632,14 +1632,14 @@ export function KnowledgeDatasetDetailPage() {
                     >
                       <SelectTrigger
                         className="mt-2 bg-card"
-                        aria-label={t("knowledge.detail.retrievalPreset", "检索预设")}
+                        aria-label={t("knowledge.detail.retrievalPreset")}
                         data-testid="retrieval-preset"
                       >
                         <SelectValue
                           placeholder={
                             retrievalPresetStatus === "loading"
-                              ? t("knowledge.eval.loadingPresets", "正在加载检索预设…")
-                              : t("knowledge.eval.selectPreset", "选择预设")
+                              ? t("knowledge.eval.loadingPresets")
+                              : t("knowledge.eval.selectPreset")
                           }
                         />
                       </SelectTrigger>
@@ -1654,8 +1654,7 @@ export function KnowledgeDatasetDetailPage() {
                     {retrievalPresetStatus === "error" ? (
                       <div className="mt-2 flex flex-col gap-2" role="alert">
                         <p className="text-xs text-destructive">
-                          {t("knowledge.eval.presetsFailed", "检索预设加载失败")}
-                          {retrievalPresetError ? `：${retrievalPresetError}` : ""}
+                          {t("knowledge.eval.presetsFailedDetail", { error: retrievalPresetError })}
                         </p>
                         <Button
                           type="button"
@@ -1664,20 +1663,16 @@ export function KnowledgeDatasetDetailPage() {
                           className="w-fit"
                           onClick={() => setRetrievalPresetReloadKey((value) => value + 1)}
                         >
-                          {t("knowledge.eval.retry", "重试")}
+                          {t("knowledge.eval.retry")}
                         </Button>
                       </div>
                     ) : (
                       <p className="text-xs text-muted-foreground mt-1.5">
                         {selectedPreset
                           ? `${retrievalPresets.find((preset) => preset.name === selectedPreset)?.summary ?? ""} ${t(
-                              "knowledge.eval.projectionHint",
-                              "仅应用当前检索 API 可执行字段。"
+                              "knowledge.eval.projectionHint"
                             )}`
-                          : t(
-                              "knowledge.eval.presetOptional",
-                              "可选：应用预设会填充请求参数；手动调整将切回自定义配置。"
-                            )}
+                          : t("knowledge.eval.presetOptional")}
                       </p>
                     )}
                   </div>
@@ -1802,7 +1797,7 @@ export function KnowledgeDatasetDetailPage() {
                       <button
                         type="button"
                         className="text-muted-foreground/70 hover:text-muted-foreground"
-                        aria-label={t("knowledge.detail.image", "图片")}
+                        aria-label={t("knowledge.detail.image")}
                       >
                         <ImageIcon className="h-4 w-4" aria-hidden="true" />
                       </button>
@@ -1935,9 +1930,9 @@ export function KnowledgeDatasetDetailPage() {
                             }
                           >
                             {typeof hitMeta.rerank_applied_provider === "string"
-                              ? t("knowledge.eval.executed", "已执行")
+                              ? t("knowledge.eval.executed")
                               : hitMeta.rerank
-                                ? t("knowledge.eval.requestedUnverified", "已请求（执行未确认）")
+                                ? t("knowledge.eval.requestedUnverified")
                                 : t("knowledge.detail.disabled")}
                           </Badge>
                         </div>
@@ -2319,7 +2314,7 @@ export function KnowledgeDatasetDetailPage() {
                     {qaHistory.slice().reverse().map((h, i) => (
                       <button
                         key={`${h.query}-${i}`}
-                        className="w-full text-left p-3 rounded-lg bg-muted/40 hover:bg-primary/5 border border-transparent hover:border-primary/20 transition-all"
+                        className="w-full text-left p-3 rounded-lg bg-muted/40 hover:bg-primary/5 border border-transparent hover:border-primary/20 transition-[background-color,border-color] duration-150"
                         onClick={() => setQaQueryInput(h.query)}
                       >
                         <p className="text-sm text-foreground/80 truncate font-medium">{h.query}</p>
@@ -2961,11 +2956,11 @@ export function KnowledgeDatasetDetailPage() {
                       </div>
                       <div className="h-2 rounded-full bg-muted/60 overflow-hidden flex">
                         <div
-                          className="h-full bg-primary/60 rounded-l-full transition-all"
+                          className="h-full bg-primary/60 rounded-l-full transition-[width] duration-200"
                           style={{ width: `${(datasetConfig.retrieval.fusion?.alpha || 0.7) * 100}%` }}
                         />
                         <div
-                          className="h-full bg-amber-500/40 rounded-r-full transition-all"
+                          className="h-full bg-amber-500/40 rounded-r-full transition-[width] duration-200"
                           style={{ width: `${(1 - (datasetConfig.retrieval.fusion?.alpha || 0.7)) * 100}%` }}
                         />
                       </div>
@@ -3121,7 +3116,7 @@ export function KnowledgeDatasetDetailPage() {
                                 {m.provider === "gemini" ? "G" : m.provider === "siliconflow" ? "S" : "A"}
                               </span>
                               <span>{m.label}</span>
-                              <span className="text-muted-foreground text-xs">{m.dimension}维</span>
+                              <span className="text-muted-foreground text-xs">{t("knowledge.detail.dimensionValue", { dimension: m.dimension })}</span>
                             </div>
                           </SelectItem>
                         ))}
@@ -3511,7 +3506,7 @@ for chunk in results.get("chunks", []):
                     return (
                       <Card
                         key={opt.id}
-                        className={`p-4 cursor-pointer transition-all ${
+                        className={`p-4 cursor-pointer transition-[border-color,background-color] duration-150 ${
                           isSelected
                             ? "border-2 border-primary bg-primary/5"
                             : "border hover:border-primary/30"

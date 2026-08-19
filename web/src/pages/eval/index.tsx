@@ -1120,24 +1120,72 @@ export function EvalPage() {
           action={<Button onClick={() => void Promise.all([summaryQuery.refetch(), dashboardQuery.refetch()])}>{t("common.retry", "Retry")}</Button>}
         />
       ) : null}
+      <div className="eval-platform-summary-block">
+        <div className="eval-metric-group">
+          <span className="eval-metric-group-title">{t("eval.workbench.traceVolume", "Traces & Golden Sets")}</span>
+          <div className="eval-metric-items">
+            <div className="eval-metric-item">
+              <span className="eval-summary-label">{t("eval.summary.ragTraces")}</span>
+              <strong className="eval-summary-value tabular-nums">{summaryQuery.data?.rag_traces ?? "—"}</strong>
+            </div>
+            <div className="eval-metric-item">
+              <span className="eval-summary-label">{t("eval.summary.totalTraces")}</span>
+              <strong className="eval-summary-value tabular-nums">{summaryQuery.data?.total_traces ?? "—"}</strong>
+            </div>
+            <div className="eval-metric-item">
+              <span className="eval-summary-label">{t("eval.summary.scoredTraces")}</span>
+              <strong className="eval-summary-value tabular-nums">{summaryQuery.data?.scored_traces ?? "—"}</strong>
+            </div>
+            <div className="eval-metric-item">
+              <span className="eval-summary-label">{t("eval.workbench.goldenCases", "Golden cases")}</span>
+              <strong className="eval-summary-value tabular-nums">{dashboardMetrics.example_count ?? "—"}</strong>
+            </div>
+          </div>
+        </div>
+
+        <div className="eval-metric-group">
+          <span className="eval-metric-group-title">{t("eval.workbench.qualityGates", "Quality & Gates")}</span>
+          <div className="eval-metric-items">
+            <div className="eval-metric-item">
+              <span className="eval-summary-label">{t("eval.workbench.passRate", "Pass rate")}</span>
+              <strong className="eval-summary-value tabular-nums" style={{ color: (dashboardMetrics.pass_rate ?? 0) >= 0.8 ? "hsl(var(--success))" : "inherit" }}>
+                {pct(dashboardMetrics.pass_rate)}
+              </strong>
+            </div>
+            <div className="eval-metric-item">
+              <span className="eval-summary-label">{t("eval.workbench.trajectoryPass", "Trajectory pass")}</span>
+              <strong className="eval-summary-value tabular-nums">
+                {pct(dashboardMetrics.trajectory_pass_rate)}
+              </strong>
+            </div>
+            <div className="eval-metric-item">
+              <span className="eval-summary-label">{t("eval.workbench.criticalFailures", "Critical failures")}</span>
+              <strong className="eval-summary-value tabular-nums" style={{ color: (dashboardMetrics.critical_failures ?? 0) > 0 ? "hsl(var(--destructive))" : "inherit" }}>
+                {dashboardMetrics.critical_failures ?? 0}
+              </strong>
+            </div>
+            <div className="eval-metric-item">
+              <span className="eval-summary-label">{t("eval.workbench.toolSafetyFailures", "Tool-safety")}</span>
+              <strong className="eval-summary-value tabular-nums">
+                {runtimeHealth.tool_safety_failures ?? 0}
+              </strong>
+            </div>
+            <div className="eval-metric-item">
+              <span className="eval-summary-label">{t("eval.workbench.outboxFailures", "Outbox")}</span>
+              <strong className="eval-summary-value tabular-nums">
+                {dashboardQuery.data?.queue_health?.failed_jobs ?? 0}
+              </strong>
+            </div>
+            <div className="eval-metric-item">
+              <span className="eval-summary-label">{t("eval.workbench.judgePending", "Judge pending")}</span>
+              <strong className="eval-summary-value tabular-nums">
+                {dashboardMetrics.judge_pending_count ?? 0}
+              </strong>
+            </div>
+          </div>
+        </div>
+      </div>
       <div className="eval-platform-grid">
-      {[
-        { key: "rag", label: t("eval.summary.ragTraces"), value: summaryQuery.data?.rag_traces ?? "—" },
-        { key: "captured", label: t("eval.summary.totalTraces"), value: summaryQuery.data?.total_traces ?? "—" },
-        { key: "scored", label: t("eval.summary.scoredTraces"), value: summaryQuery.data?.scored_traces ?? "—" },
-        { key: "golden", label: t("eval.workbench.goldenCases", "Golden cases"), value: dashboardMetrics.example_count ?? "—" },
-        { key: "pass", label: t("eval.workbench.passRate", "Pass rate"), value: pct(dashboardMetrics.pass_rate) },
-        { key: "trajectory", label: t("eval.workbench.trajectoryPass", "Trajectory pass"), value: pct(dashboardMetrics.trajectory_pass_rate) },
-        { key: "critical", label: t("eval.workbench.criticalFailures", "Critical failures"), value: dashboardMetrics.critical_failures ?? 0 },
-        { key: "toolSafety", label: t("eval.workbench.toolSafetyFailures", "Tool-safety failures"), value: runtimeHealth.tool_safety_failures ?? 0 },
-        { key: "outbox", label: t("eval.workbench.outboxFailures", "Outbox failures"), value: dashboardQuery.data?.queue_health?.failed_jobs ?? 0 },
-        { key: "judge", label: t("eval.workbench.judgePending", "Judge pending"), value: dashboardMetrics.judge_pending_count ?? 0 },
-      ].map((card) => (
-        <article key={card.key} className="eval-summary-card">
-          <span className="eval-summary-label">{card.label}</span>
-          <strong className="eval-summary-value">{card.value}</strong>
-        </article>
-      ))}
       <section className="eval-panel eval-workbench-panel eval-platform-wide">
         <div className="eval-panel-heading">
           <div>
@@ -1885,9 +1933,47 @@ export function EvalPage() {
           color: hsl(var(--muted-foreground));
           font-size: 13px;
         }
+        .eval-platform-summary-block {
+          display: grid;
+          grid-template-columns: 1fr 1.5fr;
+          gap: 12px;
+          margin-bottom: 12px;
+        }
+        @media (max-width: 900px) {
+          .eval-platform-summary-block {
+            grid-template-columns: 1fr;
+          }
+        }
+        .eval-metric-group {
+          border: 1px solid hsl(var(--border));
+          border-radius: 10px;
+          background: hsl(var(--card));
+          padding: 14px 18px;
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+        .eval-metric-group-title {
+          font-size: 11px;
+          font-weight: 600;
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+          color: hsl(var(--muted-foreground));
+        }
+        .eval-metric-items {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(70px, 1fr));
+          gap: 10px;
+        }
+        .eval-metric-item {
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+          min-width: 0;
+        }
         .eval-platform-grid {
           display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+          grid-template-columns: 1fr;
           gap: 10px;
         }
         .eval-platform-wide {

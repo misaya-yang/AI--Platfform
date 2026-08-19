@@ -150,7 +150,7 @@ export function DatasetUploadDialog({
               <p className="text-sm text-muted-foreground">
                 {t("knowledge.detail.clickOrDragUpload")}
               </p>
-              <p className="text-xs text-muted-foreground/70 mt-1">PDF、Word、TXT、MD</p>
+              <p className="text-xs text-muted-foreground/70 mt-1">{t("knowledge.upload.supportedFormats")}</p>
             </div>
 
             <div className="flex-1 min-w-0">
@@ -893,11 +893,11 @@ export function DatasetUploadDialog({
                             </span>
                             <span>{model.label}</span>
                             <span className="text-xs text-muted-foreground">
-                              {model.dimension}维
+                              {t("knowledge.detail.dimensionValue", { dimension: model.dimension })}
                             </span>
                             {"badge" in model && model.badge && (
                               <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500 text-white">
-                                {model.badge}
+                                {t(model.badge)}
                               </span>
                             )}
                           </div>

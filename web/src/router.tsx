@@ -52,7 +52,7 @@ const ConnectorsSettingsPage = lazyNamed(
 const UserManagementPage = lazyNamed(() => import("@/pages/UserManagement"), "UserManagementPage");
 const UserEditPage = lazyNamed(() => import("@/pages/UserEdit"), "UserEditPage");
 const KnowledgeDatasetsPage = lazyNamed(() => import("@/pages/knowledge"), "KnowledgeDatasetsPage");
-const KnowledgeDatasetDetailPage = lazyNamed(() => import("@/pages/knowledge"), "KnowledgeDatasetDetailPage");
+const KnowledgeDatasetDetailPage = lazyNamedWithNamespace(() => import("@/pages/knowledge"), "KnowledgeDatasetDetailPage", "eval");
 const DatasetCreatePage = lazy(() => import("@/pages/knowledge/DatasetCreate"));
 const AssistantPage = lazyNamed(() => import("@/pages/assistant"), "AssistantPage");
 const EvalPage = lazyNamedWithNamespace(() => import("@/pages/eval"), "EvalPage", "eval");

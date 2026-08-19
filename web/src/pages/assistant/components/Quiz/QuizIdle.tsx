@@ -70,7 +70,7 @@ export function QuizIdle({ quizData, onStart }: QuizIdleProps) {
           {quizData.title}
         </h2>
         <p className="text-[12px] font-mono text-[hsl(var(--assistant-text-tertiary))] tabular-nums">
-          {total} {isZh ? "题" : t("assistant.quiz.questions", "questions")}
+          {total} {t("assistant.quiz.questions")}
           {difficulty && ` · ${difficulty}`}
         </p>
         {quizData.description && (
@@ -95,7 +95,7 @@ export function QuizIdle({ quizData, onStart }: QuizIdleProps) {
           className="act-btn inline-flex items-center gap-2 h-9 px-5 rounded-md text-[13px] font-medium bg-[hsl(var(--assistant-accent)/0.15)] text-[hsl(var(--assistant-accent))] hover:bg-[hsl(var(--assistant-accent)/0.25)] transition-colors duration-150"
         >
           <PlayCircle className="w-[15px] h-[15px]" />
-          {t("assistant.quiz.startQuiz", "开始作答")}
+          {t("assistant.quiz.startQuiz")}
         </button>
       </div>
 
@@ -105,28 +105,28 @@ export function QuizIdle({ quizData, onStart }: QuizIdleProps) {
           <kbd className="px-1 py-0.5 rounded border border-[hsl(var(--assistant-border))] bg-[hsl(var(--assistant-surface-soft))] text-[10px]">
             1-4
           </kbd>
-          {t("assistant.quiz.kbdSelect", "选择")}
+          {t("assistant.quiz.kbdSelect")}
         </span>
         <span>·</span>
         <span className="inline-flex items-center gap-1">
           <kbd className="px-1 py-0.5 rounded border border-[hsl(var(--assistant-border))] bg-[hsl(var(--assistant-surface-soft))] text-[10px]">
             →
           </kbd>
-          {t("assistant.quiz.kbdNext", "下一题")}
+          {t("assistant.quiz.kbdNext")}
         </span>
         <span>·</span>
         <span className="inline-flex items-center gap-1">
           <kbd className="px-1 py-0.5 rounded border border-[hsl(var(--assistant-border))] bg-[hsl(var(--assistant-surface-soft))] text-[10px]">
             ←
           </kbd>
-          {t("assistant.quiz.kbdPrev", "上一题")}
+          {t("assistant.quiz.kbdPrev")}
         </span>
         <span>·</span>
         <span className="inline-flex items-center gap-1">
           <kbd className="px-1 py-0.5 rounded border border-[hsl(var(--assistant-border))] bg-[hsl(var(--assistant-surface-soft))] text-[10px]">
             Enter
           </kbd>
-          {t("assistant.quiz.kbdSubmit", "提交")}
+          {t("assistant.quiz.kbdSubmit")}
         </span>
       </p>
     </motion.div>

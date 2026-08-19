@@ -243,7 +243,7 @@ export function SettingsPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">{t("settings.title")}</h1>
+          <h1 className="text-2xl font-bold text-foreground">{t("settings.title")}</h1>
           <p className="text-muted-foreground">{t("settings.subtitle")}</p>
         </div>
       </div>
@@ -258,16 +258,18 @@ export function SettingsPage() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
             </div>
-            <div className="space-y-1">
-              <h4 className="text-sm font-medium text-foreground">{t("settings.configLevels.title")}</h4>
-              <p className="text-sm text-muted-foreground">
+            <div>
+              <h3 className="font-semibold text-sm text-foreground">
+                {t("settings.configLevels.title")}
+              </h3>
+              <p className="text-xs text-muted-foreground mt-1">
                 {t("settings.configLevels.description")}
               </p>
-              <ul className="text-sm text-muted-foreground list-disc list-inside space-y-0.5">
+              <ul className="text-xs text-muted-foreground mt-1.5 space-y-1 list-disc list-inside">
                 <li>{t("settings.configLevels.globalConfig")}</li>
                 <li>{t("settings.configLevels.serviceConfig")}</li>
               </ul>
-              <p className="text-xs text-foreground mt-2">
+              <p className="text-xs text-foreground mt-2 font-medium">
                 {t("settings.configLevels.priority")}
               </p>
             </div>
@@ -275,80 +277,46 @@ export function SettingsPage() {
         </CardContent>
       </Card>
 
-      {/* 连接器目录 */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg">{t("settings.connectors.title")}</CardTitle>
-          <CardDescription>{t("settings.connectors.description")}</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <Link
-            to="/settings/connectors"
-            className="inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline"
-          >
-            {t("settings.connectors.manage")}
-            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M9 5l7 7-7 7"
-              />
-            </svg>
-          </Link>
-        </CardContent>
-      </Card>
-
-      {/* 系统状态 */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg">{t("settings.systemStatus.title")}</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="flex flex-wrap gap-6">
-            <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-muted/30 hover:bg-muted/50 transition-colors">
-              <div className={`h-2.5 w-2.5 rounded-full ${status.database?.connected ? "bg-emerald-500 status-pulse" : "bg-gray-300 dark:bg-gray-600"}`} />
-              <span className="text-sm font-medium">PostgreSQL</span>
-              <Badge
-                variant="outline"
-                className={
-                  status.database?.connected
-                    ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30"
-                    : "bg-muted text-muted-foreground"
-                }
-              >
-                {status.database?.enabled ? (status.database?.connected ? t("settings.systemStatus.connected") : t("settings.systemStatus.disconnected")) : t("settings.systemStatus.notEnabled")}
-              </Badge>
-            </div>
-            <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-muted/30 hover:bg-muted/50 transition-colors">
-              <div className={`h-2.5 w-2.5 rounded-full ${status.redis?.connected ? "bg-emerald-500 status-pulse" : "bg-gray-300 dark:bg-gray-600"}`} />
-              <span className="text-sm font-medium">Redis</span>
-              <Badge
-                variant="outline"
-                className={
-                  status.redis?.connected
-                    ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30"
-                    : "bg-muted text-muted-foreground"
-                }
-              >
-                {status.redis?.enabled ? (status.redis?.connected ? t("settings.systemStatus.connected") : t("settings.systemStatus.disconnected")) : t("settings.systemStatus.notEnabled")}
-              </Badge>
-            </div>
-            <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-muted/30 hover:bg-muted/50 transition-colors">
-              <span className="text-sm font-medium">{t("settings.systemStatus.loadBalancer")}</span>
-              <Badge variant="outline" className="bg-blue-500/15 text-blue-700 dark:text-blue-400 border-blue-500/30">
-                {status.load_balancer?.strategy || "round_robin"}
-              </Badge>
-            </div>
-            <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-muted/30 hover:bg-muted/50 transition-colors">
-              <span className="text-sm font-medium">Gateway Capacity</span>
-              <Badge variant="outline" className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30">
-                {capacity.mode || "single-node"}
-              </Badge>
-            </div>
+      {/* 统一系统状态与连接器概览条 */}
+      <div className="flex flex-wrap items-center justify-between gap-4 p-3.5 rounded-lg border border-border/70 bg-card">
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-xs text-muted-foreground uppercase tracking-wider font-semibold mr-1">
+            {t("settings.systemStatus.title")}
+          </span>
+          <div className="flex items-center gap-2 px-2.5 py-1 rounded-md bg-muted/60 border border-border/50">
+            <div className={`h-2 w-2 rounded-full ${status.database?.connected ? "bg-emerald-500" : "bg-muted-foreground"}`} />
+            <span className="text-xs font-medium text-foreground">PostgreSQL</span>
+            <Badge variant="outline" className={`text-[10px] py-0 px-1.5 ${status.database?.connected ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20" : "bg-muted text-muted-foreground"}`}>
+              {status.database?.enabled ? (status.database?.connected ? t("settings.systemStatus.connected") : t("settings.systemStatus.disconnected")) : t("settings.systemStatus.notEnabled")}
+            </Badge>
           </div>
-        </CardContent>
-      </Card>
+          <div className="flex items-center gap-2 px-2.5 py-1 rounded-md bg-muted/60 border border-border/50">
+            <div className={`h-2 w-2 rounded-full ${status.redis?.connected ? "bg-emerald-500" : "bg-muted-foreground"}`} />
+            <span className="text-xs font-medium text-foreground">Redis</span>
+            <Badge variant="outline" className={`text-[10px] py-0 px-1.5 ${status.redis?.connected ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20" : "bg-muted text-muted-foreground"}`}>
+              {status.redis?.enabled ? (status.redis?.connected ? t("settings.systemStatus.connected") : t("settings.systemStatus.disconnected")) : t("settings.systemStatus.notEnabled")}
+            </Badge>
+          </div>
+          <div className="flex items-center gap-2 px-2.5 py-1 rounded-md bg-muted/60 border border-border/50">
+            <span className="text-xs font-medium text-muted-foreground">{t("settings.systemStatus.loadBalancer")}</span>
+            <span className="text-xs font-semibold text-foreground font-mono">{status.load_balancer?.strategy || "round_robin"}</span>
+          </div>
+          <div className="flex items-center gap-2 px-2.5 py-1 rounded-md bg-muted/60 border border-border/50">
+            <span className="text-xs font-medium text-muted-foreground">{t("settings.systemStatus.capacity")}</span>
+            <span className="text-xs font-semibold text-foreground font-mono">{capacity.mode || "single-node"}</span>
+          </div>
+        </div>
+
+        <Link
+          to="/settings/connectors"
+          className="inline-flex items-center gap-1.5 text-xs font-medium text-primary hover:underline px-3 py-1.5 rounded-md hover:bg-primary/5 transition-colors"
+        >
+          {t("settings.connectors.title")}
+          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </Link>
+      </div>
 
       <Tabs defaultValue="auth" className="space-y-4">
         <div className="ui-scroll-affordance w-full pb-1">
@@ -465,7 +433,7 @@ export function SettingsPage() {
               variant="primary"
               onClick={() => updateAuthMutation.mutate({ ...authForm, enabled: authForm.jwt_enabled || authForm.api_key_enabled, provider: "custom" })}
               disabled={updateAuthMutation.isPending}
-              className="transition-all duration-200"
+              className="transition-[color,background-color,border-color] duration-150"
             >
               {updateAuthMutation.isPending ? t("settings.auth.saving") : t("settings.auth.save")}
             </Button>
@@ -560,7 +528,7 @@ export function SettingsPage() {
               <Button
                 onClick={() => createRateLimitMutation.mutate({ ...rateLimitForm, enabled: true })}
                 disabled={createRateLimitMutation.isPending}
-                className="transition-all duration-200"
+                className="transition-[color,background-color,border-color] duration-150"
               >
                 {t("settings.rateLimit.addRule")}
               </Button>
@@ -713,7 +681,7 @@ export function SettingsPage() {
                 <Button
                   onClick={() => updateLbMutation.mutate({ strategy: lbStrategy })}
                   disabled={updateLbMutation.isPending}
-                  className="transition-all duration-200"
+                  className="transition-[color,background-color,border-color] duration-150"
                 >
                   {updateLbMutation.isPending ? t("settings.loadBalancer.saving") : t("settings.loadBalancer.save")}
                 </Button>
@@ -752,7 +720,7 @@ export function SettingsPage() {
               <Button
                 onClick={() => createApiKeyMutation.mutate(apiKeyForm)}
                 disabled={createApiKeyMutation.isPending || !apiKeyForm.name}
-                className="transition-all duration-200"
+                className="transition-[color,background-color,border-color] duration-150"
               >
                 {t("settings.apiKeys.generate")}
               </Button>

@@ -249,7 +249,7 @@ export function ConnectorsSettingsPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">{t("settings.connectors.title")}</h1>
+          <h1 className="text-2xl font-bold text-foreground">{t("settings.connectors.title")}</h1>
           <p className="text-muted-foreground">{t("settings.connectors.description")}</p>
         </div>
         {canEdit ? (
@@ -262,7 +262,7 @@ export function ConnectorsSettingsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-lg">{t("settings.connectors.listTitle")}</CardTitle>
+          <CardTitle className="text-lg text-foreground">{t("settings.connectors.listTitle")}</CardTitle>
           <CardDescription>{t("settings.connectors.description")}</CardDescription>
         </CardHeader>
         <CardContent>
@@ -284,10 +284,10 @@ export function ConnectorsSettingsPage() {
               <TableBody>
                 {sorted.map((row) => (
                   <TableRow key={row.provider}>
-                    <TableCell className="font-medium">{row.provider}</TableCell>
-                    <TableCell>{row.display_name}</TableCell>
+                    <TableCell className="font-mono font-medium text-foreground">{row.provider}</TableCell>
+                    <TableCell className="text-foreground">{row.display_name}</TableCell>
                     <TableCell>
-                      <Badge variant="outline">{t(`settings.connectors.${MODE_LABELS[row.mode]}`)}</Badge>
+                      <Badge variant="outline" className="text-foreground">{t(`settings.connectors.${MODE_LABELS[row.mode]}`)}</Badge>
                     </TableCell>
                     <TableCell>
                       <Switch

@@ -99,7 +99,6 @@ const PopoverTrigger = React.forwardRef<HTMLButtonElement, PopoverTriggerProps>(
       const childProps = children.props as {
         onClick?: (event: React.MouseEvent) => void;
       };
-      // eslint-disable-next-line react-hooks/refs
       return React.cloneElement(children as React.ReactElement<typeof childProps>, {
         ref: setTriggerNode,
         onClick: (e: React.MouseEvent) => {
