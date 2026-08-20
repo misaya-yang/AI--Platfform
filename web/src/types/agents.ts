@@ -324,9 +324,14 @@ export interface AgentStreamEvent {
 export interface AgentCatalogTool {
   id: string;
   name: string;
+  title?: string;
+  summary?: string;
   description: string;
   category: string;
   risk: string;
+  capabilityKind?: string;
+  mcpServer?: string;
+  mcpTool?: string;
 }
 
 export interface AgentCatalogMcpTool {

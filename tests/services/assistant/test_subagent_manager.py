@@ -855,6 +855,7 @@ async def test_subagent_rejects_malformed_tool_arguments_without_dispatch(argume
 def test_subagent_tool_registration_is_explicitly_flagged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "test")
     monkeypatch.setenv("ASSISTANT_APP__ALLOW_ANONYMOUS", "true")
     from assistant_service import main
     from assistant_service.core.tools import subagent_tool

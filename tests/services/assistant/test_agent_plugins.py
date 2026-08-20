@@ -383,6 +383,7 @@ def test_bundled_docgen_plugin_maps_to_trusted_stdio_runtime_config(
     assert capability.operation_kind is MCPOperationKind.WRITE
     assert capability.risk_level == "low"
     assert capability.requires_confirmation is False
+    assert capability.display_title == "Document generation"
 
 
 def test_bundled_quiz_plugin_discovers_skill_and_agent() -> None:

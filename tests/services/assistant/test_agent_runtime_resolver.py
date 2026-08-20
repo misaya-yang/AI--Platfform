@@ -11,6 +11,7 @@ from ai_gateway_core.agents import (
     AgentRuntimeSigner,
     InMemoryReplayStore,
 )
+from ai_gateway_core.enums import StreamEventType
 from ai_gateway_core.skills import SkillManifest, SkillRegistry
 from assistant_service.api.routes.chat import (
     AgentRuntimeChatRequest,
@@ -18,6 +19,7 @@ from assistant_service.api.routes.chat import (
     _agent_runtime_tenant_policy,
     _build_agent_runtime_config,
     _public_agent_event_data,
+    _public_agent_event_type,
     _validate_agent_runtime_native_capabilities,
     _verified_agent_runtime_attachment_paths,
     _verify_agent_runtime_request,
@@ -1102,6 +1104,13 @@ def test_agent_runtime_event_projection_is_closed_by_event_type() -> None:
         "run_error",
         {"message": "Bearer synthetic-private-value", "traceback": "private"},
     ) == {"status": "failed", "exit": "failed"}
+
+
+def test_public_agent_event_type_accepts_str_backed_stream_enum() -> None:
+    assert _public_agent_event_type(StreamEventType.TEXT_DELTA) == "text_delta"
+    assert _public_agent_event_type(StreamEventType.TEXT_MESSAGE_CONTENT) == (
+        "text_message_content"
+    )
 
 
 def test_agent_runtime_raw_sse_excludes_arbitrary_tool_context_and_error_payloads(

@@ -36,6 +36,7 @@ _BUILTIN_PLUGIN_TOOL_CAPABILITIES = {
                 "operation_kind": "write",
                 "risk_level": "low",
                 "requires_confirmation": False,
+                "display_title": "Document generation",
             },
         )
     }

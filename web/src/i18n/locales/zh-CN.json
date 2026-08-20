@@ -1957,7 +1957,23 @@
   },
   "services": {
     "actions": {
-      "debugInPlayground": "在 Playground 调试"
+      "debugInPlayground": "在 Playground 调试",
+      "openAssistant": "打开 AI 助手"
+    },
+    "modelCapabilities": {
+      "title": "模型能力配置",
+      "description": "运行时只会展示该模型明确声明的推理选项。",
+      "providerDefaults": "恢复厂商默认",
+      "reasoningAdapter": "推理适配器",
+      "defaultOption": "默认选项",
+      "optionId": "选项 ID",
+      "optionLabel": "选项名称",
+      "thinkingEnabled": "启用思考",
+      "providerEffort": "厂商推理强度",
+      "thinkingBudget": "思考预算",
+      "addOption": "添加选项",
+      "promptCacheAdapter": "提示词缓存适配器",
+      "nativeSearchAdapter": "原生搜索适配器"
     },
     "addService": "添加服务",
     "badge": {
@@ -2294,8 +2310,18 @@
     "tabs": {
       "auth": "鉴权配置",
       "rateLimit": "限流配置",
+      "capacity": "容量",
       "loadBalancer": "负载均衡",
       "apiKeys": "API Keys"
+    },
+    "capacity": {
+      "title": "网关容量",
+      "budget": "预算",
+      "limit": "上限",
+      "inFlight": "执行中",
+      "queue": "队列",
+      "status": "状态",
+      "notEnforced": "未启用约束"
     },
     "auth": {
       "jwt": {
@@ -2559,6 +2585,19 @@
     "status": {
       "active": "启用",
       "disabled": "禁用"
+    },
+    "dialog": {
+      "createTitle": "添加用户",
+      "createDescription": "创建新的用户账号，初始密码遵循服务端配置。",
+      "createAction": "创建",
+      "createFailed": "创建用户失败",
+      "requiredFields": "请填写邮箱和显示名称。",
+      "editTitle": "编辑用户",
+      "editDescription": "更新 {{email}} 的用户信息",
+      "updateFailed": "更新用户失败",
+      "selectDepartment": "选择部门",
+      "departmentHint": "部门决定用户可访问的知识库和智能体范围。",
+      "rolesNoAccessCreate": "您无权查看角色列表；新用户将分配默认角色。"
     },
     "permissions": {
       "categories": {

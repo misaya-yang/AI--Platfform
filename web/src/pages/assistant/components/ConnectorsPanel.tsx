@@ -13,6 +13,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useTranslation } from "react-i18next";
+import { Plug } from "lucide-react";
 import { api } from "@/lib/api";
 
 interface ConnectorsPanelProps {
@@ -164,7 +165,15 @@ export default function ConnectorsPanel({ open, onClose, onCountChange }: Connec
               return (
                 <div key={conn.provider} className="rounded-lg border border-zinc-200 dark:border-zinc-700 overflow-hidden">
                   <div className="flex items-center gap-3 p-3">
-                    <span className="text-xl">{conn.icon_url || "🔌"}</span>
+                    {conn.icon_url ? (
+                      <img
+                        src={conn.icon_url}
+                        alt=""
+                        className="h-5 w-5 rounded object-contain"
+                      />
+                    ) : (
+                      <Plug className="h-5 w-5 text-zinc-500" aria-hidden="true" />
+                    )}
                     <div className="flex-1 min-w-0">
                       <div className="text-sm font-medium">{conn.display_name}</div>
                       <div className="text-xs text-zinc-500 truncate">{conn.description}</div>
@@ -185,6 +194,7 @@ export default function ConnectorsPanel({ open, onClose, onCountChange }: Connec
                             <button
                               onClick={() => handleActivate(conn.provider)}
                               disabled={busyProvider === conn.provider}
+                              aria-label={`${t("connectors.activate")} ${conn.display_name}`}
                               className="px-3 py-1 text-xs font-medium text-white bg-violet-600 hover:bg-violet-700 rounded-lg transition disabled:opacity-50"
                             >
                               {busyProvider === conn.provider ? t("connectors.processing") : t("connectors.activate")}
@@ -193,6 +203,7 @@ export default function ConnectorsPanel({ open, onClose, onCountChange }: Connec
                           <button
                             onClick={() => handleDisconnect(conn.provider)}
                             disabled={busyProvider === conn.provider}
+                            aria-label={`${t("connectors.disconnect")} ${conn.display_name}`}
                             className="px-2 py-1 text-xs text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition"
                           >
                             {t("connectors.disconnect")}
@@ -205,6 +216,7 @@ export default function ConnectorsPanel({ open, onClose, onCountChange }: Connec
                         <button
                           onClick={() => handleConnect(conn.provider)}
                           disabled={busyProvider === conn.provider}
+                          aria-label={`${t("connectors.connect")} ${conn.display_name}`}
                           className="px-3 py-1 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition disabled:opacity-50"
                         >
                           {busyProvider === conn.provider ? t("connectors.redirecting") : t("connectors.connect")}

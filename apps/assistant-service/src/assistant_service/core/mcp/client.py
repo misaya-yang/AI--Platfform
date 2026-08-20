@@ -59,6 +59,7 @@ _STATIC_CAPABILITY_KEYS: Final = frozenset(
         "read_back_tool",
         "risk_level",
         "requires_confirmation",
+        "display_title",
     }
 )
 
@@ -119,6 +120,7 @@ class MCPStaticToolCapability:
     read_back_tool: str | None = None
     risk_level: str | None = None
     requires_confirmation: bool | None = None
+    display_title: str | None = None
 
     @classmethod
     def from_config(cls, tool_name: str, value: Any) -> MCPStaticToolCapability:
@@ -172,6 +174,13 @@ class MCPStaticToolCapability:
             raise ValueError("MCP_STATIC_CAPABILITY_RISK_INVALID")
         if raw_risk_level == "high" and value.get("requires_confirmation") is False:
             raise ValueError("MCP_STATIC_CAPABILITY_CONFLICT")
+        raw_display_title = value.get("display_title")
+        if raw_display_title is not None and (
+            not isinstance(raw_display_title, str)
+            or not 1 <= len(raw_display_title.strip()) <= 80
+            or any(ord(char) < 32 for char in raw_display_title)
+        ):
+            raise ValueError("MCP_STATIC_CAPABILITY_DISPLAY_TITLE_INVALID")
         return cls(
             operation_kind=operation_kind,
             read_only=read_only,
@@ -179,6 +188,7 @@ class MCPStaticToolCapability:
             read_back_tool=raw_read_back or None,
             risk_level=raw_risk_level,
             requires_confirmation=value.get("requires_confirmation"),
+            display_title=raw_display_title.strip() if raw_display_title else None,
         )
 
 

@@ -1957,7 +1957,23 @@
   },
   "services": {
     "actions": {
-      "debugInPlayground": "Debug in Playground"
+      "debugInPlayground": "Debug in Playground",
+      "openAssistant": "Open AI Assistant"
+    },
+    "modelCapabilities": {
+      "title": "Model capability profile",
+      "description": "The runtime exposes only the reasoning options declared by this model.",
+      "providerDefaults": "Provider defaults",
+      "reasoningAdapter": "Reasoning adapter",
+      "defaultOption": "Default option",
+      "optionId": "Option id",
+      "optionLabel": "Option label",
+      "thinkingEnabled": "Thinking enabled",
+      "providerEffort": "Provider effort",
+      "thinkingBudget": "Thinking budget",
+      "addOption": "Add option",
+      "promptCacheAdapter": "Prompt cache adapter",
+      "nativeSearchAdapter": "Native search adapter"
     },
     "addService": "Add Service",
     "badge": {
@@ -2294,8 +2310,18 @@
     "tabs": {
       "auth": "Authentication",
       "rateLimit": "Rate Limiting",
+      "capacity": "Capacity",
       "loadBalancer": "Load Balancer",
       "apiKeys": "API Keys"
+    },
+    "capacity": {
+      "title": "Gateway Capacity",
+      "budget": "Budget",
+      "limit": "Limit",
+      "inFlight": "In Flight",
+      "queue": "Queue",
+      "status": "Status",
+      "notEnforced": "Not enforced"
     },
     "auth": {
       "jwt": {
@@ -2559,6 +2585,19 @@
     "status": {
       "active": "Active",
       "disabled": "Disabled"
+    },
+    "dialog": {
+      "createTitle": "Create User",
+      "createDescription": "Create a new user account. The initial password follows the server configuration.",
+      "createAction": "Create",
+      "createFailed": "Failed to create user",
+      "requiredFields": "Email and display name are required.",
+      "editTitle": "Edit User",
+      "editDescription": "Update user information for {{email}}",
+      "updateFailed": "Failed to update user",
+      "selectDepartment": "Select department",
+      "departmentHint": "Department determines the user's access to knowledge bases and agents.",
+      "rolesNoAccessCreate": "You do not have permission to view roles. The default role will be assigned."
     },
     "permissions": {
       "categories": {

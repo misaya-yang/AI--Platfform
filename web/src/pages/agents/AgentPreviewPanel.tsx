@@ -35,6 +35,11 @@ import type {
   AgentStreamEvent,
   AgentVersion,
 } from "@/types/agents";
+import {
+  agentPreviewEventData,
+  agentPreviewEventText,
+  agentPreviewToolActivityId,
+} from "./agentPreviewEvents";
 
 const { Paragraph, Text, Title } = Typography;
 
@@ -70,15 +75,6 @@ interface AgentPreviewPanelProps {
 
 function eventType(event: AgentStreamEvent): string {
   return String(event.event_type || event.event || "");
-}
-
-function eventData(event: AgentStreamEvent): Record<string, unknown> {
-  return typeof event.data === "object" && event.data !== null ? event.data : {};
-}
-
-function eventText(event: AgentStreamEvent): string {
-  const data = eventData(event);
-  return String(event.content || data.content || event.message || data.message || "");
 }
 
 function previewErrorMessage(error: unknown, t: TFunction): string {
@@ -203,19 +199,26 @@ export function AgentPreviewPanel({
         signal: controller.signal,
       })) {
         const type = eventType(event);
-        const data = eventData(event);
+        const data = agentPreviewEventData(event);
         if (type === "text_delta" || type === "text_message_content") {
-          const delta = eventText(event);
+          const delta = agentPreviewEventText(event);
           setMessages((current) => current.map((message) => message.id === assistantId ? { ...message, content: `${message.content}${delta}` } : message));
         } else if (type.includes("tool_call") || type === "tool_result") {
           const name = String(event.tool_name || data.tool_name || data.name || t("agents.preview.toolDefault"));
-          setActivities((current) => [...current, {
-            id: crypto.randomUUID(),
+          const activityId = agentPreviewToolActivityId(event);
+          const nextActivity: PreviewActivity = {
+            id: activityId || crypto.randomUUID(),
             kind: "tool",
             title: t("agents.preview.toolTitle", { name }),
             detail: t("agents.preview.toolDetail"),
             status: String(event.status || data.status || t("agents.preview.toolStatus")),
-          }]);
+          };
+          setActivities((current) => {
+            if (!activityId) return [...current, nextActivity];
+            const existing = current.findIndex((activity) => activity.id === activityId);
+            if (existing < 0) return [...current, nextActivity];
+            return current.map((activity, index) => index === existing ? nextActivity : activity);
+          });
         } else if (type.includes("context") || type.includes("knowledge") || type.includes("citation")) {
           const dataset = String(event.dataset_name || data.dataset_name || data.dataset_id || t("agents.preview.knowledgeDefault"));
           const rawCitationCount = event.citation_count ?? data.citation_count;
@@ -231,7 +234,7 @@ export function AgentPreviewPanel({
               : t("agents.preview.knowledgeDetail"),
           }]);
         } else if (type === "error" || type === "run_error") {
-          throw new Error(eventText(event) || t("agents.preview.runtimeError"));
+          throw new Error(agentPreviewEventText(event) || t("agents.preview.runtimeError"));
         }
       }
       setMessages((current) => current.map((message) => message.id === assistantId && !message.content ? { ...message, content: t("agents.preview.emptyResponse") } : message));

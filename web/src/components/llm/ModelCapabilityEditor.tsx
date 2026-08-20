@@ -1,4 +1,5 @@
 import { Plus, RotateCcw, Trash2 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import type {
   CanonicalReasoningEffort,
   ModelCapabilityAdapter,
@@ -94,6 +95,7 @@ export function ModelCapabilityEditor({
   onChange,
   onReset,
 }: ModelCapabilityEditorProps) {
+  const { t } = useTranslation();
   const update = (mutate: (draft: ModelCapabilityProfile) => void) => {
     const draft = JSON.parse(JSON.stringify(profile)) as ModelCapabilityProfile;
     mutate(draft);
@@ -115,22 +117,22 @@ export function ModelCapabilityEditor({
     <section className="grid gap-4 rounded-lg border border-border/60 p-4">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold">Model capability profile</h3>
+          <h3 className="text-sm font-semibold">{t("services.modelCapabilities.title")}</h3>
           <p className="text-xs text-muted-foreground">
-            The runtime exposes only these model-declared reasoning options.
+            {t("services.modelCapabilities.description")}
           </p>
         </div>
         {onReset && (
           <Button type="button" variant="outline" size="sm" onClick={onReset}>
             <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
-            Provider defaults
+            {t("services.modelCapabilities.providerDefaults")}
           </Button>
         )}
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="grid gap-2">
-          <Label>Reasoning adapter</Label>
+          <Label>{t("services.modelCapabilities.reasoningAdapter")}</Label>
           <Select
             value={profile.reasoning.adapter_id}
             onValueChange={(adapterId) =>
@@ -152,7 +154,7 @@ export function ModelCapabilityEditor({
           </Select>
         </div>
         <div className="grid gap-2">
-          <Label>Default option</Label>
+          <Label>{t("services.modelCapabilities.defaultOption")}</Label>
           <Select
             value={profile.reasoning.default_option}
             onValueChange={(value) => update((draft) => { draft.reasoning.default_option = value; })}
@@ -174,7 +176,7 @@ export function ModelCapabilityEditor({
           <div key={`${option.id}-${index}`} className="grid gap-2 rounded-md bg-muted/25 p-3">
             <div className="grid gap-2 sm:grid-cols-3">
               <Input
-                aria-label="Option id"
+                aria-label={t("services.modelCapabilities.optionId")}
                 aria-invalid={idProblem}
                 className={idProblem ? "border-destructive" : undefined}
                 value={option.id}
@@ -182,7 +184,7 @@ export function ModelCapabilityEditor({
                 placeholder="low"
               />
               <Input
-                aria-label="Option label"
+                aria-label={t("services.modelCapabilities.optionLabel")}
                 value={option.label}
                 onChange={(event) => updateOption(index, { label: event.target.value })}
                 placeholder="Low"
@@ -213,20 +215,20 @@ export function ModelCapabilityEditor({
                     checked={Boolean(option.settings.enabled)}
                     onCheckedChange={(enabled) => updateOption(index, { settings: { ...option.settings, enabled } })}
                   />
-                  Thinking enabled
+                  {t("services.modelCapabilities.thinkingEnabled")}
                 </label>
               )}
               {"effort" in option.settings && (
                 <Input
-                  aria-label="Provider effort"
+                  aria-label={t("services.modelCapabilities.providerEffort")}
                   value={String(option.settings.effort ?? "")}
                   onChange={(event) => updateOption(index, { settings: { ...option.settings, effort: event.target.value } })}
-                  placeholder="Provider effort"
+                  placeholder={t("services.modelCapabilities.providerEffort")}
                 />
               )}
               {"budget_tokens" in option.settings && (
                 <Input
-                  aria-label="Thinking budget"
+                  aria-label={t("services.modelCapabilities.thinkingBudget")}
                   type="number"
                   min={1}
                   value={Number(option.settings.budget_tokens ?? 1)}
@@ -245,7 +247,7 @@ export function ModelCapabilityEditor({
                   }
                 })}
               >
-                <Trash2 className="mr-1.5 h-3.5 w-3.5" /> Remove
+                <Trash2 className="mr-1.5 h-3.5 w-3.5" /> {t("common.remove")}
               </Button>
             </div>
           </div>
@@ -279,20 +281,20 @@ export function ModelCapabilityEditor({
             draft.reasoning.options.push(option);
           })}
         >
-          <Plus className="mr-1.5 h-3.5 w-3.5" /> Add option
+          <Plus className="mr-1.5 h-3.5 w-3.5" /> {t("services.modelCapabilities.addOption")}
         </Button>
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="grid gap-2">
-          <Label>Prompt cache adapter</Label>
+          <Label>{t("services.modelCapabilities.promptCacheAdapter")}</Label>
           <Select value={profile.prompt_cache.adapter_id} onValueChange={(value) => update((draft) => { draft.prompt_cache = { adapter_id: value, config: {} }; })}>
             <SelectTrigger><SelectValue /></SelectTrigger>
             <SelectContent>{cacheAdapters.map((adapter) => <SelectItem key={adapter.id} value={adapter.id}>{adapter.label}</SelectItem>)}</SelectContent>
           </Select>
         </div>
         <div className="grid gap-2">
-          <Label>Native search adapter</Label>
+          <Label>{t("services.modelCapabilities.nativeSearchAdapter")}</Label>
           <Select value={profile.native_search.adapter_id} onValueChange={(value) => update((draft) => { draft.native_search = { adapter_id: value, enabled: value !== "search/none-v1", config: value === "search/anthropic-server-tool-v1" ? { max_uses: 5 } : {} }; })}>
             <SelectTrigger><SelectValue /></SelectTrigger>
             <SelectContent>{searchAdapters.map((adapter) => <SelectItem key={adapter.id} value={adapter.id}>{adapter.label}</SelectItem>)}</SelectContent>

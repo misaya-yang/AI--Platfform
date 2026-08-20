@@ -2739,7 +2739,6 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
 
           // Code/Document execution events
           case SSEEventType.CODE_EXECUTION_START:
-          case SSEEventType.DOCUMENT_GENERATION_START:
           case SSEEventType.IMAGE_GENERATION_START:
             if (event.data) {
               const startData = event.data as { execution_id?: string; title?: string; code?: string };
@@ -2753,6 +2752,21 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                 outputFiles: [],
               });
               setShowArtifacts(true);
+            }
+            break;
+
+          case SSEEventType.DOCUMENT_GENERATION_START:
+            if (event.data) {
+              const startData = event.data as { execution_id?: string; title?: string; code?: string };
+              setCodeExecution({
+                isExecuting: true,
+                executionId: startData.execution_id ?? null,
+                code: startData.code ?? null,
+                output: "Processing...\n",
+                executionTimeMs: null,
+                status: "running",
+                outputFiles: [],
+              });
             }
             break;
 
@@ -2832,7 +2846,12 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                   },
                 ];
               });
-              setShowArtifacts(true);
+              if (
+                artifactData.type === "image" ||
+                artifactData.mime_type?.startsWith("image/")
+              ) {
+                setShowArtifacts(true);
+              }
 
               // Also add to current message's generatedArtifacts for inline display
               const generatedArtifact: GeneratedArtifact = {

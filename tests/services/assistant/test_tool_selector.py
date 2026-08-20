@@ -92,6 +92,16 @@ def test_discovery_bridges_survive_a_tight_schema_budget() -> None:
     assert {item.name for item in selected} == DISCOVERY_TOOL_NAMES
 
 
+def test_discover_mode_does_not_advertise_bridges_for_an_empty_catalog() -> None:
+    selected = select_tools(
+        tool_discovery_definitions(),
+        user_message="route this support request",
+        max_tokens=10_000,
+    )
+
+    assert selected == []
+
+
 @pytest.mark.parametrize(
     "user_message",
     [

@@ -79,6 +79,14 @@ def select_tools(
         return []
     pinned = extra_always or set()
     has_discovery = any(getattr(tool, "name", "") in DISCOVERY_TOOL_NAMES for tool in all_tools)
+    has_concrete_tool = any(
+        getattr(tool, "name", "") not in DISCOVERY_TOOL_NAMES for tool in all_tools
+    )
+    # A capability-restricted Agent can legitimately have no callable tools.
+    # Advertising search/describe/call in that state makes the model repeatedly
+    # query an empty catalog and adds latency without creating any capability.
+    if has_discovery and not has_concrete_tool:
+        return []
     del user_message
     scored: list[tuple[ToolDefinition, int, int]] = []
     for tool in all_tools:

@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ServiceConfigDialog } from "@/components/ServiceConfigDialog";
 import { cn } from "@/lib/utils";
+import { useAppStore } from "@/store/useAppStore";
 import {
   MessageSquare,
   Sparkles,
@@ -62,6 +63,7 @@ export function ServiceCard({
 }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const setSelectedServiceId = useAppStore((state) => state.setSelectedServiceId);
   const [configOpen, setConfigOpen] = useState(false);
   const isHealthy = health?.status === "healthy";
   const isVirtual = service.metadata?.is_virtual === true;
@@ -136,9 +138,16 @@ export function ServiceCard({
                 className="h-7 px-2 text-xs text-muted-foreground hover:text-primary transition-[color,background-color] duration-150"
                 onClick={(e) => {
                   e.stopPropagation();
-                  navigate(`/playground`);
+                  if (service.service_type === "assistant") {
+                    navigate("/assistant");
+                    return;
+                  }
+                  setSelectedServiceId(service.service_id);
+                  navigate("/playground");
                 }}
-                title={t("services.actions.debugInPlayground", "Debug in Playground")}
+                title={service.service_type === "assistant"
+                  ? t("services.actions.openAssistant", "Open Assistant")
+                  : t("services.actions.debugInPlayground", "Debug in Playground")}
               >
                 <MessageSquare className="h-3.5 w-3.5 mr-1" />
                 <span>{t("common.debug", "调试")}</span>

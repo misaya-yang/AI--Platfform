@@ -64,6 +64,24 @@ async def test_docx_planner_deterministic_from_markdown():
 
 
 @pytest.mark.asyncio
+async def test_docx_planner_does_not_regenerate_authored_markdown_with_llm():
+    llm = _FakeLLM({})
+    brief = Brief(
+        doc_type="docx",
+        title="Transformer Guide",
+        goal="Turn the authored guide into a Word document",
+        body_markdown="# Overview\nExisting approved content.\n\n| Term | Meaning |\n| --- | --- |\n| Token | Input unit |",
+    )
+
+    result = await DocxPlanner(llm=llm).plan(brief)
+
+    assert result.used_llm is False
+    assert llm.calls == []
+    headings = [block.text for block in result.ir.content.blocks if isinstance(block, HeadingBlock)]
+    assert headings == ["Overview"]
+
+
+@pytest.mark.asyncio
 async def test_docx_planner_stable_without_markdown():
     brief = Brief(doc_type="docx", title="Hello", goal="Write a one-pager")
     res1 = await DocxPlanner().plan(brief)

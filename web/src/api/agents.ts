@@ -418,15 +418,27 @@ export async function listAgentTools(): Promise<AgentCatalogTool[]> {
       description: string;
       category: string;
       risk_level: string;
+      title?: string;
+      summary?: string;
+      capability_kind?: string;
+      mcp_server?: string;
+      mcp_tool?: string;
     }>;
   }>("/api/v1/assistant/tools");
-  return data.tools.map((tool) => ({
-    id: tool.name,
-    name: tool.name,
-    description: tool.description,
-    category: tool.category,
-    risk: tool.risk_level,
-  }));
+  return data.tools
+    .filter((tool) => !["mcp", "skill", "platform_tool_discovery"].includes(tool.capability_kind || ""))
+    .map((tool) => ({
+      id: tool.name,
+      name: tool.name,
+      title: tool.title,
+      summary: tool.summary,
+      description: tool.description,
+      category: tool.category,
+      risk: tool.risk_level,
+      capabilityKind: tool.capability_kind,
+      mcpServer: tool.mcp_server,
+      mcpTool: tool.mcp_tool,
+    }));
 }
 
 interface McpServerRecord {

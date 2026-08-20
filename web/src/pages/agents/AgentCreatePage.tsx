@@ -32,6 +32,7 @@ import {
   type AgentCapabilityBinding,
   type AgentSpec,
 } from "@/types/agents";
+import { capabilityDisplayName } from "./agentCatalogPresentation";
 import "./agent-studio.css";
 
 const { Paragraph, Text, Title } = Typography;
@@ -265,14 +266,14 @@ export function AgentCreatePage() {
               <CatalogGroup title={t("agents.create.catalogs.platformTools")} error={tools.isError ? <CatalogError label={t("agents.create.catalogs.platformTools")} /> : null}>
                 {(tools.data ?? []).map((tool) => (
                   <Checkbox key={tool.id} checked={selectedKeys.has(`native:${tool.id}`)} onChange={(event) => toggleCapability({ type: "native", resource_id: tool.id, config: { risk: tool.risk } }, event.target.checked)}>
-                    <strong>{tool.name}</strong><span>{tool.description}</span>
+                    <strong>{capabilityDisplayName(tool.name, tool.title)}</strong><span>{tool.summary || tool.description}</span>
                   </Checkbox>
                 ))}
               </CatalogGroup>
               <CatalogGroup title={t("agents.create.catalogs.mcpTools")} error={mcp.isError ? <CatalogError label={t("agents.create.catalogs.mcpTools")} /> : null}>
                 {(mcp.data ?? []).map((tool) => (
                   <Checkbox key={tool.tool_id} disabled={!tool.connection_id || !tool.enabled} checked={selectedKeys.has(`mcp:${tool.runtime_name}`)} onChange={(event) => toggleCapability({ type: "mcp", resource_id: tool.runtime_name, resource_version: tool.snapshot_id, schema_hash: tool.schema_hash, config: { connection_id: tool.connection_id, principal_type: tool.principal_type, risk: tool.risk_level } }, event.target.checked)}>
-                    <strong>{tool.runtime_name}</strong><span>{tool.server_name} · {tool.connection_id ? tool.description : t("agents.create.catalogs.connectCredential")}</span>
+                    <strong>{capabilityDisplayName(tool.runtime_name)}</strong><span>{tool.server_name} · {tool.connection_id ? tool.description : t("agents.create.catalogs.connectCredential")}</span>
                   </Checkbox>
                 ))}
               </CatalogGroup>

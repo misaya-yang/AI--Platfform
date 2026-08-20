@@ -267,7 +267,7 @@ export function ConnectorsSettingsPage() {
         </CardHeader>
         <CardContent>
           {isLoading ? (
-            <p className="text-sm text-muted-foreground">Loading...</p>
+            <p className="text-sm text-muted-foreground">{t("common.loading")}</p>
           ) : sorted.length === 0 ? (
             <p className="text-sm text-muted-foreground">{t("settings.connectors.empty")}</p>
           ) : (
@@ -301,12 +301,23 @@ export function ConnectorsSettingsPage() {
                       <div className="flex justify-end gap-1">
                         {canEdit ? (
                         <>
-                        <Button variant="ghost" size="sm" onClick={() => openEdit(row)}>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => openEdit(row)}
+                          aria-label={`${t("settings.connectors.editConnector")}: ${row.display_name}`}
+                          title={t("settings.connectors.editConnector")}
+                        >
                           <Pencil className="h-4 w-4" />
                         </Button>
                         <AlertDialog>
                           <AlertDialogTrigger asChild>
-                            <Button variant="ghost" size="sm">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              aria-label={`${t("settings.connectors.deleteConnector")}: ${row.display_name}`}
+                              title={t("settings.connectors.deleteConnector")}
+                            >
                               <Trash2 className="h-4 w-4" />
                             </Button>
                           </AlertDialogTrigger>

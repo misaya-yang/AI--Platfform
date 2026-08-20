@@ -504,7 +504,7 @@ class MCPManager:
         capability: MCPStaticToolCapability,
     ) -> dict[str, Any]:
         """Expose MCP catalog facts without loading remote schema/resource data."""
-        return {
+        metadata = {
             "kind": "mcp",
             "mcp_server": mcp_tool.server_name,
             "mcp_tool": mcp_tool.name,
@@ -538,6 +538,9 @@ class MCPManager:
                 "schema_loaded_on_demand": True,
             },
         }
+        if capability.display_title:
+            metadata["title"] = capability.display_title
+        return metadata
 
     @staticmethod
     def _static_capability(client: Any, tool_name: str) -> MCPStaticToolCapability:

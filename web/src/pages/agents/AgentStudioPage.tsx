@@ -64,6 +64,7 @@ import type {
   AgentSpec,
   AgentVersion,
 } from "@/types/agents";
+import { capabilityDisplayName } from "./agentCatalogPresentation";
 import { AgentPreviewPanel } from "./AgentPreviewPanel";
 import { AgentReleasePanel } from "./AgentReleasePanel";
 import "./agent-studio.css";
@@ -523,12 +524,12 @@ function AgentStudioWorkspace({
               {
                 key: "platform",
                 label: t("agents.studio.capabilities.platform"),
-                children: <CapabilityGroup title={t("agents.studio.capabilities.platform")} empty={t("agents.studio.capabilities.platformEmpty")}>{catalog.tools.map((tool) => <CapabilityOption key={tool.id} checked={selected.has(`native:${tool.id}`)} disabled={!canEdit} title={tool.name} description={tool.description} meta={t("agents.studio.capabilities.platformMeta", { category: tool.category, risk: tool.risk })} onChange={(checked) => toggleCapability({ type: "native", resource_id: tool.id, config: { risk: tool.risk } }, checked)} onTest={openPreviewTest} />)}</CapabilityGroup>,
+                children: <CapabilityGroup title={t("agents.studio.capabilities.platform")} empty={t("agents.studio.capabilities.platformEmpty")}>{catalog.tools.map((tool) => <CapabilityOption key={tool.id} checked={selected.has(`native:${tool.id}`)} disabled={!canEdit} title={capabilityDisplayName(tool.name, tool.title)} description={tool.summary || tool.description} meta={t("agents.studio.capabilities.platformMeta", { category: tool.category, risk: tool.risk })} onChange={(checked) => toggleCapability({ type: "native", resource_id: tool.id, config: { risk: tool.risk } }, checked)} onTest={openPreviewTest} />)}</CapabilityGroup>,
               },
               {
                 key: "mcp",
                 label: t("agents.studio.capabilities.mcp"),
-                children: <CapabilityGroup title={t("agents.studio.capabilities.mcp")} empty={t("agents.studio.capabilities.mcpEmpty")}>{catalog.mcp.map((tool) => <CapabilityOption key={tool.tool_id} checked={selected.has(`mcp:${tool.runtime_name}`)} disabled={!canEdit || !tool.connection_id || !tool.enabled} title={tool.runtime_name} description={tool.connection_id ? tool.description : t("agents.studio.capabilities.mcpSetupDescription")} meta={t("agents.studio.capabilities.mcpMeta", { server: tool.server_name, risk: tool.risk_level, state: tool.connection_id ? t("agents.studio.capabilities.mcpConfigured", { principal: tool.principal_type || t("agents.studio.capabilities.unknown") }) : t("agents.studio.capabilities.mcpSetup"), snapshot: tool.snapshot_id.slice(0, 8), schema: tool.schema_hash.slice(0, 8) })} onChange={(checked) => toggleCapability({ type: "mcp", resource_id: tool.runtime_name, resource_version: tool.snapshot_id, schema_hash: tool.schema_hash, config: { connection_id: tool.connection_id, principal_type: tool.principal_type, risk: tool.risk_level } }, checked)} onTest={openPreviewTest} />)}</CapabilityGroup>,
+                children: <CapabilityGroup title={t("agents.studio.capabilities.mcp")} empty={t("agents.studio.capabilities.mcpEmpty")}>{catalog.mcp.map((tool) => <CapabilityOption key={tool.tool_id} checked={selected.has(`mcp:${tool.runtime_name}`)} disabled={!canEdit || !tool.connection_id || !tool.enabled} title={capabilityDisplayName(tool.runtime_name)} description={tool.connection_id ? tool.description : t("agents.studio.capabilities.mcpSetupDescription")} meta={t("agents.studio.capabilities.mcpMeta", { server: tool.server_name, risk: tool.risk_level, state: tool.connection_id ? t("agents.studio.capabilities.mcpConfigured", { principal: tool.principal_type || t("agents.studio.capabilities.unknown") }) : t("agents.studio.capabilities.mcpSetup"), snapshot: tool.snapshot_id.slice(0, 8), schema: tool.schema_hash.slice(0, 8) })} onChange={(checked) => toggleCapability({ type: "mcp", resource_id: tool.runtime_name, resource_version: tool.snapshot_id, schema_hash: tool.schema_hash, config: { connection_id: tool.connection_id, principal_type: tool.principal_type, risk: tool.risk_level } }, checked)} onTest={openPreviewTest} />)}</CapabilityGroup>,
               },
               {
                 key: "skills",

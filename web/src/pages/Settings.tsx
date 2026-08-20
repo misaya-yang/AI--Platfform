@@ -323,7 +323,7 @@ export function SettingsPage() {
           <TabsList className="h-auto min-w-max justify-start">
             <TabsTrigger value="auth">{t("settings.tabs.auth")}</TabsTrigger>
             <TabsTrigger value="rate-limit">{t("settings.tabs.rateLimit")}</TabsTrigger>
-            <TabsTrigger value="capacity">Capacity</TabsTrigger>
+            <TabsTrigger value="capacity">{t("settings.tabs.capacity")}</TabsTrigger>
             <TabsTrigger value="load-balancer">
               {t("settings.tabs.loadBalancer")}
             </TabsTrigger>
@@ -581,7 +581,7 @@ export function SettingsPage() {
         <TabsContent value="capacity" className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle>Gateway Capacity</CardTitle>
+              <CardTitle>{t("settings.capacity.title")}</CardTitle>
               <CardDescription>
                 {capacity.gateway_instance_id || "gateway-1"} · {capacity.cluster_epoch || "uat-2026-05"}
               </CardDescription>
@@ -591,11 +591,11 @@ export function SettingsPage() {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Budget</TableHead>
-                      <TableHead>Limit</TableHead>
-                      <TableHead>In Flight</TableHead>
-                      <TableHead>Queue</TableHead>
-                      <TableHead>Status</TableHead>
+                      <TableHead>{t("settings.capacity.budget")}</TableHead>
+                      <TableHead>{t("settings.capacity.limit")}</TableHead>
+                      <TableHead>{t("settings.capacity.inFlight")}</TableHead>
+                      <TableHead>{t("settings.capacity.queue")}</TableHead>
+                      <TableHead>{t("settings.capacity.status")}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -607,7 +607,7 @@ export function SettingsPage() {
                         <TableCell>{budget.queue_depth}</TableCell>
                         <TableCell>
                           <Badge variant={budget.enforced ? "default" : "secondary"}>
-                            {budget.enforced ? budget.source_status : "not enforced"}
+                            {budget.enforced ? budget.source_status : t("settings.capacity.notEnforced")}
                           </Badge>
                         </TableCell>
                       </TableRow>

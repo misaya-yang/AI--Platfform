@@ -1273,7 +1273,12 @@ _PUBLIC_AGENT_LIFECYCLE_HASH_FIELDS = (
 
 
 def _public_agent_event_type(value: Any) -> str | None:
-    normalized = str(value or "").strip().lower()
+    # AssistantService maps several legacy events to ``StreamEventType``.
+    # ``json.dumps`` serializes that str-backed Enum correctly, but ``str()``
+    # produces ``StreamEventType.TEXT_DELTA`` and silently filtered all text
+    # from Preview/Hosted streams while lifecycle strings still passed.
+    enum_value = getattr(value, "value", value)
+    normalized = str(enum_value or "").strip().lower()
     return normalized if normalized in _PUBLIC_AGENT_EVENT_TYPES else None
 
 

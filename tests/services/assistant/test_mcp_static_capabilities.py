@@ -31,6 +31,7 @@ def test_unconfigured_static_tool_remains_unknown_potential_write() -> None:
     assert capability.read_back_tool is None
     assert capability.risk_level is None
     assert capability.requires_confirmation is None
+    assert capability.display_title is None
 
 
 @pytest.mark.parametrize(
@@ -45,6 +46,7 @@ def test_unconfigured_static_tool_remains_unknown_potential_write() -> None:
         {"requires_confirmation": "no"},
         {"risk_level": "high", "requires_confirmation": False},
         {"unknown_field": "secret-value"},
+        {"display_title": "\n"},
     ],
 )
 def test_invalid_or_conflicting_static_capability_fails_closed_without_value(
@@ -77,6 +79,7 @@ mcp_servers:
         operation_kind: write
         idempotency_supported: true
         read_back_tool: get_record
+        display_title: Create record
 """.strip()
     )
 
@@ -90,6 +93,7 @@ mcp_servers:
     assert write.operation_kind is MCPOperationKind.WRITE
     assert write.idempotency_supported is True
     assert write.read_back_tool == "get_record"
+    assert write.display_title == "Create record"
 
 
 def test_plugin_server_key_maps_to_stable_runtime_safe_name(

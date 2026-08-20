@@ -165,12 +165,12 @@ class DatabaseSkillArtifactRepository:
                    version.content_hash, version.status,
                    version.artifact_type, version.created_at,
                    EXISTS (
-                       SELECT 1 FROM assistant_skill_version_revocations revoked
+                       SELECT 1 FROM public.assistant_skill_version_revocations revoked
                        WHERE revoked.tenant_id = version.tenant_id
                          AND revoked.version_id = version.version_id
                    ) AS revoked
-            FROM assistant_skill_versions AS version
-            JOIN assistant_skills AS skill
+            FROM assistant.assistant_skill_versions AS version
+            JOIN assistant.assistant_skills AS skill
               ON skill.tenant_id = version.tenant_id
              AND skill.skill_id = version.skill_id
         """
@@ -196,7 +196,7 @@ class DatabaseSkillArtifactRepository:
         async with self._pool.acquire() as connection, connection.transaction():
             skill = await connection.fetchrow(
                 """
-                SELECT * FROM assistant_skills
+                SELECT * FROM assistant.assistant_skills
                 WHERE tenant_id = $1 AND user_id = $2 AND name = $3
                 FOR UPDATE
                 """,
@@ -215,7 +215,7 @@ class DatabaseSkillArtifactRepository:
             if not skill:
                 await connection.execute(
                     """
-                    INSERT INTO assistant_skills (
+                    INSERT INTO assistant.assistant_skills (
                         skill_id, tenant_id, user_id, name, title, description,
                         tags, permissions, enabled, status, artifact_type,
                         created_by, created_at, updated_at
@@ -242,7 +242,7 @@ class DatabaseSkillArtifactRepository:
                 await connection.fetchval(
                     """
                     SELECT COALESCE(MAX(revision), 0) + 1
-                    FROM assistant_skill_versions
+                    FROM assistant.assistant_skill_versions
                     WHERE skill_id = $1
                     """,
                     skill_id,
@@ -262,7 +262,7 @@ class DatabaseSkillArtifactRepository:
             version_status = "active" if stored.enabled else stored.lifecycle_status
             await connection.execute(
                 """
-                INSERT INTO assistant_skill_versions (
+                INSERT INTO assistant.assistant_skill_versions (
                     version_id, skill_id, tenant_id, user_id, version, revision,
                     manifest, entrypoint, content, content_hash, artifact_type,
                     status, created_by, created_at
@@ -287,7 +287,7 @@ class DatabaseSkillArtifactRepository:
             )
             await connection.execute(
                 """
-                UPDATE assistant_skills
+                UPDATE assistant.assistant_skills
                 SET title = $4, description = $5, tags = $6::jsonb,
                     permissions = $7::jsonb, enabled = $8, status = $9,
                     artifact_type = 'tenant_instruction',
@@ -338,7 +338,7 @@ class DatabaseSkillArtifactRepository:
             + """
               JOIN LATERAL (
                   SELECT candidate.version_id
-                  FROM assistant_skill_versions AS candidate
+                  FROM assistant.assistant_skill_versions AS candidate
                   WHERE candidate.skill_id = skill.skill_id
                   ORDER BY candidate.revision DESC
                   LIMIT 1
@@ -429,7 +429,7 @@ class DatabaseSkillArtifactRepository:
         async with self._pool.acquire() as connection:
             result = await connection.execute(
                 """
-                UPDATE assistant_skills
+                UPDATE assistant.assistant_skills
                 SET enabled = $4,
                     status = CASE WHEN $4 THEN 'active' ELSE 'disabled' END,
                     disabled_at = CASE WHEN $4 THEN NULL ELSE NOW() END,
@@ -458,7 +458,7 @@ class DatabaseSkillArtifactRepository:
         async with self._pool.acquire() as connection:
             result = await connection.execute(
                 """
-                UPDATE assistant_skills
+                UPDATE assistant.assistant_skills
                 SET enabled = FALSE, status = 'deleted', deleted_at = NOW(),
                     disabled_at = COALESCE(disabled_at, NOW()), updated_at = NOW()
                 WHERE tenant_id = $1 AND user_id = $2 AND name = $3

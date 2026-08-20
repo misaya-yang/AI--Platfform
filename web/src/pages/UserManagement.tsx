@@ -45,6 +45,7 @@ import {
   listPermissions,
 } from "@/api/users";
 import type { RoleResponse, UserResponse, PermissionResponse } from "@/api/users";
+import { getErrorMessage } from "@/lib/utils";
 
 export function UserManagementPage() {
   const { t } = useTranslation();
@@ -231,6 +232,10 @@ export function UserManagementPage() {
   // Create user
   const handleCreate = async () => {
     setFormError("");
+    if (!formEmail.trim() || !formDisplayName.trim()) {
+      setFormError(t("users.dialog.requiredFields"));
+      return;
+    }
     try {
       await createUser({
         email: formEmail,
@@ -242,8 +247,7 @@ export function UserManagementPage() {
       resetForm();
       loadUsers();
     } catch (err: unknown) {
-      const axiosError = err as { response?: { data?: { detail?: string } } };
-      setFormError(axiosError.response?.data?.detail || "Failed to create user");
+      setFormError(getErrorMessage(err) || t("users.dialog.createFailed"));
     }
   };
 
@@ -263,8 +267,7 @@ export function UserManagementPage() {
       resetForm();
       loadUsers();
     } catch (err: unknown) {
-      const axiosError = err as { response?: { data?: { detail?: string } } };
-      setFormError(axiosError.response?.data?.detail || "Failed to update user");
+      setFormError(getErrorMessage(err) || t("users.dialog.updateFailed"));
     }
   };
 
@@ -758,14 +761,14 @@ export function UserManagementPage() {
       <Dialog open={showCreateModal} onOpenChange={setShowCreateModal}>
         <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>Create User</DialogTitle>
+            <DialogTitle>{t("users.dialog.createTitle")}</DialogTitle>
             <DialogDescription>
-              Create a new user account. The initial password follows the server configuration.
+              {t("users.dialog.createDescription")}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="create-user-email">Email</Label>
+              <Label htmlFor="create-user-email">{t("users.fields.email")}</Label>
               <Input
                 id="create-user-email"
                 type="email"
@@ -775,7 +778,7 @@ export function UserManagementPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="create-user-display-name">Display Name</Label>
+              <Label htmlFor="create-user-display-name">{t("users.fields.displayName")}</Label>
               <Input
                 id="create-user-display-name"
                 value={formDisplayName}
@@ -783,10 +786,10 @@ export function UserManagementPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="create-user-department">Department</Label>
+              <Label htmlFor="create-user-department">{t("users.fields.department")}</Label>
               <Select value={formDepartment} onValueChange={setFormDepartment}>
                 <SelectTrigger id="create-user-department">
-                  <SelectValue placeholder="Select department" />
+                  <SelectValue placeholder={t("users.dialog.selectDepartment")} />
                 </SelectTrigger>
                 <SelectContent>
                   {departmentOptions.map((dept) => (
@@ -797,11 +800,11 @@ export function UserManagementPage() {
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
-                Department determines user's access to knowledge base and agents
+                {t("users.dialog.departmentHint")}
               </p>
             </div>
             <div className="space-y-2">
-              <Label>Roles</Label>
+              <Label>{t("users.fields.roles")}</Label>
               {canViewRoles ? (
                 <div className="space-y-2">
                   {roles.map((role) => (
@@ -825,8 +828,7 @@ export function UserManagementPage() {
                 </div>
               ) : (
                 <div className="text-sm text-muted-foreground">
-                  You do not have permission to view role list. New users will be
-                  assigned the default role.
+                  {t("users.dialog.rolesNoAccessCreate")}
                 </div>
               )}
             </div>
@@ -834,9 +836,9 @@ export function UserManagementPage() {
           </div>
           <DialogFooter className="flex-col-reverse sm:flex-row">
             <Button className="w-full sm:w-auto" variant="outline" onClick={() => setShowCreateModal(false)}>
-              Cancel
+              {t("common.cancel")}
             </Button>
-            <Button variant="primary" className="w-full sm:w-auto" onClick={handleCreate}>Create</Button>
+            <Button variant="primary" className="w-full sm:w-auto" onClick={handleCreate}>{t("users.dialog.createAction")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -845,14 +847,14 @@ export function UserManagementPage() {
       <Dialog open={showEditModal} onOpenChange={setShowEditModal}>
         <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>Edit User</DialogTitle>
+            <DialogTitle>{t("users.dialog.editTitle")}</DialogTitle>
             <DialogDescription>
-              Update user information for {selectedUser?.email}
+              {t("users.dialog.editDescription", { email: selectedUser?.email })}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="edit-user-display-name">Display Name</Label>
+              <Label htmlFor="edit-user-display-name">{t("users.fields.displayName")}</Label>
               <Input
                 id="edit-user-display-name"
                 value={formDisplayName}
@@ -860,10 +862,10 @@ export function UserManagementPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="edit-user-department">Department</Label>
+              <Label htmlFor="edit-user-department">{t("users.fields.department")}</Label>
               <Select value={formDepartment} onValueChange={setFormDepartment}>
                 <SelectTrigger id="edit-user-department">
-                  <SelectValue placeholder="Select department" />
+                  <SelectValue placeholder={t("users.dialog.selectDepartment")} />
                 </SelectTrigger>
                 <SelectContent>
                   {departmentOptions.map((dept) => (
@@ -874,23 +876,23 @@ export function UserManagementPage() {
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
-                Department determines user's access to knowledge base and agents
+                {t("users.dialog.departmentHint")}
               </p>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="edit-user-status">Status</Label>
+              <Label htmlFor="edit-user-status">{t("users.fields.status")}</Label>
               <Select value={formStatus} onValueChange={setFormStatus}>
                 <SelectTrigger id="edit-user-status">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="active">Active</SelectItem>
-                  <SelectItem value="disabled">Disabled</SelectItem>
+                  <SelectItem value="active">{t("users.status.active")}</SelectItem>
+                  <SelectItem value="disabled">{t("users.status.disabled")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
             <div className="space-y-2">
-              <Label>Roles</Label>
+              <Label>{t("users.fields.roles")}</Label>
               {canViewRoles ? (
                 <div className="space-y-2">
                   {roles.map((role) => (
@@ -914,14 +916,14 @@ export function UserManagementPage() {
                 </div>
               ) : (
                 <div className="text-sm text-muted-foreground">
-                  You do not have permission to view role list.
+                  {t("users.edit.roles.noAccess")}
                 </div>
               )}
             </div>
             <div className="space-y-2">
-              <Label>Extra Permissions (Direct Assignment)</Label>
+              <Label>{t("users.edit.extraPermissions.title")}</Label>
               <p className="text-xs text-muted-foreground mb-2">
-                These permissions are assigned directly to the user, in addition to role-based permissions.
+                {t("users.edit.extraPermissions.desc")}
               </p>
               {canViewRoles ? (
                 <div className="max-h-48 overflow-y-auto border rounded-md p-3 space-y-3">
@@ -967,7 +969,7 @@ export function UserManagementPage() {
                 </div>
               ) : (
                 <div className="text-sm text-muted-foreground">
-                  You do not have permission to view permissions list.
+                  {t("users.edit.extraPermissions.noAccess")}
                 </div>
               )}
             </div>
@@ -975,9 +977,9 @@ export function UserManagementPage() {
           </div>
           <DialogFooter className="flex-col-reverse sm:flex-row">
             <Button className="w-full sm:w-auto" variant="outline" onClick={() => setShowEditModal(false)}>
-              Cancel
+              {t("common.cancel")}
             </Button>
-            <Button variant="primary" className="w-full sm:w-auto" onClick={handleUpdate}>Save</Button>
+            <Button variant="primary" className="w-full sm:w-auto" onClick={handleUpdate}>{t("common.save")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

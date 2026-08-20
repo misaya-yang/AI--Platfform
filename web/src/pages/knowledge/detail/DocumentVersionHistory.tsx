@@ -4,7 +4,7 @@
  * Shows version history for a document with compare and restore functionality.
  */
 
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   History,
