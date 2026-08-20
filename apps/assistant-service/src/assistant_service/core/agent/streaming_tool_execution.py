@@ -72,14 +72,23 @@ class StreamingToolExecutionMixin:
         the transcript can cross another provider or checkpoint boundary.
         """
 
+        messages = getattr(state, "messages", None)
+        if not isinstance(messages, list):
+            messages = []
+            state.messages = messages
+        turn_tool_calls = getattr(state, "turn_tool_calls", None)
+        if not isinstance(turn_tool_calls, list):
+            turn_tool_calls = []
+            state.turn_tool_calls = turn_tool_calls
+
         existing_result_ids = {
             str(message.get("tool_call_id") or "")
-            for message in state.messages
+            for message in messages
             if isinstance(message, dict) and message.get("role") == "tool"
         }
         turn_call_records = {
             str(record.get("id") or ""): record
-            for record in state.turn_tool_calls
+            for record in turn_tool_calls
             if isinstance(record, dict) and str(record.get("id") or "")
         }
         appended: list[str] = []
@@ -128,7 +137,7 @@ class StreamingToolExecutionMixin:
             local_runtime = ctx.openai_responses_local_runtime
             if local_runtime is not None:
                 provider_blocks: list[dict[str, Any]] = []
-                for prior_message in reversed(state.messages):
+                for prior_message in reversed(messages):
                     if prior_message.get("role") != "assistant":
                         continue
                     raw_blocks = prior_message.get("provider_content_blocks")
@@ -149,7 +158,7 @@ class StreamingToolExecutionMixin:
                 if provider_result is not None:
                     tool_message["provider_content_blocks"] = [provider_result]
 
-            state.messages.append(tool_message)
+            messages.append(tool_message)
             existing_result_ids.add(tool_call_id)
             appended.append(tool_call_id)
 
@@ -171,7 +180,7 @@ class StreamingToolExecutionMixin:
                     "name": tool_name,
                     "arguments": arguments,
                 }
-                state.turn_tool_calls.append(record)
+                turn_tool_calls.append(record)
                 turn_call_records[tool_call_id] = record
             record["status"] = status
             record["error"] = reason
