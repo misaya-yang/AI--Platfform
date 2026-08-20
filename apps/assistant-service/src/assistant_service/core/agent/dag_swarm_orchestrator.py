@@ -7,10 +7,15 @@ intermediate output routing, and fault isolation across multi-agent swarms.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+from ai_gateway_core.logging import get_logger, log_internal_exception
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -30,6 +35,10 @@ class DAGTaskNode:
 
 class CyclicDependencyError(ValueError):
     """Raised when a circular dependency is detected in the agent DAG."""
+
+
+class MissingDependencyError(ValueError):
+    """Raised when a DAG node references an unknown dependency."""
 
 
 class DAGGraph:
@@ -57,6 +66,17 @@ class DAGGraph:
 
     def topological_tiers(self) -> list[list[str]]:
         """Compute execution tiers (parallel waves) using Kahn's algorithm."""
+        missing = sorted({
+            dependency
+            for node in self.nodes.values()
+            for dependency in node.dependencies
+            if dependency not in self.nodes
+        })
+        if missing:
+            raise MissingDependencyError(
+                f"Unknown DAG dependencies: {', '.join(missing)}"
+            )
+
         in_degree: dict[str, int] = defaultdict(int)
         adj: dict[str, list[str]] = defaultdict(list)
 
@@ -116,6 +136,12 @@ class DAGSwarmOrchestrator:
                     node.output = res
                     node.status = "completed"
                 except Exception as exc:
+                    log_internal_exception(
+                        logger,
+                        "assistant.dag_swarm.node_failed",
+                        exc,
+                        level=logging.WARNING,
+                    )
                     node.error = str(exc)
                     node.status = "failed"
 

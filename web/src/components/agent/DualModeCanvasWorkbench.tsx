@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Button,
   Tag,
@@ -47,6 +47,7 @@ export const DualModeCanvasWorkbench: React.FC<DualModeCanvasWorkbenchProps> = (
   );
   const [splitMode, setSplitMode] = useState<"dual" | "chat_only" | "canvas_only">("dual");
   const [copied, setCopied] = useState<boolean>(false);
+  const copyResetTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (activeArtifactId) {
@@ -54,13 +55,25 @@ export const DualModeCanvasWorkbench: React.FC<DualModeCanvasWorkbenchProps> = (
     }
   }, [activeArtifactId]);
 
-  const activeArtifact = artifacts.find((a) => a.id === (activeArtifactId || selectedId)) || artifacts[0];
+  useEffect(() => () => {
+    if (copyResetTimerRef.current !== null) {
+      window.clearTimeout(copyResetTimerRef.current);
+    }
+  }, []);
+
+  const activeArtifact = artifacts.find((a) => a.id === selectedId) || artifacts[0];
 
   const handleCopy = () => {
     if (activeArtifact?.content) {
       navigator.clipboard.writeText(activeArtifact.content);
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      if (copyResetTimerRef.current !== null) {
+        window.clearTimeout(copyResetTimerRef.current);
+      }
+      copyResetTimerRef.current = window.setTimeout(() => {
+        setCopied(false);
+        copyResetTimerRef.current = null;
+      }, 2000);
     }
   };
 

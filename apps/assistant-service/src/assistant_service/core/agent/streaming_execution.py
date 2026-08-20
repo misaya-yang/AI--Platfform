@@ -632,7 +632,10 @@ class StreamingExecutionMixin(StreamingPreparationMixin, StreamingToolLoopMixin)
             from assistant_service.core.agent.failover_classifier import classify_provider_error
 
             classification = classify_provider_error(e)
-            safe_error = f"Assistant execution failed: {classification.clean_message}"
+            safe_error = (
+                "Assistant execution failed; details [redacted]. "
+                f"{classification.clean_message}"
+            )
             ctx.model_error_seen = True
             log_internal_exception(logger, "assistant.streaming_first.failed", e)
             async for error_event in self.middleware_chain.run_on_error(ctx, e, phase):

@@ -333,6 +333,25 @@ print(json.dumps({"all_passed": len(cases) == 4, "cases": cases}))
         mock_code_executor.execute.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_ast_guard_rejects_from_import_escape_before_sandbox(
+        self,
+        executor,
+        mock_code_executor,
+    ):
+        request = ToolCallRequest(
+            call_id="test-call-ast-guard",
+            tool_name="execute_python_code",
+            arguments={"code": "from os import system\nsystem('id')"},
+        )
+
+        result = await executor.execute(request)
+
+        assert result.success is False
+        assert "static analysis" in result.error.lower()
+        assert result.metadata["side_effect_state"] == "not_started"
+        mock_code_executor.execute.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_execute_missing_code(self, executor, mock_code_executor):
         """Test execution with missing code parameter."""
         request = ToolCallRequest(

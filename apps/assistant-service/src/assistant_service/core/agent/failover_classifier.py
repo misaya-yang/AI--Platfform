@@ -311,5 +311,8 @@ def classify_provider_error(exc: Exception | None) -> FailoverClassification:
         status_code=status_code,
         clean_message="Unclassified runtime exception",
         raw_error_type=exc_type,
-        metadata={"raw_message": str(exc)[:200]},
+        # Public failover metadata must never echo provider/user-controlled
+        # exception text. Internal diagnostics already retain a safe
+        # fingerprint through log_internal_exception at the call site.
+        metadata={},
     )

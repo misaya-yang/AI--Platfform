@@ -1,6 +1,40 @@
 # 2026 SOTA Agent 架构优化综合代码审查、安全/性能审计与合并就绪度评估报告
 **Phase 1–3 运行时弹性、分布式并发队列、AST沙箱、DAG Swarm编排与画布工作台全景深度审查**
 
+## 合并后集成验收更新（2026-08-20）
+
+本报告主体保留独立 Worktree 审查时的原始判断；以下结果是合并到当前 `main` 后，
+针对真实组合代码和本地 Docker 运行时重新执行的权威增量证据：
+
+- `5634de5` 已通过 no-ff merge 进入 `main`，合并提交为 `67835d5`。
+- 初次组合门发现并修复了 Failover SSE 未保留脱敏标记、未知异常原文进入公开
+  metadata、DAG/Redis 租约宽泛异常静默吞错、Canvas 受控 Tab 锁死和 AST Guard
+  绕过/未接入代码执行工具等确定性问题。
+- Phase 专属测试扩展为 **34 passed**；代码执行工具与 Phase 测试组合为
+  **69 passed**。
+- `make verify-assistant-runtime-dev` 为 **5/5 groups passed**；
+  `make agent-eval-core-gate` 为 **83 + 24 passed**；`make test-isolation` 为
+  **18 passed、0 skipped**。
+- Phase 变更文件 Ruff、Web type-check、lint、build、bundle budgets、Harness 均通过。
+  用户指定的全目录 Ruff 命令仍会命中大量与该分支无关的仓库既有债务，因此不被
+  误报为本批次回归。
+- Compose ownership 确认为 `/Users/yang/projects/AI--Platfform`；执行
+  `make hot-update ARGS="--all"`、`make validate`、`make status` 后，PostgreSQL、
+  Redis、Qdrant、Knowledge API/worker、Assistant、Docgen、Gateway、metrics、Frontend
+  全部 Healthy。配置仅保留“本地 bootstrap 默认密码在共享部署前需轮换”的既有警告。
+
+### 当前组合边界
+
+- `RedisTaskQueue` 已提供并通过单元合同，但 Gateway composition root 仍默认选择
+  `MemoryTaskQueue`；它尚不是当前 Docker 的实际任务队列。
+- `append_session_history` 是新增的底层原子 API；现有会话热路径继续使用既有
+  `append_session_message`，本轮没有声称完成调用点迁移。
+- DAG、AaaS 和 Dual-Mode Canvas 当前分别是编排引擎、协议类型和已导出的 UI 组件；
+  尚未新增公开 AaaS 路由，也未把 Canvas 挂载为 Assistant 默认工作区。
+- `SubAgentConcurrencyLimiter` 的 Redis 客户端接口存在，但当前 Assistant composition
+  root 未连接该可选后端；Docker 实际仍以进程内租约为主。分布式原子 Lua/续租属于
+  后续组合工作，不能用本轮健康检查冒充完成。
+
 - **审查对象**: `/Users/yang/projects/AI--Platfform-sota-opt` (分支: `feat/phase1-runtime-resilience`)
 - **基准架构标准**: `/Users/yang/projects/AI--Platfform/reports/2026_agent_architecture_and_product_audit_report.md` (2026 SOTA Agent 架构基准)
 - **审查编排体系**: Multi-Agent 5路并行专家审查组 (Module 1 弹性专家, Module 2/3 并发存储专家, Module 4/5 安全前端专家, 2026 架构合规审计师, 构建测试验证员)

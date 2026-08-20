@@ -13,6 +13,7 @@ from assistant_service.core.agent.dag_swarm_orchestrator import (
     DAGGraph,
     DAGSwarmOrchestrator,
     DAGTaskNode,
+    MissingDependencyError,
 )
 from assistant_service.core.security.ast_guard import ASTSecurityGuard
 
@@ -82,6 +83,22 @@ subclasses = ().__class__.__bases__[0].__subclasses__()
     assert any(v.rule_id == "SEC_DUNDER_TRAVERSAL" for v in report.violations)
 
 
+@pytest.mark.parametrize(
+    "exploit_code",
+    [
+        "from os import system\nsystem('id')",
+        "import importlib\nimportlib.import_module('subprocess')",
+        "getattr(__builtins__, '__import__')('os')",
+        "os.execv('/bin/sh', ['sh'])",
+    ],
+)
+def test_ast_guard_blocks_import_and_reflection_bypasses(exploit_code: str) -> None:
+    report = ASTSecurityGuard.audit_python_code(exploit_code)
+
+    assert report.is_safe is False
+    assert report.violations
+
+
 # ============================================================================
 # 2. DAG Swarm Orchestrator Tests
 # ============================================================================
@@ -138,6 +155,22 @@ def test_dag_detects_cyclic_dependency() -> None:
     dag.add_node(DAGTaskNode(node_id="B", name="B", agent_role="B", prompt="", dependencies=["A"]))
 
     with pytest.raises(CyclicDependencyError, match="Circular dependency detected"):
+        dag.topological_tiers()
+
+
+def test_dag_rejects_missing_dependency_explicitly() -> None:
+    dag = DAGGraph()
+    dag.add_node(
+        DAGTaskNode(
+            node_id="A",
+            name="A",
+            agent_role="A",
+            prompt="",
+            dependencies=["missing"],
+        )
+    )
+
+    with pytest.raises(MissingDependencyError, match="missing"):
         dag.topological_tiers()
 
 

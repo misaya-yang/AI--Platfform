@@ -56,6 +56,9 @@ FORBIDDEN_MODULES = frozenset({
     "multiprocessing",
     "winreg",
     "signal",
+    "importlib",
+    "pkgutil",
+    "runpy",
 })
 
 # Dangerous built-in function names
@@ -79,6 +82,22 @@ DANGEROUS_OS_CALLS = frozenset({
     "rmdir",
     "unlink",
     "remove",
+    "execl",
+    "execle",
+    "execlp",
+    "execlpe",
+    "execv",
+    "execve",
+    "execvp",
+    "execvpe",
+    "spawnl",
+    "spawnle",
+    "spawnlp",
+    "spawnlpe",
+    "spawnv",
+    "spawnve",
+    "spawnvp",
+    "spawnvpe",
 })
 
 # Dangerous reflection / dunder attributes
@@ -90,6 +109,7 @@ DANGEROUS_ATTRIBUTES = frozenset({
     "__mro__",
     "__builtins__",
     "__import__",
+    "__class__",
 })
 
 
@@ -127,6 +147,27 @@ class CodeSecurityVisitor(ast.NodeVisitor):
                         node_type="ImportFrom",
                     )
                 )
+            dangerous_names = DANGEROUS_BUILTINS
+            if base_module == "os":
+                dangerous_names = DANGEROUS_OS_CALLS
+            elif base_module == "shutil":
+                dangerous_names = frozenset({"rmtree", "move"})
+            elif base_module != "builtins":
+                dangerous_names = frozenset()
+            for alias in node.names:
+                if alias.name in dangerous_names:
+                    self.violations.append(
+                        SecurityViolation(
+                            rule_id="SEC_DANGEROUS_FROM_IMPORT",
+                            severity="CRITICAL",
+                            message=(
+                                f"Import of dangerous callable "
+                                f"'{node.module}.{alias.name}' is blocked"
+                            ),
+                            line_number=node.lineno,
+                            node_type="ImportFrom",
+                        )
+                    )
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -138,6 +179,25 @@ class CodeSecurityVisitor(ast.NodeVisitor):
                         rule_id="SEC_DANGEROUS_BUILTIN",
                         severity="CRITICAL",
                         message=f"Call to dangerous builtin '{node.func.id}()' is blocked",
+                        line_number=node.lineno,
+                        node_type="Call",
+                    )
+                )
+            elif (
+                node.func.id in {"getattr", "setattr", "delattr"}
+                and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and isinstance(node.args[1].value, str)
+                and (
+                    node.args[1].value in DANGEROUS_ATTRIBUTES
+                    or node.args[1].value.startswith("__")
+                )
+            ):
+                self.violations.append(
+                    SecurityViolation(
+                        rule_id="SEC_DYNAMIC_DUNDER_ACCESS",
+                        severity="CRITICAL",
+                        message="Dynamic access to a dunder attribute is blocked",
                         line_number=node.lineno,
                         node_type="Call",
                     )

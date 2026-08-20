@@ -121,6 +121,14 @@ def test_classification_to_dict() -> None:
     assert "metadata" in data
 
 
+def test_unknown_classification_never_echoes_exception_text() -> None:
+    secret = "Authorization: Bearer private-provider-token"
+    data = classify_provider_error(RuntimeError(secret)).to_dict()
+
+    assert secret not in json.dumps(data)
+    assert data["reason"] == FailoverReason.UNKNOWN_FAILURE.value
+
+
 # ============================================================================
 # 2. SubAgent Concurrency Limiter Tests (Memory & Redis)
 # ============================================================================

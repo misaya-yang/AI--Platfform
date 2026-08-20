@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import math
 import re
 import threading
@@ -18,6 +19,10 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
+
+from ai_gateway_core.logging import get_logger, log_internal_exception
+
+logger = get_logger(__name__)
 
 DEFAULT_MAX_SUBAGENT_DEPTH = 1
 OPERATOR_MAX_SUBAGENT_DEPTH = 2
@@ -485,9 +490,14 @@ class SubAgentConcurrencyLimiter:
                         raise SubAgentConcurrencyExceeded("distributed session sub-agent concurrency exhausted")
             except SubAgentConcurrencyExceeded:
                 raise
-            except Exception:
+            except Exception as exc:
                 # Log warning and preserve local in-memory lease if Redis is momentarily unreachable
-                pass
+                log_internal_exception(
+                    logger,
+                    "assistant.subagent_concurrency.redis_acquire_failed",
+                    exc,
+                    level=logging.WARNING,
+                )
 
         return SubAgentConcurrencyLease(self, scope, count)
 
@@ -522,8 +532,13 @@ class SubAgentConcurrencyLimiter:
                     rem_s = self.redis_client.decrby(session_redis_key, lease.count)
                     if rem_s <= 0 and hasattr(self.redis_client, "delete"):
                         self.redis_client.delete(session_redis_key)
-            except Exception:
-                pass
+            except Exception as exc:
+                log_internal_exception(
+                    logger,
+                    "assistant.subagent_concurrency.redis_release_failed",
+                    exc,
+                    level=logging.WARNING,
+                )
 
 
 # These registries are intentionally process-local. They enforce hard bounds and
