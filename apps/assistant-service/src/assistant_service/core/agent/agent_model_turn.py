@@ -230,6 +230,15 @@ class AgentModelTurnMixin:
                         event_type="thinking_start",
                         data={"model_id": ctx.config.model_id},
                     )
+                if not result.first_token_emitted:
+                    ttft_ms = (time.time() - ttft_start) * 1000
+                    result.first_token_emitted = True
+                    logger.info("[STREAMING-FIRST] TTFT (thinking): %.0fms", ttft_ms)
+                    yield AgentLoopEvent(
+                        phase=phase,
+                        event_type="ttft",
+                        data={"ttft_ms": round(ttft_ms, 2), "token_kind": "thinking"},
+                    )
                 accumulated_thinking += delta.thinking_content
                 result.thinking_content += delta.thinking_content
                 yield AgentLoopEvent(
@@ -276,7 +285,7 @@ class AgentModelTurnMixin:
                         yield AgentLoopEvent(
                             phase=phase,
                             event_type="ttft",
-                            data={"ttft_ms": round(ttft_ms, 2)},
+                            data={"ttft_ms": round(ttft_ms, 2), "token_kind": "text"},
                         )
                     yield AgentLoopEvent(
                         phase=phase,
@@ -379,7 +388,7 @@ class AgentModelTurnMixin:
                     yield AgentLoopEvent(
                         phase=phase,
                         event_type="ttft",
-                        data={"ttft_ms": round(ttft_ms, 2)},
+                        data={"ttft_ms": round(ttft_ms, 2), "token_kind": "text"},
                     )
                 yield AgentLoopEvent(
                     phase=phase,
@@ -503,7 +512,7 @@ class AgentModelTurnMixin:
                     yield AgentLoopEvent(
                         phase=phase,
                         event_type="ttft",
-                        data={"ttft_ms": round(ttft_ms, 2)},
+                        data={"ttft_ms": round(ttft_ms, 2), "token_kind": "text"},
                     )
                 yield AgentLoopEvent(
                     phase=phase,

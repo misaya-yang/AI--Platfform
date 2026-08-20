@@ -88,4 +88,7 @@ Do not grow a file that is already over the "must split" threshold. Extract inst
 ADRs live in `docs/architecture/`. Write one when a change alters a boundary in section 3,
 introduces a new service, or changes a contract in section 4.
 
-Existing: [ADR-004 — bounded plugin subagent delegation](../architecture/ADR-004-bounded-plugin-subagent-delegation.md).
+Existing:
+
+- [ADR-004 — bounded plugin subagent delegation](../architecture/ADR-004-bounded-plugin-subagent-delegation.md)
+- [ADR-005 — tenant-configurable model capability profiles](../architecture/ADR-005-model-capability-profiles.md)

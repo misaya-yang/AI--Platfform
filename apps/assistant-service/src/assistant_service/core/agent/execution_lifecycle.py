@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.enums import StreamEventType
 from ai_gateway_core.logging import get_logger, log_internal_exception
+from ai_gateway_core.models import resolve_reasoning_option
 
 from ..rag.context_metrics import ContextMetricsBuilder
 from ..run_budget import RunBudget, RunBudgetExceeded
@@ -599,6 +600,25 @@ class ExecutionLifecycleMixin:
                 )
 
         # Emit run_started with task_id for cancellation
+        reasoning_metadata: dict[str, Any] | None = None
+        model_info = self.model_registry.get_model(config.model_id)
+        capability_profile = getattr(model_info, "capability_profile", None)
+        if model_info is not None and capability_profile is not None:
+            resolved_reasoning = resolve_reasoning_option(
+                capability_profile,
+                config.thinking_level,
+            )
+            reasoning_metadata = {
+                "requested_option": resolved_reasoning.requested,
+                "effective_option": resolved_reasoning.effective,
+                "canonical_effort": resolved_reasoning.canonical_effort,
+                "adapter_id": resolved_reasoning.adapter_id,
+                "capability_revision": int(
+                    getattr(model_info, "capability_revision", 1) or 1
+                ),
+                "fallback_reason": resolved_reasoning.fallback_reason,
+            }
+
         run_started_event = AgentLoopEvent(
             phase=AgentLoopPhase.MEMORY_LOADING,
             event_type="run_started",
@@ -611,6 +631,7 @@ class ExecutionLifecycleMixin:
                 "request_id": ctx.request_id,
                 "mode": "streaming_first",
                 "context_snapshot": ctx.context_snapshot,
+                "reasoning": reasoning_metadata,
             },
         )
         run_started_event = await self._capture_and_prepare_stream_event(ctx, run_started_event)

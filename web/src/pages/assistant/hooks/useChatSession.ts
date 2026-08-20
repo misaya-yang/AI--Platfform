@@ -1583,7 +1583,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         kb_top_k: 5,
         kb_include_images: false,
         web_search_enabled: config.web_search_enabled,
-        thinking_level: config.thinking_level || "low",
+        reasoning_option: config.reasoning_option || config.thinking_level || "auto",
         web_search_max_results: 5,
         file_paths: filePaths.length > 0 ? filePaths : undefined,
         execution_profile: config.execution_profile || "safe",
@@ -2072,6 +2072,14 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
               session_id?: string;
               task_id?: string | null;
               timestamp?: number;
+              reasoning?: {
+                requested_option?: string;
+                effective_option?: string;
+                canonical_effort?: string | null;
+                adapter_id?: string;
+                capability_revision?: number;
+                fallback_reason?: string | null;
+              } | null;
             };
             const acceptedSessionId = acceptPendingRunSession({
               requestedSessionId: sessionId,
@@ -2100,10 +2108,13 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
             setShowTaskPanel(true);
             updateAssistantMessage((m) => ({
               ...m,
-              processSummary: initProcessSummary(
-                runStartedData?.run_id,
-                runStartedData?.timestamp ?? now,
-              ),
+              processSummary: {
+                ...initProcessSummary(
+                  runStartedData?.run_id,
+                  runStartedData?.timestamp ?? now,
+                ),
+                reasoning: runStartedData?.reasoning ?? undefined,
+              },
             }));
             await persistAssistantRunId(runStartedData?.run_id);
             if (!isCurrentStream()) return;

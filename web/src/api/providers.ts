@@ -53,6 +53,7 @@ export interface ProviderTemplateModel {
   output_price_per_1k: number;
   access_level: string;
   sort_order: number;
+  catalog_capabilities?: import("./models").ModelCapabilityProfile;
 }
 
 export interface ProviderTemplate {

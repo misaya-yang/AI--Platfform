@@ -348,6 +348,9 @@ def test_bundled_docgen_plugin_maps_to_trusted_stdio_runtime_config(
 
     assert package.manifest.name == "ai-docgen"
     assert [skill.name for skill in package.skills] == ["create-document"]
+    assert package.skills[0].config["discovery_delegate_tool"] == (
+        "mcp_docgen__generate_document"
+    )
     assert [server.name for server in package.mcp_servers] == ["docgen"]
     assert config.name == "docgen"
     assert config.transport == "stdio"

@@ -400,6 +400,20 @@ class AssistantExecutionGateway(
         cancel_event: asyncio.Event | None = None,
     ) -> ToolCallResult:
         """Invoke tool through queue + policy checks."""
+        from ..tools.tool_discovery import is_tool_discovery_bridge
+
+        if is_tool_discovery_bridge(tool_name):
+            # Discovery bridges are control-plane wrappers, not a second
+            # side-effect boundary. RegistryToolInvoker revalidates the
+            # wrapper, while tool_call delegates the concrete capability back
+            # into this gateway. Avoid creating an outer durable command that
+            # would overwrite the concrete tool's command receipt.
+            return await self.tool_invoker.invoke(
+                tool_name,
+                arguments,
+                context,
+                cancel_event=cancel_event,
+            )
         started = time.time()
         plan = await self._prepare_tool_invocation(
             tool_name=tool_name,

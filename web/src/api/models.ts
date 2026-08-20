@@ -13,6 +13,63 @@ import i18n from "@/i18n";
 
 export type ModelAccessLevel = "public" | "premium" | "admin";
 
+export type CanonicalReasoningEffort =
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "adaptive"
+  | "max"
+  | "ultra";
+
+export interface ModelReasoningOption {
+  id: string;
+  label: string;
+  aliases: string[];
+  canonical_effort?: CanonicalReasoningEffort | null;
+  settings: Record<string, unknown>;
+}
+
+export interface ModelCapabilityProfile {
+  schema_version: 1;
+  reasoning: {
+    adapter_id: string;
+    default_option: string;
+    options: ModelReasoningOption[];
+    visibility: "none" | "summary" | "stream";
+    replay_policy:
+      | "discard_after_turn"
+      | "preserve_during_tool_turn"
+      | "preserve_session";
+  };
+  prompt_cache: { adapter_id: string; config: Record<string, unknown> };
+  native_search: {
+    adapter_id: string;
+    enabled: boolean;
+    config: Record<string, unknown>;
+  };
+  tools: {
+    function_calling: boolean;
+    parallel_calls: boolean;
+    strict_schema: boolean;
+  };
+  modalities: { input: string[]; output: string[] };
+  streaming: {
+    text_deltas: boolean;
+    reasoning_deltas: boolean;
+    tool_call_deltas: boolean;
+  };
+}
+
+export interface ModelCapabilityAdapter {
+  id: string;
+  kind: "reasoning" | "prompt_cache" | "native_search";
+  label: string;
+  settings_schema: Record<string, unknown>;
+}
+
 export interface LLMModel {
   model_id: string;
   tenant_id: string;
@@ -27,6 +84,10 @@ export interface LLMModel {
   access_level: ModelAccessLevel;
   is_enabled: boolean;
   sort_order: number;
+  catalog_capabilities: Partial<ModelCapabilityProfile>;
+  capability_overrides: Partial<ModelCapabilityProfile>;
+  effective_capabilities: ModelCapabilityProfile;
+  capability_revision: number;
   created_at: string;
   updated_at: string;
 }
@@ -44,6 +105,7 @@ export interface ModelCreate {
   access_level?: ModelAccessLevel;
   is_enabled?: boolean;
   sort_order?: number;
+  capability_overrides?: Partial<ModelCapabilityProfile>;
 }
 
 export interface ModelUpdate {
@@ -61,6 +123,8 @@ export interface ModelUpdate {
   access_level?: ModelAccessLevel;
   is_enabled?: boolean;
   sort_order?: number;
+  capability_overrides?: Partial<ModelCapabilityProfile>;
+  expected_capability_revision?: number;
 }
 
 export const modelQueryKeys = {
@@ -106,20 +170,31 @@ export async function createModel(model: ModelCreate): Promise<LLMModel> {
 
 /**
  * Update a model.
+ *
+ * ``providerId`` disambiguates when the same model_id exists under multiple
+ * providers (migration 055); the server falls back to the first row by
+ * sort_order+provider_id when it is omitted.
  */
 export async function updateModel(
   modelId: string,
-  updates: ModelUpdate
+  updates: ModelUpdate,
+  providerId?: string
 ): Promise<LLMModel> {
-  const { data } = await api.put<LLMModel>(`/api/v1/models/${modelId}`, updates);
+  const { data } = await api.put<LLMModel>(
+    `/api/v1/models/${encodeURIComponent(modelId)}`,
+    updates,
+    providerId ? { params: { provider_id: providerId } } : undefined
+  );
   return data;
 }
 
 /**
  * Delete a model.
  */
-export async function deleteModel(modelId: string): Promise<void> {
-  await api.delete(`/api/v1/models/${modelId}`);
+export async function deleteModel(modelId: string, providerId?: string): Promise<void> {
+  await api.delete(`/api/v1/models/${encodeURIComponent(modelId)}`, {
+    params: providerId ? { provider_id: providerId } : undefined,
+  });
 }
 
 /**
@@ -127,10 +202,43 @@ export async function deleteModel(modelId: string): Promise<void> {
  */
 export async function toggleModel(
   modelId: string,
-  isEnabled: boolean
+  isEnabled: boolean,
+  providerId?: string
 ): Promise<LLMModel> {
+  const params: Record<string, string | boolean> = { is_enabled: isEnabled };
+  if (providerId) {
+    params.provider_id = providerId;
+  }
   const { data } = await api.patch<LLMModel>(
-    `/api/v1/models/${modelId}/toggle?is_enabled=${isEnabled}`
+    `/api/v1/models/${encodeURIComponent(modelId)}/toggle`,
+    undefined,
+    { params }
+  );
+  return data;
+}
+
+export async function listCapabilityAdapters(): Promise<ModelCapabilityAdapter[]> {
+  const { data } = await api.get<ModelCapabilityAdapter[]>(
+    "/api/v1/model-capability-adapters"
+  );
+  return data;
+}
+
+export async function resetModelCapabilities(
+  modelId: string,
+  capabilityRevision: number,
+  providerId?: string
+): Promise<LLMModel> {
+  const params: Record<string, string | number> = {
+    expected_capability_revision: capabilityRevision,
+  };
+  if (providerId) {
+    params.provider_id = providerId;
+  }
+  const { data } = await api.post<LLMModel>(
+    `/api/v1/models/${encodeURIComponent(modelId)}/capabilities/reset`,
+    undefined,
+    { params }
   );
   return data;
 }

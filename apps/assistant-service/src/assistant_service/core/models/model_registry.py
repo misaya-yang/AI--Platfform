@@ -31,9 +31,6 @@ from .model_catalog import (
     DEFAULT_MODELS as DEFAULT_MODELS,
 )
 from .model_catalog import (
-    NATIVE_SEARCH_CAPABLE as NATIVE_SEARCH_CAPABLE,
-)
-from .model_catalog import (
     ModelConfig as ModelConfig,
 )
 from .model_catalog import (
@@ -295,13 +292,12 @@ class ModelRegistry(RegistryLifecycleMixin):
         openai_local_runtime: Any | None = None,
     ) -> dict[str, Any]:
         """Build request body for the provider's API."""
+        from .capability_adapters import apply_model_capability_adapters
+
+        model_info = self.get_model(model_id)
+        if model_info is None or model_info.capability_profile is None:
+            raise ValueError("model capability profile is unavailable")
         if self._uses_responses_v1(provider):
-            reasoning_effort = (
-                thinking_level
-                if provider == ModelProvider.OPENAI
-                and thinking_level in {"minimal", "low", "medium", "high"}
-                else None
-            )
             body = build_responses_request(
                 model_id=model_id,
                 messages=messages,
@@ -309,21 +305,24 @@ class ModelRegistry(RegistryLifecycleMixin):
                 max_output_tokens=max_tokens,
                 tools=tools,
                 stream=stream,
-                reasoning_effort=reasoning_effort,
+                reasoning_effort=None,
                 local_runtime=(openai_local_runtime if provider == ModelProvider.OPENAI else None),
             )
-            if provider == ModelProvider.DASHSCOPE:
-                from .thinking_policy import apply_qwen_thinking_fields
-
-                apply_qwen_thinking_fields(
-                    body, model_id, thinking_level, token_field="max_output_tokens"
-                )
-                if native_search_config and native_search_config.get("enable_search"):
-                    response_tools = body.setdefault("tools", [])
-                    response_tools.append({"type": "web_search"})
+            if (
+                native_search_config
+                and native_search_config.get("enable_search")
+                and model_info.supports_native_search
+            ):
+                response_tools = body.setdefault("tools", [])
+                response_tools.append({"type": "web_search"})
+            apply_model_capability_adapters(
+                body,
+                model_info.capability_profile,
+                thinking_level,
+            )
             return body
         if provider == ModelProvider.ANTHROPIC:
-            return self._build_anthropic_body(
+            body = self._build_anthropic_body(
                 model_id,
                 messages,
                 temperature,
@@ -333,28 +332,35 @@ class ModelRegistry(RegistryLifecycleMixin):
                 native_search_config=native_search_config,
             )
         elif provider in (ModelProvider.GOOGLE, ModelProvider.GOOGLE_VERTEX):
-            return self._build_google_body(
+            body = self._build_google_body(
                 model_id,
                 messages,
                 temperature,
                 max_tokens,
                 tools,
                 stream,
-                thinking_level,
+                None,
                 tool_config,
                 native_search_config=native_search_config,
             )
         else:
-            return self._build_openai_body(
+            body = self._build_openai_body(
                 model_id,
                 messages,
                 temperature,
                 max_tokens,
                 tools,
                 stream,
-                thinking_level=thinking_level,
+                thinking_level=None,
                 native_search_config=native_search_config,
+                provider=provider,
             )
+        apply_model_capability_adapters(
+            body,
+            model_info.capability_profile,
+            thinking_level,
+        )
+        return body
 
     def _build_openai_body(
         self,
@@ -366,8 +372,10 @@ class ModelRegistry(RegistryLifecycleMixin):
         stream: bool,
         thinking_level: str | None = None,
         native_search_config: dict[str, Any] | None = None,
+        provider: ModelProvider = ModelProvider.DASHSCOPE,
     ) -> dict[str, Any]:
         """Build OpenAI-compatible request body."""
+        del thinking_level
         from ..prompts.system_prompt_v2 import CACHE_SPLIT_MARKER
 
         formatted_messages = []
@@ -425,11 +433,6 @@ class ModelRegistry(RegistryLifecycleMixin):
         #     refuses ("I can't fetch real-time data").
         #   body.enable_search = True → flag RESPECTED, model returns
         #     results with real team names and scores.
-        # Same applies to enable_thinking. Off must be explicit false:
-        # omitting the flag uses the provider default (on for Qwen 3.7 Plus).
-        from .thinking_policy import apply_qwen_thinking_fields
-
-        apply_qwen_thinking_fields(body, model_id, thinking_level, token_field="max_tokens")
         if native_search_config and native_search_config.get("enable_search"):
             # DashScope CN vs Intl differ in where ``enable_search`` belongs:
             #   CN (dashscope.aliyuncs.com):   body.enable_search = True (top-level)
@@ -439,7 +442,11 @@ class ModelRegistry(RegistryLifecycleMixin):
             # Also documented at https://www.alibabacloud.com/help/en/model-studio/web-search —
             # the Intl doc explicitly uses ``extra_body={"enable_search": True,
             # "search_options": {"search_strategy": "agent"}}``.
-            provider = ModelProvider.DASHSCOPE
+            # Read the *requesting* provider's base_url (only the DashScope
+            # search adapter produces ``enable_search``, so this is normally
+            # DASHSCOPE; using the parameter keeps tenant overrides that point
+            # another OpenAI-compatible provider at the DashScope adapter from
+            # being decided by an unrelated provider's config).
             cfg = self._configs.get(provider) if provider in self._configs else None
             cfg_base = (cfg.base_url if cfg else "") or ""
             if "-intl" in cfg_base:
@@ -611,41 +618,7 @@ class ModelRegistry(RegistryLifecycleMixin):
             "stream": stream,
         }
         if system_prompt:
-            # Split the prompt on CACHE_SPLIT_MARKER (inserted by
-            # build_system_prompt_v2) into a tenant-stable static prefix and
-            # a per-tenant/per-scenario tail. Both get `cache_control:
-            # ephemeral` so the prefix caches across all tenants while the
-            # tail still caches per (tenant, scenario, tools) combination.
-            # Anthropic allows up to 4 cache breakpoints; we use 2.
-            from ..prompts.system_prompt_v2 import CACHE_SPLIT_MARKER
-
-            if CACHE_SPLIT_MARKER in system_prompt:
-                static_prefix, dynamic_tail = system_prompt.split(CACHE_SPLIT_MARKER, 1)
-                blocks = [
-                    {
-                        "type": "text",
-                        "text": static_prefix.rstrip(),
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ]
-                dynamic_tail = dynamic_tail.lstrip()
-                if dynamic_tail:
-                    blocks.append(
-                        {
-                            "type": "text",
-                            "text": dynamic_tail,
-                            "cache_control": {"type": "ephemeral"},
-                        }
-                    )
-                body["system"] = blocks
-            else:
-                body["system"] = [
-                    {
-                        "type": "text",
-                        "text": system_prompt,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ]
+            body["system"] = system_prompt
         if tools:
             # Convert OpenAI tool format to Anthropic format.
             anthropic_tools = []
@@ -662,10 +635,6 @@ class ModelRegistry(RegistryLifecycleMixin):
                         }
                     )
             if anthropic_tools:
-                # Cache the tool definitions too — they're stable across turns
-                # for the same session. Put the marker on the last tool entry;
-                # Anthropic caches everything up to (and including) the marker.
-                anthropic_tools[-1]["cache_control"] = {"type": "ephemeral"}
                 body["tools"] = anthropic_tools
 
         # Native search — Anthropic server tool `web_search_20250305`. Append
@@ -696,7 +665,7 @@ class ModelRegistry(RegistryLifecycleMixin):
         native_search_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build Google Gemini API request body."""
-        del stream
+        del model_id, stream, thinking_level
         contents = []
         system_instruction = None
 
@@ -830,34 +799,6 @@ class ModelRegistry(RegistryLifecycleMixin):
                 "maxOutputTokens": max_tokens or 8192,
             },
         }
-
-        # Thinking configuration.
-        #
-        # Gemini 2.5+ / 3.x only emits "thought summary" parts
-        # (`candidates[].content.parts[].thought == true`) when the request
-        # body explicitly enables `thinkingConfig.includeThoughts`. Without
-        # it the REST API silently drops thinking content, which breaks the
-        # Activity drawer (no thinking_start / thinking_delta SSE events).
-        #
-        # Rules:
-        #   - When the caller explicitly sets `thinking_level`, honour it
-        #     (PPT request path) AND turn on includeThoughts so thought
-        #     summaries still stream to the Activity drawer.
-        #   - Otherwise, default to `includeThoughts: true` for Gemini
-        #     models that support thought summaries (2.5+ / 3.x). We skip
-        #     older ids (gemini-1.5-*, gemini-pro, etc.) since their REST
-        #     surface does not accept the field.
-        mid = (model_id or "").lower()
-        supports_thought_summaries = "gemini-2.5" in mid or "gemini-3" in mid
-        from .thinking_policy import normalize_thinking_level
-
-        effective_level = normalize_thinking_level(thinking_level)
-        if effective_level != "off" and supports_thought_summaries:
-            gemini_level = "HIGH" if effective_level == "high" else effective_level.upper()
-            body["generationConfig"]["thinkingConfig"] = {
-                "thinkingLevel": gemini_level,
-                "includeThoughts": True,
-            }
 
         if system_instruction:
             # Strip Anthropic-only cache marker before sending to Gemini.

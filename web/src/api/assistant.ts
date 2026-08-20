@@ -9,6 +9,7 @@ import { api } from "@/lib/api";
 import { sseFetch } from "@/lib/sse";
 import { SSEEventType, type SSEEventTypeValue } from "@/pages/assistant/sse-events";
 import { useAuthStore } from "@/store/useAuthStore";
+import type { ModelCapabilityProfile } from "@/api/models";
 
 export { SSEEventType };
 export type { SSEEventTypeValue };
@@ -30,6 +31,8 @@ export interface ModelInfo {
   access_level?: ModelAccessLevel;
   input_price_per_1k?: number;
   output_price_per_1k?: number;
+  effective_capabilities?: ModelCapabilityProfile;
+  capability_revision?: number;
 }
 
 export interface DatasetInfo {
@@ -72,6 +75,7 @@ export interface ChatRequest {
   system_prompt?: string;
   execution_profile?: "safe" | "balanced" | "power";
   thinking_level?: "off" | "low" | "medium" | "high";
+  reasoning_option?: string;
   memory_mode?: "auto" | "strict" | "off";
   os_agent_enabled?: boolean;
   local_node_device_id?: string;

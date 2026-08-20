@@ -181,6 +181,7 @@ EXPECTED_ASSISTANT_CONFIG_FIELDS: frozenset[str] = frozenset(
         "enable_memory_loading",
         "enable_react_loop",
         "thinking_level",
+        "reasoning_option",
         # Gateway / policy
         "execution_profile",
         "memory_mode",
@@ -268,6 +269,7 @@ EXPECTED_AGENT_LOOP_CONFIG_FIELDS: frozenset[str] = frozenset(
         "react_thinking_visible",
         "react_auto_retry",
         "thinking_level",
+        "output_format",
         "enable_error_recovery",
         "error_max_retries",
         "error_base_delay",

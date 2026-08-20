@@ -57,6 +57,31 @@ def test_skill_bridge_registers_progressive_catalog_metadata_without_instruction
     assert "private operating instructions" not in metadata_json
 
 
+def test_bundled_instruction_skill_delegates_to_one_concrete_tool() -> None:
+    registry = _FakeToolRegistry()
+    bridge = SkillToolBridge(skill_registry=object(), tool_registry=registry)
+    skill = _skill()
+    skill.config = {"discovery_delegate_tool": "mcp_docgen__generate_document"}
+
+    registered = bridge.register_skill_as_tool(skill)
+
+    assert registered is False
+    assert registry.definitions == {}
+
+
+def test_version_pinned_skill_keeps_explicit_callable_identity() -> None:
+    registry = _FakeToolRegistry()
+    bridge = SkillToolBridge(skill_registry=object(), tool_registry=registry)
+    skill = _skill()
+    skill.version_id = "00000000-0000-4000-8000-000000000001"
+    skill.config = {"discovery_delegate_tool": "mcp_docgen__generate_document"}
+
+    registered = bridge.register_skill_as_tool(skill, versioned_name=True)
+
+    assert registered is True
+    assert len(registry.definitions) == 1
+
+
 def test_tools_route_catalog_entry_exposes_skill_level0_metadata() -> None:
     from assistant_service.api.routes.tools import _tool_catalog_entry
 

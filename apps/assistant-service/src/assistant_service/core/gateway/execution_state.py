@@ -338,7 +338,7 @@ class GatewayStateMixin:
     def _sanitize_pending_tool(cls, pending_tool: dict[str, Any] | None) -> dict[str, Any]:
         if not isinstance(pending_tool, dict):
             return {}
-        arguments = pending_tool.get("arguments")
+        arguments = pending_tool.get("dispatched_arguments", pending_tool.get("arguments"))
         comparable_arguments = (
             cls._without_control_args(arguments) if isinstance(arguments, dict) else arguments
         )
@@ -346,6 +346,7 @@ class GatewayStateMixin:
             {
                 "tool_id": pending_tool.get("tool_id"),
                 "tool_name": pending_tool.get("tool_name"),
+                "dispatched_tool_name": pending_tool.get("dispatched_tool_name"),
                 "arguments_hash": cls._hash_value(comparable_arguments or {}),
                 "has_arguments": bool(arguments),
             }
@@ -358,7 +359,12 @@ class GatewayStateMixin:
         if not isinstance(pending_tool, dict):
             return {}
         safe: dict[str, Any] = {}
-        for key in ("tool_id", "tool_name", "arguments_hash"):
+        for key in (
+            "tool_id",
+            "tool_name",
+            "dispatched_tool_name",
+            "arguments_hash",
+        ):
             value = cls._sanitize_checkpoint_text(
                 pending_tool.get(key),
                 limit=cls._CHECKPOINT_KEY_LIMIT,

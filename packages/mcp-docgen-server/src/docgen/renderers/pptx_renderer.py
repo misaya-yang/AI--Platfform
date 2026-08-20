@@ -31,11 +31,9 @@ Design conventions the layouts assume (distilled from 2026 SOTA research):
 from __future__ import annotations
 
 import logging
-import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from pptx import Presentation
 from pptx.util import Inches
@@ -50,6 +48,7 @@ from ..design_system import (
 )
 from ..ir import PptxIR
 from .base import BaseRenderer, RenderError, RenderResult
+from .filename import safe_document_stem
 from .layouts import LAYOUT_DISPATCH
 from .primitives import SLIDE_H, SLIDE_W, Primitives
 
@@ -86,7 +85,7 @@ class PptxRenderer(BaseRenderer):
         ds_name = None
         if ir.metadata.model_extra:
             ds_name = ir.metadata.model_extra.get("design_system")
-        ds: Optional[DesignSystem] = None
+        ds: DesignSystem | None = None
         if ds_name and ds_name in available_systems():
             ds = get_design_system(ds_name)
         if ds is None:
@@ -129,7 +128,7 @@ class PptxRenderer(BaseRenderer):
                 slide.notes_slide.notes_text_frame.text = s_ir.notes
 
         out_dir.mkdir(parents=True, exist_ok=True)
-        safe_name = re.sub(r"[^A-Za-z0-9_\-\.]", "_", ir.metadata.title)[:80] or "presentation"
+        safe_name = safe_document_stem(ir.metadata.title, fallback="presentation")
         path = out_dir / f"{safe_name}.pptx"
         prs.save(str(path))
 
@@ -142,4 +141,5 @@ class PptxRenderer(BaseRenderer):
         )
 
     async def fix(self, ir: PptxIR, critic_findings, out_dir: Path) -> RenderResult:
+        _ = critic_findings
         return await self.render(ir, out_dir)

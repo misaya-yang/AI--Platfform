@@ -291,7 +291,14 @@ class ApprovalLifecycleMixin:
             and checkpoint.status in {"running", "blocked"}
             and checkpoint.approval_id == approval.approval_id
             and str(resume_payload.get("attempt_id") or "")
-            and str(pending_tool.get("tool_name") or "") == approval.tool_name
+            # Approval records carry the dispatched identity for discovery-
+            # bridge tools; older checkpoints only recorded the wrapper name.
+            and str(
+                pending_tool.get("dispatched_tool_name")
+                or pending_tool.get("tool_name")
+                or ""
+            )
+            == approval.tool_name
             and str(pending_tool.get("arguments_hash") or "")
             == self._approval_arguments_hash(approval.arguments)
         )

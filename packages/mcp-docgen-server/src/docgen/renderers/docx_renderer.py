@@ -14,14 +14,13 @@ sandbox client in Phase 2.
 
 from __future__ import annotations
 
-import re
+import contextlib
 import time
 from pathlib import Path
-from typing import Optional
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Pt, RGBColor, Cm
+from docx.shared import Cm, Pt, RGBColor
 
 from ..ir import (
     BulletBlock,
@@ -35,7 +34,7 @@ from ..ir import (
     TableBlock,
 )
 from .base import BaseRenderer, RenderError, RenderResult
-
+from .filename import safe_document_stem
 
 _ALIGN = {
     "left": WD_ALIGN_PARAGRAPH.LEFT,
@@ -131,10 +130,8 @@ class DocxRenderer(BaseRenderer):
         width = Cm(block.width_pt / 28.35) if block.width_pt else Cm(14)
         doc.add_picture(str(src), width=width)
         # Alt text: python-docx needs to patch the XML directly to set descr=
-        try:
+        with contextlib.suppress(Exception):
             self._set_image_alt(doc, block.alt_text)
-        except Exception:
-            pass
 
     def _set_image_alt(self, doc: Document, alt: str) -> None:
         # Iterate the last inline picture and set descr/title on the <wp:docPr>.
@@ -187,7 +184,7 @@ class DocxRenderer(BaseRenderer):
             doc.core_properties.author = ir.metadata.author
 
         # Title page-ish
-        title_heading = doc.add_heading(ir.metadata.title, level=0)
+        doc.add_heading(ir.metadata.title, level=0)
         if ir.metadata.subtitle:
             sub = doc.add_paragraph(ir.metadata.subtitle)
             sub.alignment = WD_ALIGN_PARAGRAPH.LEFT
@@ -203,7 +200,7 @@ class DocxRenderer(BaseRenderer):
             self._render_block(doc, block, out_dir)
 
         out_dir.mkdir(parents=True, exist_ok=True)
-        safe_name = re.sub(r"[^A-Za-z0-9_\-\.]", "_", ir.metadata.title)[:80] or "document"
+        safe_name = safe_document_stem(ir.metadata.title, fallback="document")
         path = out_dir / f"{safe_name}.docx"
         doc.save(str(path))
 
@@ -215,6 +212,7 @@ class DocxRenderer(BaseRenderer):
         )
 
     async def fix(self, ir: DocxIR, critic_findings, out_dir: Path) -> RenderResult:
+        _ = critic_findings
         # DOCX fixes are OOXML-level (strip placeholders, fix alt text).
         # For Phase 1 we just re-render; Phase 3 adds targeted patches.
         return await self.render(ir, out_dir)

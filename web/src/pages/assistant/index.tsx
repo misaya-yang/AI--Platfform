@@ -70,6 +70,10 @@ import i18n from "@/i18n";
 import { useChatShortcuts } from "@/features/chat/shortcuts";
 import { useAppStore } from "@/store/useAppStore";
 import { trackChatHistoryEmptyState } from "@/features/chat/telemetry";
+import {
+  reasoningOptionsForModel,
+  resolveReasoningOptionId,
+} from "@/features/models/modelCapabilities";
 
 const ASSISTANT_UI_V2 = import.meta.env.VITE_ASSISTANT_UI_V2 !== "false";
 const ASSISTANT_COMPOSER_ID = "assistant-chat-composer";
@@ -260,7 +264,7 @@ export function AssistantPage() {
   const [selectedDatasets, setSelectedDatasets] = useState<string[]>([]);
   const [temperature, setTemperature] = useState(0.7);
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
-  const [thinkingLevel, setThinkingLevel] = useState<"off" | "low" | "medium" | "high">("low");
+  const [thinkingLevel, setThinkingLevel] = useState<string>("auto");
   const [selectedStyle, setSelectedStyle] = useState(DEFAULT_STYLE_ID);
   
   // 3. UI State
@@ -273,6 +277,19 @@ export function AssistantPage() {
   const [connectorCount, setConnectorCount] = useState(0);
   const [isMobile, setIsMobile] = useState(false);
   const shouldReduceMotion = useReducedMotion();
+  const selectedModelInfo = useMemo(
+    () => models.find((model) => model.id === selectedModel),
+    [models, selectedModel]
+  );
+  const reasoningOptions = useMemo(
+    () => reasoningOptionsForModel(selectedModelInfo?.effective_capabilities),
+    [selectedModelInfo?.effective_capabilities]
+  );
+  useEffect(() => {
+    setThinkingLevel((current) =>
+      resolveReasoningOptionId(selectedModelInfo?.effective_capabilities, current)
+    );
+  }, [selectedModelInfo?.capability_revision, selectedModelInfo?.effective_capabilities]);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const wasCompactLayoutRef = useRef(false);
   const showLeftPanel = useAppStore((state) => state.assistantSidebarOpen);
@@ -648,22 +665,21 @@ export function AssistantPage() {
     if (isMobile) setShowLeftPanel(false);
     const sessionConfig = await handleSelectSession(sessionId);
     if (sessionConfig) {
-      if (sessionConfig.selected_model && models.some((m) => m.id === sessionConfig.selected_model)) {
+      const sessionModel = sessionConfig.selected_model
+        ? models.find((model) => model.id === sessionConfig.selected_model)
+        : undefined;
+      if (sessionConfig.selected_model && sessionModel) {
         setSelectedModel(sessionConfig.selected_model);
         writeLastModelId(sessionConfig.selected_model, userId);
       }
       setSelectedDatasets(sessionConfig.selected_datasets || []);  // Always reset, even if empty
       if (typeof sessionConfig.web_search_enabled === "boolean") setWebSearchEnabled(sessionConfig.web_search_enabled);
-      if (
-        sessionConfig.thinking_level === "off" ||
-        sessionConfig.thinking_level === "low" ||
-        sessionConfig.thinking_level === "medium" ||
-        sessionConfig.thinking_level === "high"
-      ) {
-        setThinkingLevel(sessionConfig.thinking_level);
-      } else {
-        setThinkingLevel("low");
-      }
+      setThinkingLevel(
+        resolveReasoningOptionId(
+          sessionModel?.effective_capabilities,
+          sessionConfig.reasoning_option || sessionConfig.thinking_level || "auto"
+        )
+      );
       if (typeof sessionConfig.temperature === "number") setTemperature(sessionConfig.temperature);
       if (sessionConfig.selected_style) setSelectedStyle(sessionConfig.selected_style);
     }
@@ -678,7 +694,7 @@ export function AssistantPage() {
     // Reset feature toggles to defaults
     setSelectedDatasets([]);  // Clear selected knowledge bases
     setWebSearchEnabled(false);  // Disable web search
-    setThinkingLevel("low");
+    setThinkingLevel("auto");
     // Keep model and temperature as user preferences
   }, [handleNewChat, cancelImageMode, isMobile, setShowLeftPanel, disableSessionOptIn]);
 
@@ -739,7 +755,7 @@ export function AssistantPage() {
         selected_model: selectedModel,
         selected_datasets: selectedDatasets,
         web_search_enabled: webSearchEnabled,
-        thinking_level: thinkingLevel,
+        reasoning_option: thinkingLevel,
         temperature,
         selected_style: selectedStyle,
         execution_profile: "safe",
@@ -1190,6 +1206,7 @@ export function AssistantPage() {
               setWebSearchEnabled={setWebSearchEnabled}
               thinkingLevel={thinkingLevel}
               setThinkingLevel={setThinkingLevel}
+              reasoningOptions={reasoningOptions}
               handleImageGenerate={handleImageGenerate}
               selectedStyle={selectedStyle}
               setSelectedStyle={setSelectedStyle}

@@ -50,8 +50,20 @@ class SkillToolBridge:
         skill: SkillManifest,
         *,
         versioned_name: bool = False,
-    ) -> None:
+    ) -> bool:
         """Convert a SkillManifest into a ToolDefinition and register it."""
+        delegate_tool = str(skill.config.get("discovery_delegate_tool") or "").strip()
+        if delegate_tool and not versioned_name:
+            # Bundled instruction skills can refine a concrete tool without
+            # becoming a second callable hop. Their instructions still enter
+            # the selected-skill context; the real tool remains discoverable
+            # and owns schema validation, policy and execution.
+            logger.info(
+                "Skill %s delegates discovery to concrete tool %s",
+                skill.name,
+                delegate_tool,
+            )
+            return False
         tool_name = skill_tool_name(
             skill.name,
             skill.version_id if versioned_name else None,
@@ -100,6 +112,7 @@ class SkillToolBridge:
 
         self.tools.register(definition, skill_executor)
         logger.info(f"Registered skill as tool: {tool_name} (category=SKILL)")
+        return True
 
     def sync_all_skills(
         self,
@@ -117,11 +130,12 @@ class SkillToolBridge:
             allowed_versions=allowed_versions,
         ):
             try:
-                self.register_skill_as_tool(
+                registered = self.register_skill_as_tool(
                     skill,
                     versioned_name=bool(skill.version_id),
                 )
-                count += 1
+                if registered:
+                    count += 1
             except Exception as e:
                 record_internal_exception(
                     __name__, "assistant.core.skills.tool_bridge.internal_failure", e

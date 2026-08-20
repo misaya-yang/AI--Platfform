@@ -11,6 +11,8 @@ from dataclasses import asdict, dataclass
 from decimal import Decimal
 from typing import Any
 
+from ai_gateway_core.models import get_builtin_model_capabilities
+
 
 @dataclass(frozen=True)
 class CredentialField:
@@ -38,8 +40,8 @@ class CatalogModel:
     access_level: str = "public"
     sort_order: int = 0
 
-    def to_model_kwargs(self) -> dict[str, Any]:
-        return {
+    def to_model_kwargs(self, *, provider_id: str | None = None) -> dict[str, Any]:
+        result = {
             "model_id": self.model_id,
             "display_name": self.display_name,
             "context_window": self.context_window,
@@ -51,9 +53,15 @@ class CatalogModel:
             "access_level": self.access_level,
             "sort_order": self.sort_order,
         }
+        if provider_id:
+            result["catalog_capabilities"] = get_builtin_model_capabilities(
+                provider_id,
+                self.model_id,
+            ) or {}
+        return result
 
-    def to_response(self) -> dict[str, Any]:
-        result = self.to_model_kwargs()
+    def to_response(self, *, provider_id: str | None = None) -> dict[str, Any]:
+        result = self.to_model_kwargs(provider_id=provider_id)
         result["input_price_per_1k"] = float(self.input_price_per_1k)
         result["output_price_per_1k"] = float(self.output_price_per_1k)
         return result
@@ -84,7 +92,10 @@ class ProviderTemplate:
             "default_base_url": self.default_base_url,
             "credential_fields": [asdict(field) for field in self.credential_fields],
             "discovery_strategy": self.discovery_strategy,
-            "default_models": [model.to_response() for model in self.default_models],
+            "default_models": [
+                model.to_response(provider_id=self.default_provider_id)
+                for model in self.default_models
+            ],
             "advanced": self.advanced,
         }
 

@@ -20,6 +20,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
+from ai_gateway_core.logging import record_internal_exception
+
 if TYPE_CHECKING:
     from ai_gateway_core.persistence import DatabaseStorageLike
 
@@ -461,6 +463,11 @@ class ArtifactShareManager:
                 client_ip,
             )
         except Exception as exc:
+            record_internal_exception(
+                __name__,
+                "artifact_share.quiz_attempt.persistence_failed",
+                exc,
+            )
             _raise_typed_database_error(exc)
         if not row:
             raise ShareUnavailableError("Share not found or expired")

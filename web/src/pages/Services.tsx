@@ -137,6 +137,10 @@ export function ServicesPage() {
     queryKey: modelsApi.modelQueryKeys.all,
     queryFn: () => modelsApi.listModels(undefined, true),
   });
+  const capabilityAdaptersQuery = useQuery({
+    queryKey: ["model-capability-adapters"],
+    queryFn: modelsApi.listCapabilityAdapters,
+  });
 
   const models = useMemo(() => {
     if (!modelsQuery.data) return [];
@@ -255,8 +259,15 @@ export function ServicesPage() {
   });
 
   const updateModelMutation = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: ModelUpdate }) =>
-      modelsApi.updateModel(id, data),
+    mutationFn: ({
+      id,
+      data,
+      providerId,
+    }: {
+      id: string;
+      data: ModelUpdate;
+      providerId?: string;
+    }) => modelsApi.updateModel(id, data, providerId),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["models"] });
       setModelFormOpen(false);
@@ -269,7 +280,7 @@ export function ServicesPage() {
   });
 
   const deleteModelMutation = useMutation({
-    mutationFn: (id: string) => modelsApi.deleteModel(id),
+    mutationFn: (model: LLMModel) => modelsApi.deleteModel(model.model_id, model.provider_id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["models"] });
       setDeleteModelOpen(false);
@@ -282,13 +293,40 @@ export function ServicesPage() {
   });
 
   const toggleModelMutation = useMutation({
-    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
-      modelsApi.toggleModel(id, enabled),
+    mutationFn: ({ id, enabled, providerId }: { id: string; enabled: boolean; providerId?: string }) =>
+      modelsApi.toggleModel(id, enabled, providerId),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["models"] });
     },
     onError: (err: Error) => {
       toast({ title: t("services.page.toast.operationFailed"), description: getErrorMessage(err), variant: "destructive" });
+    },
+  });
+
+  const resetCapabilitiesMutation = useMutation({
+    mutationFn: ({
+      id,
+      providerId,
+      capabilityRevision,
+    }: {
+      id: string;
+      providerId?: string;
+      capabilityRevision: number;
+    }) => modelsApi.resetModelCapabilities(id, capabilityRevision, providerId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["models"] });
+      setModelFormOpen(false);
+      setEditingModel(null);
+      toast({
+        title: t("services.page.toast.capabilitiesReset", "Capability overrides cleared"),
+      });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: t("services.page.toast.updateFailed"),
+        description: getErrorMessage(err),
+        variant: "destructive",
+      });
     },
   });
 
@@ -327,6 +365,7 @@ export function ServicesPage() {
       await updateModelMutation.mutateAsync({
         id: editingModel.model_id,
         data: data as ModelUpdate,
+        providerId: editingModel.provider_id,
       });
     } else {
       await createModelMutation.mutateAsync(data as ModelCreate);
@@ -344,7 +383,11 @@ export function ServicesPage() {
   };
 
   const handleToggleModel = async (model: LLMModel, enabled: boolean) => {
-    await toggleModelMutation.mutateAsync({ id: model.model_id, enabled });
+    await toggleModelMutation.mutateAsync({
+      id: model.model_id,
+      enabled,
+      providerId: model.provider_id,
+    });
   };
 
   return (
@@ -615,8 +658,25 @@ export function ServicesPage() {
         providerTemplates={providerTemplatesQuery.data || []}
         providersLoading={providersQuery.isLoading}
         providerTemplatesLoading={providerTemplatesQuery.isLoading}
+        capabilityAdapters={capabilityAdaptersQuery.data || []}
         onSubmit={handleModelSubmit}
-        loading={createModelMutation.isPending || updateModelMutation.isPending}
+        onResetCapabilities={
+          editingModel
+            ? () =>
+                resetCapabilitiesMutation
+                  .mutateAsync({
+                    id: editingModel.model_id,
+                    providerId: editingModel.provider_id,
+                    capabilityRevision: editingModel.capability_revision,
+                  })
+                  .then(() => undefined)
+            : undefined
+        }
+        loading={
+          createModelMutation.isPending ||
+          updateModelMutation.isPending ||
+          resetCapabilitiesMutation.isPending
+        }
       />
 
       <AlertDialog open={deleteProviderOpen} onOpenChange={setDeleteProviderOpen}>
@@ -650,7 +710,7 @@ export function ServicesPage() {
           <AlertDialogFooter>
             <AlertDialogCancel>{t("services.page.deleteModel.cancel")}</AlertDialogCancel>
             <AlertDialogAction
-              onClick={() => modelToDelete && deleteModelMutation.mutate(modelToDelete.model_id)}
+              onClick={() => modelToDelete && deleteModelMutation.mutate(modelToDelete)}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               {deleteModelMutation.isPending ? t("services.page.deleteModel.deleting") : t("services.page.deleteModel.confirm")}

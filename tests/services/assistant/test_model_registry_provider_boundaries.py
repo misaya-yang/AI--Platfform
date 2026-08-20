@@ -414,8 +414,9 @@ def test_google_body_rejects_non_object_tool_arguments(arguments: str) -> None:
 
 
 def test_qwen_thinking_honors_explicit_packet_output_ceiling() -> None:
-    registry = ModelRegistry(use_default_models=False)
-    explicit = registry._build_openai_body(
+    registry = ModelRegistry()
+    explicit = registry._build_request_body(
+        ModelProvider.DASHSCOPE,
         "qwen3.7-plus",
         [ChatMessage(role="user", content="hello")],
         temperature=0,
@@ -424,7 +425,8 @@ def test_qwen_thinking_honors_explicit_packet_output_ceiling() -> None:
         stream=True,
         thinking_level="high",
     )
-    defaulted = registry._build_openai_body(
+    defaulted = registry._build_request_body(
+        ModelProvider.DASHSCOPE,
         "qwen3.7-plus",
         [ChatMessage(role="user", content="hello")],
         temperature=0,
@@ -435,7 +437,54 @@ def test_qwen_thinking_honors_explicit_packet_output_ceiling() -> None:
     )
 
     assert explicit["max_tokens"] == 2048
+    assert explicit["enable_thinking"] is True
+    # DashScope rejects (or runs unbounded) hybrid-thinking requests without
+    # an output token cap, so when the caller supplies none the provider
+    # floor must be restored instead of omitting the field.
     assert defaulted["max_tokens"] == 16384
+    assert defaulted["enable_thinking"] is True
+
+
+def test_qwen_chat_body_marks_stable_system_prefix_for_explicit_cache() -> None:
+    registry = ModelRegistry()
+
+    body = registry._build_request_body(
+        ModelProvider.DASHSCOPE,
+        "qwen3.7-plus",
+        [
+            ChatMessage(role="system", content="stable agent instructions"),
+            ChatMessage(role="user", content="hello"),
+        ],
+        temperature=0,
+        max_tokens=2048,
+        tools=[{"type": "function", "function": {"name": "tool_search"}}],
+        stream=True,
+        thinking_level="medium",
+    )
+
+    assert body["messages"][0]["content"] == [
+        {
+            "type": "text",
+            "text": "stable agent instructions",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
+
+def test_non_dashscope_chat_body_does_not_emit_qwen_cache_extension() -> None:
+    registry = ModelRegistry(use_default_models=False)
+
+    body = registry._build_openai_body(
+        "qwen3.7-plus",
+        [ChatMessage(role="system", content="stable agent instructions")],
+        temperature=0,
+        max_tokens=2048,
+        tools=None,
+        stream=True,
+        provider=ModelProvider.OPENAI,
+    )
+
+    assert body["messages"][0]["content"] == "stable agent instructions"
 
 
 @pytest.mark.parametrize("model_id", ["claude-opus-4-7", "claude-sonnet-4-6"])

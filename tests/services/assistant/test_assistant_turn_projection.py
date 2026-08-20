@@ -129,8 +129,16 @@ async def test_resume_identity_and_agent_policy_reach_only_the_canonical_agent_l
             return None
 
     class Resolver:
+        leases = 0
+
         async def resolve(self, *_args: Any, **_kwargs: Any) -> RequestRegistry:
             return RequestRegistry()
+
+        def retain(self, _registry: RequestRegistry) -> None:
+            self.leases += 1
+
+        async def release(self, _registry: RequestRegistry) -> None:
+            self.leases -= 1
 
     service.tenant_model_registry_resolver = Resolver()
     runtime_pin = SimpleNamespace(
@@ -185,6 +193,7 @@ async def test_verified_agent_provider_pin_reaches_resolver_and_canonical_loop(
 
     class Resolver:
         calls: list[tuple[str, str, str | None]] = []
+        leases = 0
 
         async def resolve(
             self,
@@ -194,6 +203,12 @@ async def test_verified_agent_provider_pin_reaches_resolver_and_canonical_loop(
         ) -> PinnedRegistry:
             self.calls.append((tenant_id, model_id, provider_id))
             return pinned_registry
+
+        def retain(self, _registry: PinnedRegistry) -> None:
+            self.leases += 1
+
+        async def release(self, _registry: PinnedRegistry) -> None:
+            self.leases -= 1
 
     pinned_registry = PinnedRegistry()
     fallback_registry = object()
@@ -226,7 +241,8 @@ async def test_verified_agent_provider_pin_reaches_resolver_and_canonical_loop(
     assert resolver.calls == [("tenant-1", "shared-model", "dashscope-intl")]
     assert FakeAgentLoop.last_model_registry is pinned_registry
     assert FakeAgentLoop.last_config.model_provider_id == "dashscope-intl"
-    assert pinned_registry.closed is True
+    assert resolver.leases == 0
+    assert pinned_registry.closed is False
     assert FakeAgentLoop.last_model_registry is not fallback_registry
 
 

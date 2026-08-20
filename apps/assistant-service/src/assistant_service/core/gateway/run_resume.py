@@ -236,7 +236,14 @@ class RunResumeMixin:
                     )
             expected_approval_id = checkpoint.get("approval_id")
             pending_tool = checkpoint.get("pending_tool") or {}
-            tool_name = str(pending_tool.get("tool_name") or "")
+            # Approval records hold the dispatched (concrete) tool identity for
+            # discovery-bridge calls; checkpoints only learned to record it
+            # later, so fall back to ``tool_name`` for pre-change checkpoints.
+            tool_name = str(
+                pending_tool.get("dispatched_tool_name")
+                or pending_tool.get("tool_name")
+                or ""
+            )
             arguments_hash = str(pending_tool.get("arguments_hash") or "")
             if not (
                 self._checkpoint_persistence_confirmed(checkpoint)

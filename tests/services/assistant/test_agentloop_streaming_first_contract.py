@@ -107,6 +107,7 @@ class FakeModelRegistry:
                 tool_calls=d.get("tool_calls"),
                 usage=d.get("usage"),
                 finish_reason=d.get("finish_reason"),
+                thinking_content=d.get("thinking_content"),
                 provider_content_blocks=d.get("provider_content_blocks"),
             )
 
@@ -585,6 +586,39 @@ async def test_plain_first_turn_does_not_pin_every_builtin_skill_schema() -> Non
     first_turn_names = {schema["function"]["name"] for schema in (model.tools_history[0] or [])}
     assert first_turn_names == {"tool_call", "tool_describe", "tool_search"}
     assert any(event.event_type == "run_finished" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_first_thinking_token_is_the_backend_ttft_event() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    model = FakeModelRegistry(
+        scripted=[
+            [
+                {"thinking_content": "verify"},
+                {"content": "200", "finish_reason": "stop"},
+            ]
+        ]
+    )
+    loop = AgentLoop(model_registry=model, tool_invoker=FakeToolInvoker({}))
+
+    events = [
+        event
+        async for event in loop.execute(
+            session_id="thinking-ttft",
+            user=MockUserContext("u1"),  # type: ignore[arg-type]
+            message="100 + 100",
+            config=AgentLoopConfig(model_id="test", persist_messages=False),
+            history=[],
+        )
+    ]
+
+    event_types = [event.event_type for event in events]
+    ttft_events = [event for event in events if event.event_type == "ttft"]
+    assert len(ttft_events) == 1
+    assert ttft_events[0].data["token_kind"] == "thinking"
+    assert event_types.index("ttft") < event_types.index("thinking_delta")
+    assert event_types.index("thinking_delta") < event_types.index("text_delta")
 
 
 @pytest.mark.asyncio
@@ -4281,6 +4315,7 @@ async def test_approval_resume_recorded_result_checkpoint_carries_exact_ack_iden
         if checkpoint.phase == "tool_call_completed"
     )
     assert completed.pending_tool["tool_name"] == "generate_image"
+    assert completed.pending_tool["dispatched_tool_name"] == "generate_image"
     assert completed.pending_tool["arguments_hash"] == gateway._hash_value({"prompt": "cat"})
     assert completed.idempotency_keys["command_id"] == command_id
     assert completed.idempotency_keys["command_result_acknowledgeable"] is True
@@ -4437,7 +4472,7 @@ async def test_approval_resume_without_trace_writer_keeps_db_less_contract() -> 
     )
     assert "run_finished" in event_types
     assert invoker.invocation_count == 1
-    assert loop.model_registry.thinking_history == ["low"]
+    assert loop.model_registry.thinking_history == ["auto"]
     collector = TurnEventCollector()
     for event in events:
         collector.accept(event)
@@ -4579,7 +4614,7 @@ async def test_approval_resume_reenters_canonical_loop_with_frozen_profile_and_t
     assert invoker.invocations == [(first_tool, {"version": 1})]
     assert resume_model.temperature_history == [0.0]
     assert resume_model.max_tokens_history == [4096]
-    assert resume_model.thinking_history == ["low"]
+    assert resume_model.thinking_history == ["auto"]
     assert resume_model.tools_history[0] == initial_model.tools_history[0]
     assert [
         str((tool.get("function") or {}).get("name") or "")

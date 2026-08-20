@@ -46,6 +46,7 @@ def _ai_adapter() -> benchmark.AIPlatformAdapter:
     adapter._thinking_level = "low"
     adapter._execution_profile = "balanced"
     adapter._max_approval_rounds = 8
+    adapter._task_output_formats = {"task": "json", "tagged": "text"}
     adapter._sessions = {"task": "session-1"}
     return adapter
 
@@ -110,6 +111,7 @@ def test_manifest_is_an_eight_task_three_way_result_suite() -> None:
         "unknown_effect",
     }
     assert sum(len(task["turns"]) > 1 for task in manifest["tasks"]) == 2
+    assert {task["output_format"] for task in manifest["tasks"]} == {"json", "text"}
 
 
 def test_tenant_access_requires_the_complete_semantic_work_product() -> None:
@@ -484,13 +486,25 @@ def test_validate_only_performs_no_provider_calls(capsys: pytest.CaptureFixture[
 def test_ai_adapter_uses_the_explicit_cohort_thinking_level() -> None:
     adapter = _ai_adapter()
 
-    body = adapter._turn_request_body(session_id="session-1", prompt="complex task")
+    body = adapter._turn_request_body(
+        task_id="task",
+        session_id="session-1",
+        prompt="complex task",
+    )
 
     assert body["thinking_level"] == "low"
     assert body["execution_profile"] == "balanced"
     assert body["enable_task_planning"] is False
     assert body["memory_mode"] == "off"
     assert body["skills_enabled"] is False
+    assert body["output_format"] == "json"
+
+    tagged = adapter._turn_request_body(
+        task_id="tagged",
+        session_id="session-1",
+        prompt="tagged work product",
+    )
+    assert tagged["output_format"] == "text"
 
 
 def test_ai_adapter_keeps_the_unpaused_success_path(
@@ -564,8 +578,14 @@ def test_ai_adapter_records_thinking_to_visible_timing(
 
     timing = result.metadata["timing"]["phases"][0]
     assert timing["first_thinking_seconds"] is not None
-    assert timing["thinking_to_visible_seconds"] > 0
-    assert timing["ttft_seconds"] > timing["first_thinking_seconds"]
+    assert timing["thinking_to_text_seconds"] > 0
+    assert timing["thinking_to_visible_seconds"] == timing["thinking_to_text_seconds"]
+    assert timing["ttft_seconds"] == timing["first_thinking_seconds"]
+    assert timing["first_text_seconds"] > timing["ttft_seconds"]
+    assert (
+        result.metadata["timing"]["ttft_seconds"]
+        == result.metadata["timing"]["first_thinking_seconds"]
+    )
 
 
 def test_ai_adapter_explicitly_approves_once_resumes_and_keeps_timing_evidence(

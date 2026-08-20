@@ -51,6 +51,7 @@ Rule of thumb: **design** says why, **plans** say what next, **runbooks** track 
 | Doc | Subject |
 | --- | --- |
 | [`design/agent-design-manifesto.md`](design/agent-design-manifesto.md) | Design intent for the general agent runtime |
+| [`design/general-agent-product-contract.md`](design/general-agent-product-contract.md) | Product, UX, safety, eval, and release contract for the general Agent |
 | [`design/agent-design-manifesto-critique.md`](design/agent-design-manifesto-critique.md) | Counter-arguments against the manifesto; read with it, not instead of it |
 | [`design/agent-optimization-spec.md`](design/agent-optimization-spec.md) | Optimization targets for the agent loop |
 

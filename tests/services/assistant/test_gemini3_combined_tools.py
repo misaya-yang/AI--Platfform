@@ -19,9 +19,9 @@ catalog and only ship Gemini 3.x; this test pins the new behaviour:
 from __future__ import annotations
 
 import pytest
-
 from assistant_service.core.models.model_registry import (
     ChatMessage,
+    ModelInfo,
     ModelProvider,
     ModelRegistry,
 )
@@ -29,7 +29,24 @@ from assistant_service.core.models.model_registry import (
 
 @pytest.fixture
 def registry() -> ModelRegistry:
-    return ModelRegistry(use_default_models=False)
+    registry = ModelRegistry(use_default_models=False)
+    # The profile-aware request builder resolves capabilities from the loaded
+    # model, so the models under test must be registered.
+    registry.add_custom_model(
+        ModelInfo(
+            id="gemini-3-pro-preview",
+            name="Gemini 3 Pro",
+            provider=ModelProvider.GOOGLE,
+        )
+    )
+    registry.add_custom_model(
+        ModelInfo(
+            id="gemini-3-flash-preview",
+            name="Gemini 3 Flash",
+            provider=ModelProvider.GOOGLE_VERTEX,
+        )
+    )
+    return registry
 
 
 def _function_tool() -> dict:

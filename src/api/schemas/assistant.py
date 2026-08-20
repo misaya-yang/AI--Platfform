@@ -197,9 +197,15 @@ class AssistantChatRequest(BaseModel):
         default=None,
         max_length=16,
         description=(
-            "Thinking intensity: off, low, medium, or high. "
-            "Omitted requests default to low; only explicit off disables thinking."
+            "Legacy reasoning option alias. Prefer reasoning_option for model-specific profiles."
         ),
+    )
+    reasoning_option: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=32,
+        pattern=r"^[a-z][a-z0-9_-]{0,31}$",
+        description="Model-profile reasoning option id; auto inherits the model default",
     )
     confirm_plan: Literal[False] = Field(
         default=False,
@@ -327,6 +333,11 @@ class ModelInfoResponse(BaseModel):
     access_level: str = Field(default="public", description="Access level: public, premium, admin")
     input_price_per_1k: float = Field(default=0.0, description="Price per 1K input tokens (USD)")
     output_price_per_1k: float = Field(default=0.0, description="Price per 1K output tokens (USD)")
+    effective_capabilities: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Resolved model capability profile visible to this tenant",
+    )
+    capability_revision: int = Field(default=1, ge=1)
 
 
 class ModelsListResponse(BaseModel):

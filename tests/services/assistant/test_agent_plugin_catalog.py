@@ -79,6 +79,9 @@ def test_catalog_loads_bundled_agents_without_database_or_runtime_adapter(
     monkeypatch.setenv("ASSISTANT_SUBAGENTS_ENABLED", "true")
     monkeypatch.setenv("ASSISTANT_AGENT_PLUGIN_PATHS", paths)
     monkeypatch.setenv("ASSISTANT_APP__ALLOW_ANONYMOUS", "true")
+    # The import-time auth guard rejects anonymous access unless the
+    # environment is explicitly non-production; pin it for hermeticity.
+    monkeypatch.setenv("ENVIRONMENT", "test")
 
     from assistant_service import main
 
@@ -165,6 +168,9 @@ async def test_db_less_lifespan_registers_catalog_profiles(
     monkeypatch.setenv("REDIS_URL", "")
     monkeypatch.setenv("AGENT_STUDIO_MCP_ENABLED", "false")
     monkeypatch.setenv("ASSISTANT_CODE_EXECUTOR_ENABLED", "false")
+    # The import-time auth guard rejects anonymous access unless the
+    # environment is explicitly non-production; pin it for hermeticity.
+    monkeypatch.setenv("ENVIRONMENT", "test")
 
     from ai_gateway_core import knowledge, metrics, persistence, storage, tracing
     from ai_gateway_core.proxy import drain

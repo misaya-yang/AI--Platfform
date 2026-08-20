@@ -1474,10 +1474,25 @@ CREATE TABLE IF NOT EXISTS llm_models (
     sort_order INTEGER DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
+    catalog_capabilities JSONB NOT NULL DEFAULT '{}'::jsonb,
+    capability_overrides JSONB NOT NULL DEFAULT '{}'::jsonb,
+    capability_revision BIGINT NOT NULL DEFAULT 1,
+    CONSTRAINT llm_models_catalog_capabilities_object
+        CHECK (jsonb_typeof(catalog_capabilities) = 'object'),
+    CONSTRAINT llm_models_capability_overrides_object
+        CHECK (jsonb_typeof(capability_overrides) = 'object'),
+    CONSTRAINT llm_models_capability_revision_positive
+        CHECK (capability_revision > 0),
     PRIMARY KEY (tenant_id, model_id)
 );
 
 COMMENT ON TABLE llm_models IS 'LLM 模型表：多租户模型配置与定价';
+COMMENT ON COLUMN llm_models.catalog_capabilities IS
+    'Versioned provider catalog capability profile; provider sync may update it.';
+COMMENT ON COLUMN llm_models.capability_overrides IS
+    'Tenant administrator capability overrides; provider sync must preserve it.';
+COMMENT ON COLUMN llm_models.capability_revision IS
+    'Optimistic concurrency revision for effective capability changes.';
 
 -- ============================================================
 -- 30. 文档版本控制

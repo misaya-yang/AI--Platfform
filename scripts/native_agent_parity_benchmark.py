@@ -23,6 +23,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -146,6 +147,8 @@ def load_manifest(path: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
             "unknown_effect",
         }:
             raise BenchmarkError(f"unsupported_validator:{task_id}")
+        if task.get("output_format") not in {"text", "json"}:
+            raise BenchmarkError(f"unsupported_output_format:{task_id}")
         turns = task.get("turns")
         if not isinstance(turns, list) or not turns:
             raise BenchmarkError(f"task_requires_turns:{task_id}")
@@ -807,6 +810,7 @@ class AIPlatformAdapter:
         thinking_level: str,
         execution_profile: str,
         max_approval_rounds: int,
+        task_output_formats: Mapping[str, str],
     ) -> None:
         self._base = gateway_base_url.rstrip("/")
         login = _request_json(
@@ -823,6 +827,7 @@ class AIPlatformAdapter:
         self._thinking_level = thinking_level
         self._execution_profile = execution_profile
         self._max_approval_rounds = max_approval_rounds
+        self._task_output_formats = dict(task_output_formats)
         self._sessions: dict[str, str] = {}
 
     def start_task(self, task_id: str) -> None:
@@ -838,7 +843,7 @@ class AIPlatformAdapter:
 
     def run_turn(self, task_id: str, prompt: str) -> TurnResult:
         session_id = self._sessions[task_id]
-        body = self._turn_request_body(session_id=session_id, prompt=prompt)
+        body = self._turn_request_body(task_id=task_id, session_id=session_id, prompt=prompt)
         started = time.monotonic()
         initial = self._stream_turn(
             body,
@@ -884,6 +889,7 @@ class AIPlatformAdapter:
                 raise BenchmarkError("gateway_approval_receipt_mismatch")
 
             resume_body = self._turn_request_body(
+                task_id=task_id,
                 session_id=session_id,
                 prompt=self._RESUME_MESSAGE,
             )
@@ -945,6 +951,20 @@ class AIPlatformAdapter:
             ),
             None,
         )
+        first_thinking_at = next(
+            (
+                stream["first_thinking_at"]
+                for stream in streams
+                if stream["first_thinking_at"] is not None
+            ),
+            None,
+        )
+        first_visible_candidates = [
+            timestamp
+            for timestamp in (first_thinking_at, first_text_at)
+            if timestamp is not None
+        ]
+        first_visible_at = min(first_visible_candidates) if first_visible_candidates else None
         finished = streams[-1]["finished_at"]
         duration = finished - started
         return TurnResult(
@@ -960,8 +980,18 @@ class AIPlatformAdapter:
                 ],
                 "timing": {
                     "ttft_seconds": (
+                        round(first_visible_at - started, 6)
+                        if first_visible_at is not None
+                        else None
+                    ),
+                    "first_text_seconds": (
                         round(first_text_at - started, 6)
                         if first_text_at is not None
+                        else None
+                    ),
+                    "first_thinking_seconds": (
+                        round(first_thinking_at - started, 6)
+                        if first_thinking_at is not None
                         else None
                     ),
                     "total_duration_seconds": round(duration, 6),
@@ -1124,6 +1154,7 @@ class AIPlatformAdapter:
             "run_started_events": run_started_events,
             "lifecycle_events": lifecycle_events,
             "first_text_at": first_text_at,
+            "first_thinking_at": first_thinking_at,
             "finished_at": finished_at,
             "timing": {
                 "phase": phase,
@@ -1139,11 +1170,23 @@ class AIPlatformAdapter:
                     else None
                 ),
                 "ttft_seconds": (
+                    round(min(first_thinking_at, first_text_at) - phase_started, 6)
+                    if first_thinking_at is not None and first_text_at is not None
+                    else round((first_thinking_at or first_text_at) - phase_started, 6)
+                    if first_thinking_at is not None or first_text_at is not None
+                    else None
+                ),
+                "first_text_seconds": (
                     round(first_text_at - phase_started, 6)
                     if first_text_at is not None
                     else None
                 ),
                 "thinking_to_visible_seconds": (
+                    round(first_text_at - first_thinking_at, 6)
+                    if first_text_at is not None and first_thinking_at is not None
+                    else None
+                ),
+                "thinking_to_text_seconds": (
                     round(first_text_at - first_thinking_at, 6)
                     if first_text_at is not None and first_thinking_at is not None
                     else None
@@ -1271,7 +1314,13 @@ class AIPlatformAdapter:
             receipt["attempt_number"] = attempt_number
         return receipt
 
-    def _turn_request_body(self, *, session_id: str, prompt: str) -> dict[str, Any]:
+    def _turn_request_body(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        prompt: str,
+    ) -> dict[str, Any]:
         """Build the parity request with the cohort's explicit reasoning policy."""
 
         return {
@@ -1287,6 +1336,10 @@ class AIPlatformAdapter:
             "execution_profile": self._execution_profile,
             "memory_mode": "off",
             "skills_enabled": False,
+            # Output contracts are manifest data, not prompt-text inference.
+            # JSON work products exercise the Agent loop's canonicalization;
+            # tagged multi-part scenarios retain their explicit text envelope.
+            "output_format": self._task_output_formats[task_id],
         }
 
 
@@ -1661,6 +1714,9 @@ def _make_adapter(
             password=runtime["password"],
             execution_profile=manifest["execution_profile"],
             max_approval_rounds=manifest["max_approval_rounds"],
+            task_output_formats={
+                task["task_id"]: task["output_format"] for task in manifest["tasks"]
+            },
             **common,
         )
     if system == "hermes":

@@ -1152,6 +1152,7 @@
                 "items": {
                   "type": "string"
                 },
+                "maxItems": 20,
                 "type": "array"
               },
               {
@@ -1169,6 +1170,7 @@
                   },
                   "type": "object"
                 },
+                "maxItems": 200,
                 "type": "array"
               },
               {
@@ -1266,6 +1268,8 @@
           "max_tokens": {
             "anyOf": [
               {
+                "maximum": 32768.0,
+                "minimum": 1.0,
                 "type": "integer"
               },
               {
@@ -1297,6 +1301,8 @@
             "title": "Memory Profile"
           },
           "message": {
+            "maxLength": 200000,
+            "minLength": 1,
             "title": "Message",
             "type": "string"
           },
@@ -1316,6 +1322,15 @@
             ],
             "title": "Os Agent Enabled"
           },
+          "output_format": {
+            "default": "text",
+            "enum": [
+              "text",
+              "json"
+            ],
+            "title": "Output Format",
+            "type": "string"
+          },
           "queue_mode": {
             "anyOf": [
               {
@@ -1326,6 +1341,20 @@
               }
             ],
             "title": "Queue Mode"
+          },
+          "reasoning_option": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "minLength": 1,
+                "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Option"
           },
           "resume_approval_id": {
             "anyOf": [
@@ -1390,6 +1419,7 @@
           "system_prompt": {
             "anyOf": [
               {
+                "maxLength": 100000,
                 "type": "string"
               },
               {
@@ -3760,6 +3790,51 @@
         "title": "StylePreset",
         "type": "string"
       },
+      "TaskCancelRequest": {
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "title": "TaskCancelRequest",
+        "type": "object"
+      },
+      "TaskCancelResponse": {
+        "properties": {
+          "cancelled": {
+            "title": "Cancelled",
+            "type": "boolean"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "task_id": {
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "session_id",
+          "cancelled",
+          "message"
+        ],
+        "title": "TaskCancelResponse",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -6011,6 +6086,66 @@
         "summary": "Get Session History",
         "tags": [
           "Sessions"
+        ]
+      }
+    },
+    "/api/v1/assistant/tasks/{task_id}/cancel": {
+      "post": {
+        "description": "Cancel a task in this process after owner-scoped lookup.",
+        "operationId": "cancel_task_api_v1_assistant_tasks__task_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/TaskCancelRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskCancelResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Task",
+        "tags": [
+          "Chat"
         ]
       }
     },

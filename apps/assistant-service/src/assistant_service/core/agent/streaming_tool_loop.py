@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 from ai_gateway_core.enums import StreamEventType
-from ai_gateway_core.logging import get_logger
+from ai_gateway_core.logging import get_logger, record_internal_exception
 
 from ..run_budget import RunBudgetExceeded
 from .agent_loop_helpers import (
@@ -101,6 +101,11 @@ class StreamingToolLoopMixin(StreamingToolCallMixin):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                record_internal_exception(
+                    __name__,
+                    "assistant.parallel_read_tool.preinvoke_failed",
+                    exc,
+                )
                 frame.preinvoke_error = exc
                 frame.preinvoked = True
 
@@ -136,9 +141,10 @@ class StreamingToolLoopMixin(StreamingToolCallMixin):
                         )
                     )
                 except (Exception, asyncio.CancelledError) as exc:
-                    logger.warning(
-                        "Parallel read-only cancellation checkpoint failed: %s",
-                        type(exc).__name__,
+                    record_internal_exception(
+                        __name__,
+                        "assistant.parallel_read_tool.cancel_checkpoint_failed",
+                        exc,
                     )
             raise
 
@@ -237,6 +243,21 @@ class StreamingToolLoopMixin(StreamingToolCallMixin):
                             pending_tool={
                                 "tool_id": frame.tool_id,
                                 "tool_name": frame.tool_name,
+                                "dispatched_tool_name": (
+                                    str(
+                                        frame.tool_metadata.get("discovered_tool_name")
+                                        or frame.tool_name
+                                    )
+                                    if isinstance(frame.tool_metadata, dict)
+                                    else frame.tool_name
+                                ),
+                                "dispatched_arguments": (
+                                    frame.tool_args.get("arguments")
+                                    if isinstance(frame.tool_metadata, dict)
+                                    and frame.tool_metadata.get("discovered_tool_name")
+                                    and isinstance(frame.tool_args.get("arguments"), dict)
+                                    else frame.tool_args
+                                ),
                                 "arguments": frame.tool_args,
                             },
                             approval_id=approval_id,

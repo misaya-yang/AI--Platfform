@@ -18,20 +18,22 @@ H-3: Knowledge-service ``get_user_context`` must parse ``X-User-Roles``
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import asyncio
+import contextlib
+import json
+import time
+from typing import Any
 
 import httpx
 import pytest
-from fastapi import FastAPI, Request
-from fastapi.testclient import TestClient
-
 from ai_gateway_core.proxy.base import (
     CircuitBreaker,
     InMemoryCounter,
     ServiceProxy,
     ServiceProxyConfig,
 )
-
+from fastapi import FastAPI, Request
+from fastapi.testclient import TestClient
 
 # ---------------------------------------------------------------------------
 # H-1: body preserved across retry
@@ -238,3 +240,90 @@ def test_knowledge_service_roles_parse_shape_matches_assistant_service():
         assert fragment in kb, (
             f"KB impl missing idiom {fragment!r} — cross-service drift from AS"
         )
+
+
+# ---------------------------------------------------------------------------
+# Model-config watcher: a dropped Redis connection must not silently kill the
+# invalidation subscription (bounded TTL is only the degraded fallback).
+# ---------------------------------------------------------------------------
+
+
+class _RecordingResolver:
+    def __init__(self) -> None:
+        self.invalidations: list[dict[str, Any]] = []
+
+    async def invalidate(self, **kwargs: Any) -> None:
+        self.invalidations.append(kwargs)
+
+
+class _ScriptedPubSub:
+    def __init__(self, deliver: int, then: str) -> None:
+        self.deliver = deliver
+        self.then = then  # "fail" raises, "hang" blocks until cancelled
+        self.subscribed_channels: list[str] = []
+        self.closed = False
+
+    async def subscribe(self, channel: str) -> None:
+        self.subscribed_channels.append(channel)
+
+    async def listen(self):
+        for _index in range(self.deliver):
+            yield {
+                "type": "message",
+                "data": json.dumps(
+                    {"tenant_id": f"tenant-{len(self.subscribed_channels)}"}
+                ),
+            }
+        if self.then == "fail":
+            raise ConnectionError("redis connection lost")
+        await asyncio.Event().wait()
+
+    async def unsubscribe(self, channel: str) -> None:
+        del channel
+        return None
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _ScriptedRedis:
+    def __init__(self) -> None:
+        self.pubsubs: list[_ScriptedPubSub] = []
+
+    def pubsub(self) -> _ScriptedPubSub:
+        pubsub = _ScriptedPubSub(
+            deliver=1,
+            then="fail" if not self.pubsubs else "hang",
+        )
+        self.pubsubs.append(pubsub)
+        return pubsub
+
+
+@pytest.mark.asyncio
+async def test_model_config_watch_reconnects_after_redis_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GATEWAY_ASSISTANT_SHARED_SECRET", "test-only-shared-secret")
+    from assistant_service import main as assistant_main
+
+    redis_client = _ScriptedRedis()
+    resolver = _RecordingResolver()
+
+    task = asyncio.create_task(
+        assistant_main._watch_model_config_changes(redis_client, resolver)
+    )
+    try:
+        deadline = time.monotonic() + 15.0
+        while len(resolver.invalidations) < 2 and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        assert len(resolver.invalidations) == 2
+        assert len(redis_client.pubsubs) == 2
+        assert redis_client.pubsubs[0].subscribed_channels == [
+            "gateway:model-config:changed:v1"
+        ]
+        assert redis_client.pubsubs[0].closed
+        assert not task.done()
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task

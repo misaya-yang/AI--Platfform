@@ -35,6 +35,8 @@ def mock_model_registry():
         context_window=128000,
         supports_vision=True,
         supports_tools=True,
+        capability_profile=None,
+        capability_revision=1,
     )
     registry.get_available_models.return_value = []
     return registry

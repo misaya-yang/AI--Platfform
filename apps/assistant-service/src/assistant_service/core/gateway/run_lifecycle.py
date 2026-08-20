@@ -260,7 +260,11 @@ class RunLifecycleMixin:
                 )
                 and self._approval_arguments_hash(approval.arguments) == arguments_hash
                 and approval.tool_name
-                == str((checkpoint.pending_tool or {}).get("tool_name") or "")
+                == str(
+                    (checkpoint.pending_tool or {}).get("dispatched_tool_name")
+                    or (checkpoint.pending_tool or {}).get("tool_name")
+                    or ""
+                )
                 and not unsafe_command
                 and not self._hard_checkpoint_from_memory(
                     run_id=run_id,
@@ -1228,6 +1232,11 @@ class RunLifecycleMixin:
             )
             receipt = dict((command or {}).get("steer_payload") or {})
             pending_tool = checkpoint.pending_tool if checkpoint else {}
+            dispatched_tool_name = str(
+                (pending_tool or {}).get("dispatched_tool_name")
+                or (pending_tool or {}).get("tool_name")
+                or ""
+            )
             eligible = bool(
                 checkpoint
                 and self._checkpoint_persistence_confirmed(self._checkpoint_to_dict(checkpoint))
@@ -1235,8 +1244,7 @@ class RunLifecycleMixin:
                 and command.get("tenant_id") == tenant_id
                 and command.get("user_id") == user_id
                 and command.get("session_id") == session_id
-                and str((command or {}).get("tool_name") or "")
-                == str((pending_tool or {}).get("tool_name") or "")
+                and str((command or {}).get("tool_name") or "") == dispatched_tool_name
                 and str(receipt.get("_arguments_hash") or "")
                 == str((pending_tool or {}).get("arguments_hash") or "")
                 and bool(receipt.get("_arguments_hash"))
@@ -1328,7 +1336,13 @@ class RunLifecycleMixin:
                    AND command.tenant_id = $4
                    AND command.user_id = $5
                    AND command.session_id = $6
-                   AND command.tool_name = completion.pending_tool->>'tool_name'
+                   AND command.tool_name = COALESCE(
+                           NULLIF(
+                               completion.pending_tool->>'dispatched_tool_name',
+                               ''
+                           ),
+                           completion.pending_tool->>'tool_name'
+                       )
                    AND command.steer_payload->>'_arguments_hash'
                            = completion.pending_tool->>'arguments_hash'
                    AND COALESCE(command.steer_payload->>'_arguments_hash', '') <> ''

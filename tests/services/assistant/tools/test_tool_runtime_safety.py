@@ -141,6 +141,9 @@ async def test_tool_invoker_bridge_inherits_target_timeout() -> None:
     assert projection["invoked_tool"] == "slow_document_tool"
     assert projection["status"] == "success"
     assert projection["result"] == "delayed execution completed"
+    assert all(
+        command.get("tool_name") != "tool_call" for command in gateway._commands.values()
+    )
 
 
 @pytest.mark.asyncio

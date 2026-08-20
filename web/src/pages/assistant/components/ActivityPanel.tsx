@@ -72,6 +72,9 @@ export function ActivityPanel({
   const running = !cancelled && !blocked && !failed && !!message?.isStreaming;
   const stepCount = steps.length;
   const durationLabel = formatTotal(totalDurationMs);
+  const reasoningLabel = message?.processSummary?.reasoning?.effective_option
+    ? `think:${message.processSummary.reasoning.effective_option}`
+    : "";
   const pendingApprovals =
     message?.processSummary?.tools.filter(
       (tool) => tool.status === "approval_required" && tool.approvalId,
@@ -92,7 +95,7 @@ export function ActivityPanel({
     defaultValue: "{{count}} steps",
   });
 
-  const subtitle = [statusWord, stepsText, durationLabel]
+  const subtitle = [statusWord, reasoningLabel, stepsText, durationLabel]
     .filter(Boolean)
     .join(" · ");
 

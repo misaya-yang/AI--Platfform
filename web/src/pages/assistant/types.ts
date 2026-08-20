@@ -86,6 +86,14 @@ export interface ProcessSummaryState {
     compacted?: boolean;
     dropped_history_messages?: number;
   };
+  reasoning?: {
+    requested_option?: string;
+    effective_option?: string;
+    canonical_effort?: string | null;
+    adapter_id?: string;
+    capability_revision?: number;
+    fallback_reason?: string | null;
+  };
 }
 
 // =============================================================================

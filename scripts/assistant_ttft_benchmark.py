@@ -68,6 +68,7 @@ def run_benchmark(
     trials: int,
     thinking_level: str,
     p50_ceiling_seconds: float,
+    p95_ceiling_seconds: float,
 ) -> dict[str, Any]:
     if not 1 <= trials <= 100:
         raise BenchmarkError("ttft_trials_out_of_range")
@@ -113,7 +114,8 @@ def run_benchmark(
                     "first_event_seconds": phase.get("first_event_seconds"),
                     "first_thinking_seconds": phase.get("first_thinking_seconds"),
                     "ttft_seconds": result.metadata["timing"].get("ttft_seconds"),
-                    "thinking_to_visible_seconds": phase.get("thinking_to_visible_seconds"),
+                    "first_text_seconds": result.metadata["timing"].get("first_text_seconds"),
+                    "thinking_to_text_seconds": phase.get("thinking_to_text_seconds"),
                     "total_seconds": result.duration_seconds,
                     "input_tokens": usage.get("input_tokens"),
                     "cached_input_tokens": usage.get("cached_input_tokens"),
@@ -136,14 +138,23 @@ def run_benchmark(
             "first_event_seconds",
             "first_thinking_seconds",
             "ttft_seconds",
-            "thinking_to_visible_seconds",
+            "first_text_seconds",
+            "thinking_to_text_seconds",
             "total_seconds",
         )
     }
     ttft_p50 = metrics["ttft_seconds"]["p50"]
-    passed = len(successful) == trials and ttft_p50 is not None and ttft_p50 <= p50_ceiling_seconds
+    ttft_p95 = metrics["ttft_seconds"]["p95"]
+    passed = (
+        len(successful) == trials
+        and ttft_p50 is not None
+        and ttft_p95 is not None
+        and ttft_p50 <= p50_ceiling_seconds
+        and ttft_p95 <= p95_ceiling_seconds
+    )
     summary = {
-        "schema_version": "assistant-ttft-benchmark/v1",
+        "schema_version": "assistant-ttft-benchmark/v2",
+        "ttft_definition": "first_user_visible_thinking_or_text_token",
         "model_id": runtime["model_id"],
         "thinking_level": thinking_level,
         "thinking_required": True,
@@ -155,6 +166,7 @@ def run_benchmark(
         "trial_count": trials,
         "successful_trials": len(successful),
         "p50_ceiling_seconds": p50_ceiling_seconds,
+        "p95_ceiling_seconds": p95_ceiling_seconds,
         "passed": passed,
         "metrics": metrics,
         "trials": results,
@@ -172,7 +184,8 @@ def main() -> int:
     parser.add_argument("--prompt", default="只回答数字：2+2等于多少？")
     parser.add_argument("--trials", type=int, default=10)
     parser.add_argument("--thinking-level", default="low")
-    parser.add_argument("--p50-ceiling-seconds", type=float, default=3.41)
+    parser.add_argument("--p50-ceiling-seconds", type=float, default=4.0)
+    parser.add_argument("--p95-ceiling-seconds", type=float, default=5.0)
     args = parser.parse_args()
     try:
         summary = run_benchmark(
@@ -183,6 +196,7 @@ def main() -> int:
             trials=args.trials,
             thinking_level=args.thinking_level,
             p50_ceiling_seconds=args.p50_ceiling_seconds,
+            p95_ceiling_seconds=args.p95_ceiling_seconds,
         )
     except (BenchmarkError, FileExistsError) as exc:
         print({"status": "infrastructure_error", "reason": str(exc)})

@@ -50,7 +50,14 @@ async def list_models(request: Request, user: UserContext = Depends(get_user_con
     if not mr:
         return {"models": []}
 
-    all_models = mr.get_available_models()
+    assistant = getattr(request.app.state, "assistant_service", None)
+    resolver = getattr(assistant, "tenant_model_registry_resolver", None)
+    tenant_models = (
+        await resolver.list_model_infos(user.tenant_id)
+        if resolver is not None
+        else []
+    )
+    all_models = tenant_models or mr.get_available_models()
     visible = [m for m in all_models if _user_can_access_model(user, m.access_level.value)]
 
     return {
@@ -66,6 +73,8 @@ async def list_models(request: Request, user: UserContext = Depends(get_user_con
                 "access_level": m.access_level.value,
                 "input_price_per_1k": m.input_price_per_1k,
                 "output_price_per_1k": m.output_price_per_1k,
+                "effective_capabilities": m.capability_profile,
+                "capability_revision": m.capability_revision,
             }
             for m in visible
         ]

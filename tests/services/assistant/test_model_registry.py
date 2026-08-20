@@ -161,25 +161,14 @@ class TestDefaultCatalogPricing:
         assert "gemini-3.1-pro-preview" in google_ids
         assert "gemini-3.1-flash-lite-preview" in google_ids
 
-    def test_native_search_capability_is_derived_not_persisted(self):
-        """``supports_native_search`` and ``native_search_config`` must be
-        populated by ``__post_init__`` from the ``NATIVE_SEARCH_CAPABLE``
-        map — they are derived, so the Model Management UI must not
-        expose them as editable fields. This test pins the invariant."""
-        from assistant_service.core.models.model_registry import (
-            NATIVE_SEARCH_CAPABLE,
-            ModelInfo,
-            ModelProvider,
-        )
+    def test_native_search_capability_comes_from_model_profile(self):
+        from assistant_service.core.models.model_registry import ModelInfo, ModelProvider
 
-        # A model that IS in the capability map should auto-populate.
         qwen = ModelInfo(id="qwen3.7-plus", name="Qwen 3.7 Plus", provider=ModelProvider.DASHSCOPE)
         assert qwen.supports_native_search is True
-        assert qwen.native_search_config == NATIVE_SEARCH_CAPABLE[
-            (ModelProvider.DASHSCOPE, "qwen3.7-plus")
-        ]
+        assert qwen.native_search_config == {"enable_search": True}
+        assert qwen.capability_profile["native_search"]["adapter_id"] == "search/dashscope-native-v1"
 
-        # A model NOT in the map should remain False.
         unknown = ModelInfo(id="made-up-id", name="Made Up", provider=ModelProvider.OPENAI)
         assert unknown.supports_native_search is False
         assert unknown.native_search_config is None
@@ -381,7 +370,10 @@ class TestSanitizeUsage:
 
         raw = {
             "prompt_tokens": 100,
-            "prompt_tokens_details": {"cached_tokens": 42},
+            "prompt_tokens_details": {
+                "cached_tokens": 42,
+                "cache_creation_input_tokens": 58,
+            },
             "completion_tokens": 50,
         }
         result = _sanitize_usage(raw)
@@ -390,6 +382,7 @@ class TestSanitizeUsage:
         assert result["input_tokens"] == 100
         assert result["output_tokens"] == 50
         assert result["cached_input_tokens"] == 42
+        assert result["cache_creation_input_tokens"] == 58
 
     def test_sanitize_gemini_cache_usage(self):
         """Should normalize Gemini usage metadata cache token fields."""

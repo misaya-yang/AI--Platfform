@@ -364,6 +364,10 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
       (message.processSummary?.tools.length || 0) +
       (message.activeSubAgents?.length || 0);
   const totalDurationMs = message.processSummary?.totalDurationMs || message.durationMs || 0;
+  const standaloneArtifacts = (message.generatedArtifacts || []).filter((artifact) => {
+    const url = artifact.url?.trim();
+    return !url || !message.content.includes(url);
+  });
 
   // Always surface the activity entry point on assistant turns. Earlier we
   // gated on `timelineSteps.length > 0 || isStreaming`, but messages reloaded
@@ -522,17 +526,16 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
 
           {/* Generated artifacts */}
           {!message.isStreaming &&
-            message.generatedArtifacts &&
-            message.generatedArtifacts.length > 0 &&
+            standaloneArtifacts.length > 0 &&
             (ASSISTANT_UI_V2 ? (
               <div className="mt-4 space-y-2">
-                {message.generatedArtifacts.map((artifact) => (
+                {standaloneArtifacts.map((artifact) => (
                   <InlineArtifactCard key={artifact.id} artifact={artifact} />
                 ))}
               </div>
             ) : (
               <div className="mt-4 space-y-3">
-                {message.generatedArtifacts.map((artifact) => (
+                {standaloneArtifacts.map((artifact) => (
                   <Suspense key={artifact.id} fallback={null}>
                     <DocumentPreview
                       title={artifact.title || artifact.filename || "Document"}

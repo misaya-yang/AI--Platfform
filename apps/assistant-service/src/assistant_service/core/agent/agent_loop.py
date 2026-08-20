@@ -1197,6 +1197,15 @@ class AgentLoop(
             pending_tool={
                 "tool_id": tool_id,
                 "tool_name": tool_name,
+                "dispatched_tool_name": str(
+                    tool_metadata.get("discovered_tool_name") or tool_name
+                ),
+                "dispatched_arguments": (
+                    persisted_tool_args.get("arguments")
+                    if tool_metadata.get("discovered_tool_name")
+                    and isinstance(persisted_tool_args.get("arguments"), dict)
+                    else persisted_tool_args
+                ),
                 "arguments": persisted_tool_args,
             },
             approval_id=approval_id,

@@ -21,6 +21,10 @@
 
 ### Platform architecture
 
+- Added tenant-configurable model capability profiles and typed Provider
+  Capability Adapters. Reasoning options, budgets, prompt caching, and native
+  search now flow from the Gateway model control plane through Assistant and
+  the console without model-name or user-prompt keyword routing.
 - Added [`docs/harness/platform-architecture.md`](docs/harness/platform-architecture.md): the product
   law behind form and capability diversification — four layers (surfaces / contract / kernel /
   extensions over the gateway), five rules, the `permissions` + `capabilities` coexistence decision,

@@ -5,6 +5,7 @@ Tests that model create/update operations properly sync pricing
 to the model_pricing table for usage recording.
 """
 
+import json
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -53,6 +54,22 @@ def sample_model_row():
 
 class TestModelServicePricingSync:
     """Tests for pricing synchronization in ModelService."""
+
+    def test_row_capability_json_is_decoded_before_profile_merge(
+        self, model_service, sample_model_row
+    ):
+        row = {
+            **sample_model_row,
+            "catalog_capabilities": json.dumps({}),
+            "capability_overrides": json.dumps({}),
+            "capability_revision": 1,
+        }
+
+        result = model_service._row_to_dict(row)
+
+        assert isinstance(result["catalog_capabilities"], dict)
+        assert isinstance(result["capability_overrides"], dict)
+        assert result["effective_capabilities"]["schema_version"] == 1
 
     @pytest.mark.asyncio
     async def test_create_model_syncs_pricing(self, model_service, mock_db, sample_model_row):

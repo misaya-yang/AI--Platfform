@@ -4,16 +4,30 @@ LLM Model Service.
 Manages LLM model configurations.
 """
 
+import json
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
 from ai_gateway_core.logging import get_logger
+from ai_gateway_core.models import (
+    ModelCapabilityError,
+    get_builtin_model_capabilities,
+    merge_model_capability_profiles,
+)
 
 from ...persistence.database import DatabaseStorage
 from ...services.billing.model_pricing import get_pricing_service
 
 logger = get_logger(__name__)
+
+
+class ModelCapabilityRevisionConflict(RuntimeError):
+    """An administrator edited an older capability profile revision."""
+
+
+def _jsonb_object(value: dict[str, Any]) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 class ModelService:
@@ -63,6 +77,7 @@ class ModelService:
         query = f"""
             SELECT model_id, tenant_id, provider_id, display_name,
                    context_window, max_output_tokens, supports_vision, supports_tools,
+                   catalog_capabilities, capability_overrides, capability_revision,
                    input_price_per_1k, output_price_per_1k, access_level,
                    is_enabled, sort_order, created_at, updated_at
             FROM llm_models
@@ -91,6 +106,7 @@ class ModelService:
             query = """
                 SELECT model_id, tenant_id, provider_id, display_name,
                        context_window, max_output_tokens, supports_vision, supports_tools,
+                       catalog_capabilities, capability_overrides, capability_revision,
                        input_price_per_1k, output_price_per_1k, access_level,
                        is_enabled, sort_order, created_at, updated_at
                 FROM llm_models
@@ -101,6 +117,7 @@ class ModelService:
             query = """
                 SELECT model_id, tenant_id, provider_id, display_name,
                        context_window, max_output_tokens, supports_vision, supports_tools,
+                       catalog_capabilities, capability_overrides, capability_revision,
                        input_price_per_1k, output_price_per_1k, access_level,
                        is_enabled, sort_order, created_at, updated_at
                 FROM llm_models
@@ -139,17 +156,38 @@ class ModelService:
         access_level: str = "public",
         is_enabled: bool = True,
         sort_order: int = 0,
+        catalog_capabilities: dict[str, Any] | None = None,
+        capability_overrides: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Create a new model."""
+        catalog_capabilities = dict(catalog_capabilities or {})
+        capability_overrides = dict(capability_overrides or {})
+        # The read path (_row_to_dict) synthesizes the builtin catalog into
+        # ``catalog_capabilities`` whenever the persisted catalog is empty, so
+        # create-time validation must use the same source.  Otherwise an
+        # override that is valid for the model's builtin adapter is rejected
+        # here, and an override that conflicts with the builtin profile is
+        # accepted but silently discarded on every read.
+        validation_catalog = catalog_capabilities or (
+            get_builtin_model_capabilities(provider_id, model_id) or {}
+        )
+        merge_model_capability_profiles(
+            validation_catalog,
+            capability_overrides,
+            supports_tools=supports_tools,
+            supports_vision=supports_vision,
+        )
         query = """
             INSERT INTO llm_models (
                 model_id, tenant_id, provider_id, display_name,
                 context_window, max_output_tokens, supports_vision, supports_tools,
+                catalog_capabilities, capability_overrides, capability_revision,
                 input_price_per_1k, output_price_per_1k, access_level,
                 is_enabled, sort_order
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11, $12, $13, $14, $15)
             RETURNING model_id, tenant_id, provider_id, display_name,
                       context_window, max_output_tokens, supports_vision, supports_tools,
+                      catalog_capabilities, capability_overrides, capability_revision,
                       input_price_per_1k, output_price_per_1k, access_level,
                       is_enabled, sort_order, created_at, updated_at
         """
@@ -163,6 +201,8 @@ class ModelService:
             max_output_tokens,
             supports_vision,
             supports_tools,
+            _jsonb_object(catalog_capabilities),
+            _jsonb_object(capability_overrides),
             input_price_per_1k,
             output_price_per_1k,
             access_level,
@@ -202,11 +242,16 @@ class ModelService:
         access_level: str = "public",
         sort_order: int = 0,
         enable_new: bool = True,
-    ) -> tuple[str, dict[str, Any]]:
+        catalog_capabilities: dict[str, Any] | None = None,
+    ) -> tuple[str, dict[str, Any], bool]:
         """Create or refresh catalog metadata for a provider-scoped model.
 
         Existing rows keep their ``is_enabled`` value so an admin-disabled
         model is not re-enabled by a later sync.
+
+        The third return value reports whether the effective capability
+        profile changed (a new row, or a ``capability_revision`` bump), so
+        callers can publish exact invalidations on the model-config channel.
         """
         existing = await self.get_provider_model(
             tenant_id=tenant_id,
@@ -214,6 +259,12 @@ class ModelService:
             model_id=model_id,
         )
         if existing:
+            catalog_update = (
+                catalog_capabilities
+                if dict(existing.get("catalog_capabilities") or {})
+                != dict(catalog_capabilities or {})
+                else None
+            )
             updated = await self.update_model(
                 tenant_id=tenant_id,
                 provider_id=provider_id,
@@ -227,8 +278,13 @@ class ModelService:
                 output_price_per_1k=output_price_per_1k,
                 access_level=access_level,
                 sort_order=sort_order,
+                catalog_capabilities=catalog_update,
             )
-            return "updated", updated or existing
+            result = updated or existing
+            capability_changed = int(result.get("capability_revision") or 1) != int(
+                existing.get("capability_revision") or 1
+            )
+            return "updated", result, capability_changed
 
         created = await self.create_model(
             tenant_id=tenant_id,
@@ -244,8 +300,9 @@ class ModelService:
             access_level=access_level,
             is_enabled=enable_new,
             sort_order=sort_order,
+            catalog_capabilities=catalog_capabilities,
         )
-        return "created", created
+        return "created", created, True
 
     async def update_model(
         self,
@@ -263,6 +320,9 @@ class ModelService:
         is_enabled: bool | None = None,
         sort_order: int | None = None,
         provider_id: str | None = None,
+        catalog_capabilities: dict[str, Any] | None = None,
+        capability_overrides: dict[str, Any] | None = None,
+        expected_capability_revision: int | None = None,
     ) -> dict[str, Any] | None:
         """Update a model. ``new_model_id`` renames the primary key.
 
@@ -330,6 +390,78 @@ class ModelService:
             params.append(sort_order)
             param_idx += 1
 
+        # The effective capability profile depends on the catalog/override
+        # layers AND on the supports_tools/supports_vision columns (the safe
+        # base profile derives tools.function_calling, streaming.tool_call_deltas
+        # and modalities.input from them).  A change to any of these must bump
+        # capability_revision so one revision always means one immutable
+        # effective profile (ADR-005 invariant 6).
+        capability_touched = (
+            catalog_capabilities is not None
+            or capability_overrides is not None
+            or supports_tools is not None
+            or supports_vision is not None
+        )
+        revision_guarded = capability_touched and expected_capability_revision is not None
+        if capability_touched:
+            current = await self.get_model(
+                tenant_id,
+                model_id,
+                provider_id=provider_id,
+            )
+            if current is None:
+                return None
+            next_catalog = (
+                dict(catalog_capabilities)
+                if catalog_capabilities is not None
+                else dict(current.get("catalog_capabilities") or {})
+            )
+            next_overrides = (
+                dict(capability_overrides)
+                if capability_overrides is not None
+                else dict(current.get("capability_overrides") or {})
+            )
+            next_supports_tools = (
+                supports_tools
+                if supports_tools is not None
+                else bool(current.get("supports_tools", True))
+            )
+            next_supports_vision = (
+                supports_vision
+                if supports_vision is not None
+                else bool(current.get("supports_vision", False))
+            )
+            merge_model_capability_profiles(
+                next_catalog,
+                next_overrides,
+                supports_tools=next_supports_tools,
+                supports_vision=next_supports_vision,
+            )
+            if expected_capability_revision is not None and int(
+                current.get("capability_revision") or 1
+            ) != expected_capability_revision:
+                raise ModelCapabilityRevisionConflict("model capability revision conflict")
+            if catalog_capabilities is not None:
+                updates.append(f"catalog_capabilities = ${param_idx}")
+                params.append(_jsonb_object(next_catalog))
+                param_idx += 1
+            if capability_overrides is not None:
+                updates.append(f"capability_overrides = ${param_idx}")
+                params.append(_jsonb_object(next_overrides))
+                param_idx += 1
+            capability_value_changed = (
+                catalog_capabilities is not None
+                and next_catalog != dict(current.get("catalog_capabilities") or {})
+            ) or (
+                capability_overrides is not None
+                and next_overrides != dict(current.get("capability_overrides") or {})
+            ) or (
+                bool(current.get("supports_tools", True)) != next_supports_tools
+                or bool(current.get("supports_vision", False)) != next_supports_vision
+            )
+            if capability_value_changed:
+                updates.append("capability_revision = capability_revision + 1")
+
         if not updates:
             return await self.get_model(tenant_id, model_id, provider_id=provider_id)
 
@@ -351,11 +483,23 @@ class ModelService:
                 f"AND provider_id = ${param_idx + 1} "
                 f"AND model_id = ${param_idx + 2}"
             )
+            param_idx += 3
         else:
             params.extend([tenant_id, model_id])
             where_clause = (
                 f"WHERE tenant_id = ${param_idx} AND model_id = ${param_idx + 1}"
             )
+            param_idx += 2
+
+        if revision_guarded:
+            # The pre-check read above is not atomic with this UPDATE; a
+            # concurrent writer can bump the revision between the read and
+            # here.  The WHERE-clause guard closes that race: the UPDATE then
+            # matches no row, and the existence re-check below reports the
+            # conflict instead of silently overwriting the newer profile.
+            params.append(expected_capability_revision)
+            where_clause += f" AND capability_revision = ${param_idx}"
+            param_idx += 1
 
         query = f"""
             UPDATE llm_models
@@ -363,6 +507,7 @@ class ModelService:
             {where_clause}
             RETURNING model_id, tenant_id, provider_id, display_name,
                       context_window, max_output_tokens, supports_vision, supports_tools,
+                      catalog_capabilities, capability_overrides, capability_revision,
                       input_price_per_1k, output_price_per_1k, access_level,
                       is_enabled, sort_order, created_at, updated_at
         """
@@ -388,7 +533,34 @@ class ModelService:
             )
             return row_dict
 
+        if revision_guarded:
+            # The UPDATE matched no row.  The row existed when the pre-check
+            # read it, so either it was deleted concurrently (None -> 404) or
+            # the revision moved between the read and the UPDATE (conflict).
+            existing = await self.get_model(
+                tenant_id, model_id, provider_id=provider_id
+            )
+            if existing is not None:
+                raise ModelCapabilityRevisionConflict(
+                    "model capability revision conflict"
+                )
         return None
+
+    async def reset_model_capabilities(
+        self,
+        *,
+        tenant_id: str,
+        model_id: str,
+        provider_id: str | None = None,
+        expected_capability_revision: int | None = None,
+    ) -> dict[str, Any] | None:
+        return await self.update_model(
+            tenant_id=tenant_id,
+            model_id=model_id,
+            provider_id=provider_id,
+            capability_overrides={},
+            expected_capability_revision=expected_capability_revision,
+        )
 
     async def delete_model(
         self,
@@ -455,6 +627,7 @@ class ModelService:
         query = f"""
             SELECT m.model_id, m.tenant_id, m.provider_id, m.display_name,
                    m.context_window, m.max_output_tokens, m.supports_vision, m.supports_tools,
+                   m.catalog_capabilities, m.capability_overrides, m.capability_revision,
                    m.input_price_per_1k, m.output_price_per_1k, m.access_level,
                    m.is_enabled, m.sort_order, m.created_at, m.updated_at
             FROM llm_models m
@@ -537,9 +710,43 @@ class ModelService:
         if not row:
             return {}
         result = dict(row)
+        for field in ("catalog_capabilities", "capability_overrides"):
+            raw = result.get(field)
+            if isinstance(raw, str):
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError:
+                    parsed = {}
+                result[field] = parsed if isinstance(parsed, dict) else {}
+            elif not isinstance(raw, dict):
+                result[field] = {}
         # Convert Decimal to float for JSON serialization
         if "input_price_per_1k" in result and result["input_price_per_1k"] is not None:
             result["input_price_per_1k"] = float(result["input_price_per_1k"])
         if "output_price_per_1k" in result and result["output_price_per_1k"] is not None:
             result["output_price_per_1k"] = float(result["output_price_per_1k"])
+        if not result.get("catalog_capabilities"):
+            result["catalog_capabilities"] = get_builtin_model_capabilities(
+                str(result.get("provider_id") or ""),
+                str(result.get("model_id") or ""),
+            ) or {}
+        try:
+            result["effective_capabilities"] = merge_model_capability_profiles(
+                result.get("catalog_capabilities") or {},
+                result.get("capability_overrides") or {},
+                supports_tools=bool(result.get("supports_tools", True)),
+                supports_vision=bool(result.get("supports_vision", False)),
+            )
+        except ModelCapabilityError:
+            logger.warning(
+                "Rejected invalid persisted capability profile model_id=%s provider_id=%s",
+                result.get("model_id"),
+                result.get("provider_id"),
+            )
+            result["effective_capabilities"] = merge_model_capability_profiles(
+                {},
+                {},
+                supports_tools=bool(result.get("supports_tools", True)),
+                supports_vision=bool(result.get("supports_vision", False)),
+            )
         return result

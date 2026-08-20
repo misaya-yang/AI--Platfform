@@ -173,6 +173,9 @@ export function AppLayout() {
     { key: "dark", icon: <Moon size={14} />, label: t("theme.mode.dark", "Dark"), onClick: () => setThemeMode("dark") },
     { key: "system", icon: <Monitor size={14} />, label: t("theme.mode.system", "System"), onClick: () => setThemeMode("system") },
   ];
+  const themeToggleLabel = darkMode
+    ? t("theme.switchToLight", "Switch to light")
+    : t("theme.switchToDark", "Switch to dark");
 
   const userMenuItems: MenuProps['items'] = [
     { key: 'profile', label: t('user.profile'), icon: <User size={14} /> },
@@ -358,23 +361,18 @@ export function AppLayout() {
             <button
               type="button"
               onClick={toggleDarkMode}
-              aria-label={darkMode ? t("theme.mode.light") : t("theme.mode.dark")}
+              aria-label={themeToggleLabel}
               className={`app-nav-link flex items-center rounded-lg transition-colors duration-140 ${
                 collapsed ? 'justify-center py-[10px]' : 'gap-[10px] px-[10px] py-[10px]'
               }`}
             >
               <span className="app-nav-icon shrink-0">
-                {darkMode ? <Moon size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} /> : <Sun size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />}
+                {darkMode ? <Sun size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} /> : <Moon size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />}
               </span>
               {!collapsed && (
-                <>
-                  <span className="app-nav-label flex-1 text-left truncate">
-                    {darkMode ? t("theme.mode.dark", "Dark") : t("theme.mode.light", "Light")}
-                  </span>
-                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" style={{ color: 'hsl(var(--muted-foreground) / 0.5)', transform: 'rotate(-90deg)' }}>
-                    <path d="M2.5 3.8l2.5 2.5 2.5-2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                </>
+                <span className="app-nav-label flex-1 text-left truncate">
+                  {themeToggleLabel}
+                </span>
               )}
             </button>
             <button
@@ -461,7 +459,8 @@ export function AppLayout() {
           z-index: 35;
           padding: 0;
           border: 0;
-          background: transparent;
+          background: hsl(228 12% 5% / 0.34);
+          backdrop-filter: blur(2px);
           cursor: default;
         }
         .scrollbar-hide::-webkit-scrollbar { display: none; }

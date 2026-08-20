@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Mapping
 from typing import Any
 from urllib.parse import urlsplit
@@ -9,6 +10,10 @@ from urllib.parse import urlsplit
 import httpx
 from ai_gateway_core.enums import ModelAccessLevel, ModelProvider
 from ai_gateway_core.logging import get_logger, record_internal_exception
+from ai_gateway_core.models import (
+    get_builtin_model_capabilities,
+    merge_model_capability_profiles,
+)
 
 from .model_catalog import DEFAULT_MODELS, ModelConfig, ModelInfo
 from .responses_api import (
@@ -113,6 +118,31 @@ class RegistryLifecycleMixin:
                 provider = ModelProvider(row.get("provider_id", ""))
                 access_level = ModelAccessLevel(row.get("access_level"))
                 model_id = row["model_id"]
+                catalog_capabilities = row.get("catalog_capabilities") or {}
+                capability_overrides = row.get("capability_overrides") or {}
+                if isinstance(catalog_capabilities, str):
+                    catalog_capabilities = json.loads(catalog_capabilities)
+                if isinstance(capability_overrides, str):
+                    capability_overrides = json.loads(capability_overrides)
+                builtin_profile = get_builtin_model_capabilities(
+                    str(row.get("capability_provider_id") or provider.value),
+                    model_id,
+                )
+                capability_profile = (
+                    merge_model_capability_profiles(
+                        catalog_capabilities,
+                        capability_overrides,
+                        supports_tools=row.get("supports_tools", True),
+                        supports_vision=row.get("supports_vision", False),
+                    )
+                    if catalog_capabilities or capability_overrides
+                    else merge_model_capability_profiles(
+                        builtin_profile or {},
+                        {},
+                        supports_tools=row.get("supports_tools", True),
+                        supports_vision=row.get("supports_vision", False),
+                    )
+                )
                 model = ModelInfo(
                     id=model_id,
                     name=row.get("display_name") or model_id,
@@ -124,6 +154,8 @@ class RegistryLifecycleMixin:
                     input_price_per_1k=float(row.get("input_price_per_1k", 0)),
                     output_price_per_1k=float(row.get("output_price_per_1k", 0)),
                     access_level=access_level,
+                    capability_profile=capability_profile,
+                    capability_revision=int(row.get("capability_revision") or 1),
                 )
             except Exception as exc:
                 record_internal_exception(
@@ -315,6 +347,15 @@ class RegistryLifecycleMixin:
             if self.is_provider_configured(model.provider):
                 available.append(model)
         return available
+
+    def list_loaded_models(self) -> list[ModelInfo]:
+        """Return every loaded model regardless of provider configuration.
+
+        Metadata listings (e.g. the Assistant model picker) must not depend on
+        this registry holding API credentials; credential resolution happens
+        on the chat path via a fully configured registry.
+        """
+        return list(self._models.values())
 
     def get_model(self, model_id: str) -> ModelInfo | None:
         """Get model info by ID."""

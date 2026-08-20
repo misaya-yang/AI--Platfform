@@ -35,7 +35,7 @@ class FakeModelService:
     def __init__(self):
         self.calls: list[dict[str, Any]] = []
 
-    async def upsert_model_from_catalog(self, **kwargs: Any) -> tuple[str, dict[str, Any]]:
+    async def upsert_model_from_catalog(self, **kwargs: Any) -> tuple[str, dict[str, Any], bool]:
         self.calls.append(kwargs)
         return (
             "created",
@@ -45,6 +45,7 @@ class FakeModelService:
                 "display_name": kwargs["display_name"],
                 "is_enabled": True,
             },
+            True,
         )
 
 
@@ -197,7 +198,9 @@ async def test_model_catalog_upsert_preserves_existing_disabled_state() -> None:
         "context_window": 1000000,
         "is_enabled": False,
     }
-    db.fetchrow = AsyncMock(side_effect=[existing, updated])
+    # fetchrow call order: get_provider_model, capability pre-check read in
+    # update_model (supports_* flags are revision-relevant), then the UPDATE.
+    db.fetchrow = AsyncMock(side_effect=[existing, existing, updated])
     db.fetch = AsyncMock(return_value=[])
     db.execute = AsyncMock()
     service = ModelService(database=db)
@@ -207,7 +210,7 @@ async def test_model_catalog_upsert_preserves_existing_disabled_state() -> None:
         pricing.update_pricing = AsyncMock()
         mock_get_pricing.return_value = pricing
 
-        status, result = await service.upsert_model_from_catalog(
+        status, result, capability_changed = await service.upsert_model_from_catalog(
             tenant_id="tenant-a",
             provider_id="google",
             model_id="gemini-3.5-flash",
@@ -217,5 +220,5 @@ async def test_model_catalog_upsert_preserves_existing_disabled_state() -> None:
 
     assert status == "updated"
     assert result["is_enabled"] is False
-    update_sql = db.fetchrow.call_args_list[1].args[0].split("RETURNING")[0]
+    update_sql = db.fetchrow.call_args_list[2].args[0].split("RETURNING")[0]
     assert "is_enabled =" not in update_sql

@@ -146,6 +146,7 @@ class AssistantConfig:
     enable_memory_loading: bool = False
     enable_react_loop: bool = False
     thinking_level: str | None = None
+    reasoning_option: str | None = None
 
     execution_profile: str = "safe"
     memory_mode: str = "auto"

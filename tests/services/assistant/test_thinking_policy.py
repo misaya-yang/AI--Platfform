@@ -3,7 +3,6 @@ from assistant_service.core.models.model_catalog import should_use_native_search
 from assistant_service.core.models.model_registry import ModelRegistry
 from assistant_service.core.models.responses_api import ChatMessage
 from assistant_service.core.models.thinking_policy import (
-    apply_qwen_thinking_fields,
     normalize_thinking_level,
     resolve_session_thinking_level,
     resolve_turn_thinking_level,
@@ -12,9 +11,10 @@ from assistant_service.core.models.thinking_policy import (
 
 
 def test_normalize_thinking_aliases_and_unknown_are_safe() -> None:
-    assert normalize_thinking_level(None) == "low"
-    assert normalize_thinking_level("enabled") == "low"
-    assert normalize_thinking_level("not-a-level") == "low"
+    assert normalize_thinking_level(None) == "auto"
+    assert normalize_thinking_level("enabled") == "auto"
+    assert normalize_thinking_level("not a level") == "auto"
+    assert normalize_thinking_level("custom_deep") == "custom_deep"
     assert normalize_thinking_level("HIGH") == "high"
 
 
@@ -24,8 +24,8 @@ def test_loop_keeps_session_level_across_model_turns() -> None:
     assert resolve_turn_thinking_level(requested="high", iteration=2) == "high"
 
 
-def test_session_thinking_prefers_request_then_stored_then_low() -> None:
-    assert resolve_session_thinking_level(requested=None, stored=None) == "low"
+def test_session_thinking_prefers_request_then_stored_then_auto() -> None:
+    assert resolve_session_thinking_level(requested=None, stored=None) == "auto"
     assert resolve_session_thinking_level(requested=None, stored="low") == "low"
     assert resolve_session_thinking_level(requested="high", stored="low") == "high"
     assert resolve_session_thinking_level(requested="  ", stored="medium") == "medium"
@@ -49,9 +49,8 @@ def test_native_search_ignores_message_text() -> None:
     assert should_use_native_search("hello", enabled=True) is True
 
 
-def test_qwen_omitted_thinking_level_defaults_to_low() -> None:
-    registry = ModelRegistry(use_default_models=False)
-    registry.configure_provider(ModelProvider.DASHSCOPE, api_key="test-key")
+def test_qwen_omitted_reasoning_option_uses_catalog_default() -> None:
+    registry = ModelRegistry()
     body = registry._build_request_body(
         ModelProvider.DASHSCOPE,
         "qwen3.7-plus",
@@ -59,12 +58,17 @@ def test_qwen_omitted_thinking_level_defaults_to_low() -> None:
         stream=True,
     )
     assert body["enable_thinking"] is True
-    assert body["thinking_budget"] == 256
+    assert body["thinking_budget"] == 128
 
 
-def test_qwen_low_thinking_sends_budget() -> None:
-    body: dict[str, object] = {}
-    apply_qwen_thinking_fields(body, "qwen3.7-plus", "low", token_field="max_tokens")
+def test_qwen_low_reasoning_budget_comes_from_catalog_profile() -> None:
+    registry = ModelRegistry()
+    body = registry._build_request_body(
+        ModelProvider.DASHSCOPE,
+        "qwen3.7-plus",
+        [ChatMessage(role="user", content="hello")],
+        stream=True,
+        thinking_level="low",
+    )
     assert body["enable_thinking"] is True
-    assert body["thinking_budget"] == 256
-    assert body["max_tokens"] == 16384
+    assert body["thinking_budget"] == 128

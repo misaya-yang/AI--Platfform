@@ -9,14 +9,20 @@ lazily from the DB), so the old gateway-side
 ``load_models_from_database`` cache-refresh calls are no-ops here.
 """
 
+import json
 from decimal import Decimal
 
+from ai_gateway_core.models import (
+    ModelCapabilityError,
+    get_model_capability_adapter,
+    list_model_capability_adapters,
+)
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ...core.auth.permissions import Capability, build_permission_denied_detail, check_capability
 from ...core.auth.rbac import RBAC
 from ...core.auth.user_resolver import UserContext
-from ...services.llm.model_service import ModelService
+from ...services.llm.model_service import ModelCapabilityRevisionConflict, ModelService
 from ...services.metrics.audit_event_writer import record_config_change
 from ..deps import AuthContext, get_user_context
 from ..schemas.providers import (
@@ -27,6 +33,40 @@ from ..schemas.providers import (
 
 router = APIRouter()
 _USER_CONTEXT_RBAC = RBAC(role_permissions={"admin": ["admin:*"]})
+_MODEL_CONFIG_CHANNEL = "gateway:model-config:changed:v1"
+
+
+async def _publish_model_config_changed(
+    request: Request | None,
+    *,
+    tenant_id: str,
+    model_id: str,
+    provider_id: str | None,
+) -> None:
+    if request is None:
+        return
+    storage = getattr(request.app.state, "redis", None)
+    getter = getattr(storage, "get_native_client", None)
+    client = getter() if callable(getter) else storage
+    publish = getattr(client, "publish", None)
+    if not callable(publish):
+        return
+    try:
+        await publish(
+            _MODEL_CONFIG_CHANNEL,
+            json.dumps(
+                {
+                    "tenant_id": tenant_id,
+                    "model_id": model_id,
+                    "provider_id": provider_id,
+                },
+                separators=(",", ":"),
+            ),
+        )
+    except Exception:
+        # The Assistant has a bounded TTL fallback; config writes must not fail
+        # merely because the optional invalidation channel is unavailable.
+        return
 
 
 def _auth_from_user(user: UserContext) -> AuthContext:
@@ -54,6 +94,24 @@ def _require_user_gateway_capability(user: UserContext, capability: Capability) 
     )
 
 
+def _redact_capability_layers_for_non_admin(
+    models: list[dict], user: UserContext
+) -> list[dict]:
+    """Hide the catalog/override config layers from non-admin callers.
+
+    ADR-005 keeps capability profile editing admin-only; the raw layers are
+    admin configuration, not runtime data.  Non-admin readers keep
+    ``effective_capabilities`` (what the model actually offers) but never see
+    the tenant override layer or the catalog snapshot it merges over.
+    """
+    if "admin" in user.roles:
+        return models
+    for model in models:
+        model.pop("catalog_capabilities", None)
+        model.pop("capability_overrides", None)
+    return models
+
+
 def get_model_service(request: Request) -> ModelService:
     """Get ModelService from app state."""
     svc = getattr(request.app.state, "model_service", None)
@@ -63,6 +121,28 @@ def get_model_service(request: Request) -> ModelService:
             detail="Model service is not initialized.",
         )
     return svc
+
+
+@router.get("/model-capability-adapters")
+async def list_capability_adapters(
+    user: UserContext = Depends(get_user_context),
+):
+    """Return the typed adapter catalog used by the model management form."""
+
+    del user
+    return list_model_capability_adapters()
+
+
+@router.get("/model-capability-adapters/{adapter_id:path}/schema")
+async def get_capability_adapter_schema(
+    adapter_id: str,
+    user: UserContext = Depends(get_user_context),
+):
+    del user
+    adapter = get_model_capability_adapter(adapter_id)
+    if adapter is None:
+        raise HTTPException(status_code=404, detail="Capability adapter not found")
+    return adapter
 
 
 @router.get("/models", response_model=list[ModelResponse])
@@ -89,7 +169,7 @@ async def list_models(
         include_disabled=include_disabled,
         access_level=access_level if not include_disabled else None,
     )
-    return models
+    return _redact_capability_layers_for_non_admin(models, user)
 
 
 @router.post("/models", response_model=ModelResponse)
@@ -117,6 +197,7 @@ async def create_model(
             access_level=body.access_level,
             is_enabled=body.is_enabled,
             sort_order=body.sort_order,
+            capability_overrides=body.capability_overrides,
         )
         if request is not None:
             await record_config_change(
@@ -128,7 +209,15 @@ async def create_model(
                 before=None,
                 after=body.model_dump(),
             )
+            await _publish_model_config_changed(
+                request,
+                tenant_id=user.tenant_id or "default",
+                model_id=body.model_id,
+                provider_id=body.provider_id,
+            )
         return model
+    except ModelCapabilityError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     except Exception as e:
         if "duplicate key" in str(e).lower():
             raise HTTPException(status_code=409, detail="Model already exists")
@@ -148,7 +237,7 @@ async def get_model(
     )
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
-    return model
+    return _redact_capability_layers_for_non_admin([model], user)[0]
 
 
 @router.put("/models/{model_id}", response_model=ModelResponse)
@@ -179,22 +268,29 @@ async def update_model(
 
     new_mid = body.model_id if body.model_id and body.model_id != model_id else None
 
-    model = await model_service.update_model(
-        tenant_id=user.tenant_id or "default",
-        model_id=model_id,
-        new_model_id=new_mid,
-        display_name=body.display_name,
-        context_window=body.context_window,
-        max_output_tokens=body.max_output_tokens,
-        supports_vision=body.supports_vision,
-        supports_tools=body.supports_tools,
-        input_price_per_1k=input_price,
-        output_price_per_1k=output_price,
-        access_level=body.access_level,
-        is_enabled=body.is_enabled,
-        sort_order=body.sort_order,
-        provider_id=provider_id,
-    )
+    try:
+        model = await model_service.update_model(
+            tenant_id=user.tenant_id or "default",
+            model_id=model_id,
+            new_model_id=new_mid,
+            display_name=body.display_name,
+            context_window=body.context_window,
+            max_output_tokens=body.max_output_tokens,
+            supports_vision=body.supports_vision,
+            supports_tools=body.supports_tools,
+            input_price_per_1k=input_price,
+            output_price_per_1k=output_price,
+            access_level=body.access_level,
+            is_enabled=body.is_enabled,
+            sort_order=body.sort_order,
+            provider_id=provider_id,
+            capability_overrides=body.capability_overrides,
+            expected_capability_revision=body.expected_capability_revision,
+        )
+    except ModelCapabilityRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail="Model capability profile was updated") from exc
+    except ModelCapabilityError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
     if request is not None:
@@ -207,6 +303,53 @@ async def update_model(
             before={"model_id": model_id, "provider_id": provider_id},
             after=body.model_dump(exclude_none=True),
         )
+        await _publish_model_config_changed(
+            request,
+            tenant_id=user.tenant_id or "default",
+            model_id=str(model["model_id"]),
+            provider_id=provider_id or str(model.get("provider_id") or "") or None,
+        )
+    return model
+
+
+@router.post("/models/{model_id}/capabilities/reset", response_model=ModelResponse)
+async def reset_model_capabilities(
+    model_id: str,
+    request: Request,
+    provider_id: str | None = None,
+    expected_capability_revision: int | None = Query(None, ge=1),
+    model_service: ModelService = Depends(get_model_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """Clear only tenant overrides, preserving provider catalog defaults."""
+
+    _require_user_gateway_capability(user, Capability.GATEWAY_MODEL_CONFIG_WRITE)
+    try:
+        model = await model_service.reset_model_capabilities(
+            tenant_id=user.tenant_id or "default",
+            model_id=model_id,
+            provider_id=provider_id,
+            expected_capability_revision=expected_capability_revision,
+        )
+    except ModelCapabilityRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail="Model capability profile was updated") from exc
+    if model is None:
+        raise HTTPException(status_code=404, detail="Model not found")
+    await record_config_change(
+        request=request,
+        auth=_auth_from_user(user),
+        resource_type="model",
+        resource_id=model_id,
+        action="capabilities_reset",
+        before={"capability_revision": expected_capability_revision},
+        after={"capability_revision": model["capability_revision"]},
+    )
+    await _publish_model_config_changed(
+        request,
+        tenant_id=user.tenant_id or "default",
+        model_id=model_id,
+        provider_id=provider_id or str(model.get("provider_id") or "") or None,
+    )
     return model
 
 
@@ -238,6 +381,12 @@ async def delete_model(
             action="delete",
             before={"model_id": model_id, "provider_id": provider_id},
             after=None,
+        )
+        await _publish_model_config_changed(
+            request,
+            tenant_id=user.tenant_id or "default",
+            model_id=model_id,
+            provider_id=provider_id,
         )
     return {"model_id": model_id, "status": "deleted"}
 
@@ -271,5 +420,11 @@ async def toggle_model(
             action="toggle",
             before={"model_id": model_id, "provider_id": provider_id},
             after={"is_enabled": is_enabled},
+        )
+        await _publish_model_config_changed(
+            request,
+            tenant_id=user.tenant_id or "default",
+            model_id=model_id,
+            provider_id=provider_id or str(model.get("provider_id") or "") or None,
         )
     return model

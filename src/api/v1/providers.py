@@ -29,6 +29,7 @@ from ..schemas.providers import (
     ProviderTemplateResponse,
     ProviderUpdate,
 )
+from .models import _publish_model_config_changed
 
 router = APIRouter()
 _USER_CONTEXT_RBAC = RBAC(role_permissions={"admin": ["admin:*"]})
@@ -345,6 +346,7 @@ async def test_provider_connection(
 @router.post("/providers/{provider_id}/models/sync", response_model=ProviderModelSyncResult)
 async def sync_provider_models(
     provider_id: str,
+    request: Request = None,
     provider_service: ProviderService = Depends(get_provider_service),
     model_service: ModelService = Depends(get_model_service),
     user: UserContext = Depends(get_user_context),
@@ -354,7 +356,7 @@ async def sync_provider_models(
 
     sync_service = ModelCatalogSyncService(provider_service, model_service)
     try:
-        return await sync_service.sync_provider_models(
+        result = await sync_service.sync_provider_models(
             tenant_id=user.tenant_id or "default",
             provider_id=provider_id,
         )
@@ -362,3 +364,15 @@ async def sync_provider_models(
         if str(e) == "PROVIDER_NOT_FOUND":
             raise HTTPException(status_code=404, detail="Provider not found")
         raise HTTPException(status_code=400, detail=str(e))
+
+    # Catalog sync can change effective capability profiles (new models or a
+    # capability_revision bump).  Publish exact invalidations so the Assistant
+    # does not serve stale profiles until its bounded TTL expires.
+    for model in result.get("capability_changed_models", []):
+        await _publish_model_config_changed(
+            request,
+            tenant_id=user.tenant_id or "default",
+            model_id=str(model.get("model_id") or ""),
+            provider_id=str(model.get("provider_id") or provider_id),
+        )
+    return result

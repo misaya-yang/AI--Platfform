@@ -361,6 +361,14 @@ def _parse_agent_skill(
         for key, value in custom_metadata.items()
     ):
         raise AgentPluginLoadError("AGENT_PLUGIN_SKILL_METADATA_INVALID")
+    discovery_delegate_tool = str(
+        custom_metadata.get("discovery_delegate_tool") or ""
+    ).strip()
+    if discovery_delegate_tool and not re.fullmatch(
+        r"[A-Za-z][A-Za-z0-9_.:-]{0,127}",
+        discovery_delegate_tool,
+    ):
+        raise AgentPluginLoadError("AGENT_PLUGIN_SKILL_METADATA_INVALID")
 
     # ``allowed-tools`` is descriptive only. A third-party package cannot
     # grant itself tools or permissions; the existing runtime policy remains
@@ -380,6 +388,7 @@ def _parse_agent_skill(
         config={
             "agent_plugin": plugin.name,
             "declared_allowed_tools": metadata.get("allowed-tools", ""),
+            "discovery_delegate_tool": discovery_delegate_tool,
         },
         source=SkillSource.MARKETPLACE,
         max_context_tokens=2000,

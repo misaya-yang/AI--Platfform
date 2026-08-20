@@ -6,6 +6,7 @@ export interface SessionConfig {
   selected_datasets?: string[];
   web_search_enabled?: boolean;
   thinking_level?: "off" | "low" | "medium" | "high";
+  reasoning_option?: string;
   temperature?: number;
   selected_style?: string;
   execution_profile?: "safe" | "balanced" | "power";

@@ -1269,6 +1269,9 @@ def test_wire_protocol_is_opt_in_and_provider_scoped() -> None:
 def test_qwen_default_request_remains_chat_completions_shape() -> None:
     registry = ModelRegistry(use_default_models=False)
     registry.configure_provider(ModelProvider.DASHSCOPE, api_key="test-key")
+    registry.add_custom_model(
+        ModelInfo("qwen3.7-plus", "Qwen 3.7 Plus", ModelProvider.DASHSCOPE)
+    )
 
     body = registry._build_request_body(
         ModelProvider.DASHSCOPE,
@@ -1290,6 +1293,9 @@ def test_qwen_default_request_remains_chat_completions_shape() -> None:
 def test_qwen_explicit_thinking_off_is_forwarded_for_both_wire_protocols() -> None:
     registry = ModelRegistry(use_default_models=False)
     registry.configure_provider(ModelProvider.DASHSCOPE, api_key="test-key")
+    registry.add_custom_model(
+        ModelInfo("qwen3.7-plus", "Qwen 3.7 Plus", ModelProvider.DASHSCOPE)
+    )
 
     messages = [ChatMessage(role="user", content="summarize the completed tool result")]
     chat_body = registry._build_request_body(
@@ -1333,6 +1339,10 @@ def test_responses_native_search_uses_provider_specific_tool_shape() -> None:
         api_key="test-key",
         wire_protocol=RESPONSES_V1_WIRE_PROTOCOL,
     )
+    registry.add_custom_model(
+        ModelInfo("qwen3.7-plus", "Qwen 3.7 Plus", ModelProvider.DASHSCOPE)
+    )
+    registry.add_custom_model(ModelInfo("gpt-test", "GPT Test", ModelProvider.OPENAI))
 
     dashscope_body = registry._build_request_body(
         ModelProvider.DASHSCOPE,

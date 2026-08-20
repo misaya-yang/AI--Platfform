@@ -1020,6 +1020,22 @@ class StreamingToolExecutionMixin:
                     pending_tool={
                         "tool_id": frame.tool_id,
                         "tool_name": frame.tool_name,
+                        # Approval records for discovery-bridge dispatches carry
+                        # the concrete tool identity (the gateway approves the
+                        # unwrapped tool), so the checkpoint must record it too
+                        # or resume matching fails permanently.
+                        "dispatched_tool_name": (
+                            str(frame.tool_metadata.get("discovered_tool_name") or frame.tool_name)
+                            if isinstance(frame.tool_metadata, dict)
+                            else frame.tool_name
+                        ),
+                        "dispatched_arguments": (
+                            frame.tool_args.get("arguments")
+                            if isinstance(frame.tool_metadata, dict)
+                            and frame.tool_metadata.get("discovered_tool_name")
+                            and isinstance(frame.tool_args.get("arguments"), dict)
+                            else frame.tool_args
+                        ),
                         "arguments": frame.tool_args,
                     },
                     approval_id=approval_id,
@@ -1421,6 +1437,18 @@ class StreamingToolExecutionMixin:
             pending_tool={
                 "tool_id": frame.tool_id,
                 "tool_name": frame.tool_name,
+                "dispatched_tool_name": (
+                    str(frame.tool_metadata.get("discovered_tool_name") or frame.tool_name)
+                    if isinstance(frame.tool_metadata, dict)
+                    else frame.tool_name
+                ),
+                "dispatched_arguments": (
+                    frame.tool_args.get("arguments")
+                    if isinstance(frame.tool_metadata, dict)
+                    and frame.tool_metadata.get("discovered_tool_name")
+                    and isinstance(frame.tool_args.get("arguments"), dict)
+                    else frame.tool_args
+                ),
                 "arguments": frame.tool_args,
             },
             approval_id=(

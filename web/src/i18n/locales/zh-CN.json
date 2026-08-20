@@ -332,6 +332,7 @@
     "taskGoalFallback": "任务目标",
     "taskRunning": "任务进行中...",
     "thinking": "思考中...",
+    "thinkingAuto": "自动思考",
     "thinkingHigh": "深度思考",
     "thinkingInProgress": "思考中...",
     "thinkingLevel": "思考强度",
@@ -1685,7 +1686,9 @@
         "contextWindowMin": "上下文窗口至少为 1",
         "contextWindowMax": "上下文窗口不能超过 10,000,000",
         "maxOutputTokensMin": "最大输出至少为 1",
-        "priceMin": "价格不能为负数"
+        "priceMin": "价格不能为负数",
+        "capabilityOptionIdInvalid": "每个推理选项需要非空标签和唯一 id：仅限小写字母、数字、'_' 或 '-'（最长 32 个字符）；'auto' 为保留字。",
+        "capabilityOptionIdDuplicate": "推理选项的 id 与别名必须唯一，且别名不能覆盖已有选项 id。"
       }
     }
   },
@@ -2156,6 +2159,7 @@
       "noProviders": "暂无厂商",
       "noModels": "暂无模型",
       "toast": {
+        "capabilitiesReset": "能力覆盖已清除，模型将使用厂商默认配置",
         "createFailed": "创建失败",
         "deleteFailed": "删除失败",
         "modelCreated": "模型创建成功",
@@ -2504,6 +2508,8 @@
   "theme": {
     "title": "主题",
     "dark": "深色模式",
+    "switchToLight": "切换至浅色",
+    "switchToDark": "切换至深色",
     "mode": {
       "light": "浅色",
       "dark": "深色",

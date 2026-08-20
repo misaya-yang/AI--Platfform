@@ -331,7 +331,9 @@ async def _initialize_model_registry(
         try:
             async with database._pool.acquire() as conn:
                 rows = await conn.fetch(
-                    "SELECT model_id, display_name, provider_id, context_window, max_output_tokens, access_level "
+                    "SELECT model_id, display_name, provider_id, context_window, max_output_tokens, "
+                    "supports_vision, supports_tools, catalog_capabilities, capability_overrides, "
+                    "capability_revision, input_price_per_1k, output_price_per_1k, access_level "
                     "FROM llm_models WHERE tenant_id = $1 AND is_enabled = true "
                     "ORDER BY sort_order ASC, model_id ASC",
                     "default",
@@ -359,6 +361,8 @@ async def _shutdown_assistant_service(
     mcp_runtime,
     database,
     redis_client,
+    model_config_watch_task,
+    tenant_model_registry_resolver,
 ) -> None:
     """Drain requests, then close process-scoped resources in startup order."""
     from ai_gateway_core.proxy.drain import DRAIN
@@ -369,15 +373,95 @@ async def _shutdown_assistant_service(
             DRAIN.inflight,
         )
 
+    if model_config_watch_task is not None:
+        model_config_watch_task.cancel()
+        # The watcher is best-effort; a watcher that already died on a Redis
+        # error must not break the shutdown ordering either. CancelledError is
+        # a BaseException since Python 3.8, so it must be named explicitly.
+        try:
+            await model_config_watch_task
+        except (asyncio.CancelledError, Exception) as exc:
+            log_internal_exception(
+                logger,
+                "assistant.model_config.watch_shutdown_failed",
+                exc,
+                level=logging.WARNING,
+            )
     if agent_plugin_mcp_manager is not None:
         await agent_plugin_mcp_manager.shutdown()
     if mcp_runtime is not None:
         await mcp_runtime.close()
+    if tenant_model_registry_resolver is not None:
+        await tenant_model_registry_resolver.close()
     if database:
         await database.close()
     if redis_client:
         await redis_client.close()
     logger.info("Assistant Service shut down")
+
+
+async def _watch_model_config_changes(redis_client, resolver) -> None:
+    """Invalidate exact tenant model snapshots after Gateway CRUD commits.
+
+    The subscription is a liveness optimization (bounded TTL is the degraded
+    fallback), so a dropped Redis connection must never kill the watcher
+    silently: reconnect with capped backoff instead.
+    """
+
+    channel = "gateway:model-config:changed:v1"
+    backoff = 1.0
+    while True:
+        pubsub = redis_client.pubsub()
+        try:
+            await pubsub.subscribe(channel)
+            backoff = 1.0
+            async for message in pubsub.listen():
+                if message.get("type") != "message":
+                    continue
+                try:
+                    payload = json.loads(message.get("data") or "{}")
+                    await resolver.invalidate(
+                        tenant_id=payload.get("tenant_id"),
+                        model_id=payload.get("model_id"),
+                        provider_id=payload.get("provider_id"),
+                    )
+                except Exception as exc:
+                    log_internal_exception(
+                        logger,
+                        "assistant.model_config.invalidation_failed",
+                        exc,
+                        level=logging.WARNING,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log_internal_exception(
+                logger,
+                "assistant.model_config.watch_reconnecting",
+                exc,
+                level=logging.WARNING,
+            )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2.0, 30.0)
+        finally:
+            try:
+                await pubsub.unsubscribe(channel)
+            except Exception as exc:
+                log_internal_exception(
+                    logger,
+                    "assistant.model_config.watch_unsubscribe_failed",
+                    exc,
+                    level=logging.WARNING,
+                )
+            try:
+                await pubsub.aclose()
+            except Exception as exc:
+                log_internal_exception(
+                    logger,
+                    "assistant.model_config.watch_close_failed",
+                    exc,
+                    level=logging.WARNING,
+                )
 
 
 @asynccontextmanager
@@ -941,6 +1025,14 @@ async def lifespan(app: FastAPI):
         if database is not None
         else None
     )
+    model_config_watch_task = (
+        asyncio.create_task(
+            _watch_model_config_changes(redis_client, tenant_model_registry_resolver),
+            name="assistant-model-config-watch",
+        )
+        if redis_client is not None and tenant_model_registry_resolver is not None
+        else None
+    )
 
     trace_writer = AssistantTraceWriter(
         database=database,
@@ -1068,6 +1160,8 @@ async def lifespan(app: FastAPI):
         mcp_runtime=mcp_runtime,
         database=database,
         redis_client=redis_client,
+        model_config_watch_task=model_config_watch_task,
+        tenant_model_registry_resolver=tenant_model_registry_resolver,
     )
 
 

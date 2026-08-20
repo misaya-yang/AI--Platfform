@@ -4,7 +4,7 @@
  * Modal form for creating/editing LLM models.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useForm } from "react-hook-form";
 import {
@@ -32,8 +32,23 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { ChevronDown } from "lucide-react";
-import type { LLMModel, ModelCreate, ModelUpdate, ModelAccessLevel } from "@/api/models";
+import type {
+  LLMModel,
+  ModelCapabilityAdapter,
+  ModelCapabilityProfile,
+  ModelCreate,
+  ModelUpdate,
+  ModelAccessLevel,
+} from "@/api/models";
 import type { Provider, ProviderTemplate } from "@/api/providers";
+import { ModelCapabilityEditor } from "./ModelCapabilityEditor";
+import {
+  cloneModelCapabilityProfile,
+  createSafeModelCapabilityProfile,
+  isUsableModelCapabilityProfile,
+  modelCapabilityProfilesEqual,
+  validateCapabilityProfileOptionIds,
+} from "@/features/models/modelCapabilities";
 
 interface ModelFormProps {
   open: boolean;
@@ -43,7 +58,13 @@ interface ModelFormProps {
   providerTemplates?: ProviderTemplate[];
   providersLoading?: boolean;
   providerTemplatesLoading?: boolean;
+  capabilityAdapters?: ModelCapabilityAdapter[];
   onSubmit: (data: ModelCreate | ModelUpdate) => Promise<void>;
+  /**
+   * Edit mode only: clear tenant overrides server-side (back to provider
+   * defaults). When absent, "Provider defaults" only resets the local draft.
+   */
+  onResetCapabilities?: () => Promise<void>;
   loading?: boolean;
 }
 
@@ -144,14 +165,36 @@ export function ModelForm({
   providerTemplates = [],
   providersLoading = false,
   providerTemplatesLoading = false,
+  capabilityAdapters = [],
   onSubmit,
+  onResetCapabilities,
   loading,
 }: ModelFormProps) {
   const { t } = useTranslation();
   const isEdit = !!model;
   const [advancedCatalogOverride, setAdvancedCatalogOverride] = useState(false);
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
+  const [capabilityProfile, setCapabilityProfile] = useState<ModelCapabilityProfile>(
+    () => createSafeModelCapabilityProfile()
+  );
+  // The profile the form was seeded with. Compared against the live profile
+  // at submit time so an untouched form does NOT persist a maximal override
+  // layer that would shadow every future catalog update.
+  const baselineCapabilityProfileRef = useRef<ModelCapabilityProfile>(
+    createSafeModelCapabilityProfile()
+  );
+  const [capabilityError, setCapabilityError] = useState<string | null>(null);
+  const seedCapabilityProfile = useCallback((profile: ModelCapabilityProfile) => {
+    setCapabilityProfile(profile);
+    baselineCapabilityProfileRef.current = cloneModelCapabilityProfile(profile);
+    setCapabilityError(null);
+  }, []);
   const initializedFormKeyRef = useRef<string | null>(null);
+  // Create mode: whether the typed model_id currently matches a catalog
+  // entry. When it transitions matched → unmatched the profile re-seeds to
+  // the safe default once (mirrors what the server computes for a custom
+  // model without overrides); it must NOT re-seed on every keystroke.
+  const catalogMatchedModelIdRef = useRef<string | null>(null);
 
   const ACCESS_LEVELS: { value: ModelAccessLevel; label: string }[] = [
     { value: "public", label: t("llm.model.accessLevels.public") },
@@ -292,6 +335,7 @@ export function ModelForm({
   useEffect(() => {
     if (!open) {
       initializedFormKeyRef.current = null;
+      catalogMatchedModelIdRef.current = null;
       return;
     }
 
@@ -321,7 +365,13 @@ export function ModelForm({
         is_enabled: model.is_enabled,
         sort_order: model.sort_order,
       });
+      seedCapabilityProfile(
+        isUsableModelCapabilityProfile(model.effective_capabilities)
+          ? cloneModelCapabilityProfile(model.effective_capabilities)
+          : createSafeModelCapabilityProfile(model.supports_tools, model.supports_vision)
+      );
     } else {
+      catalogMatchedModelIdRef.current = null;
       const firstProviderOption = selectableProviderOptions[0];
       const firstCatalogModel = firstProviderOption?.template?.default_models[0];
       setAdvancedCatalogOverride(false);
@@ -330,6 +380,14 @@ export function ModelForm({
         ...createCatalogModelDefaults(firstCatalogModel),
         provider_id: firstProviderOption?.value || "",
       });
+      seedCapabilityProfile(
+        firstCatalogModel && isUsableModelCapabilityProfile(firstCatalogModel.catalog_capabilities)
+          ? cloneModelCapabilityProfile(firstCatalogModel.catalog_capabilities)
+          : createSafeModelCapabilityProfile(
+              firstCatalogModel?.supports_tools ?? true,
+              firstCatalogModel?.supports_vision ?? false
+            )
+      );
     }
   }, [
     model,
@@ -337,6 +395,7 @@ export function ModelForm({
     providerTemplatesLoading,
     providersLoading,
     reset,
+    seedCapabilityProfile,
     selectableProviderOptions,
   ]);
 
@@ -347,10 +406,27 @@ export function ModelForm({
     const catalogModel = template?.default_models.find(
       (item) => item.model_id.toLowerCase() === modelId.trim().toLowerCase()
     );
-    if (!catalogModel) return;
+    if (!catalogModel) {
+      if (catalogMatchedModelIdRef.current !== null) {
+        catalogMatchedModelIdRef.current = null;
+        seedCapabilityProfile(
+          createSafeModelCapabilityProfile(watch("supports_tools"), watch("supports_vision"))
+        );
+      }
+      return;
+    }
 
+    catalogMatchedModelIdRef.current = catalogModel.model_id;
     applyCatalogModel(catalogModel, setValue);
-  }, [isEdit, modelId, providerId, selectedProviderOption, setValue]);
+    seedCapabilityProfile(
+      isUsableModelCapabilityProfile(catalogModel.catalog_capabilities)
+        ? cloneModelCapabilityProfile(catalogModel.catalog_capabilities)
+        : createSafeModelCapabilityProfile(
+            catalogModel.supports_tools,
+            catalogModel.supports_vision
+          )
+    );
+  }, [isEdit, modelId, providerId, selectedProviderOption, setValue, seedCapabilityProfile, watch]);
 
   useEffect(() => {
     if (isEdit || !providerId || catalogModelId === CUSTOM_MODEL_VALUE) return;
@@ -363,6 +439,28 @@ export function ModelForm({
   }, [catalogModelId, catalogModels, isEdit, providerId, setValue]);
 
   const onFormSubmit = async (data: FormData) => {
+    const optionIdIssue = validateCapabilityProfileOptionIds(capabilityProfile);
+    if (optionIdIssue) {
+      setCapabilityError(
+        t(
+          optionIdIssue === "duplicate"
+            ? "llm.model.validation.capabilityOptionIdDuplicate"
+            : "llm.model.validation.capabilityOptionIdInvalid"
+        )
+      );
+      return;
+    }
+    setCapabilityError(null);
+
+    // An untouched profile must NOT be persisted: sending the whole seeded
+    // profile as ``capability_overrides`` would create a maximal override
+    // layer that shadows every future provider-catalog update for this model.
+    const profileUnchanged = modelCapabilityProfilesEqual(
+      capabilityProfile,
+      baselineCapabilityProfileRef.current
+    );
+    const capabilityOverrides = profileUnchanged ? undefined : capabilityProfile;
+
     const submitData: ModelCreate | ModelUpdate = isEdit
       ? {
           // ``model_id`` may be a rename in edit mode; the server treats
@@ -378,6 +476,8 @@ export function ModelForm({
           access_level: data.access_level,
           is_enabled: data.is_enabled,
           sort_order: data.sort_order,
+          capability_overrides: capabilityOverrides,
+          expected_capability_revision: model?.capability_revision,
         }
       : {
           model_id: data.model_id,
@@ -392,6 +492,7 @@ export function ModelForm({
           access_level: data.access_level,
           is_enabled: data.is_enabled,
           sort_order: data.sort_order,
+          capability_overrides: capabilityOverrides,
         };
 
     await onSubmit(submitData);
@@ -403,9 +504,20 @@ export function ModelForm({
     const firstCatalogModel = option?.template?.default_models[0];
     if (firstCatalogModel) {
       applyCatalogModel(firstCatalogModel, setValue);
+      seedCapabilityProfile(
+        isUsableModelCapabilityProfile(firstCatalogModel.catalog_capabilities)
+          ? cloneModelCapabilityProfile(firstCatalogModel.catalog_capabilities)
+          : createSafeModelCapabilityProfile(
+              firstCatalogModel.supports_tools,
+              firstCatalogModel.supports_vision
+            )
+      );
       setShowAdvancedSettings(false);
     } else {
       setValue("catalog_model_id", CUSTOM_MODEL_VALUE);
+      seedCapabilityProfile(
+        createSafeModelCapabilityProfile(watch("supports_tools"), watch("supports_vision"))
+      );
       setShowAdvancedSettings(true);
     }
   };
@@ -413,6 +525,9 @@ export function ModelForm({
   const handleCatalogModelChange = (value: string) => {
     setValue("catalog_model_id", value);
     if (value === CUSTOM_MODEL_VALUE) {
+      seedCapabilityProfile(
+        createSafeModelCapabilityProfile(watch("supports_tools"), watch("supports_vision"))
+      );
       setShowAdvancedSettings(true);
       return;
     }
@@ -420,13 +535,21 @@ export function ModelForm({
     const catalogModel = catalogModels.find((item) => item.model_id === value);
     if (catalogModel) {
       applyCatalogModel(catalogModel, setValue);
+      seedCapabilityProfile(
+        isUsableModelCapabilityProfile(catalogModel.catalog_capabilities)
+          ? cloneModelCapabilityProfile(catalogModel.catalog_capabilities)
+          : createSafeModelCapabilityProfile(
+              catalogModel.supports_tools,
+              catalogModel.supports_vision
+            )
+      );
       setShowAdvancedSettings(false);
     }
   };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[600px] max-h-[90vh] overflow-y-auto">
+      <DialogContent className="sm:max-w-[760px] max-h-[90vh] overflow-y-auto">
         <form onSubmit={handleSubmit(onFormSubmit)}>
           <DialogHeader>
             <DialogTitle>{isEdit ? t("llm.model.editTitle") : t("llm.model.addTitle")}</DialogTitle>
@@ -657,6 +780,29 @@ export function ModelForm({
                       />
                     </div>
                   </section>
+
+                  <ModelCapabilityEditor
+                    profile={capabilityProfile}
+                    adapters={capabilityAdapters}
+                    onChange={setCapabilityProfile}
+                    onReset={async () => {
+                      if (isEdit && onResetCapabilities) {
+                        await onResetCapabilities();
+                        return;
+                      }
+                      seedCapabilityProfile(
+                        model && isUsableModelCapabilityProfile(model.catalog_capabilities)
+                          ? cloneModelCapabilityProfile(model.catalog_capabilities)
+                          : createSafeModelCapabilityProfile(
+                              watch("supports_tools"),
+                              watch("supports_vision")
+                            )
+                      );
+                    }}
+                  />
+                  {capabilityError && (
+                    <p className="text-sm text-destructive">{capabilityError}</p>
+                  )}
 
                   <section className="grid gap-4">
                     <h3 className="text-sm font-semibold text-foreground">

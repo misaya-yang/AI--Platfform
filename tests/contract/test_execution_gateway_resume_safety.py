@@ -368,10 +368,13 @@ class _SharedCommandDatabase:
     ) -> bool:
         pending_tool = self._json_dict((checkpoint or {}).get("pending_tool"))
         steer_payload = self._json_dict((command or {}).get("steer_payload"))
+        dispatched_tool_name = (
+            pending_tool.get("dispatched_tool_name") or pending_tool.get("tool_name")
+        )
         return bool(
             checkpoint
             and command
-            and command.get("tool_name") == pending_tool.get("tool_name")
+            and command.get("tool_name") == dispatched_tool_name
             and steer_payload.get("_arguments_hash")
             and steer_payload.get("_arguments_hash") == pending_tool.get("arguments_hash")
             and command.get("status") in {"result_recorded_succeeded", "result_recorded_failed"}
@@ -404,6 +407,7 @@ class _SharedCommandDatabase:
         checkpoint_id: str,
         acknowledgeable: bool = True,
         artifact_ids: list[str] | None = None,
+        checkpoint_tool_name: str | None = None,
     ) -> None:
         command = self.commands[command_id]
         self.checkpoints.append(
@@ -415,7 +419,8 @@ class _SharedCommandDatabase:
                 "session_id": command["session_id"],
                 "phase": "tool_call_completed",
                 "pending_tool": {
-                    "tool_name": command["tool_name"],
+                    "tool_name": checkpoint_tool_name or command["tool_name"],
+                    "dispatched_tool_name": command["tool_name"],
                     "arguments_hash": command["steer_payload"]["_arguments_hash"],
                 },
                 "idempotency_keys": {
@@ -2229,7 +2234,7 @@ async def test_fresh_run_completion_ack_releases_sticky_result_for_third_intent(
     assert ack["committed"] is True
     assert database.commands[command_id]["status"] == "succeeded"
     assert "command.run_id" not in database.ack_query
-    assert "completion.pending_tool->>'tool_name'" in database.ack_query
+    assert "completion.pending_tool->>'dispatched_tool_name'" in database.ack_query
     assert "completion.pending_tool->>'arguments_hash'" in database.ack_query
 
     database.run["run_id"] = RUN_ID_3
@@ -2246,6 +2251,57 @@ async def test_fresh_run_completion_ack_releases_sticky_result_for_third_intent(
         == 1
     )
 
+
+@pytest.mark.asyncio
+async def test_completion_ack_uses_dispatched_name_for_meta_tool_checkpoint() -> None:
+    database = _SharedCommandDatabase()
+    invoker = _CountingInvoker()
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=database)
+
+    first = await gateway.invoke_tool(
+        "external_write",
+        {"value": "x"},
+        _context(request_id="meta-tool-intent"),
+    )
+    command_id = str(first.metadata["command_id"])
+    checkpoint_id = "45454545-4545-4545-8545-454545454545"
+    database.add_completion_checkpoint(
+        command_id=command_id,
+        run_id=RUN_ID_2,
+        checkpoint_id=checkpoint_id,
+        checkpoint_tool_name="tool_call",
+    )
+
+    ack = await gateway.acknowledge_command_result(
+        command_id=command_id,
+        checkpoint_id=checkpoint_id,
+        run_id=RUN_ID_2,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+    )
+
+    assert ack["committed"] is True
+    assert database.commands[command_id]["status"] == "succeeded"
+
+
+def test_pending_tool_receipt_hashes_dispatched_meta_tool_arguments() -> None:
+    sanitized = AssistantExecutionGateway._sanitize_pending_tool(
+        {
+            "tool_id": "call-1",
+            "tool_name": "tool_call",
+            "dispatched_tool_name": "external_write",
+            "arguments": {
+                "name": "external_write",
+                "arguments": {"value": "x"},
+            },
+            "dispatched_arguments": {"value": "x"},
+        }
+    )
+
+    assert sanitized["tool_name"] == "tool_call"
+    assert sanitized["dispatched_tool_name"] == "external_write"
+    assert sanitized["arguments_hash"] == AssistantExecutionGateway._hash_value({"value": "x"})
 
 @pytest.mark.asyncio
 async def test_completion_ack_commit_then_ack_loss_never_replays_exact_intent() -> None:
@@ -2685,3 +2741,200 @@ async def test_process_finish_is_suppressed_by_unacknowledged_result() -> None:
     assert receipt["committed"] is True
     assert receipt["resume_in_progress"] is True
     assert gateway._runs[RUN_ID].status == "running"
+
+
+@pytest.mark.asyncio
+async def test_discovery_dispatched_approval_matches_dispatched_checkpoint_identity() -> None:
+    """Approvals created for the concrete discovered tool must approve.
+
+    The discovery bridge dispatches ``tool_call`` whose gateway invocation
+    unwraps to the concrete tool; the approval record therefore carries the
+    concrete name/arguments while the frame checkpoint records the wrapper.
+    Matching must use the checkpoint's dispatched identity.
+    """
+    gateway = AssistantExecutionGateway(tool_invoker=_CountingInvoker(), database=None)
+    context = _context()
+    await _start_run(gateway)
+    approval_id = await gateway.request_tool_approval(
+        context=context,
+        tool_name="mcp_write_document",
+        arguments={"path": "/docs/a.md"},
+        reason="test",
+    )
+    await gateway.save_run_checkpoint(
+        run_id=context.run_id,
+        tenant_id=context.tenant_id,
+        user_id=context.user_id,
+        session_id=context.session_id,
+        phase="approval_pending",
+        pending_tool={
+            "tool_id": "call-1",
+            "tool_name": "tool_call",
+            "dispatched_tool_name": "mcp_write_document",
+            "dispatched_arguments": {"path": "/docs/a.md"},
+            "arguments": {
+                "name": "mcp_write_document",
+                "arguments": {"path": "/docs/a.md"},
+            },
+        },
+        approval_id=approval_id,
+        resume_payload={"attempt_id": "attempt-dispatched"},
+        status="blocked",
+    )
+
+    approved = await gateway.approve(
+        approval_id=approval_id,
+        tenant_id=context.tenant_id,
+        user_id=context.user_id,
+        approved=True,
+        approver_user_id=context.user_id,
+    )
+
+    assert approved is not None
+    assert approved["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_wrapper_only_checkpoint_still_fails_closed_against_concrete_approval() -> None:
+    """Pre-change checkpoints must not be loosely matched to concrete approvals."""
+    gateway = AssistantExecutionGateway(tool_invoker=_CountingInvoker(), database=None)
+    context = _context()
+    await _start_run(gateway)
+    approval_id = await gateway.request_tool_approval(
+        context=context,
+        tool_name="mcp_write_document",
+        arguments={"path": "/docs/a.md"},
+        reason="test",
+    )
+    await gateway.save_run_checkpoint(
+        run_id=context.run_id,
+        tenant_id=context.tenant_id,
+        user_id=context.user_id,
+        session_id=context.session_id,
+        phase="approval_pending",
+        pending_tool={
+            "tool_id": "call-1",
+            "tool_name": "tool_call",
+            "arguments": {
+                "name": "mcp_write_document",
+                "arguments": {"path": "/docs/a.md"},
+            },
+        },
+        approval_id=approval_id,
+        resume_payload={"attempt_id": "attempt-legacy"},
+        status="blocked",
+    )
+
+    approved = await gateway.approve(
+        approval_id=approval_id,
+        tenant_id=context.tenant_id,
+        user_id=context.user_id,
+        approved=True,
+        approver_user_id=context.user_id,
+    )
+
+    assert approved is None
+    assert gateway._approvals[approval_id].status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_discovery_dispatched_approval_resume_preflight_is_ready() -> None:
+    """An approved discovery-dispatched tool must produce a ready resume plan."""
+    gateway = AssistantExecutionGateway(tool_invoker=_CountingInvoker(), database=None)
+    context = _context()
+    await _start_run(gateway)
+    approval_id = await gateway.request_tool_approval(
+        context=context,
+        tool_name="mcp_write_document",
+        arguments={"path": "/docs/a.md"},
+        reason="test",
+    )
+    checkpoint = await gateway.save_run_checkpoint(
+        run_id=context.run_id,
+        tenant_id=context.tenant_id,
+        user_id=context.user_id,
+        session_id=context.session_id,
+        phase="approval_pending",
+        pending_tool={
+            "tool_id": "call-1",
+            "tool_name": "tool_call",
+            "dispatched_tool_name": "mcp_write_document",
+            "dispatched_arguments": {"path": "/docs/a.md"},
+            "arguments": {
+                "name": "mcp_write_document",
+                "arguments": {"path": "/docs/a.md"},
+            },
+        },
+        approval_id=approval_id,
+        resume_payload={"attempt_id": "attempt-resume"},
+        status="blocked",
+    )
+    approved = await gateway.approve(
+        approval_id=approval_id,
+        tenant_id=context.tenant_id,
+        user_id=context.user_id,
+        approved=True,
+        approver_user_id=context.user_id,
+    )
+    assert approved is not None
+
+    plan = await gateway.prepare_run_resume(
+        run_id=context.run_id,
+        tenant_id=context.tenant_id,
+        user_id=context.user_id,
+        session_id=context.session_id,
+        approval_id=approval_id,
+    )
+
+    assert plan is not None
+    assert plan["status"] == "ready"
+    assert plan["resume_mode"] == "checkpoint"
+    assert plan["checkpoint"]["checkpoint_id"] == checkpoint["checkpoint_id"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_direct_approval_resume_preflight_remains_ready() -> None:
+    """Checkpoints without dispatched fields keep matching same-name approvals."""
+    gateway = AssistantExecutionGateway(tool_invoker=_CountingInvoker(), database=None)
+    context = _context()
+    await _start_run(gateway)
+    approval_id = await gateway.request_tool_approval(
+        context=context,
+        tool_name="confirmation_tool",
+        arguments={"value": "current"},
+        reason="test",
+    )
+    await gateway.save_run_checkpoint(
+        run_id=context.run_id,
+        tenant_id=context.tenant_id,
+        user_id=context.user_id,
+        session_id=context.session_id,
+        phase="approval_pending",
+        pending_tool={
+            "tool_id": "tool-legacy",
+            "tool_name": "confirmation_tool",
+            "arguments": {"value": "current"},
+        },
+        approval_id=approval_id,
+        resume_payload={"attempt_id": "attempt-legacy-ready"},
+        status="blocked",
+    )
+    approved = await gateway.approve(
+        approval_id=approval_id,
+        tenant_id=context.tenant_id,
+        user_id=context.user_id,
+        approved=True,
+        approver_user_id=context.user_id,
+    )
+    assert approved is not None
+
+    plan = await gateway.prepare_run_resume(
+        run_id=context.run_id,
+        tenant_id=context.tenant_id,
+        user_id=context.user_id,
+        session_id=context.session_id,
+        approval_id=approval_id,
+    )
+
+    assert plan is not None
+    assert plan["status"] == "ready"

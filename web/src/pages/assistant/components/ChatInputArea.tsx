@@ -1,8 +1,15 @@
 import { useRef, useCallback, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
-import { Send, Loader2, X, FileText, ImageIcon } from "lucide-react";
+import { ChevronDown, Send, Loader2, X, FileText, ImageIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { QuickActionsMenu } from "../components/QuickActionsMenu"; // Assume this exists or is moved
@@ -10,6 +17,7 @@ import { StyleSelector } from "../components/StyleSelector";
 import type { UploadedFile } from "../hooks/useFileHandler";
 import { isImageFile, formatFileSize } from "@/api/files";
 import type { DatasetInfo, AssistantConfig } from "@/api/assistant";
+import type { ModelReasoningOption } from "@/api/models";
 
 const ASSISTANT_UI_V2 = import.meta.env.VITE_ASSISTANT_UI_V2 !== "false";
 
@@ -35,8 +43,9 @@ interface ChatInputAreaProps {
   onToggleDataset: (id: string) => void;
   webSearchEnabled: boolean;
   setWebSearchEnabled: (val: boolean) => void;
-  thinkingLevel: "off" | "low" | "medium" | "high";
-  setThinkingLevel: (val: "off" | "low" | "medium" | "high") => void;
+  thinkingLevel: string;
+  setThinkingLevel: (val: string) => void;
+  reasoningOptions: ModelReasoningOption[];
   handleImageGenerate: () => void;
   selectedStyle: string;
   setSelectedStyle: (style: string) => void;
@@ -68,6 +77,7 @@ export function ChatInputArea({
   setWebSearchEnabled,
   thinkingLevel,
   setThinkingLevel,
+  reasoningOptions,
   handleImageGenerate,
   selectedStyle,
   setSelectedStyle,
@@ -85,6 +95,10 @@ export function ChatInputArea({
     !isGeneratingImage &&
     hasAvailableModel &&
     Boolean(input.trim() || hasUploadedFiles);
+  const selectedReasoningLabel =
+    thinkingLevel === "auto"
+      ? t("assistant.thinkingAuto", "Think auto")
+      : reasoningOptions.find((option) => option.id === thinkingLevel)?.label || thinkingLevel;
 
   // Auto-resize textarea
   const handleTextareaChange = useCallback(
@@ -199,20 +213,37 @@ export function ChatInputArea({
               ring without elevating the card. */}
           <div className="relative flex items-end gap-2 p-2 rounded-[10px] bg-[hsl(var(--assistant-surface-bg))] border border-[hsl(var(--assistant-border))] focus-within:border-[hsl(var(--assistant-accent))]/40 transition-colors duration-150">
             {/* Quick actions menu */}
-            <select
-              aria-label={t("assistant.thinkingLevel", "Thinking")}
-              value={thinkingLevel}
-              disabled={isStreaming || isGeneratingImage}
-              onChange={(event) =>
-                setThinkingLevel(event.target.value as "off" | "low" | "medium" | "high")
-              }
-              className="h-9 shrink-0 rounded-md border border-transparent bg-transparent px-1.5 text-[11px] text-muted-foreground hover:bg-muted/50"
-            >
-              <option value="off">{t("assistant.thinkingOff", "Think off")}</option>
-              <option value="low">{t("assistant.thinkingLow", "Think low")}</option>
-              <option value="medium">{t("assistant.thinkingMedium", "Think mid")}</option>
-              <option value="high">{t("assistant.thinkingHigh", "Think high")}</option>
-            </select>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  aria-label={t("assistant.thinkingLevel", "Thinking")}
+                  disabled={isStreaming || isGeneratingImage}
+                  className="h-9 min-w-[108px] max-w-[148px] shrink-0 justify-between gap-1.5 rounded-md border border-transparent bg-[hsl(var(--assistant-surface-soft))] px-2.5 text-[12px] font-medium text-[hsl(var(--assistant-text-secondary))] shadow-none hover:border-[hsl(var(--assistant-border))] hover:bg-[hsl(var(--assistant-chip-bg))] hover:text-[hsl(var(--assistant-text-primary))] focus-visible:border-[hsl(var(--assistant-accent))]/45 focus-visible:ring-[3px] focus-visible:ring-[hsl(var(--assistant-accent))]/15"
+                >
+                  <span className="truncate">{selectedReasoningLabel}</span>
+                  <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[hsl(var(--assistant-text-tertiary))]" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                side="top"
+                align="start"
+                sideOffset={8}
+                className="min-w-[168px] border-[hsl(var(--assistant-border))] bg-[hsl(var(--assistant-surface-bg))] text-[hsl(var(--assistant-text-primary))]"
+              >
+                <DropdownMenuRadioGroup value={thinkingLevel} onValueChange={setThinkingLevel}>
+                  <DropdownMenuRadioItem value="auto">
+                    {t("assistant.thinkingAuto", "Think auto")}
+                  </DropdownMenuRadioItem>
+                  {reasoningOptions.map((option) => (
+                    <DropdownMenuRadioItem key={option.id} value={option.id}>
+                      {option.label}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
             <QuickActionsMenu
               onFileUpload={() => fileInputRef.current?.click()}
               onImageGenerate={handleImageGenerate}

@@ -192,6 +192,10 @@ class ModelBase(BaseModel):
     )
     is_enabled: bool = Field(default=True, description="Whether the model is enabled")
     sort_order: int = Field(default=0, description="Sort order for UI display")
+    capability_overrides: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Tenant capability profile overrides merged over the provider catalog",
+    )
 
 
 class ModelCreate(ModelBase):
@@ -221,12 +225,17 @@ class ModelUpdate(BaseModel):
     access_level: str | None = None
     is_enabled: bool | None = None
     sort_order: int | None = None
+    capability_overrides: dict[str, Any] | None = None
+    expected_capability_revision: int | None = Field(default=None, ge=1)
 
 
 class ModelResponse(ModelBase):
     """Model response."""
 
     tenant_id: str
+    catalog_capabilities: dict[str, Any] = Field(default_factory=dict)
+    effective_capabilities: dict[str, Any] = Field(default_factory=dict)
+    capability_revision: int = Field(default=1, ge=1)
     created_at: datetime
     updated_at: datetime
 

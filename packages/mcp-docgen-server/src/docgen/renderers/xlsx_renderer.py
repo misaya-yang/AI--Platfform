@@ -14,7 +14,6 @@ formula body without the leading ``=`` and we prepend it here.
 
 from __future__ import annotations
 
-import re
 import time
 from pathlib import Path
 
@@ -24,7 +23,7 @@ from openpyxl.utils import get_column_letter
 
 from ..ir import XlsxCell, XlsxIR, XlsxSheet
 from .base import BaseRenderer, RenderError, RenderResult
-
+from .filename import safe_document_stem
 
 _ROLE_FONT = {
     "input": "0042A3",      # blue  (hardcoded input)
@@ -57,6 +56,7 @@ class XlsxRenderer(BaseRenderer):
     format = "xlsx"
 
     def _cell_font(self, c: XlsxCell, header_fill_hex: str | None) -> Font:
+        _ = header_fill_hex
         hex_color = _ROLE_FONT.get(c.role, "000000")
         if c.font_color is not None:
             hex_color = c.font_color.value
@@ -122,7 +122,7 @@ class XlsxRenderer(BaseRenderer):
             self._write_sheet(wb, sheet, header_fill_hex)
 
         out_dir.mkdir(parents=True, exist_ok=True)
-        safe_name = re.sub(r"[^A-Za-z0-9_\-\.]", "_", ir.metadata.title)[:80] or "workbook"
+        safe_name = safe_document_stem(ir.metadata.title, fallback="workbook")
         path = out_dir / f"{safe_name}.xlsx"
         wb.save(str(path))
 
@@ -135,4 +135,5 @@ class XlsxRenderer(BaseRenderer):
         )
 
     async def fix(self, ir: XlsxIR, critic_findings, out_dir: Path) -> RenderResult:
+        _ = critic_findings
         return await self.render(ir, out_dir)

@@ -253,6 +253,11 @@ def normalize_provider_cache_usage(
         cached = _safe_int(details.get("cached_tokens"))
         if cached is not None:
             result["cached_input_tokens"] = max(result.get("cached_input_tokens", 0), cached)
+        created = _safe_int(details.get("cache_creation_input_tokens"))
+        if created is not None:
+            result["cache_creation_input_tokens"] = max(
+                result.get("cache_creation_input_tokens", 0), created
+            )
 
     if "cached_input_tokens" not in result and result.get("cache_read_input_tokens"):
         result["cached_input_tokens"] = result["cache_read_input_tokens"]

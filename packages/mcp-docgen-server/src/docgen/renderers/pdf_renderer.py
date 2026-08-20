@@ -13,15 +13,13 @@ available via the sandbox client.
 
 from __future__ import annotations
 
-import re
 import time
 from pathlib import Path
-from typing import Optional
 
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4, LETTER, LEGAL
+from reportlab.lib.pagesizes import A4, LEGAL, LETTER
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import cm, inch
+from reportlab.lib.units import cm
 from reportlab.platypus import (
     Image,
     ListFlowable,
@@ -47,7 +45,7 @@ from ..ir import (
     TableBlock,
 )
 from .base import BaseRenderer, RenderError, RenderResult
-
+from .filename import safe_document_stem
 
 _PAGE_SIZES = {"A4": A4, "Letter": LETTER, "Legal": LEGAL}
 
@@ -207,7 +205,7 @@ class PdfRenderer(BaseRenderer):
         page_size = _PAGE_SIZES.get(ir.content.page_size, A4)
         styles = self._styles(ir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        safe_name = re.sub(r"[^A-Za-z0-9_\-\.]", "_", ir.metadata.title)[:80] or "document"
+        safe_name = safe_document_stem(ir.metadata.title, fallback="document")
         path = out_dir / f"{safe_name}.pdf"
 
         story = []
@@ -257,4 +255,5 @@ class PdfRenderer(BaseRenderer):
         )
 
     async def fix(self, ir: PdfIR, critic_findings, out_dir: Path) -> RenderResult:
+        _ = critic_findings
         return await self.render(ir, out_dir)

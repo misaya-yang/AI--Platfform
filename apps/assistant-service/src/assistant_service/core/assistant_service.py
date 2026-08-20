@@ -764,9 +764,11 @@ Workflow:
         if session is not None:
             raw_config = getattr(session, "config", None) or {}
             if isinstance(raw_config, dict):
-                stored_value = raw_config.get("thinking_level")
+                stored_value = raw_config.get("reasoning_option", raw_config.get("thinking_level"))
                 stored = str(stored_value) if stored_value is not None else None
-        requested = getattr(config, "thinking_level", None)
+        requested = getattr(config, "reasoning_option", None) or getattr(
+            config, "thinking_level", None
+        )
         effective = resolve_session_thinking_level(requested=requested, stored=stored)
         persist_value = session_thinking_persist_value(
             requested=requested, stored=stored, effective=effective
@@ -778,6 +780,7 @@ Workflow:
             and hasattr(self.session_manager, "update_config")
         ):
             merged = dict(getattr(session, "config", None) or {})
+            merged["reasoning_option"] = persist_value
             merged["thinking_level"] = persist_value
             try:
                 await self.session_manager.update_config(session_id, merged)
@@ -785,7 +788,7 @@ Workflow:
                 record_internal_exception(
                     __name__, "assistant.session.thinking_persist_failed", exc
                 )
-        return replace(config, thinking_level=effective)
+        return replace(config, thinking_level=effective, reasoning_option=effective)
 
     def _preflight_failure_event(
         self,
@@ -1484,6 +1487,7 @@ Workflow:
         logger.info(f"[AGENT LOOP] streaming-first model={loop_config.model_id}")
 
         request_registry = None
+        request_registry_leased = False
         if config.agent_runtime is not None:
             provider_id = str(config.model_provider_id or "")
             if not provider_id:
@@ -1502,6 +1506,9 @@ Workflow:
                 user.tenant_id or "default",
                 config.model_id,
             )
+        if request_registry is not None:
+            self.tenant_model_registry_resolver.retain(request_registry)
+            request_registry_leased = True
         turn_model_registry = request_registry or self.model_registry
 
         # Create AgentLoop instance (system_prompt passed via loop_config).
@@ -1545,8 +1552,9 @@ Workflow:
                 )
                 history = []
 
-        # Execute the agent loop. A DB-backed registry owns provider clients
-        # for this turn only, so tenant credentials never enter shared state.
+        # Execute the agent loop. The tenant resolver owns cached provider
+        # clients; this run holds a lease so cancellation or config invalidation
+        # cannot close a client underneath an active or immediately following turn.
         try:
             async for event in agent_loop.execute(
                 session_id=session_id,
@@ -1606,8 +1614,8 @@ Workflow:
                 # Convert AgentLoopEvent to AssistantStreamEvent
                 yield self._convert_agent_loop_event(event)
         finally:
-            if request_registry is not None:
-                await request_registry.close()
+            if request_registry_leased:
+                await self.tenant_model_registry_resolver.release(request_registry)
 
     def _convert_agent_loop_event(
         self,

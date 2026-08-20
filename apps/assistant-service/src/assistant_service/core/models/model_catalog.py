@@ -6,18 +6,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from ai_gateway_core.enums import ModelAccessLevel, ModelProvider
+from ai_gateway_core.models import (
+    get_builtin_model_capabilities,
+    merge_model_capability_profiles,
+)
 
+from .capability_adapters import native_search_config_from_profile
 from .responses_api import CHAT_COMPLETIONS_WIRE_PROTOCOL
-
-
-def _qwen_thinking_enabled(model_id: str, thinking_level: str | None) -> bool | None:
-    """Return an explicit Qwen thinking flag. Off is False, never omitted."""
-    from .thinking_policy import qwen_thinking_request, uses_qwen_thinking_protocol
-
-    if not uses_qwen_thinking_protocol(model_id):
-        return None
-    enabled, _budget = qwen_thinking_request(thinking_level)
-    return enabled
 
 
 @dataclass
@@ -34,75 +29,25 @@ class ModelInfo:
     input_price_per_1k: float = 0.0  # USD per 1K tokens
     output_price_per_1k: float = 0.0
     access_level: ModelAccessLevel = ModelAccessLevel.PUBLIC  # Permission level required
-
-    # --- Native web-search capability (DERIVED — not persisted, not UI-editable) ---
-    # Populated from ``NATIVE_SEARCH_CAPABLE`` in ``__post_init__`` based on the
-    # (provider, model_id) pair. Intentionally NOT exposed in the Model
-    # Management UI because the capability requires provider-specific
-    # request-body wiring in ``_build_*_body`` (e.g. Anthropic's
-    # ``web_search_20250305`` tool, Gemini's ``google_search`` tool,
-    # DashScope's ``enable_search`` flag). Flipping a DB boolean without a
-    # matching code path would produce 400 errors — so the map is the
-    # single source of truth and DB-loaded ``ModelInfo`` instances pick
-    # it up transparently on construction.
+    capability_profile: dict[str, Any] | None = None
+    capability_revision: int = 1
     supports_native_search: bool = False
     native_search_config: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
-        if not self.supports_native_search and self.native_search_config is None:
-            cfg = NATIVE_SEARCH_CAPABLE.get((self.provider, self.id))
-            if cfg is not None:
-                self.supports_native_search = True
-                self.native_search_config = cfg
-
-
-# Hardcoded capability map: (provider, model_id) -> provider-specific config
-# that will be merged into the request body when native search is activated.
-# Keeping this here (not per-ModelInfo field) so DB-backed and default models
-# both benefit and we have one place to update when providers change APIs.
-NATIVE_SEARCH_CAPABLE: dict[tuple[ModelProvider, str], dict[str, Any]] = {
-    # DashScope / Qwen — `enable_search: true` in extra_body (OpenAI-compat).
-    # Ref: https://help.aliyun.com/zh/model-studio/qwen-web-search
-    # Note: qwen-turbo / qwen-plus retired from catalog (2026-04).
-    (ModelProvider.DASHSCOPE, "qwen-max"): {"enable_search": True},
-    (ModelProvider.DASHSCOPE, "qwen3.7-plus"): {"enable_search": True},
-    (ModelProvider.DASHSCOPE, "qwen3.6-plus"): {"enable_search": True},
-    # Google Gemini — `google_search` tool (2.0+).
-    # Ref: https://ai.google.dev/gemini-api/docs/grounding
-    # Note: Gemini 2.5 family retired from catalog (2026-04) in favor of 3.x.
-    (ModelProvider.GOOGLE, "gemini-3.1-pro-preview"): {"tool_type": "google_search"},
-    (ModelProvider.GOOGLE, "gemini-3.1-flash-lite-preview"): {"tool_type": "google_search"},
-    (ModelProvider.GOOGLE, "gemini-3-pro-preview"): {"tool_type": "google_search"},
-    (ModelProvider.GOOGLE, "gemini-3-flash-preview"): {"tool_type": "google_search"},
-    # Vertex entries mirror the Google ones — same wire format, same tool_type,
-    # different host. Kept explicit (rather than branching on provider at
-    # lookup time) so the capability map stays uniform across providers.
-    (ModelProvider.GOOGLE_VERTEX, "gemini-3.1-pro-preview"): {"tool_type": "google_search"},
-    (ModelProvider.GOOGLE_VERTEX, "gemini-3.1-flash-lite-preview"): {"tool_type": "google_search"},
-    (ModelProvider.GOOGLE_VERTEX, "gemini-3-pro-preview"): {"tool_type": "google_search"},
-    (ModelProvider.GOOGLE_VERTEX, "gemini-3-flash-preview"): {"tool_type": "google_search"},
-    # Anthropic — server tool `web_search_20250305`.
-    # Ref: https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/web-search-tool
-    # Note: Claude 3.5 and Sonnet-4 (2025-05) retired in favor of 4.5 family.
-    (ModelProvider.ANTHROPIC, "claude-opus-4-7"): {
-        "tool_type": "web_search_20250305",
-        "max_uses": 5,
-    },
-    (ModelProvider.ANTHROPIC, "claude-opus-4-5"): {
-        "tool_type": "web_search_20250305",
-        "max_uses": 5,
-    },
-    (ModelProvider.ANTHROPIC, "claude-sonnet-4-6"): {
-        "tool_type": "web_search_20250305",
-        "max_uses": 5,
-    },
-    (ModelProvider.ANTHROPIC, "claude-sonnet-4-5"): {
-        "tool_type": "web_search_20250305",
-        "max_uses": 5,
-    },
-    # OpenAI — deferred: Responses API `web_search_preview` is not supported by
-    # our /chat/completions path. DeepSeek has no native search. Tavily fallback.
-}
+        catalog = get_builtin_model_capabilities(self.provider.value, self.id) or {}
+        self.capability_profile = merge_model_capability_profiles(
+            catalog,
+            self.capability_profile or {},
+            supports_tools=self.supports_tools,
+            supports_vision=self.supports_vision,
+        )
+        tools = self.capability_profile["tools"]
+        modalities = self.capability_profile["modalities"]["input"]
+        self.supports_tools = bool(tools["function_calling"])
+        self.supports_vision = "image" in modalities
+        self.native_search_config = native_search_config_from_profile(self.capability_profile)
+        self.supports_native_search = self.native_search_config is not None
 
 
 def should_use_native_search(

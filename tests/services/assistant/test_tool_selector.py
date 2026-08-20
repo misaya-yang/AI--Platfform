@@ -129,7 +129,7 @@ def test_discover_mode_without_bridges_keeps_bounded_tools_reachable() -> None:
     assert {item.name for item in selected} == {"spawn_subagent", "generate_pptx"}
 
 
-def test_discover_mode_advertises_relevant_generation_backend() -> None:
+def test_discover_mode_defers_generation_backend_without_explicit_pin() -> None:
     tools = [
         *tool_discovery_definitions(),
         FakeToolDefinition("mcp_docgen__generate_document", category=ToolCategory.MCP),
@@ -140,7 +140,7 @@ def test_discover_mode_advertises_relevant_generation_backend() -> None:
     selected = select_tools(tools, user_message="create a PDF document", max_tokens=10_000)
     names = {item.name for item in selected}
 
-    assert "mcp_docgen__generate_document" in names
+    assert "mcp_docgen__generate_document" not in names
     assert "mcp_vendor__opaque" not in names
     assert "spawn_subagent" not in names
 
@@ -153,7 +153,7 @@ def test_discover_mode_advertises_relevant_generation_backend() -> None:
         "repair and test this function against edge cases",
     ],
 )
-def test_discover_mode_advertises_explicit_code_request(user_message: str) -> None:
+def test_discover_mode_does_not_route_code_by_prompt_keywords(user_message: str) -> None:
     tools = [
         *tool_discovery_definitions(),
         FakeToolDefinition(
@@ -169,7 +169,7 @@ def test_discover_mode_advertises_explicit_code_request(user_message: str) -> No
     selected = select_tools(tools, user_message=user_message, max_tokens=10_000)
     names = {item.name for item in selected}
 
-    assert "execute_python_code" in names
+    assert "execute_python_code" not in names
     assert "update_user_memory" not in names
 
 
@@ -198,7 +198,7 @@ def test_discover_mode_plain_analysis_does_not_advertise_code_executor(
     assert {item.name for item in selected} == DISCOVERY_TOOL_NAMES
 
 
-def test_ascii_alias_requires_a_complete_word_boundary() -> None:
+def test_relevance_aliases_do_not_bypass_discovery() -> None:
     tools = [
         *tool_discovery_definitions(),
         FakeToolDefinition("custom_runner", relevance_keywords=["run"]),
@@ -208,7 +208,22 @@ def test_ascii_alias_requires_a_complete_word_boundary() -> None:
     explicit = select_tools(tools, user_message="Run the requested task")
 
     assert {item.name for item in returned} == DISCOVERY_TOOL_NAMES
-    assert "custom_runner" in {item.name for item in explicit}
+    assert {item.name for item in explicit} == DISCOVERY_TOOL_NAMES
+
+
+def test_single_generic_cjk_bigram_does_not_advertise_unrelated_tool() -> None:
+    tools = [
+        *tool_discovery_definitions(),
+        FakeToolDefinition(
+            "mcp_docgen__generate_document",
+            category=ToolCategory.MCP,
+            description="生成支持中文排版的专业文档",
+        ),
+    ]
+
+    selected = select_tools(tools, user_message="你好，请用自然的中文回应我")
+
+    assert {item.name for item in selected} == DISCOVERY_TOOL_NAMES
 
 
 def test_discover_mode_advertises_explicitly_pinned_tool() -> None:

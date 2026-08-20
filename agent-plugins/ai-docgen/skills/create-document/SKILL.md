@@ -3,6 +3,8 @@ name: create-document
 description: Create a polished downloadable DOCX, PPTX, XLSX, or PDF when the user asks for a document, presentation, spreadsheet, or report artifact.
 compatibility: Requires Python 3.11+ with the ai-docgen MCP runtime installed.
 allowed-tools: generate_document
+metadata:
+  discovery_delegate_tool: mcp_docgen__generate_document
 ---
 
 Use the `generate_document` MCP tool whenever the user asks for a downloadable

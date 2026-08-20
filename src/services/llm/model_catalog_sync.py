@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 from ai_gateway_core.logging import get_logger
+from ai_gateway_core.models import ModelCapabilityError
 
 from .model_service import ModelService
 from .provider_service import ProviderService
@@ -98,13 +99,32 @@ class ModelCatalogSyncService:
 
         created_models: list[dict[str, Any]] = []
         updated_models: list[dict[str, Any]] = []
+        capability_changed_models: list[dict[str, Any]] = []
 
         for entry in sorted(catalog_by_id.values(), key=lambda item: (-item.sort_order, item.model_id)):
-            status, model = await self.model_service.upsert_model_from_catalog(
-                tenant_id=tenant_id,
-                provider_id=provider_id,
-                **entry.to_model_kwargs(),
-            )
+            try:
+                status, model, capability_changed = await self.model_service.upsert_model_from_catalog(
+                    tenant_id=tenant_id,
+                    provider_id=provider_id,
+                    **entry.to_model_kwargs(provider_id=provider_id),
+                )
+            except ModelCapabilityError as exc:
+                # A single model whose existing tenant overrides conflict with
+                # the refreshed catalog must not wedge the whole provider sync.
+                # Skip it and continue with the remaining models.
+                skipped_models.append(
+                    {
+                        "model_id": entry.model_id,
+                        "reason": f"capability_override_conflict: {exc}",
+                    }
+                )
+                logger.warning(
+                    "Skipped catalog sync for model_id=%s provider_id=%s due to capability conflict: %s",
+                    entry.model_id,
+                    provider_id,
+                    exc,
+                )
+                continue
             payload = {
                 "model_id": model["model_id"],
                 "provider_id": model["provider_id"],
@@ -115,14 +135,17 @@ class ModelCatalogSyncService:
                 created_models.append(payload)
             else:
                 updated_models.append(payload)
+            if capability_changed:
+                capability_changed_models.append(payload)
 
         logger.info(
-            "Synced model catalog provider_id=%s template_id=%s created=%s updated=%s skipped=%s",
+            "Synced model catalog provider_id=%s template_id=%s created=%s updated=%s skipped=%s capability_changed=%s",
             provider_id,
             template.template_id,
             len(created_models),
             len(updated_models),
             len(skipped_models),
+            len(capability_changed_models),
         )
 
         return {
@@ -132,6 +155,11 @@ class ModelCatalogSyncService:
             "updated_models": updated_models,
             "skipped_models": skipped_models,
             "discovery_warnings": discovery_warnings,
+            # Internal-only: models whose effective capability profile changed.
+            # Not part of the public ``ProviderModelSyncResult`` schema; the
+            # sync endpoint reads it to publish exact invalidations and FastAPI
+            # drops it when serializing the response.
+            "capability_changed_models": capability_changed_models,
         }
 
     async def _discover_models(
