@@ -554,6 +554,35 @@ async def _validate_chat_session_access(
         raise HTTPException(status_code=404, detail="Session not found")
 
 
+async def _enforce_session_runtime_owner(
+    request: Request,
+    user: UserContext,
+    session_id: str | None,
+) -> None:
+    """Never let one session fall through to a different Agent kernel."""
+
+    if not session_id:
+        return
+    assignment_store = getattr(request.app.state, "assistant_runtime_assignments", None)
+    if assignment_store is None:
+        return
+    assignment = await assignment_store.resolve(
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        session_id=session_id,
+    )
+    if assignment is not None and assignment.runtime_owner == "codex_candidate":
+        # Phase 1 exposes lifecycle and recovery only. Returning a stable local
+        # error is safer than executing this session in the Python control loop.
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "CODEX_RUNTIME_TURNS_NOT_READY",
+                "message": "This session is assigned to the Codex candidate runtime",
+            },
+        )
+
+
 @router.post("/chat", response_model=AssistantChatResponse)
 async def chat(
     body: AssistantChatRequest,
@@ -595,6 +624,7 @@ async def chat(
     session_id = body.session_id or str(uuid.uuid4())
     if body.session_id:
         await _validate_chat_session_access(request=request, user=user, session_id=session_id)
+        await _enforce_session_runtime_owner(request, user, session_id)
 
     from ._assistant_proxy import proxy_to_assistant_service
 
@@ -663,6 +693,7 @@ async def chat_stream(
     session_id = validated_body.session_id
     if session_id:
         await _validate_chat_session_access(request=request, user=user, session_id=session_id)
+        await _enforce_session_runtime_owner(request, user, session_id)
 
     body_bytes = _chat_body_with_model(body_json, model_id)
     return await proxy_to_assistant_service(request, user, path="chat/stream", body=body_bytes)
@@ -733,6 +764,19 @@ async def create_session(
             service_id="__builtin_assistant__",  # 保留的 service_id，避免与用户注册的服务冲突
             metadata=body.metadata if body else None,
         )
+        assignment_store = getattr(request.app.state, "assistant_runtime_assignments", None)
+        if assignment_store is not None:
+            try:
+                await assignment_store.bind(
+                    tenant_id=user.tenant_id,
+                    user_id=user.user_id,
+                    session_id=session.session_id,
+                    runtime_owner=request.app.state.assistant_runtime_default_owner,
+                    kernel_revision=request.app.state.assistant_runtime_kernel_revision,
+                )
+            except Exception:
+                await session_manager.delete(session.session_id)
+                raise
 
         return SessionResponse(
             session_id=session.session_id,

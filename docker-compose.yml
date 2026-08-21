@@ -275,6 +275,9 @@ services:
       # value must be set on the assistant-service block. Both sides
       # load it via env_file in prod.
       ASSISTANT_SERVICE_URL: "${ASSISTANT_SERVICE_URL:-http://assistant-service:8093}"
+      ASSISTANT_RUNTIME_DEFAULT_OWNER: "${ASSISTANT_RUNTIME_DEFAULT_OWNER:-python_control}"
+      CODEX_RUNTIME_KERNEL_REVISION: "${CODEX_RUNTIME_KERNEL_REVISION:-}"
+      CODEX_RUNTIME_URL: "${CODEX_RUNTIME_URL:-http://codex-agent-runtime:8094}"
       ASSISTANT_ROUTE_SESSIONS_PROXIED: "${ASSISTANT_ROUTE_SESSIONS_PROXIED:-true}"
       AGENT_STUDIO_RUNTIME_ENABLED: "${AGENT_STUDIO_RUNTIME_ENABLED:-true}"
       AGENT_STUDIO_MANAGEMENT_ENABLED: "${AGENT_STUDIO_MANAGEMENT_ENABLED:-true}"
@@ -655,6 +658,45 @@ services:
     mem_limit: "${ASSISTANT_MEMORY_LIMIT:-640m}"
     init: true
 
+  # Candidate-only Rust Agent kernel. It never starts in the default profile
+  # and does not receive user traffic until a durable session assignment says
+  # codex_candidate. Python assistant-service remains the rollback control.
+  codex-agent-runtime:
+    profiles: ["codex-runtime"]
+    container_name: ai-gateway-codex-agent-runtime
+    image: "${CODEX_RUNTIME_IMAGE:-ai-gateway-codex-agent-runtime:unavailable}"
+    expose:
+      - "8094"
+    environment:
+      <<: *container-proxy-env
+      AI_PLATFORM_INTERNAL_TOKEN: "${CODEX_RUNTIME_INTERNAL_TOKEN:-}"
+      AI_PLATFORM_RUNTIME_BIND: "0.0.0.0:8094"
+      AI_PLATFORM_RUNTIME_WORKDIR: "/workspace"
+      AI_PLATFORM_CODEX_HOME: "/var/lib/ai-platform-codex/runtime-home"
+      POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: "${POSTGRES_USER:-postgres}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+      POSTGRES_DB: "${POSTGRES_DB:-gateway}"
+      AI_PLATFORM_RUNTIME_DB_POOL_MAX_SIZE: "${CODEX_RUNTIME_DB_POOL_MAX_SIZE:-10}"
+      AI_PLATFORM_RUNTIME_CHANNEL_CAPACITY: "${CODEX_RUNTIME_CHANNEL_CAPACITY:-256}"
+    volumes:
+      - codex-runtime-home:/var/lib/ai-platform-codex/runtime-home
+    networks:
+      - ai-gateway-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8094/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    mem_limit: "${CODEX_RUNTIME_MEMORY_LIMIT:-512m}"
+    init: true
+
 # =============================================================================
 # Networks
 # =============================================================================
@@ -673,5 +715,6 @@ volumes:
   gateway-logs: {}
   gateway-data: {}
   assistant-memory-data: {}
+  codex-runtime-home: {}
   kb-data: {}
   tempo-data: {}

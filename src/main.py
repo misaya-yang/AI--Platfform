@@ -853,6 +853,20 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     app.state.redis = container.redis
     app.state.memory_service = container.memory_service
 
+    from .services.assistant_runtime_assignment import (
+        AssistantRuntimeAssignmentStore,
+        runtime_assignment_policy_from_env,
+    )
+
+    runtime_owner, kernel_revision = runtime_assignment_policy_from_env()
+    app.state.assistant_runtime_default_owner = runtime_owner
+    app.state.assistant_runtime_kernel_revision = kernel_revision
+    app.state.assistant_runtime_assignments = (
+        AssistantRuntimeAssignmentStore(container.database)
+        if container.settings.database.enabled
+        else None
+    )
+
     # AS-03: Gateway owns tenant MCP CRUD and capability resolution while the
     # protocol client remains in assistant-service. Both processes share the
     # same repository contract and every runtime resolution is tenant/caller/

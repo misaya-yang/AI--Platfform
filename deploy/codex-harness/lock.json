@@ -1,0 +1,56 @@
+{
+  "build": {
+    "app_server_schema_file_count": 292,
+    "app_server_schema_sha256": "d6fc70952574166e7c69d6524601065a81fc94d26a1b99d180d7c3918c46e3f7",
+    "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
+    "cargo_lock_sha256": "2326bc07bcf1830121891ecab79eb8217348667f0c50e33d578c42c62121e668",
+    "local_image_profile": "dev-small",
+    "rust_toolchain_sha256": "570656042681cfd8795403a455baf9a33035331a07db0645e866bbcea89a3d64",
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "sbom": "deploy/codex-harness/sbom.cdx.json",
+    "sbom_sha256": "8ed3f9719e1a4be4e89f355ecf0686aa7ff514edc75e006c46226809a149c02e",
+    "source_receipt": "deploy/codex-harness/source-receipt.json",
+    "source_receipt_sha256": "bd289f3408906539223dc8160684330555f430d32adba9e735d81c3dcae71f40"
+  },
+  "license": {
+    "notice": "deploy/codex-harness/NOTICE.md",
+    "notice_sha256": "87e497f9aeef8b35848fac983a0466f813322dd0712dd3c16acf221b038155ad",
+    "spdx": "Apache-2.0",
+    "upstream_license_sha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc",
+    "upstream_notice_sha256": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915"
+  },
+  "oci": {
+    "artifacts": {
+      "agent_runtime": {
+        "binary": "ai-platform-agent-runtime",
+        "candidate_start_allowed": true,
+        "image_digest": "sha256:2b5fd538de1698436800a64fd94a53de4c2cc37cf723232a626e205cb2e12388",
+        "image_ref": "local-image://sha256:2b5fd538de1698436800a64fd94a53de4c2cc37cf723232a626e205cb2e12388",
+        "platforms": [
+          "linux/arm64"
+        ],
+        "protocol": "ai-platform-agent-runtime-http-sse/v1"
+      },
+      "app_server": {
+        "binary": "codex-app-server",
+        "candidate_start_allowed": true,
+        "image_digest": "sha256:2ea458a6dff0d50e0cdff881184f1aaa6e70c1c8a4fa2a9eaecc2be84d7bce94",
+        "image_ref": "local-image://sha256:2ea458a6dff0d50e0cdff881184f1aaa6e70c1c8a4fa2a9eaecc2be84d7bce94",
+        "platforms": [
+          "linux/arm64"
+        ],
+        "protocol": "codex-app-server-jsonrpc/v2"
+      }
+    }
+  },
+  "release_state": "local_image_locked",
+  "schema_version": "ai-platform/codex-harness-lock/v2",
+  "source": {
+    "branch": "ai-platform/main",
+    "fork_repository": "local://AI--Platfform-codex-harness",
+    "fork_sha": "44d926ab7c9efe0f2ff42c099f11c18d81e8197a",
+    "git_tree_sha": "ad660cb7668a133a06d35e4ea6e8e6905f51ba12",
+    "upstream_sha": "93c54bca38996b56d344a2ca65f01627b1953b27",
+    "upstream_url": "https://github.com/openai/codex.git"
+  }
+}

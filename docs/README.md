@@ -60,6 +60,9 @@ Rule of thumb: **design** says why, **plans** say what next, **runbooks** track 
 | ADR | Subject |
 | --- | --- |
 | [`ADR-004`](architecture/ADR-004-bounded-plugin-subagent-delegation.md) | Bounded plugin subagent delegation |
+| [`ADR-005`](architecture/ADR-005-model-capability-profiles.md) | Tenant-configurable model capability profiles |
+| [`ADR-006`](architecture/ADR-006-codex-harness-single-kernel.md) | Codex Open Harness as the single target Agent kernel |
+| [`ADR-007`](architecture/ADR-007-codex-runtime-data-boundaries.md) | Gateway model plane, ThreadStore, and capability-service boundaries |
 
 Write a new ADR when a change alters a dependency boundary, adds a service, or changes a contract
 listed in [`harness/architecture.md`](harness/architecture.md) §4.
@@ -86,6 +89,7 @@ each program's `loop-state.json`, never from prose. Verified 2026-08-17:
 
 | Program | Terminal phase | Status |
 | --- | --- | --- |
+| **`codex-harness-runtime-migration`** | CHR-00 → CHR-06 | **active** — source lock and single-kernel architecture checkpoint in progress; no runtime traffic has moved. |
 | **`performance-correctness-hardening`** | PCH-00 → PCH-07 | **active** — PCH-07 is the stop-safe tool-exchange gate. Successor performance work is planned in [`plans/sota-performance-optimization-2026-08.md`](plans/sota-performance-optimization-2026-08.md), not started as a runbook. |
 | **`agent-contract-unification`** | ACU-00 → ACU-06 | **active** — makes the assistant an `AgentSpec` instance and the public runtime API the only surface contract. Target law: [`harness/platform-architecture.md`](harness/platform-architecture.md) |
 | **`product-convergence`** | PC-04 | **verified** — review findings #1–#5+#8: first-run onboarding, connectors as the only Confluence story, ai-quiz plugin, nav groups, DEFAULT_MODEL. Report: [`reports/code-review/product-convergence-2026-08.md`](../reports/code-review/product-convergence-2026-08.md) |

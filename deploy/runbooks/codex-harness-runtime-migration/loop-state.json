@@ -1,0 +1,181 @@
+{
+  "schema_version": "prd-phase-harness/loop-state/v4",
+  "goal": "Replace the Python AgentLoop with a Codex Open Harness single kernel while preserving platform contracts, tenant safety, and rollback.",
+  "cycle": [
+    "observe",
+    "act",
+    "verify",
+    "decide"
+  ],
+  "active_phase": "CHR-02",
+  "active_feature": "CHR-F003",
+  "iteration": 0,
+  "max_iterations": 8,
+  "last_result": "CHR-01 passed: clean fork 44d926ab7c9e is source-locked, both OCI artifacts are digest-pinned, and the isolated Docker Runtime created then resumed the same PostgreSQL-backed Thread in a second process at 36.6 MB then 14.0 MB cgroup memory.",
+  "next_action": "Implement immutable RuntimeSnapshot and short-lived signed leases, then route a pure-text Codex Turn through a strictly private Gateway model-only Responses stream.",
+  "blockers": [],
+  "confirmation": null,
+  "phases": [
+    {
+      "id": "CHR-00",
+      "file": "phase-00-reproducible-fork-supply-chain-lock-and-single-kernel-architecture-contracts.md",
+      "depends_on": [],
+      "status": "done",
+      "evidence": [
+        "source cargo build -> completed in 8m49s; 292 App Server schemas",
+        "CODEX_HARNESS_FORK=... make codex-harness-build-local -> Linux dev-small image and initialize passed",
+        "make codex-harness-contract -> 6 passed",
+        "make harness-check -> Harness contract OK",
+        "strict program validation -> passed"
+      ],
+      "review": "not_required"
+    },
+    {
+      "id": "CHR-01",
+      "file": "phase-01-runtime-shell-append-only-threadstore-and-v1-event-projection.md",
+      "depends_on": [
+        "CHR-00"
+      ],
+      "status": "done",
+      "evidence": [
+        "make codex-thread-store-contract -> Python 3 passed; Rust in-memory 1 passed; Rust live PostgreSQL 1 passed",
+        "just test -p codex-app-server-client -> 26 passed",
+        "host ThreadStore/ExtensionRegistry/reserved-root regression -> passed",
+        "app-server/client broad run -> 332 passed before environment-dependent auth/network failures and intentional interrupt",
+        "make codex-thread-store-contract -> Python 4 passed; Rust 6 passed; live two-process HTTP/SSE/resume/archive 1 passed",
+        "Gateway runtime assignment/session regressions -> 19 passed",
+        "Compose config, make validate-config, make harness-check, and Phase 0 supply-chain contract -> passed",
+        "Bazel module update + Python 3.11 lock check -> passed; no MODULE.bazel.lock diff",
+        "Gateway/session/supply-chain cohort -> 29 passed; changed-file Ruff passed",
+        "Runtime OCI negative gates -> unlocked Runtime, dirty fork, and wrong artifact all rejected",
+        "Dockerfile check, Compose profile config, Harness, config, Phase 0 artifact lock, strict program validation -> passed",
+        "clean fork 44d926ab7c9e -> 292-file schema, SBOM, source receipt, and both OCI artifacts locked",
+        "make codex-runtime-contract -> App Server and Agent Runtime artifact identities passed",
+        "isolated Docker create/kill/restart/resume smoke -> passed at 36.6 MB then 14.0 MB cgroup memory"
+      ],
+      "review": "not_required"
+    },
+    {
+      "id": "CHR-02",
+      "file": "phase-02-private-model-data-plane-runtime-leases-and-pure-text-harness-execution.md",
+      "depends_on": [
+        "CHR-01"
+      ],
+      "status": "working",
+      "evidence": [],
+      "review": "not_required"
+    },
+    {
+      "id": "CHR-03",
+      "file": "phase-03-context-knowledge-tools-mcp-artifacts-and-office-capabilities.md",
+      "depends_on": [
+        "CHR-02"
+      ],
+      "status": "pending",
+      "evidence": [],
+      "review": "not_required"
+    },
+    {
+      "id": "CHR-04",
+      "file": "phase-04-write-tools-approvals-interruption-recovery-side-effect-safety-and-long-tasks.md",
+      "depends_on": [
+        "CHR-03"
+      ],
+      "status": "pending",
+      "evidence": [],
+      "review": "not_required"
+    },
+    {
+      "id": "CHR-05",
+      "file": "phase-05-lazy-legacy-session-import-docker-browser-acceptance-and-stable-canary-rollout.md",
+      "depends_on": [
+        "CHR-04"
+      ],
+      "status": "pending",
+      "evidence": [],
+      "review": "not_required"
+    },
+    {
+      "id": "CHR-06",
+      "file": "phase-06-native-v2-thread-turn-item-api-full-cutover-and-gated-python-loop-deletion.md",
+      "depends_on": [
+        "CHR-05"
+      ],
+      "status": "pending",
+      "evidence": [],
+      "review": "not_required"
+    }
+  ],
+  "features": [
+    {
+      "id": "CHR-F001",
+      "phase_id": "CHR-00",
+      "description": "A maintainer can verify one pinned Codex source, schema, license, and build identity before any candidate runtime is allowed to start.",
+      "steps": [
+        "Run the Codex Harness supply-chain contract against the committed lock and generated source receipt.",
+        "Observe exact upstream/fork/schema/toolchain/license matches and rejection of unlocked or mismatched artifacts."
+      ],
+      "passes": true
+    },
+    {
+      "id": "CHR-F002",
+      "phase_id": "CHR-01",
+      "description": "A session can create, append, flush, resume, and cursor-read a durable Codex Thread while V1 clients receive an ordered compatibility stream.",
+      "steps": [
+        "Create a Thread, append concurrent Items, restart the Runtime, and resume from PostgreSQL.",
+        "Observe gap-free sequence order, idempotent replay, tenant isolation, and the expected assistant-turn-contract/v1 projection."
+      ],
+      "passes": true
+    },
+    {
+      "id": "CHR-F003",
+      "phase_id": "CHR-02",
+      "description": "A pure-text Turn runs through Codex Harness and the private model-only Gateway path without invoking the Python AgentLoop.",
+      "steps": [
+        "Start a candidate Turn with a signed immutable runtime snapshot and stream a real model response.",
+        "Observe one billed model path, requested/effective reasoning metadata, visible TTFT, resumable history, and zero provider 400 responses."
+      ],
+      "passes": false
+    },
+    {
+      "id": "CHR-F004",
+      "phase_id": "CHR-03",
+      "description": "The Codex kernel discovers and uses tenant-scoped Knowledge, tools, MCP, skills, citations, and artifacts without prompt keyword routing.",
+      "steps": [
+        "Run representative Knowledge, research, coding, attachment, and office-read scenarios through the candidate.",
+        "Observe capability-driven discovery, compact structured results, artifact/citation Items, and no cross-tenant reuse."
+      ],
+      "passes": false
+    },
+    {
+      "id": "CHR-F005",
+      "phase_id": "CHR-04",
+      "description": "Write and long-running tools remain approval-gated, idempotent, stop-safe, and recoverable under the Codex lifecycle.",
+      "steps": [
+        "Interrupt before dispatch, during read-only work, after unknown write dispatch, and while approval is pending.",
+        "Observe one result per call, side_effect_unknown for uncertain writes, no blind retry, durable approval recovery, and no orphan process."
+      ],
+      "passes": false
+    },
+    {
+      "id": "CHR-F006",
+      "phase_id": "CHR-05",
+      "description": "A legacy quiescent session imports exactly once and real product journeys pass in Docker before stable session canary promotion.",
+      "steps": [
+        "Resume legacy sessions and execute the full authenticated browser and Agent Eval matrix on the Codex candidate.",
+        "Observe atomic import receipts, stable kernel ownership, successful rollback rehearsal, healthy services, and every canary quality/performance gate."
+      ],
+      "passes": false
+    },
+    {
+      "id": "CHR-F007",
+      "phase_id": "CHR-06",
+      "description": "All surfaces consume the V2 Thread/Turn/Item contract and the Python loop can be removed without losing compatibility or rollback evidence.",
+      "steps": [
+        "Run Web and SDK journeys through V2 after a full canary window and confirm zero production calls to the legacy loop.",
+        "Observe native event fidelity, a passing V1 deprecation window, rollback rehearsal, and deletion gates before removing legacy orchestration."
+      ],
+      "passes": false
+    }
+  ]
+}

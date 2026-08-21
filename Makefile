@@ -6,6 +6,7 @@
 #   make doctor          环境体检 (工具/内存/端口/compose 归属，只读不改动)
 #   make quickstart      首次一键启动 (生成 .env + 拉镜像 + 启动 + 迁移 + 校验)
 #   make harness-check   校验 harness.yml 契约与文档预算
+#   make codex-harness-contract 校验 Codex Harness 源码/Schema/SBOM/OCI 锁
 #
 #   make deploy          部署全部服务 (启动+迁移+健康检查，不默认重建镜像)
 #   make deploy-build    部署并强制重新构建镜像
@@ -54,13 +55,44 @@ export COMPOSE_PARALLEL_LIMIT
 
 # -- Quick Start --------------------------------------------------------------
 
-.PHONY: doctor harness-check sdk-sse-contract quickstart quickstart-build validate-config validate-example-config validate seed-demo seed-demo-apply
+.PHONY: doctor harness-check codex-harness-build-local codex-harness-contract codex-runtime-build-local codex-runtime-contract codex-runtime-smoke codex-thread-store-contract sdk-sse-contract quickstart quickstart-build validate-config validate-example-config validate seed-demo seed-demo-apply
 
 doctor:                     ## 环境体检: 工具/Docker/内存/端口/compose 归属 (只读)
 	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/doctor.sh --env "$(ENV_FILE)"
 
 harness-check:              ## 校验 harness.yml 契约: 命令存在、必备文档、指令文件行数预算
 	@python3 scripts/harness/check_harness.py
+
+codex-harness-contract:     ## 校验 Codex Harness 不可变源码、Schema、SBOM、许可证和 OCI 身份
+	@python3 scripts/harness/codex_harness_supply_chain.py validate \
+		--repo-root . \
+		--lock deploy/codex-harness/lock.json \
+		--require-artifact app_server
+	@uv run --all-packages --extra test pytest -q --no-cov \
+		tests/harness/test_codex_harness_supply_chain.py
+
+codex-runtime-contract:     ## 校验 Rust Agent Runtime 已锁到独立、可运行的 OCI 制品
+	@python3 scripts/harness/codex_harness_supply_chain.py validate \
+		--repo-root . \
+		--lock deploy/codex-harness/lock.json \
+		--require-artifact app_server
+	@python3 scripts/harness/codex_harness_supply_chain.py validate \
+		--repo-root . \
+		--lock deploy/codex-harness/lock.json \
+		--require-artifact agent_runtime
+
+codex-runtime-build-local:  ## 从干净受控 fork 构建 Rust Agent Runtime 镜像
+	@bash scripts/harness/build_codex_runtime_image.sh
+
+codex-runtime-smoke:        ## 在隔离 PostgreSQL/Docker 网络验证 Runtime 健康、Thread 和重启恢复
+	@bash scripts/harness/smoke_codex_runtime_image.sh
+
+codex-thread-store-contract: ## 在真实 PostgreSQL 验证 Codex ThreadStore 与预授权根线程闭环
+	@ENV_FILE="$(ENV_FILE)" CODEX_HARNESS_FORK="$(CODEX_HARNESS_FORK)" \
+		bash scripts/harness/codex_thread_store_contract.sh
+
+codex-harness-build-local:  ## 低内存构建本地 Codex App Server 镜像并验证源码/Schema 标签与 initialize
+	@bash scripts/harness/build_codex_harness_image.sh
 
 sdk-sse-contract:           ## 验证四端 SSE 合同；发布 CI 要求 Maven/Dart 必须存在
 	@uv run --all-packages --extra test pytest -q --no-cov \
