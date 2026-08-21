@@ -82,6 +82,7 @@ async def test_create_provider_from_template_hides_raw_fields_for_dashscope() ->
     assert result["base_url"] == "https://dashscope.aliyuncs.com/compatible-mode"
     assert service.created is not None
     assert service.created["api_key"] == "server-side-secret"
+    assert service.created["metadata"] == {"wire_protocol": "responses_v1"}
 
 
 @pytest.mark.asyncio

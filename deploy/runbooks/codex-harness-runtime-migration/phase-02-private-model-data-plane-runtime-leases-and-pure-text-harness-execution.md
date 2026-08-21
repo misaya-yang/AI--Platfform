@@ -24,6 +24,22 @@ Out:
 - [ ] Real simple/long/multi-turn scenarios have one billing path, zero provider 400s, and measured TTFT.
 - [ ] Existing affected behavior still passes its smallest relevant regression check.
 
+## Current checkpoint
+
+- Qwen catalog, open-source defaults, Provider templates, and the default-tenant
+  additive migration now select native `responses_v1`. An explicitly configured
+  tenant `chat_completions` value remains a compatibility fallback.
+- The Gateway issues immutable snapshots and signed, scope-bound model leases;
+  the Rust Runtime reserves the platform Run ID as the Codex Turn ID and calls a
+  private model-only Responses endpoint that cannot enter either Agent loop.
+- A real isolated Docker chain carried the normal Codex tool catalog (five
+  top-level entries and 8,844 input tokens) through Qwen Responses. The first
+  provider-visible reasoning token arrived in 3.931 seconds, followed by text
+  and one successful terminal event; accounting completed and Runtime cgroup
+  memory was 38,825,984 bytes.
+- CHR-02 remains open until the reproducible text gate covers long and multi-turn
+  resume cases as well as the simple live-provider case.
+
 ## Verify
 
 | Check | Command or observation | Proves |

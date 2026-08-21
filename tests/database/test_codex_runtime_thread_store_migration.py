@@ -6,6 +6,7 @@ import json
 import os
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import asyncpg
@@ -15,6 +16,7 @@ from dotenv import dotenv_values
 
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = ROOT / "database" / "migrations" / "089_codex_runtime_thread_store.sql"
+MODEL_LEASE_MIGRATION = ROOT / "database" / "migrations" / "090_codex_runtime_model_leases.sql"
 
 
 def _postgres_config() -> dict[str, object]:
@@ -95,6 +97,9 @@ async def codex_runtime_pool() -> AsyncIterator[asyncpg.Pool]:
             sql = MIGRATION.read_text(encoding="utf-8")
             await conn.execute(sql)
             await conn.execute(sql)
+            lease_sql = MODEL_LEASE_MIGRATION.read_text(encoding="utf-8")
+            await conn.execute(lease_sql)
+            await conn.execute(lease_sql)
         yield pool
     finally:
         await pool.close()
@@ -114,6 +119,15 @@ def test_migration_is_additive_and_has_atomic_append_contract() -> None:
     assert "ASSISTANT_RUNTIME_THREAD_SCOPE_MISMATCH" in upper
     assert "ASSISTANT_RUNTIME_MEMBER_SCOPE_MISMATCH" in upper
     assert "ASSISTANT_RUNTIME_ASSIGNMENT_IMMUTABLE" in upper
+
+    lease_sql = MODEL_LEASE_MIGRATION.read_text(encoding="utf-8")
+    lease_upper = lease_sql.upper()
+    assert "DROP TABLE" not in lease_upper
+    assert "TRUNCATE" not in lease_upper
+    assert "CREATE OR REPLACE FUNCTION ISSUE_ASSISTANT_RUNTIME_TURN" in lease_upper
+    assert "CREATE OR REPLACE FUNCTION RESERVE_ASSISTANT_RUNTIME_MODEL_CALL" in lease_upper
+    assert "ASSISTANT_RUNTIME_MODEL_CALL_REPLAYED" in lease_upper
+    assert "ASSISTANT_RUNTIME_LEASE_BUDGET_EXHAUSTED" in lease_upper
 
 
 @pytest.mark.asyncio
@@ -463,4 +477,131 @@ async def test_snapshots_items_and_run_identity_fail_closed(
             await conn.execute(
                 "UPDATE assistant_runtime_items SET status = 'completed' WHERE event_id = $1",
                 event_id,
+            )
+
+
+@pytest.mark.asyncio
+async def test_runtime_model_lease_is_atomic_bounded_and_replay_safe(
+    codex_runtime_pool: asyncpg.Pool,
+) -> None:
+    thread_id, tenant_id, user_id, session_id = await _seed_thread(codex_runtime_pool)
+    run_id = uuid.uuid4()
+    snapshot_id = uuid.uuid4()
+    lease_id = uuid.uuid4()
+    snapshot = {
+        "schema_version": "codex-runtime-snapshot/v1",
+        "model": {"id": "model-a", "provider_id": "provider-a"},
+        "capability_revision": 3,
+    }
+    snapshot_text = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    snapshot_hash = hashlib.sha256(snapshot_text.encode()).hexdigest()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+
+    async with codex_runtime_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO assistant_session_runtime_assignments (
+                tenant_id, user_id, session_id, runtime_owner, kernel_revision
+            ) VALUES ($1, $2, $3, 'codex_candidate', 'fork-sha')
+            """,
+            tenant_id,
+            user_id,
+            session_id,
+        )
+        await conn.execute(
+            """
+            SELECT issue_assistant_runtime_turn(
+                $1, $2, $3, $4, $5, $6, $7, 'fork-sha',
+                'codex-runtime-snapshot/v1', $8::jsonb, $9, 3, 'balanced',
+                'codex-runtime-model-lease/v1', 'provider-a', 'model-a',
+                'provider-revision-a', $10, 2, 1000, 500, 1000000, $11, 'hello'
+            )
+            """,
+            snapshot_id,
+            lease_id,
+            run_id,
+            thread_id,
+            tenant_id,
+            user_id,
+            session_id,
+            snapshot_text,
+            snapshot_hash,
+            "a" * 64,
+            expires_at,
+        )
+        run = await conn.fetchrow(
+            """
+            SELECT engine, harness_thread_id, harness_turn_id, runtime_snapshot_id
+              FROM assistant_runs WHERE run_id = $1
+            """,
+            run_id,
+        )
+        assert dict(run) == {
+            "engine": "codex_harness",
+            "harness_thread_id": thread_id,
+            "harness_turn_id": str(run_id),
+            "runtime_snapshot_id": snapshot_id,
+        }
+
+        call_id = uuid.uuid4()
+        await conn.execute(
+            "SELECT reserve_assistant_runtime_model_call($1, $2, $3, 100, 200, 250000)",
+            call_id,
+            lease_id,
+            "b" * 64,
+        )
+        with pytest.raises(asyncpg.ObjectNotInPrerequisiteStateError):
+            await conn.execute(
+                "SELECT reserve_assistant_runtime_model_call($1, $2, $3, 100, 200, 250000)",
+                uuid.uuid4(),
+                lease_id,
+                "b" * 64,
+            )
+        await conn.execute(
+            """
+            UPDATE assistant_runtime_model_calls
+               SET status = 'dispatched', dispatched_at = NOW(), updated_at = NOW()
+             WHERE call_id = $1 AND status = 'reserved'
+            """,
+            call_id,
+        )
+        await conn.execute(
+            "SELECT complete_assistant_runtime_model_call($1, 90, 50, 120000, 'provider-request')",
+            call_id,
+        )
+        lease = await conn.fetchrow(
+            """
+            SELECT calls_reserved, calls_completed, used_input_tokens,
+                   used_output_tokens, used_cost_microusd
+              FROM assistant_runtime_model_leases WHERE lease_id = $1
+            """,
+            lease_id,
+        )
+        assert dict(lease) == {
+            "calls_reserved": 1,
+            "calls_completed": 1,
+            "used_input_tokens": 90,
+            "used_output_tokens": 50,
+            "used_cost_microusd": 120000,
+        }
+
+        with pytest.raises(asyncpg.InsufficientPrivilegeError):
+            await conn.execute(
+                """
+                SELECT issue_assistant_runtime_turn(
+                    $1, $2, $3, $4, 'tenant-b', $5, $6, 'fork-sha',
+                    'codex-runtime-snapshot/v1', '{}'::jsonb, $7, 1, 'auto',
+                    'codex-runtime-model-lease/v1', 'provider-a', 'model-a',
+                    'provider-revision-a', $8, 1, 100, 100, 1000, $9, 'cross-tenant'
+                )
+                """,
+                uuid.uuid4(),
+                uuid.uuid4(),
+                uuid.uuid4(),
+                thread_id,
+                user_id,
+                session_id,
+                hashlib.sha256(b"{}").hexdigest(),
+                "c" * 64,
+                expires_at,
             )

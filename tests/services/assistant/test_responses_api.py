@@ -640,6 +640,7 @@ async def test_registry_stream_maps_reasoning_text_tools_and_terminal_usage() ->
 
     async def handler(request: httpx.Request) -> httpx.Response:
         captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
         captured["body"] = json.loads(request.content)
         return httpx.Response(
             200,
@@ -676,9 +677,11 @@ async def test_registry_stream_maps_reasoning_text_tools_and_terminal_usage() ->
         await registry.close()
 
     assert captured["url"].endswith("/compatible-mode/v1/responses")
+    assert captured["headers"]["x-dashscope-session-cache"] == "enable"
     assert captured["body"]["store"] is False
     assert captured["body"]["max_output_tokens"] == 512
-    assert captured["body"]["enable_thinking"] is True
+    assert captured["body"]["reasoning"] == {"effort": "minimal"}
+    assert "enable_thinking" not in captured["body"]
     assert "messages" not in captured["body"]
 
     assert "".join(delta.thinking_content or "" for delta in deltas) == "thinking"
@@ -1242,15 +1245,13 @@ async def test_stream_rejects_incomplete_function_lifecycle() -> None:
     assert exc_info.value.error_type == "incomplete_output_item"
 
 
-def test_wire_protocol_is_opt_in_and_provider_scoped() -> None:
+def test_wire_protocol_default_is_provider_scoped() -> None:
     registry = ModelRegistry(use_default_models=False)
     registry.configure_provider(ModelProvider.OPENAI, api_key="test-key")
     registry.configure_provider(ModelProvider.DASHSCOPE, api_key="test-key")
 
     assert registry._configs[ModelProvider.OPENAI].wire_protocol == (CHAT_COMPLETIONS_WIRE_PROTOCOL)
-    assert registry._configs[ModelProvider.DASHSCOPE].wire_protocol == (
-        CHAT_COMPLETIONS_WIRE_PROTOCOL
-    )
+    assert registry._configs[ModelProvider.DASHSCOPE].wire_protocol == RESPONSES_V1_WIRE_PROTOCOL
 
     with pytest.raises(ValueError, match="Unsupported provider wire protocol"):
         registry.configure_provider(
@@ -1266,12 +1267,10 @@ def test_wire_protocol_is_opt_in_and_provider_scoped() -> None:
         )
 
 
-def test_qwen_default_request_remains_chat_completions_shape() -> None:
+def test_qwen_default_request_uses_native_responses_shape() -> None:
     registry = ModelRegistry(use_default_models=False)
     registry.configure_provider(ModelProvider.DASHSCOPE, api_key="test-key")
-    registry.add_custom_model(
-        ModelInfo("qwen3.7-plus", "Qwen 3.7 Plus", ModelProvider.DASHSCOPE)
-    )
+    registry.add_custom_model(ModelInfo("qwen3.7-plus", "Qwen 3.7 Plus", ModelProvider.DASHSCOPE))
 
     body = registry._build_request_body(
         ModelProvider.DASHSCOPE,
@@ -1282,20 +1281,22 @@ def test_qwen_default_request_remains_chat_completions_shape() -> None:
         thinking_level="enabled",
     )
 
-    assert body["messages"] == [{"role": "user", "content": "hello"}]
-    assert body["max_tokens"] == 256
-    assert body["stream_options"] == {"include_usage": True}
-    assert body["enable_thinking"] is True
-    assert "input" not in body
-    assert "store" not in body
+    assert body["input"] == [{"role": "user", "content": "hello"}]
+    assert body["max_output_tokens"] == 256
+    assert body["reasoning"] == {"effort": "minimal"}
+    assert body["store"] is False
+    assert "messages" not in body
+    assert "enable_thinking" not in body
 
 
 def test_qwen_explicit_thinking_off_is_forwarded_for_both_wire_protocols() -> None:
     registry = ModelRegistry(use_default_models=False)
-    registry.configure_provider(ModelProvider.DASHSCOPE, api_key="test-key")
-    registry.add_custom_model(
-        ModelInfo("qwen3.7-plus", "Qwen 3.7 Plus", ModelProvider.DASHSCOPE)
+    registry.configure_provider(
+        ModelProvider.DASHSCOPE,
+        api_key="test-key",
+        wire_protocol=CHAT_COMPLETIONS_WIRE_PROTOCOL,
     )
+    registry.add_custom_model(ModelInfo("qwen3.7-plus", "Qwen 3.7 Plus", ModelProvider.DASHSCOPE))
 
     messages = [ChatMessage(role="user", content="summarize the completed tool result")]
     chat_body = registry._build_request_body(
@@ -1323,7 +1324,8 @@ def test_qwen_explicit_thinking_off_is_forwarded_for_both_wire_protocols() -> No
 
     assert chat_body["enable_thinking"] is False
     assert chat_body["max_tokens"] == 512
-    assert responses_body["enable_thinking"] is False
+    assert responses_body["reasoning"] == {"effort": "none"}
+    assert "enable_thinking" not in responses_body
     assert responses_body["max_output_tokens"] == 512
 
 
@@ -1339,9 +1341,7 @@ def test_responses_native_search_uses_provider_specific_tool_shape() -> None:
         api_key="test-key",
         wire_protocol=RESPONSES_V1_WIRE_PROTOCOL,
     )
-    registry.add_custom_model(
-        ModelInfo("qwen3.7-plus", "Qwen 3.7 Plus", ModelProvider.DASHSCOPE)
-    )
+    registry.add_custom_model(ModelInfo("qwen3.7-plus", "Qwen 3.7 Plus", ModelProvider.DASHSCOPE))
     registry.add_custom_model(ModelInfo("gpt-test", "GPT Test", ModelProvider.OPENAI))
 
     dashscope_body = registry._build_request_body(

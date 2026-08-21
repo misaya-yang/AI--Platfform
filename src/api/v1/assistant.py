@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from typing import Annotated, Any
 from urllib.parse import urlsplit
@@ -554,33 +555,96 @@ async def _validate_chat_session_access(
         raise HTTPException(status_code=404, detail="Session not found")
 
 
-async def _enforce_session_runtime_owner(
+async def _session_runtime_assignment(
     request: Request,
     user: UserContext,
     session_id: str | None,
-) -> None:
+) -> Any | None:
     """Never let one session fall through to a different Agent kernel."""
 
     if not session_id:
-        return
+        return None
     assignment_store = getattr(request.app.state, "assistant_runtime_assignments", None)
     if assignment_store is None:
-        return
+        return None
     assignment = await assignment_store.resolve(
         tenant_id=user.tenant_id,
         user_id=user.user_id,
         session_id=session_id,
     )
-    if assignment is not None and assignment.runtime_owner == "codex_candidate":
-        # Phase 1 exposes lifecycle and recovery only. Returning a stable local
-        # error is safer than executing this session in the Python control loop.
+    if (
+        assignment is not None
+        and assignment.runtime_owner == "codex_candidate"
+        and getattr(request.app.state, "codex_runtime_control", None) is None
+    ):
         raise HTTPException(
             status_code=503,
             detail={
-                "code": "CODEX_RUNTIME_TURNS_NOT_READY",
+                "code": "CODEX_RUNTIME_UNAVAILABLE",
                 "message": "This session is assigned to the Codex candidate runtime",
             },
         )
+    return assignment
+
+
+def _require_phase2_candidate_request(body: AssistantChatRequest) -> None:
+    """Fail closed instead of silently dropping capabilities not migrated yet."""
+
+    unsupported = bool(
+        body.kb_dataset_ids
+        or body.web_search_enabled
+        or body.file_paths
+        or body.system_prompt
+        or body.enable_task_planning
+        or body.confirm_plan
+        or body.os_agent_enabled
+        or body.local_node_device_id
+        or body.local_node_grant_ids
+        or body.resume_run_id
+        or body.resume_approval_id
+    )
+    if unsupported:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "CODEX_RUNTIME_CAPABILITY_NOT_MIGRATED",
+                "message": "This capability is not available on the Codex candidate yet",
+            },
+        )
+
+
+async def _start_codex_candidate_turn(
+    request: Request,
+    user: UserContext,
+    body: AssistantChatRequest,
+    *,
+    session_id: str,
+    model_id: str,
+):
+    _require_phase2_candidate_request(body)
+    control = getattr(request.app.state, "codex_runtime_control", None)
+    if control is None:
+        raise HTTPException(status_code=503, detail="Codex runtime is unavailable")
+    try:
+        return await control.start_turn(
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            session_id=session_id,
+            message=body.message,
+            model_id=model_id,
+            reasoning_option=body.reasoning_option,
+            legacy_thinking_level=body.thinking_level,
+            max_tokens=body.max_tokens,
+        )
+    except Exception as exc:
+        from ...services.codex_runtime import CodexRuntimeControlError
+
+        if isinstance(exc, CodexRuntimeControlError):
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": "Codex runtime rejected the turn"},
+            ) from None
+        raise
 
 
 @router.post("/chat", response_model=AssistantChatResponse)
@@ -622,9 +686,48 @@ async def chat(
         await _check_model_permission(user, model_id, model_meta)
 
     session_id = body.session_id or str(uuid.uuid4())
+    assignment = None
     if body.session_id:
         await _validate_chat_session_access(request=request, user=user, session_id=session_id)
-        await _enforce_session_runtime_owner(request, user, session_id)
+        assignment = await _session_runtime_assignment(request, user, session_id)
+
+    if assignment is not None and assignment.runtime_owner == "codex_candidate":
+        started_at = time.perf_counter()
+        turn = await _start_codex_candidate_turn(
+            request,
+            user,
+            body,
+            session_id=session_id,
+            model_id=model_id,
+        )
+        control = request.app.state.codex_runtime_control
+        content_parts: list[str] = []
+        async for frame in control.stream_events(
+            turn=turn,
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            session_id=session_id,
+        ):
+            for line in frame.decode("utf-8", errors="ignore").splitlines():
+                if not line.startswith("data:"):
+                    continue
+                try:
+                    event = json.loads(line[5:].strip())
+                except json.JSONDecodeError:
+                    continue
+                if event.get("event_type") == "text_delta":
+                    data = event.get("data")
+                    if isinstance(data, dict) and isinstance(data.get("content"), str):
+                        content_parts.append(data["content"])
+        return AssistantChatResponse(
+            content="".join(content_parts),
+            usage={},
+            contexts=[],
+            duration_ms=(time.perf_counter() - started_at) * 1000,
+            model_id=model_id,
+            session_id=session_id,
+            run_id=turn.run_id,
+        )
 
     from ._assistant_proxy import proxy_to_assistant_service
 
@@ -691,9 +794,34 @@ async def chat_stream(
     # that session. assistant-service would also reject mismatches via
     # its own session manager, but defence-in-depth belongs at the edge.
     session_id = validated_body.session_id
+    assignment = None
     if session_id:
         await _validate_chat_session_access(request=request, user=user, session_id=session_id)
-        await _enforce_session_runtime_owner(request, user, session_id)
+        assignment = await _session_runtime_assignment(request, user, session_id)
+
+    if assignment is not None and assignment.runtime_owner == "codex_candidate":
+        turn = await _start_codex_candidate_turn(
+            request,
+            user,
+            validated_body,
+            session_id=session_id,
+            model_id=model_id,
+        )
+        control = request.app.state.codex_runtime_control
+        return StreamingResponse(
+            control.stream_events(
+                turn=turn,
+                tenant_id=user.tenant_id,
+                user_id=user.user_id,
+                session_id=session_id,
+            ),
+            media_type="text/event-stream",
+            headers={
+                "cache-control": "no-cache",
+                "x-accel-buffering": "no",
+                "x-ai-agent-kernel": "codex",
+            },
+        )
 
     body_bytes = _chat_body_with_model(body_json, model_id)
     return await proxy_to_assistant_service(request, user, path="chat/stream", body=body_bytes)

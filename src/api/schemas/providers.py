@@ -116,6 +116,7 @@ class ProviderTemplateResponse(BaseModel):
     credential_fields: list[ProviderTemplateCredentialField]
     discovery_strategy: str
     default_models: list[ProviderTemplateModel]
+    default_metadata: dict[str, Any] = Field(default_factory=dict)
     advanced: bool = False
 
 

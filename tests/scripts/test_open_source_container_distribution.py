@@ -140,6 +140,9 @@ def test_default_initializer_needs_only_dashscope_model_secret(tmp_path: Path) -
         "JWT_SECRET",
         "GATEWAY_ASSISTANT_SHARED_SECRET",
         "GATEWAY_ENCRYPTION_KEY",
+        "CODEX_RUNTIME_INTERNAL_TOKEN",
+        "CODEX_RUNTIME_LEASE_SIGNING_SECRET",
+        "CODEX_MODEL_PLANE_INTERNAL_TOKEN",
         "DEFAULT_USER_PASSWORD",
         "KB_EMBEDDING_API_KEY",
         "KB_EMBEDDING_PROVIDER",
@@ -170,6 +173,9 @@ def test_default_initializer_needs_only_dashscope_model_secret(tmp_path: Path) -
         "JWT_SECRET",
         "GATEWAY_ASSISTANT_SHARED_SECRET",
         "GATEWAY_ENCRYPTION_KEY",
+        "CODEX_RUNTIME_INTERNAL_TOKEN",
+        "CODEX_RUNTIME_LEASE_SIGNING_SECRET",
+        "CODEX_MODEL_PLANE_INTERNAL_TOKEN",
         "DEFAULT_USER_PASSWORD",
     ):
         assert len(values[key]) >= 32
@@ -177,7 +183,7 @@ def test_default_initializer_needs_only_dashscope_model_secret(tmp_path: Path) -
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
 
-def test_initializer_backfills_encryption_key_without_replacing_existing_env(
+def test_initializer_backfills_runtime_trust_secrets_without_replacing_existing_env(
     tmp_path: Path,
 ) -> None:
     target = tmp_path / ".env"
@@ -203,6 +209,13 @@ def test_initializer_backfills_encryption_key_without_replacing_existing_env(
     assert values["POSTGRES_PASSWORD"] == "keep-this-value"
     assert len(values["GATEWAY_ENCRYPTION_KEY"]) >= 32
     assert values["GATEWAY_ENCRYPTION_KEY"] not in output
+    for key in (
+        "CODEX_RUNTIME_INTERNAL_TOKEN",
+        "CODEX_RUNTIME_LEASE_SIGNING_SECRET",
+        "CODEX_MODEL_PLANE_INTERNAL_TOKEN",
+    ):
+        assert len(values[key]) >= 32
+        assert values[key] not in output
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
 
@@ -440,18 +453,18 @@ def test_dashscope_endpoint_overrides_are_documented_and_injected() -> None:
     )
 
 
-def test_responses_wire_opt_in_reaches_the_assistant_execution_service() -> None:
+def test_qwen_responses_wire_default_reaches_the_assistant_execution_service() -> None:
     env_values = _env_values(ROOT / ".env.example")
     compose = (ROOT / "docker-compose.yml").read_text()
 
-    assert env_values["DASHSCOPE_CHAT_WIRE_PROTOCOL"] == "chat_completions"
+    assert env_values["DASHSCOPE_CHAT_WIRE_PROTOCOL"] == "responses_v1"
     assert env_values["OPENAI_BASE_URL"] == ""
     assert env_values["OPENAI_WIRE_PROTOCOL"] == "chat_completions"
 
     for service in ("gateway", "assistant-service"):
         section = _service_section(compose, service)
         assert (
-            'DASHSCOPE_CHAT_WIRE_PROTOCOL: "${DASHSCOPE_CHAT_WIRE_PROTOCOL:-chat_completions}"'
+            'DASHSCOPE_CHAT_WIRE_PROTOCOL: "${DASHSCOPE_CHAT_WIRE_PROTOCOL:-responses_v1}"'
         ) in section
         assert 'OPENAI_BASE_URL: "${OPENAI_BASE_URL:-}"' in section
         assert 'OPENAI_WIRE_PROTOCOL: "${OPENAI_WIRE_PROTOCOL:-chat_completions}"' in section
@@ -578,7 +591,7 @@ def test_default_complete_stack_memory_ceiling_stays_below_3_5_gib() -> None:
     compose = (ROOT / "docker-compose.yml").read_text()
     limits = [int(value) for value in re.findall(r'mem_limit: "\$\{[A-Z0-9_]+:-(\d+)m\}"', compose)]
 
-    assert len(limits) == 8
+    assert len(limits) == 9
     assert sum(limits) <= 3_584
     assert 'mem_limit: "${KNOWLEDGE_WORKER_MEMORY_LIMIT:-512m}"' in compose
     assert 'REDIS_MAXMEMORY: "${REDIS_MAXMEMORY:-192mb}"' in compose

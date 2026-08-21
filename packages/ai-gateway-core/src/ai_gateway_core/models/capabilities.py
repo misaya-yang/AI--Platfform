@@ -17,6 +17,9 @@ from importlib.resources import files
 from typing import Any
 
 PROFILE_SCHEMA_VERSION = 1
+CHAT_COMPLETIONS_WIRE_PROTOCOL = "chat_completions"
+RESPONSES_V1_WIRE_PROTOCOL = "responses_v1"
+SUPPORTED_WIRE_PROTOCOLS = frozenset({CHAT_COMPLETIONS_WIRE_PROTOCOL, RESPONSES_V1_WIRE_PROTOCOL})
 _OPTION_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 #: ``auto`` is reserved: it always resolves to the profile's default option.
 RESERVED_OPTION_IDS = frozenset({"auto"})
@@ -57,6 +60,28 @@ _ADAPTER_SPECS: tuple[dict[str, Any], ...] = (
                 "budget_tokens": {"type": "integer", "minimum": 1, "maximum": 262144},
             },
             "required": ["enabled"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "id": "reasoning/dashscope-responses-effort-v1",
+        "kind": "reasoning",
+        "label": "DashScope Responses reasoning effort",
+        "settings_schema": {
+            "type": "object",
+            "properties": {
+                "effort": {
+                    "type": "string",
+                    "enum": ["none", "minimal", "medium", "high"],
+                },
+                "chat_enabled": {"type": "boolean"},
+                "chat_budget_tokens": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 262144,
+                },
+            },
+            "required": ["effort", "chat_enabled"],
             "additionalProperties": False,
         },
     },
@@ -172,6 +197,17 @@ _ADAPTER_SPECS: tuple[dict[str, Any], ...] = (
         "settings_schema": {"type": "object", "additionalProperties": False},
     },
     {
+        "id": "cache/dashscope-session-v1",
+        "kind": "prompt_cache",
+        "label": "DashScope Responses session cache",
+        "settings_schema": {
+            "type": "object",
+            "properties": {"enabled": {"type": "boolean"}},
+            "required": ["enabled"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "id": "cache/anthropic-breakpoint-v1",
         "kind": "prompt_cache",
         "label": "Anthropic explicit cache breakpoints",
@@ -231,10 +267,16 @@ def get_model_capability_adapter(adapter_id: str) -> dict[str, Any] | None:
     return copy.deepcopy(spec) if spec is not None else None
 
 
-def safe_model_capability_profile(*, supports_tools: bool = True, supports_vision: bool = False) -> dict[str, Any]:
-    inputs = ["text", *( ["image"] if supports_vision else [])]
+def safe_model_capability_profile(
+    *, supports_tools: bool = True, supports_vision: bool = False
+) -> dict[str, Any]:
+    inputs = ["text", *(["image"] if supports_vision else [])]
     return {
         "schema_version": PROFILE_SCHEMA_VERSION,
+        "wire_protocols": {
+            "preferred": CHAT_COMPLETIONS_WIRE_PROTOCOL,
+            "supported": [CHAT_COMPLETIONS_WIRE_PROTOCOL],
+        },
         "reasoning": {
             "adapter_id": "reasoning/none-v1",
             "default_option": "off",
@@ -256,6 +298,8 @@ def safe_model_capability_profile(*, supports_tools: bool = True, supports_visio
             "function_calling": bool(supports_tools),
             "parallel_calls": False,
             "strict_schema": False,
+            "namespace_wire": "native",
+            "web_search_wire": "disabled",
         },
         "modalities": {"input": inputs, "output": ["text"]},
         "streaming": {
@@ -302,7 +346,9 @@ def _validate_settings(adapter_id: str, settings: Mapping[str, Any]) -> None:
     properties = schema.get("properties", {})
     unknown = set(settings) - set(properties)
     if schema.get("additionalProperties") is False and unknown:
-        raise ModelCapabilityError(f"unsupported {adapter_id} settings: {', '.join(sorted(unknown))}")
+        raise ModelCapabilityError(
+            f"unsupported {adapter_id} settings: {', '.join(sorted(unknown))}"
+        )
     missing = set(schema.get("required", [])) - set(settings)
     if missing:
         raise ModelCapabilityError(f"missing {adapter_id} settings: {', '.join(sorted(missing))}")
@@ -331,6 +377,31 @@ def validate_model_capability_profile(profile: Mapping[str, Any]) -> dict[str, A
     value = copy.deepcopy(dict(profile))
     if value.get("schema_version") != PROFILE_SCHEMA_VERSION:
         raise ModelCapabilityError("unsupported model capability schema_version")
+
+    wire_protocols = value.setdefault(
+        "wire_protocols",
+        {
+            "preferred": CHAT_COMPLETIONS_WIRE_PROTOCOL,
+            "supported": [CHAT_COMPLETIONS_WIRE_PROTOCOL],
+        },
+    )
+    if not isinstance(wire_protocols, dict):
+        raise ModelCapabilityError("wire_protocols profile must be an object")
+    preferred_wire = wire_protocols.get("preferred")
+    supported_wires = wire_protocols.get("supported")
+    if (
+        not isinstance(preferred_wire, str)
+        or preferred_wire not in SUPPORTED_WIRE_PROTOCOLS
+        or not isinstance(supported_wires, list)
+        or not supported_wires
+        or len(supported_wires) != len(set(supported_wires))
+        or any(
+            not isinstance(item, str) or item not in SUPPORTED_WIRE_PROTOCOLS
+            for item in supported_wires
+        )
+        or preferred_wire not in supported_wires
+    ):
+        raise ModelCapabilityError("wire_protocols profile is invalid")
 
     reasoning = value.get("reasoning")
     if not isinstance(reasoning, dict):
@@ -418,17 +489,31 @@ def validate_model_capability_profile(profile: Mapping[str, Any]) -> dict[str, A
         raise ModelCapabilityError("native_search.enabled must be boolean")
 
     tools = value.get("tools")
-    if not isinstance(tools, dict) or any(
-        not isinstance(tools.get(key), bool)
-        for key in ("function_calling", "parallel_calls", "strict_schema")
+    if isinstance(tools, dict):
+        tools.setdefault("namespace_wire", "native")
+        tools.setdefault("web_search_wire", "disabled")
+    if (
+        not isinstance(tools, dict)
+        or any(
+            not isinstance(tools.get(key), bool)
+            for key in ("function_calling", "parallel_calls", "strict_schema")
+        )
+        or tools.get("namespace_wire") not in {"native", "flatten"}
+        or tools.get("web_search_wire") not in {"native", "disabled"}
     ):
         raise ModelCapabilityError("tools capability profile is invalid")
+    if tools["web_search_wire"] == "native" and value["native_search"]["enabled"] is not True:
+        raise ModelCapabilityError("tools.web_search_wire requires native_search.enabled")
     modalities = value.get("modalities")
     if not isinstance(modalities, dict):
         raise ModelCapabilityError("modalities capability profile is invalid")
     for key in ("input", "output"):
         items = modalities.get(key)
-        if not isinstance(items, list) or not items or any(not isinstance(item, str) for item in items):
+        if (
+            not isinstance(items, list)
+            or not items
+            or any(not isinstance(item, str) for item in items)
+        ):
             raise ModelCapabilityError(f"modalities.{key} is invalid")
     streaming = value.get("streaming")
     if not isinstance(streaming, dict) or any(
@@ -497,9 +582,12 @@ def get_builtin_model_capabilities(provider_id: str, model_id: str) -> dict[str,
 
 
 __all__ = [
+    "CHAT_COMPLETIONS_WIRE_PROTOCOL",
     "ModelCapabilityError",
     "RESERVED_OPTION_IDS",
+    "RESPONSES_V1_WIRE_PROTOCOL",
     "ResolvedReasoningOption",
+    "SUPPORTED_WIRE_PROTOCOLS",
     "get_builtin_model_capabilities",
     "get_model_capability_adapter",
     "list_model_capability_adapters",

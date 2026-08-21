@@ -41,9 +41,7 @@ def _row(**overrides):
 
 async def test_ui_provider_secret_builds_isolated_runtime_registry():
     encryption_key = "e" * 64
-    database = _Database(
-        _row(api_key_encrypted=encrypt_value("provider-secret", encryption_key))
-    )
+    database = _Database(_row(api_key_encrypted=encrypt_value("provider-secret", encryption_key)))
 
     registry = await TenantModelRegistryResolver(
         database,
@@ -56,15 +54,33 @@ async def test_ui_provider_secret_builds_isolated_runtime_registry():
     assert model.provider is ModelProvider.DASHSCOPE
     assert registry.is_provider_configured(ModelProvider.DASHSCOPE)
     assert registry._configs[ModelProvider.DASHSCOPE].api_key == "provider-secret"
+    assert registry._configs[ModelProvider.DASHSCOPE].wire_protocol == "responses_v1"
     assert database.calls[0][1] == ("tenant-a", "qwen3.7-plus")
+    await registry.close()
+
+
+async def test_explicit_tenant_chat_compatibility_fallback_is_preserved():
+    encryption_key = "e" * 64
+    database = _Database(
+        _row(
+            api_key_encrypted=encrypt_value("provider-secret", encryption_key),
+            metadata={"wire_protocol": "chat_completions"},
+        )
+    )
+
+    registry = await TenantModelRegistryResolver(
+        database,
+        encryption_key=encryption_key,
+    ).resolve("tenant-a", "qwen3.7-plus")
+
+    assert registry is not None
+    assert registry._configs[ModelProvider.DASHSCOPE].wire_protocol == "chat_completions"
     await registry.close()
 
 
 async def test_agent_runtime_provider_pin_adds_exact_sql_filter():
     encryption_key = "e" * 64
-    database = _Database(
-        _row(api_key_encrypted=encrypt_value("provider-secret", encryption_key))
-    )
+    database = _Database(_row(api_key_encrypted=encrypt_value("provider-secret", encryption_key)))
 
     registry = await TenantModelRegistryResolver(
         database,
@@ -105,9 +121,7 @@ async def test_env_config_remains_the_fallback_when_db_has_no_secret():
 
 
 async def test_wrong_encryption_key_never_forwards_ciphertext_as_api_key():
-    database = _Database(
-        _row(api_key_encrypted=encrypt_value("provider-secret", "correct-key"))
-    )
+    database = _Database(_row(api_key_encrypted=encrypt_value("provider-secret", "correct-key")))
 
     registry = await TenantModelRegistryResolver(
         database,
@@ -142,9 +156,7 @@ async def test_unknown_provider_fails_closed_without_default_catalog():
 
 async def test_concurrent_cold_resolves_use_one_database_query():
     encryption_key = "e" * 64
-    database = _Database(
-        _row(api_key_encrypted=encrypt_value("provider-secret", encryption_key))
-    )
+    database = _Database(_row(api_key_encrypted=encrypt_value("provider-secret", encryption_key)))
     resolver = TenantModelRegistryResolver(database, encryption_key=encryption_key)
 
     registries = await asyncio.gather(

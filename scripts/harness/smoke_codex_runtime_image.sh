@@ -28,6 +28,12 @@ internal_token="$(openssl rand -hex 32)"
 tenant_id="tenant-smoke-${suffix}"
 user_id="user-smoke-${suffix}"
 session_id="session-smoke-${suffix}"
+run_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+snapshot_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+lease_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+lease_signature="v1:$(openssl rand -hex 32)"
+nonce_sha256="$(openssl rand -hex 32)"
+snapshot_sha256="$(printf '{}' | shasum -a 256 | awk '{print $1}')"
 
 cleanup() {
     docker rm -f "$runtime_name" "$postgres_name" >/dev/null 2>&1 || true
@@ -61,6 +67,8 @@ docker exec -i "$postgres_name" psql -v ON_ERROR_STOP=1 -U runtime_smoke -d runt
     < "$repo_root/deploy/codex-harness/runtime-smoke-base.sql" >/dev/null
 docker exec -i "$postgres_name" psql -v ON_ERROR_STOP=1 -U runtime_smoke -d runtime_smoke \
     < "$repo_root/database/migrations/089_codex_runtime_thread_store.sql" >/dev/null
+docker exec -i "$postgres_name" psql -v ON_ERROR_STOP=1 -U runtime_smoke -d runtime_smoke \
+    < "$repo_root/database/migrations/090_codex_runtime_model_leases.sql" >/dev/null
 docker exec "$postgres_name" psql -v ON_ERROR_STOP=1 -U runtime_smoke -d runtime_smoke -c \
     "INSERT INTO sessions (session_id, service_id, user_id, tenant_id) VALUES ('$session_id', '__builtin_assistant__', '$user_id', '$tenant_id')" \
     >/dev/null
@@ -117,6 +125,10 @@ if [[ ! "$thread_id" =~ ^[0-9a-f-]{36}$ ]]; then
     exit 1
 fi
 
+docker exec "$postgres_name" psql -v ON_ERROR_STOP=1 -U runtime_smoke -d runtime_smoke -c \
+    "INSERT INTO assistant_session_runtime_assignments (tenant_id,user_id,session_id,runtime_owner,kernel_revision,assignment_reason) VALUES ('$tenant_id','$user_id','$session_id','codex_candidate','smoke-kernel','explicit'); SELECT issue_assistant_runtime_turn('$snapshot_id','$lease_id','$run_id','$thread_id','$tenant_id','$user_id','$session_id','smoke-kernel','codex-runtime-snapshot/v1','{}'::jsonb,'$snapshot_sha256',1,'minimal','codex-runtime-model-lease/v1','dashscope','qwen3.7-plus','smoke-provider','$nonce_sha256',1,1000000,1024,1000000,NOW() + INTERVAL '15 minutes','runtime smoke');" \
+    >/dev/null
+
 docker rm -f "$runtime_name" >/dev/null
 start_runtime
 resume_response="$(docker exec "$runtime_name" curl -fsS \
@@ -130,6 +142,21 @@ resume_response="$(docker exec "$runtime_name" curl -fsS \
 resumed_thread_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["thread"]["id"])' <<<"$resume_response")"
 if [[ "$resumed_thread_id" != "$thread_id" ]]; then
     echo "ERROR: second Runtime process resumed a different Thread" >&2
+    exit 1
+fi
+
+
+turn_response="$(docker exec "$runtime_name" curl -fsS \
+    -H "x-ai-platform-internal-token: $internal_token" \
+    -H "x-ai-tenant-id: $tenant_id" \
+    -H "x-ai-user-id: $user_id" \
+    -H "x-ai-session-id: $session_id" \
+    -H 'content-type: application/json' \
+    -d "{\"runId\":\"$run_id\",\"snapshotId\":\"$snapshot_id\",\"leaseId\":\"$lease_id\",\"leaseSignature\":\"$lease_signature\",\"message\":\"hello\",\"model\":\"qwen3.7-plus\",\"effort\":\"minimal\"}" \
+    "http://127.0.0.1:8094/internal/v1/threads/$thread_id/turns")"
+returned_turn_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["turn"]["id"])' <<<"$turn_response")"
+if [[ "$returned_turn_id" != "$run_id" ]]; then
+    echo "ERROR: Runtime did not preserve the pre-authorized Turn ID" >&2
     exit 1
 fi
 

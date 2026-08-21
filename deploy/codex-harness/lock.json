@@ -8,9 +8,9 @@
     "rust_toolchain_sha256": "570656042681cfd8795403a455baf9a33035331a07db0645e866bbcea89a3d64",
     "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
     "sbom": "deploy/codex-harness/sbom.cdx.json",
-    "sbom_sha256": "8ed3f9719e1a4be4e89f355ecf0686aa7ff514edc75e006c46226809a149c02e",
+    "sbom_sha256": "3174f454671932867dfe73005bfb5381d7acc041e7372fcfca4c6169ed023ea5",
     "source_receipt": "deploy/codex-harness/source-receipt.json",
-    "source_receipt_sha256": "bd289f3408906539223dc8160684330555f430d32adba9e735d81c3dcae71f40"
+    "source_receipt_sha256": "a5cd5aecc6aa2f2604a021c2f7179e6f42839ce89f19e9db0859e5ab77113c37"
   },
   "license": {
     "notice": "deploy/codex-harness/NOTICE.md",
@@ -24,8 +24,8 @@
       "agent_runtime": {
         "binary": "ai-platform-agent-runtime",
         "candidate_start_allowed": true,
-        "image_digest": "sha256:2b5fd538de1698436800a64fd94a53de4c2cc37cf723232a626e205cb2e12388",
-        "image_ref": "local-image://sha256:2b5fd538de1698436800a64fd94a53de4c2cc37cf723232a626e205cb2e12388",
+        "image_digest": "sha256:b08ef4fbb83457823ae47ef74f8757c637f41e39fdc0d48c59638e883bf7d299",
+        "image_ref": "local-image://sha256:b08ef4fbb83457823ae47ef74f8757c637f41e39fdc0d48c59638e883bf7d299",
         "platforms": [
           "linux/arm64"
         ],
@@ -34,8 +34,8 @@
       "app_server": {
         "binary": "codex-app-server",
         "candidate_start_allowed": true,
-        "image_digest": "sha256:2ea458a6dff0d50e0cdff881184f1aaa6e70c1c8a4fa2a9eaecc2be84d7bce94",
-        "image_ref": "local-image://sha256:2ea458a6dff0d50e0cdff881184f1aaa6e70c1c8a4fa2a9eaecc2be84d7bce94",
+        "image_digest": "sha256:cc234deec72036157494a7d40f72057ceecb268c602d23f8dc4b6cbae2b56125",
+        "image_ref": "local-image://sha256:cc234deec72036157494a7d40f72057ceecb268c602d23f8dc4b6cbae2b56125",
         "platforms": [
           "linux/arm64"
         ],
@@ -48,8 +48,8 @@
   "source": {
     "branch": "ai-platform/main",
     "fork_repository": "local://AI--Platfform-codex-harness",
-    "fork_sha": "44d926ab7c9efe0f2ff42c099f11c18d81e8197a",
-    "git_tree_sha": "ad660cb7668a133a06d35e4ea6e8e6905f51ba12",
+    "fork_sha": "077933ba474a1212a083058e3c8fed702fec86fd",
+    "git_tree_sha": "6e8e6250a26c1891f8eafc0dbf83068ca48280de",
     "upstream_sha": "93c54bca38996b56d344a2ca65f01627b1953b27",
     "upstream_url": "https://github.com/openai/codex.git"
   }

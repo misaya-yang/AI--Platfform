@@ -78,8 +78,8 @@ class ModelConfig:
     #: drop-in replacements — no OAuth / project / location required,
     #: which is why we only support Express Mode for now.
     backend: str = "ai_studio"
-    #: Versioned upstream wire protocol. Responses v1 is opt-in per provider;
-    #: OpenAI-compatible chat completions remains the compatibility default.
+    #: Versioned upstream wire protocol. The registry resolves a provider
+    #: default when configuring clients; this field is the concrete snapshot.
     wire_protocol: str = CHAT_COMPLETIONS_WIRE_PROTOCOL
 
 

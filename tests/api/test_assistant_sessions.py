@@ -130,20 +130,37 @@ async def test_codex_assigned_session_never_falls_through_to_python_control() ->
     user = UserContext(user_id="user_1", tenant_id="tenant_1", is_authenticated=True)
     request = _build_request(AsyncMock(), method="POST")
     assignment_store = AsyncMock()
-    assignment_store.resolve.return_value = SimpleNamespace(
-        runtime_owner="codex_candidate"
-    )
+    assignment_store.resolve.return_value = SimpleNamespace(runtime_owner="codex_candidate")
     request.app.state.assistant_runtime_assignments = assignment_store
 
     with pytest.raises(HTTPException) as exc_info:
-        await assistant_api._enforce_session_runtime_owner(
+        await assistant_api._session_runtime_assignment(
             request,
             user,
             "session-1",
         )
 
     assert exc_info.value.status_code == 503
-    assert exc_info.value.detail["code"] == "CODEX_RUNTIME_TURNS_NOT_READY"
+    assert exc_info.value.detail["code"] == "CODEX_RUNTIME_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_codex_assignment_is_returned_only_when_control_plane_is_ready() -> None:
+    user = UserContext(user_id="user_1", tenant_id="tenant_1", is_authenticated=True)
+    request = _build_request(AsyncMock(), method="POST")
+    assignment = SimpleNamespace(runtime_owner="codex_candidate")
+    assignment_store = AsyncMock()
+    assignment_store.resolve.return_value = assignment
+    request.app.state.assistant_runtime_assignments = assignment_store
+    request.app.state.codex_runtime_control = SimpleNamespace()
+
+    resolved = await assistant_api._session_runtime_assignment(
+        request,
+        user,
+        "session-1",
+    )
+
+    assert resolved is assignment
 
 
 @pytest.mark.asyncio

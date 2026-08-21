@@ -211,7 +211,7 @@ _SETTING_SPECS = (
     ),
     _SettingSpec(
         "DASHSCOPE_CHAT_WIRE_PROTOCOL",
-        "chat_completions",
+        "responses_v1",
         "string",
         choices=frozenset({"chat_completions", "responses_v1"}),
     ),

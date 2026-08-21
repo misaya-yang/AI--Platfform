@@ -7,7 +7,7 @@
   "sbom": {
     "component_count": 1359,
     "format": "CycloneDX-1.5",
-    "sha256": "8ed3f9719e1a4be4e89f355ecf0686aa7ff514edc75e006c46226809a149c02e"
+    "sha256": "3174f454671932867dfe73005bfb5381d7acc041e7372fcfca4c6169ed023ea5"
   },
   "schema_bundle": {
     "file_count": 292,
@@ -17,8 +17,8 @@
   "schema_version": "ai-platform/codex-harness-source-receipt/v1",
   "source": {
     "branch": "ai-platform/main",
-    "fork_sha": "44d926ab7c9efe0f2ff42c099f11c18d81e8197a",
-    "git_tree_sha": "ad660cb7668a133a06d35e4ea6e8e6905f51ba12",
+    "fork_sha": "077933ba474a1212a083058e3c8fed702fec86fd",
+    "git_tree_sha": "6e8e6250a26c1891f8eafc0dbf83068ca48280de",
     "upstream_sha": "93c54bca38996b56d344a2ca65f01627b1953b27",
     "upstream_url": "https://github.com/openai/codex.git"
   },
