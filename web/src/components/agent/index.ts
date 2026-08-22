@@ -66,3 +66,9 @@ export {
   ErrorDisplay,
   type StreamError,
 } from "./ErrorDisplay";
+
+export {
+  DualModeCanvasWorkbench,
+  type ArtifactItem,
+  type DualModeCanvasWorkbenchProps,
+} from "./DualModeCanvasWorkbench";

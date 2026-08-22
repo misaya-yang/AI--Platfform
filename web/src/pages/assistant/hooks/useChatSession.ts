@@ -1332,6 +1332,8 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     let firstTokenMs: number | undefined;
     let firstTextTokenMs: number | undefined;
     let content = "";
+    let accumulatedThinkingContent = "";
+    let thinkingActivityStarted = false;
     const contexts: RetrievedContext[] = [];
     let webSearchResults: WebSearchResult[] = [];
     let usage: any = {};
@@ -1702,7 +1704,10 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
           case SSEEventType.THINKING_START:
           case "thinking_start": {
             markFirstResponse(now);
-            activityQueue.enqueue({ kind: "thinking_start" });
+            if (!thinkingActivityStarted) {
+              thinkingActivityStarted = true;
+              activityQueue.enqueue({ kind: "thinking_start" });
+            }
             break;
           }
 
@@ -1713,6 +1718,11 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
               : (event.data as { content?: string })?.content || "";
             if (thinkingDelta) {
               markFirstResponse(now);
+              if (!thinkingActivityStarted) {
+                thinkingActivityStarted = true;
+                activityQueue.enqueue({ kind: "thinking_start" });
+              }
+              accumulatedThinkingContent += thinkingDelta;
               activityQueue.enqueue({ kind: "thinking_delta", text: thinkingDelta });
             }
             break;
@@ -1720,9 +1730,15 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
 
           case SSEEventType.THINKING_END:
           case "thinking_end": {
-            const thinkingData = event.data as { content?: string } | undefined;
-            const thinkingText = thinkingData?.content || "";
-            activityQueue.enqueue({ kind: "thinking_end", text: thinkingText });
+            const thinkingText = typeof event.data === "string"
+              ? event.data
+              : ((event.data as { content?: string } | undefined)?.content || "");
+            accumulatedThinkingContent =
+              thinkingText.trim() || accumulatedThinkingContent;
+            activityQueue.enqueue({
+              kind: "thinking_end",
+              text: accumulatedThinkingContent,
+            });
             break;
           }
 
@@ -2972,6 +2988,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       // Cancel pending RAF and flush before final update
       if (syncRafId !== null) { cancelAnimationFrame(syncRafId); syncRafId = null; }
       flushTurnStateToMessage();
+      activityQueue.flushNow();
 
       // Final update
       const finishedAtMs = Date.now();
@@ -2998,6 +3015,8 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         firstTextTokenMs,
         isStreaming: false,
         isThinkingStreaming: false,
+        thinkingContent:
+          accumulatedThinkingContent.trim() || m.thinkingContent,
         streamingThinkingContent: undefined,
         status:
           streamTurnState.status === "failed" || streamTurnState.status === "cancelled"
@@ -3030,6 +3049,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     } catch (error: any) {
       if (syncRafId !== null) { cancelAnimationFrame(syncRafId); syncRafId = null; }
       flushTurnStateToMessage();
+      activityQueue.flushNow();
       if (!isCurrentStream()) {
         closeStreamTrace("cancelled", { reason: "session_epoch_changed" });
         return;
@@ -3052,6 +3072,10 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
               createdAt
             ),
             isStreaming: false,
+            isThinkingStreaming: false,
+            thinkingContent:
+              accumulatedThinkingContent.trim() || m.thinkingContent,
+            streamingThinkingContent: undefined,
             status: "failed",
             firstTokenMs: streamTurnState.firstTokenMs ?? firstTokenMs,
             firstTextTokenMs,
@@ -3075,6 +3099,10 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
             content: cancelledContent,
             parts: buildTextParts(assistantMessage.id, cancelledContent, createdAt),
             isStreaming: false,
+            isThinkingStreaming: false,
+            thinkingContent:
+              accumulatedThinkingContent.trim() || m.thinkingContent,
+            streamingThinkingContent: undefined,
             status: "cancelled",
             firstTokenMs: streamTurnState.firstTokenMs ?? firstTokenMs,
             firstTextTokenMs,

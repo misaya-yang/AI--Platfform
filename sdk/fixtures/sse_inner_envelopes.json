@@ -46,5 +46,11 @@
     "sse": "data: {\"event_type\":\"status\",\"data\":[1,2]}\n\n",
     "event_type": "status",
     "value": [1, 2]
+  },
+  "agent_v2_item": {
+    "sse": "id: 7\nevent: item\ndata: {\"schema_version\":\"agent-event/v2\",\"thread_id\":\"thread-1\",\"sequence\":7,\"event\":{\"type\":\"rollout/item\",\"payload\":{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]} }},\"timestamp\":\"2026-08-21T00:00:00Z\"}\n\n",
+    "event_type": "item",
+    "sequence": 7,
+    "text": "hello"
   }
 }

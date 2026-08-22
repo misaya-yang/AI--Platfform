@@ -28,6 +28,12 @@ from .runtime import (
     canonical_runtime_json,
     runtime_sha256,
 )
+from .runtime_lease import (
+    RUNTIME_MODEL_LEASE_SCHEMA_VERSION,
+    RuntimeModelLeaseClaims,
+    RuntimeModelLeaseError,
+    RuntimeModelLeaseSigner,
+)
 
 __all__ = [
     "RUNTIME_CLEANUP_INVENTORY_SCHEMA",
@@ -50,6 +56,10 @@ __all__ = [
     "is_memory_source_handle",
     "is_memory_source_scope_handle",
     "runtime_sha256",
+    "RUNTIME_MODEL_LEASE_SCHEMA_VERSION",
+    "RuntimeModelLeaseClaims",
+    "RuntimeModelLeaseError",
+    "RuntimeModelLeaseSigner",
     "validate_runtime_cleanup_inventory",
     "validate_runtime_cleanup_plan",
     "validate_runtime_cleanup_receipt",

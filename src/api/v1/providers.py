@@ -191,6 +191,10 @@ async def create_provider_from_template(
         )
 
     tenant_id = user.tenant_id or "default"
+    metadata = {
+        **dict(template.default_metadata),
+        **(_safe_provider_metadata(body.metadata) or {}),
+    }
     existing = await provider_service.get_provider(tenant_id, provider_id)
     if existing:
         provider = await provider_service.update_provider(
@@ -200,7 +204,7 @@ async def create_provider_from_template(
             api_type=template.api_type,
             base_url=base_url,
             api_key=body.api_key,
-            metadata=_safe_provider_metadata(body.metadata),
+            metadata=metadata,
             is_enabled=body.is_enabled,
         )
         if not provider:
@@ -225,7 +229,7 @@ async def create_provider_from_template(
             api_type=template.api_type,
             base_url=base_url,
             api_key=body.api_key,
-            metadata=_safe_provider_metadata(body.metadata),
+            metadata=metadata,
             is_enabled=body.is_enabled,
         )
         if request is not None:

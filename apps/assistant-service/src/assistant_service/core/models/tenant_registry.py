@@ -177,9 +177,7 @@ class TenantModelRegistryResolver:
     async def close(self) -> None:
         """Close all cached and retired provider clients during process shutdown."""
 
-        registries = {
-            id(registry): registry for _expires, registry in self._cache.values()
-        }
+        registries = {id(registry): registry for _expires, registry in self._cache.values()}
         registries.update(self._retired_registries)
         self._cache.clear()
         self._retired_registries.clear()
@@ -213,9 +211,7 @@ class TenantModelRegistryResolver:
                 tenant_id or "default",
             )
         except Exception as exc:
-            record_internal_exception(
-                __name__, "assistant.tenant_model.list_failed", exc
-            )
+            record_internal_exception(__name__, "assistant.tenant_model.list_failed", exc)
             return []
         normalized_rows = []
         for row in rows:
@@ -284,7 +280,10 @@ class TenantModelRegistryResolver:
         if not row:
             return None
         data = dict(row)
-        if exact_provider_id is not None and str(data.get("provider_id") or "") != exact_provider_id:
+        if (
+            exact_provider_id is not None
+            and str(data.get("provider_id") or "") != exact_provider_id
+        ):
             logger.warning("Pinned Agent provider resolution returned a mismatched row")
             return None
         stored_secret = str(data.get("api_key_encrypted") or "")
@@ -319,7 +318,7 @@ class TenantModelRegistryResolver:
             return registry
 
         metadata = _metadata(data.get("metadata"))
-        wire_protocol = str(metadata.get("wire_protocol") or "chat_completions")
+        wire_protocol = str(metadata.get("wire_protocol") or "responses_v1")
         try:
             registry.configure_provider(
                 provider,

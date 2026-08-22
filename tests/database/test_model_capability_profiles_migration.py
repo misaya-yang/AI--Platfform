@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = ROOT / "database" / "migrations" / "088_model_capability_profiles.sql"
+QWEN_RESPONSES_MIGRATION = ROOT / "database" / "migrations" / "091_qwen_responses_default.sql"
 SCHEMA = ROOT / "database" / "schema.sql"
 
 
@@ -75,3 +76,16 @@ def test_schema_sql_matches_migration_end_state() -> None:
         assert column not in model_pricing, (
             f"model_pricing must not carry capability column: {column}"
         )
+
+
+def test_qwen_responses_default_migration_is_narrow_and_idempotent() -> None:
+    migration = QWEN_RESPONSES_MIGRATION.read_text(encoding="utf-8")
+    upper = migration.upper()
+
+    assert "tenant_id = 'default'" in migration
+    assert "provider_id = 'dashscope'" in migration
+    assert "'\"responses_v1\"'::jsonb" in migration
+    assert "IS DISTINCT FROM 'responses_v1'" in migration
+    assert "DROP TABLE" not in upper
+    assert "TRUNCATE" not in upper
+    assert "DELETE FROM" not in upper

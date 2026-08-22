@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.logging import get_logger, record_internal_exception
 
+from ..security.ast_guard import ASTSecurityGuard
 from .tool_registry import (
     ToolCallRequest,
     ToolCallResult,
@@ -360,7 +361,12 @@ class CodeExecutorToolExecutor(ToolExecutor):
         # Defense-in-depth: AST-level denylist for sandbox-escape imports.
         # Primary isolation is Docker + gVisor; this rejects obvious
         # attempts (socket, ctypes, subprocess...) before the sandbox runs.
-        denied_reason = _scan_code_for_denied_imports(code)
+        safety_report = ASTSecurityGuard.audit_python_code(code)
+        denied_reason = (
+            safety_report.violations[0].message
+            if safety_report.violations
+            else _scan_code_for_denied_imports(code)
+        )
         if denied_reason:
             logger.warning(
                 f"[Security] code_executor rejected code "

@@ -206,6 +206,9 @@ def create_app() -> FastAPI:
             "/api/v1/assistant/config",
             "/api/v1/assistant/models",
             "/api/v1/assistant/datasets",
+            # Private Runtime path performs its own constant-time service auth
+            # and lease/budget admission; public rate buckets must not count it.
+            "/internal/v1/codex-model-plane/responses",
         ],
     )
     app.add_middleware(StreamingRateLimitMiddleware, config=rate_limit_config)
@@ -213,7 +216,11 @@ def create_app() -> FastAPI:
     app.add_middleware(
         RequestBodyLimitMiddleware,
         max_bytes=8 * 1024 * 1024,
-        paths={"/api/v1/assistant/chat", "/api/v1/assistant/chat/stream"},
+        paths={
+            "/api/v1/assistant/chat",
+            "/api/v1/assistant/chat/stream",
+            "/internal/v1/codex-model-plane/responses",
+        },
         path_prefixes=("/api/v1/public/agents/",),
     )
 
@@ -250,6 +257,9 @@ def create_app() -> FastAPI:
             "/health/ready",
             "/docs",
             "/openapi.json",
+            # This exact path is not public: the route performs independent
+            # service-token and signed Runtime lease verification.
+            "/internal/v1/codex-model-plane/responses",
         ],
     )
     app.add_middleware(StreamingAuthMiddleware, config=auth_config)
@@ -330,6 +340,14 @@ def create_app() -> FastAPI:
     # ========== 路由 ==========
 
     app.include_router(api_router, prefix="/api/v1")
+    # Native Codex Thread/Turn/Item API. V1 remains the compatibility surface
+    # for one complete release window; V2 is additive and candidate-gated.
+    from .api.v2.agent import router as agent_v2_router
+
+    app.include_router(agent_v2_router, prefix="/api/v2")
+    from .api.internal.codex_model_plane import router as codex_model_plane_router
+
+    app.include_router(codex_model_plane_router)
     from .api.v1.agent_public import document_router as agent_embed_document_router
 
     app.include_router(agent_embed_document_router)
@@ -794,6 +812,13 @@ def create_app() -> FastAPI:
         if assistant_service is not None:
             await assistant_service.close()
 
+        codex_model_plane = getattr(app.state, "codex_model_plane", None)
+        if codex_model_plane is not None:
+            await codex_model_plane.close()
+        codex_runtime_control = getattr(app.state, "codex_runtime_control", None)
+        if codex_runtime_control is not None:
+            await codex_runtime_control.close()
+
         # Stop Assistant TaskManager lifecycle
         from ai_gateway_core.tasks import shutdown_task_manager
 
@@ -852,6 +877,25 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     app.state.database = container.database
     app.state.redis = container.redis
     app.state.memory_service = container.memory_service
+
+    from .services.assistant_runtime_assignment import (
+        AssistantRuntimeAssignmentStore,
+        RuntimeAssignmentPolicy,
+        runtime_assignment_policy_from_env,
+    )
+
+    runtime_owner, kernel_revision = runtime_assignment_policy_from_env()
+    app.state.assistant_runtime_default_owner = runtime_owner
+    app.state.assistant_runtime_kernel_revision = kernel_revision
+    app.state.assistant_runtime_assignment_policy = RuntimeAssignmentPolicy.from_env()
+    from .services.codex_runtime.cutover_guard import LegacyLoopUsageCounter
+
+    app.state.legacy_loop_usage_counter = LegacyLoopUsageCounter()
+    app.state.assistant_runtime_assignments = (
+        AssistantRuntimeAssignmentStore(container.database)
+        if container.settings.database.enabled
+        else None
+    )
 
     # AS-03: Gateway owns tenant MCP CRUD and capability resolution while the
     # protocol client remains in assistant-service. Both processes share the
@@ -937,6 +981,52 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     encryption_key = os.environ.get("GATEWAY_ENCRYPTION_KEY", "")
     app.state.provider_service = ProviderService(container.database, encryption_key)
     app.state.model_service = ModelService(container.database)
+
+    from ai_gateway_core.agents import RuntimeModelLeaseSigner
+
+    from .services.codex_runtime import CodexModelPlane, CodexRuntimeControlPlane
+
+    model_plane_token = os.environ.get("CODEX_MODEL_PLANE_INTERNAL_TOKEN", "").strip()
+    lease_secret = os.environ.get("CODEX_RUNTIME_LEASE_SIGNING_SECRET", "").strip()
+    app.state.codex_model_plane_internal_token = model_plane_token
+    app.state.codex_model_plane = (
+        CodexModelPlane(
+            database=container.database,
+            provider_service=app.state.provider_service,
+            lease_signer=RuntimeModelLeaseSigner(lease_secret),
+        )
+        if container.settings.database.enabled and model_plane_token and lease_secret
+        else None
+    )
+    runtime_internal_token = os.environ.get("CODEX_RUNTIME_INTERNAL_TOKEN", "").strip()
+    runtime_url = os.environ.get("CODEX_RUNTIME_URL", "http://codex-agent-runtime:8094").strip()
+    model_plane_runtime_base_url = os.environ.get(
+        "CODEX_MODEL_PLANE_RUNTIME_BASE_URL",
+        "http://gateway:8080/internal/v1/codex-model-plane",
+    ).strip()
+    app.state.codex_runtime_control = (
+        CodexRuntimeControlPlane(
+            database=container.database,
+            model_service=app.state.model_service,
+            provider_service=app.state.provider_service,
+            assignment_store=app.state.assistant_runtime_assignments,
+            lease_signer=RuntimeModelLeaseSigner(lease_secret),
+            runtime_url=runtime_url,
+            runtime_internal_token=runtime_internal_token,
+            model_plane_base_url=model_plane_runtime_base_url,
+            kernel_revision=str(app.state.assistant_runtime_kernel_revision or ""),
+        )
+        if (
+            container.settings.database.enabled
+            and app.state.assistant_runtime_assignments is not None
+            and runtime_internal_token
+            and runtime_url
+            and model_plane_runtime_base_url
+            and app.state.assistant_runtime_kernel_revision
+            and lease_secret
+        )
+        else None
+    )
 
     from .adapters.langgraph import LangGraphAdapter
 

@@ -627,9 +627,15 @@ class StreamingExecutionMixin(StreamingPreparationMixin, StreamingToolLoopMixin)
         except RunBudgetExceeded:
             raise
         except Exception as e:
-            # The exception itself is retained for in-process error middleware,
-            # while public events carry only a stable redacted summary.
-            safe_error = "Assistant execution failed; details [redacted]"
+            # The exception is categorized via FailoverClassifier for structured recovery,
+            # while public events carry clean messages and structured failover metadata.
+            from assistant_service.core.agent.failover_classifier import classify_provider_error
+
+            classification = classify_provider_error(e)
+            safe_error = (
+                "Assistant execution failed; details [redacted]. "
+                f"{classification.clean_message}"
+            )
             ctx.model_error_seen = True
             log_internal_exception(logger, "assistant.streaming_first.failed", e)
             async for error_event in self.middleware_chain.run_on_error(ctx, e, phase):
@@ -644,5 +650,6 @@ class StreamingExecutionMixin(StreamingPreparationMixin, StreamingToolLoopMixin)
                     "code": "STREAMING_FIRST_ERROR",
                     "message": safe_error,
                     "phase": phase.value,
+                    "failover": classification.to_dict(),
                 },
             )

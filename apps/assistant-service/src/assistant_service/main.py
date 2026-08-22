@@ -515,14 +515,15 @@ async def lifespan(app: FastAPI):
     try:
         from ai_gateway_core.persistence import DatabaseStorage
 
-        # SPO-05 / D1: explicit small pool for the assistant worker profile
-        # (single worker per container) plus the shared command timeout.
+        # SPO-05 / D1 / SOTA: configurable connection pool for assistant worker
+        pool_min_size = _STARTUP_CONFIG.int_value("ASSISTANT_DB_POOL_MIN_SIZE")
+        pool_max_size = _STARTUP_CONFIG.int_value("ASSISTANT_DB_POOL_MAX_SIZE")
         database = DatabaseStorage(
             db_dsn,
             enabled=True,
             auto_init=False,
-            pool_min_size=1,
-            pool_max_size=5,
+            pool_min_size=pool_min_size,
+            pool_max_size=pool_max_size,
         )
         await database.connect()
         app.state.database = database
@@ -1280,6 +1281,14 @@ if _gateway_secret_env:
             replay_protection=True,
         ),
         allow_anonymous=_STARTUP_CONFIG.bool_value("ASSISTANT_APP__ALLOW_ANONYMOUS"),
+        # These two private routes authenticate the Rust Runtime with the
+        # distinct AI_PLATFORM_INTERNAL_TOKEN inside the route handler.
+        separately_authenticated_paths=frozenset(
+            {
+                "/internal/v1/capabilities/catalog",
+                "/internal/v1/capabilities/invoke",
+            }
+        ),
     )
     logger.info(
         "Gateway-secret middleware active (allow_anonymous=%s)",
@@ -1356,3 +1365,6 @@ async def security_headers(request, call_next):
 from .api.router import router as api_router  # noqa: E402
 
 app.include_router(api_router, prefix="/api/v1/assistant")
+from .api.routes.capability_plane import router as capability_plane_router  # noqa: E402
+
+app.include_router(capability_plane_router)

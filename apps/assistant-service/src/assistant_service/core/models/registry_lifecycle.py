@@ -180,7 +180,7 @@ class RegistryLifecycleMixin:
         base_url: str | None = None,
         timeout: float = 120.0,
         backend: str = "ai_studio",
-        wire_protocol: str = CHAT_COMPLETIONS_WIRE_PROTOCOL,
+        wire_protocol: str | None = None,
     ) -> None:
         """Configure a provider with API credentials.
 
@@ -190,7 +190,12 @@ class RegistryLifecycleMixin:
         no explicit ``base_url`` is passed, the Vertex base URL is selected
         automatically so callers don't have to know the host format.
         """
-        normalized_wire_protocol = str(wire_protocol or "").strip().lower()
+        default_wire_protocol = (
+            RESPONSES_V1_WIRE_PROTOCOL
+            if provider is ModelProvider.DASHSCOPE
+            else CHAT_COMPLETIONS_WIRE_PROTOCOL
+        )
+        normalized_wire_protocol = str(wire_protocol or default_wire_protocol).strip().lower()
         if normalized_wire_protocol not in SUPPORTED_WIRE_PROTOCOLS:
             raise ValueError(f"Unsupported provider wire protocol: {normalized_wire_protocol}")
         if normalized_wire_protocol == RESPONSES_V1_WIRE_PROTOCOL and provider not in {

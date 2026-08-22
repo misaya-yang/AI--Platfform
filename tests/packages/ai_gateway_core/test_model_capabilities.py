@@ -23,8 +23,13 @@ def test_catalog_profile_resolves_model_specific_option_without_runtime_model_br
 
     resolved = resolve_reasoning_option(profile, "minimal")
 
-    assert resolved.effective == "low"
-    assert resolved.settings == {"enabled": True, "budget_tokens": 128}
+    assert resolved.effective == "minimal"
+    assert resolved.settings == {
+        "effort": "minimal",
+        "chat_enabled": True,
+        "chat_budget_tokens": 128,
+    }
+    assert profile["wire_protocols"]["preferred"] == "responses_v1"
 
 
 def test_operator_override_wins_without_erasing_catalog_sections() -> None:
@@ -39,7 +44,11 @@ def test_operator_override_wins_without_erasing_catalog_sections() -> None:
                     "label": "Balanced",
                     "aliases": ["low", "high"],
                     "canonical_effort": "medium",
-                    "settings": {"enabled": True, "budget_tokens": 768},
+                    "settings": {
+                        "effort": "medium",
+                        "chat_enabled": True,
+                        "chat_budget_tokens": 768,
+                    },
                 }
             ],
         }
@@ -49,7 +58,11 @@ def test_operator_override_wins_without_erasing_catalog_sections() -> None:
 
     assert effective["reasoning"]["default_option"] == "medium"
     assert effective["prompt_cache"] == catalog["prompt_cache"]
-    assert resolve_reasoning_option(effective, "auto").settings["budget_tokens"] == 768
+    assert resolve_reasoning_option(effective, "auto").settings == {
+        "effort": "medium",
+        "chat_enabled": True,
+        "chat_budget_tokens": 768,
+    }
 
 
 def test_unknown_requested_option_falls_back_to_profile_default_with_receipt() -> None:
@@ -86,6 +99,14 @@ def test_invalid_adapter_setting_is_rejected() -> None:
 
     with pytest.raises(ModelCapabilityError, match="unsupported value"):
         merge_model_capability_profiles({}, profile)
+
+
+def test_native_web_search_wire_requires_enabled_profile_capability() -> None:
+    profile = safe_model_capability_profile()
+    profile["tools"]["web_search_wire"] = "native"
+
+    with pytest.raises(ModelCapabilityError, match="requires native_search.enabled"):
+        validate_model_capability_profile(profile)
 
 
 def test_adapter_catalog_is_typed_and_has_unique_ids() -> None:

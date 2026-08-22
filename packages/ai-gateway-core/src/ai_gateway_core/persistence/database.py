@@ -1441,9 +1441,29 @@ class DatabaseStorage:
                 json.dumps(session.get("history", [])),
                 json.dumps(session.get("metadata", {})),
                 json.dumps(session.get("config", {})),
-                session.get("status", "active"),
                 session.get("expires_at"),
             )
+
+    async def append_session_history(
+        self,
+        session_id: str,
+        events: list[dict[str, Any]],
+    ) -> bool:
+        """Incrementally append events to session history via JSONB concatenation without full overwrite."""
+        if not self._pool or not events:
+            return False
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE assistant.sessions
+                SET history = COALESCE(history, '[]'::jsonb) || $2::jsonb,
+                    updated_at = NOW()
+                WHERE session_id = $1
+                """,
+                session_id,
+                json.dumps(events),
+            )
+            return "UPDATE 1" in str(result)
 
     async def create_session_if_absent(self, session: dict[str, Any]) -> bool:
         """Insert a session without overwriting an existing global id."""

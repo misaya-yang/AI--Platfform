@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from ai_assistant.exceptions import StreamError
@@ -113,6 +114,11 @@ class SSEParser:
         else:
             data = {"value": inner}
 
+        if isinstance(timestamp, str):
+            try:
+                timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                timestamp = time.time()
         return StreamEvent(
             event_type=event_type,
             data=data,

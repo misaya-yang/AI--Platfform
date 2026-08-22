@@ -20,8 +20,10 @@ Endpoints:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import time
 import uuid
 from typing import Annotated, Any
 from urllib.parse import urlsplit
@@ -449,9 +451,74 @@ async def approve_tool_call(
 ) -> ApprovalResponse:
     """Thin proxy — approval state lives in ``assistant_tool_approvals``
     (ADR-004). Gateway forwards the request body to assistant-service."""
+    body_bytes = await request.body()
+    database = getattr(request.app.state, "database", None)
+    if database is not None:
+        try:
+            run = await database.fetchrow(
+                """
+                SELECT r.engine, r.session_id
+                  FROM assistant_tool_approvals AS a
+                  JOIN assistant_runs AS r ON r.run_id = a.run_id
+                 WHERE a.approval_id = $1::uuid
+                   AND a.tenant_id = $2
+                   AND a.user_id = $3
+                """,
+                approval_id,
+                user.tenant_id,
+                user.user_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to resolve approval runtime owner",
+                extra={"approval_id": approval_id},
+                exc_info=exc,
+            )
+            raise HTTPException(
+                status_code=503, detail="Approval runtime ownership unavailable"
+            ) from exc
+        if not run:
+            raise HTTPException(status_code=404, detail="Approval not found")
+        if run and str(run.get("engine") or "") == "codex_harness":
+            control = getattr(request.app.state, "codex_runtime_control", None)
+            if control is None:
+                raise HTTPException(status_code=503, detail="Codex Runtime unavailable")
+            session_id = str(run.get("session_id") or "")
+            from ...services.codex_runtime import CodexRuntimeControlError
+
+            try:
+                approval = await control.get_approval(
+                    approval_id=approval_id,
+                    tenant_id=user.tenant_id,
+                    user_id=user.user_id,
+                    session_id=session_id,
+                )
+            except CodexRuntimeControlError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.code) from exc
+            if approval is None:
+                raise HTTPException(status_code=404, detail="Approval not found")
+            payload = body.model_dump()
+            try:
+                await control.decide_approval(
+                    approval_id=approval_id,
+                    approved=bool(payload["approved"]),
+                    reason=payload.get("reason"),
+                    tenant_id=user.tenant_id,
+                    user_id=user.user_id,
+                    session_id=session_id,
+                )
+            except CodexRuntimeControlError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.code) from exc
+            return ApprovalResponse(
+                approval={
+                    **approval,
+                    "status": "approved" if payload["approved"] else "rejected",
+                    "approved": payload["approved"],
+                    "reason": payload.get("reason"),
+                }
+            )
     from ._assistant_proxy import proxy_to_assistant_service
 
-    body_bytes = await request.body()
     return await proxy_to_assistant_service(
         request, user, path=f"approvals/{approval_id}", body=body_bytes
     )
@@ -464,6 +531,33 @@ async def get_run_status(
     user: UserContext = Depends(get_user_context),
 ) -> RunStatusResponse:
     """Thin proxy — run state lives in ``assistant_runs`` (ADR-004)."""
+    database = getattr(request.app.state, "database", None)
+    try:
+        parsed_run_id = uuid.UUID(run_id)
+    except ValueError:
+        parsed_run_id = None
+    if database is not None and parsed_run_id is not None:
+        row = await database.fetchrow(
+            """
+            SELECT run_id, tenant_id, user_id, session_id, status, engine,
+                   usage, error, started_at, finished_at, updated_at,
+                   harness_thread_id, harness_turn_id, kernel_revision,
+                   capability_revision
+              FROM assistant_runs
+             WHERE run_id = $1 AND tenant_id = $2 AND user_id = $3
+               AND engine = 'codex_harness'
+            """,
+            parsed_run_id,
+            user.tenant_id,
+            user.user_id,
+        )
+        if row is not None:
+            payload = dict(row)
+            usage = payload.get("usage")
+            if isinstance(usage, str):
+                with contextlib.suppress(json.JSONDecodeError):
+                    payload["usage"] = json.loads(usage)
+            return RunStatusResponse(run=payload)
     from ._assistant_proxy import proxy_to_assistant_service
 
     return await proxy_to_assistant_service(request, user, path=f"runs/{run_id}")
@@ -554,6 +648,120 @@ async def _validate_chat_session_access(
         raise HTTPException(status_code=404, detail="Session not found")
 
 
+async def _session_runtime_assignment(
+    request: Request,
+    user: UserContext,
+    session_id: str | None,
+) -> Any | None:
+    """Never let one session fall through to a different Agent kernel."""
+
+    if not session_id:
+        return None
+    assignment_store = getattr(request.app.state, "assistant_runtime_assignments", None)
+    if assignment_store is None:
+        return None
+    assignment = await assignment_store.resolve(
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        session_id=session_id,
+    )
+    if (
+        assignment is not None
+        and assignment.runtime_owner == "codex_candidate"
+        and getattr(request.app.state, "codex_runtime_control", None) is None
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "CODEX_RUNTIME_UNAVAILABLE",
+                "message": "This session is assigned to the Codex candidate runtime",
+            },
+        )
+    return assignment
+
+
+def _record_legacy_loop_usage(request: Request, session_id: str | None) -> None:
+    counter = getattr(request.app.state, "legacy_loop_usage_counter", None)
+    if counter is not None:
+        counter.record(session_id)
+
+
+def _require_phase2_candidate_request(body: AssistantChatRequest) -> None:
+    """Fail closed instead of silently dropping non-read-only capabilities."""
+
+    unsupported = bool(
+        body.system_prompt
+        or body.enable_task_planning
+        or body.confirm_plan
+        or body.os_agent_enabled
+        or body.local_node_device_id
+        or body.local_node_grant_ids
+        or body.resume_run_id
+        or body.resume_approval_id
+    )
+    if unsupported:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "CODEX_RUNTIME_CAPABILITY_NOT_MIGRATED",
+                "message": "This capability is not available on the Codex candidate yet",
+            },
+        )
+
+
+def _candidate_readonly_capabilities(body: AssistantChatRequest) -> dict[str, Any]:
+    """Build explicit read-only references for the Codex Runtime boundary."""
+
+    return {
+        "knowledge": {
+            "dataset_ids": list(body.kb_dataset_ids),
+            "mode": body.kb_mode,
+            "top_k": body.kb_top_k,
+            "score_threshold": body.kb_score_threshold,
+        },
+        "attachments": {"refs": list(body.file_paths)},
+        "web_search": {
+            "enabled": body.web_search_enabled,
+            "max_results": body.web_search_max_results,
+        },
+    }
+
+
+async def _start_codex_candidate_turn(
+    request: Request,
+    user: UserContext,
+    body: AssistantChatRequest,
+    *,
+    session_id: str,
+    model_id: str,
+):
+    _require_phase2_candidate_request(body)
+    control = getattr(request.app.state, "codex_runtime_control", None)
+    if control is None:
+        raise HTTPException(status_code=503, detail="Codex runtime is unavailable")
+    try:
+        return await control.start_turn(
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            session_id=session_id,
+            message=body.message,
+            model_id=model_id,
+            reasoning_option=body.reasoning_option,
+            legacy_thinking_level=body.thinking_level,
+            max_tokens=body.max_tokens,
+            readonly_capabilities=_candidate_readonly_capabilities(body),
+        )
+    except Exception as exc:
+        from ...services.codex_runtime import CodexRuntimeControlError
+
+        if isinstance(exc, CodexRuntimeControlError):
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": "Codex runtime rejected the turn"},
+            ) from None
+        raise
+
+
 @router.post("/chat", response_model=AssistantChatResponse)
 async def chat(
     body: AssistantChatRequest,
@@ -593,11 +801,52 @@ async def chat(
         await _check_model_permission(user, model_id, model_meta)
 
     session_id = body.session_id or str(uuid.uuid4())
+    assignment = None
     if body.session_id:
         await _validate_chat_session_access(request=request, user=user, session_id=session_id)
+        assignment = await _session_runtime_assignment(request, user, session_id)
+
+    if assignment is not None and assignment.runtime_owner == "codex_candidate":
+        started_at = time.perf_counter()
+        turn = await _start_codex_candidate_turn(
+            request,
+            user,
+            body,
+            session_id=session_id,
+            model_id=model_id,
+        )
+        control = request.app.state.codex_runtime_control
+        content_parts: list[str] = []
+        async for frame in control.stream_events(
+            turn=turn,
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            session_id=session_id,
+        ):
+            for line in frame.decode("utf-8", errors="ignore").splitlines():
+                if not line.startswith("data:"):
+                    continue
+                try:
+                    event = json.loads(line[5:].strip())
+                except json.JSONDecodeError:
+                    continue
+                if event.get("event_type") == "text_delta":
+                    data = event.get("data")
+                    if isinstance(data, dict) and isinstance(data.get("content"), str):
+                        content_parts.append(data["content"])
+        return AssistantChatResponse(
+            content="".join(content_parts),
+            usage={},
+            contexts=[],
+            duration_ms=(time.perf_counter() - started_at) * 1000,
+            model_id=model_id,
+            session_id=session_id,
+            run_id=turn.run_id,
+        )
 
     from ._assistant_proxy import proxy_to_assistant_service
 
+    _record_legacy_loop_usage(request, session_id)
     body_bytes = _chat_body_with_model(raw_body, model_id)
     return await proxy_to_assistant_service(request, user, path="chat", body=body_bytes)
 
@@ -661,10 +910,37 @@ async def chat_stream(
     # that session. assistant-service would also reject mismatches via
     # its own session manager, but defence-in-depth belongs at the edge.
     session_id = validated_body.session_id
+    assignment = None
     if session_id:
         await _validate_chat_session_access(request=request, user=user, session_id=session_id)
+        assignment = await _session_runtime_assignment(request, user, session_id)
+
+    if assignment is not None and assignment.runtime_owner == "codex_candidate":
+        turn = await _start_codex_candidate_turn(
+            request,
+            user,
+            validated_body,
+            session_id=session_id,
+            model_id=model_id,
+        )
+        control = request.app.state.codex_runtime_control
+        return StreamingResponse(
+            control.stream_events(
+                turn=turn,
+                tenant_id=user.tenant_id,
+                user_id=user.user_id,
+                session_id=session_id,
+            ),
+            media_type="text/event-stream",
+            headers={
+                "cache-control": "no-cache",
+                "x-accel-buffering": "no",
+                "x-ai-agent-kernel": "codex",
+            },
+        )
 
     body_bytes = _chat_body_with_model(body_json, model_id)
+    _record_legacy_loop_usage(request, session_id)
     return await proxy_to_assistant_service(request, user, path="chat/stream", body=body_bytes)
 
 
@@ -733,6 +1009,28 @@ async def create_session(
             service_id="__builtin_assistant__",  # 保留的 service_id，避免与用户注册的服务冲突
             metadata=body.metadata if body else None,
         )
+        assignment_store = getattr(request.app.state, "assistant_runtime_assignments", None)
+        if assignment_store is not None:
+            try:
+                policy = getattr(request.app.state, "assistant_runtime_assignment_policy", None)
+                if policy is not None and hasattr(assignment_store, "bind_new_session"):
+                    await assignment_store.bind_new_session(
+                        tenant_id=user.tenant_id,
+                        user_id=user.user_id,
+                        session_id=session.session_id,
+                        policy=policy,
+                    )
+                else:
+                    await assignment_store.bind(
+                        tenant_id=user.tenant_id,
+                        user_id=user.user_id,
+                        session_id=session.session_id,
+                        runtime_owner=request.app.state.assistant_runtime_default_owner,
+                        kernel_revision=request.app.state.assistant_runtime_kernel_revision,
+                    )
+            except Exception:
+                await session_manager.delete(session.session_id)
+                raise
 
         return SessionResponse(
             session_id=session.session_id,

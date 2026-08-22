@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import math
 import re
 import threading
@@ -18,6 +19,10 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
+
+from ai_gateway_core.logging import get_logger, log_internal_exception
+
+logger = get_logger(__name__)
 
 DEFAULT_MAX_SUBAGENT_DEPTH = 1
 OPERATOR_MAX_SUBAGENT_DEPTH = 2
@@ -413,26 +418,37 @@ class SubAgentConcurrencyLease:
 
 
 class SubAgentConcurrencyLimiter:
-    """Atomic process-global tenant/session active-child slot accounting."""
+    """Atomic tenant/session active-child slot accounting with optional Redis distributed backend."""
 
     def __init__(
         self,
         *,
         tenant_limit: int = DEFAULT_TENANT_SUBAGENT_CONCURRENCY,
         session_limit: int = DEFAULT_SESSION_SUBAGENT_CONCURRENCY,
+        redis_client: Any | None = None,
+        ttl_seconds: int = 300,
     ) -> None:
         if tenant_limit <= 0 or session_limit <= 0 or session_limit > tenant_limit:
             raise ValueError("invalid tenant/session sub-agent concurrency limits")
         self.tenant_limit = tenant_limit
         self.session_limit = session_limit
+        self.redis_client = redis_client
+        self.ttl_seconds = ttl_seconds
         self._tenant_active: dict[str, int] = {}
         self._session_active: dict[tuple[str, str], int] = {}
         self._lock = threading.Lock()
+
+    def configure_redis(self, redis_client: Any | None, ttl_seconds: int = 300) -> None:
+        """Attach or update the Redis distributed client for multi-worker deployments."""
+        self.redis_client = redis_client
+        self.ttl_seconds = ttl_seconds
 
     def acquire(self, scope: DispatchScope, count: int) -> SubAgentConcurrencyLease:
         if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
             raise ValueError("concurrency lease count must be a positive integer")
         session_key = (scope.tenant_id, scope.session_id)
+
+        # 1. Process-local atomic check
         with self._lock:
             tenant_used = self._tenant_active.get(scope.tenant_id, 0)
             session_used = self._session_active.get(session_key, 0)
@@ -442,6 +458,47 @@ class SubAgentConcurrencyLimiter:
                 raise SubAgentConcurrencyExceeded("session sub-agent concurrency exhausted")
             self._tenant_active[scope.tenant_id] = tenant_used + count
             self._session_active[session_key] = session_used + count
+
+        # 2. Redis distributed accounting if client is attached
+        if self.redis_client is not None:
+            tenant_redis_key = f"subagent:concurrency:tenant:{scope.tenant_id}"
+            session_redis_key = f"subagent:concurrency:session:{scope.tenant_id}:{scope.session_id}"
+            try:
+                if hasattr(self.redis_client, "incrby"):
+                    # Synchronous redis client
+                    cur_tenant = self.redis_client.incrby(tenant_redis_key, count)
+                    if hasattr(self.redis_client, "expire"):
+                        self.redis_client.expire(tenant_redis_key, self.ttl_seconds)
+                    cur_session = self.redis_client.incrby(session_redis_key, count)
+                    if hasattr(self.redis_client, "expire"):
+                        self.redis_client.expire(session_redis_key, self.ttl_seconds)
+
+                    if cur_tenant > self.tenant_limit or cur_session > self.session_limit:
+                        # Roll back
+                        self.redis_client.decrby(tenant_redis_key, count)
+                        self.redis_client.decrby(session_redis_key, count)
+                        # Roll back local lock
+                        with self._lock:
+                            self._tenant_active[scope.tenant_id] = max(
+                                0, self._tenant_active.get(scope.tenant_id, 0) - count
+                            )
+                            self._session_active[session_key] = max(
+                                0, self._session_active.get(session_key, 0) - count
+                            )
+                        if cur_tenant > self.tenant_limit:
+                            raise SubAgentConcurrencyExceeded("distributed tenant sub-agent concurrency exhausted")
+                        raise SubAgentConcurrencyExceeded("distributed session sub-agent concurrency exhausted")
+            except SubAgentConcurrencyExceeded:
+                raise
+            except Exception as exc:
+                # Log warning and preserve local in-memory lease if Redis is momentarily unreachable
+                log_internal_exception(
+                    logger,
+                    "assistant.subagent_concurrency.redis_acquire_failed",
+                    exc,
+                    level=logging.WARNING,
+                )
+
         return SubAgentConcurrencyLease(self, scope, count)
 
     def release(self, lease: SubAgentConcurrencyLease) -> None:
@@ -463,6 +520,25 @@ class SubAgentConcurrencyLimiter:
                 self._session_active[session_key] = session_remaining
             else:
                 self._session_active.pop(session_key, None)
+
+        if self.redis_client is not None:
+            tenant_redis_key = f"subagent:concurrency:tenant:{lease.scope.tenant_id}"
+            session_redis_key = f"subagent:concurrency:session:{lease.scope.tenant_id}:{lease.scope.session_id}"
+            try:
+                if hasattr(self.redis_client, "decrby"):
+                    rem_t = self.redis_client.decrby(tenant_redis_key, lease.count)
+                    if rem_t <= 0 and hasattr(self.redis_client, "delete"):
+                        self.redis_client.delete(tenant_redis_key)
+                    rem_s = self.redis_client.decrby(session_redis_key, lease.count)
+                    if rem_s <= 0 and hasattr(self.redis_client, "delete"):
+                        self.redis_client.delete(session_redis_key)
+            except Exception as exc:
+                log_internal_exception(
+                    logger,
+                    "assistant.subagent_concurrency.redis_release_failed",
+                    exc,
+                    level=logging.WARNING,
+                )
 
 
 # These registries are intentionally process-local. They enforce hard bounds and

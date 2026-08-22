@@ -43,3 +43,18 @@ def test_current_openapi_keeps_existing_paths_and_parameters_compatible() -> Non
                     path,
                     key,
                 )
+
+
+def test_published_openapi_contains_the_actual_v2_runtime_routes() -> None:
+    published = json.loads(BASELINE.read_text(encoding="utf-8"))
+    app_paths = create_app().openapi().get("paths", {})
+    v2_paths = {
+        "/api/v2/agent/threads",
+        "/api/v2/agent/threads/{thread_id}",
+        "/api/v2/agent/threads/{thread_id}/turns",
+        "/api/v2/agent/threads/{thread_id}/turns/{turn_id}:interrupt",
+        "/api/v2/agent/threads/{thread_id}/events",
+    }
+    assert v2_paths <= set(app_paths)
+    for path in v2_paths:
+        assert published["paths"][path] == app_paths[path]

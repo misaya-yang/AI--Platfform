@@ -94,12 +94,14 @@ async def _safe_provider_stream(
     client: httpx.AsyncClient,
     endpoint: str,
     body: dict[str, Any],
+    *,
+    headers: dict[str, str] | None = None,
 ) -> AsyncIterator[Any]:
     """Open a provider stream without retaining credentials or response bodies."""
 
     safe_transport_error: httpx.RequestError | None = None
     try:
-        async with client.stream("POST", endpoint, json=body) as response:
+        async with client.stream("POST", endpoint, json=body, headers=headers) as response:
             _raise_for_status_without_query_secrets(response)
             yield response
     except httpx.HTTPStatusError:
@@ -233,6 +235,8 @@ def configure_stream_smoother(*, disabled: bool) -> None:
 
     global _SMOOTHER_DISABLED
     _SMOOTHER_DISABLED = bool(disabled)
+
+
 _SMOOTHER_CHARS_PER_CHUNK = 4
 _SMOOTHER_DELAY_SECONDS = 0.020
 _SMOOTHER_MIN_TEXT_LEN = 12  # chunks smaller than this don't benefit from splitting
@@ -890,6 +894,11 @@ class ModelRegistry(RegistryLifecycleMixin):
             native_search_config=native_search_config,
             openai_local_runtime=openai_local_runtime,
         )
+        request_headers: dict[str, str] | None = None
+        if self._uses_responses_v1(model.provider):
+            from .capability_adapters import request_headers_from_profile
+
+            request_headers = request_headers_from_profile(model.capability_profile or {})
 
         if model.provider == ModelProvider.GOOGLE:
             # Path differs between AI Studio and Vertex; auth stays in headers.
@@ -906,7 +915,7 @@ class ModelRegistry(RegistryLifecycleMixin):
         safe_transport_error: httpx.RequestError | None = None
         try:
             try:
-                response = await client.post(endpoint, json=body)
+                response = await client.post(endpoint, json=body, headers=request_headers)
             except httpx.RequestError as exc:
                 safe_transport_error = _safe_request_error(exc)
             if safe_transport_error is not None:
@@ -1005,6 +1014,11 @@ class ModelRegistry(RegistryLifecycleMixin):
             native_search_config=native_search_config,
             openai_local_runtime=openai_local_runtime,
         )
+        request_headers: dict[str, str] | None = None
+        if self._uses_responses_v1(model.provider):
+            from .capability_adapters import request_headers_from_profile
+
+            request_headers = request_headers_from_profile(model.capability_profile or {})
 
         try:
             if model.provider == ModelProvider.GOOGLE:
@@ -1021,7 +1035,12 @@ class ModelRegistry(RegistryLifecycleMixin):
                     yield delta
             elif self._uses_responses_v1(model.provider):
                 endpoint = self._responses_endpoint(model.provider)
-                async with _safe_provider_stream(client, endpoint, body) as response:
+                async with _safe_provider_stream(
+                    client,
+                    endpoint,
+                    body,
+                    headers=request_headers,
+                ) as response:
                     async for response_delta in iter_responses_stream(
                         response.aiter_lines(),
                         local_runtime=(

@@ -79,6 +79,7 @@ class ProviderTemplate:
     credential_fields: tuple[CredentialField, ...]
     discovery_strategy: str
     default_models: tuple[CatalogModel, ...]
+    default_metadata: tuple[tuple[str, Any], ...] = ()
     description: str = ""
     advanced: bool = False
 
@@ -96,6 +97,7 @@ class ProviderTemplate:
                 model.to_response(provider_id=self.default_provider_id)
                 for model in self.default_models
             ],
+            "default_metadata": dict(self.default_metadata),
             "advanced": self.advanced,
         }
 
@@ -249,6 +251,7 @@ PROVIDER_TEMPLATES: tuple[ProviderTemplate, ...] = (
         ),
         discovery_strategy="catalog",
         default_models=DASHSCOPE_MODELS,
+        default_metadata=(("wire_protocol", "responses_v1"),),
     ),
     ProviderTemplate(
         template_id="dashscope-intl",
@@ -266,6 +269,7 @@ PROVIDER_TEMPLATES: tuple[ProviderTemplate, ...] = (
         ),
         discovery_strategy="catalog",
         default_models=DASHSCOPE_MODELS,
+        default_metadata=(("wire_protocol", "responses_v1"),),
     ),
     ProviderTemplate(
         template_id="google-ai-studio",

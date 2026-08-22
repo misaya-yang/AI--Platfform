@@ -72,6 +72,98 @@ def _build_request(
 
 
 @pytest.mark.asyncio
+async def test_create_session_persists_runtime_assignment() -> None:
+    user = UserContext(user_id="user_1", tenant_id="tenant_1", is_authenticated=True)
+    session = Session(
+        session_id="session-1",
+        user_id=user.user_id,
+        tenant_id=user.tenant_id,
+        service_id="__builtin_assistant__",
+    )
+    session_manager = AsyncMock()
+    session_manager.create.return_value = session
+    assignment_store = AsyncMock()
+    request = _build_request(session_manager, method="POST")
+    request.app.state.assistant_runtime_assignments = assignment_store
+    request.app.state.assistant_runtime_default_owner = "codex_candidate"
+    request.app.state.assistant_runtime_kernel_revision = "fork-sha"
+
+    response = await assistant_api.create_session(None, user, request)
+
+    assert response.session_id == session.session_id
+    assignment_store.bind.assert_awaited_once_with(
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        session_id=session.session_id,
+        runtime_owner="codex_candidate",
+        kernel_revision="fork-sha",
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_session_removes_row_when_runtime_assignment_fails() -> None:
+    user = UserContext(user_id="user_1", tenant_id="tenant_1", is_authenticated=True)
+    session = Session(
+        session_id="session-1",
+        user_id=user.user_id,
+        tenant_id=user.tenant_id,
+        service_id="__builtin_assistant__",
+    )
+    session_manager = AsyncMock()
+    session_manager.create.return_value = session
+    assignment_store = AsyncMock()
+    assignment_store.bind.side_effect = RuntimeError("assignment failed")
+    request = _build_request(session_manager, method="POST")
+    request.app.state.assistant_runtime_assignments = assignment_store
+    request.app.state.assistant_runtime_default_owner = "python_control"
+    request.app.state.assistant_runtime_kernel_revision = None
+
+    with pytest.raises(HTTPException) as exc_info:
+        await assistant_api.create_session(None, user, request)
+
+    assert exc_info.value.status_code == 500
+    session_manager.delete.assert_awaited_once_with(session.session_id)
+
+
+@pytest.mark.asyncio
+async def test_codex_assigned_session_never_falls_through_to_python_control() -> None:
+    user = UserContext(user_id="user_1", tenant_id="tenant_1", is_authenticated=True)
+    request = _build_request(AsyncMock(), method="POST")
+    assignment_store = AsyncMock()
+    assignment_store.resolve.return_value = SimpleNamespace(runtime_owner="codex_candidate")
+    request.app.state.assistant_runtime_assignments = assignment_store
+
+    with pytest.raises(HTTPException) as exc_info:
+        await assistant_api._session_runtime_assignment(
+            request,
+            user,
+            "session-1",
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["code"] == "CODEX_RUNTIME_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_codex_assignment_is_returned_only_when_control_plane_is_ready() -> None:
+    user = UserContext(user_id="user_1", tenant_id="tenant_1", is_authenticated=True)
+    request = _build_request(AsyncMock(), method="POST")
+    assignment = SimpleNamespace(runtime_owner="codex_candidate")
+    assignment_store = AsyncMock()
+    assignment_store.resolve.return_value = assignment
+    request.app.state.assistant_runtime_assignments = assignment_store
+    request.app.state.codex_runtime_control = SimpleNamespace()
+
+    resolved = await assistant_api._session_runtime_assignment(
+        request,
+        user,
+        "session-1",
+    )
+
+    assert resolved is assignment
+
+
+@pytest.mark.asyncio
 async def test_delete_session_proxies_to_runtime_cleanup_route_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

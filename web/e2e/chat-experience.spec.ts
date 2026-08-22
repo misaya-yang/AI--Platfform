@@ -1007,6 +1007,32 @@ test("assistant emits stream telemetry lifecycle on mocked stream", async ({ pag
   expect(finishedEvent?.payload?.outcome).toBe("completed");
 });
 
+test("assistant preserves reasoning when provider omits thinking start and end", async ({ page }) => {
+  const reasoningSummary = "Provider reasoning summary without lifecycle markers.";
+  await installAssistantHarness(page, async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body: toSseBody([
+        { event_type: "run_started", data: { run_id: "run-reasoning-summary" } },
+        { event_type: "thinking_delta", data: reasoningSummary },
+        { event_type: "text_delta", data: "Reasoning persisted." },
+        { event_type: "run_finished", data: { run_id: "run-reasoning-summary" } },
+      ]),
+    });
+  });
+
+  await ensureAuthenticatedPage(page, "/assistant");
+  const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
+  await composer.fill(`reasoning-summary-${Date.now()}`);
+  await composer.press("Enter");
+
+  await expect(page.getByText("Reasoning persisted.")).toBeVisible();
+  await page.getByRole("button", { name: /Activity/ }).last().click();
+  await expect(page.getByText(reasoningSummary)).toBeVisible();
+  await expect(page.getByText(/1 step/)).toBeVisible();
+});
+
 test("assistant new-session stream is not blocked by delayed sidebar refresh", async ({ page }) => {
   test.setTimeout(20_000);
   const createSessionDelayMs = 250;

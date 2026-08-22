@@ -53,3 +53,8 @@ async def test_shared_inner_envelope_fixture() -> None:
     for name in ("null_data", "number_data", "boolean_data", "array_data"):
         event = (await _parse(fixture[name]["sse"]))[0]
         assert event.data == {"value": fixture[name]["value"]}
+
+    v2 = (await _parse(fixture["agent_v2_item"]["sse"]))[0]
+    assert v2.event_type == fixture["agent_v2_item"]["event_type"]
+    assert v2.data["sequence"] == fixture["agent_v2_item"]["sequence"]
+    assert v2.data["event"]["payload"]["payload"]["content"][0]["text"] == "hello"

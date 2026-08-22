@@ -7,21 +7,22 @@
       "model_ids": ["qwen3.7-plus"],
       "capabilities": {
         "schema_version": 1,
+        "wire_protocols": {"preferred": "responses_v1", "supported": ["responses_v1", "chat_completions"]},
         "reasoning": {
-          "adapter_id": "reasoning/dashscope-thinking-v1",
-          "default_option": "low",
+          "adapter_id": "reasoning/dashscope-responses-effort-v1",
+          "default_option": "minimal",
           "options": [
-            {"id": "off", "label": "Off", "aliases": ["none"], "canonical_effort": "none", "settings": {"enabled": false}},
-            {"id": "low", "label": "Low", "aliases": ["minimal"], "canonical_effort": "low", "settings": {"enabled": true, "budget_tokens": 128}},
-            {"id": "medium", "label": "Medium", "aliases": [], "canonical_effort": "medium", "settings": {"enabled": true, "budget_tokens": 1024}},
-            {"id": "high", "label": "High", "aliases": ["xhigh", "max"], "canonical_effort": "high", "settings": {"enabled": true}}
+            {"id": "off", "label": "Off", "aliases": ["none"], "canonical_effort": "none", "settings": {"effort": "none", "chat_enabled": false}},
+            {"id": "minimal", "label": "Minimal", "aliases": ["low"], "canonical_effort": "minimal", "settings": {"effort": "minimal", "chat_enabled": true, "chat_budget_tokens": 128}},
+            {"id": "medium", "label": "Medium", "aliases": [], "canonical_effort": "medium", "settings": {"effort": "medium", "chat_enabled": true, "chat_budget_tokens": 1024}},
+            {"id": "high", "label": "High", "aliases": ["xhigh", "max"], "canonical_effort": "high", "settings": {"effort": "high", "chat_enabled": true}}
           ],
           "visibility": "stream",
           "replay_policy": "discard_after_turn"
         },
-        "prompt_cache": {"adapter_id": "cache/openai-content-breakpoint-v1", "config": {}},
+        "prompt_cache": {"adapter_id": "cache/dashscope-session-v1", "config": {"enabled": true}},
         "native_search": {"adapter_id": "search/dashscope-native-v1", "enabled": true, "config": {}},
-        "tools": {"function_calling": true, "parallel_calls": true, "strict_schema": false},
+        "tools": {"function_calling": true, "parallel_calls": true, "strict_schema": false, "namespace_wire": "flatten", "web_search_wire": "native"},
         "modalities": {"input": ["text", "image"], "output": ["text"]},
         "streaming": {"text_deltas": true, "reasoning_deltas": true, "tool_call_deltas": true}
       }
@@ -31,21 +32,22 @@
       "model_id": "qwen3.7-max",
       "capabilities": {
         "schema_version": 1,
+        "wire_protocols": {"preferred": "responses_v1", "supported": ["responses_v1", "chat_completions"]},
         "reasoning": {
-          "adapter_id": "reasoning/dashscope-thinking-v1",
-          "default_option": "low",
+          "adapter_id": "reasoning/dashscope-responses-effort-v1",
+          "default_option": "minimal",
           "options": [
-            {"id": "off", "label": "Off", "aliases": ["none"], "canonical_effort": "none", "settings": {"enabled": false}},
-            {"id": "low", "label": "Low", "aliases": ["minimal"], "canonical_effort": "low", "settings": {"enabled": true, "budget_tokens": 128}},
-            {"id": "medium", "label": "Medium", "aliases": [], "canonical_effort": "medium", "settings": {"enabled": true, "budget_tokens": 1024}},
-            {"id": "high", "label": "High", "aliases": ["xhigh", "max"], "canonical_effort": "high", "settings": {"enabled": true}}
+            {"id": "off", "label": "Off", "aliases": ["none"], "canonical_effort": "none", "settings": {"effort": "none", "chat_enabled": false}},
+            {"id": "minimal", "label": "Minimal", "aliases": ["low"], "canonical_effort": "minimal", "settings": {"effort": "minimal", "chat_enabled": true, "chat_budget_tokens": 128}},
+            {"id": "medium", "label": "Medium", "aliases": [], "canonical_effort": "medium", "settings": {"effort": "medium", "chat_enabled": true, "chat_budget_tokens": 1024}},
+            {"id": "high", "label": "High", "aliases": ["xhigh", "max"], "canonical_effort": "high", "settings": {"effort": "high", "chat_enabled": true}}
           ],
           "visibility": "stream",
           "replay_policy": "discard_after_turn"
         },
-        "prompt_cache": {"adapter_id": "cache/openai-content-breakpoint-v1", "config": {}},
+        "prompt_cache": {"adapter_id": "cache/dashscope-session-v1", "config": {"enabled": true}},
         "native_search": {"adapter_id": "search/dashscope-native-v1", "enabled": true, "config": {}},
-        "tools": {"function_calling": true, "parallel_calls": true, "strict_schema": false},
+        "tools": {"function_calling": true, "parallel_calls": true, "strict_schema": false, "namespace_wire": "flatten", "web_search_wire": "native"},
         "modalities": {"input": ["text", "image"], "output": ["text"]},
         "streaming": {"text_deltas": true, "reasoning_deltas": true, "tool_call_deltas": true}
       }
@@ -55,21 +57,22 @@
       "model_id": "qwen3.6-plus",
       "capabilities": {
         "schema_version": 1,
+        "wire_protocols": {"preferred": "responses_v1", "supported": ["responses_v1", "chat_completions"]},
         "reasoning": {
-          "adapter_id": "reasoning/dashscope-thinking-v1",
-          "default_option": "low",
+          "adapter_id": "reasoning/dashscope-responses-effort-v1",
+          "default_option": "minimal",
           "options": [
-            {"id": "off", "label": "Off", "aliases": ["none"], "canonical_effort": "none", "settings": {"enabled": false}},
-            {"id": "low", "label": "Low", "aliases": ["minimal"], "canonical_effort": "low", "settings": {"enabled": true, "budget_tokens": 128}},
-            {"id": "medium", "label": "Medium", "aliases": [], "canonical_effort": "medium", "settings": {"enabled": true, "budget_tokens": 1024}},
-            {"id": "high", "label": "High", "aliases": ["xhigh", "max"], "canonical_effort": "high", "settings": {"enabled": true}}
+            {"id": "off", "label": "Off", "aliases": ["none"], "canonical_effort": "none", "settings": {"effort": "none", "chat_enabled": false}},
+            {"id": "minimal", "label": "Minimal", "aliases": ["low"], "canonical_effort": "minimal", "settings": {"effort": "minimal", "chat_enabled": true, "chat_budget_tokens": 128}},
+            {"id": "medium", "label": "Medium", "aliases": [], "canonical_effort": "medium", "settings": {"effort": "medium", "chat_enabled": true, "chat_budget_tokens": 1024}},
+            {"id": "high", "label": "High", "aliases": ["xhigh", "max"], "canonical_effort": "high", "settings": {"effort": "high", "chat_enabled": true}}
           ],
           "visibility": "stream",
           "replay_policy": "discard_after_turn"
         },
-        "prompt_cache": {"adapter_id": "cache/openai-content-breakpoint-v1", "config": {}},
+        "prompt_cache": {"adapter_id": "cache/dashscope-session-v1", "config": {"enabled": true}},
         "native_search": {"adapter_id": "search/dashscope-native-v1", "enabled": true, "config": {}},
-        "tools": {"function_calling": true, "parallel_calls": true, "strict_schema": false},
+        "tools": {"function_calling": true, "parallel_calls": true, "strict_schema": false, "namespace_wire": "flatten", "web_search_wire": "native"},
         "modalities": {"input": ["text", "image"], "output": ["text"]},
         "streaming": {"text_deltas": true, "reasoning_deltas": true, "tool_call_deltas": true}
       }
@@ -79,21 +82,22 @@
       "provider_keys": ["dashscope", "dashscope-cn", "dashscope-intl"],
       "capabilities": {
         "schema_version": 1,
+        "wire_protocols": {"preferred": "responses_v1", "supported": ["responses_v1", "chat_completions"]},
         "reasoning": {
-          "adapter_id": "reasoning/dashscope-thinking-v1",
-          "default_option": "low",
+          "adapter_id": "reasoning/dashscope-responses-effort-v1",
+          "default_option": "minimal",
           "options": [
-            {"id": "off", "label": "Off", "aliases": ["none"], "canonical_effort": "none", "settings": {"enabled": false}},
-            {"id": "low", "label": "Low", "aliases": ["minimal"], "canonical_effort": "low", "settings": {"enabled": true, "budget_tokens": 128}},
-            {"id": "medium", "label": "Medium", "aliases": [], "canonical_effort": "medium", "settings": {"enabled": true, "budget_tokens": 1024}},
-            {"id": "high", "label": "High", "aliases": ["xhigh", "max"], "canonical_effort": "high", "settings": {"enabled": true}}
+            {"id": "off", "label": "Off", "aliases": ["none"], "canonical_effort": "none", "settings": {"effort": "none", "chat_enabled": false}},
+            {"id": "minimal", "label": "Minimal", "aliases": ["low"], "canonical_effort": "minimal", "settings": {"effort": "minimal", "chat_enabled": true, "chat_budget_tokens": 128}},
+            {"id": "medium", "label": "Medium", "aliases": [], "canonical_effort": "medium", "settings": {"effort": "medium", "chat_enabled": true, "chat_budget_tokens": 1024}},
+            {"id": "high", "label": "High", "aliases": ["xhigh", "max"], "canonical_effort": "high", "settings": {"effort": "high", "chat_enabled": true}}
           ],
           "visibility": "stream",
           "replay_policy": "discard_after_turn"
         },
-        "prompt_cache": {"adapter_id": "cache/automatic-v1", "config": {}},
+        "prompt_cache": {"adapter_id": "cache/dashscope-session-v1", "config": {"enabled": true}},
         "native_search": {"adapter_id": "search/dashscope-native-v1", "enabled": true, "config": {}},
-        "tools": {"function_calling": true, "parallel_calls": true, "strict_schema": false},
+        "tools": {"function_calling": true, "parallel_calls": true, "strict_schema": false, "namespace_wire": "flatten", "web_search_wire": "native"},
         "modalities": {"input": ["text"], "output": ["text"]},
         "streaming": {"text_deltas": true, "reasoning_deltas": true, "tool_call_deltas": true}
       }
@@ -104,21 +108,22 @@
       "provider_keys": ["dashscope", "dashscope-cn", "dashscope-intl"],
       "capabilities": {
         "schema_version": 1,
+        "wire_protocols": {"preferred": "responses_v1", "supported": ["responses_v1", "chat_completions"]},
         "reasoning": {
-          "adapter_id": "reasoning/dashscope-thinking-v1",
-          "default_option": "low",
+          "adapter_id": "reasoning/dashscope-responses-effort-v1",
+          "default_option": "minimal",
           "options": [
-            {"id": "off", "label": "Off", "aliases": ["none"], "canonical_effort": "none", "settings": {"enabled": false}},
-            {"id": "low", "label": "Low", "aliases": ["minimal"], "canonical_effort": "low", "settings": {"enabled": true, "budget_tokens": 128}},
-            {"id": "medium", "label": "Medium", "aliases": [], "canonical_effort": "medium", "settings": {"enabled": true, "budget_tokens": 1024}},
-            {"id": "high", "label": "High", "aliases": ["xhigh", "max"], "canonical_effort": "high", "settings": {"enabled": true}}
+            {"id": "off", "label": "Off", "aliases": ["none"], "canonical_effort": "none", "settings": {"effort": "none", "chat_enabled": false}},
+            {"id": "minimal", "label": "Minimal", "aliases": ["low"], "canonical_effort": "minimal", "settings": {"effort": "minimal", "chat_enabled": true, "chat_budget_tokens": 128}},
+            {"id": "medium", "label": "Medium", "aliases": [], "canonical_effort": "medium", "settings": {"effort": "medium", "chat_enabled": true, "chat_budget_tokens": 1024}},
+            {"id": "high", "label": "High", "aliases": ["xhigh", "max"], "canonical_effort": "high", "settings": {"effort": "high", "chat_enabled": true}}
           ],
           "visibility": "stream",
           "replay_policy": "discard_after_turn"
         },
-        "prompt_cache": {"adapter_id": "cache/automatic-v1", "config": {}},
+        "prompt_cache": {"adapter_id": "cache/dashscope-session-v1", "config": {"enabled": true}},
         "native_search": {"adapter_id": "search/none-v1", "enabled": false, "config": {}},
-        "tools": {"function_calling": true, "parallel_calls": true, "strict_schema": false},
+        "tools": {"function_calling": true, "parallel_calls": true, "strict_schema": false, "namespace_wire": "flatten", "web_search_wire": "disabled"},
         "modalities": {"input": ["text"], "output": ["text"]},
         "streaming": {"text_deltas": true, "reasoning_deltas": true, "tool_call_deltas": true}
       }
