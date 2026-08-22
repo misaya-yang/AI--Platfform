@@ -18,6 +18,12 @@ def main() -> int:
     assert "ASSISTANT_RUNTIME_IMPORT_IN_FLIGHT" in migration
     assert "FOR UPDATE" in migration
     assert "assistant_runtime_thread_projections" in migration
+    normalization = (
+        ROOT / "database/migrations/094_codex_runtime_legacy_import_normalization.sql"
+    ).read_text()
+    assert "to_regclass('assistant.sessions')" in normalization
+    assert "ASSISTANT_RUNTIME_IMPORT_TOOL_PAIRING_INVALID" in normalization
+    assert "codex-runtime-legacy-approval/v1" in normalization
     routes = (ROOT / "src/api/v2/agent.py").read_text()
     assert "/threads/{thread_id}/events" in routes
     assert "after_sequence" in routes

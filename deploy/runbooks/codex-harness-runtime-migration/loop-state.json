@@ -9,9 +9,9 @@
   ],
   "active_phase": "CHR-05",
   "active_feature": "CHR-F006",
-  "iteration": 0,
+  "iteration": 1,
   "max_iterations": 8,
-  "last_result": "CHR-03 and CHR-04 code contracts are closed on controlled fork c84c011f403a. Focused Python 80/80, Assistant runtime 375/375 plus golden gate, Agent Eval 107/107, Runtime write 26/26, live PostgreSQL ThreadStore, Web type/lint/build, Docker health, and authenticated V2 browser arithmetic/long text/interrupt/follow-up/connectivity passed. Latest connectivity first token was 4.13s and PostgreSQL recorded codex_candidate/codex_harness/succeeded. Local canary code is ready; production canary, rollback rehearsal, and legacy-loop deletion remain intentionally unverified.",
+  "last_result": "CHR-05 lazy import now resolves authoritative assistant.* sources independently of caller search_path, rejects source drift and unpaired legacy tools atomically, blocks resumable Run/approval states, emits paired Codex response Items, and hashes approval arguments. PostgreSQL migration contracts returned 13/13; a real split-schema transaction with caller search_path=public produced message,function_call,function_call_output,message plus one approval receipt and rolled back cleanly. A final authenticated Qwen UI probe answered 9x9 correctly, retained think:minimal with one Activity step, reached first token in 4.30s, and produced no new browser warnings/errors. Production canary, rollback rehearsal, and legacy-loop deletion remain intentionally unverified.",
   "next_action": "Run the time-bound production canary and rollback rehearsal before full cutover or Python loop deletion.",
   "blockers": [],
   "confirmation": null,
@@ -119,7 +119,10 @@
       "evidence": [
         "make codex-runtime-canary-gate -> code contract passed and 27 passed; production canary not verified",
         "authenticated local browser V2 arithmetic, Transformer, interrupt/follow-up, theme, narrow viewport, and seven core route smokes passed",
-        "all nine Compose services healthy; observed total memory about 838 MiB"
+        "all nine Compose services healthy; observed total memory about 838 MiB",
+        "migration 094 PostgreSQL contract 13/13 and real split-schema rollback smoke with caller search_path=public preserved paired tool Items plus hashed approval provenance",
+        "make codex-runtime-canary-gate -> code contract passed and 33 passed after normalized legacy import",
+        "authenticated Qwen UI final smoke -> correct answer, think:minimal one-step Activity, first token 4.30s, zero new browser warnings/errors"
       ],
       "review": "not_required"
     },

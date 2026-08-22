@@ -21,6 +21,9 @@ LEGACY_IMPORT_MIGRATION = ROOT / "database" / "migrations" / "092_codex_runtime_
 SESSION_FK_MIGRATION = (
     ROOT / "database" / "migrations" / "093_codex_runtime_assistant_session_fks.sql"
 )
+LEGACY_NORMALIZATION_MIGRATION = (
+    ROOT / "database" / "migrations" / "094_codex_runtime_legacy_import_normalization.sql"
+)
 
 
 def _postgres_config() -> dict[str, object]:
@@ -101,7 +104,16 @@ async def codex_runtime_pool() -> AsyncIterator[asyncpg.Pool]:
                     tenant_id VARCHAR(255) NOT NULL,
                     user_id VARCHAR(255) NOT NULL,
                     session_id VARCHAR(255) NOT NULL,
-                    status VARCHAR(32) NOT NULL DEFAULT 'pending'
+                    run_id UUID,
+                    tool_name VARCHAR(100) NOT NULL DEFAULT 'unknown',
+                    arguments JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                    reason TEXT,
+                    approved_by VARCHAR(255),
+                    approved_at TIMESTAMPTZ,
+                    expires_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
                 CREATE OR REPLACE FUNCTION update_assistant_gateway_timestamp()
                 RETURNS TRIGGER AS $$
@@ -121,6 +133,9 @@ async def codex_runtime_pool() -> AsyncIterator[asyncpg.Pool]:
             import_sql = LEGACY_IMPORT_MIGRATION.read_text(encoding="utf-8")
             await conn.execute(import_sql)
             await conn.execute(import_sql)
+            normalization_sql = LEGACY_NORMALIZATION_MIGRATION.read_text(encoding="utf-8")
+            await conn.execute(normalization_sql)
+            await conn.execute(normalization_sql)
         yield pool
     finally:
         await pool.close()
@@ -165,6 +180,18 @@ def test_migration_is_additive_and_has_atomic_append_contract() -> None:
     assert "GATEWAY.ASSISTANT_RUNTIME_THREADS" in session_fk_upper
     assert "DROP TABLE" not in session_fk_upper
     assert "TRUNCATE" not in session_fk_upper
+
+    normalization_sql = LEGACY_NORMALIZATION_MIGRATION.read_text(encoding="utf-8")
+    normalization_upper = normalization_sql.upper()
+    assert "CREATE OR REPLACE FUNCTION IMPORT_ASSISTANT_LEGACY_SESSION" in normalization_upper
+    assert "TO_REGCLASS('ASSISTANT.SESSIONS')" in normalization_upper
+    assert "SET SEARCH_PATH FROM CURRENT" in normalization_upper
+    assert "ASSISTANT_RUNTIME_IMPORT_TOOL_PAIRING_INVALID" in normalization_upper
+    assert "ASSISTANT_RUNTIME_IMPORT_SOURCE_CHANGED" in normalization_upper
+    assert "''BLOCKED''" in normalization_upper
+    assert "CODEX-RUNTIME-LEGACY-APPROVAL/V1" in normalization_upper
+    assert "DROP TABLE" not in normalization_upper
+    assert "TRUNCATE" not in normalization_upper
 
 
 @pytest.mark.asyncio
@@ -299,8 +326,10 @@ async def test_legacy_import_is_idempotent_and_cross_tenant_scoped(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("run_status", ["running", "blocked"])
 async def test_legacy_import_refuses_in_flight_run(
     codex_runtime_pool: asyncpg.Pool,
+    run_status: str,
 ) -> None:
     session_id = f"legacy-running-{uuid.uuid4()}"
     async with codex_runtime_pool.acquire() as conn:
@@ -314,15 +343,272 @@ async def test_legacy_import_refuses_in_flight_run(
         await conn.execute(
             """
             INSERT INTO assistant_runs (run_id, tenant_id, user_id, session_id, status)
-            VALUES ($1, 'running-tenant', 'running-user', $2, 'running')
+            VALUES ($1, 'running-tenant', 'running-user', $2, $3)
             """,
-            uuid.uuid4(), session_id,
+            uuid.uuid4(), session_id, run_status,
         )
         with pytest.raises(asyncpg.ObjectNotInPrerequisiteStateError):
             await conn.fetchrow(
                 "SELECT * FROM import_assistant_legacy_session($1, $2, $3, $4)",
                 uuid.uuid4(), "running-tenant", "running-user", session_id,
             )
+
+
+@pytest.mark.asyncio
+async def test_legacy_import_refuses_approved_unconsumed_approval(
+    codex_runtime_pool: asyncpg.Pool,
+) -> None:
+    session_id = f"legacy-approved-{uuid.uuid4()}"
+    async with codex_runtime_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO sessions (session_id, user_id, tenant_id, history)
+            VALUES ($1, 'approval-user', 'approval-tenant', '[]'::jsonb)
+            """,
+            session_id,
+        )
+        await conn.execute(
+            """
+            INSERT INTO assistant_tool_approvals (
+                approval_id, tenant_id, user_id, session_id, tool_name, status
+            ) VALUES ($1, 'approval-tenant', 'approval-user', $2, 'write_tool', 'approved')
+            """,
+            uuid.uuid4(),
+            session_id,
+        )
+        with pytest.raises(asyncpg.ObjectNotInPrerequisiteStateError):
+            await conn.fetchrow(
+                "SELECT * FROM import_assistant_legacy_session($1, $2, $3, $4)",
+                uuid.uuid4(),
+                "approval-tenant",
+                "approval-user",
+                session_id,
+            )
+
+
+@pytest.mark.asyncio
+async def test_legacy_import_preserves_paired_tool_history_and_hashed_approval_receipt(
+    codex_runtime_pool: asyncpg.Pool,
+) -> None:
+    session_id = f"legacy-tools-{uuid.uuid4()}"
+    runtime_thread_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    approval_id = uuid.uuid4()
+    history = [
+        {"role": "user", "content": "look up the account"},
+        {
+            "role": "assistant",
+            "content": "The account is active.",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "name": "account_lookup",
+                        "arguments": {"account_id": "acct-1"},
+                        "status": "completed",
+                    }
+                ],
+                "tool_results": [
+                    {
+                        "tool_call_id": "call-1",
+                        "name": "account_lookup",
+                        "result": {"active": True},
+                        "error": None,
+                    }
+                ],
+            },
+        },
+    ]
+    async with codex_runtime_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO sessions (session_id, service_id, user_id, tenant_id, history)
+            VALUES ($1, '__builtin_assistant__', 'legacy-user', 'legacy-tenant', $2::jsonb)
+            """,
+            session_id,
+            json.dumps(history),
+        )
+        await conn.execute(
+            """
+            INSERT INTO assistant_tool_approvals (
+                approval_id, tenant_id, user_id, session_id, run_id,
+                tool_name, arguments, status, approved_by, approved_at
+            ) VALUES (
+                $1, 'legacy-tenant', 'legacy-user', $2, $3,
+                'account_lookup', '{"account_id":"acct-1"}'::jsonb,
+                'consumed', 'legacy-user', NOW()
+            )
+            """,
+            approval_id,
+            session_id,
+            run_id,
+        )
+
+        imported = await conn.fetchrow(
+            "SELECT * FROM import_assistant_legacy_session($1, $2, $3, $4)",
+            runtime_thread_id,
+            "legacy-tenant",
+            "legacy-user",
+            session_id,
+        )
+        assert imported["import_status"] == "ready"
+        rollout_rows = await conn.fetch(
+            """
+            SELECT payload
+              FROM assistant_runtime_items
+             WHERE runtime_thread_id = $1 AND event_type = 'rollout/item'
+             ORDER BY sequence
+            """,
+            runtime_thread_id,
+        )
+        payloads = [json.loads(row["payload"]) for row in rollout_rows]
+        assert [payload["payload"]["type"] for payload in payloads] == [
+            "message",
+            "function_call",
+            "function_call_output",
+            "message",
+        ]
+        assert payloads[1]["payload"] == {
+            "type": "function_call",
+            "name": "account_lookup",
+            "arguments": '{"account_id": "acct-1"}',
+            "call_id": "call-1",
+        }
+        assert payloads[2]["payload"]["call_id"] == "call-1"
+        assert json.loads(payloads[2]["payload"]["output"]) == {"active": True}
+
+        approval = await conn.fetchrow(
+            """
+            SELECT payload
+              FROM assistant_runtime_items
+             WHERE runtime_thread_id = $1 AND event_type = 'codex/legacy_approval'
+            """,
+            runtime_thread_id,
+        )
+        approval_payload = json.loads(approval["payload"])
+        assert approval_payload["approval_id"] == str(approval_id)
+        assert approval_payload["arguments_sha256"]
+        assert "arguments" not in approval_payload
+
+        projection = await conn.fetchval(
+            """
+            SELECT projection->'legacy_import'
+              FROM assistant_runtime_thread_projections
+             WHERE runtime_thread_id = $1
+            """,
+            runtime_thread_id,
+        )
+        projection = json.loads(projection)
+        assert projection["normalizer_version"] == 2
+        assert projection["tool_call_count"] == 1
+        assert projection["approval_receipt_count"] == 1
+        assert json.loads(await conn.fetchval(
+            "SELECT history FROM sessions WHERE session_id = $1", session_id
+        )) == history
+
+
+@pytest.mark.asyncio
+async def test_ready_legacy_import_rejects_source_history_drift(
+    codex_runtime_pool: asyncpg.Pool,
+) -> None:
+    session_id = f"legacy-drift-{uuid.uuid4()}"
+    runtime_thread_id = uuid.uuid4()
+    async with codex_runtime_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO sessions (session_id, user_id, tenant_id, history)
+            VALUES ($1, 'legacy-user', 'legacy-tenant',
+                    '[{"role":"user","content":"before"}]'::jsonb)
+            """,
+            session_id,
+        )
+        first = await conn.fetchrow(
+            "SELECT * FROM import_assistant_legacy_session($1, $2, $3, $4)",
+            runtime_thread_id,
+            "legacy-tenant",
+            "legacy-user",
+            session_id,
+        )
+        await conn.execute(
+            """
+            UPDATE sessions
+               SET history = history || '[{"role":"assistant","content":"after"}]'::jsonb
+             WHERE session_id = $1
+            """,
+            session_id,
+        )
+        with pytest.raises(asyncpg.PostgresError, match="IMPORT_SOURCE_CHANGED"):
+            await conn.fetchrow(
+                "SELECT * FROM import_assistant_legacy_session($1, $2, $3, $4)",
+                runtime_thread_id,
+                "legacy-tenant",
+                "legacy-user",
+                session_id,
+            )
+        stored = await conn.fetchrow(
+            """
+            SELECT import_status, source_history_count, source_history_sha256
+              FROM assistant_runtime_threads
+             WHERE runtime_thread_id = $1
+            """,
+            runtime_thread_id,
+        )
+        assert stored["import_status"] == "ready"
+        assert stored["source_history_count"] == 1
+        assert stored["source_history_sha256"] == first["source_history_sha256"]
+        assert await conn.fetchval(
+            "SELECT count(*) FROM assistant_runtime_items WHERE runtime_thread_id = $1",
+            runtime_thread_id,
+        ) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_calls", "tool_results"),
+    [
+        ([{"id": "orphan-call", "name": "lookup", "arguments": {}}], []),
+        ([], [{"tool_call_id": "orphan-result", "name": "lookup", "result": "x"}]),
+    ],
+)
+async def test_legacy_import_rejects_unpaired_tool_history_atomically(
+    codex_runtime_pool: asyncpg.Pool,
+    tool_calls: list[dict],
+    tool_results: list[dict],
+) -> None:
+    session_id = f"legacy-unpaired-{uuid.uuid4()}"
+    runtime_thread_id = uuid.uuid4()
+    history = [
+        {
+            "role": "assistant",
+            "content": "",
+            "metadata": {"tool_calls": tool_calls, "tool_results": tool_results},
+        }
+    ]
+    async with codex_runtime_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO sessions (session_id, user_id, tenant_id, history)
+            VALUES ($1, 'legacy-user', 'legacy-tenant', $2::jsonb)
+            """,
+            session_id,
+            json.dumps(history),
+        )
+        with pytest.raises(asyncpg.PostgresError, match="IMPORT_TOOL_PAIRING_INVALID"):
+            await conn.fetchrow(
+                "SELECT * FROM import_assistant_legacy_session($1, $2, $3, $4)",
+                runtime_thread_id,
+                "legacy-tenant",
+                "legacy-user",
+                session_id,
+            )
+        assert await conn.fetchval(
+            "SELECT count(*) FROM assistant_runtime_threads WHERE runtime_thread_id = $1",
+            runtime_thread_id,
+        ) == 0
+        assert await conn.fetchval(
+            "SELECT count(*) FROM assistant_runtime_items WHERE runtime_thread_id = $1",
+            runtime_thread_id,
+        ) == 0
 
 
 async def _seed_thread(pool: asyncpg.Pool) -> tuple[uuid.UUID, str, str, str]:
