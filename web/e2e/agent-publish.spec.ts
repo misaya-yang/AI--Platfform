@@ -626,7 +626,7 @@ test.describe("Agent release evaluation", () => {
     await page.goto(`/agents/${AGENT_ID}/evals`, { waitUntil: "domcontentloaded" });
 
     await expect(page.getByTestId("agent-release-eval-panel")).toBeVisible();
-    await expect(page.getByText("No production dataset is configured")).toBeVisible();
+    await expect(page.getByText("No production evaluation dataset is configured")).toBeVisible();
     for (const status of ["queued", "running", "passed", "failed", "cancelled", "stale"] as const) {
       await expect(page.getByTestId(`agent-eval-${status}`)).toBeVisible();
     }

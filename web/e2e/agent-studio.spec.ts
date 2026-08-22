@@ -448,8 +448,8 @@ test.describe("Agent Studio directory", () => {
     await page.goto("/agents", { waitUntil: "domcontentloaded" });
     await expect(page.getByText("Create your first agent to configure a reusable runtime.")).toBeVisible();
     await expect(page.getByLabel("Agent directory").getByRole("button", { name: "Create blank agent" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Support template" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Knowledge template" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Support triage template" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Knowledge guide template" })).toBeVisible();
     await captureEvidence(page, "directory-empty-desktop-1440x900");
     await page.setViewportSize({ width: 390, height: 844 });
     await captureEvidence(page, "directory-empty-mobile-390x844");
@@ -839,7 +839,7 @@ test.describe("Agent Studio workbench", () => {
     await expect(trigger).toBeFocused();
     await expect(page.getByRole("heading", { name: "Capabilities" })).toBeVisible();
     await page.getByRole("tab", { name: "MCP tools" }).click();
-    await expect(page.getByText("support_ticket_lookup")).toBeVisible();
+    await expect(page.getByRole("checkbox", { name: "Enable Support ticket lookup" })).toBeVisible();
     await page.getByRole("tab", { name: "Skills" }).click();
     await expect(page.getByText("Support writing")).toBeVisible();
     await page.getByRole("tab", { name: "Connectors" }).click();

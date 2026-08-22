@@ -100,7 +100,10 @@ test.describe("first-run onboarding", () => {
 
     await page.getByRole("button", { name: "Dismiss" }).click();
     await expect(page.getByText(/No model service is configured yet/)).toHaveCount(0);
-    expect(await page.evaluate(() => localStorage.getItem("setup-banner-dismissed"))).toBe("1");
+    expect(
+      await page.evaluate(() => localStorage.getItem("setup-banner-dismissed:first-run-user")),
+    ).toBe("1");
+    expect(await page.evaluate(() => localStorage.getItem("setup-banner-dismissed"))).toBeNull();
 
     // The checklist is independent of the banner dismissal.
     await expect(page.getByText("First-run setup")).toBeVisible();
