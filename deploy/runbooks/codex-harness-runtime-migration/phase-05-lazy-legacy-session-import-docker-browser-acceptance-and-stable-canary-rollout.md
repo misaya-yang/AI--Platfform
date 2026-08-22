@@ -32,6 +32,27 @@ Out:
 
 Use the smallest check that can falsify the outcome. Add runtime, browser, migration, or reviewer evidence only when the outcome requires it.
 
+### New-session assignment controls
+
+The Gateway chooses an owner once, when a session is first created. The bucket
+is `sha256(salt:tenant_id:session_id) % 100`; prompt text, model, response,
+tool names, and turn results are never inputs. Existing rows in
+`assistant_session_runtime_assignments` are immutable.
+
+```text
+ASSISTANT_RUNTIME_CANARY_PERCENT=0|1|10|25|50|100
+ASSISTANT_RUNTIME_CANARY_E2E_TENANTS=tenant-a,tenant-b
+ASSISTANT_RUNTIME_CANARY_KILL_SWITCH=false
+ASSISTANT_RUNTIME_CANARY_SALT=ai-platform-runtime-v1
+```
+
+The explicit E2E tenant override and kill switch affect only new sessions;
+active Codex turns finish on their original owner. Rollback therefore means
+new sessions select `python_control` while existing assignments remain pinned.
+The CHR-06 deletion guard additionally requires a completed 100% window, zero
+legacy-loop calls, V1 compatibility, and a passing assignment rollback
+rehearsal. No code gate treats those conditions as production evidence.
+
 ## Stop or confirm
 
 - Stop when a dependency is incomplete, the same failure repeats without a new hypothesis, or the iteration cap is reached.

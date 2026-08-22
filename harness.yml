@@ -103,6 +103,12 @@ commands:
   codex_runtime_text_gate:
     make: codex-runtime-text-gate
     purpose: Verify native Qwen Responses text, long output, accounting, and restart-resumed context.
+  codex_runtime_readonly_gate:
+    make: codex-runtime-readonly-gate
+    purpose: Verify tenant/revision-bound Context, Knowledge, Tool, MCP, citation, artifact, and office-read contributors.
+  codex_runtime_write_gate:
+    make: codex-runtime-write-gate
+    purpose: Verify approval binding, dispatch fences, idempotency, interruption recovery, and tool pairing.
   codex_thread_store_contract:
     make: codex-thread-store-contract
     purpose: Verify pre-authorized Codex thread creation and durable PostgreSQL history against an isolated schema.
@@ -124,6 +130,9 @@ gates:
   codex_runtime_image:
     make: codex-runtime-contract
     triggers: [deploy/codex-harness/Dockerfile.runtime, scripts/harness/build_codex_runtime_image.sh, scripts/harness/smoke_codex_runtime_image.sh]
+  codex_runtime_readonly:
+    make: codex-runtime-readonly-gate
+    triggers: [src/services/codex_runtime/readonly_capabilities.py, tests/services/codex_runtime/test_readonly_capabilities.py, scripts/harness/codex_runtime_readonly_gate.py, tests/harness/test_codex_runtime_readonly_gate.py]
   codex_thread_store:
     make: codex-thread-store-contract
     triggers: [database/migrations/089*, tests/database/test_codex_runtime_thread_store_migration.py, scripts/harness/codex_thread_store_contract.sh]

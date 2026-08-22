@@ -10,6 +10,7 @@ import { sseFetch } from "@/lib/sse";
 import { SSEEventType, type SSEEventTypeValue } from "@/pages/assistant/sse-events";
 import { useAuthStore } from "@/store/useAuthStore";
 import type { ModelCapabilityProfile } from "@/api/models";
+import { isAgentRuntimeV2Enabled } from "@/config/runtime";
 
 export { SSEEventType };
 export type { SSEEventTypeValue };
@@ -629,6 +630,21 @@ export async function* chatStream(
   request: ChatRequest,
   signal?: AbortSignal
 ): AsyncGenerator<StreamEvent, void, void> {
+  // The V2 Thread API needs the client-owned session id so the created
+  // thread can be attached to the same conversation. Preserve the V1
+  // behavior for callers that intentionally omit a session id.
+  if (isAgentRuntimeV2Enabled() && request.session_id) {
+    const { isAgentRuntimeV2AssignmentFallback, streamAgentRuntimeV2 } = await import("@/api/agentThreads");
+    try {
+      yield* streamAgentRuntimeV2(request, signal);
+      return;
+    } catch (error) {
+      if (!isAgentRuntimeV2AssignmentFallback(error)) throw error;
+      // Assignment conflict is discovered before a V2 turn starts. The
+      // immutable session owner therefore makes this a safe V1 compatibility
+      // fallback, never a mid-turn kernel switch.
+    }
+  }
   const token = getAuthToken();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",

@@ -60,10 +60,12 @@ class GatewaySecretAuthMiddleware:
         *,
         gateway_secret: GatewaySecret,
         allow_anonymous: bool = False,
+        separately_authenticated_paths: frozenset[str] = frozenset(),
     ) -> None:
         self.app = app
         self._gateway_secret = gateway_secret
         self._allow_anonymous = allow_anonymous
+        self._separately_authenticated_paths = separately_authenticated_paths
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] != "http":
@@ -71,7 +73,7 @@ class GatewaySecretAuthMiddleware:
             return
 
         path = scope.get("path", "")
-        if path in self._SAFE_PATHS:
+        if path in self._SAFE_PATHS or path in self._separately_authenticated_paths:
             await self.app(scope, receive, send)
             return
 

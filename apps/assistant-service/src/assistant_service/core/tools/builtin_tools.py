@@ -158,6 +158,13 @@ KB_SEARCH_DEFINITION = ToolDefinition(
         ),
     ],
     timeout_seconds=30,
+    capability_metadata={
+        "kind": "knowledge",
+        "source": "knowledge",
+        "operation_kind": "read",
+        "read_only": True,
+        "tags": ["read", "retrieval"],
+    },
 )
 
 

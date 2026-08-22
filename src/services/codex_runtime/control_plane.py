@@ -84,6 +84,7 @@ class CodexRuntimeControlPlane:
         self.runtime_url = runtime_url.rstrip("/")
         self.runtime_internal_token = runtime_internal_token
         self.model_plane_base_url = model_plane_base_url.rstrip("/")
+        self.capability_plane_url = os.getenv("AI_PLATFORM_CAPABILITY_PLANE_URL", "").strip().rstrip("/")
         self.kernel_revision = kernel_revision
         self.http_client = http_client or httpx.AsyncClient(
             timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0),
@@ -131,7 +132,7 @@ class CodexRuntimeControlPlane:
     ) -> dict[str, Any] | None:
         row = await self.database.fetchrow(
             """
-            SELECT runtime_thread_id, last_sequence
+            SELECT runtime_thread_id, last_sequence, dynamic_tool_fingerprint
               FROM assistant_runtime_threads
              WHERE tenant_id = $1 AND user_id = $2 AND session_id = $3
                AND deleted_at IS NULL
@@ -141,6 +142,88 @@ class CodexRuntimeControlPlane:
             session_id,
         )
         return dict(row) if row else None
+
+    @staticmethod
+    def _assert_dynamic_tool_fingerprint(
+        existing: dict[str, Any], requested_fingerprint: str
+    ) -> None:
+        stored_fingerprint = str(existing.get("dynamic_tool_fingerprint") or "")
+        if stored_fingerprint != requested_fingerprint:
+            raise CodexRuntimeControlError(
+                "CODEX_RUNTIME_CAPABILITY_THREAD_RECREATE_REQUIRED", status_code=409
+            )
+
+    async def _bind_dynamic_tool_fingerprint(
+        self,
+        *,
+        existing: dict[str, Any],
+        fingerprint: str,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+        created_by_this_request: bool = False,
+    ) -> dict[str, Any]:
+        """Persist a newly created Thread fingerprint with a null-only CAS.
+
+        Runtime thread creation and Gateway mapping are separate writes. A
+        concurrent creator can briefly expose a mapped thread before its
+        fingerprint is written, so readers wait for the creator. An older
+        unbound Thread is never adopted because its kernel-side tool catalog
+        cannot be proven equal to the current catalog.
+        """
+        stored_fingerprint = str(existing.get("dynamic_tool_fingerprint") or "")
+        if stored_fingerprint:
+            self._assert_dynamic_tool_fingerprint(existing, fingerprint)
+        if stored_fingerprint:
+            return existing
+        if not created_by_this_request:
+            for _ in range(5):
+                await asyncio.sleep(0.05)
+                refreshed = await self._existing_thread(tenant_id, user_id, session_id)
+                if refreshed is not None and refreshed.get("dynamic_tool_fingerprint"):
+                    self._assert_dynamic_tool_fingerprint(refreshed, fingerprint)
+                    return refreshed
+            raise CodexRuntimeControlError(
+                "CODEX_RUNTIME_CAPABILITY_THREAD_RECREATE_REQUIRED", status_code=409
+            )
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                result = await self.database.execute(
+                    """
+                    UPDATE assistant_runtime_threads
+                       SET dynamic_tool_fingerprint = $1, updated_at = NOW()
+                     WHERE runtime_thread_id = $2 AND tenant_id = $3
+                       AND user_id = $4 AND session_id = $5
+                       AND deleted_at IS NULL
+                       AND dynamic_tool_fingerprint IS NULL
+                    """,
+                    fingerprint,
+                    uuid.UUID(str(existing["runtime_thread_id"])),
+                    tenant_id,
+                    user_id,
+                    session_id,
+                )
+                if str(result).endswith(" 1"):
+                    return {
+                        **existing,
+                        "dynamic_tool_fingerprint": fingerprint,
+                    }
+            except Exception as exc:  # retry a transient mapping write
+                last_error = exc
+            refreshed = await self._existing_thread(tenant_id, user_id, session_id)
+            if refreshed is not None:
+                self._assert_dynamic_tool_fingerprint(refreshed, fingerprint)
+                if refreshed.get("dynamic_tool_fingerprint"):
+                    return refreshed
+            if attempt < 2:
+                await asyncio.sleep(0.05)
+        error = CodexRuntimeControlError(
+            "CODEX_RUNTIME_CAPABILITY_BIND_FAILED", status_code=503
+        )
+        if last_error is not None:
+            raise error from last_error
+        raise error
 
     def _runtime_model_config(self, model_id: str) -> dict[str, Any]:
         return {
@@ -160,6 +243,55 @@ class CodexRuntimeControlPlane:
             },
         }
 
+    @staticmethod
+    def _dynamic_tools(readonly: dict[str, Any]) -> list[dict[str, Any]]:
+        tools = [*(readonly.get("tools") or []), *(readonly.get("mcp") or [])]
+        if not isinstance(tools, list):
+            raise CodexRuntimeControlError("CODEX_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+        result: list[dict[str, Any]] = []
+        for descriptor in tools:
+            if not isinstance(descriptor, dict) or descriptor.get("read_only") is not True:
+                raise CodexRuntimeControlError("CODEX_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+            name = descriptor.get("name")
+            description = descriptor.get("description")
+            schema = descriptor.get("schema")
+            if not isinstance(name, str) or not isinstance(description, str) or not isinstance(schema, dict):
+                raise CodexRuntimeControlError("CODEX_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+            result.append(
+                {
+                    "type": "function",
+                    "name": name,
+                    "description": description,
+                    "inputSchema": schema,
+                }
+            )
+        return result
+
+    @staticmethod
+    def _validate_catalog_descriptor(
+        descriptor: Any, *, tenant_id: str, capability_revision: int
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(descriptor, dict)
+            or descriptor.get("read_only") is not True
+            or descriptor.get("tenant_id") != tenant_id
+            or descriptor.get("capability_revision") != capability_revision
+            or not isinstance(descriptor.get("name"), str)
+            or not isinstance(descriptor.get("description"), str)
+            or not isinstance(descriptor.get("schema"), dict)
+            or descriptor.get("kind") not in {
+                "tool",
+                "knowledge",
+                "mcp",
+                "office_read",
+                "platform_tool_discovery",
+            }
+        ):
+            raise CodexRuntimeControlError(
+                "CODEX_RUNTIME_CAPABILITY_CATALOG_INVALID", status_code=503
+            )
+        return descriptor
+
     async def ensure_thread(
         self,
         *,
@@ -167,23 +299,63 @@ class CodexRuntimeControlPlane:
         user_id: str,
         session_id: str,
         model_id: str,
+        readonly_capabilities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if readonly_capabilities is None:
+            model = await self.model_service.get_model(tenant_id, model_id)
+            if not model or not bool(model.get("is_enabled", True)):
+                raise CodexRuntimeControlError(
+                    "CODEX_RUNTIME_MODEL_NOT_FOUND", status_code=400
+                )
+            capability_revision = int(model.get("capability_revision") or 1)
+            readonly_capabilities = self._readonly_capability_payload(
+                None,
+                tenant_id=tenant_id,
+                capability_revision=capability_revision,
+            )
+            await self._fetch_capability_catalog(
+                readonly_capabilities,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=session_id,
+                model_id=model_id,
+                capability_revision=capability_revision,
+            )
         existing = await self._existing_thread(tenant_id, user_id, session_id)
         if existing:
-            return existing
+            fingerprint = self._dynamic_tool_fingerprint(readonly_capabilities or {})
+            return await self._bind_dynamic_tool_fingerprint(
+                existing=existing,
+                fingerprint=fingerprint,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=session_id,
+            )
         key = (tenant_id, user_id, session_id)
         lock = self._thread_locks.setdefault(key, asyncio.Lock())
         async with lock:
             existing = await self._existing_thread(tenant_id, user_id, session_id)
             if existing:
-                return existing
+                fingerprint = self._dynamic_tool_fingerprint(readonly_capabilities or {})
+                return await self._bind_dynamic_tool_fingerprint(
+                    existing=existing,
+                    fingerprint=fingerprint,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    created_by_this_request=True,
+                )
             start = {
                 "model": model_id,
                 "modelProvider": "ai-platform-gateway",
                 "cwd": "/workspace",
-                "approvalPolicy": "never",
+                # Codex emits approval requests for write-capable built-ins;
+                # the Runtime broker persists and scope-binds those requests
+                # before any handler is allowed to dispatch.
+                "approvalPolicy": "on-request",
                 "sandbox": "read-only",
                 "config": self._runtime_model_config(model_id),
+                "dynamicTools": self._dynamic_tools(readonly_capabilities or {}),
             }
             response = await self.http_client.post(
                 f"{self.runtime_url}/internal/v1/threads",
@@ -199,7 +371,15 @@ class CodexRuntimeControlPlane:
                 # A concurrent process may have won the unique session scope.
                 existing = await self._existing_thread(tenant_id, user_id, session_id)
                 if existing:
-                    return existing
+                    return await self._bind_dynamic_tool_fingerprint(
+                        existing=existing,
+                        fingerprint=self._dynamic_tool_fingerprint(
+                            readonly_capabilities or {}
+                        ),
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        session_id=session_id,
+                    )
                 raise CodexRuntimeControlError(
                     "CODEX_RUNTIME_THREAD_CREATE_FAILED",
                     status_code=503,
@@ -212,7 +392,28 @@ class CodexRuntimeControlPlane:
                     "CODEX_RUNTIME_THREAD_CREATE_INVALID",
                     status_code=503,
                 )
-            return {"runtime_thread_id": uuid.UUID(thread_id), "last_sequence": 0}
+            fingerprint = self._dynamic_tool_fingerprint(readonly_capabilities or {})
+            await self._bind_dynamic_tool_fingerprint(
+                existing={
+                    "runtime_thread_id": uuid.UUID(thread_id),
+                    "dynamic_tool_fingerprint": None,
+                },
+                fingerprint=fingerprint,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=session_id,
+                created_by_this_request=True,
+            )
+            return {
+                "runtime_thread_id": uuid.UUID(thread_id),
+                "last_sequence": 0,
+                "dynamic_tool_fingerprint": fingerprint,
+            }
+
+    @staticmethod
+    def _dynamic_tool_fingerprint(readonly: dict[str, Any]) -> str:
+        tools = [*(readonly.get("tools") or []), *(readonly.get("mcp") or [])]
+        return sha256(canonical_runtime_json(tools).encode()).hexdigest()
 
     async def _resume_thread(
         self,
@@ -242,6 +443,180 @@ class CodexRuntimeControlPlane:
                 status_code=503,
             )
 
+    async def verify_thread(
+        self,
+        *,
+        runtime_thread_id: str,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+        model_id: str,
+    ) -> None:
+        """Verify that the durable Gateway identity is backed by a live kernel thread."""
+        await self._resume_thread(
+            runtime_thread_id=uuid.UUID(str(runtime_thread_id)),
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            model_id=model_id,
+        )
+
+    @staticmethod
+    def _readonly_capability_payload(
+        value: dict[str, Any] | None,
+        *,
+        tenant_id: str,
+        capability_revision: int,
+    ) -> dict[str, Any]:
+        """Normalize explicit read-only references into the runtime contract.
+
+        This adapter accepts platform-selected references only. It does not
+        inspect user text and it never carries a write-capable tool schema.
+        """
+
+        raw = value if isinstance(value, dict) else {}
+        allowed = {"knowledge", "attachments", "web_search", "tools", "mcp"}
+        if set(raw) - allowed:
+            raise CodexRuntimeControlError("CODEX_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+        items: list[dict[str, Any]] = []
+        knowledge = raw.get("knowledge")
+        if knowledge is not None and not isinstance(knowledge, dict):
+            raise CodexRuntimeControlError("CODEX_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+        if isinstance(knowledge, dict):
+            dataset_ids = knowledge.get("dataset_ids") or []
+            if not isinstance(dataset_ids, list) or any(not isinstance(item, str) for item in dataset_ids):
+                raise CodexRuntimeControlError("CODEX_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+            for dataset_id in dataset_ids:
+                items.append(
+                    {
+                        "item_id": f"knowledge:{dataset_id}",
+                        "kind": "knowledge",
+                        "source": "knowledge",
+                        "payload": {"dataset_id": dataset_id},
+                        "tenant_id": tenant_id,
+                        "capability_revision": capability_revision,
+                    }
+                )
+        attachments = raw.get("attachments")
+        if attachments is not None and not isinstance(attachments, dict):
+            raise CodexRuntimeControlError("CODEX_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+        if isinstance(attachments, dict):
+            refs = attachments.get("refs") or []
+            if not isinstance(refs, list) or any(not isinstance(item, str) for item in refs):
+                raise CodexRuntimeControlError("CODEX_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+            for reference in refs:
+                items.append(
+                    {
+                        "item_id": f"attachment:{reference}",
+                        "kind": "attachment",
+                        "source": "attachments",
+                        "payload": {"content_ref": reference},
+                        "tenant_id": tenant_id,
+                        "capability_revision": capability_revision,
+                    }
+                )
+        web_search = raw.get("web_search")
+        if web_search is not None and not isinstance(web_search, dict):
+            raise CodexRuntimeControlError("CODEX_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+        if isinstance(web_search, dict) and web_search.get("enabled"):
+            max_results = web_search.get("max_results") or 5
+            if isinstance(max_results, bool):
+                raise CodexRuntimeControlError("CODEX_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+            try:
+                max_results = int(max_results)
+            except (TypeError, ValueError) as exc:
+                raise CodexRuntimeControlError(
+                    "CODEX_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400
+                ) from exc
+            items.append(
+                {
+                    "item_id": "context:web-search",
+                    "kind": "context",
+                    "source": "web-search",
+                    "payload": {"max_results": max_results},
+                    "tenant_id": tenant_id,
+                    "capability_revision": capability_revision,
+                }
+            )
+        tools = raw.get("tools") or []
+        mcp = raw.get("mcp") or []
+        if not isinstance(tools, list) or not isinstance(mcp, list):
+            raise CodexRuntimeControlError("CODEX_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+        for descriptor in [*tools, *mcp]:
+            if (
+                not isinstance(descriptor, dict)
+                or descriptor.get("read_only") is not True
+                or descriptor.get("tenant_id") != tenant_id
+                or int(descriptor.get("capability_revision") or 0) != capability_revision
+            ):
+                raise CodexRuntimeControlError("CODEX_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+        return {
+            "schema_version": "codex-readonly-capability/v1",
+            "tenant_id": tenant_id,
+            "capability_revision": capability_revision,
+            "items": items,
+            "tools": tools,
+            "mcp": mcp,
+        }
+
+    async def _fetch_capability_catalog(
+        self,
+        readonly: dict[str, Any],
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+        model_id: str,
+        capability_revision: int,
+    ) -> None:
+        """Fetch stable read-only schemas before the first Thread is created."""
+
+        if not self.capability_plane_url:
+            return
+        response = await self.http_client.post(
+            f"{self.capability_plane_url}/catalog",
+            headers={
+                "x-ai-platform-internal-token": self.runtime_internal_token,
+                "x-ai-tenant-id": tenant_id,
+                "x-ai-user-id": user_id,
+                "x-ai-session-id": session_id,
+            },
+            json={
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "session_id": session_id,
+                "model_id": model_id,
+                "capability_revision": capability_revision,
+            },
+        )
+        if response.status_code >= 400:
+            raise CodexRuntimeControlError(
+                "CODEX_RUNTIME_CAPABILITY_CATALOG_UNAVAILABLE", status_code=503
+            )
+        payload = response.json()
+        tools = payload.get("tools") if isinstance(payload, dict) else None
+        mcp = payload.get("mcp", []) if isinstance(payload, dict) else None
+        if not isinstance(tools, list) or not isinstance(mcp, list):
+            raise CodexRuntimeControlError(
+                "CODEX_RUNTIME_CAPABILITY_CATALOG_INVALID", status_code=503
+            )
+        readonly["tools"] = [
+            self._validate_catalog_descriptor(
+                descriptor,
+                tenant_id=tenant_id,
+                capability_revision=capability_revision,
+            )
+            for descriptor in tools
+        ]
+        readonly["mcp"] = [
+            self._validate_catalog_descriptor(
+                descriptor,
+                tenant_id=tenant_id,
+                capability_revision=capability_revision,
+            )
+            for descriptor in mcp
+        ]
+
     async def start_turn(
         self,
         *,
@@ -253,6 +628,7 @@ class CodexRuntimeControlPlane:
         reasoning_option: str | None,
         legacy_thinking_level: str | None,
         max_tokens: int | None,
+        readonly_capabilities: dict[str, Any] | None = None,
     ) -> CandidateTurn:
         assignment = await self._assignment(tenant_id, user_id, session_id)
         model = await self.model_service.get_model(tenant_id, model_id)
@@ -262,12 +638,6 @@ class CodexRuntimeControlPlane:
         provider = await self.provider_service.get_provider(tenant_id, provider_id)
         if not provider or not bool(provider.get("is_enabled")):
             raise CodexRuntimeControlError("CODEX_RUNTIME_PROVIDER_UNAVAILABLE", status_code=503)
-        thread = await self.ensure_thread(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            session_id=session_id,
-            model_id=model_id,
-        )
         profile = model.get("effective_capabilities")
         if not isinstance(profile, dict):
             raise CodexRuntimeControlError(
@@ -295,6 +665,26 @@ class CodexRuntimeControlPlane:
             int(model.get("max_output_tokens") or 4096),
         )
         output_limit = max(1, output_limit)
+        readonly = self._readonly_capability_payload(
+            readonly_capabilities,
+            tenant_id=tenant_id,
+            capability_revision=capability_revision,
+        )
+        await self._fetch_capability_catalog(
+            readonly,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            model_id=model_id,
+            capability_revision=capability_revision,
+        )
+        thread = await self.ensure_thread(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            model_id=model_id,
+            readonly_capabilities=readonly,
+        )
         runtime_thread_id = uuid.UUID(str(thread["runtime_thread_id"]))
         await self._resume_thread(
             runtime_thread_id=runtime_thread_id,
@@ -343,7 +733,11 @@ class CodexRuntimeControlPlane:
                 "input_price_per_1k": float(model.get("input_price_per_1k") or 0),
                 "output_price_per_1k": float(model.get("output_price_per_1k") or 0),
             },
-            "tools": {"enabled": False, "phase": "pure_text"},
+            "tools": {
+                "enabled": bool(readonly.get("tools") or readonly.get("mcp")),
+                "phase": "readonly" if readonly.get("items") or readonly.get("tools") or readonly.get("mcp") else "pure_text",
+            },
+            "readonly_capabilities": readonly,
         }
         snapshot_json = canonical_runtime_json(snapshot)
         snapshot_hash = sha256(snapshot_json.encode()).hexdigest()
@@ -427,6 +821,8 @@ class CodexRuntimeControlPlane:
                 "message": message,
                 "model": model_id,
                 "effort": effort,
+                "capabilityRevision": capability_revision,
+                "readonly": readonly,
             },
         )
         if response.status_code >= 400:
@@ -538,6 +934,156 @@ class CodexRuntimeControlPlane:
         if terminal_status:
             await self._complete_run(uuid.UUID(turn.run_id), terminal_status)
 
+    async def stream_thread_events(
+        self,
+        *,
+        runtime_thread_id: str,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+        after_sequence: int = 0,
+        limit: int = 1000,
+        turn_id: str | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream Runtime replay + live broadcast without Gateway DB polling."""
+        url = f"{self.runtime_url}/internal/v1/threads/{runtime_thread_id}/events"
+        headers = {
+            "x-ai-platform-internal-token": self.runtime_internal_token,
+            "x-ai-tenant-id": tenant_id,
+            "x-ai-user-id": user_id,
+            "x-ai-session-id": session_id,
+        }
+        frame: list[str] = []
+        terminal_status: str | None = None
+        async with self.http_client.stream(
+            "GET", url, headers=headers,
+            params={"after_sequence": max(0, int(after_sequence)), "limit": max(1, min(int(limit), 1000))},
+        ) as response:
+            if response.status_code >= 400:
+                raise CodexRuntimeControlError("CODEX_RUNTIME_EVENT_STREAM_FAILED", status_code=503)
+            async for line in response.aiter_lines():
+                if line:
+                    frame.append(line)
+                    continue
+                if not frame:
+                    continue
+                data_raw = next((value[5:].strip() for value in frame if value.startswith("data:")), "")
+                frame = []
+                if not data_raw:
+                    continue
+                with contextlib.suppress(json.JSONDecodeError):
+                    envelope = json.loads(data_raw)
+                    if not isinstance(envelope, dict):
+                        continue
+                    event_data = envelope.get("data")
+                    if turn_id and (
+                        not isinstance(event_data, dict)
+                        or str(event_data.get("run_id") or "") != turn_id
+                    ):
+                        continue
+                    event_type = str(envelope.get("event_type") or "")
+                    yield envelope
+                    if event_type in {"run_finished", "run_error"}:
+                        terminal_status = str(
+                            (event_data or {}).get("status") or "failed"
+                        )
+                        break
+        if terminal_status and turn_id:
+            await self._complete_run(uuid.UUID(turn_id), terminal_status)
+
+    async def interrupt_turn(
+        self,
+        *,
+        runtime_thread_id: str,
+        turn_id: str,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+        reason: str = "client_interrupt",
+    ) -> None:
+        """Request a native kernel interrupt without switching runtimes.
+
+        The Runtime owns the active turn state.  Gateway only authenticates
+        the scope and forwards the request; it never marks a turn terminal on
+        a failed dispatch, which preserves the one-call/one-result contract.
+        """
+        del reason  # The strict Codex turn/interrupt wire body is intentionally empty.
+        response = await self.http_client.post(
+            f"{self.runtime_url}/internal/v1/threads/{runtime_thread_id}/turns/{turn_id}/interrupt",
+            headers={
+                "x-ai-platform-internal-token": self.runtime_internal_token,
+                "x-ai-tenant-id": tenant_id,
+                "x-ai-user-id": user_id,
+                "x-ai-session-id": session_id,
+            },
+            # Codex App Server's typed turn/interrupt request has an empty
+            # body and only acknowledges after TurnAborted is emitted. The
+            # public reason remains Gateway audit context; forwarding it would
+            # make the strict Runtime decoder reject the interrupt.
+            json={},
+        )
+        if response.status_code >= 400:
+            raise CodexRuntimeControlError(
+                "CODEX_RUNTIME_INTERRUPT_FAILED",
+                status_code=503 if response.status_code >= 500 else 409,
+            )
+        await self._complete_run(uuid.UUID(turn_id), "cancelled")
+
+    async def get_approval(
+        self,
+        *,
+        approval_id: str,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+    ) -> dict[str, Any] | None:
+        response = await self.http_client.get(
+            f"{self.runtime_url}/internal/v1/approvals/{approval_id}",
+            headers={
+                "x-ai-platform-internal-token": self.runtime_internal_token,
+                "x-ai-tenant-id": tenant_id,
+                "x-ai-user-id": user_id,
+                "x-ai-session-id": session_id,
+            },
+        )
+        if response.status_code == 404:
+            return None
+        if response.status_code >= 400:
+            raise CodexRuntimeControlError("CODEX_RUNTIME_APPROVAL_LOOKUP_FAILED", status_code=503)
+        payload = response.json()
+        return payload if isinstance(payload, dict) else None
+
+    async def decide_approval(
+        self,
+        *,
+        approval_id: str,
+        approved: bool,
+        reason: str | None = None,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        response = await self.http_client.post(
+            f"{self.runtime_url}/internal/v1/approvals/{approval_id}/decision",
+            headers={
+                "x-ai-platform-internal-token": self.runtime_internal_token,
+                "x-ai-tenant-id": tenant_id,
+                "x-ai-user-id": user_id,
+                "x-ai-session-id": session_id,
+            },
+            json={
+                "decision": "approve" if approved else "reject",
+                "reason": reason,
+            },
+        )
+        if response.status_code >= 400:
+            status = 409 if response.status_code in {400, 404, 409} else 503
+            raise CodexRuntimeControlError(
+                "CODEX_RUNTIME_APPROVAL_DECISION_FAILED", status_code=status
+            )
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {"approval_id": approval_id, "status": "consumed"}
+
     async def _complete_run(self, run_id: uuid.UUID, terminal_status: str) -> None:
         status = (
             "succeeded"
@@ -555,6 +1101,16 @@ class CodexRuntimeControlPlane:
              WHERE run_id = $1 AND status = 'completed'
             """,
             run_id,
+        )
+        await self.database.execute(
+            """
+            UPDATE assistant_runtime_model_leases
+               SET status = 'revoked', revoked_at = NOW(),
+                   revoked_reason = $2, updated_at = NOW()
+             WHERE run_id = $1 AND status = 'active'
+            """,
+            run_id,
+            f"turn_{status}",
         )
         await self.database.execute(
             """

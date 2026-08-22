@@ -20,9 +20,9 @@ Out:
 
 ## Done when
 
-- [ ] No internal request can enter either Agent loop; credentials never enter snapshots or model context.
-- [ ] Real simple/long/multi-turn scenarios have one billing path, zero provider 400s, and measured TTFT.
-- [ ] Existing affected behavior still passes its smallest relevant regression check.
+- [x] No internal request can enter either Agent loop; credentials never enter snapshots or model context.
+- [x] Real simple/long/multi-turn scenarios have one billing path, zero provider 400s, and measured TTFT.
+- [x] Existing affected behavior still passes its smallest relevant regression check.
 
 ## Current checkpoint
 
@@ -37,8 +37,8 @@ Out:
   provider-visible reasoning token arrived in 3.931 seconds, followed by text
   and one successful terminal event; accounting completed and Runtime cgroup
   memory was 38,825,984 bytes.
-- CHR-02 remains open until the reproducible text gate covers long and multi-turn
-  resume cases as well as the simple live-provider case.
+- The reproducible text gate covers long and multi-turn resume cases as well as
+  the simple live-provider case.
 - The canonical `make codex-runtime-text-gate` now owns those four scenarios.
   Running it against the prior locked image passed simple exact output, long
   Transformer explanation, and multi-turn setup, then correctly exposed that
@@ -52,10 +52,11 @@ Out:
   times were 3.865s, 1.978s, 1.665s, and 1.959s; the long response contained
   1,755 non-whitespace characters; four Turns produced exactly four completed
   model calls; and the restarted Runtime used 47,476,736 bytes.
-- Functional CHR-02 acceptance is complete. Governance remains open because the
-  controlled fork changes are intentionally uncommitted, so the immutable
-  source receipt and locked OCI digest still name the prior fork revision. The
-  `dev-resume` image is verification evidence only and cannot be promoted.
+- CHR-02 is closed at controlled fork `7640138305a0`. The matching source
+  receipt, deterministic SBOM, App Server OCI, and Agent Runtime OCI identities
+  pass the fail-closed contract. The locked Runtime passed isolated restart
+  smoke and the real four-scenario Qwen gate with first-visible times of 3.715s,
+  1.773s, 1.830s, and 2.086s; four Turns produced exactly four model calls.
 
 ## Verify
 

@@ -231,6 +231,8 @@ class _ObservedModelPlane(CodexModelPlane):
         super().__init__(**kwargs)
         self.authorization_calls = 0
         self.last_authorization_error: str | None = None
+        self.response_event_types: list[str] = []
+        self.first_provider_visible_seconds: float | None = None
 
     async def authorize_and_reserve(
         self,
@@ -247,6 +249,26 @@ class _ObservedModelPlane(CodexModelPlane):
         except CodexModelPlaneError as exc:
             self.last_authorization_error = exc.code
             raise
+
+    async def stream(self, **kwargs: Any):
+        started_at = time.perf_counter()
+        async for chunk in super().stream(**kwargs):
+            for line in chunk.decode("utf-8", errors="replace").splitlines():
+                if not line.startswith("event:"):
+                    continue
+                event_type = line.removeprefix("event:").strip()
+                self.response_event_types.append(event_type)
+                if (
+                    self.first_provider_visible_seconds is None
+                    and event_type
+                    in {
+                        "response.reasoning_summary_text.delta",
+                        "response.reasoning_text.delta",
+                        "response.output_text.delta",
+                    }
+                ):
+                    self.first_provider_visible_seconds = time.perf_counter() - started_at
+            yield chunk
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,6 +413,7 @@ class LiveTextGate:
                 ROOT / "deploy/codex-harness/runtime-smoke-base.sql",
                 ROOT / "database/migrations/089_codex_runtime_thread_store.sql",
                 ROOT / "database/migrations/090_codex_runtime_model_leases.sql",
+                ROOT / "database/migrations/092_codex_runtime_legacy_import.sql",
             ):
                 await connection.execute(path.read_text(encoding="utf-8"))
             await connection.execute(
@@ -662,9 +685,21 @@ class LiveTextGate:
                 safe_errors = f"{safe_errors};model_plane={plane_status}"
             raise GateError(f"{label} failed before closure ({safe_errors})")
         if first_visible is None:
-            raise GateError(f"{label} emitted no visible reasoning or text")
+            raise GateError(
+                f"{label} emitted no visible reasoning or text "
+                f"(events={','.join(event_types) or 'none'})"
+            )
         if first_visible > self.config.ttft_limit_seconds:
-            raise GateError(f"{label} exceeded the configured first-visible-token limit")
+            provider_events = (
+                ",".join(self.model_plane.response_event_types[-20:])
+                if self.model_plane is not None
+                else "unavailable"
+            )
+            raise GateError(
+                f"{label} exceeded the configured first-visible-token limit "
+                f"({first_visible:.3f}s > {self.config.ttft_limit_seconds:.3f}s; "
+                f"events={','.join(event_types)}; provider_events={provider_events})"
+            )
         if not text:
             raise GateError(f"{label} completed without text")
         if (

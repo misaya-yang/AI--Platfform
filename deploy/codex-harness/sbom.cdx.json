@@ -23620,7 +23620,7 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "urn:git:077933ba474a1212a083058e3c8fed702fec86fd",
+      "bom-ref": "urn:git:c84c011f403a18be3db3e6c0f2cb603ee7ea1cdd",
       "name": "ai-platform-codex-harness",
       "properties": [
         {
@@ -23633,14 +23633,14 @@
         },
         {
           "name": "ai-platform:git.tree",
-          "value": "6e8e6250a26c1891f8eafc0dbf83068ca48280de"
+          "value": "4c0ebd059212af3f9e0f28ab219606201540616f"
         }
       ],
       "type": "application",
-      "version": "077933ba474a1212a083058e3c8fed702fec86fd"
+      "version": "c84c011f403a18be3db3e6c0f2cb603ee7ea1cdd"
     }
   },
-  "serialNumber": "urn:uuid:bf1f9aaa-9a27-51f1-9b1d-204c84fdfcf2",
+  "serialNumber": "urn:uuid:a0903e4d-d95b-5826-813e-693eeb7ac857",
   "specVersion": "1.5",
   "version": 1
 }

@@ -45,6 +45,19 @@ class CodexModelPlaneError(RuntimeError):
         super().__init__(code)
 
 
+def _runtime_snapshot(value: Any) -> dict[str, Any]:
+    """Normalize asyncpg JSONB codecs without weakening snapshot validation."""
+
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            value = None
+    if not isinstance(value, dict):
+        raise CodexModelPlaneError("RUNTIME_MODEL_SNAPSHOT_INVALID", status_code=503)
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class _AuthorizedCall:
     call_id: uuid.UUID
@@ -125,7 +138,9 @@ def _responses_url(base_url: str) -> str:
     return urlunsplit(parsed._replace(path=f"{path}/v1/responses"))
 
 
-def _validate_phase2_responses_input(body: Mapping[str, Any]) -> None:
+def _validate_phase2_responses_input(
+    body: Mapping[str, Any], *, allow_tool_transcript: bool = False
+) -> None:
     raw_input = body.get("input")
     if isinstance(raw_input, str):
         if not raw_input:
@@ -137,7 +152,7 @@ def _validate_phase2_responses_input(body: Mapping[str, Any]) -> None:
         if not isinstance(item, Mapping):
             raise CodexModelPlaneError("RUNTIME_RESPONSES_INPUT_INVALID")
         item_type = item.get("type")
-        if item_type in {"function_call", "function_call_output"}:
+        if item_type in {"function_call", "function_call_output"} and not allow_tool_transcript:
             raise CodexModelPlaneError("RUNTIME_TOOLS_NOT_ENABLED_FOR_PHASE", status_code=422)
 
 
@@ -260,8 +275,28 @@ def _native_responses_body(
     profile: Mapping[str, Any],
     reasoning_option: str,
 ) -> tuple[dict[str, Any], dict[str, tuple[str, str]]]:
-    _validate_phase2_responses_input(body)
     validated_tools = _validated_native_tools(body.get("tools"), profile)
+    allow_function_transcript = any(
+        tool.get("type") == "function" for tool in validated_tools.tools
+    )
+    _validate_phase2_responses_input(
+        body,
+        allow_tool_transcript=allow_function_transcript,
+    )
+    raw_input = body.get("input")
+    if isinstance(raw_input, list) and any(
+        isinstance(item, Mapping)
+        and item.get("type") in {"function_call", "function_call_output"}
+        for item in raw_input
+    ):
+        _validate_tool_transcript(
+            raw_input,
+            allowed_tool_names={
+                str(tool["name"])
+                for tool in validated_tools.tools
+                if tool.get("type") == "function"
+            },
+        )
     result: dict[str, Any] = {
         "model": model_id,
         "input": copy.deepcopy(body["input"]),
@@ -314,6 +349,45 @@ def _content_text(value: Any) -> str:
     return "".join(parts)
 
 
+def _validate_tool_transcript(
+    raw_input: list[Any], *, allowed_tool_names: set[str] | None = None
+) -> None:
+    pending_calls: dict[str, str] = {}
+    completed_calls: set[str] = set()
+    for item in raw_input:
+        if not isinstance(item, Mapping):
+            continue
+        item_type = item.get("type")
+        if item_type == "function_call":
+            call_id = item.get("call_id")
+            name = item.get("name")
+            arguments = item.get("arguments")
+            if (
+                not isinstance(call_id, str)
+                or not call_id
+                or not isinstance(name, str)
+                or not _TOOL_NAME_RE.fullmatch(name)
+                or not isinstance(arguments, str)
+                or call_id in pending_calls
+                or call_id in completed_calls
+                or (allowed_tool_names is not None and name not in allowed_tool_names)
+            ):
+                raise CodexModelPlaneError("RUNTIME_TOOL_TRANSCRIPT_INVALID", status_code=422)
+            pending_calls[call_id] = name
+        elif item_type == "function_call_output":
+            call_id = item.get("call_id")
+            if (
+                not isinstance(call_id, str)
+                or call_id not in pending_calls
+                or not isinstance(item.get("output"), str)
+            ):
+                raise CodexModelPlaneError("RUNTIME_TOOL_TRANSCRIPT_INVALID", status_code=422)
+            pending_calls.pop(call_id)
+            completed_calls.add(call_id)
+    if pending_calls:
+        raise CodexModelPlaneError("RUNTIME_TOOL_TRANSCRIPT_INVALID", status_code=422)
+
+
 def _responses_input_to_messages(body: Mapping[str, Any]) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
     instructions = body.get("instructions")
@@ -325,6 +399,8 @@ def _responses_input_to_messages(body: Mapping[str, Any]) -> list[dict[str, Any]
         return messages
     if not isinstance(raw_input, list):
         raise CodexModelPlaneError("RUNTIME_RESPONSES_INPUT_INVALID")
+
+    _validate_tool_transcript(raw_input)
 
     pending_calls: dict[str, str] = {}
     for item in raw_input:
@@ -350,6 +426,8 @@ def _responses_input_to_messages(body: Mapping[str, Any]) -> list[dict[str, Any]
             name = str(item.get("name") or "")
             arguments = str(item.get("arguments") or "")
             if not call_id or not name:
+                raise CodexModelPlaneError("RUNTIME_TOOL_TRANSCRIPT_INVALID")
+            if call_id in pending_calls:
                 raise CodexModelPlaneError("RUNTIME_TOOL_TRANSCRIPT_INVALID")
             pending_calls[call_id] = name
             messages.append(
@@ -629,12 +707,14 @@ class _NativeResponsesStreamValidator:
         tool_aliases: Mapping[str, tuple[str, str]] | None = None,
         *,
         reasoning_visibility: str = "none",
+        allow_tools: bool = False,
     ) -> None:
         self.last_sequence = -1
         self.seen_created = False
         self.terminal: _NativeResponsesTerminal | None = None
         self.tool_aliases = dict(tool_aliases or {})
         self.reasoning_visibility = reasoning_visibility
+        self.allow_tools = allow_tools
 
     def _normalize_reasoning_event(self, event: dict[str, Any]) -> None:
         event_type = event.get("type")
@@ -679,10 +759,12 @@ class _NativeResponsesStreamValidator:
             raise CodexModelPlaneError("RUNTIME_PROVIDER_USAGE_INVALID", status_code=502)
         return input_tokens, output_tokens
 
-    @staticmethod
-    def _reject_tool_item(event: Mapping[str, Any]) -> None:
+    def _reject_tool_item(self, event: Mapping[str, Any]) -> None:
         item = event.get("item")
-        if isinstance(item, Mapping) and item.get("type") not in {None, "message", "reasoning"}:
+        allowed = {None, "message", "reasoning"}
+        if self.allow_tools:
+            allowed.add("function_call")
+        if isinstance(item, Mapping) and item.get("type") not in allowed:
             raise CodexModelPlaneError(
                 "RUNTIME_TOOLS_NOT_ENABLED_FOR_PHASE",
                 status_code=502,
@@ -723,7 +805,10 @@ class _NativeResponsesStreamValidator:
             "response.cancelled",
         }:
             raise CodexModelPlaneError("RUNTIME_PROVIDER_REJECTED", status_code=502)
-        if any(marker in event_type for marker in ("function_call", "_search_call", "mcp_call")):
+        if (
+            any(marker in event_type for marker in ("function_call", "_search_call", "mcp_call"))
+            and not self.allow_tools
+        ):
             raise CodexModelPlaneError(
                 "RUNTIME_TOOLS_NOT_ENABLED_FOR_PHASE",
                 status_code=502,
@@ -740,7 +825,10 @@ class _NativeResponsesStreamValidator:
         if isinstance(output, list):
             for item in output:
                 self._restore_tool_namespace(item)
-                if isinstance(item, Mapping) and item.get("type") not in {"message", "reasoning"}:
+                allowed = {"message", "reasoning"}
+                if self.allow_tools:
+                    allowed.add("function_call")
+                if isinstance(item, Mapping) and item.get("type") not in allowed:
                     raise CodexModelPlaneError(
                         "RUNTIME_TOOLS_NOT_ENABLED_FOR_PHASE",
                         status_code=502,
@@ -805,7 +893,18 @@ class CodexModelPlane:
                AND s.tenant_id = l.tenant_id
                AND s.user_id = l.user_id
                AND s.session_id = l.session_id
+              JOIN assistant_runs AS run
+                ON run.run_id = l.run_id
              WHERE l.lease_id = $1
+               AND l.status = 'active'
+               AND l.expires_at > NOW()
+               AND run.status = 'running'
+               AND run.engine = 'codex_harness'
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM assistant_runtime_snapshot_revocations AS revoked
+                    WHERE revoked.snapshot_id = l.snapshot_id
+               )
             """,
             lease_id,
         )
@@ -848,9 +947,7 @@ class CodexModelPlane:
             raise CodexModelPlaneError("RUNTIME_MODEL_LEASE_SCOPE_MISMATCH", status_code=403)
         if str(body.get("model") or "") != claims.model_id:
             raise CodexModelPlaneError("RUNTIME_MODEL_LEASE_MODEL_MISMATCH", status_code=403)
-        snapshot = data.get("snapshot")
-        if not isinstance(snapshot, dict):
-            raise CodexModelPlaneError("RUNTIME_MODEL_SNAPSHOT_INVALID", status_code=503)
+        snapshot = _runtime_snapshot(data.get("snapshot"))
         snapshot_hash = sha256(canonical_runtime_json(snapshot).encode()).hexdigest()
         if snapshot_hash != str(data["snapshot_sha256"]):
             raise CodexModelPlaneError("RUNTIME_MODEL_SNAPSHOT_HASH_MISMATCH", status_code=503)
@@ -1109,6 +1206,10 @@ class CodexModelPlane:
         validator = _NativeResponsesStreamValidator(
             tool_aliases,
             reasoning_visibility=reasoning_visibility,
+            allow_tools=any(
+                isinstance(tool, Mapping) and tool.get("type") == "function"
+                for tool in provider_body.get("tools", [])
+            ),
         )
         header_request_id: str | None = None
         try:

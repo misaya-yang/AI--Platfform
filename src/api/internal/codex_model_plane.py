@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -14,6 +15,7 @@ router = APIRouter(
     prefix="/internal/v1/codex-model-plane",
     include_in_schema=False,
 )
+logger = logging.getLogger(__name__)
 
 
 def _error(error: CodexModelPlaneError) -> JSONResponse:
@@ -59,6 +61,11 @@ async def responses(request: Request):
             turn_metadata=turn_metadata,
         )
     except CodexModelPlaneError as error:
+        logger.warning(
+            "Codex model-plane request rejected code=%s status=%s",
+            error.code,
+            error.status_code,
+        )
         return _error(error)
     return StreamingResponse(
         plane.stream(

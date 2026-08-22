@@ -15,7 +15,134 @@ from src.services.codex_runtime.model_plane import (
     _AuthorizedCall,
     _native_responses_body,
     _NativeResponsesStreamValidator,
+    _responses_input_to_messages,
+    _runtime_snapshot,
 )
+
+
+def test_runtime_snapshot_accepts_asyncpg_json_text_and_rejects_non_objects() -> None:
+    assert _runtime_snapshot('{"schema_version":"codex-runtime-snapshot/v1"}') == {
+        "schema_version": "codex-runtime-snapshot/v1"
+    }
+    with pytest.raises(CodexModelPlaneError, match="SNAPSHOT_INVALID"):
+        _runtime_snapshot("[]")
+
+
+def test_dynamic_tool_transcript_accepts_one_pair_and_rejects_duplicate_call() -> None:
+    body = {
+        "input": [
+            {"type": "function_call", "call_id": "call-1", "name": "read", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call-1", "output": "Knowledge result"},
+        ]
+    }
+    assert _responses_input_to_messages(body)[-1]["content"] == "Knowledge result"
+    duplicate = {
+        "input": [
+            {"type": "function_call", "call_id": "call-1", "name": "read", "arguments": "{}"},
+            {"type": "function_call", "call_id": "call-1", "name": "read", "arguments": "{}"},
+        ]
+    }
+    with pytest.raises(CodexModelPlaneError, match="TRANSCRIPT"):
+        _responses_input_to_messages(duplicate)
+
+
+@pytest.mark.parametrize(
+    "raw_input",
+    [
+        [{"type": "function_call_output", "call_id": "orphan", "output": "x"}],
+        [{"type": "function_call", "call_id": "open", "name": "read", "arguments": "{}"}],
+        [
+            {"type": "function_call", "call_id": "call-1", "name": "other", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call-1", "output": "x"},
+        ],
+    ],
+)
+def test_native_responses_rejects_invalid_tool_transcript_before_serialization(
+    raw_input: list[dict[str, str]],
+) -> None:
+    profile = _profile()
+    with pytest.raises(CodexModelPlaneError, match="TRANSCRIPT"):
+        _native_responses_body(
+            {
+                "input": raw_input,
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "read",
+                        "description": "Read one value.",
+                        "parameters": {"type": "object", "properties": {}},
+                    }
+                ],
+            },
+            model_id="qwen3.7-plus",
+            max_output_tokens=256,
+            profile=profile,
+            reasoning_option="minimal",
+        )
+
+
+def test_fake_responses_tool_call_then_capability_result_can_start_next_model_round() -> None:
+    validator = _NativeResponsesStreamValidator(allow_tools=True)
+    validator.consume(
+        json.dumps(
+            {"type": "response.created", "sequence_number": 0, "response": {"id": "r1"}}
+        )
+    )
+    validator.consume(
+        json.dumps(
+            {
+                "type": "response.output_item.added",
+                "sequence_number": 1,
+                "item": {
+                    "id": "call-1",
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "search_knowledge_base",
+                    "arguments": "{\"query\":\"transformer\"}",
+                },
+            }
+        )
+    )
+    validator.consume(
+        json.dumps(
+            {
+                "type": "response.completed",
+                "sequence_number": 2,
+                "response": {
+                    "id": "r1",
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "call_id": "call-1",
+                            "name": "search_knowledge_base",
+                            "arguments": "{\"query\":\"transformer\"}",
+                        }
+                    ],
+                    "usage": {"input_tokens": 10, "output_tokens": 2},
+                },
+            }
+        )
+    )
+    assert validator.finish().output_tokens == 2
+    messages = _responses_input_to_messages(
+        {
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "search_knowledge_base",
+                    "arguments": "{\"query\":\"transformer\"}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-1",
+                    "output": "Knowledge result: attention.",
+                },
+            ]
+        }
+    )
+    assert messages[-1]["content"] == "Knowledge result: attention."
 
 
 class _Database:
@@ -168,6 +295,27 @@ def test_qwen_tool_adapter_flattens_namespaces_without_prompt_routing() -> None:
     assert function_tool["name"].startswith("ns_")
     assert aliases[function_tool["name"]] == ("skills", "read")
     assert body["tools"][1] == {"type": "web_search"}
+
+
+def test_web_search_alone_does_not_authorize_function_transcript() -> None:
+    with pytest.raises(CodexModelPlaneError, match="TOOLS_NOT_ENABLED"):
+        _native_responses_body(
+            {
+                "input": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-1",
+                        "name": "search_knowledge_base",
+                        "arguments": "{}",
+                    }
+                ],
+                "tools": [{"type": "web_search"}],
+            },
+            model_id="qwen3.7-plus",
+            max_output_tokens=128,
+            profile=_profile(),
+            reasoning_option="minimal",
+        )
 
 
 def test_native_responses_projects_only_profile_visible_reasoning() -> None:

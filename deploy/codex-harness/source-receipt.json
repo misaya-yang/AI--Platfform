@@ -7,7 +7,7 @@
   "sbom": {
     "component_count": 1359,
     "format": "CycloneDX-1.5",
-    "sha256": "3174f454671932867dfe73005bfb5381d7acc041e7372fcfca4c6169ed023ea5"
+    "sha256": "8176c4e7808270cffaf040aca32426508609e93391d8920733d52124b108d4fa"
   },
   "schema_bundle": {
     "file_count": 292,
@@ -17,14 +17,14 @@
   "schema_version": "ai-platform/codex-harness-source-receipt/v1",
   "source": {
     "branch": "ai-platform/main",
-    "fork_sha": "077933ba474a1212a083058e3c8fed702fec86fd",
-    "git_tree_sha": "6e8e6250a26c1891f8eafc0dbf83068ca48280de",
+    "fork_sha": "c84c011f403a18be3db3e6c0f2cb603ee7ea1cdd",
+    "git_tree_sha": "4c0ebd059212af3f9e0f28ab219606201540616f",
     "upstream_sha": "93c54bca38996b56d344a2ca65f01627b1953b27",
     "upstream_url": "https://github.com/openai/codex.git"
   },
   "toolchain": {
     "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
-    "cargo_lock_sha256": "2326bc07bcf1830121891ecab79eb8217348667f0c50e33d578c42c62121e668",
+    "cargo_lock_sha256": "13a58d438af37ce092236233832aa8441ee0a2e01e3b934b28b4c5cfd8c5ab66",
     "rust_toolchain_sha256": "570656042681cfd8795403a455baf9a33035331a07db0645e866bbcea89a3d64",
     "rustc": "rustc 1.95.0 (59807616e 2026-04-14)"
   }

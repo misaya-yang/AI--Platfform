@@ -340,6 +340,11 @@ def create_app() -> FastAPI:
     # ========== 路由 ==========
 
     app.include_router(api_router, prefix="/api/v1")
+    # Native Codex Thread/Turn/Item API. V1 remains the compatibility surface
+    # for one complete release window; V2 is additive and candidate-gated.
+    from .api.v2.agent import router as agent_v2_router
+
+    app.include_router(agent_v2_router, prefix="/api/v2")
     from .api.internal.codex_model_plane import router as codex_model_plane_router
 
     app.include_router(codex_model_plane_router)
@@ -875,12 +880,17 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
 
     from .services.assistant_runtime_assignment import (
         AssistantRuntimeAssignmentStore,
+        RuntimeAssignmentPolicy,
         runtime_assignment_policy_from_env,
     )
 
     runtime_owner, kernel_revision = runtime_assignment_policy_from_env()
     app.state.assistant_runtime_default_owner = runtime_owner
     app.state.assistant_runtime_kernel_revision = kernel_revision
+    app.state.assistant_runtime_assignment_policy = RuntimeAssignmentPolicy.from_env()
+    from .services.codex_runtime.cutover_guard import LegacyLoopUsageCounter
+
+    app.state.legacy_loop_usage_counter = LegacyLoopUsageCounter()
     app.state.assistant_runtime_assignments = (
         AssistantRuntimeAssignmentStore(container.database)
         if container.settings.database.enabled

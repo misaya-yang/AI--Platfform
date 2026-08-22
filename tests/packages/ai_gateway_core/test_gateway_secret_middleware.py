@@ -18,13 +18,18 @@ class Payload(BaseModel):
     query: str
 
 
-def _app(*, allow_anonymous: bool = False) -> tuple[FastAPI, GatewaySecret]:
+def _app(
+    *,
+    allow_anonymous: bool = False,
+    separately_authenticated_paths: frozenset[str] = frozenset(),
+) -> tuple[FastAPI, GatewaySecret]:
     secret = GatewaySecret(secret="shared-secret-for-tests")
     app = FastAPI()
     app.add_middleware(
         GatewaySecretAuthMiddleware,
         gateway_secret=secret,
         allow_anonymous=allow_anonymous,
+        separately_authenticated_paths=separately_authenticated_paths,
     )
 
     @app.get("/health")
@@ -34,6 +39,10 @@ def _app(*, allow_anonymous: bool = False) -> tuple[FastAPI, GatewaySecret]:
     @app.get("/protected")
     async def protected():
         return {"status": "accepted"}
+
+    @app.get("/private-runtime")
+    async def private_runtime():
+        return {"status": "separately-authenticated"}
 
     return app, secret
 
@@ -91,6 +100,19 @@ def test_gateway_secret_middleware_rejects_missing_signature() -> None:
         "code": "AUTH_DENIED",
         "message": "Missing or invalid X-Gateway-Secret",
     }
+
+
+def test_gateway_secret_middleware_bypasses_only_explicit_separate_auth_path() -> None:
+    app, _secret = _app(
+        separately_authenticated_paths=frozenset({"/private-runtime"})
+    )
+
+    accepted = TestClient(app).get("/private-runtime")
+    rejected = TestClient(app).get("/protected")
+
+    assert accepted.status_code == 200
+    assert accepted.json() == {"status": "separately-authenticated"}
+    assert rejected.status_code == 401
 
 
 def test_gateway_secret_middleware_accepts_valid_signature() -> None:

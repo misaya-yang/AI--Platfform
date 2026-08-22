@@ -7,17 +7,14 @@
     "verify",
     "decide"
   ],
-  "active_phase": "CHR-02",
-  "active_feature": "CHR-F003",
-  "iteration": 2,
+  "active_phase": "CHR-05",
+  "active_feature": "CHR-F006",
+  "iteration": 0,
   "max_iterations": 8,
-  "last_result": "CHR-02 functional acceptance passed. Current Rust Runtime 10/10, Python affected cohort 157/157, development-image Docker lifecycle, and the real Qwen simple/long/remember/restart-resume gate are green. First-visible times were 3.865/1.978/1.665/1.959s, long output 1755 chars, four Turns exactly four completed model calls, and restarted Runtime memory 47476736 bytes. The image remains development-only because the fork changes are uncommitted and therefore not source-locked.",
-  "next_action": "Obtain explicit authorization for a local controlled-fork and migration checkpoint commit, then rebuild through the immutable supply-chain target, refresh the source receipt/SBOM/OCI digest, rerun the same gates, close CHR-02, and begin CHR-03.",
+  "last_result": "CHR-03 and CHR-04 code contracts are closed on controlled fork c84c011f403a. Focused Python 80/80, Assistant runtime 375/375 plus golden gate, Agent Eval 107/107, Runtime write 26/26, live PostgreSQL ThreadStore, Web type/lint/build, Docker health, and authenticated V2 browser arithmetic/long text/interrupt/follow-up/connectivity passed. Latest connectivity first token was 4.13s and PostgreSQL recorded codex_candidate/codex_harness/succeeded. Local canary code is ready; production canary, rollback rehearsal, and legacy-loop deletion remain intentionally unverified.",
+  "next_action": "Run the time-bound production canary and rollback rehearsal before full cutover or Python loop deletion.",
   "blockers": [],
-  "confirmation": {
-    "reason": "A clean fixed fork SHA and matching migration checkpoint are required before the verified Runtime can become a locked candidate artifact.",
-    "requested_action": "Authorize local checkpoint commits only; no push, publish, production deploy, or legacy deletion."
-  },
+  "confirmation": null,
   "phases": [
     {
       "id": "CHR-00",
@@ -64,7 +61,7 @@
       "depends_on": [
         "CHR-01"
       ],
-      "status": "working",
+      "status": "done",
       "evidence": [
         "controlled fork 077933ba474a reserves the exact platform Run ID as the Codex Turn ID and binds every model call to a fixed-length platform scope digest",
         "Qwen catalog, Compose, env, direct registry and Provider templates default to responses_v1 while explicit tenant chat_completions fallback remains supported",
@@ -77,7 +74,10 @@
         "current affected Python, migration, Assistant Responses, provider, API, container-distribution, and text-gate cohort -> 157 passed",
         "development Runtime image lifecycle -> isolated create, resume, reserved Turn, and memory smoke passed at 14745600 then 13201408 bytes",
         "real Qwen simple/long/remember/restart-resume gate -> first-visible 3.865/1.978/1.665/1.959 seconds, 1755 long-output chars, exactly 4 completed model calls, 37648/1186 tokens, 47476736 Runtime bytes",
-        "Docker storage incident recovered after deleting only 31 GB of reproducible Rust incremental cache and performing a normal Docker Desktop restart; project PostgreSQL, Redis, and Qdrant returned healthy"
+        "Docker storage incident recovered after deleting only 31 GB of reproducible Rust incremental cache and performing a normal Docker Desktop restart; project PostgreSQL, Redis, and Qdrant returned healthy",
+        "controlled fork 7640138305a0 -> refreshed source receipt, deterministic SBOM, App Server OCI sha256:516769398742 and Agent Runtime OCI sha256:4da479165e20",
+        "locked Runtime contract and isolated create/restart/resume smoke -> passed at 34.9 MB then 13.6 MB",
+        "locked Runtime real Qwen gate -> first-visible 3.715/1.773/1.830/2.086 seconds, exactly four model calls, 1,302 long-output characters, 37,064/1,210 tokens, 45.7 MB Runtime"
       ],
       "review": "not_required"
     },
@@ -87,8 +87,12 @@
       "depends_on": [
         "CHR-02"
       ],
-      "status": "pending",
-      "evidence": [],
+      "status": "done",
+      "evidence": [
+        "make codex-runtime-readonly-gate -> contract OK and 4 passed",
+        "authenticated Docker capability catalog -> 200 with tenant/revision-bound read-only descriptors",
+        "dynamic tool wire schema validated against Codex inputSchema contract"
+      ],
       "review": "not_required"
     },
     {
@@ -97,8 +101,12 @@
       "depends_on": [
         "CHR-03"
       ],
-      "status": "pending",
-      "evidence": [],
+      "status": "done",
+      "evidence": [
+        "make codex-runtime-write-gate -> 26 passed, 1 skipped",
+        "authenticated browser long task -> cancelled; same-session follow-up succeeded",
+        "cancelled and succeeded Runs persisted terminal status with revoked model leases"
+      ],
       "review": "not_required"
     },
     {
@@ -107,8 +115,12 @@
       "depends_on": [
         "CHR-04"
       ],
-      "status": "pending",
-      "evidence": [],
+      "status": "working",
+      "evidence": [
+        "make codex-runtime-canary-gate -> code contract passed and 27 passed; production canary not verified",
+        "authenticated local browser V2 arithmetic, Transformer, interrupt/follow-up, theme, narrow viewport, and seven core route smokes passed",
+        "all nine Compose services healthy; observed total memory about 838 MiB"
+      ],
       "review": "not_required"
     },
     {
@@ -151,7 +163,7 @@
         "Start a candidate Turn with a signed immutable runtime snapshot and stream a real model response.",
         "Observe one billed model path, requested/effective reasoning metadata, visible TTFT, resumable history, and zero provider 400 responses."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "CHR-F004",
@@ -161,7 +173,7 @@
         "Run representative Knowledge, research, coding, attachment, and office-read scenarios through the candidate.",
         "Observe capability-driven discovery, compact structured results, artifact/citation Items, and no cross-tenant reuse."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "CHR-F005",
@@ -171,7 +183,7 @@
         "Interrupt before dispatch, during read-only work, after unknown write dispatch, and while approval is pending.",
         "Observe one result per call, side_effect_unknown for uncertain writes, no blind retry, durable approval recovery, and no orphan process."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "CHR-F006",

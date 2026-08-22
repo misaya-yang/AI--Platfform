@@ -28,7 +28,13 @@ class _Database:
 
     async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
         if "FROM assistant_runtime_threads" in query:
-            return {"runtime_thread_id": self.runtime_thread_id, "last_sequence": 9}
+            return {
+                "runtime_thread_id": self.runtime_thread_id,
+                "last_sequence": 9,
+                "dynamic_tool_fingerprint": (
+                    CodexRuntimeControlPlane._dynamic_tool_fingerprint({})
+                ),
+            }
         if "issue_assistant_runtime_turn" in query:
             self.snapshot_id = args[0]
             self.lease_id = args[1]
@@ -149,6 +155,11 @@ async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() ->
             reasoning_option="auto",
             legacy_thinking_level=None,
             max_tokens=1024,
+            readonly_capabilities={
+                "knowledge": {"dataset_ids": ["dataset-a"]},
+                "attachments": {"refs": ["attachment-a"]},
+                "web_search": {"enabled": True, "max_results": 3},
+            },
         )
     finally:
         await client.aclose()
@@ -156,6 +167,15 @@ async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() ->
     assert captured["url"].endswith(f"/internal/v1/threads/{runtime_thread_id}/turns")
     assert captured["body"]["runId"] == turn.run_id
     assert captured["body"]["effort"] == "minimal"
+    readonly = captured["body"]["readonly"]
+    assert readonly["schema_version"] == "codex-readonly-capability/v1"
+    assert readonly["tenant_id"] == "tenant-a"
+    assert readonly["capability_revision"] == 7
+    assert [item["kind"] for item in readonly["items"]] == [
+        "knowledge",
+        "attachment",
+        "context",
+    ]
     assert captured["headers"]["x-ai-tenant-id"] == "tenant-a"
     assert captured["requests"][0] == (
         f"/internal/v1/threads/{runtime_thread_id}/resume",
@@ -178,6 +198,225 @@ async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() ->
         },
         "fallback_reason": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_catalog_is_fetched_before_first_thread_and_dynamic_tools_are_pinned() -> None:
+    runtime_thread_id = uuid.uuid4()
+    requests: list[tuple[str, dict[str, Any]]] = []
+
+    class FreshDatabase:
+        fingerprint: str | None = None
+
+        async def fetchrow(self, query: str, *_args: Any):
+            if "assistant_runtime_threads" in query:
+                return None
+            raise AssertionError(f"unexpected query: {query}")
+
+        async def execute(self, query: str, *args: Any):
+            assert "dynamic_tool_fingerprint" in query
+            self.fingerprint = args[0]
+            return "UPDATE 1"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append((request.url.path, body))
+        if request.url.path.endswith("/catalog"):
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "tools": [
+                        {
+                            "name": "search_knowledge_base",
+                            "description": "Read Knowledge.",
+                            "schema": {"type": "object", "properties": {}},
+                            "source": "knowledge",
+                            "kind": "knowledge",
+                            "read_only": True,
+                            "tenant_id": "tenant-a",
+                            "capability_revision": 7,
+                        },
+                        {
+                            "name": "tool_search",
+                            "description": "Search the stable tool catalog.",
+                            "schema": {"type": "object", "properties": {}},
+                            "source": "assistant",
+                            "kind": "platform_tool_discovery",
+                            "read_only": True,
+                            "tenant_id": "tenant-a",
+                            "capability_revision": 7,
+                        }
+                    ]
+                },
+            )
+        assert request.url.path.endswith("/threads")
+        return httpx.Response(
+            200,
+            request=request,
+            json={"thread": {"id": str(runtime_thread_id)}},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    plane = CodexRuntimeControlPlane(
+        database=FreshDatabase(),
+        model_service=_ModelService(),
+        provider_service=_ProviderService(),
+        assignment_store=_AssignmentStore(),
+        lease_signer=RuntimeModelLeaseSigner("x" * 32),
+        runtime_url="http://runtime.test",
+        runtime_internal_token="runtime-token",
+        model_plane_base_url="http://gateway.test/internal/v1/codex-model-plane",
+        kernel_revision="kernel-1",
+        http_client=client,
+    )
+    plane.capability_plane_url = "http://capability.test/internal/v1/capabilities"
+    try:
+        readonly = plane._readonly_capability_payload(
+            {"knowledge": {"dataset_ids": ["dataset-a"]}},
+            tenant_id="tenant-a",
+            capability_revision=7,
+        )
+        await plane._fetch_capability_catalog(
+            readonly,
+            tenant_id="tenant-a",
+            user_id="user-a",
+            session_id="session-a",
+            model_id="qwen3.7-plus",
+            capability_revision=7,
+        )
+        await plane.ensure_thread(
+            tenant_id="tenant-a",
+            user_id="user-a",
+            session_id="session-a",
+            model_id="qwen3.7-plus",
+            readonly_capabilities=readonly,
+        )
+    finally:
+        await client.aclose()
+
+    thread_request = next(body for path, body in requests if path.endswith("/threads"))
+    assert thread_request["start"]["approvalPolicy"] == "on-request"
+    assert thread_request["start"]["dynamicTools"][0]["name"] == "search_knowledge_base"
+    assert thread_request["start"]["dynamicTools"][1]["name"] == "tool_search"
+    assert thread_request["start"]["dynamicTools"][0]["inputSchema"] == {
+        "type": "object",
+        "properties": {},
+    }
+    assert "parameters" not in thread_request["start"]["dynamicTools"][0]
+    assert len(plane.database.fingerprint or "") == 64
+
+
+@pytest.mark.asyncio
+async def test_existing_thread_uses_persisted_dynamic_tool_fingerprint_after_restart() -> None:
+    runtime_thread_id = uuid.uuid4()
+    readonly = {
+        "tools": [
+            {
+                "name": "search_knowledge_base",
+                "description": "Read Knowledge.",
+                "schema": {"type": "object", "properties": {}},
+                "kind": "knowledge",
+                "read_only": True,
+                "tenant_id": "tenant-a",
+                "capability_revision": 7,
+            }
+        ],
+        "mcp": [],
+    }
+
+    class ExistingDatabase:
+        async def fetchrow(self, query: str, *_args: Any):
+            assert "assistant_runtime_threads" in query
+            return {
+                "runtime_thread_id": runtime_thread_id,
+                "last_sequence": 3,
+                "dynamic_tool_fingerprint": CodexRuntimeControlPlane._dynamic_tool_fingerprint(
+                    readonly
+                ),
+            }
+
+    plane = CodexRuntimeControlPlane(
+        database=ExistingDatabase(),
+        model_service=_ModelService(),
+        provider_service=_ProviderService(),
+        assignment_store=_AssignmentStore(),
+        lease_signer=RuntimeModelLeaseSigner("x" * 32),
+        runtime_url="http://runtime.test",
+        runtime_internal_token="runtime-token",
+        model_plane_base_url="http://gateway.test/internal/v1/codex-model-plane",
+        kernel_revision="kernel-1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(lambda _request: None)),
+    )
+    try:
+        thread = await plane.ensure_thread(
+            tenant_id="tenant-a",
+            user_id="user-a",
+            session_id="session-a",
+            model_id="qwen3.7-plus",
+            readonly_capabilities=readonly,
+        )
+    finally:
+        await plane.http_client.aclose()
+    assert thread["runtime_thread_id"] == runtime_thread_id
+
+
+@pytest.mark.asyncio
+async def test_existing_unbound_thread_requires_recreation_instead_of_catalog_adoption() -> None:
+    runtime_thread_id = uuid.uuid4()
+    readonly = {
+        "tools": [
+            {
+                "name": "search_knowledge_base",
+                "description": "Read Knowledge.",
+                "schema": {"type": "object", "properties": {}},
+                "kind": "knowledge",
+                "read_only": True,
+                "tenant_id": "tenant-a",
+                "capability_revision": 7,
+            }
+        ],
+        "mcp": [],
+    }
+
+    class DatabaseWithUnboundThread:
+        async def fetchrow(self, query: str, *_args: Any):
+            assert "assistant_runtime_threads" in query
+            return {
+                "runtime_thread_id": runtime_thread_id,
+                "last_sequence": 3,
+                "dynamic_tool_fingerprint": None,
+            }
+
+    database = DatabaseWithUnboundThread()
+    plane = CodexRuntimeControlPlane(
+        database=database,
+        model_service=_ModelService(),
+        provider_service=_ProviderService(),
+        assignment_store=_AssignmentStore(),
+        lease_signer=RuntimeModelLeaseSigner("x" * 32),
+        runtime_url="http://runtime.test",
+        runtime_internal_token="runtime-token",
+        model_plane_base_url="http://gateway.test/internal/v1/codex-model-plane",
+        kernel_revision="kernel-1",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _request: httpx.Response(500))
+        ),
+    )
+    try:
+        with pytest.raises(
+            CodexRuntimeControlError,
+            match="CODEX_RUNTIME_CAPABILITY_THREAD_RECREATE_REQUIRED",
+        ):
+            await plane.ensure_thread(
+                tenant_id="tenant-a",
+                user_id="user-a",
+                session_id="session-a",
+                model_id="qwen3.7-plus",
+                readonly_capabilities=readonly,
+            )
+    finally:
+        await plane.http_client.aclose()
 
 
 @pytest.mark.asyncio
@@ -312,3 +551,48 @@ async def test_control_plane_relays_and_enriches_run_started_frame() -> None:
         "kernel": "codex",
     }
     assert completed == [(uuid.UUID(run_id), "succeeded")]
+
+
+@pytest.mark.asyncio
+async def test_interrupt_uses_strict_empty_runtime_body_and_closes_run() -> None:
+    runtime_thread_id = str(uuid.uuid4())
+    run_id = str(uuid.uuid4())
+    captured: dict[str, Any] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, request=request, json={})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    plane = CodexRuntimeControlPlane(
+        database=SimpleNamespace(),
+        model_service=SimpleNamespace(),
+        provider_service=SimpleNamespace(),
+        assignment_store=SimpleNamespace(),
+        lease_signer=RuntimeModelLeaseSigner("x" * 32),
+        runtime_url="http://runtime.test",
+        runtime_internal_token="runtime-token",
+        model_plane_base_url="http://gateway.test/internal/v1/codex-model-plane",
+        kernel_revision="kernel-1",
+        http_client=client,
+    )
+    completed: list[tuple[uuid.UUID, str]] = []
+
+    async def complete(completed_run_id: uuid.UUID, status: str) -> None:
+        completed.append((completed_run_id, status))
+
+    plane._complete_run = complete  # type: ignore[method-assign]
+    try:
+        await plane.interrupt_turn(
+            runtime_thread_id=runtime_thread_id,
+            turn_id=run_id,
+            tenant_id="tenant-a",
+            user_id="user-a",
+            session_id="session-a",
+            reason="client_interrupt",
+        )
+    finally:
+        await client.aclose()
+
+    assert captured["body"] == {}
+    assert completed == [(uuid.UUID(run_id), "cancelled")]

@@ -3,14 +3,14 @@
     "app_server_schema_file_count": 292,
     "app_server_schema_sha256": "d6fc70952574166e7c69d6524601065a81fc94d26a1b99d180d7c3918c46e3f7",
     "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
-    "cargo_lock_sha256": "2326bc07bcf1830121891ecab79eb8217348667f0c50e33d578c42c62121e668",
+    "cargo_lock_sha256": "13a58d438af37ce092236233832aa8441ee0a2e01e3b934b28b4c5cfd8c5ab66",
     "local_image_profile": "dev-small",
     "rust_toolchain_sha256": "570656042681cfd8795403a455baf9a33035331a07db0645e866bbcea89a3d64",
     "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
     "sbom": "deploy/codex-harness/sbom.cdx.json",
-    "sbom_sha256": "3174f454671932867dfe73005bfb5381d7acc041e7372fcfca4c6169ed023ea5",
+    "sbom_sha256": "8176c4e7808270cffaf040aca32426508609e93391d8920733d52124b108d4fa",
     "source_receipt": "deploy/codex-harness/source-receipt.json",
-    "source_receipt_sha256": "a5cd5aecc6aa2f2604a021c2f7179e6f42839ce89f19e9db0859e5ab77113c37"
+    "source_receipt_sha256": "5b2777363148e58b0d5482e63b0c9231d82d1f38f335b1892f96fba3797c87f0"
   },
   "license": {
     "notice": "deploy/codex-harness/NOTICE.md",
@@ -24,8 +24,8 @@
       "agent_runtime": {
         "binary": "ai-platform-agent-runtime",
         "candidate_start_allowed": true,
-        "image_digest": "sha256:b08ef4fbb83457823ae47ef74f8757c637f41e39fdc0d48c59638e883bf7d299",
-        "image_ref": "local-image://sha256:b08ef4fbb83457823ae47ef74f8757c637f41e39fdc0d48c59638e883bf7d299",
+        "image_digest": "sha256:9ff5e43297ddffee32726b3aa4d0b42f931321a8526c48506121305c2749fad6",
+        "image_ref": "local-image://sha256:9ff5e43297ddffee32726b3aa4d0b42f931321a8526c48506121305c2749fad6",
         "platforms": [
           "linux/arm64"
         ],
@@ -34,8 +34,8 @@
       "app_server": {
         "binary": "codex-app-server",
         "candidate_start_allowed": true,
-        "image_digest": "sha256:cc234deec72036157494a7d40f72057ceecb268c602d23f8dc4b6cbae2b56125",
-        "image_ref": "local-image://sha256:cc234deec72036157494a7d40f72057ceecb268c602d23f8dc4b6cbae2b56125",
+        "image_digest": "sha256:1d6ad37a3c6e66115ce373867a06816f1ff92df88bdffdf3c1ba0bc275cec3d3",
+        "image_ref": "local-image://sha256:1d6ad37a3c6e66115ce373867a06816f1ff92df88bdffdf3c1ba0bc275cec3d3",
         "platforms": [
           "linux/arm64"
         ],
@@ -48,8 +48,8 @@
   "source": {
     "branch": "ai-platform/main",
     "fork_repository": "local://AI--Platfform-codex-harness",
-    "fork_sha": "077933ba474a1212a083058e3c8fed702fec86fd",
-    "git_tree_sha": "6e8e6250a26c1891f8eafc0dbf83068ca48280de",
+    "fork_sha": "c84c011f403a18be3db3e6c0f2cb603ee7ea1cdd",
+    "git_tree_sha": "4c0ebd059212af3f9e0f28ab219606201540616f",
     "upstream_sha": "93c54bca38996b56d344a2ca65f01627b1953b27",
     "upstream_url": "https://github.com/openai/codex.git"
   }

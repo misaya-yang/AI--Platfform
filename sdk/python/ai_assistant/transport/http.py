@@ -183,6 +183,36 @@ class HTTPTransport:
                 request_id=headers.get("X-Request-Id"),
             ) from exc
 
+    async def stream_sse_get(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """GET an append-only SSE cursor (used by the native V2 Items API)."""
+        headers = self._auth.get_headers()
+        headers["Accept"] = "text/event-stream"
+        try:
+            async with self._client.stream(
+                "GET", path, params=params, headers=headers,
+                timeout=httpx.Timeout(None, connect=10.0),
+            ) as response:
+                if not response.is_success:
+                    await response.aread()
+                    self._raise_for_status(response, headers.get("X-Request-Id"))
+                async for event in self._sse_parser.parse(response):
+                    yield event
+        except AssistantError:
+            raise
+        except httpx.TimeoutException as exc:
+            raise TimeoutError(
+                "SSE connection timed out", request_id=headers.get("X-Request-Id")
+            ) from exc
+        except Exception as exc:
+            raise StreamError(
+                f"SSE stream error: {exc}", request_id=headers.get("X-Request-Id")
+            ) from exc
+
     async def close(self) -> None:
         """Shut down the underlying ``httpx.AsyncClient``."""
         await self._client.aclose()

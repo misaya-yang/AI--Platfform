@@ -69,6 +69,8 @@ docker exec -i "$postgres_name" psql -v ON_ERROR_STOP=1 -U runtime_smoke -d runt
     < "$repo_root/database/migrations/089_codex_runtime_thread_store.sql" >/dev/null
 docker exec -i "$postgres_name" psql -v ON_ERROR_STOP=1 -U runtime_smoke -d runtime_smoke \
     < "$repo_root/database/migrations/090_codex_runtime_model_leases.sql" >/dev/null
+docker exec -i "$postgres_name" psql -v ON_ERROR_STOP=1 -U runtime_smoke -d runtime_smoke \
+    < "$repo_root/database/migrations/092_codex_runtime_legacy_import.sql" >/dev/null
 docker exec "$postgres_name" psql -v ON_ERROR_STOP=1 -U runtime_smoke -d runtime_smoke -c \
     "INSERT INTO sessions (session_id, service_id, user_id, tenant_id) VALUES ('$session_id', '__builtin_assistant__', '$user_id', '$tenant_id')" \
     >/dev/null
@@ -152,7 +154,7 @@ turn_response="$(docker exec "$runtime_name" curl -fsS \
     -H "x-ai-user-id: $user_id" \
     -H "x-ai-session-id: $session_id" \
     -H 'content-type: application/json' \
-    -d "{\"runId\":\"$run_id\",\"snapshotId\":\"$snapshot_id\",\"leaseId\":\"$lease_id\",\"leaseSignature\":\"$lease_signature\",\"message\":\"hello\",\"model\":\"qwen3.7-plus\",\"effort\":\"minimal\"}" \
+    -d "{\"runId\":\"$run_id\",\"snapshotId\":\"$snapshot_id\",\"leaseId\":\"$lease_id\",\"leaseSignature\":\"$lease_signature\",\"message\":\"hello\",\"model\":\"qwen3.7-plus\",\"effort\":\"minimal\",\"capabilityRevision\":1}" \
     "http://127.0.0.1:8094/internal/v1/threads/$thread_id/turns")"
 returned_turn_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["turn"]["id"])' <<<"$turn_response")"
 if [[ "$returned_turn_id" != "$run_id" ]]; then

@@ -226,6 +226,9 @@ if [ "$UPDATE_FRONTEND" = true ]; then
     log_step "Building frontend assets locally"
     corepack pnpm@10.33.0 -C web build
     copy_dir "web/dist" "$frontend" "/usr/share/nginx/html"
+    copy_dir "web/docker-entrypoint.d" "$frontend" "/docker-entrypoint.d"
+    docker exec -u root "$frontend" chmod +x /docker-entrypoint.d/40-runtime-config.sh
+    docker exec "$frontend" /docker-entrypoint.d/40-runtime-config.sh
     docker exec "$frontend" nginx -s reload >/dev/null 2>&1 || restart_services+=("frontend")
 fi
 

@@ -21,6 +21,10 @@ Out:
 ## Done when
 
 - [ ] Tool discovery is metadata-driven and all capability reads are tenant-scoped and revision-bound.
+- The private capability plane is `POST /internal/v1/capabilities/catalog` and
+  `POST /internal/v1/capabilities/invoke`; it accepts only an active Runtime
+  lease and read-only schemas. Runtime dynamic tool calls are resolved through
+  this boundary, never by a second Agent loop.
 - [ ] Knowledge, research, coding, attachment, and office-read Agent Eval scenarios pass.
 - [ ] Existing affected behavior still passes its smallest relevant regression check.
 

@@ -6618,7 +6618,7 @@
     "/api/v1/setup/state": {
       "get": {
         "summary": "Setup State",
-        "description": "Report whether a model provider is configured for the tenant.\n\nReturns:\n    ``{\"configured\": bool, \"missing\": [provider_id, ...], \"mode\": str,\n    \"default_model\": str | None}``. ``configured`` is true when at\n    least one provider has a runtime credential path; ``missing`` lists\n    the providers that are not configured; ``mode`` is the\n    ``model_setup_mode`` setting (``ui`` | ``environment``);\n    ``default_model`` mirrors ``DEFAULT_MODEL`` when the deployment\n    preselects one.",
+        "description": "Report whether a model provider is configured for the tenant.\n\nReturns:\n    ``{\"configured\": bool, \"missing\": [provider_id, ...], \"mode\": str,\n    \"default_model\": str}``. ``configured`` is true when at\n    least one provider has a runtime credential path; ``missing`` lists\n    the providers that are not configured; ``mode`` is the\n    ``model_setup_mode`` setting (``ui`` | ``environment``);\n    ``default_model`` is the effective deployment default — the\n    ``DEFAULT_MODEL`` env var, or the platform code default when unset.",
         "operationId": "setup_state_api_v1_setup_state_get",
         "responses": {
           "200": {
@@ -8625,52 +8625,13 @@
       }
     },
     "/api/v1/langgraph/{full_path}": {
-      "patch": {
+      "get": {
         "tags": [
           "LangGraph"
         ],
         "summary": "Passthrough",
         "description": "LangGraph CLI / LangSmith Deployment API is evolving quickly.\nThis catch-all route forwards any unimplemented endpoint to the selected\nupstream instance so the gateway stays compatible with upstream `/docs`.",
-        "operationId": "passthrough_api_v1_langgraph__full_path__patch",
-        "parameters": [
-          {
-            "name": "full_path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Full Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "LangGraph"
-        ],
-        "summary": "Passthrough",
-        "description": "LangGraph CLI / LangSmith Deployment API is evolving quickly.\nThis catch-all route forwards any unimplemented endpoint to the selected\nupstream instance so the gateway stays compatible with upstream `/docs`.",
-        "operationId": "passthrough_api_v1_langgraph__full_path__patch",
+        "operationId": "passthrough_api_v1_langgraph__full_path__get",
         "parameters": [
           {
             "name": "full_path",
@@ -8709,7 +8670,7 @@
         ],
         "summary": "Passthrough",
         "description": "LangGraph CLI / LangSmith Deployment API is evolving quickly.\nThis catch-all route forwards any unimplemented endpoint to the selected\nupstream instance so the gateway stays compatible with upstream `/docs`.",
-        "operationId": "passthrough_api_v1_langgraph__full_path__patch",
+        "operationId": "passthrough_api_v1_langgraph__full_path__get",
         "parameters": [
           {
             "name": "full_path",
@@ -8748,7 +8709,7 @@
         ],
         "summary": "Passthrough",
         "description": "LangGraph CLI / LangSmith Deployment API is evolving quickly.\nThis catch-all route forwards any unimplemented endpoint to the selected\nupstream instance so the gateway stays compatible with upstream `/docs`.",
-        "operationId": "passthrough_api_v1_langgraph__full_path__patch",
+        "operationId": "passthrough_api_v1_langgraph__full_path__get",
         "parameters": [
           {
             "name": "full_path",
@@ -8781,13 +8742,52 @@
           }
         }
       },
-      "get": {
+      "delete": {
         "tags": [
           "LangGraph"
         ],
         "summary": "Passthrough",
         "description": "LangGraph CLI / LangSmith Deployment API is evolving quickly.\nThis catch-all route forwards any unimplemented endpoint to the selected\nupstream instance so the gateway stays compatible with upstream `/docs`.",
-        "operationId": "passthrough_api_v1_langgraph__full_path__patch",
+        "operationId": "passthrough_api_v1_langgraph__full_path__get",
+        "parameters": [
+          {
+            "name": "full_path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Full Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "LangGraph"
+        ],
+        "summary": "Passthrough",
+        "description": "LangGraph CLI / LangSmith Deployment API is evolving quickly.\nThis catch-all route forwards any unimplemented endpoint to the selected\nupstream instance so the gateway stays compatible with upstream `/docs`.",
+        "operationId": "passthrough_api_v1_langgraph__full_path__get",
         "parameters": [
           {
             "name": "full_path",
@@ -8822,109 +8822,13 @@
       }
     },
     "/api/v1/proxy/{service_name}/{path}": {
-      "patch": {
+      "get": {
         "tags": [
           "Transparent Proxy"
         ],
         "summary": "透明代理",
         "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
-        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__patch",
-        "parameters": [
-          {
-            "name": "service_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Name"
-            }
-          },
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "head": {
-        "tags": [
-          "Transparent Proxy"
-        ],
-        "summary": "透明代理",
-        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
-        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__patch",
-        "parameters": [
-          {
-            "name": "service_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Name"
-            }
-          },
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "Transparent Proxy"
-        ],
-        "summary": "透明代理",
-        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
-        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__patch",
+        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__get",
         "parameters": [
           {
             "name": "service_name",
@@ -8972,7 +8876,7 @@
         ],
         "summary": "透明代理",
         "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
-        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__patch",
+        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__get",
         "parameters": [
           {
             "name": "service_name",
@@ -9020,55 +8924,7 @@
         ],
         "summary": "透明代理",
         "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
-        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__patch",
-        "parameters": [
-          {
-            "name": "service_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Name"
-            }
-          },
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "get": {
-        "tags": [
-          "Transparent Proxy"
-        ],
-        "summary": "透明代理",
-        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
-        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__patch",
+        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__get",
         "parameters": [
           {
             "name": "service_name",
@@ -9116,7 +8972,151 @@
         ],
         "summary": "透明代理",
         "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
-        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__patch",
+        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__get",
+        "parameters": [
+          {
+            "name": "service_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Name"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Transparent Proxy"
+        ],
+        "summary": "透明代理",
+        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
+        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__get",
+        "parameters": [
+          {
+            "name": "service_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Name"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "head": {
+        "tags": [
+          "Transparent Proxy"
+        ],
+        "summary": "透明代理",
+        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
+        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__get",
+        "parameters": [
+          {
+            "name": "service_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Name"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Transparent Proxy"
+        ],
+        "summary": "透明代理",
+        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
+        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__get",
         "parameters": [
           {
             "name": "service_name",
@@ -9160,91 +9160,13 @@
       }
     },
     "/api/v1/proxy/{service_name}": {
-      "patch": {
+      "get": {
         "tags": [
           "Transparent Proxy"
         ],
         "summary": "透明代理（根路径）",
         "description": "透明代理路由，转发至服务根路径。",
-        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__patch",
-        "parameters": [
-          {
-            "name": "service_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Name"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "head": {
-        "tags": [
-          "Transparent Proxy"
-        ],
-        "summary": "透明代理（根路径）",
-        "description": "透明代理路由，转发至服务根路径。",
-        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__patch",
-        "parameters": [
-          {
-            "name": "service_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Name"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "Transparent Proxy"
-        ],
-        "summary": "透明代理（根路径）",
-        "description": "透明代理路由，转发至服务根路径。",
-        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__patch",
+        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__get",
         "parameters": [
           {
             "name": "service_name",
@@ -9283,7 +9205,7 @@
         ],
         "summary": "透明代理（根路径）",
         "description": "透明代理路由，转发至服务根路径。",
-        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__patch",
+        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__get",
         "parameters": [
           {
             "name": "service_name",
@@ -9322,46 +9244,7 @@
         ],
         "summary": "透明代理（根路径）",
         "description": "透明代理路由，转发至服务根路径。",
-        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__patch",
-        "parameters": [
-          {
-            "name": "service_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Name"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "get": {
-        "tags": [
-          "Transparent Proxy"
-        ],
-        "summary": "透明代理（根路径）",
-        "description": "透明代理路由，转发至服务根路径。",
-        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__patch",
+        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__get",
         "parameters": [
           {
             "name": "service_name",
@@ -9400,7 +9283,124 @@
         ],
         "summary": "透明代理（根路径）",
         "description": "透明代理路由，转发至服务根路径。",
-        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__patch",
+        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__get",
+        "parameters": [
+          {
+            "name": "service_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Transparent Proxy"
+        ],
+        "summary": "透明代理（根路径）",
+        "description": "透明代理路由，转发至服务根路径。",
+        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__get",
+        "parameters": [
+          {
+            "name": "service_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "head": {
+        "tags": [
+          "Transparent Proxy"
+        ],
+        "summary": "透明代理（根路径）",
+        "description": "透明代理路由，转发至服务根路径。",
+        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__get",
+        "parameters": [
+          {
+            "name": "service_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Transparent Proxy"
+        ],
+        "summary": "透明代理（根路径）",
+        "description": "透明代理路由，转发至服务根路径。",
+        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__get",
         "parameters": [
           {
             "name": "service_name",
@@ -9537,50 +9537,12 @@
       }
     },
     "/api/v1/knowledge/{path}": {
-      "patch": {
+      "get": {
         "tags": [
           "Knowledge Base"
         ],
         "summary": "Proxy to Knowledge Base Service",
-        "operationId": "proxy_knowledge_api_v1_knowledge__path__patch",
-        "parameters": [
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "Knowledge Base"
-        ],
-        "summary": "Proxy to Knowledge Base Service",
-        "operationId": "proxy_knowledge_api_v1_knowledge__path__patch",
+        "operationId": "proxy_knowledge_api_v1_knowledge__path__get",
         "parameters": [
           {
             "name": "path",
@@ -9618,7 +9580,7 @@
           "Knowledge Base"
         ],
         "summary": "Proxy to Knowledge Base Service",
-        "operationId": "proxy_knowledge_api_v1_knowledge__path__patch",
+        "operationId": "proxy_knowledge_api_v1_knowledge__path__get",
         "parameters": [
           {
             "name": "path",
@@ -9656,7 +9618,7 @@
           "Knowledge Base"
         ],
         "summary": "Proxy to Knowledge Base Service",
-        "operationId": "proxy_knowledge_api_v1_knowledge__path__patch",
+        "operationId": "proxy_knowledge_api_v1_knowledge__path__get",
         "parameters": [
           {
             "name": "path",
@@ -9689,12 +9651,50 @@
           }
         }
       },
-      "get": {
+      "delete": {
         "tags": [
           "Knowledge Base"
         ],
         "summary": "Proxy to Knowledge Base Service",
-        "operationId": "proxy_knowledge_api_v1_knowledge__path__patch",
+        "operationId": "proxy_knowledge_api_v1_knowledge__path__get",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Knowledge Base"
+        ],
+        "summary": "Proxy to Knowledge Base Service",
+        "operationId": "proxy_knowledge_api_v1_knowledge__path__get",
         "parameters": [
           {
             "name": "path",
@@ -9729,52 +9729,13 @@
       }
     },
     "/api/v1/kb-tools/{path}": {
-      "patch": {
+      "get": {
         "tags": [
           "KB Tools"
         ],
         "summary": "Proxy KB Tools to KB Service",
         "description": "Forward /kb-tools/* requests with the standard knowledge rate limit.",
-        "operationId": "proxy_kb_tools_api_v1_kb_tools__path__patch",
-        "parameters": [
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "KB Tools"
-        ],
-        "summary": "Proxy KB Tools to KB Service",
-        "description": "Forward /kb-tools/* requests with the standard knowledge rate limit.",
-        "operationId": "proxy_kb_tools_api_v1_kb_tools__path__patch",
+        "operationId": "proxy_kb_tools_api_v1_kb_tools__path__get",
         "parameters": [
           {
             "name": "path",
@@ -9813,7 +9774,7 @@
         ],
         "summary": "Proxy KB Tools to KB Service",
         "description": "Forward /kb-tools/* requests with the standard knowledge rate limit.",
-        "operationId": "proxy_kb_tools_api_v1_kb_tools__path__patch",
+        "operationId": "proxy_kb_tools_api_v1_kb_tools__path__get",
         "parameters": [
           {
             "name": "path",
@@ -9852,7 +9813,7 @@
         ],
         "summary": "Proxy KB Tools to KB Service",
         "description": "Forward /kb-tools/* requests with the standard knowledge rate limit.",
-        "operationId": "proxy_kb_tools_api_v1_kb_tools__path__patch",
+        "operationId": "proxy_kb_tools_api_v1_kb_tools__path__get",
         "parameters": [
           {
             "name": "path",
@@ -9885,13 +9846,52 @@
           }
         }
       },
-      "get": {
+      "delete": {
         "tags": [
           "KB Tools"
         ],
         "summary": "Proxy KB Tools to KB Service",
         "description": "Forward /kb-tools/* requests with the standard knowledge rate limit.",
-        "operationId": "proxy_kb_tools_api_v1_kb_tools__path__patch",
+        "operationId": "proxy_kb_tools_api_v1_kb_tools__path__get",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "KB Tools"
+        ],
+        "summary": "Proxy KB Tools to KB Service",
+        "description": "Forward /kb-tools/* requests with the standard knowledge rate limit.",
+        "operationId": "proxy_kb_tools_api_v1_kb_tools__path__get",
         "parameters": [
           {
             "name": "path",
@@ -14985,6 +14985,22 @@
               "type": "string",
               "title": "Target User Id"
             }
+          },
+          {
+            "name": "target_tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Target Tenant Id"
+            }
           }
         ],
         "responses": {
@@ -16081,7 +16097,7 @@
           "assistant"
         ],
         "summary": "Cancel Task",
-        "description": "Cancel a running assistant task.\n\nRequests cancellation of an ongoing streaming response.\nThe actual cancellation may take a moment as the current\noperation completes gracefully.\n\nArgs:\n    task_id: Task ID (from run_started event)\n    body: Optional cancellation reason\n\nReturns:\n    TaskCancelResponse with cancellation status",
+        "description": "Authenticate at the edge and cancel in the owning Assistant process.",
         "operationId": "cancel_task_api_v1_assistant_tasks__task_id__cancel_post",
         "parameters": [
           {
@@ -17009,6 +17025,49 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PublicQuizResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/quiz/public/{share_code}/attempts/start": {
+      "post": {
+        "tags": [
+          "quiz-public"
+        ],
+        "summary": "Start Shared Quiz Attempt",
+        "description": "Start the per-attempt clock and return a single-use opaque token.",
+        "operationId": "start_shared_quiz_attempt_api_v1_quiz_public__share_code__attempts_start_post",
+        "parameters": [
+          {
+            "name": "share_code",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Share Code"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicQuizAttemptStartResponse"
                 }
               }
             }
@@ -19808,6 +19867,60 @@
         }
       }
     },
+    "/api/v1/model-capability-adapters": {
+      "get": {
+        "summary": "List Capability Adapters",
+        "description": "Return the typed adapter catalog used by the model management form.",
+        "operationId": "list_capability_adapters_api_v1_model_capability_adapters_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/model-capability-adapters/{adapter_id}/schema": {
+      "get": {
+        "summary": "Get Capability Adapter Schema",
+        "operationId": "get_capability_adapter_schema_api_v1_model_capability_adapters__adapter_id__schema_get",
+        "parameters": [
+          {
+            "name": "adapter_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Adapter Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/models": {
       "get": {
         "summary": "List Models",
@@ -20066,6 +20179,79 @@
         }
       }
     },
+    "/api/v1/models/{model_id}/capabilities/reset": {
+      "post": {
+        "summary": "Reset Model Capabilities",
+        "description": "Clear only tenant overrides, preserving provider catalog defaults.",
+        "operationId": "reset_model_capabilities_api_v1_models__model_id__capabilities_reset_post",
+        "parameters": [
+          {
+            "name": "model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Model Id"
+            }
+          },
+          {
+            "name": "provider_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Provider Id"
+            }
+          },
+          {
+            "name": "expected_capability_revision",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expected Capability Revision"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/models/{model_id}/toggle": {
       "patch": {
         "summary": "Toggle Model",
@@ -20106,6 +20292,408 @@
                 }
               ],
               "title": "Provider Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/agent/threads": {
+      "post": {
+        "tags": [
+          "Agent Runtime V2"
+        ],
+        "summary": "Create Thread",
+        "operationId": "create_thread_api_v2_agent_threads_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThreadCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Create Thread Api V2 Agent Threads Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/agent/threads/{thread_id}": {
+      "get": {
+        "tags": [
+          "Agent Runtime V2"
+        ],
+        "summary": "Get Thread",
+        "operationId": "get_thread_api_v2_agent_threads__thread_id__get",
+        "parameters": [
+          {
+            "name": "thread_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Thread Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Thread Api V2 Agent Threads  Thread Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/agent/threads/{thread_id}/turns": {
+      "post": {
+        "tags": [
+          "Agent Runtime V2"
+        ],
+        "summary": "Create Turn",
+        "operationId": "create_turn_api_v2_agent_threads__thread_id__turns_post",
+        "parameters": [
+          {
+            "name": "thread_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Thread Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TurnCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Create Turn Api V2 Agent Threads  Thread Id  Turns Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/agent/threads/{thread_id}/turns/{turn_id}:interrupt": {
+      "post": {
+        "tags": [
+          "Agent Runtime V2"
+        ],
+        "summary": "Interrupt Turn",
+        "operationId": "interrupt_turn_api_v2_agent_threads__thread_id__turns__turn_id__interrupt_post",
+        "parameters": [
+          {
+            "name": "thread_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Thread Id"
+            }
+          },
+          {
+            "name": "turn_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Turn Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InterruptRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Interrupt Turn Api V2 Agent Threads  Thread Id  Turns  Turn Id  Interrupt Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/agent/threads/{thread_id}/approvals/{approval_id}": {
+      "get": {
+        "tags": [
+          "Agent Runtime V2"
+        ],
+        "summary": "Get Thread Approval",
+        "description": "Read a pending approval through the owning Codex Runtime.\n\nThe thread lookup is deliberately performed before forwarding the request;\nthis keeps approval IDs from becoming a cross-tenant oracle and binds the\nRuntime scope to the session that owns the thread.",
+        "operationId": "get_thread_approval_api_v2_agent_threads__thread_id__approvals__approval_id__get",
+        "parameters": [
+          {
+            "name": "thread_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Thread Id"
+            }
+          },
+          {
+            "name": "approval_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Approval Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Thread Approval Api V2 Agent Threads  Thread Id  Approvals  Approval Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/agent/threads/{thread_id}/approvals/{approval_id}/decision": {
+      "post": {
+        "tags": [
+          "Agent Runtime V2"
+        ],
+        "summary": "Decide Thread Approval",
+        "description": "Consume one Runtime approval decision, preserving tenant/thread scope.",
+        "operationId": "decide_thread_approval_api_v2_agent_threads__thread_id__approvals__approval_id__decision_post",
+        "parameters": [
+          {
+            "name": "thread_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Thread Id"
+            }
+          },
+          {
+            "name": "approval_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Approval Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApprovalDecisionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Decide Thread Approval Api V2 Agent Threads  Thread Id  Approvals  Approval Id  Decision Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/agent/threads/{thread_id}/events": {
+      "get": {
+        "tags": [
+          "Agent Runtime V2"
+        ],
+        "summary": "Thread Events",
+        "operationId": "thread_events_api_v2_agent_threads__thread_id__events_get",
+        "parameters": [
+          {
+            "name": "thread_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Thread Id"
+            }
+          },
+          {
+            "name": "after_sequence",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "After Sequence"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "turn_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Turn Id"
             }
           }
         ],
@@ -20174,50 +20762,12 @@
       }
     },
     "/v1/knowledge/{path}": {
-      "patch": {
+      "get": {
         "tags": [
           "Knowledge Base"
         ],
         "summary": "Proxy to Knowledge Base Service",
-        "operationId": "proxy_knowledge_v1_knowledge__path__patch",
-        "parameters": [
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "Knowledge Base"
-        ],
-        "summary": "Proxy to Knowledge Base Service",
-        "operationId": "proxy_knowledge_v1_knowledge__path__patch",
+        "operationId": "proxy_knowledge_v1_knowledge__path__get",
         "parameters": [
           {
             "name": "path",
@@ -20255,7 +20805,7 @@
           "Knowledge Base"
         ],
         "summary": "Proxy to Knowledge Base Service",
-        "operationId": "proxy_knowledge_v1_knowledge__path__patch",
+        "operationId": "proxy_knowledge_v1_knowledge__path__get",
         "parameters": [
           {
             "name": "path",
@@ -20293,7 +20843,7 @@
           "Knowledge Base"
         ],
         "summary": "Proxy to Knowledge Base Service",
-        "operationId": "proxy_knowledge_v1_knowledge__path__patch",
+        "operationId": "proxy_knowledge_v1_knowledge__path__get",
         "parameters": [
           {
             "name": "path",
@@ -20326,12 +20876,50 @@
           }
         }
       },
-      "get": {
+      "delete": {
         "tags": [
           "Knowledge Base"
         ],
         "summary": "Proxy to Knowledge Base Service",
-        "operationId": "proxy_knowledge_v1_knowledge__path__patch",
+        "operationId": "proxy_knowledge_v1_knowledge__path__get",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Knowledge Base"
+        ],
+        "summary": "Proxy to Knowledge Base Service",
+        "operationId": "proxy_knowledge_v1_knowledge__path__get",
         "parameters": [
           {
             "name": "path",
@@ -25747,6 +26335,32 @@
         "title": "ApiKeyCreate",
         "description": "创建 API Key"
       },
+      "ApprovalDecisionRequest": {
+        "properties": {
+          "approved": {
+            "type": "boolean",
+            "title": "Approved"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "approved"
+        ],
+        "title": "ApprovalDecisionRequest"
+      },
       "ApprovalRequest": {
         "properties": {
           "approved": {
@@ -26051,10 +26665,106 @@
         "type": "object",
         "title": "ArtifactShareCreateRequest"
       },
+      "ArtifactShareCreateResponse": {
+        "properties": {
+          "share_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Share Id"
+          },
+          "share_code": {
+            "type": "string",
+            "title": "Share Code"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "require_name": {
+            "type": "boolean",
+            "title": "Require Name"
+          },
+          "max_attempts": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Attempts"
+          },
+          "time_limit_minutes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Limit Minutes"
+          },
+          "quiz_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Quiz Id"
+          },
+          "quiz_title": {
+            "type": "string",
+            "title": "Quiz Title"
+          }
+        },
+        "type": "object",
+        "required": [
+          "share_id",
+          "share_code",
+          "kind",
+          "title",
+          "expires_at",
+          "require_name",
+          "max_attempts",
+          "time_limit_minutes",
+          "quiz_id",
+          "quiz_title"
+        ],
+        "title": "ArtifactShareCreateResponse"
+      },
+      "ArtifactShareRevokeResponse": {
+        "properties": {
+          "revoked": {
+            "type": "boolean",
+            "title": "Revoked"
+          }
+        },
+        "type": "object",
+        "required": [
+          "revoked"
+        ],
+        "title": "ArtifactShareRevokeResponse"
+      },
       "AssistantChatRequest": {
         "properties": {
           "message": {
             "type": "string",
+            "maxLength": 200000,
             "minLength": 1,
             "title": "Message",
             "description": "User's message"
@@ -26077,7 +26787,8 @@
                 "items": {
                   "$ref": "#/components/schemas/AssistantMessage"
                 },
-                "type": "array"
+                "type": "array",
+                "maxItems": 200
               },
               {
                 "type": "null"
@@ -26109,7 +26820,9 @@
           "max_tokens": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "maximum": 32768.0,
+                "minimum": 1.0
               },
               {
                 "type": "null"
@@ -26174,13 +26887,15 @@
               "type": "string"
             },
             "type": "array",
+            "maxItems": 20,
             "title": "File Paths",
-            "description": "Paths to uploaded files for multimodal input"
+            "description": "Paths to uploaded files for multimodal input (maximum 20)"
           },
           "system_prompt": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100000
               },
               {
                 "type": "null"
@@ -26206,7 +26921,22 @@
               }
             ],
             "title": "Thinking Level",
-            "description": "Thinking intensity: off, low, medium, or high. Default off."
+            "description": "Legacy reasoning option alias. Prefer reasoning_option for model-specific profiles."
+          },
+          "reasoning_option": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1,
+                "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Option",
+            "description": "Model-profile reasoning option id; auto inherits the model default"
           },
           "confirm_plan": {
             "type": "boolean",
@@ -27236,12 +27966,18 @@
             "default": "X-API-Key"
           },
           "api_keys": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Api Keys",
-            "default": []
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Keys"
           }
         },
         "type": "object",
@@ -27552,9 +28288,48 @@
             "description": "OAuth redirect URI override"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "ConnectorAuthConfig",
         "description": "OAuth app credentials/endpoints the admin manages for a provider."
+      },
+      "ConnectorAuthResponse": {
+        "properties": {
+          "client_id": {
+            "type": "string",
+            "title": "Client Id",
+            "default": ""
+          },
+          "auth_url": {
+            "type": "string",
+            "title": "Auth Url",
+            "default": ""
+          },
+          "token_url": {
+            "type": "string",
+            "title": "Token Url",
+            "default": ""
+          },
+          "scopes": {
+            "type": "string",
+            "title": "Scopes",
+            "default": ""
+          },
+          "redirect_uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Redirect Uri"
+          }
+        },
+        "type": "object",
+        "title": "ConnectorAuthResponse",
+        "description": "Public OAuth metadata. The write-only client secret is not a field."
       },
       "ConnectorMcpToolInfo": {
         "properties": {
@@ -27894,16 +28669,6 @@
             "title": "Supports Search",
             "default": true
           },
-          "auth": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ConnectorAuthConfig"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "mcp_tools": {
             "items": {
               "$ref": "#/components/schemas/ConnectorMcpToolInfo"
@@ -27916,6 +28681,16 @@
             "additionalProperties": true,
             "type": "object",
             "title": "Extra Config"
+          },
+          "auth": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConnectorAuthConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false,
@@ -27990,16 +28765,6 @@
             "title": "Supports Search",
             "default": true
           },
-          "auth": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ConnectorAuthConfig"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "mcp_tools": {
             "items": {
               "$ref": "#/components/schemas/ConnectorMcpToolInfo"
@@ -28013,6 +28778,16 @@
             "type": "object",
             "title": "Extra Config"
           },
+          "auth": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConnectorAuthResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "tenant_id": {
             "type": "string",
             "title": "Tenant Id",
@@ -28021,7 +28796,8 @@
           "created_at": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "format": "date-time"
               },
               {
                 "type": "null"
@@ -28032,7 +28808,8 @@
           "updated_at": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "format": "date-time"
               },
               {
                 "type": "null"
@@ -28048,7 +28825,7 @@
           "display_name"
         ],
         "title": "ConnectorProviderResponse",
-        "description": "Read model — client_secret is never serialized."
+        "description": "Read model with no client-secret field in its schema."
       },
       "ConnectorProviderUpdate": {
         "properties": {
@@ -31804,6 +32581,20 @@
         "title": "ImageGenerationResponse",
         "description": "Response for image generation."
       },
+      "InterruptRequest": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Reason",
+            "default": "client_interrupt"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "InterruptRequest"
+      },
       "KbRagasBatchScoreRequest": {
         "properties": {
           "evaluator_id": {
@@ -33666,6 +34457,12 @@
             "title": "Sort Order",
             "description": "Sort order for UI display",
             "default": 0
+          },
+          "capability_overrides": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Capability Overrides",
+            "description": "Tenant capability profile overrides merged over the provider catalog"
           }
         },
         "type": "object",
@@ -33731,6 +34528,18 @@
             "title": "Output Price Per 1K",
             "description": "Price per 1K output tokens (USD)",
             "default": 0.0
+          },
+          "effective_capabilities": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Effective Capabilities",
+            "description": "Resolved model capability profile visible to this tenant"
+          },
+          "capability_revision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Capability Revision",
+            "default": 1
           }
         },
         "type": "object",
@@ -33827,9 +34636,31 @@
             "description": "Sort order for UI display",
             "default": 0
           },
+          "capability_overrides": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Capability Overrides",
+            "description": "Tenant capability profile overrides merged over the provider catalog"
+          },
           "tenant_id": {
             "type": "string",
             "title": "Tenant Id"
+          },
+          "catalog_capabilities": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Catalog Capabilities"
+          },
+          "effective_capabilities": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Effective Capabilities"
+          },
+          "capability_revision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Capability Revision",
+            "default": 1
           },
           "created_at": {
             "type": "string",
@@ -33992,6 +34823,30 @@
               }
             ],
             "title": "Sort Order"
+          },
+          "capability_overrides": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capability Overrides"
+          },
+          "expected_capability_revision": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Capability Revision"
           }
         },
         "type": "object",
@@ -34723,6 +35578,11 @@
             "type": "array",
             "title": "Default Models"
           },
+          "default_metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Default Metadata"
+          },
           "advanced": {
             "type": "boolean",
             "title": "Advanced",
@@ -34823,6 +35683,113 @@
         "title": "ProviderUpdate",
         "description": "Request to update a provider."
       },
+      "PublicQuizAttemptStartResponse": {
+        "properties": {
+          "attempt_token": {
+            "type": "string",
+            "title": "Attempt Token"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Started At"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Expires At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "attempt_token",
+          "started_at",
+          "expires_at"
+        ],
+        "title": "PublicQuizAttemptStartResponse"
+      },
+      "PublicQuizResponse": {
+        "properties": {
+          "share_code": {
+            "type": "string",
+            "title": "Share Code"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "require_name": {
+            "type": "boolean",
+            "title": "Require Name"
+          },
+          "time_limit_minutes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Limit Minutes"
+          },
+          "quiz_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quiz Id"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "question_count": {
+            "type": "integer",
+            "title": "Question Count"
+          },
+          "difficulty": {
+            "type": "string",
+            "title": "Difficulty"
+          },
+          "questions": {
+            "items": {
+              "$ref": "#/components/schemas/QuizQuestionResponse"
+            },
+            "type": "array",
+            "title": "Questions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "share_code",
+          "kind",
+          "title",
+          "require_name",
+          "time_limit_minutes",
+          "quiz_id",
+          "question_count",
+          "difficulty",
+          "questions"
+        ],
+        "title": "PublicQuizResponse"
+      },
       "PublicQuizSubmitRequest": {
         "properties": {
           "answers": {
@@ -34844,6 +35811,18 @@
             ],
             "title": "Display Name",
             "description": "Anonymous user's name"
+          },
+          "attempt_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attempt Token",
+            "description": "Opaque token returned by the public attempt-start endpoint"
           }
         },
         "type": "object",
@@ -34851,6 +35830,132 @@
           "answers"
         ],
         "title": "PublicQuizSubmitRequest"
+      },
+      "QuizAttemptListItem": {
+        "properties": {
+          "attempt_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Attempt Id"
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "total_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Score"
+          },
+          "correct_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Correct Count"
+          },
+          "total_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Count"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "attempt_id",
+          "user_id",
+          "display_name",
+          "total_score",
+          "correct_count",
+          "total_count",
+          "started_at",
+          "completed_at",
+          "status"
+        ],
+        "title": "QuizAttemptListItem"
+      },
+      "QuizAttemptListResponse": {
+        "properties": {
+          "attempts": {
+            "items": {
+              "$ref": "#/components/schemas/QuizAttemptListItem"
+            },
+            "type": "array",
+            "title": "Attempts"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "attempts",
+          "total"
+        ],
+        "title": "QuizAttemptListResponse"
       },
       "QuizAttemptResponse": {
         "properties": {
@@ -34889,6 +35994,133 @@
           "per_question"
         ],
         "title": "QuizAttemptResponse"
+      },
+      "QuizDeleteResponse": {
+        "properties": {
+          "deleted": {
+            "type": "boolean",
+            "title": "Deleted"
+          }
+        },
+        "type": "object",
+        "required": [
+          "deleted"
+        ],
+        "title": "QuizDeleteResponse"
+      },
+      "QuizQuestionResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "question_num": {
+            "type": "integer",
+            "title": "Question Num"
+          },
+          "question_type": {
+            "type": "string",
+            "title": "Question Type"
+          },
+          "question_text": {
+            "type": "string",
+            "title": "Question Text"
+          },
+          "options": {
+            "items": {},
+            "type": "array",
+            "title": "Options"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "question_num",
+          "question_type",
+          "question_text",
+          "options"
+        ],
+        "title": "QuizQuestionResponse"
+      },
+      "QuizResponse": {
+        "properties": {
+          "quiz_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Quiz Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "topic": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Topic"
+          },
+          "difficulty": {
+            "type": "string",
+            "title": "Difficulty"
+          },
+          "question_count": {
+            "type": "integer",
+            "title": "Question Count"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "questions": {
+            "items": {
+              "$ref": "#/components/schemas/QuizQuestionResponse"
+            },
+            "type": "array",
+            "title": "Questions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "quiz_id",
+          "title",
+          "description",
+          "topic",
+          "difficulty",
+          "question_count",
+          "status",
+          "created_at",
+          "questions"
+        ],
+        "title": "QuizResponse"
       },
       "QuizSubmitRequest": {
         "properties": {
@@ -36462,6 +37694,17 @@
       },
       "SessionCreate": {
         "properties": {
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
           "service_id": {
             "anyOf": [
               {
@@ -37324,6 +38567,39 @@
         "type": "object",
         "title": "ThreadCreate"
       },
+      "ThreadCreateRequest": {
+        "properties": {
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "model_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ThreadCreateRequest"
+      },
       "ThreadStateUpdate": {
         "properties": {
           "values": {
@@ -37982,6 +39258,120 @@
         },
         "type": "object",
         "title": "TraceEnvelope"
+      },
+      "TurnCreateRequest": {
+        "properties": {
+          "message": {
+            "type": "string",
+            "maxLength": 200000,
+            "minLength": 1,
+            "title": "Message"
+          },
+          "model_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Id"
+          },
+          "reasoning_option": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Option"
+          },
+          "thinking_level": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thinking Level"
+          },
+          "max_tokens": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 1000000.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Tokens"
+          },
+          "kb_dataset_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "title": "Kb Dataset Ids"
+          },
+          "kb_mode": {
+            "type": "string",
+            "maxLength": 20,
+            "title": "Kb Mode",
+            "default": "off"
+          },
+          "kb_top_k": {
+            "type": "integer",
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Kb Top K",
+            "default": 5
+          },
+          "kb_score_threshold": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Kb Score Threshold",
+            "default": 0.4
+          },
+          "web_search_enabled": {
+            "type": "boolean",
+            "title": "Web Search Enabled",
+            "default": false
+          },
+          "web_search_max_results": {
+            "type": "integer",
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Web Search Max Results",
+            "default": 5
+          },
+          "file_paths": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "title": "File Paths"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "title": "TurnCreateRequest"
       },
       "UnifiedRequestSchema": {
         "properties": {
@@ -39115,436 +40505,6 @@
         ],
         "title": "TimeSeriesResponse",
         "description": "时间序列响应"
-      },
-      "QuizAttemptListItem": {
-        "properties": {
-          "attempt_id": {
-            "type": "string",
-            "format": "uuid",
-            "title": "Attempt Id"
-          },
-          "user_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "User Id"
-          },
-          "display_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Display Name"
-          },
-          "total_score": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Total Score"
-          },
-          "correct_count": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Correct Count"
-          },
-          "total_count": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Total Count"
-          },
-          "started_at": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "date-time"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Started At"
-          },
-          "completed_at": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "date-time"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Completed At"
-          },
-          "status": {
-            "type": "string",
-            "title": "Status"
-          }
-        },
-        "type": "object",
-        "required": [
-          "attempt_id",
-          "user_id",
-          "display_name",
-          "total_score",
-          "correct_count",
-          "total_count",
-          "started_at",
-          "completed_at",
-          "status"
-        ],
-        "title": "QuizAttemptListItem"
-      },
-      "QuizAttemptListResponse": {
-        "properties": {
-          "attempts": {
-            "items": {
-              "$ref": "#/components/schemas/QuizAttemptListItem"
-            },
-            "type": "array",
-            "title": "Attempts"
-          },
-          "total": {
-            "type": "integer",
-            "title": "Total"
-          }
-        },
-        "type": "object",
-        "required": [
-          "attempts",
-          "total"
-        ],
-        "title": "QuizAttemptListResponse"
-      },
-      "QuizResponse": {
-        "properties": {
-          "quiz_id": {
-            "type": "string",
-            "format": "uuid",
-            "title": "Quiz Id"
-          },
-          "title": {
-            "type": "string",
-            "title": "Title"
-          },
-          "description": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Description"
-          },
-          "topic": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Topic"
-          },
-          "difficulty": {
-            "type": "string",
-            "title": "Difficulty"
-          },
-          "question_count": {
-            "type": "integer",
-            "title": "Question Count"
-          },
-          "status": {
-            "type": "string",
-            "title": "Status"
-          },
-          "created_at": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "date-time"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Created At"
-          },
-          "questions": {
-            "items": {
-              "$ref": "#/components/schemas/QuizQuestionResponse"
-            },
-            "type": "array",
-            "title": "Questions"
-          }
-        },
-        "type": "object",
-        "required": [
-          "quiz_id",
-          "title",
-          "description",
-          "topic",
-          "difficulty",
-          "question_count",
-          "status",
-          "created_at",
-          "questions"
-        ],
-        "title": "QuizResponse"
-      },
-      "PublicQuizResponse": {
-        "properties": {
-          "share_code": {
-            "type": "string",
-            "title": "Share Code"
-          },
-          "kind": {
-            "type": "string",
-            "title": "Kind"
-          },
-          "title": {
-            "type": "string",
-            "title": "Title"
-          },
-          "require_name": {
-            "type": "boolean",
-            "title": "Require Name"
-          },
-          "time_limit_minutes": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Time Limit Minutes"
-          },
-          "quiz_id": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "uuid"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Quiz Id"
-          },
-          "description": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Description"
-          },
-          "question_count": {
-            "type": "integer",
-            "title": "Question Count"
-          },
-          "difficulty": {
-            "type": "string",
-            "title": "Difficulty"
-          },
-          "questions": {
-            "items": {
-              "$ref": "#/components/schemas/QuizQuestionResponse"
-            },
-            "type": "array",
-            "title": "Questions"
-          }
-        },
-        "type": "object",
-        "required": [
-          "share_code",
-          "kind",
-          "title",
-          "require_name",
-          "time_limit_minutes",
-          "quiz_id",
-          "question_count",
-          "difficulty",
-          "questions"
-        ],
-        "title": "PublicQuizResponse"
-      },
-      "QuizQuestionResponse": {
-        "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid",
-            "title": "Id"
-          },
-          "question_num": {
-            "type": "integer",
-            "title": "Question Num"
-          },
-          "question_type": {
-            "type": "string",
-            "title": "Question Type"
-          },
-          "question_text": {
-            "type": "string",
-            "title": "Question Text"
-          },
-          "options": {
-            "items": {},
-            "type": "array",
-            "title": "Options"
-          }
-        },
-        "type": "object",
-        "required": [
-          "id",
-          "question_num",
-          "question_type",
-          "question_text",
-          "options"
-        ],
-        "title": "QuizQuestionResponse"
-      },
-      "QuizDeleteResponse": {
-        "properties": {
-          "deleted": {
-            "type": "boolean",
-            "title": "Deleted"
-          }
-        },
-        "type": "object",
-        "required": [
-          "deleted"
-        ],
-        "title": "QuizDeleteResponse"
-      },
-      "ArtifactShareRevokeResponse": {
-        "properties": {
-          "revoked": {
-            "type": "boolean",
-            "title": "Revoked"
-          }
-        },
-        "type": "object",
-        "required": [
-          "revoked"
-        ],
-        "title": "ArtifactShareRevokeResponse"
-      },
-      "ArtifactShareCreateResponse": {
-        "properties": {
-          "share_id": {
-            "type": "string",
-            "format": "uuid",
-            "title": "Share Id"
-          },
-          "share_code": {
-            "type": "string",
-            "title": "Share Code"
-          },
-          "kind": {
-            "type": "string",
-            "title": "Kind"
-          },
-          "title": {
-            "type": "string",
-            "title": "Title"
-          },
-          "expires_at": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "date-time"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Expires At"
-          },
-          "require_name": {
-            "type": "boolean",
-            "title": "Require Name"
-          },
-          "max_attempts": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Max Attempts"
-          },
-          "time_limit_minutes": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Time Limit Minutes"
-          },
-          "quiz_id": {
-            "type": "string",
-            "format": "uuid",
-            "title": "Quiz Id"
-          },
-          "quiz_title": {
-            "type": "string",
-            "title": "Quiz Title"
-          }
-        },
-        "type": "object",
-        "required": [
-          "share_id",
-          "share_code",
-          "kind",
-          "title",
-          "expires_at",
-          "require_name",
-          "max_attempts",
-          "time_limit_minutes",
-          "quiz_id",
-          "quiz_title"
-        ],
-        "title": "ArtifactShareCreateResponse"
       }
     }
   },
@@ -39571,7 +40531,7 @@
     },
     {
       "name": "Quiz",
-      "description": "AI quiz system — generation, submission, scoring, and exam management."
+      "description": "Quiz share and grading shims. Generation is the in-chat generate_quiz tool."
     },
     {
       "name": "Dashboard",

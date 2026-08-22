@@ -17,10 +17,14 @@ from dotenv import dotenv_values
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = ROOT / "database" / "migrations" / "089_codex_runtime_thread_store.sql"
 MODEL_LEASE_MIGRATION = ROOT / "database" / "migrations" / "090_codex_runtime_model_leases.sql"
+LEGACY_IMPORT_MIGRATION = ROOT / "database" / "migrations" / "092_codex_runtime_legacy_import.sql"
+SESSION_FK_MIGRATION = (
+    ROOT / "database" / "migrations" / "093_codex_runtime_assistant_session_fks.sql"
+)
 
 
 def _postgres_config() -> dict[str, object]:
-    file_values = dotenv_values(ROOT / ".env")
+    file_values = dotenv_values(os.environ.get("ENV_FILE") or ROOT / ".env")
     required = ("POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "POSTGRES_PORT")
     values = {key: os.environ.get(key) or file_values.get(key) for key in required}
     missing = [key for key, value in values.items() if not value]
@@ -85,6 +89,20 @@ async def codex_runtime_pool() -> AsyncIterator[asyncpg.Pool]:
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
+                CREATE TABLE assistant_command_queue (
+                    command_id UUID PRIMARY KEY,
+                    tenant_id VARCHAR(255) NOT NULL,
+                    user_id VARCHAR(255) NOT NULL,
+                    session_id VARCHAR(255) NOT NULL,
+                    status VARCHAR(32) NOT NULL DEFAULT 'queued'
+                );
+                CREATE TABLE assistant_tool_approvals (
+                    approval_id UUID PRIMARY KEY,
+                    tenant_id VARCHAR(255) NOT NULL,
+                    user_id VARCHAR(255) NOT NULL,
+                    session_id VARCHAR(255) NOT NULL,
+                    status VARCHAR(32) NOT NULL DEFAULT 'pending'
+                );
                 CREATE OR REPLACE FUNCTION update_assistant_gateway_timestamp()
                 RETURNS TRIGGER AS $$
                 BEGIN
@@ -100,6 +118,9 @@ async def codex_runtime_pool() -> AsyncIterator[asyncpg.Pool]:
             lease_sql = MODEL_LEASE_MIGRATION.read_text(encoding="utf-8")
             await conn.execute(lease_sql)
             await conn.execute(lease_sql)
+            import_sql = LEGACY_IMPORT_MIGRATION.read_text(encoding="utf-8")
+            await conn.execute(import_sql)
+            await conn.execute(import_sql)
         yield pool
     finally:
         await pool.close()
@@ -129,6 +150,22 @@ def test_migration_is_additive_and_has_atomic_append_contract() -> None:
     assert "ASSISTANT_RUNTIME_MODEL_CALL_REPLAYED" in lease_upper
     assert "ASSISTANT_RUNTIME_LEASE_BUDGET_EXHAUSTED" in lease_upper
 
+    import_sql = LEGACY_IMPORT_MIGRATION.read_text(encoding="utf-8")
+    import_upper = import_sql.upper()
+    assert "CREATE OR REPLACE FUNCTION IMPORT_ASSISTANT_LEGACY_SESSION" in import_upper
+    assert "ASSISTANT_RUNTIME_IMPORT_IN_FLIGHT" in import_upper
+    assert "ASSISTANT_RUNTIME_SOURCE_KIND_INVALID" in import_upper
+    assert "DYNAMIC_TOOL_FINGERPRINT" in import_upper
+    assert "FOR UPDATE" in import_upper
+
+    session_fk_sql = SESSION_FK_MIGRATION.read_text(encoding="utf-8")
+    session_fk_upper = session_fk_sql.upper()
+    assert "REFERENCES ASSISTANT.SESSIONS" in session_fk_upper
+    assert "GATEWAY.ASSISTANT_SESSION_RUNTIME_ASSIGNMENTS" in session_fk_upper
+    assert "GATEWAY.ASSISTANT_RUNTIME_THREADS" in session_fk_upper
+    assert "DROP TABLE" not in session_fk_upper
+    assert "TRUNCATE" not in session_fk_upper
+
 
 @pytest.mark.asyncio
 async def test_session_runtime_assignment_is_scope_bound_and_immutable(
@@ -153,9 +190,7 @@ async def test_session_runtime_assignment_is_scope_bound_and_immutable(
                 tenant_id, user_id, session_id, runtime_owner
             ) VALUES ($1, $2, $3, 'python_control')
             """,
-            tenant_id,
-            user_id,
-            session_id,
+            tenant_id, user_id, session_id,
         )
         assignment = await conn.fetchrow(
             """
@@ -163,15 +198,9 @@ async def test_session_runtime_assignment_is_scope_bound_and_immutable(
             FROM assistant_session_runtime_assignments
             WHERE tenant_id = $1 AND user_id = $2 AND session_id = $3
             """,
-            tenant_id,
-            user_id,
-            session_id,
+            tenant_id, user_id, session_id,
         )
-        assert dict(assignment) == {
-            "runtime_owner": "python_control",
-            "kernel_revision": None,
-        }
-
+        assert dict(assignment) == {"runtime_owner": "python_control", "kernel_revision": None}
         with pytest.raises(asyncpg.ObjectNotInPrerequisiteStateError):
             await conn.execute(
                 """
@@ -179,9 +208,7 @@ async def test_session_runtime_assignment_is_scope_bound_and_immutable(
                 SET runtime_owner = 'codex_candidate', kernel_revision = 'fork-sha'
                 WHERE tenant_id = $1 AND user_id = $2 AND session_id = $3
                 """,
-                tenant_id,
-                user_id,
-                session_id,
+                tenant_id, user_id, session_id,
             )
         invalid_session_id = f"session-{uuid.uuid4()}"
         await conn.execute(
@@ -189,9 +216,7 @@ async def test_session_runtime_assignment_is_scope_bound_and_immutable(
             INSERT INTO sessions (session_id, service_id, user_id, tenant_id)
             VALUES ($1, '__builtin_assistant__', $2, $3)
             """,
-            invalid_session_id,
-            user_id,
-            tenant_id,
+            invalid_session_id, user_id, tenant_id,
         )
         with pytest.raises(asyncpg.CheckViolationError):
             await conn.execute(
@@ -200,9 +225,103 @@ async def test_session_runtime_assignment_is_scope_bound_and_immutable(
                     tenant_id, user_id, session_id, runtime_owner
                 ) VALUES ($1, $2, $3, 'codex_candidate')
                 """,
-                tenant_id,
-                user_id,
-                invalid_session_id,
+                tenant_id, user_id, invalid_session_id,
+            )
+
+
+@pytest.mark.asyncio
+async def test_legacy_import_is_idempotent_and_cross_tenant_scoped(
+    codex_runtime_pool: asyncpg.Pool,
+) -> None:
+    session_id = f"legacy-{uuid.uuid4()}"
+    runtime_thread_id = uuid.uuid4()
+    async with codex_runtime_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO sessions (session_id, service_id, user_id, tenant_id, history)
+            VALUES ($1, '__builtin_assistant__', 'legacy-user', 'legacy-tenant', $2::jsonb)
+            """,
+            session_id,
+            json.dumps([{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}]),
+        )
+        first = await conn.fetchrow(
+            "SELECT * FROM import_assistant_legacy_session($1, $2, $3, $4)",
+            runtime_thread_id, "legacy-tenant", "legacy-user", session_id,
+        )
+        second = await conn.fetchrow(
+            "SELECT * FROM import_assistant_legacy_session($1, $2, $3, $4)",
+            runtime_thread_id, "legacy-tenant", "legacy-user", session_id,
+        )
+        assert first["import_status"] == "ready"
+        assert second["import_status"] == "ready"
+        assert second["source_history_count"] == 2
+        assert await conn.fetchval(
+            "SELECT count(*) FROM assistant_runtime_items WHERE runtime_thread_id = $1",
+            runtime_thread_id,
+        ) == 2
+        rollout_item = await conn.fetchrow(
+            """
+            SELECT event_type, payload
+            FROM assistant_runtime_items
+            WHERE runtime_thread_id = $1
+            ORDER BY sequence
+            LIMIT 1
+            """,
+            runtime_thread_id,
+        )
+        assert rollout_item["event_type"] == "rollout/item"
+        rollout_payload = json.loads(rollout_item["payload"])
+        assert rollout_payload["type"] == "response_item"
+        assert rollout_payload["payload"]["type"] == "message"
+        original_history = await conn.fetchval(
+            "SELECT history FROM sessions WHERE session_id = $1", session_id
+        )
+        assert json.loads(original_history) == [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+        with pytest.raises(asyncpg.InsufficientPrivilegeError):
+            await conn.fetchrow(
+                "SELECT * FROM import_assistant_legacy_session($1, $2, $3, $4)",
+                uuid.uuid4(), "other-tenant", "legacy-user", session_id,
+            )
+
+    async def import_once() -> dict:
+        async with codex_runtime_pool.acquire() as concurrent_conn:
+            row = await concurrent_conn.fetchrow(
+                "SELECT * FROM import_assistant_legacy_session($1, $2, $3, $4)",
+                runtime_thread_id, "legacy-tenant", "legacy-user", session_id,
+            )
+            return dict(row)
+
+    concurrent_results = await asyncio.gather(import_once(), import_once())
+    assert [result["import_status"] for result in concurrent_results] == ["ready", "ready"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_import_refuses_in_flight_run(
+    codex_runtime_pool: asyncpg.Pool,
+) -> None:
+    session_id = f"legacy-running-{uuid.uuid4()}"
+    async with codex_runtime_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO sessions (session_id, user_id, tenant_id, history)
+            VALUES ($1, 'running-user', 'running-tenant', '[]'::jsonb)
+            """,
+            session_id,
+        )
+        await conn.execute(
+            """
+            INSERT INTO assistant_runs (run_id, tenant_id, user_id, session_id, status)
+            VALUES ($1, 'running-tenant', 'running-user', $2, 'running')
+            """,
+            uuid.uuid4(), session_id,
+        )
+        with pytest.raises(asyncpg.ObjectNotInPrerequisiteStateError):
+            await conn.fetchrow(
+                "SELECT * FROM import_assistant_legacy_session($1, $2, $3, $4)",
+                uuid.uuid4(), "running-tenant", "running-user", session_id,
             )
 
 

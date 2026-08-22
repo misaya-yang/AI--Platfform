@@ -55,7 +55,7 @@ export COMPOSE_PARALLEL_LIMIT
 
 # -- Quick Start --------------------------------------------------------------
 
-.PHONY: doctor harness-check codex-harness-build-local codex-harness-contract codex-runtime-build-local codex-runtime-contract codex-runtime-smoke codex-runtime-text-gate codex-thread-store-contract sdk-sse-contract quickstart quickstart-build validate-config validate-example-config validate seed-demo seed-demo-apply
+.PHONY: doctor harness-check codex-harness-build-local codex-harness-contract codex-runtime-build-local codex-runtime-contract codex-runtime-smoke codex-runtime-text-gate codex-runtime-canary-gate codex-runtime-cutover-gate codex-runtime-readonly-gate codex-runtime-write-gate codex-thread-store-contract sdk-sse-contract snapshot-gateway-openapi quickstart quickstart-build validate-config validate-example-config validate seed-demo seed-demo-apply
 
 doctor:                     ## 环境体检: 工具/Docker/内存/端口/compose 归属 (只读)
 	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/doctor.sh --env "$(ENV_FILE)"
@@ -93,6 +93,32 @@ codex-runtime-text-gate:    ## 真实 Qwen Responses：简单、长输出与重�
 		--env-file "$(ENV_FILE)" \
 		--runtime-image "$(CODEX_RUNTIME_IMAGE)"
 
+codex-runtime-canary-gate: ## CHR-05 代码合同；真实 Docker/provider/canary 窗口另行验收
+	@python3 scripts/harness/codex_runtime_canary_gate.py
+	@ENV_FILE="$(ENV_FILE)" uv run --all-packages --extra test pytest -q --no-cov \
+		tests/services/assistant/test_runtime_assignment.py \
+		tests/services/codex_runtime/test_thread_store.py \
+		tests/api/test_agent_v2.py \
+		tests/database/test_codex_runtime_thread_store_migration.py
+
+codex-runtime-cutover-gate: ## CHR-06 代码合同；不伪造全量切主或旧 loop 删除证据
+	@python3 scripts/harness/codex_runtime_cutover_gate.py
+	@uv run --all-packages --extra test pytest -q --no-cov \
+		tests/api/test_agent_v2.py \
+		tests/services/codex_runtime/test_cutover_guard.py \
+		tests/contract/test_openapi_schema_compat.py
+
+codex-runtime-readonly-gate: ## CHR-03：Context/Knowledge/Tool/MCP/Artifact 只读桥合同
+	@uv run --all-packages --extra test python scripts/harness/codex_runtime_readonly_gate.py
+	@uv run --all-packages --extra test pytest -q --no-cov \
+		tests/services/codex_runtime/test_readonly_capabilities.py \
+		tests/harness/test_codex_runtime_readonly_gate.py
+
+codex-runtime-write-gate:   ## 校验工具审批、dispatch fence、幂等和中断恢复闭环
+	@uv run --all-packages --extra test python \
+		scripts/harness/codex_runtime_write_gate.py \
+		--fork "$(CODEX_HARNESS_FORK)"
+
 codex-thread-store-contract: ## 在真实 PostgreSQL 验证 Codex ThreadStore 与预授权根线程闭环
 	@ENV_FILE="$(ENV_FILE)" CODEX_HARNESS_FORK="$(CODEX_HARNESS_FORK)" \
 		bash scripts/harness/codex_thread_store_contract.sh
@@ -120,6 +146,9 @@ sdk-sse-contract:           ## 验证四端 SSE 合同；发布 CI 要求 Maven/
 	else \
 		echo "SKIP Dart SDK SSE contract: dart not installed"; \
 	fi
+
+snapshot-gateway-openapi:  ## 从实际 FastAPI app 生成 Gateway OpenAPI 快照
+	@uv run --all-packages --extra test python scripts/snapshot_gateway_openapi.py
 
 quickstart:                 ## 拉取版本化多架构镜像并一键部署 (仅需模型配置)
 	@bash $(SCRIPTS)/init-env.sh --env "$(ENV_FILE)" --if-missing

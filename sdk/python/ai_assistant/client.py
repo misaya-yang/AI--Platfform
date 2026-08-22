@@ -43,6 +43,7 @@ from ai_assistant.images import ImageModule
 from ai_assistant.knowledge import KnowledgeModule
 from ai_assistant.mcp import MCPManager
 from ai_assistant.sessions import SessionModule
+from ai_assistant.threads import ThreadModule
 from ai_assistant.tools import ToolModule
 from ai_assistant.transport.http import HTTPTransport
 
@@ -102,6 +103,7 @@ class AssistantClient:
         self.images = ImageModule(self._transport)
         self.artifacts = ArtifactModule(self._transport)
         self.tools = ToolModule(self._transport)
+        self.threads = ThreadModule(self._transport)
         self.mcp = MCPManager()
 
     # -- Configuration accessors ---------------------------------------------

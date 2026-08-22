@@ -1281,6 +1281,14 @@ if _gateway_secret_env:
             replay_protection=True,
         ),
         allow_anonymous=_STARTUP_CONFIG.bool_value("ASSISTANT_APP__ALLOW_ANONYMOUS"),
+        # These two private routes authenticate the Rust Runtime with the
+        # distinct AI_PLATFORM_INTERNAL_TOKEN inside the route handler.
+        separately_authenticated_paths=frozenset(
+            {
+                "/internal/v1/capabilities/catalog",
+                "/internal/v1/capabilities/invoke",
+            }
+        ),
     )
     logger.info(
         "Gateway-secret middleware active (allow_anonymous=%s)",
@@ -1357,3 +1365,6 @@ async def security_headers(request, call_next):
 from .api.router import router as api_router  # noqa: E402
 
 app.include_router(api_router, prefix="/api/v1/assistant")
+from .api.routes.capability_plane import router as capability_plane_router  # noqa: E402
+
+app.include_router(capability_plane_router)
