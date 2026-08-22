@@ -31,6 +31,7 @@ Never mix package managers: **pnpm for `web/`, uv for Python.** No `npm install`
 | Build the pinned local Codex image and probe initialize | `CODEX_HARNESS_FORK=/absolute/fork make codex-harness-build-local` |
 | Build the pinned Rust Agent Runtime image | `CODEX_HARNESS_FORK=/absolute/fork make codex-runtime-build-local` |
 | Smoke-test the Rust Runtime in an isolated Docker network | `CODEX_RUNTIME_IMAGE=... make codex-runtime-smoke` |
+| Run real Qwen Responses simple/long/resumed text gate | `ENV_FILE=/path/to/.env CODEX_RUNTIME_IMAGE=... make codex-runtime-text-gate` |
 | First run: generate `.env`, pull images, start, migrate, validate | `make quickstart` |
 | Maintainer first run from current source | `make quickstart-build` |
 | Validate `.env` + Compose without starting | `make validate-config` |
@@ -128,6 +129,7 @@ Run the gate that matches what you touched. These are the same commands CI runs.
 | Codex Harness source/schema/SBOM/image lock | `make codex-harness-contract` |
 | Codex Rust Runtime image identity | `make codex-runtime-contract` |
 | Codex Rust Runtime Docker lifecycle | `CODEX_RUNTIME_IMAGE=... make codex-runtime-smoke` |
+| Codex Runtime real Qwen text path | `ENV_FILE=/path/to/.env CODEX_RUNTIME_IMAGE=... make codex-runtime-text-gate` |
 | Codex ThreadStore fresh/idempotent/live contract | `CODEX_HARNESS_FORK=/path/to/fork make codex-thread-store-contract` |
 | Assistant runtime | `make verify-assistant-runtime-dev` |
 | Eval / trace pipeline | `make eval-e1-gate`, then `make verify-eval-dev` for the wider branch gate |

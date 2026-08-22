@@ -9,12 +9,15 @@
   ],
   "active_phase": "CHR-02",
   "active_feature": "CHR-F003",
-  "iteration": 1,
+  "iteration": 2,
   "max_iterations": 8,
-  "last_result": "CHR-02 checkpoint passed the native Qwen Responses simple-turn path: scope-bound signed lease, reserved Codex Turn identity, private model-only Gateway stream, visible reasoning at 3.931s with 8844 input tokens and the normal five-entry Codex tool catalog, one terminal, completed accounting, 38.8 MB Runtime memory, 153 affected regressions, and current digest-pinned Docker smoke.",
-  "next_action": "Make the CHR-02 live text gate reproducible and cover long output plus multi-turn resume before closing the phase and starting capability-service migration.",
+  "last_result": "CHR-02 functional acceptance passed. Current Rust Runtime 10/10, Python affected cohort 157/157, development-image Docker lifecycle, and the real Qwen simple/long/remember/restart-resume gate are green. First-visible times were 3.865/1.978/1.665/1.959s, long output 1755 chars, four Turns exactly four completed model calls, and restarted Runtime memory 47476736 bytes. The image remains development-only because the fork changes are uncommitted and therefore not source-locked.",
+  "next_action": "Obtain explicit authorization for a local controlled-fork and migration checkpoint commit, then rebuild through the immutable supply-chain target, refresh the source receipt/SBOM/OCI digest, rerun the same gates, close CHR-02, and begin CHR-03.",
   "blockers": [],
-  "confirmation": null,
+  "confirmation": {
+    "reason": "A clean fixed fork SHA and matching migration checkpoint are required before the verified Runtime can become a locked candidate artifact.",
+    "requested_action": "Authorize local checkpoint commits only; no push, publish, production deploy, or legacy deletion."
+  },
   "phases": [
     {
       "id": "CHR-00",
@@ -68,7 +71,13 @@
         "real isolated Docker Codex Runtime -> signed lease -> private Gateway model plane -> native Qwen Responses completed with thinking_delta, text_delta and one run_finished; first visible 3.931s, input/output 8844/27, Runtime memory 38825984 bytes",
         "affected Python regression cohort -> 153 passed; changed-file Ruff and diff check passed",
         "make codex-runtime-contract and latest locked OCI make codex-runtime-smoke -> passed; memory 13627392 then 13688832 bytes",
-        "make validate-example-config and make harness-check -> passed"
+        "make validate-example-config and make harness-check -> passed",
+        "canonical codex-runtime-text-gate reached the restart boundary after simple exact output, long Transformer output, and remember-turn accounting passed; the old image exposed an OpenAI fallback on resume",
+        "Gateway and Runtime resume rebind including bounded URL and exclude-turns -> current Rust Runtime 10 passed; package fmt and Clippy passed",
+        "current affected Python, migration, Assistant Responses, provider, API, container-distribution, and text-gate cohort -> 157 passed",
+        "development Runtime image lifecycle -> isolated create, resume, reserved Turn, and memory smoke passed at 14745600 then 13201408 bytes",
+        "real Qwen simple/long/remember/restart-resume gate -> first-visible 3.865/1.978/1.665/1.959 seconds, 1755 long-output chars, exactly 4 completed model calls, 37648/1186 tokens, 47476736 Runtime bytes",
+        "Docker storage incident recovered after deleting only 31 GB of reproducible Rust incremental cache and performing a normal Docker Desktop restart; project PostgreSQL, Redis, and Qdrant returned healthy"
       ],
       "review": "not_required"
     },

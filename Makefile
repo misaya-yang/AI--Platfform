@@ -55,7 +55,7 @@ export COMPOSE_PARALLEL_LIMIT
 
 # -- Quick Start --------------------------------------------------------------
 
-.PHONY: doctor harness-check codex-harness-build-local codex-harness-contract codex-runtime-build-local codex-runtime-contract codex-runtime-smoke codex-thread-store-contract sdk-sse-contract quickstart quickstart-build validate-config validate-example-config validate seed-demo seed-demo-apply
+.PHONY: doctor harness-check codex-harness-build-local codex-harness-contract codex-runtime-build-local codex-runtime-contract codex-runtime-smoke codex-runtime-text-gate codex-thread-store-contract sdk-sse-contract quickstart quickstart-build validate-config validate-example-config validate seed-demo seed-demo-apply
 
 doctor:                     ## 环境体检: 工具/Docker/内存/端口/compose 归属 (只读)
 	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/doctor.sh --env "$(ENV_FILE)"
@@ -86,6 +86,12 @@ codex-runtime-build-local:  ## 从干净受控 fork 构建 Rust Agent Runtime �
 
 codex-runtime-smoke:        ## 在隔离 PostgreSQL/Docker 网络验证 Runtime 健康、Thread 和重启恢复
 	@bash scripts/harness/smoke_codex_runtime_image.sh
+
+codex-runtime-text-gate:    ## 真实 Qwen Responses：简单、长输出与重启后多轮恢复
+	@uv run --all-packages --extra test python \
+		scripts/harness/codex_runtime_text_gate.py \
+		--env-file "$(ENV_FILE)" \
+		--runtime-image "$(CODEX_RUNTIME_IMAGE)"
 
 codex-thread-store-contract: ## 在真实 PostgreSQL 验证 Codex ThreadStore 与预授权根线程闭环
 	@ENV_FILE="$(ENV_FILE)" CODEX_HARNESS_FORK="$(CODEX_HARNESS_FORK)" \

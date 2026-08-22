@@ -137,7 +137,7 @@ resume_response="$(docker exec "$runtime_name" curl -fsS \
     -H "x-ai-user-id: $user_id" \
     -H "x-ai-session-id: $session_id" \
     -H 'content-type: application/json' \
-    -d '{}' \
+    -d '{"model":"qwen3.7-plus","modelPlaneBaseUrl":"http://gateway.invalid/internal/v1/codex-model-plane"}' \
     "http://127.0.0.1:8094/internal/v1/threads/$thread_id/resume")"
 resumed_thread_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["thread"]["id"])' <<<"$resume_response")"
 if [[ "$resumed_thread_id" != "$thread_id" ]]; then

@@ -11,7 +11,11 @@ import pytest
 from ai_gateway_core.agents import RuntimeModelLeaseSigner
 from ai_gateway_core.models import get_builtin_model_capabilities
 
-from src.services.codex_runtime.control_plane import CandidateTurn, CodexRuntimeControlPlane
+from src.services.codex_runtime.control_plane import (
+    CandidateTurn,
+    CodexRuntimeControlError,
+    CodexRuntimeControlPlane,
+)
 
 
 class _Database:
@@ -95,12 +99,20 @@ class _AssignmentStore:
 async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() -> None:
     runtime_thread_id = uuid.uuid4()
     database = _Database(runtime_thread_id)
-    captured: dict[str, Any] = {}
+    captured: dict[str, Any] = {"requests": []}
 
     async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        captured["requests"].append((request.url.path, body))
+        if request.url.path.endswith("/resume"):
+            return httpx.Response(
+                200,
+                request=request,
+                json={"thread": {"id": str(runtime_thread_id)}},
+            )
         captured["url"] = str(request.url)
         captured["headers"] = dict(request.headers)
-        captured["body"] = json.loads(request.content)
+        captured["body"] = body
         return httpx.Response(
             200,
             request=request,
@@ -145,6 +157,13 @@ async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() ->
     assert captured["body"]["runId"] == turn.run_id
     assert captured["body"]["effort"] == "minimal"
     assert captured["headers"]["x-ai-tenant-id"] == "tenant-a"
+    assert captured["requests"][0] == (
+        f"/internal/v1/threads/{runtime_thread_id}/resume",
+        {
+            "model": "qwen3.7-plus",
+            "modelPlaneBaseUrl": "http://gateway.test/internal/v1/codex-model-plane",
+        },
+    )
     assert database.issued_snapshot is not None
     assert database.issued_snapshot["model"]["wire_protocol"] == "responses_v1"
     assert database.issued_snapshot["reasoning"] == {
@@ -159,6 +178,49 @@ async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() ->
         },
         "fallback_reason": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_control_plane_fails_before_lease_issue_when_runtime_resume_rejects() -> None:
+    runtime_thread_id = uuid.uuid4()
+    database = _Database(runtime_thread_id)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/resume")
+        return httpx.Response(400, request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    plane = CodexRuntimeControlPlane(
+        database=database,
+        model_service=_ModelService(),
+        provider_service=_ProviderService(),
+        assignment_store=_AssignmentStore(),
+        lease_signer=RuntimeModelLeaseSigner("x" * 32),
+        runtime_url="http://runtime.test",
+        runtime_internal_token="runtime-token",
+        model_plane_base_url="http://gateway.test/internal/v1/codex-model-plane",
+        kernel_revision="kernel-1",
+        http_client=client,
+    )
+    try:
+        with pytest.raises(
+            CodexRuntimeControlError,
+            match="CODEX_RUNTIME_THREAD_RESUME_FAILED",
+        ):
+            await plane.start_turn(
+                tenant_id="tenant-a",
+                user_id="user-a",
+                session_id="session-a",
+                message="你好",
+                model_id="qwen3.7-plus",
+                reasoning_option="auto",
+                legacy_thinking_level=None,
+                max_tokens=1024,
+            )
+    finally:
+        await client.aclose()
+
+    assert database.issued_snapshot is None
 
 
 @pytest.mark.asyncio

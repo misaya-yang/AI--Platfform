@@ -39,6 +39,23 @@ Out:
   memory was 38,825,984 bytes.
 - CHR-02 remains open until the reproducible text gate covers long and multi-turn
   resume cases as well as the simple live-provider case.
+- The canonical `make codex-runtime-text-gate` now owns those four scenarios.
+  Running it against the prior locked image passed simple exact output, long
+  Transformer explanation, and multi-turn setup, then correctly exposed that
+  a process restart resumed with Codex's default OpenAI provider instead of the
+  platform model plane. Gateway and Runtime now reapply a bounded, non-secret
+  model-plane configuration before issuing the next lease; the Runtime rejects
+  partial, credential-bearing, or non-platform resume endpoints.
+- The current resume rebind and final bounded-URL/`exclude_turns` hardening pass
+  the full Rust Runtime unit cohort. A development Runtime image also passes
+  Docker lifecycle and the real four-scenario Qwen gate: first-visible token
+  times were 3.865s, 1.978s, 1.665s, and 1.959s; the long response contained
+  1,755 non-whitespace characters; four Turns produced exactly four completed
+  model calls; and the restarted Runtime used 47,476,736 bytes.
+- Functional CHR-02 acceptance is complete. Governance remains open because the
+  controlled fork changes are intentionally uncommitted, so the immutable
+  source receipt and locked OCI digest still name the prior fork revision. The
+  `dev-resume` image is verification evidence only and cannot be promoted.
 
 ## Verify
 

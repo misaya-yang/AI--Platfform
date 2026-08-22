@@ -88,6 +88,7 @@ class CodexRuntimeControlPlane:
         self.http_client = http_client or httpx.AsyncClient(
             timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0),
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+            trust_env=False,
         )
         self._owns_http_client = http_client is None
         self.lease_ttl_seconds = max(
@@ -141,6 +142,24 @@ class CodexRuntimeControlPlane:
         )
         return dict(row) if row else None
 
+    def _runtime_model_config(self, model_id: str) -> dict[str, Any]:
+        return {
+            "model_provider": "ai-platform-gateway",
+            "model": model_id,
+            "model_providers": {
+                "ai-platform-gateway": {
+                    "name": "AI Platform Gateway Model Plane",
+                    "base_url": self.model_plane_base_url,
+                    "env_key": "CODEX_MODEL_PLANE_INTERNAL_TOKEN",
+                    "wire_api": "responses",
+                    "requires_openai_auth": False,
+                    "supports_websockets": False,
+                    "request_max_retries": 0,
+                    "stream_max_retries": 0,
+                }
+            },
+        }
+
     async def ensure_thread(
         self,
         *,
@@ -164,22 +183,7 @@ class CodexRuntimeControlPlane:
                 "cwd": "/workspace",
                 "approvalPolicy": "never",
                 "sandbox": "read-only",
-                "config": {
-                    "model_provider": "ai-platform-gateway",
-                    "model": model_id,
-                    "model_providers": {
-                        "ai-platform-gateway": {
-                            "name": "AI Platform Gateway Model Plane",
-                            "base_url": self.model_plane_base_url,
-                            "env_key": "CODEX_MODEL_PLANE_INTERNAL_TOKEN",
-                            "wire_api": "responses",
-                            "requires_openai_auth": False,
-                            "supports_websockets": False,
-                            "request_max_retries": 0,
-                            "stream_max_retries": 0,
-                        }
-                    },
-                },
+                "config": self._runtime_model_config(model_id),
             }
             response = await self.http_client.post(
                 f"{self.runtime_url}/internal/v1/threads",
@@ -209,6 +213,34 @@ class CodexRuntimeControlPlane:
                     status_code=503,
                 )
             return {"runtime_thread_id": uuid.UUID(thread_id), "last_sequence": 0}
+
+    async def _resume_thread(
+        self,
+        *,
+        runtime_thread_id: uuid.UUID,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+        model_id: str,
+    ) -> None:
+        response = await self.http_client.post(
+            f"{self.runtime_url}/internal/v1/threads/{runtime_thread_id}/resume",
+            headers={
+                "x-ai-platform-internal-token": self.runtime_internal_token,
+                "x-ai-tenant-id": tenant_id,
+                "x-ai-user-id": user_id,
+                "x-ai-session-id": session_id,
+            },
+            json={
+                "model": model_id,
+                "modelPlaneBaseUrl": self.model_plane_base_url,
+            },
+        )
+        if response.status_code >= 400:
+            raise CodexRuntimeControlError(
+                "CODEX_RUNTIME_THREAD_RESUME_FAILED",
+                status_code=503,
+            )
 
     async def start_turn(
         self,
@@ -264,6 +296,13 @@ class CodexRuntimeControlPlane:
         )
         output_limit = max(1, output_limit)
         runtime_thread_id = uuid.UUID(str(thread["runtime_thread_id"]))
+        await self._resume_thread(
+            runtime_thread_id=runtime_thread_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            model_id=model_id,
+        )
         run_id = uuid.uuid4()
         snapshot_id = uuid.uuid4()
         lease_id = uuid.uuid4()

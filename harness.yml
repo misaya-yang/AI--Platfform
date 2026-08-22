@@ -100,6 +100,9 @@ commands:
   codex_runtime_smoke:
     make: codex-runtime-smoke
     purpose: Verify the Runtime image against isolated PostgreSQL across a process restart.
+  codex_runtime_text_gate:
+    make: codex-runtime-text-gate
+    purpose: Verify native Qwen Responses text, long output, accounting, and restart-resumed context.
   codex_thread_store_contract:
     make: codex-thread-store-contract
     purpose: Verify pre-authorized Codex thread creation and durable PostgreSQL history against an isolated schema.
