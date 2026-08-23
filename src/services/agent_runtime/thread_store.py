@@ -151,7 +151,7 @@ class AgentThreadStore:
         rows = await self.database.fetch(
             """
             SELECT role, content, sequence, run_id, created_at, thinking_content,
-                   tool_calls, tool_results,
+                   tool_calls, tool_results, runtime_events,
                    COUNT(*) OVER() AS total
               FROM (
                     SELECT 'user'::text AS role,
@@ -164,7 +164,8 @@ class AgentThreadStore:
                            run.started_at AS created_at,
                            NULL::text AS thinking_content,
                            NULL::jsonb AS tool_calls,
-                           NULL::jsonb AS tool_results
+                           NULL::jsonb AS tool_results,
+                           NULL::jsonb AS runtime_events
                       FROM assistant_runs AS run
                       JOIN assistant_runtime_snapshots AS snapshot
                         ON snapshot.run_id = run.run_id
@@ -238,6 +239,28 @@ class AgentThreadStore:
                                   AND result.turn_id = active_turn.turn_id
                                   AND result.event_type = 'compat/v1/tool_call_result'
                            ) AS tool_results
+                           ,(
+                               SELECT jsonb_agg(
+                                   jsonb_build_object(
+                                       'event_type', replace(runtime.event_type, 'compat/v1/', ''),
+                                       'data', runtime.payload #> '{data}',
+                                       'timestamp', EXTRACT(EPOCH FROM runtime.created_at)
+                                   ) ORDER BY runtime.sequence
+                               )
+                                 FROM assistant_runtime_items AS runtime
+                                WHERE runtime.runtime_thread_id = item.runtime_thread_id
+                                  AND runtime.tenant_id = item.tenant_id
+                                  AND runtime.user_id = item.user_id
+                                  AND runtime.turn_id = active_turn.turn_id
+                                  AND runtime.event_type IN (
+                                      'compat/v1/subagent_started',
+                                      'compat/v1/subagent_step',
+                                      'compat/v1/subagent_finished',
+                                      'compat/v1/plan_update',
+                                      'compat/v1/context_compaction',
+                                      'compat/v1/memory_loaded'
+                                  )
+                           ) AS runtime_events
                       FROM assistant_runtime_items AS item
                       JOIN LATERAL (
                            SELECT started.turn_id
@@ -254,6 +277,86 @@ class AgentThreadStore:
                        AND item.event_type = 'rollout/item'
                        AND item.item_type = 'event_msg'
                        AND item.payload #>> '{payload,type}' = 'agent_message'
+                    UNION ALL
+                    SELECT 'assistant'::text AS role,
+                           string_agg(
+                               delta.payload #>> '{data,content}',
+                               '' ORDER BY delta.sequence
+                           ) AS content,
+                           MAX(delta.sequence) AS sequence,
+                           delta.turn_id AS run_id,
+                           MAX(delta.created_at) AS created_at,
+                           (
+                               SELECT string_agg(
+                                   reasoning.payload #>> '{data,content}',
+                                   '' ORDER BY reasoning.sequence
+                               )
+                                 FROM assistant_runtime_items AS reasoning
+                                WHERE reasoning.runtime_thread_id = delta.runtime_thread_id
+                                  AND reasoning.tenant_id = delta.tenant_id
+                                  AND reasoning.user_id = delta.user_id
+                                  AND reasoning.turn_id = delta.turn_id
+                                  AND reasoning.event_type = 'compat/v1/thinking_delta'
+                           ) AS thinking_content,
+                           NULL::jsonb AS tool_calls,
+                           NULL::jsonb AS tool_results,
+                           (
+                               SELECT jsonb_agg(
+                                   jsonb_build_object(
+                                       'event_type', replace(runtime.event_type, 'compat/v1/', ''),
+                                       'data', runtime.payload #> '{data}',
+                                       'timestamp', EXTRACT(EPOCH FROM runtime.created_at)
+                                   ) ORDER BY runtime.sequence
+                               )
+                                 FROM assistant_runtime_items AS runtime
+                                WHERE runtime.runtime_thread_id = delta.runtime_thread_id
+                                  AND runtime.tenant_id = delta.tenant_id
+                                  AND runtime.user_id = delta.user_id
+                                  AND runtime.turn_id = delta.turn_id
+                                  AND runtime.event_type IN (
+                                      'compat/v1/subagent_started',
+                                      'compat/v1/subagent_step',
+                                      'compat/v1/subagent_finished',
+                                      'compat/v1/plan_update',
+                                      'compat/v1/context_compaction',
+                                      'compat/v1/memory_loaded',
+                                      'compat/v1/run_error',
+                                      'compat/v1/cancelled'
+                                  )
+                           ) AS runtime_events
+                      FROM assistant_runtime_items AS delta
+                      JOIN assistant_runtime_items AS started
+                        ON started.runtime_thread_id = delta.runtime_thread_id
+                       AND started.tenant_id = delta.tenant_id
+                       AND started.user_id = delta.user_id
+                       AND started.turn_id = delta.turn_id
+                       AND started.event_type = 'compat/v1/run_started'
+                     WHERE delta.runtime_thread_id = $1
+                       AND delta.tenant_id = $2 AND delta.user_id = $3
+                       AND delta.event_type = 'compat/v1/text_delta'
+                       AND NOT EXISTS (
+                           SELECT 1
+                             FROM assistant_runtime_items AS completed
+                            WHERE completed.runtime_thread_id = delta.runtime_thread_id
+                              AND completed.tenant_id = delta.tenant_id
+                              AND completed.user_id = delta.user_id
+                              AND completed.event_type = 'rollout/item'
+                              AND completed.item_type = 'event_msg'
+                              AND completed.payload #>> '{payload,type}' = 'agent_message'
+                              AND completed.sequence > started.sequence
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                    FROM assistant_runtime_items AS next_started
+                                   WHERE next_started.runtime_thread_id = started.runtime_thread_id
+                                     AND next_started.tenant_id = started.tenant_id
+                                     AND next_started.user_id = started.user_id
+                                     AND next_started.event_type = 'compat/v1/run_started'
+                                     AND next_started.sequence > started.sequence
+                                     AND next_started.sequence <= completed.sequence
+                              )
+                       )
+                     GROUP BY delta.runtime_thread_id, delta.tenant_id,
+                              delta.user_id, delta.turn_id, started.sequence
                    ) AS message
              WHERE content IS NOT NULL AND content <> ''
              ORDER BY created_at DESC, sequence DESC NULLS LAST LIMIT $4
@@ -276,12 +379,67 @@ class AgentThreadStore:
             thinking_content = row.get("thinking_content")
             if role == "assistant" and isinstance(thinking_content, str) and thinking_content:
                 metadata["thinking_content"] = thinking_content
-            for key in ("tool_calls", "tool_results"):
+            for key in ("tool_calls", "tool_results", "runtime_events"):
                 value = row.get(key)
                 if isinstance(value, str):
                     value = json.loads(value)
                 if role == "assistant" and isinstance(value, list) and value:
                     metadata[key] = value
+            runtime_events = metadata.get("runtime_events")
+            if role == "assistant" and isinstance(runtime_events, list):
+                steps: list[dict[str, Any]] = []
+                summary_status = "succeeded"
+                for runtime_event in runtime_events:
+                    if not isinstance(runtime_event, dict):
+                        continue
+                    event_type = runtime_event.get("event_type")
+                    data = runtime_event.get("data")
+                    data = data if isinstance(data, dict) else {}
+                    if event_type == "plan_update" and isinstance(data.get("plan"), list):
+                        for index, item in enumerate(data["plan"]):
+                            if not isinstance(item, dict) or not str(item.get("step") or "").strip():
+                                continue
+                            status = str(item.get("status") or "pending")
+                            normalized_status = "pending"
+                            if status in {"inProgress", "in_progress"}:
+                                normalized_status = "running"
+                            elif status == "completed":
+                                normalized_status = "completed"
+                            steps.append(
+                                {
+                                    "id": str(item.get("id") or f"plan-{index}"),
+                                    "title": str(item["step"])[:500],
+                                    "status": normalized_status,
+                                }
+                            )
+                    elif event_type == "context_compaction":
+                        steps.append(
+                            {
+                                "id": "context-compaction",
+                                "title": "Context compacted",
+                                "status": "completed",
+                            }
+                        )
+                    elif event_type == "memory_loaded":
+                        steps.append(
+                            {
+                                "id": "memory-loaded",
+                                "title": "Memory loaded",
+                                "status": "completed",
+                            }
+                        )
+                    elif event_type in {"run_error", "cancelled"}:
+                        summary_status = "failed"
+                        if event_type == "cancelled" or data.get("status") == "cancelled":
+                            summary_status = "cancelled"
+                if steps or summary_status != "succeeded":
+                    metadata["process_summary"] = {
+                        "collapsed": True,
+                        "run_id": row.get("run_id"),
+                        "status": summary_status,
+                        "steps": steps,
+                        "tools": [],
+                    }
             messages.append(
                 {
                     "role": role,
@@ -294,7 +452,13 @@ class AgentThreadStore:
         return messages, total
 
     async def turn_metadata(
-        self, *, tenant_id: str, user_id: str, session_id: str, runtime_thread_id: str, turn_id: str
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+        runtime_thread_id: str,
+        turn_id: str,
     ) -> dict[str, Any] | None:
         row = await self.database.fetchrow(
             """
@@ -304,8 +468,11 @@ class AgentThreadStore:
              WHERE run_id = $1 AND runtime_thread_id = $2
                AND tenant_id = $3 AND user_id = $4 AND session_id = $5
             """,
-            uuid.UUID(str(turn_id)), uuid.UUID(str(runtime_thread_id)),
-            tenant_id, user_id, session_id,
+            uuid.UUID(str(turn_id)),
+            uuid.UUID(str(runtime_thread_id)),
+            tenant_id,
+            user_id,
+            session_id,
         )
         if not row:
             return None
@@ -344,10 +511,20 @@ class AgentThreadStore:
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14
             ) AS sequence
             """,
-            uuid.UUID(thread.runtime_thread_id), uuid.UUID(thread.runtime_thread_id),
-            thread.tenant_id, thread.user_id, thread.session_id,
-            event_id, event_key, turn_id, item_id, event_type, item_id and "item" or None,
-            status, payload_json, sha256(payload_json.encode()).hexdigest(),
+            uuid.UUID(thread.runtime_thread_id),
+            uuid.UUID(thread.runtime_thread_id),
+            thread.tenant_id,
+            thread.user_id,
+            thread.session_id,
+            event_id,
+            event_key,
+            turn_id,
+            item_id,
+            event_type,
+            "item" if item_id else None,
+            status,
+            payload_json,
+            sha256(payload_json.encode()).hexdigest(),
         )
         return int(row["sequence"])
 

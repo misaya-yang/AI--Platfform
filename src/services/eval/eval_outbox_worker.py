@@ -231,9 +231,9 @@ def init_eval_outbox_worker(
     )
     if llm_complete is not None:
         logger.info(
-            "Eval LLM judge enabled model=%s assistant=%s",
+            "Eval LLM judge enabled model=%s gateway=%s",
             llm_settings.default_judge_model_id,
-            llm_settings.assistant_base_url,
+            llm_settings.gateway_base_url,
         )
     else:
         logger.warning("Eval LLM judge disabled; llm evaluators will require manual review")

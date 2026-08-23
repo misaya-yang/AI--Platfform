@@ -32,6 +32,7 @@ fn platform_resume_reinstates_the_private_responses_provider() {
             model_plane_base_url: Some(
                 "http://gateway:8080/internal/v1/agent-model-plane".to_string(),
             ),
+            ..Default::default()
         },
     )
     .unwrap_or_else(|_| panic!("valid platform resume"));
@@ -66,22 +67,93 @@ fn incomplete_or_untrusted_platform_resume_config_is_rejected() {
         ResumeThreadRequest {
             model: Some("qwen3.7-plus".to_string()),
             model_plane_base_url: None,
+            ..Default::default()
         },
         ResumeThreadRequest {
             model: Some("qwen3.7-plus".to_string()),
             model_plane_base_url: Some(
                 "https://user@example.test/internal/v1/agent-model-plane".to_string(),
             ),
+            ..Default::default()
         },
         ResumeThreadRequest {
             model: Some("qwen3.7-plus".to_string()),
             model_plane_base_url: Some("https://example.test/v1/responses".to_string()),
+            ..Default::default()
         },
         ResumeThreadRequest {
             model: Some("qwen3.7-plus".to_string()),
             model_plane_base_url: Some("http:///internal/v1/agent-model-plane".to_string()),
+            ..Default::default()
         },
     ] {
         assert!(resume_params(thread_id, request).is_err());
     }
+}
+
+#[test]
+fn platform_resume_carries_model_context_and_compaction_limits() {
+    let result = resume_params(
+        ThreadId::new(),
+        ResumeThreadRequest {
+            model: Some("qwen3.7-plus".to_string()),
+            model_plane_base_url: Some(
+                "http://gateway:8080/internal/v1/agent-model-plane".to_string(),
+            ),
+            model_context_window: Some(1_000_000),
+            auto_compact_token_limit: Some(900_000),
+            ..Default::default()
+        },
+    );
+    assert!(result.is_ok(), "valid platform resume");
+    let actual = match result {
+        Ok(value) => value,
+        Err(_) => unreachable!("checked above"),
+    };
+    let config = actual.config.expect("platform config");
+    assert_eq!(config["model_context_window"], 1_000_000);
+    assert_eq!(config["model_auto_compact_token_limit"], 900_000);
+}
+
+#[test]
+fn platform_resume_rebinds_stable_system_and_developer_instructions() {
+    let result = resume_params(
+        ThreadId::new(),
+        ResumeThreadRequest {
+            model: Some("qwen3.7-plus".to_string()),
+            model_plane_base_url: Some(
+                "http://gateway:8080/internal/v1/agent-model-plane".to_string(),
+            ),
+            base_instructions: Some("platform system contract".to_string()),
+            developer_instructions: Some("platform developer contract".to_string()),
+            ..Default::default()
+        },
+    );
+    assert!(result.is_ok(), "valid platform resume");
+    let actual = match result {
+        Ok(value) => value,
+        Err(_) => unreachable!("checked above"),
+    };
+    assert_eq!(
+        actual.base_instructions.as_deref(),
+        Some("platform system contract")
+    );
+    assert_eq!(
+        actual.developer_instructions.as_deref(),
+        Some("platform developer contract")
+    );
+    assert!(
+        resume_params(
+            ThreadId::new(),
+            ResumeThreadRequest {
+                model: Some("qwen3.7-plus".to_string()),
+                model_plane_base_url: Some(
+                    "http://gateway:8080/internal/v1/agent-model-plane".to_string(),
+                ),
+                developer_instructions: Some("   ".to_string()),
+                ..Default::default()
+            }
+        )
+        .is_err()
+    );
 }

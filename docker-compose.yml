@@ -375,7 +375,6 @@ services:
       VITE_TELEMETRY_ENDPOINT: "${VITE_TELEMETRY_ENDPOINT:-}"
       VITE_SSE_DEBUG: "${VITE_SSE_DEBUG:-}"
       VITE_AGENT_STUDIO_ENABLED: "${VITE_AGENT_STUDIO_ENABLED:-true}"
-      VITE_AGENT_RUNTIME_V2_ENABLED: "${VITE_AGENT_RUNTIME_V2_ENABLED:-false}"
     ports:
       - "127.0.0.1:${FRONTEND_PORT:-8081}:80"
     networks:
@@ -667,7 +666,7 @@ services:
   # Rust Agent Runtime. It is the sole Agent kernel for new and resumed turns.
   agent-runtime:
     container_name: ai-gateway-agent-runtime
-    image: "${AI_PLATFORM_AGENT_RUNTIME_IMAGE:-ai-gateway-agent-runtime:local-93c54bca3899-49230d811181}"
+    image: "${AI_PLATFORM_AGENT_RUNTIME_IMAGE:-ai-gateway-agent-runtime:local-93c54bca3899-c3add32732c2}"
     expose:
       - "8094"
     environment:

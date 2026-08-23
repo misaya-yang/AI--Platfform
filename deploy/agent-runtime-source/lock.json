@@ -6,13 +6,13 @@
     "cargo_lock_sha256": "13a58d438af37ce092236233832aa8441ee0a2e01e3b934b28b4c5cfd8c5ab66",
     "local_image_profile": "dev-small",
     "overlay_manifest": "rust/agent-runtime-overlay/manifest.json",
-    "overlay_sha256": "49230d811181b4be1768c3033413b5b1283ee88e584b0e77dc6d3e365a59a192",
+    "overlay_sha256": "c3add32732c21999f3f1e00fead8c8924807db70735c6b3bb903e42990a5d594",
     "rust_toolchain_sha256": "570656042681cfd8795403a455baf9a33035331a07db0645e866bbcea89a3d64",
     "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
     "sbom": "deploy/agent-runtime-source/sbom.cdx.json",
     "sbom_sha256": "41a6a321a0d412353f65891015976f430bafe239f57ac2ee77b10aab290aa607",
     "source_receipt": "deploy/agent-runtime-source/source-receipt.json",
-    "source_receipt_sha256": "6992cefba0aedcc7af688dd509fa4c9569fed0fd5d20d711bc07416e5db8a231"
+    "source_receipt_sha256": "b98663a28deb61425e65afa6c88cdd6996e8ad0ff8e8ba4e1993ee31456e35e3"
   },
   "license": {
     "notice": "deploy/agent-runtime-source/NOTICE.md",
@@ -26,8 +26,8 @@
       "agent_runtime": {
         "binary": "ai-platform-agent-runtime",
         "candidate_start_allowed": true,
-        "image_digest": "sha256:b781252a3f8917bbcc67432afae80cf72824228950a6f4f3773e26f4a8e3f6a4",
-        "image_ref": "local-image://sha256:b781252a3f8917bbcc67432afae80cf72824228950a6f4f3773e26f4a8e3f6a4",
+        "image_digest": "sha256:3ff61e345f3af707e41619cb3ce1fcb611430a6fa1ced2e90c6cf75dc54b0c30",
+        "image_ref": "local-image://sha256:3ff61e345f3af707e41619cb3ce1fcb611430a6fa1ced2e90c6cf75dc54b0c30",
         "platforms": [
           "linux/arm64"
         ],
@@ -35,9 +35,9 @@
       },
       "app_server": {
         "binary": "codex-app-server",
-        "candidate_start_allowed": true,
-        "image_digest": "sha256:1d6ad37a3c6e66115ce373867a06816f1ff92df88bdffdf3c1ba0bc275cec3d3",
-        "image_ref": "local-image://sha256:1d6ad37a3c6e66115ce373867a06816f1ff92df88bdffdf3c1ba0bc275cec3d3",
+        "candidate_start_allowed": false,
+        "image_digest": null,
+        "image_ref": null,
         "platforms": [
           "linux/arm64"
         ],

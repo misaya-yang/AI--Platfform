@@ -5,8 +5,8 @@
     "upstream_notice_sha256": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915"
   },
   "overlay": {
-    "file_count": 49,
-    "sha256": "49230d811181b4be1768c3033413b5b1283ee88e584b0e77dc6d3e365a59a192",
+    "file_count": 51,
+    "sha256": "c3add32732c21999f3f1e00fead8c8924807db70735c6b3bb903e42990a5d594",
     "source_revision": "c84c011f403a18be3db3e6c0f2cb603ee7ea1cdd",
     "upstream_sha": "93c54bca38996b56d344a2ca65f01627b1953b27"
   },

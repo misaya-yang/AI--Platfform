@@ -443,11 +443,22 @@ def test_deploy_builds_and_pins_the_agent_runtime_image() -> None:
     deploy = _read("scripts/new/deploy.sh")
     compose = _read("docker-compose.yml")
     example = _read(".env.example")
+    receipt = json.loads(_read("deploy/agent-runtime-source/source-receipt.json"))
+    expected_image = (
+        "ai-gateway-agent-runtime:local-"
+        f"{receipt['source']['upstream_sha'][:12]}-"
+        f"{receipt['overlay']['sha256'][:12]}"
+    )
+    expected_revision = (
+        f"{receipt['source']['upstream_sha']}+{receipt['overlay']['sha256'][:12]}"
+    )
 
     assert "agent_runtime_kernel_revision" in deploy
     assert "agent_runtime_image_tag" in deploy
     assert "build_agent_runtime_image.sh" in deploy
     assert "AI_PLATFORM_AGENT_RUNTIME_SOURCE is required for --build" in deploy
     assert 'AI_PLATFORM_AGENT_RUNTIME_IMAGE_TAG' in deploy
-    assert "AI_PLATFORM_AGENT_RUNTIME_IMAGE" in compose
-    assert "AI_PLATFORM_AGENT_RUNTIME_IMAGE=" in example
+    assert "assert_agent_runtime_image_locked" in deploy
+    assert f"AI_PLATFORM_AGENT_RUNTIME_IMAGE:-{expected_image}" in compose
+    assert f"AI_PLATFORM_AGENT_RUNTIME_IMAGE={expected_image}" in example
+    assert f"AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION={expected_revision}" in example

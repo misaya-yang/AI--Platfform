@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 import ai_gateway_core.session.database_manager as database_manager_module
 import pytest
+from ai_gateway_core.persistence.database import DatabaseStorage
 
 from src.models.session import Session
 from src.services.session.database_session_manager import DatabaseSessionManager
@@ -65,6 +66,51 @@ async def test_client_selected_session_id_conflict_does_not_cache() -> None:
         )
 
     assert manager._memory_cache == {}
+
+
+@pytest.mark.asyncio
+async def test_atomic_session_insert_handles_every_unique_constraint() -> None:
+    class Connection:
+        query = ""
+
+        async def fetchrow(self, query: str, *args):
+            del args
+            self.query = query
+            return None
+
+    class Acquire:
+        def __init__(self, connection: Connection) -> None:
+            self.connection = connection
+
+        async def __aenter__(self):
+            return self.connection
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Pool:
+        def __init__(self, connection: Connection) -> None:
+            self.connection = connection
+
+        def acquire(self):
+            return Acquire(self.connection)
+
+    connection = Connection()
+    database = object.__new__(DatabaseStorage)
+    database._pool = Pool(connection)
+
+    created = await database.create_session_if_absent(
+        {
+            "session_id": "session-1",
+            "service_id": "__builtin_assistant__",
+            "user_id": "user-1",
+            "tenant_id": "tenant-1",
+        }
+    )
+
+    assert created is False
+    assert "ON CONFLICT DO NOTHING" in connection.query
+    assert "ON CONFLICT (session_id)" not in connection.query
 
 
 def _build_session(session_id: str = "session-1") -> Session:

@@ -155,6 +155,10 @@ if [ "$BUILD" = true ]; then
     compose build "${BUILD_ARGS[@]}" $SERVICES
 fi
 
+if [ "$INFRA_ONLY" != true ]; then
+    assert_agent_runtime_image_locked "${AI_PLATFORM_AGENT_RUNTIME_IMAGE:-$(agent_runtime_image_tag)}"
+fi
+
 # The shell migration runner is the schema owner. Stop app services first so a
 # previous run cannot race migrations during startup.
 if [ "$INFRA_ONLY" != true ]; then

@@ -250,9 +250,33 @@ class RegistryToolInvoker(ToolInvoker):
                 success=False,
                 error="TOOL_DISCOVERY_CALL_UNAVAILABLE",
             )
+        # Capability-plane discovery is a controlled escape hatch from the
+        # bridge to one exact authorized tool.  Preserve the normal Gateway
+        # approval boundary for write/unknown targets; otherwise a read-only
+        # ``tool_call`` bridge could accidentally dispatch a mutating target
+        # before the Gateway sees it.
+        forwarded_arguments = arguments
+        if (context.metadata or {}).get("capability_plane"):
+            runtime_definition = (
+                context.runtime_tool_registry.get_tool(tool_name)
+                if context.runtime_tool_registry is not None
+                else None
+            )
+            definition = runtime_definition or self.tool_registry.get_tool(tool_name)
+            binding_type = ""
+            if context.capability_allowlist is not None:
+                binding = context.capability_allowlist.binding(tool_name) or {}
+                binding_type = str(binding.get("type") or "")
+            from .tools.tool_registry import tool_operation_kind
+
+            if tool_operation_kind(definition, binding_type=binding_type) != "read":
+                forwarded_arguments = {
+                    **arguments,
+                    "_middleware_approval_required": True,
+                }
         return await gateway.invoke_tool(
             tool_name=tool_name,
-            arguments=arguments,
+            arguments=forwarded_arguments,
             context=context,
         )
 

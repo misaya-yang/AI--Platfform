@@ -1,4 +1,4 @@
-"""Assistant-service backed LLM completion for eval judge runs."""
+"""Gateway Agent Runtime backed LLM completion for eval judge runs."""
 
 from __future__ import annotations
 
@@ -6,11 +6,14 @@ import json
 import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 import httpx
-from ai_gateway_core.auth.gateway_secret import GatewaySecret
+import jwt
 from ai_gateway_core.eval.evaluator_executor import LlmCompleteContext
 from ai_gateway_core.logging import get_logger
+
+from ...core.auth.jwt_config import get_jwt_algorithms, get_jwt_secret
 
 logger = get_logger(__name__)
 
@@ -33,7 +36,7 @@ def _read_float_env(name: str, default: float) -> float:
 @dataclass(frozen=True)
 class EvalLlmSettings:
     enabled: bool = True
-    assistant_base_url: str = "http://assistant-service:8093"
+    gateway_base_url: str = "http://gateway:8080"
     default_judge_model_id: str = DEFAULT_JUDGE_MODEL_ID
     system_tenant_id: str = "default"
     timeout_read_s: float = 120.0
@@ -48,7 +51,10 @@ def load_eval_llm_settings() -> EvalLlmSettings:
     }
     return EvalLlmSettings(
         enabled=enabled,
-        assistant_base_url=os.getenv("ASSISTANT_SERVICE_URL", "http://assistant-service:8093").rstrip("/"),
+        gateway_base_url=os.getenv(
+            "EVAL_LLM_GATEWAY_URL",
+            os.getenv("GATEWAY_URL", "http://gateway:8080"),
+        ).rstrip("/"),
         default_judge_model_id=os.getenv("EVAL_JUDGE_MODEL_ID", DEFAULT_JUDGE_MODEL_ID).strip()
         or DEFAULT_JUDGE_MODEL_ID,
         system_tenant_id=os.getenv("EVAL_SYSTEM_TENANT_ID", "default").strip() or "default",
@@ -56,19 +62,46 @@ def load_eval_llm_settings() -> EvalLlmSettings:
     )
 
 
-def _build_assistant_signer() -> GatewaySecret | None:
-    secret = os.getenv("GATEWAY_ASSISTANT_SHARED_SECRET", "").strip()
-    if not secret:
-        return None
-    return GatewaySecret(secret=secret)
+def _build_internal_jwt(*, tenant_id: str) -> str:
+    configured_secret = (
+        os.getenv("GATEWAY_AUTHENTICATION__JWT__SECRET", "").strip()
+        or os.getenv("JWT_SECRET", "").strip()
+    )
+    algorithms_raw = os.getenv("GATEWAY_AUTHENTICATION__JWT__ALGORITHMS", "").strip()
+    configured_algorithms: list[str] | None = None
+    if algorithms_raw:
+        try:
+            parsed = json.loads(algorithms_raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Eval judge JWT algorithms are invalid") from exc
+        if isinstance(parsed, list):
+            configured_algorithms = [str(value) for value in parsed]
+    algorithm = get_jwt_algorithms(configured_algorithms)[0]
+    now = datetime.now(UTC)
+    payload: dict[str, object] = {
+        "sub": EVAL_WORKER_USER_ID,
+        "user_id": EVAL_WORKER_USER_ID,
+        "tenant_id": tenant_id,
+        "roles": ["user"],
+        "permissions": [],
+        "tier": "normal",
+        "iat": now,
+        "exp": now + timedelta(minutes=5),
+    }
+    audience = os.getenv("GATEWAY_AUTHENTICATION__JWT__AUDIENCE", "").strip()
+    issuer = os.getenv("GATEWAY_AUTHENTICATION__JWT__ISSUER", "").strip()
+    if audience:
+        payload["aud"] = audience
+    if issuer:
+        payload["iss"] = issuer
+    return jwt.encode(payload, get_jwt_secret(configured_secret), algorithm=algorithm)
 
 
-class EvalAssistantLlmClient:
-    """Call assistant-service /chat for bounded evaluator judge prompts."""
+class EvalGatewayLlmClient:
+    """Call the Gateway's single Agent Runtime path for bounded judge prompts."""
 
     def __init__(self, settings: EvalLlmSettings | None = None) -> None:
         self.settings = settings or load_eval_llm_settings()
-        self._signer = _build_assistant_signer()
 
     async def complete(
         self,
@@ -87,23 +120,24 @@ class EvalAssistantLlmClient:
             "web_search_enabled": False,
         }
         encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        headers = self._headers(tenant_id=tenant_id, body=encoded)
+        headers = self._headers(tenant_id=tenant_id)
 
         timeout = httpx.Timeout(connect=5.0, read=self.settings.timeout_read_s, write=30.0, pool=10.0)
-        async with httpx.AsyncClient(base_url=self.settings.assistant_base_url, timeout=timeout) as client:
+        async with httpx.AsyncClient(base_url=self.settings.gateway_base_url, timeout=timeout) as client:
             response = await client.post(ASSISTANT_CHAT_PATH, headers=headers, content=encoded)
 
         if response.status_code >= 400:
-            raise RuntimeError(f"assistant-service judge chat failed with HTTP {response.status_code}")
+            raise RuntimeError(f"Gateway Agent Runtime judge failed with HTTP {response.status_code}")
 
         payload = response.json()
         content = str(payload.get("content") or "").strip()
         if not content:
-            raise RuntimeError("assistant-service judge chat returned empty content")
+            raise RuntimeError("Gateway Agent Runtime judge returned empty content")
         return content
 
-    def _headers(self, *, tenant_id: str, body: bytes) -> dict[str, str]:
+    def _headers(self, *, tenant_id: str) -> dict[str, str]:
         headers = {
+            "Authorization": f"Bearer {_build_internal_jwt(tenant_id=tenant_id)}",
             "Content-Type": "application/json",
             "Accept": "application/json",
             "X-User-Id": EVAL_WORKER_USER_ID,
@@ -112,13 +146,6 @@ class EvalAssistantLlmClient:
             "X-User-Type": "system",
             "X-User-Roles": "admin",
         }
-        if self._signer is not None:
-            headers[self._signer.header_name] = self._signer.sign(
-                method="POST",
-                path=ASSISTANT_CHAT_PATH,
-                query="",
-                body=body,
-            )
         return headers
 
 
@@ -131,7 +158,7 @@ def build_eval_llm_complete(
         logger.info("Eval LLM judge disabled via EVAL_LLM_ENABLED")
         return None
 
-    client = EvalAssistantLlmClient(resolved)
+    client = EvalGatewayLlmClient(resolved)
 
     async def _complete(model_id: str, prompt: str, context: LlmCompleteContext | None = None) -> str:
         ctx = context or LlmCompleteContext(tenant_id=resolved.system_tenant_id)

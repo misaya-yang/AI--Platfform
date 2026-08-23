@@ -1,4 +1,6 @@
 use codex_app_server_protocol::AgentMessageDeltaNotification;
+use codex_app_server_protocol::CollabAgentTool;
+use codex_app_server_protocol::CollabAgentToolCallStatus;
 use codex_app_server_protocol::DynamicToolCallStatus;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
@@ -11,6 +13,7 @@ use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::TurnStatus;
 use serde_json::json;
+use std::collections::HashMap;
 
 use super::v1_projector::V1ProjectionContext;
 use super::v1_projector::project_server_notification;
@@ -104,6 +107,208 @@ fn dynamic_tool_item_projects_one_start_and_one_terminal_pair() {
         completed[1].data["tool_call_id"]
     );
     assert_eq!(completed[0].data["success"], true);
+}
+
+#[test]
+fn collaboration_item_projects_stable_child_lifecycle() {
+    let item = ThreadItem::CollabAgentToolCall {
+        id: "collab-call".to_string(),
+        tool: CollabAgentTool::SpawnAgent,
+        status: CollabAgentToolCallStatus::InProgress,
+        sender_thread_id: "thread-a".to_string(),
+        receiver_thread_ids: vec!["child-a".to_string(), "child-b".to_string()],
+        prompt: Some("inspect the repository".to_string()),
+        model: None,
+        reasoning_effort: None,
+        agents_states: HashMap::new(),
+    };
+    let started = project_server_notification(
+        &ServerNotification::ItemStarted(ItemStartedNotification {
+            item: item.clone(),
+            thread_id: "thread-a".to_string(),
+            turn_id: "turn-a".to_string(),
+            started_at_ms: 1,
+        }),
+        &context(),
+    );
+    assert_eq!(
+        started
+            .iter()
+            .filter(|event| event.event_type == "subagent_started")
+            .count(),
+        2
+    );
+    assert_eq!(
+        started
+            .iter()
+            .filter(|event| event.event_type == "tool_call_start")
+            .count(),
+        1
+    );
+    assert!(
+        started
+            .iter()
+            .any(|event| event.data["agent_id"] == "child-a")
+    );
+    assert!(
+        started
+            .iter()
+            .any(|event| event.data["agent_id"] == "child-b")
+    );
+
+    let completed_item = ThreadItem::CollabAgentToolCall {
+        id: "collab-call".to_string(),
+        tool: CollabAgentTool::SpawnAgent,
+        status: CollabAgentToolCallStatus::Completed,
+        sender_thread_id: "thread-a".to_string(),
+        receiver_thread_ids: vec!["child-a".to_string(), "child-b".to_string()],
+        prompt: Some("inspect the repository".to_string()),
+        model: None,
+        reasoning_effort: None,
+        agents_states: HashMap::new(),
+    };
+    let completed = project_server_notification(
+        &ServerNotification::ItemCompleted(ItemCompletedNotification {
+            item: completed_item,
+            thread_id: "thread-a".to_string(),
+            turn_id: "turn-a".to_string(),
+            completed_at_ms: 2,
+        }),
+        &context(),
+    );
+    assert_eq!(
+        completed
+            .iter()
+            .filter(|event| event.event_type == "subagent_started")
+            .count(),
+        0
+    );
+    assert_eq!(
+        completed
+            .iter()
+            .filter(|event| event.event_type == "subagent_finished")
+            .count(),
+        2
+    );
+    assert_eq!(
+        completed
+            .iter()
+            .filter(|event| event.event_type == "tool_call_result")
+            .count(),
+        1
+    );
+    assert_eq!(
+        completed
+            .iter()
+            .filter(|event| event.event_type == "tool_call_end")
+            .count(),
+        1
+    );
+
+    let input = ThreadItem::CollabAgentToolCall {
+        id: "input-call".to_string(),
+        tool: CollabAgentTool::SendInput,
+        status: CollabAgentToolCallStatus::InProgress,
+        sender_thread_id: "thread-a".to_string(),
+        receiver_thread_ids: vec!["child-a".to_string()],
+        prompt: Some("continue".to_string()),
+        model: None,
+        reasoning_effort: None,
+        agents_states: HashMap::new(),
+    };
+    let input_events = project_server_notification(
+        &ServerNotification::ItemStarted(ItemStartedNotification {
+            item: input,
+            thread_id: "thread-a".to_string(),
+            turn_id: "turn-a".to_string(),
+            started_at_ms: 3,
+        }),
+        &context(),
+    );
+    assert_eq!(input_events.len(), 2);
+    let step = input_events
+        .iter()
+        .find(|event| event.event_type == "subagent_step")
+        .expect("subagent step");
+    assert_eq!(step.data["agent_id"], "child-a");
+    assert_eq!(
+        input_events
+            .iter()
+            .filter(|event| event.event_type == "tool_call_start")
+            .count(),
+        1
+    );
+
+    let unknown_spawn = ThreadItem::CollabAgentToolCall {
+        id: "unknown-spawn".to_string(),
+        tool: CollabAgentTool::SpawnAgent,
+        status: CollabAgentToolCallStatus::InProgress,
+        sender_thread_id: "thread-a".to_string(),
+        receiver_thread_ids: Vec::new(),
+        prompt: Some("not yet assigned".to_string()),
+        model: None,
+        reasoning_effort: None,
+        agents_states: HashMap::new(),
+    };
+    let fallback = project_server_notification(
+        &ServerNotification::ItemStarted(ItemStartedNotification {
+            item: unknown_spawn,
+            thread_id: "thread-a".to_string(),
+            turn_id: "turn-a".to_string(),
+            started_at_ms: 4,
+        }),
+        &context(),
+    );
+    assert_eq!(fallback.len(), 1);
+    assert_eq!(fallback[0].event_type, "tool_call_start");
+
+    let stable_completion = project_server_notification(
+        &ServerNotification::ItemCompleted(ItemCompletedNotification {
+            item: ThreadItem::CollabAgentToolCall {
+                id: "unknown-spawn".to_string(),
+                tool: CollabAgentTool::SpawnAgent,
+                status: CollabAgentToolCallStatus::Completed,
+                sender_thread_id: "thread-a".to_string(),
+                receiver_thread_ids: vec!["child-late".to_string()],
+                prompt: Some("not yet assigned".to_string()),
+                model: None,
+                reasoning_effort: None,
+                agents_states: HashMap::new(),
+            },
+            thread_id: "thread-a".to_string(),
+            turn_id: "turn-a".to_string(),
+            completed_at_ms: 5,
+        }),
+        &context(),
+    );
+    assert_eq!(
+        stable_completion
+            .iter()
+            .filter(|event| event.event_type == "tool_call_result")
+            .count(),
+        1
+    );
+    assert_eq!(
+        stable_completion
+            .iter()
+            .filter(|event| event.event_type == "tool_call_end")
+            .count(),
+        1
+    );
+    assert_eq!(
+        stable_completion
+            .iter()
+            .filter(|event| event.event_type == "subagent_started")
+            .count(),
+        0
+    );
+    assert_eq!(
+        stable_completion
+            .iter()
+            .filter(|event| event.event_type == "subagent_finished")
+            .count(),
+        1
+    );
 }
 
 #[test]

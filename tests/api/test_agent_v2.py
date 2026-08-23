@@ -250,7 +250,7 @@ async def test_v2_turn_uses_gateway_default_when_model_is_omitted() -> None:
     "field, value",
     [
         ("execution_profile", "balanced"),
-        ("memory_mode", "strict"),
+        ("memory_mode", "user"),
         ("system_prompt", "custom instructions"),
         ("os_agent_enabled", True),
         ("local_node_device_id", "node-a"),
@@ -268,14 +268,16 @@ async def test_v2_turn_rejects_unmigrated_capabilities(
     assert getattr(exc_info.value, "status_code", None) == 409
 
 
-def test_v2_turn_accepts_safe_auto_and_temperature() -> None:
-    body = TurnCreateRequest(
-        message="hello",
-        temperature=0.2,
-        execution_profile="safe",
-        memory_mode="auto",
+@pytest.mark.parametrize("memory_mode", ["auto", "strict", "off"])
+def test_v2_turn_accepts_migrated_memory_modes_and_temperature(memory_mode: str) -> None:
+    _reject_unmigrated_turn_capabilities(
+        TurnCreateRequest(
+            message="hello",
+            temperature=0.2,
+            execution_profile="safe",
+            memory_mode=memory_mode,
+        )
     )
-    _reject_unmigrated_turn_capabilities(body)
 
 
 @pytest.mark.asyncio

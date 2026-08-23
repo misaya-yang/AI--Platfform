@@ -95,6 +95,34 @@ class ToolRiskLevel(str, Enum):
     HIGH = "high"  # Irreversible operations, requires confirmation
 
 
+_TOOL_OPERATION_KINDS = frozenset({"read", "write", "unknown"})
+
+
+def tool_operation_kind(definition: Any, *, binding_type: str = "") -> str:
+    """Resolve the canonical side-effect class from trusted tool metadata.
+
+    This is deliberately metadata-only.  It never inspects a user message or
+    a tool argument, so the capability plane and the invoker cannot disagree
+    because of prompt-specific routing.  Unknown declarations stay unknown
+    and therefore require the approval boundary before dispatch.
+    """
+
+    metadata = dict(getattr(definition, "capability_metadata", None) or {})
+    declared = str(metadata.get("operation_kind") or "").lower()
+    if declared in _TOOL_OPERATION_KINDS:
+        return declared
+    if getattr(definition, "requires_confirmation", False):
+        return "write"
+    risk = str(getattr(getattr(definition, "risk_level", None), "value", "") or "")
+    if risk in {"medium", "high"}:
+        return "write"
+    if metadata.get("read_only") is True:
+        return "read"
+    if binding_type in {"mcp", "connector"}:
+        return "write"
+    return "unknown"
+
+
 class ToolCategory(str, Enum):
     """Tool categories for organization."""
 

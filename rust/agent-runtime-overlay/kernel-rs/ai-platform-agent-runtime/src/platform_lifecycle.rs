@@ -113,6 +113,42 @@ fn command_argument(payload: &ToolPayload) -> Option<String> {
         .map(str::to_string)
 }
 
+fn is_internal_agent_control_tool(tool_name: &str) -> bool {
+    let unnamespaced = matches!(
+        tool_name,
+        "spawn_agent"
+            | "send_input"
+            | "wait"
+            | "close_agent"
+            | "resume_agent"
+            | "send_message"
+            | "followup_task"
+            | "wait_agent"
+            | "list_agents"
+            | "interrupt_agent"
+            | "update_plan"
+            | "skillsread"
+    );
+    let collaboration_v2 = matches!(
+        tool_name,
+        "collaborationspawn_agent"
+            | "collaborationsend_message"
+            | "collaborationfollowup_task"
+            | "collaborationwait_agent"
+            | "collaborationlist_agents"
+            | "collaborationinterrupt_agent"
+    );
+    let collaboration_v1 = matches!(
+        tool_name,
+        "multi_agent_v1spawn_agent"
+            | "multi_agent_v1send_input"
+            | "multi_agent_v1wait"
+            | "multi_agent_v1close_agent"
+            | "multi_agent_v1resume_agent"
+    );
+    unnamespaced || collaboration_v2 || collaboration_v1
+}
+
 impl ThreadLifecycleContributor<Config> for PlatformLifecycleContributor {
     fn on_thread_resume<'a>(&'a self, input: ThreadResumeInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
@@ -138,7 +174,10 @@ impl ToolLifecycleContributor for PlatformLifecycleContributor {
         input: &'a codex_extension_api::ToolStartInput<'a>,
     ) -> codex_extension_api::ToolDispatchFuture<'a> {
         Box::pin(async move {
-            if matches!(input.effect, ToolEffect::Write | ToolEffect::Unknown) {
+            let tool_name = input.tool_name.to_string();
+            if matches!(input.effect, ToolEffect::Write | ToolEffect::Unknown)
+                && !is_internal_agent_control_tool(&tool_name)
+            {
                 let run_id =
                     uuid::Uuid::parse_str(input.turn_id).map_err(|_| ToolDispatchError {
                         code: "AI_PLATFORM_AGENT_RUNTIME_APPROVAL_REQUIRED".to_string(),
@@ -160,7 +199,6 @@ impl ToolLifecycleContributor for PlatformLifecycleContributor {
                         code: "AI_PLATFORM_AGENT_RUNTIME_SCOPE_INVALID".to_string(),
                         message: "tool scope is unavailable".to_string(),
                     })?;
-                let tool_name = input.tool_name.to_string();
                 let tool_kind = match tool_name.as_str() {
                     "shell" | "exec_command" | "shell_command" => "command_execution",
                     "apply_patch" => "file_change",
@@ -302,6 +340,7 @@ impl TurnLifecycleContributor for PlatformLifecycleContributor {
 #[cfg(test)]
 mod tests {
     use super::command_argument;
+    use super::is_internal_agent_control_tool;
     use super::unclosed_tool_call_ids;
     use codex_tools::ToolPayload;
     use serde_json::json;
@@ -330,5 +369,23 @@ mod tests {
             arguments: "not-json".to_string(),
         };
         assert!(command_argument(&malformed).is_none());
+    }
+
+    #[test]
+    fn native_agent_control_tools_do_not_require_external_action_approval() {
+        for name in [
+            "spawn_agent",
+            "collaborationspawn_agent",
+            "send_message",
+            "wait_agent",
+            "interrupt_agent",
+            "update_plan",
+            "skillsread",
+        ] {
+            assert!(is_internal_agent_control_tool(name));
+        }
+        for name in ["exec_command", "apply_patch", "unknown_external_tool"] {
+            assert!(!is_internal_agent_control_tool(name));
+        }
     }
 }

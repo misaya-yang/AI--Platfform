@@ -54,6 +54,7 @@ export const SSEEventType = {
   TOOL_CALL: "tool_call",
   TOOL_RESULT: "tool_result",
   TASK_PLANNING: "task_planning",
+  PLAN_UPDATE: "plan_update",
   WORKING_MEMORY_UPDATE: "working_memory_update",
   MEMORY_LOADED: "memory_loaded",
 
@@ -85,6 +86,7 @@ export const SSEEventType = {
   // New gateway/context events
   CONTEXT_BUDGET: "context_budget",
   CONTEXT_COMPACTED: "context_compacted",
+  CONTEXT_COMPACTION: "context_compaction",
   QUEUE_STATE: "queue_state",
   APPROVAL_REQUIRED: "approval_required",
   APPROVAL_RESULT: "approval_result",

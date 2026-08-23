@@ -91,16 +91,20 @@ if [ -e "$ENV_FILE" ] && [ "$FORCE" != true ]; then
             upgraded=true
         done
         kernel_revision="$(agent_runtime_kernel_revision)"
-        if ! awk -F= -v key="AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION" \
-            '$1 == key && length($0) > length($1) + 1 {found=1} END {exit !found}' "$upgrade_file"; then
+        existing_kernel_revision="$(awk -F= '$1 == "AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION" {print substr($0, length($1) + 2); exit}' "$upgrade_file")"
+        if [ -z "$existing_kernel_revision" ] \
+            || { [[ "$existing_kernel_revision" =~ ^[0-9a-f]{40}\+[0-9a-f]{12}$ ]] \
+                && [ "$existing_kernel_revision" != "$kernel_revision" ]; }; then
             awk -F= '$1 != "AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION" {print}' "$upgrade_file" > "${upgrade_file}.next"
             printf 'AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION=%s\n' "$kernel_revision" >> "${upgrade_file}.next"
             mv "${upgrade_file}.next" "$upgrade_file"
             upgraded=true
         fi
         runtime_image="$(agent_runtime_image_tag)"
-        if ! awk -F= -v key="AI_PLATFORM_AGENT_RUNTIME_IMAGE" \
-            '$1 == key && length($0) > length($1) + 1 {found=1} END {exit !found}' "$upgrade_file"; then
+        existing_runtime_image="$(awk -F= '$1 == "AI_PLATFORM_AGENT_RUNTIME_IMAGE" {print substr($0, length($1) + 2); exit}' "$upgrade_file")"
+        if [ -z "$existing_runtime_image" ] \
+            || { [[ "$existing_runtime_image" == ai-gateway-agent-runtime:local-* ]] \
+                && [ "$existing_runtime_image" != "$runtime_image" ]; }; then
             awk -F= '$1 != "AI_PLATFORM_AGENT_RUNTIME_IMAGE" {print}' "$upgrade_file" > "${upgrade_file}.next"
             printf 'AI_PLATFORM_AGENT_RUNTIME_IMAGE=%s\n' "$runtime_image" >> "${upgrade_file}.next"
             mv "${upgrade_file}.next" "$upgrade_file"

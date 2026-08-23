@@ -12,6 +12,7 @@ from ai_gateway_core.agents import RuntimeModelLeaseSigner
 from ai_gateway_core.models import get_builtin_model_capabilities
 
 from src.services.agent_runtime.control_plane import (
+    GENERIC_AGENT_INSTRUCTIONS_V1,
     AgentRuntimeControlError,
     AgentRuntimeControlPlane,
     AgentTurn,
@@ -101,6 +102,186 @@ class _AssignmentStore:
         )
 
 
+def test_signed_capability_catalog_allowlist_rejects_unbound_or_unsealed_tools() -> None:
+    allowlist = [
+        {
+            "type": "mcp",
+            "name": "tool-a",
+            "id": "server-a",
+            "version": "v1",
+            "schema_hash": "sha256:" + "a" * 64,
+        }
+    ]
+    selected = AgentRuntimeControlPlane._allowlisted_catalog_descriptors(
+        [
+            {
+                "name": "tool-a",
+                "id": "server-a",
+                "version": "v1",
+                "schema_hash": "sha256:" + "a" * 64,
+            }
+        ],
+        allowlist,
+    )
+    assert [item["name"] for item in selected] == ["tool-a"]
+    with pytest.raises(AgentRuntimeControlError, match="SCOPE_MISMATCH"):
+        AgentRuntimeControlPlane._allowlisted_catalog_descriptors(
+            [
+                {
+                    "name": "tool-b",
+                    "id": "server-b",
+                    "version": "v1",
+                    "schema_hash": "sha256:" + "b" * 64,
+                }
+            ],
+            allowlist,
+        )
+
+    platform_without_legacy_hash = [
+        {
+            "type": "platform",
+            "name": "safe-read",
+            "id": "safe-read",
+            "version": None,
+            "schema_hash": None,
+        }
+    ]
+    selected = AgentRuntimeControlPlane._allowlisted_catalog_descriptors(
+        [
+            {
+                "name": "safe-read",
+                "id": "safe-read",
+                "version": None,
+                "schema_hash": "sha256:" + "c" * 64,
+            }
+        ],
+        platform_without_legacy_hash,
+    )
+    assert selected[0]["schema_hash"] == "sha256:" + "c" * 64
+    with pytest.raises(AgentRuntimeControlError, match="SCOPE_MISMATCH"):
+        AgentRuntimeControlPlane._allowlisted_catalog_descriptors(
+            [
+                {
+                    "name": "tool-a",
+                    "id": "server-a",
+                    "version": "v2",
+                    "schema_hash": "sha256:" + "a" * 64,
+                }
+            ],
+            allowlist,
+        )
+
+
+def test_runtime_uses_native_multi_agent_and_hides_legacy_loop_alias() -> None:
+    config = AgentRuntimeControlPlane._runtime_model_config(
+        SimpleNamespace(model_plane_base_url="http://gateway.test/model-plane"),
+        "qwen3.7-plus",
+    )
+    assert config["features"]["multi_agent_v2"] == {
+        "enabled": True,
+        "max_concurrent_threads_per_session": 6,
+    }
+    dynamic = AgentRuntimeControlPlane._dynamic_tools(
+        {
+            "tools": [
+                {
+                    "name": "spawn_subagent",
+                    "description": "Legacy Python subagent loop",
+                    "schema": {"type": "object"},
+                    "read_only": True,
+                },
+                {
+                    "name": "search_knowledge_base",
+                    "description": "Search knowledge",
+                    "schema": {"type": "object"},
+                    "read_only": True,
+                },
+            ]
+        }
+    )
+    assert [tool["name"] for tool in dynamic] == ["search_knowledge_base"]
+
+
+@pytest.mark.asyncio
+async def test_memory_context_is_tenant_scoped_and_mode_gated() -> None:
+    class Memory:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, int]] = []
+
+        async def get_long_term_context(self, *, tenant_id: str, user_id: str, limit: int):
+            self.calls.append((tenant_id, user_id, limit))
+            return {
+                "preferences": {"language": "zh-CN"},
+                "frequent_memories": [{"key": "project", "value": "alpha"}],
+            }
+
+    memory = Memory()
+    plane = object.__new__(AgentRuntimeControlPlane)
+    plane.memory_service = memory
+    assert await plane._load_memory_context(
+        tenant_id="tenant-a", user_id="user-a", mode="off"
+    ) is None
+    assert await plane._load_memory_context(
+        tenant_id="tenant-a", user_id="user-a", mode="session"
+    ) is None
+    loaded = await plane._load_memory_context(
+        tenant_id="tenant-a", user_id="user-a", mode="user"
+    )
+    assert loaded == {
+        "status": "available",
+        "context": {
+            "preferences": {"language": "zh-CN"},
+            "frequent_memories": [{"key": "project", "value": "alpha", "access_count": 0}],
+        },
+    }
+    assert memory.calls == [("tenant-a", "user-a", 20)]
+
+    class Broken:
+        async def get_long_term_context(self, **_kwargs: Any):
+            raise RuntimeError("memory unavailable")
+
+    plane.memory_service = Broken()
+    with pytest.raises(AgentRuntimeControlError, match="MEMORY_UNAVAILABLE"):
+        await plane._load_memory_context(tenant_id="tenant-a", user_id="user-a", mode="strict")
+    degraded = await plane._load_memory_context(
+        tenant_id="tenant-a", user_id="user-a", mode="auto"
+    )
+    assert degraded == {"status": "unavailable", "reason": "memory_lookup_failed"}
+
+
+@pytest.mark.asyncio
+async def test_empty_developer_instructions_use_stable_generic_default() -> None:
+    captured: dict[str, Any] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, request=request, json={"thread": {"id": "thread-a"}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    plane = AgentRuntimeControlPlane(
+        database=_Database(uuid.uuid4()),
+        model_service=_ModelService(),
+        provider_service=_ProviderService(),
+        assignment_store=_AssignmentStore(),
+        lease_signer=RuntimeModelLeaseSigner("x" * 32),
+        runtime_url="http://runtime.test",
+        runtime_internal_token="runtime-token",
+        model_plane_base_url="http://gateway.test/internal/v1/agent-model-plane",
+        kernel_revision="kernel-1",
+        http_client=client,
+    )
+    try:
+        await plane._resume_thread(
+            runtime_thread_id=uuid.uuid4(),
+            tenant_id="tenant-a",
+            user_id="user-a",
+            session_id="session-a",
+            model_id="qwen3.7-plus",
+            developer_instructions="",
+        )
+    finally:
+        await client.aclose()
+    assert captured["developerInstructions"] == GENERIC_AGENT_INSTRUCTIONS_V1
 @pytest.mark.asyncio
 async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() -> None:
     runtime_thread_id = uuid.uuid4()
@@ -178,13 +359,13 @@ async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() ->
         "context",
     ]
     assert captured["headers"]["x-ai-tenant-id"] == "tenant-a"
-    assert captured["requests"][0] == (
-        f"/internal/v1/threads/{runtime_thread_id}/resume",
-        {
-            "model": "qwen3.7-plus",
-            "modelPlaneBaseUrl": "http://gateway.test/internal/v1/agent-model-plane",
-        },
+    assert captured["requests"][0][0] == f"/internal/v1/threads/{runtime_thread_id}/resume"
+    assert captured["requests"][0][1]["model"] == "qwen3.7-plus"
+    assert captured["requests"][0][1]["modelPlaneBaseUrl"] == (
+        "http://gateway.test/internal/v1/agent-model-plane"
     )
+    assert captured["requests"][0][1]["baseInstructions"]
+    assert captured["requests"][0][1]["developerInstructions"]
     assert database.issued_snapshot is not None
     assert database.issued_snapshot["model"]["wire_protocol"] == "responses_v1"
     assert database.issued_snapshot["parameters"] == {"temperature": 0.2}
@@ -232,6 +413,9 @@ async def test_catalog_is_fetched_before_first_thread_and_dynamic_tools_are_pinn
                     "tools": [
                         {
                             "name": "search_knowledge_base",
+                            "id": "search_knowledge_base",
+                            "version": None,
+                            "schema_hash": "sha256:" + "a" * 64,
                             "description": "Read Knowledge.",
                             "schema": {"type": "object", "properties": {}},
                             "source": "knowledge",
@@ -242,6 +426,9 @@ async def test_catalog_is_fetched_before_first_thread_and_dynamic_tools_are_pinn
                         },
                         {
                             "name": "tool_search",
+                            "id": "tool_search",
+                            "version": None,
+                            "schema_hash": "sha256:" + "b" * 64,
                             "description": "Search the stable tool catalog.",
                             "schema": {"type": "object", "properties": {}},
                             "source": "assistant",
@@ -307,6 +494,22 @@ async def test_catalog_is_fetched_before_first_thread_and_dynamic_tools_are_pinn
         "properties": {},
     }
     assert "parameters" not in thread_request["start"]["dynamicTools"][0]
+    assert readonly["capability_allowlist"] == [
+        {
+            "type": "knowledge",
+            "name": "search_knowledge_base",
+            "id": "search_knowledge_base",
+            "version": None,
+            "schema_hash": "sha256:" + "a" * 64,
+        },
+        {
+            "type": "platform_tool_discovery",
+            "name": "tool_search",
+            "id": "tool_search",
+            "version": None,
+            "schema_hash": "sha256:" + "b" * 64,
+        },
+    ]
     assert len(plane.database.fingerprint or "") == 64
 
 

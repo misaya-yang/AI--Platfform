@@ -6,7 +6,7 @@ import pytest
 from ai_gateway_core.eval.evaluator_executor import LlmCompleteContext
 
 from src.services.eval.eval_llm_client import (
-    EvalAssistantLlmClient,
+    EvalGatewayLlmClient,
     EvalLlmSettings,
     build_eval_llm_complete,
     load_eval_llm_settings,
@@ -31,12 +31,12 @@ async def test_eval_assistant_llm_client_posts_chat(monkeypatch: pytest.MonkeyPa
         return _FakeResponse()
 
     monkeypatch.setattr("httpx.AsyncClient.post", _fake_post)
-    monkeypatch.delenv("GATEWAY_ASSISTANT_SHARED_SECRET", raising=False)
+    monkeypatch.setenv("GATEWAY_AUTHENTICATION__JWT__SECRET", "x" * 32)
 
-    client = EvalAssistantLlmClient(
+    client = EvalGatewayLlmClient(
         EvalLlmSettings(
             enabled=True,
-            assistant_base_url="http://assistant.test",
+            gateway_base_url="http://gateway.test",
             default_judge_model_id="judge-model",
         )
     )
@@ -50,6 +50,7 @@ async def test_eval_assistant_llm_client_posts_chat(monkeypatch: pytest.MonkeyPa
     assert captured["url"] == "/api/v1/assistant/chat"
     headers = captured["headers"]
     assert isinstance(headers, dict)
+    assert str(headers["Authorization"]).startswith("Bearer ")
     assert headers["X-Tenant-Id"] == "tenant-a"
     assert headers["X-User-Id"] == "eval-worker"
     body = captured["body"]
@@ -83,7 +84,7 @@ async def test_build_eval_llm_complete_passes_context(monkeypatch: pytest.Monkey
             return '{"numeric_value": 1}'
 
     monkeypatch.setattr(
-        "src.services.eval.eval_llm_client.EvalAssistantLlmClient",
+        "src.services.eval.eval_llm_client.EvalGatewayLlmClient",
         lambda _settings: _StubClient(),
     )
     complete = build_eval_llm_complete(EvalLlmSettings(enabled=True))

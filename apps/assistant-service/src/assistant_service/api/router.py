@@ -21,7 +21,7 @@ router = APIRouter()
 chat_router.routes = [
     route
     for route in chat_router.routes
-    if route.path not in {"/chat", "/chat/stream"}
+    if route.path not in {"/chat", "/chat/stream", "/responses"}
 ]
 router.include_router(chat_router, tags=["Chat"])
 router.include_router(sessions_router, tags=["Sessions"])

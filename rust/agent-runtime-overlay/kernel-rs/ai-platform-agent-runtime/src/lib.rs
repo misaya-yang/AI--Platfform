@@ -16,6 +16,7 @@ mod v1_projector;
 
 pub use postgres_store::PlatformThreadIdentity;
 pub use postgres_store::PostgresThreadStore;
+pub use readonly_capabilities::CapabilityAllowlistEntry;
 pub use readonly_capabilities::CapabilityDescriptor;
 pub use readonly_capabilities::CapabilityItem;
 pub use readonly_capabilities::MetadataFilter;
@@ -30,6 +31,7 @@ pub use readonly_capabilities::project_item;
 pub use readonly_capabilities::project_knowledge;
 pub use readonly_capabilities::project_office_read;
 pub use readonly_capabilities::render_turn_input;
+pub use readonly_capabilities::resolve_dynamic_tool;
 pub use readonly_extension::ReadonlyTurnContext;
 pub use readonly_extension::install_readonly_contributors;
 pub use v1_projector::ASSISTANT_TURN_CONTRACT_V1;

@@ -27,6 +27,8 @@ use codex_app_server_client::InProcessAppServerRequestHandle;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ThreadMemoryMode;
+use codex_app_server_protocol::ThreadMemoryModeSetParams;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
@@ -57,8 +59,8 @@ use crate::approval_control::ApprovalDecisionRequest;
 use crate::postgres_store::PlatformLifecycleEvent;
 use crate::project_server_notification;
 use crate::readonly_capabilities::RuntimeCapabilityScope;
-use crate::readonly_capabilities::allows_dynamic_tool;
 use crate::readonly_capabilities::render_turn_input;
+use crate::readonly_capabilities::resolve_dynamic_tool;
 use crate::server_notification_thread_id;
 
 mod security;
@@ -114,9 +116,51 @@ struct TextProjectionState {
 struct TurnTextProjectionState {
     delta_items: HashSet<String>,
     completed_items: HashSet<String>,
+    child_agents: HashSet<String>,
 }
 
 impl TextProjectionState {
+    fn normalize_subagent_events(
+        &mut self,
+        projected: Vec<crate::AssistantTurnEventV1>,
+    ) -> Vec<crate::AssistantTurnEventV1> {
+        let mut normalized = Vec::with_capacity(projected.len());
+        for event in projected {
+            let run_id = event
+                .data
+                .get("run_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let agent_id = event
+                .data
+                .get("agent_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if run_id.is_empty() || agent_id.is_empty() {
+                normalized.push(event);
+                continue;
+            }
+            if event.event_type == "subagent_started" {
+                if self.turn(run_id).child_agents.insert(agent_id.to_string()) {
+                    normalized.push(event);
+                }
+                continue;
+            }
+            if event.event_type == "subagent_finished"
+                && self.turn(run_id).child_agents.insert(agent_id.to_string())
+            {
+                let mut started = event.data.clone();
+                started["status"] = "running".into();
+                normalized.push(crate::AssistantTurnEventV1::new(
+                    "subagent_started",
+                    started,
+                ));
+            }
+            normalized.push(event);
+        }
+        normalized
+    }
+
     fn fallback_event(
         &mut self,
         notification: &codex_app_server_protocol::ServerNotification,
@@ -305,13 +349,22 @@ async fn ready(
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateThreadRequest {
     tenant_id: String,
     user_id: String,
     session_id: String,
     #[serde(default)]
     start: ThreadStartParams,
+    /// Platform-selected memory behavior for this thread. Applied through
+    /// the kernel's native thread/memoryMode/set request after the durable
+    /// root identity is reserved.
+    memory_mode: Option<ThreadMemoryMode>,
+    /// Model capability data from the immutable platform snapshot. These are
+    /// converted to the kernel's config keys before thread creation so child
+    /// threads inherit the same context/compaction policy.
+    model_context_window: Option<i64>,
+    auto_compact_token_limit: Option<i64>,
 }
 
 async fn create_thread(
@@ -323,6 +376,14 @@ async fn create_thread(
     if body.start.ephemeral == Some(true) {
         return Err(RuntimeError::bad_request("ephemeral_thread_not_supported"));
     }
+    let mut start = body.start;
+    apply_model_limits(
+        &mut start,
+        body.model_context_window,
+        body.auto_compact_token_limit,
+    )?;
+    let memory_mode = body.memory_mode;
+    validate_memory_mode(memory_mode)?;
     let root_thread_id = ThreadId::new();
     state
         .store
@@ -339,16 +400,92 @@ async fn create_thread(
         .request_thread_start(
             ClientRequest::ThreadStart {
                 request_id: RequestId::String(format!("thread-start-{root_thread_id}")),
-                params: body.start,
+                params: start,
             },
             codex_app_server::host_runtime::AppServerThreadStartOptions::new(root_thread_id),
         )
         .await
         .map_err(|_| RuntimeError::unavailable("agent_kernel_unavailable"))?
         .map_err(|_| RuntimeError::bad_request("agent_thread_start_rejected"))?;
+    if let Some(mode) = memory_mode {
+        state
+            .requests
+            .request(ClientRequest::ThreadMemoryModeSet {
+                request_id: RequestId::String(format!("thread-memory-mode-{root_thread_id}")),
+                params: ThreadMemoryModeSetParams {
+                    thread_id: root_thread_id.to_string(),
+                    mode,
+                },
+            })
+            .await
+            .map_err(|_| RuntimeError::unavailable("agent_kernel_unavailable"))?
+            .map_err(|_| RuntimeError::bad_request("agent_thread_memory_mode_rejected"))?;
+    }
     serde_json::from_value(result)
         .map(Json)
         .map_err(|_| RuntimeError::internal("invalid_agent_thread_start_response"))
+}
+
+fn validate_memory_mode(mode: Option<ThreadMemoryMode>) -> Result<(), RuntimeError> {
+    if matches!(mode, Some(ThreadMemoryMode::Enabled)) {
+        // The upstream memory generator persists into a process-local SQLite
+        // home. This service is multi-tenant, so accepting `enabled` here
+        // would create an unscoped cross-tenant memory store. Until the
+        // platform memory contributor is wired to tenant-scoped storage,
+        // fail closed rather than silently enabling it.
+        return Err(RuntimeError::bad_request(
+            "agent_memory_backend_unavailable",
+        ));
+    }
+    Ok(())
+}
+
+/// Merge model capability limits into the official thread config map. The
+/// platform sends camelCase fields while the kernel config loader owns the
+/// snake_case keys. Conflicting values are rejected rather than silently
+/// choosing one source of truth.
+fn apply_model_limits(
+    start: &mut ThreadStartParams,
+    model_context_window: Option<i64>,
+    auto_compact_token_limit: Option<i64>,
+) -> Result<(), RuntimeError> {
+    if model_context_window.is_none() && auto_compact_token_limit.is_none() {
+        return Ok(());
+    }
+    let context_window = model_context_window.ok_or_else(|| {
+        RuntimeError::bad_request("model_context_window_required_for_compaction_policy")
+    })?;
+    if !(1..=10_000_000).contains(&context_window) {
+        return Err(RuntimeError::bad_request("invalid_model_context_window"));
+    }
+    let compact_limit = auto_compact_token_limit.unwrap_or((context_window * 9) / 10);
+    if !(1..=context_window).contains(&compact_limit) {
+        return Err(RuntimeError::bad_request(
+            "invalid_auto_compact_token_limit",
+        ));
+    }
+    let config = start.config.get_or_insert_with(HashMap::new);
+    insert_matching_config(config, "model_context_window", context_window)?;
+    insert_matching_config(config, "model_auto_compact_token_limit", compact_limit)?;
+    Ok(())
+}
+
+fn insert_matching_config(
+    config: &mut HashMap<String, serde_json::Value>,
+    key: &str,
+    value: i64,
+) -> Result<(), RuntimeError> {
+    let json_value = serde_json::Value::from(value);
+    if let Some(existing) = config.get(key) {
+        if existing != &json_value {
+            return Err(RuntimeError::bad_request(
+                "conflicting_model_runtime_config",
+            ));
+        }
+    } else {
+        config.insert(key.to_string(), json_value);
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -859,9 +996,9 @@ async fn handle_dynamic_tool_call(
     {
         return Err("dynamic_tool_binding_changed".to_string());
     }
-    if !allows_dynamic_tool(&binding.payload, params.namespace.as_deref(), &params.tool) {
-        return Err("dynamic_tool_not_authorized".to_string());
-    }
+    let (capability_allowlist, expected_tool) =
+        resolve_dynamic_tool(&binding.payload, params.namespace.as_deref(), &params.tool)
+            .map_err(|error| error.to_string())?;
     let bound_dataset_ids = binding
         .payload
         .get("items")
@@ -911,6 +1048,8 @@ async fn handle_dynamic_tool_call(
         binding.capability_revision,
         &binding.snapshot_id,
         &bound_dataset_ids,
+        &capability_allowlist,
+        &expected_tool,
     )
     .await;
     let (status, detail) = match &result {
@@ -1099,6 +1238,19 @@ async fn persist_projected_events(
             Ok(recovered) => recovered,
             Err(error) => {
                 warn!(%error, turn_id = %completed.turn.id, "terminal admission failed");
+                // Persistence is the authority for normal event sequencing,
+                // but a failed admission must not leave the connected client
+                // waiting forever. Broadcast one explicitly non-durable,
+                // failed terminal at the maximum sequence. Eval rejects any
+                // missing tool receipts; the Gateway also marks the run failed.
+                let event = terminal_admission_failure_event(completed, &context);
+                let _ = events.send(RuntimeBroadcastEvent {
+                    root_thread_id: identity.runtime_thread_id,
+                    event: SequencedAssistantTurnEventV1 {
+                        sequence: i64::MAX,
+                        event,
+                    },
+                });
                 return;
             }
         };
@@ -1134,10 +1286,11 @@ async fn persist_projected_events(
             }
         }
     }
-    for event in fallback
+    let projected = fallback
         .into_iter()
         .chain(project_server_notification(notification, &context))
-    {
+        .collect();
+    for event in text_projection.normalize_subagent_events(projected) {
         let event_id = Uuid::now_v7();
         let event_key = format!("compat/v1/{event_id}");
         match store
@@ -1164,6 +1317,35 @@ fn stable_event_id(event_key: &str) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
+fn terminal_admission_failure_event(
+    completed: &codex_app_server_protocol::TurnCompletedNotification,
+    context: &V1ProjectionContext,
+) -> crate::AssistantTurnEventV1 {
+    crate::AssistantTurnEventV1::new(
+        "run_error",
+        json!({
+            "run_id": completed.turn.id,
+            "tenant_id": context.tenant_id,
+            "user_id": context.user_id,
+            "session_id": context.session_id,
+            "thread_id": completed.thread_id,
+            "status": "failed",
+            "exit": "failed",
+            "durable": false,
+            "terminal_envelope": {
+                "schema_version": crate::ASSISTANT_TURN_CONTRACT_V1,
+                "run_id": completed.turn.id,
+                "tenant_id": context.tenant_id,
+                "user_id": context.user_id,
+                "session_id": context.session_id,
+                "thread_id": completed.thread_id,
+                "status": "failed",
+                "exit_reason": "terminal_admission_failed",
+            },
+        }),
+    )
+}
+
 #[cfg(test)]
 mod turn_request_tests {
     use super::*;
@@ -1171,6 +1353,10 @@ mod turn_request_tests {
     use codex_app_server_protocol::ItemCompletedNotification;
     use codex_app_server_protocol::ServerNotification;
     use codex_app_server_protocol::ThreadItem;
+    use codex_app_server_protocol::Turn;
+    use codex_app_server_protocol::TurnCompletedNotification;
+    use codex_app_server_protocol::TurnItemsView;
+    use codex_app_server_protocol::TurnStatus;
 
     fn request(signature: String) -> StartTurnRequest {
         StartTurnRequest {
@@ -1202,6 +1388,117 @@ mod turn_request_tests {
         assert!(validate_start_turn_request(&uppercase).is_err());
         let oversized = request(format!("v1:{}", "a".repeat(65)));
         assert!(validate_start_turn_request(&oversized).is_err());
+    }
+
+    #[test]
+    fn model_limits_are_profile_driven_and_conflicts_fail_closed() {
+        let mut start = ThreadStartParams::default();
+        assert!(
+            apply_model_limits(&mut start, Some(1_000_000), Some(900_000)).is_ok(),
+            "valid model limits"
+        );
+        let config = start.config.expect("limits should be placed in config");
+        assert_eq!(config["model_context_window"], 1_000_000);
+        assert_eq!(config["model_auto_compact_token_limit"], 900_000);
+
+        let mut conflicting = ThreadStartParams {
+            config: Some(HashMap::from([(
+                "model_context_window".to_string(),
+                serde_json::json!(272_000),
+            )])),
+            ..Default::default()
+        };
+        assert!(apply_model_limits(&mut conflicting, Some(1_000_000), None).is_err());
+        assert!(apply_model_limits(&mut ThreadStartParams::default(), None, Some(10)).is_err());
+        assert!(
+            apply_model_limits(&mut ThreadStartParams::default(), Some(1_000), Some(1_001))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn official_thread_instructions_use_stable_camel_case_fields() {
+        let start = ThreadStartParams {
+            base_instructions: Some("platform system contract".to_string()),
+            developer_instructions: Some("platform developer contract".to_string()),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(start).expect("thread params should serialize");
+        assert_eq!(value["baseInstructions"], "platform system contract");
+        assert_eq!(
+            value["developerInstructions"],
+            "platform developer contract"
+        );
+        assert!(!value.as_object().unwrap().contains_key("base_instructions"));
+    }
+
+    #[test]
+    fn memory_mode_does_not_enable_unscoped_local_storage() {
+        assert!(validate_memory_mode(None).is_ok());
+        assert!(validate_memory_mode(Some(ThreadMemoryMode::Disabled)).is_ok());
+        assert!(validate_memory_mode(Some(ThreadMemoryMode::Enabled)).is_err());
+    }
+
+    #[test]
+    fn subagent_projection_deduplicates_starts_and_repairs_late_receiver_identity() {
+        let data = json!({
+            "run_id": "turn-a",
+            "agent_id": "child-a",
+            "status": "running",
+        });
+        let mut state = TextProjectionState::default();
+        let first = state.normalize_subagent_events(vec![crate::AssistantTurnEventV1::new(
+            "subagent_started",
+            data.clone(),
+        )]);
+        assert_eq!(first.len(), 1);
+        let duplicate = state.normalize_subagent_events(vec![crate::AssistantTurnEventV1::new(
+            "subagent_started",
+            data.clone(),
+        )]);
+        assert!(duplicate.is_empty());
+        let finish = state.normalize_subagent_events(vec![crate::AssistantTurnEventV1::new(
+            "subagent_finished",
+            json!({
+                "run_id": "turn-a",
+                "agent_id": "child-late",
+                "status": "completed",
+            }),
+        )]);
+        assert_eq!(finish.len(), 2);
+        assert_eq!(finish[0].event_type, "subagent_started");
+        assert_eq!(finish[1].event_type, "subagent_finished");
+    }
+
+    #[test]
+    fn terminal_admission_failure_is_an_explicit_non_durable_failure() {
+        let event = terminal_admission_failure_event(
+            &TurnCompletedNotification {
+                thread_id: "thread-a".to_string(),
+                turn: Turn {
+                    id: "turn-a".to_string(),
+                    items: Vec::new(),
+                    items_view: TurnItemsView::NotLoaded,
+                    status: TurnStatus::Interrupted,
+                    error: None,
+                    started_at: Some(1),
+                    completed_at: Some(2),
+                    duration_ms: Some(1_000),
+                },
+            },
+            &V1ProjectionContext {
+                tenant_id: "tenant-a".to_string(),
+                user_id: "user-a".to_string(),
+                session_id: "session-a".to_string(),
+            },
+        );
+        assert_eq!(event.event_type, "run_error");
+        assert_eq!(event.data["status"], "failed");
+        assert_eq!(event.data["durable"], false);
+        assert_eq!(
+            event.data["terminal_envelope"]["exit_reason"],
+            "terminal_admission_failed"
+        );
     }
 
     fn completed_message(item_id: &str, text: &str) -> ServerNotification {

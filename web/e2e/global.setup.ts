@@ -31,25 +31,28 @@ async function verifyApi(apiURL: string) {
     throw new Error(`Health check failed (${healthResponse.status})`);
   }
 
-  // OpenAPI check is best-effort — production nginx may route /openapi.json to SPA
+  // OpenAPI availability is best-effort, but a successfully parsed API
+  // description must belong to this product. Do not swallow our own target
+  // mismatch error in the network/parse fallback.
+  let openapiResponse: Response;
   try {
-    const openapiResponse = await fetch(`${apiURL}/openapi.json`);
-    if (openapiResponse.ok) {
-      const text = await openapiResponse.text();
-      if (text.startsWith("{")) {
-        const openapi = JSON.parse(text) as {
-          info?: { title?: string };
-          paths?: Record<string, unknown>;
-        };
-        const paths = new Set(Object.keys(openapi.paths || {}));
-        const missing = REQUIRED_PATHS.filter((requiredPath) => !paths.has(requiredPath));
-        if (missing.length > 0) {
-          throw new Error(`Target API is not ai-gateway. Missing paths: ${missing.join(", ")}`);
-        }
-      }
-    }
+    openapiResponse = await fetch(`${apiURL}/openapi.json`);
   } catch {
-    // Skip OpenAPI validation if endpoint is not available
+    return;
+  }
+  if (!openapiResponse.ok) return;
+  const text = await openapiResponse.text();
+  if (!text.startsWith("{")) return;
+  let openapi: { info?: { title?: string }; paths?: Record<string, unknown> };
+  try {
+    openapi = JSON.parse(text) as typeof openapi;
+  } catch {
+    return;
+  }
+  const paths = new Set(Object.keys(openapi.paths || {}));
+  const missing = REQUIRED_PATHS.filter((requiredPath) => !paths.has(requiredPath));
+  if (missing.length > 0) {
+    throw new Error(`Target API is not ai-gateway. Missing paths: ${missing.join(", ")}`);
   }
 }
 
@@ -379,7 +382,7 @@ export default async function globalSetup(config: FullConfig) {
   const authPayload = {
     state: {
       token,
-      user: loginPayload.user,
+      user: currentUser,
       isAuthenticated: true,
       forcePasswordChange: Boolean(loginPayload.force_password_change),
       rememberMe: true,
@@ -417,6 +420,16 @@ export default async function globalSetup(config: FullConfig) {
   );
   await page.goto(`${baseURL}/dashboard`, { waitUntil: "domcontentloaded" });
   await page.waitForURL(/\/dashboard/);
+  // The setup page's in-memory auth store may finish hydrating after the
+  // direct localStorage seed and rewrite it.  Persist the validated token once
+  // more immediately before capturing storage state so the test context starts
+  // from the same authenticated state that was verified above.
+  await page.evaluate(
+    ({ authStorageKey, authState }) => {
+      localStorage.setItem(authStorageKey, JSON.stringify(authState));
+    },
+    { authStorageKey: AUTH_STORAGE_KEY, authState: authPayload }
+  );
   await context.storageState({ path: storageStatePath });
   await browser.close();
 

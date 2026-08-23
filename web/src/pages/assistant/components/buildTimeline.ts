@@ -8,10 +8,12 @@
 import type {
   ChatMessage as ChatMessageType,
   SearchStatusItem,
+  SubAgentState,
   ToolCall,
   ToolResult,
   WebSearchResult,
 } from "../types";
+import { safeSubAgentText } from "../subagentSafety";
 import type {
   TimelineIcon,
   TimelineSource,
@@ -104,6 +106,22 @@ function asString(value: unknown): string | undefined {
 function asNumber(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   return undefined;
+}
+
+function subAgentTimelineStatus(status: SubAgentState["status"]): TimelineStepData["status"] {
+  if (status === "running") return "running";
+  if (status === "completed") return "completed";
+  return "error";
+}
+
+function subAgentTimelineDetail(agent: SubAgentState): string {
+  const fallback = agent.status === "running"
+    ? "Delegated work in progress"
+    : "Delegated work finished";
+  return safeSubAgentText(
+    agent.resultSummary || agent.error || agent.currentStep || fallback,
+    4_000,
+  );
 }
 
 function truncate(text: string, max = 180): string {
@@ -546,6 +564,22 @@ export function buildTimeline(
       durationMs: tool.durationMs,
       status: timelineStatusFromProcessTool(tool.status),
       toolName: toolName || undefined,
+    });
+  }
+
+  // Child-agent lifecycle is projected into the same activity rail as tools.
+  // The child thread ID is the stable UI identity, so reconnects and history
+  // hydration do not create duplicate-looking steps.
+  for (const agent of message.activeSubAgents ?? []) {
+    steps.push({
+      kind: "tool",
+      id: `subagent-${agent.agentId}`,
+      icon: "other",
+      title: safeSubAgentText(agent.description, 500) || `Sub-agent ${agent.agentId}`,
+      body: subAgentTimelineDetail(agent),
+      durationMs: agent.durationMs,
+      status: subAgentTimelineStatus(agent.status),
+      toolName: "subagent",
     });
   }
 

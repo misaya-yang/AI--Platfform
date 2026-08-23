@@ -829,13 +829,19 @@ def main() -> int:
     parser.add_argument("--env-file", type=Path, default=ROOT / ".env")
     parser.add_argument("--runtime-image", default=os.environ.get("AI_PLATFORM_AGENT_RUNTIME_IMAGE", ""))
     arguments = parser.parse_args()
-    if not arguments.runtime_image:
+    env_file = arguments.env_file.expanduser().resolve()
+    runtime_image = str(
+        arguments.runtime_image
+        or (dotenv_values(env_file).get("AI_PLATFORM_AGENT_RUNTIME_IMAGE") if env_file.is_file() else "")
+        or ""
+    ).strip()
+    if not runtime_image:
         print("ERROR: AI_PLATFORM_AGENT_RUNTIME_IMAGE is required")
         return 2
     try:
         config = GateConfig.load(
-            env_file=arguments.env_file.expanduser().resolve(),
-            runtime_image=arguments.runtime_image,
+            env_file=env_file,
+            runtime_image=runtime_image,
         )
         asyncio.run(_run(config))
     except (GateError, OSError, asyncpg.PostgresError, httpx.HTTPError) as exc:

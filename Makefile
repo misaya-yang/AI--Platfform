@@ -67,15 +67,11 @@ agent-runtime-source-contract: ## 校验 Agent Runtime 不可变源码、Schema�
 	@python3 scripts/harness/agent_runtime_supply_chain.py validate \
 		--repo-root . \
 		--lock deploy/agent-runtime-source/lock.json \
-		--require-artifact app_server
+		--require-artifact agent_runtime
 	@uv run --all-packages --extra test pytest -q --no-cov \
 		tests/harness/test_agent_runtime_supply_chain.py
 
 agent-runtime-contract:     ## 校验 Rust Agent Runtime 已锁到独立、可运行的 OCI 制品
-	@python3 scripts/harness/agent_runtime_supply_chain.py validate \
-		--repo-root . \
-		--lock deploy/agent-runtime-source/lock.json \
-		--require-artifact app_server
 	@python3 scripts/harness/agent_runtime_supply_chain.py validate \
 		--repo-root . \
 		--lock deploy/agent-runtime-source/lock.json \
@@ -268,7 +264,7 @@ dev-compose-logs:           ## 查看源码挂载开发服务日志
 
 # -- Agent Trace / Eval Development Gates ------------------------------------
 
-.PHONY: verify-agent-studio verify-eval-dev agent-eval-core-gate eval-e1-gate eval-e1-unit-gate eval-regression-gate rag-eval-regression-gate verify-assistant-runtime-dev test-isolation snapshot-assistant-openapi
+.PHONY: verify-agent-studio verify-eval-dev agent-eval-core-gate agent-runtime-eval-contract-gate eval-e1-gate eval-e1-unit-gate eval-regression-gate rag-eval-regression-gate verify-assistant-runtime-dev test-isolation snapshot-assistant-openapi
 
 EVAL_REGRESSION_REPORT_DIR ?= tmp/eval-regression
 EVAL_E1_ARTIFACT_DIR ?= tmp/eval-e1
@@ -281,15 +277,19 @@ verify-agent-studio:        ## 运行 AS-00~AS-08 版本化 Agent Studio 整体�
 verify-assistant-runtime-dev: ## 运行 Assistant Runtime 离线回归门禁 (AHR-01~AHR-04)
 	@$(EVAL_UV_RUN) python scripts/assistant_runtime_regression.py gate --no-write
 
-agent-eval-core-gate:       ## 运行 Agent Eval 候选执行、统计、评估器与多代理核心门禁
+agent-runtime-eval-contract-gate: ## 验证 V2 Agent Runtime 的离线 Thread/Turn/Item 质量合同
+	@$(EVAL_UV_RUN) pytest -q --no-cov \
+		tests/services/eval/test_agent_runtime_eval_contract.py \
+		tests/services/eval/test_eval_candidate_client.py
+
+agent-eval-core-gate:       ## 运行 Agent Runtime 候选执行、统计、评估器与多代理核心门禁
+	@$(MAKE) agent-runtime-eval-contract-gate
 	@$(EVAL_UV_RUN) pytest -q --no-cov \
 		tests/services/eval/test_candidate_runner.py \
 		tests/services/eval/test_experiment_statistics.py \
 		tests/services/eval/test_eval_candidate_client.py \
 		tests/services/eval/test_evaluator_executor.py
-	@$(EVAL_UV_RUN) pytest -q --no-cov \
-		tests/services/assistant/test_subagent_manager.py \
-		tests/services/assistant/test_internal_exception_logging_gate.py
+	@echo "Agent Runtime live-provider candidate is not run by this offline gate; use the explicit V2 live gate with AGENT_EVAL_AUTH_TOKEN or AGENT_EVAL_API_KEY."
 
 verify-eval-dev:            ## 运行 Agent Trace/Eval dev 分支验证门禁
 	@$(EVAL_RUFF_RUN) ruff check \

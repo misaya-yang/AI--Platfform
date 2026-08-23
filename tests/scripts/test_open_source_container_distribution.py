@@ -219,6 +219,32 @@ def test_initializer_backfills_runtime_trust_secrets_without_replacing_existing_
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
 
+def test_initializer_refreshes_only_stale_local_runtime_identity(tmp_path: Path) -> None:
+    target = tmp_path / ".env"
+    target.write_text(
+        "AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION=" + "a" * 40 + "+" + "b" * 12 + "\n"
+        "AI_PLATFORM_AGENT_RUNTIME_IMAGE=ai-gateway-agent-runtime:local-old-old\n"
+    )
+
+    result = subprocess.run(
+        ["bash", "scripts/new/init-env.sh", "--env", str(target), "--if-missing"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    values = _env_values(target)
+    expected = _env_values(ROOT / ".env.example")
+    assert values["AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION"] == expected[
+        "AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION"
+    ]
+    assert values["AI_PLATFORM_AGENT_RUNTIME_IMAGE"] == expected[
+        "AI_PLATFORM_AGENT_RUNTIME_IMAGE"
+    ]
+
+
 def test_generated_admin_password_is_hashed_before_database_bootstrap() -> None:
     container = (ROOT / "src/container.py").read_text()
     database = (

@@ -21,7 +21,18 @@ from ai_gateway_core.agents import (
     RuntimeModelLeaseSigner,
     canonical_runtime_json,
 )
+from ai_gateway_core.agents.system_prompt import (
+    CORE_ASSISTANT_PROMPT,
+    GENERIC_AGENT_INSTRUCTIONS,
+)
 from ai_gateway_core.models import resolve_reasoning_option
+
+# Stable, provider-neutral instructions for the generic Assistant. These are
+# sent through the Runtime's typed ThreadResume contract, not as user input.
+BASE_AGENT_INSTRUCTIONS_V1 = CORE_ASSISTANT_PROMPT
+GENERIC_AGENT_INSTRUCTIONS_V1 = GENERIC_AGENT_INSTRUCTIONS
+DISCOVERY_BRIDGE_NAMES = frozenset({"tool_search", "tool_describe", "tool_call"})
+KERNEL_OWNED_AGENT_TOOL_ALIASES = frozenset({"spawn_subagent"})
 
 
 class _Database(Protocol):
@@ -70,6 +81,7 @@ class AgentRuntimeControlPlane:
         runtime_internal_token: str,
         model_plane_base_url: str,
         kernel_revision: str,
+        memory_service: Any | None = None,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         if not runtime_url or not runtime_internal_token or not model_plane_base_url:
@@ -86,6 +98,12 @@ class AgentRuntimeControlPlane:
         self.model_plane_base_url = model_plane_base_url.rstrip("/")
         self.capability_plane_url = os.getenv("AI_PLATFORM_CAPABILITY_PLANE_URL", "").strip().rstrip("/")
         self.kernel_revision = kernel_revision
+        self.memory_service = memory_service
+        if self.memory_service is None:
+            with contextlib.suppress(Exception):
+                from ai_gateway_core.memory import MemoryService
+
+                self.memory_service = MemoryService(database)
         self.http_client = http_client or httpx.AsyncClient(
             timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0),
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
@@ -225,6 +243,14 @@ class AgentRuntimeControlPlane:
         return {
             "model_provider": "ai-platform-gateway",
             "model": model_id,
+            "features": {
+                "multi_agent_v2": {
+                    "enabled": True,
+                    # The root thread occupies one slot; five child workers
+                    # remain available without overloading local deployments.
+                    "max_concurrent_threads_per_session": 6,
+                }
+            },
             "model_providers": {
                 "ai-platform-gateway": {
                     "name": "AI Platform Gateway Model Plane",
@@ -253,6 +279,8 @@ class AgentRuntimeControlPlane:
             schema = descriptor.get("schema")
             if not isinstance(name, str) or not isinstance(description, str) or not isinstance(schema, dict):
                 raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+            if name in KERNEL_OWNED_AGENT_TOOL_ALIASES:
+                continue
             result.append(
                 {
                     "type": "function",
@@ -275,6 +303,15 @@ class AgentRuntimeControlPlane:
             or not isinstance(descriptor.get("name"), str)
             or not isinstance(descriptor.get("description"), str)
             or not isinstance(descriptor.get("schema"), dict)
+            or not isinstance(descriptor.get("id"), str)
+            or not descriptor.get("id")
+            or not isinstance(descriptor.get("schema_hash"), str)
+            or len(descriptor.get("schema_hash")) != 71
+            or not descriptor.get("schema_hash").startswith("sha256:")
+            or any(
+                character not in "0123456789abcdef"
+                for character in descriptor.get("schema_hash")[7:]
+            )
             or descriptor.get("kind") not in {
                 "tool",
                 "knowledge",
@@ -288,6 +325,91 @@ class AgentRuntimeControlPlane:
             )
         return descriptor
 
+    @staticmethod
+    def _allowlisted_catalog_descriptors(
+        descriptors: list[dict[str, Any]],
+        allowlist: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        if allowlist is None:
+            return descriptors
+        allowed: list[dict[str, Any]] = []
+        for descriptor in descriptors:
+            matches = [
+                entry
+                for entry in allowlist
+                if str(entry.get("id") or "") == str(descriptor.get("id") or "")
+            ]
+            if len(matches) != 1:
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_CATALOG_SCOPE_MISMATCH",
+                    status_code=409,
+                )
+            expected = matches[0]
+            for field in ("version", "schema_hash"):
+                expected_value = expected.get(field)
+                actual_value = descriptor.get(field)
+                allow_platform_schema_resolution = (
+                    field == "schema_hash"
+                    and expected.get("type") == "platform"
+                    and expected_value is None
+                )
+                if actual_value != expected_value and not allow_platform_schema_resolution:
+                    raise AgentRuntimeControlError(
+                        "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_CATALOG_SCOPE_MISMATCH",
+                        status_code=409,
+                    )
+            allowed.append(descriptor)
+        return allowed
+
+    @staticmethod
+    def _snapshot_capability_allowlist(
+        snapshot: dict[str, Any] | None,
+    ) -> list[dict[str, Any]] | None:
+        """Project signed AgentSpec capabilities into a catalog allowlist."""
+
+        if snapshot is None:
+            return None
+        raw_capabilities = snapshot.get("capabilities")
+        if not isinstance(raw_capabilities, list):
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_AGENT_SNAPSHOT_INVALID", status_code=409
+            )
+        allowlist: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str, str]] = set()
+        for raw in raw_capabilities:
+            if not isinstance(raw, dict):
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_AGENT_SNAPSHOT_INVALID", status_code=409
+                )
+            capability_type = str(raw.get("type") or "")
+            capability_id = str(raw.get("id") or "")
+            config = raw.get("config") if isinstance(raw.get("config"), dict) else {}
+            name = str(config.get("tool_name") or config.get("name") or capability_id)
+            version = str(raw.get("version") or "")
+            schema_hash = str(raw.get("schema_hash") or "")
+            if not capability_type or not capability_id or not name:
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_AGENT_SNAPSHOT_INVALID", status_code=409
+                )
+            if not schema_hash and capability_type != "platform":
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_BINDING_INVALID", status_code=409
+                )
+            key = (capability_type, capability_id, version, schema_hash)
+            if key in seen:
+                continue
+            seen.add(key)
+            allowlist.append(
+                {
+                    "type": capability_type,
+                    "name": name,
+                    "id": capability_id,
+                    "version": version or None,
+                    "schema_hash": schema_hash or None,
+                }
+            )
+        return allowlist
+
     async def ensure_thread(
         self,
         *,
@@ -296,6 +418,7 @@ class AgentRuntimeControlPlane:
         session_id: str,
         model_id: str,
         readonly_capabilities: dict[str, Any] | None = None,
+        capability_allowlist: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if readonly_capabilities is None:
             model = await self.model_service.get_model(tenant_id, model_id)
@@ -316,6 +439,7 @@ class AgentRuntimeControlPlane:
                 session_id=session_id,
                 model_id=model_id,
                 capability_revision=capability_revision,
+                capability_allowlist=capability_allowlist,
             )
         existing = await self._existing_thread(tenant_id, user_id, session_id)
         if existing:
@@ -419,7 +543,13 @@ class AgentRuntimeControlPlane:
         user_id: str,
         session_id: str,
         model_id: str,
+        base_instructions: str | None = BASE_AGENT_INSTRUCTIONS_V1,
+        developer_instructions: str | None = None,
+        model_context_window: int | None = None,
+        auto_compact_token_limit: int | None = None,
     ) -> None:
+        if developer_instructions is not None and not developer_instructions.strip():
+            developer_instructions = GENERIC_AGENT_INSTRUCTIONS_V1
         response = await self.http_client.post(
             f"{self.runtime_url}/internal/v1/threads/{runtime_thread_id}/resume",
             headers={
@@ -431,6 +561,10 @@ class AgentRuntimeControlPlane:
             json={
                 "model": model_id,
                 "modelPlaneBaseUrl": self.model_plane_base_url,
+                "baseInstructions": base_instructions,
+                "developerInstructions": developer_instructions,
+                "modelContextWindow": model_context_window,
+                "autoCompactTokenLimit": auto_compact_token_limit,
             },
         )
         if response.status_code >= 400:
@@ -471,7 +605,15 @@ class AgentRuntimeControlPlane:
         """
 
         raw = value if isinstance(value, dict) else {}
-        allowed = {"knowledge", "attachments", "web_search", "tools", "mcp"}
+        allowed = {
+            "knowledge",
+            "attachments",
+            "web_search",
+            "tools",
+            "mcp",
+            "memory_context",
+            "capability_allowlist",
+        }
         if set(raw) - allowed:
             raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
         items: list[dict[str, Any]] = []
@@ -534,6 +676,22 @@ class AgentRuntimeControlPlane:
                     "capability_revision": capability_revision,
                 }
             )
+        memory_context = raw.get("memory_context")
+        if memory_context is not None:
+            if not isinstance(memory_context, dict):
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_MEMORY_CONTEXT_INVALID", status_code=503
+                )
+            items.append(
+                {
+                    "item_id": "context:long-term-memory",
+                    "kind": "context",
+                    "source": "long-term-memory",
+                    "payload": memory_context,
+                    "tenant_id": tenant_id,
+                    "capability_revision": capability_revision,
+                }
+            )
         tools = raw.get("tools") or []
         mcp = raw.get("mcp") or []
         if not isinstance(tools, list) or not isinstance(mcp, list):
@@ -546,7 +704,15 @@ class AgentRuntimeControlPlane:
                 or int(descriptor.get("capability_revision") or 0) != capability_revision
             ):
                 raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
-        return {
+        capability_allowlist = raw.get("capability_allowlist")
+        if capability_allowlist is not None and (
+            not isinstance(capability_allowlist, list)
+            or any(not isinstance(item, dict) for item in capability_allowlist)
+        ):
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400
+            )
+        normalized = {
             "schema_version": "agent-readonly-capability/v1",
             "tenant_id": tenant_id,
             "capability_revision": capability_revision,
@@ -554,6 +720,9 @@ class AgentRuntimeControlPlane:
             "tools": tools,
             "mcp": mcp,
         }
+        if capability_allowlist is not None:
+            normalized["capability_allowlist"] = capability_allowlist
+        return normalized
 
     async def _fetch_capability_catalog(
         self,
@@ -564,6 +733,7 @@ class AgentRuntimeControlPlane:
         session_id: str,
         model_id: str,
         capability_revision: int,
+        capability_allowlist: list[dict[str, Any]] | None = None,
     ) -> None:
         """Fetch stable read-only schemas before the first Thread is created."""
 
@@ -583,6 +753,11 @@ class AgentRuntimeControlPlane:
                 "session_id": session_id,
                 "model_id": model_id,
                 "capability_revision": capability_revision,
+                **(
+                    {"capability_allowlist": capability_allowlist}
+                    if capability_allowlist is not None
+                    else {}
+                ),
             },
         )
         if response.status_code >= 400:
@@ -592,9 +767,23 @@ class AgentRuntimeControlPlane:
         payload = response.json()
         tools = payload.get("tools") if isinstance(payload, dict) else None
         mcp = payload.get("mcp", []) if isinstance(payload, dict) else None
-        if not isinstance(tools, list) or not isinstance(mcp, list):
+        deferred = payload.get("deferred", []) if isinstance(payload, dict) else None
+        if (
+            not isinstance(tools, list)
+            or not isinstance(mcp, list)
+            or not isinstance(deferred, list)
+        ):
             raise AgentRuntimeControlError(
                 "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_CATALOG_INVALID", status_code=503
+            )
+        if capability_allowlist is not None and deferred:
+            # The dynamic Runtime bridge is deliberately read-only. Refuse an
+            # AgentSpec that binds write/unknown capabilities until its typed
+            # approval contributor is available instead of silently dropping
+            # requested authority and producing misleading Agent behavior.
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_WRITE_CAPABILITY_NOT_MIGRATED",
+                status_code=409,
             )
         readonly["tools"] = [
             self._validate_catalog_descriptor(
@@ -612,6 +801,102 @@ class AgentRuntimeControlPlane:
             )
             for descriptor in mcp
         ]
+        bridges = [
+            item for item in readonly["tools"] if item.get("name") in DISCOVERY_BRIDGE_NAMES
+        ]
+        bound_tools = [
+            item for item in readonly["tools"] if item.get("name") not in DISCOVERY_BRIDGE_NAMES
+        ]
+        allowed_tools = self._allowlisted_catalog_descriptors(
+            bound_tools, capability_allowlist
+        )
+        allowed_mcp = self._allowlisted_catalog_descriptors(
+            readonly["mcp"], capability_allowlist
+        )
+        readonly["tools"] = allowed_tools + bridges
+        readonly["mcp"] = allowed_mcp
+        if capability_allowlist is not None and len(allowed_tools) + len(allowed_mcp) != len(
+            capability_allowlist
+        ):
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_CATALOG_SCOPE_MISMATCH",
+                status_code=409,
+            )
+        # Every turn, including the generic Assistant without an AgentSpec,
+        # carries an exact live descriptor allowlist. The Runtime therefore
+        # never has to treat a missing allowlist as tenant-wide authority.
+        readonly["capability_allowlist"] = [
+            {
+                "type": str(item["kind"]),
+                "name": str(item["name"]),
+                "id": str(item["id"]),
+                "version": item.get("version"),
+                "schema_hash": item.get("schema_hash"),
+            }
+            for item in [*allowed_tools, *allowed_mcp, *bridges]
+        ]
+
+    async def _load_memory_context(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        mode: str,
+    ) -> dict[str, Any] | None:
+        """Load bounded cross-session memory only for an explicit memory mode."""
+
+        if mode not in {"auto", "strict", "user"}:
+            return None
+        service = self.memory_service
+        if service is None or not hasattr(service, "get_long_term_context"):
+            if mode in {"strict", "user"}:
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_MEMORY_UNAVAILABLE", status_code=503
+                )
+            return {"status": "unavailable", "reason": "memory_service_unavailable"}
+        try:
+            context = await service.get_long_term_context(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                limit=20,
+            )
+        except Exception as exc:  # noqa: BLE001 - memory policy decides fallback
+            if mode in {"strict", "user"}:
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_MEMORY_UNAVAILABLE", status_code=503
+                ) from exc
+            return {"status": "unavailable", "reason": "memory_lookup_failed"}
+        if not isinstance(context, dict):
+            if mode in {"strict", "user"}:
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_MEMORY_INVALID", status_code=503
+                )
+            return {"status": "unavailable", "reason": "memory_payload_invalid"}
+        preferences = context.get("preferences")
+        frequent = context.get("frequent_memories")
+        if not isinstance(preferences, dict):
+            preferences = {}
+        if not isinstance(frequent, list):
+            frequent = []
+        bounded_frequent: list[dict[str, Any]] = []
+        for item in frequent[:10]:
+            if not isinstance(item, dict):
+                continue
+            bounded_frequent.append(
+                {
+                    "key": str(item.get("key") or "")[:128],
+                    "value": item.get("value"),
+                    "access_count": int(item.get("access_count") or 0),
+                }
+            )
+        bounded = {"preferences": preferences, "frequent_memories": bounded_frequent}
+        encoded = canonical_runtime_json(bounded)
+        if len(encoded) > 64 * 1024:
+            bounded["frequent_memories"] = []
+            encoded = canonical_runtime_json(bounded)
+            if len(encoded) > 64 * 1024:
+                bounded["preferences"] = {}
+        return {"status": "available", "context": bounded}
 
     async def start_turn(
         self,
@@ -626,6 +911,10 @@ class AgentRuntimeControlPlane:
         max_tokens: int | None,
         temperature: float | None = None,
         readonly_capabilities: dict[str, Any] | None = None,
+        resolved_agent_snapshot: dict[str, Any] | None = None,
+        developer_instructions: str | None = None,
+        memory_mode: str = "auto",
+        enable_dynamic_tools: bool = True,
     ) -> AgentTurn:
         assignment = await self._assignment(tenant_id, user_id, session_id)
         model = await self.model_service.get_model(tenant_id, model_id)
@@ -640,7 +929,131 @@ class AgentRuntimeControlPlane:
             raise AgentRuntimeControlError(
                 "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_PROFILE_INVALID", status_code=503
             )
-        requested = reasoning_option or legacy_thinking_level or "auto"
+        signed_model: dict[str, Any] = {}
+        signed_agent_spec: dict[str, Any] | None = None
+        if resolved_agent_snapshot is not None:
+            if not isinstance(resolved_agent_snapshot, dict):
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_AGENT_SNAPSHOT_INVALID", status_code=409
+                )
+            if (
+                str(resolved_agent_snapshot.get("tenant_id") or "") != tenant_id
+                or str(resolved_agent_snapshot.get("user_id") or "") not in {"", user_id}
+                or str(resolved_agent_snapshot.get("session_id") or "") not in {"", session_id}
+                or not str(resolved_agent_snapshot.get("agent_id") or "")
+            ):
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_AGENT_SNAPSHOT_SCOPE_MISMATCH", status_code=403
+                )
+            signed_model = resolved_agent_snapshot.get("model")
+            signed_agent_spec = resolved_agent_snapshot.get("agent_spec")
+            if not isinstance(signed_model, dict) or not isinstance(signed_agent_spec, dict):
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_AGENT_SNAPSHOT_INVALID", status_code=409
+                )
+            if (
+                str(signed_model.get("id") or "") != model_id
+                or str(signed_model.get("provider") or "") != provider_id
+                or not isinstance(signed_agent_spec.get("developerInstructions"), str)
+            ):
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_AGENT_SNAPSHOT_MODEL_MISMATCH", status_code=409
+                )
+            if not signed_agent_spec["developerInstructions"].strip():
+                signed_agent_spec = {
+                    **signed_agent_spec,
+                    "developerInstructions": GENERIC_AGENT_INSTRUCTIONS_V1,
+                }
+        signed_parameters = signed_model.get("parameters") if signed_model else {}
+        if not isinstance(signed_parameters, dict):
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_AGENT_SNAPSHOT_INVALID", status_code=409
+            )
+        effective_max_tokens = max_tokens
+        signed_max_tokens = signed_parameters.get("max_tokens")
+        if effective_max_tokens is None and signed_max_tokens is not None:
+            if isinstance(signed_max_tokens, bool) or not isinstance(signed_max_tokens, int):
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_AGENT_SNAPSHOT_INVALID", status_code=409
+                )
+            effective_max_tokens = signed_max_tokens
+        effective_temperature = temperature
+        signed_temperature = signed_parameters.get("temperature")
+        if effective_temperature is None and signed_temperature is not None:
+            if (
+                isinstance(signed_temperature, bool)
+                or not isinstance(signed_temperature, int | float)
+                or not 0 <= float(signed_temperature) <= 2
+            ):
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_AGENT_SNAPSHOT_INVALID", status_code=409
+                )
+            effective_temperature = float(signed_temperature)
+        effective_reasoning_option = reasoning_option
+        effective_legacy_thinking = legacy_thinking_level
+        signed_thinking_mode = signed_parameters.get("thinking_mode")
+        if not effective_reasoning_option and not effective_legacy_thinking and signed_thinking_mode:
+            if not isinstance(signed_thinking_mode, str) or len(signed_thinking_mode) > 100:
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_AGENT_SNAPSHOT_INVALID", status_code=409
+                )
+            effective_legacy_thinking = signed_thinking_mode
+        requested = effective_reasoning_option or effective_legacy_thinking or "auto"
+        if developer_instructions is not None and (
+            not isinstance(developer_instructions, str)
+            or not developer_instructions.strip()
+            or len(developer_instructions) > 256 * 1024
+        ):
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_AGENT_INSTRUCTIONS_INVALID", status_code=400
+            )
+        if (
+            signed_agent_spec is not None
+            and developer_instructions is not None
+            and developer_instructions != signed_agent_spec["developerInstructions"]
+        ):
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_AGENT_INSTRUCTIONS_MISMATCH", status_code=409
+            )
+        agent_spec = signed_agent_spec or {
+            "developerInstructions": GENERIC_AGENT_INSTRUCTIONS_V1,
+            "model": {
+                "id": model_id,
+                "provider": provider_id,
+                "parameters": {},
+            },
+            "knowledge": {"datasets": [], "retrieval": {}},
+            "capabilities": [],
+            "memory": {"mode": "session"},
+        }
+        if developer_instructions is not None:
+            agent_spec = {**agent_spec, "developerInstructions": developer_instructions}
+        signed_memory = agent_spec.get("memory")
+        signed_memory_mode = (
+            str(signed_memory.get("mode") or "session")
+            if isinstance(signed_memory, dict)
+            else "session"
+        )
+        selected_memory_mode = (
+            signed_memory_mode
+            if signed_agent_spec is not None
+            else str(memory_mode or "auto").strip().lower()
+        )
+        if selected_memory_mode not in {"off", "session", "auto", "strict", "user"}:
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_MEMORY_MODE_INVALID", status_code=400
+            )
+        memory_context = await self._load_memory_context(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            mode=selected_memory_mode,
+        )
+        capability_allowlist = self._snapshot_capability_allowlist(resolved_agent_snapshot)
+        readonly_input = dict(readonly_capabilities or {})
+        if capability_allowlist is not None:
+            readonly_input["capability_allowlist"] = capability_allowlist
+        if memory_context and memory_context.get("status") == "available":
+            readonly_input["memory_context"] = memory_context["context"]
         resolved = resolve_reasoning_option(profile, requested)
         capability_revision = int(model.get("capability_revision") or 1)
         provider_revision = _provider_revision(provider.get("updated_at"))
@@ -658,29 +1071,32 @@ class AgentRuntimeControlPlane:
                 status_code=503,
             )
         output_limit = min(
-            int(max_tokens or model.get("max_output_tokens") or 4096),
+            int(effective_max_tokens or model.get("max_output_tokens") or 4096),
             int(model.get("max_output_tokens") or 4096),
         )
         output_limit = max(1, output_limit)
         readonly = self._readonly_capability_payload(
-            readonly_capabilities,
+            readonly_input,
             tenant_id=tenant_id,
             capability_revision=capability_revision,
         )
-        await self._fetch_capability_catalog(
-            readonly,
-            tenant_id=tenant_id,
-            user_id=user_id,
-            session_id=session_id,
-            model_id=model_id,
-            capability_revision=capability_revision,
-        )
+        if enable_dynamic_tools:
+            await self._fetch_capability_catalog(
+                readonly,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=session_id,
+                model_id=model_id,
+                capability_revision=capability_revision,
+                capability_allowlist=capability_allowlist,
+            )
         thread = await self.ensure_thread(
             tenant_id=tenant_id,
             user_id=user_id,
             session_id=session_id,
             model_id=model_id,
             readonly_capabilities=readonly,
+            capability_allowlist=capability_allowlist,
         )
         runtime_thread_id = uuid.UUID(str(thread["runtime_thread_id"]))
         await self._resume_thread(
@@ -689,6 +1105,19 @@ class AgentRuntimeControlPlane:
             user_id=user_id,
             session_id=session_id,
             model_id=model_id,
+            developer_instructions=agent_spec["developerInstructions"],
+            model_context_window=int(model.get("context_window") or 128000),
+            auto_compact_token_limit=(
+                int(model["auto_compact_token_limit"])
+                if isinstance(model.get("auto_compact_token_limit"), int)
+                and not isinstance(model.get("auto_compact_token_limit"), bool)
+                else (
+                    int(profile["auto_compact_token_limit"])
+                    if isinstance(profile.get("auto_compact_token_limit"), int)
+                    and not isinstance(profile.get("auto_compact_token_limit"), bool)
+                    else None
+                )
+            ),
         )
         run_id = uuid.uuid4()
         snapshot_id = uuid.uuid4()
@@ -713,6 +1142,15 @@ class AgentRuntimeControlPlane:
             },
             "capability_revision": capability_revision,
             "capabilities": profile,
+            "instructions": {
+                "developerInstructions": agent_spec["developerInstructions"],
+            },
+            "agent_spec": agent_spec,
+            "memory": {
+                "mode": selected_memory_mode,
+                "context_status": (memory_context or {}).get("status", "not_loaded"),
+            },
+            "memory_context": memory_context,
             "reasoning": {
                 "requested_option": resolved.requested,
                 "effective_option": resolved.effective,
@@ -727,7 +1165,11 @@ class AgentRuntimeControlPlane:
                 "max_output_tokens": output_limit,
                 "max_model_calls": self.max_model_calls,
             },
-            "parameters": ({"temperature": temperature} if temperature is not None else {}),
+            "parameters": (
+                {"temperature": effective_temperature}
+                if effective_temperature is not None
+                else {}
+            ),
             "pricing": {
                 "input_price_per_1k": float(model.get("input_price_per_1k") or 0),
                 "output_price_per_1k": float(model.get("output_price_per_1k") or 0),
@@ -738,6 +1180,18 @@ class AgentRuntimeControlPlane:
             },
             "readonly_capabilities": readonly,
         }
+        # Keep compaction/model limits data-driven. Providers may omit an
+        # explicit threshold; in that case the kernel uses its own bounded
+        # default rather than a model-name branch.
+        raw_compact_limit = model.get("auto_compact_token_limit")
+        if raw_compact_limit is None:
+            raw_compact_limit = profile.get("auto_compact_token_limit")
+        if raw_compact_limit is not None:
+            if isinstance(raw_compact_limit, bool) or not isinstance(raw_compact_limit, int):
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_PROFILE_INVALID", status_code=503
+                )
+            snapshot["limits"]["auto_compact_token_limit"] = max(1, raw_compact_limit)
         snapshot_json = canonical_runtime_json(snapshot)
         snapshot_hash = sha256(snapshot_json.encode()).hexdigest()
         max_input_tokens = min(

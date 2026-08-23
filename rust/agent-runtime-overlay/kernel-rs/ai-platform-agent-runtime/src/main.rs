@@ -126,6 +126,11 @@ async fn async_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
             cloud_config_bundle: CloudConfigBundleLoader::default(),
             feedback: CodexFeedback::new(),
             log_db: None,
+            // The Runtime is a shared multi-tenant process. Do not enable the
+            // upstream per-home SQLite state DB here: it would mix tenant
+            // memory across sessions. Platform memory is authoritative in the
+            // scoped PostgreSQL/capability snapshot until a tenant-keyed state
+            // backend is available.
             state_db: None,
             environment_manager,
             config_warnings: Vec::new(),

@@ -125,6 +125,7 @@ async def test_history_messages_projects_runtime_rollout_in_chronological_order(
             assert "FROM assistant_runs AS run" in query
             assert "item_type = 'event_msg'" in query
             assert "JOIN LATERAL" in query
+            assert "delta.event_type = 'compat/v1/text_delta'" in query
             assert args[1:] == ("tenant-a", "user-a", 10)
             return [
                 {
@@ -138,6 +139,23 @@ async def test_history_messages_projects_runtime_rollout_in_chronological_order(
                     "tool_results": [
                         {"tool_call_id": "call-1", "name": "search", "result": "ok"}
                     ],
+                    "runtime_events": [
+                        {
+                            "event_type": "subagent_started",
+                            "data": {"agent_id": "child-a", "agent_type": "task"},
+                            "timestamp": 1.0,
+                        },
+                        {
+                            "event_type": "subagent_finished",
+                            "data": {"agent_id": "child-a", "status": "completed"},
+                            "timestamp": 2.0,
+                        },
+                        {
+                            "event_type": "context_compaction",
+                            "data": {"compacted": True},
+                            "timestamp": 3.0,
+                        },
+                    ],
                     "total": 2,
                 },
                 {
@@ -149,6 +167,7 @@ async def test_history_messages_projects_runtime_rollout_in_chronological_order(
                     "thinking_content": None,
                     "tool_calls": None,
                     "tool_results": None,
+                    "runtime_events": None,
                     "total": 2,
                 },
             ]
@@ -168,3 +187,5 @@ async def test_history_messages_projects_runtime_rollout_in_chronological_order(
     assert messages[1]["metadata"]["thinking_content"] == "Reasoning summary"
     assert messages[1]["metadata"]["tool_calls"][0]["id"] == "call-1"
     assert messages[1]["metadata"]["tool_results"][0]["result"] == "ok"
+    assert messages[1]["metadata"]["runtime_events"][0]["event_type"] == "subagent_started"
+    assert messages[1]["metadata"]["process_summary"]["steps"][0]["id"] == "context-compaction"

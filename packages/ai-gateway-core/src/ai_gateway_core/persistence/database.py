@@ -1477,7 +1477,11 @@ class DatabaseStorage:
                     session_id, service_id, user_id, tenant_id,
                     state, history, metadata, config, status, expires_at
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                ON CONFLICT (session_id) DO NOTHING
+                -- A concurrent V1 create can collide on both the primary key
+                -- and the runtime-owner scope constraint. Any conflict means
+                -- this caller did not create the row; the API then performs
+                -- an owner-checked read before adopting it.
+                ON CONFLICT DO NOTHING
                 RETURNING session_id
                 """,
                 session.get("session_id"),

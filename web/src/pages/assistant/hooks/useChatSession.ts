@@ -413,6 +413,82 @@ const restoreMessageMetadata = (msg: any, index: number, sessionId: string): Cha
       }));
     }
 
+    // Runtime history may include the normalized child-agent lifecycle. Feed
+    // it through the same monotonic reducer used by live SSE so refreshes do
+    // not resurrect a terminal child or invent a second identity.
+    let persistedSubagents: unknown[] = [];
+    if (Array.isArray(msg.metadata.active_sub_agents)) {
+      persistedSubagents = msg.metadata.active_sub_agents;
+    } else if (Array.isArray(msg.metadata.subagents)) {
+      persistedSubagents = msg.metadata.subagents;
+    }
+    if (persistedSubagents.length > 0) {
+      let restored: ChatMessageType["activeSubAgents"] = [];
+      for (const raw of persistedSubagents) {
+        if (!raw || typeof raw !== "object") continue;
+        const agent = raw as Record<string, unknown>;
+        const agentId = typeof agent.agent_id === "string" ? agent.agent_id : "";
+        if (!agentId) continue;
+        restored = reduceSubAgentEvent(restored, "subagent_started", agent, Date.now());
+        if (typeof agent.current_step === "string") {
+          restored = reduceSubAgentEvent(restored, "subagent_step", {
+            ...agent,
+            step: agent.current_step,
+            status: agent.current_step_status ?? "running",
+          }, Date.now());
+        }
+        if (typeof agent.status === "string" && agent.status !== "running") {
+          restored = reduceSubAgentEvent(restored, "subagent_finished", agent, Date.now());
+        }
+      }
+      if (restored.length > 0) baseMessage.activeSubAgents = restored;
+    }
+
+    // Some Runtime history projections expose the append-only event list
+    // instead of a pre-folded child array. Reuse the live reducer for those
+    // records as well; unknown event types remain harmless no-ops.
+    const persistedRuntimeEvents = Array.isArray(msg.metadata.runtime_events)
+      ? msg.metadata.runtime_events
+      : [];
+    if (persistedRuntimeEvents.length > 0) {
+      let restored = baseMessage.activeSubAgents ?? [];
+      for (const raw of persistedRuntimeEvents) {
+        if (!raw || typeof raw !== "object") continue;
+        const record = raw as Record<string, unknown>;
+        const eventType = typeof record.event_type === "string" ? record.event_type : "";
+        if (!eventType) continue;
+        restored = reduceSubAgentEvent(
+          restored,
+          eventType,
+          record.data,
+          typeof record.timestamp === "number" ? record.timestamp * 1000 : Date.now(),
+        );
+      }
+      if (restored.length > 0) baseMessage.activeSubAgents = restored;
+    }
+
+    const persistedSummary = msg.metadata.process_summary;
+    if (persistedSummary && typeof persistedSummary === "object") {
+      const summary = persistedSummary as Record<string, unknown>;
+      let status: ProcessSummaryState["status"] = "succeeded";
+      if (
+        summary.status === "failed" ||
+        summary.status === "cancelled" ||
+        summary.status === "blocked"
+      ) {
+        status = summary.status;
+      } else if (summary.status === "running") {
+        status = "running";
+      }
+      baseMessage.processSummary = {
+        collapsed: summary.collapsed === true,
+        runId: typeof summary.run_id === "string" ? summary.run_id : undefined,
+        status,
+        steps: Array.isArray(summary.steps) ? summary.steps as ProcessStepItem[] : [],
+        tools: Array.isArray(summary.tools) ? summary.tools as ToolTimelineItem[] : [],
+      };
+    }
+
   }
   return baseMessage;
 };
@@ -1886,6 +1962,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
             break;
 
           case SSEEventType.CONTEXT_COMPACTED:
+          case SSEEventType.CONTEXT_COMPACTION:
             updateAssistantMessage((m) => {
               const prev = m.processSummary ?? initProcessSummary(undefined, now);
               const compactData = (event.data || {}) as Record<string, unknown>;
@@ -2686,6 +2763,79 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
             break;
 
           // === Legacy Events ===
+          case SSEEventType.PLAN_UPDATE: {
+            const planData = (event.data || {}) as Record<string, unknown>;
+            const rawPlan = Array.isArray(planData.plan) ? planData.plan : [];
+            const planTasks = rawPlan.flatMap((raw, index) => {
+              if (!raw || typeof raw !== "object") return [];
+              const item = raw as Record<string, unknown>;
+              const description =
+                typeof item.step === "string" ? item.step.trim() : "";
+              if (!description) return [];
+              const rawStatus = item.status;
+              let status: "pending" | "in_progress" | "completed" = "pending";
+              if (rawStatus === "completed") {
+                status = "completed";
+              } else if (rawStatus === "inProgress" || rawStatus === "in_progress") {
+                status = "in_progress";
+              }
+              const id =
+                typeof item.id === "string" && item.id.trim()
+                  ? item.id
+                  : `plan-${String(planData.item_id ?? "turn")}-${index}`;
+              return [{
+                id,
+                description,
+                status,
+              }];
+            });
+            const delta = typeof planData.delta === "string" ? planData.delta.trim() : "";
+            const explanation =
+              typeof planData.explanation === "string"
+                ? planData.explanation
+                : undefined;
+            if (planTasks.length > 0) {
+              setWorkingMemory((prev) => ({
+                goal: explanation ?? prev?.goal ?? "",
+                tasks: planTasks,
+                collectedInfo: prev?.collectedInfo || [],
+                notes: prev?.notes || [],
+              }));
+              setShowTaskPanel(true);
+            }
+            updateAssistantMessage((m) => {
+              const prev = m.processSummary ?? initProcessSummary(undefined, now);
+              const steps = planTasks.length > 0
+                ? planTasks.reduce(
+                    (current, task) => {
+                      let status: ProcessStepStatus = "pending";
+                      if (task.status === "in_progress") {
+                        status = "running";
+                      } else if (task.status === "completed") {
+                        status = "completed";
+                      }
+                      return upsertStep(current, {
+                        id: task.id,
+                        title: sanitizeProgressLabel(task.description) || task.id,
+                        status,
+                      });
+                    },
+                    prev.steps,
+                  )
+                : prev.steps;
+              return {
+                ...m,
+                processSummary: {
+                  ...prev,
+                  collapsed: false,
+                  currentStep: delta || explanation || prev.currentStep,
+                  steps,
+                },
+              };
+            });
+            break;
+          }
+
           case SSEEventType.TASK_PLANNING:
             const planData = event.data as TaskPlanningEventData;
             setWorkingMemory({
@@ -2716,6 +2866,29 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
               };
             });
             setShowTaskPanel(true);
+            break;
+
+          case SSEEventType.MEMORY_LOADED:
+            updateAssistantMessage((m) => {
+              const prev = m.processSummary ?? initProcessSummary(undefined, now);
+              return {
+                ...m,
+                processSummary: {
+                  ...prev,
+                  collapsed: false,
+                  steps: upsertStep(prev.steps, {
+                    id: `memory-loaded-${m.id}`,
+                    title: t("assistant.activity.memoryLoaded", {
+                      defaultValue: "Memory loaded",
+                    }),
+                    description: t("assistant.activity.memoryLoadedBody", {
+                      defaultValue: "Session memory is available to this turn.",
+                    }),
+                    status: "completed",
+                  }),
+                },
+              };
+            });
             break;
 
           case SSEEventType.WORKING_MEMORY_UPDATE:

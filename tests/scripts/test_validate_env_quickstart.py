@@ -1035,6 +1035,9 @@ def test_runtime_checks_microservice_readiness_not_only_liveness() -> None:
     assert "127.0.0.1:8765" not in common
     assert 'http://127.0.0.1:8092/health" &>/dev/null' not in common
     assert 'http://127.0.0.1:8093/health" &>/dev/null' not in common
+    assert "assert_agent_runtime_image_locked()" in common
+    assert "--require-artifact agent_runtime" in common
+    assert 'docker image inspect "$task_image" --format \'{{.Id}}\'' in common
 
 
 def test_knowledge_worker_is_first_class_in_runtime_scripts() -> None:
@@ -1060,6 +1063,10 @@ def test_knowledge_worker_is_first_class_in_runtime_scripts() -> None:
     assert 'restart_services+=("knowledge-service" "knowledge-worker")' in hot_update
     assert hot_update.count('copy_dir "apps/knowledge-service/src/knowledge_service"') >= 2
     assert 'wait_for_healthy "Knowledge worker" "check_knowledge_worker_health"' in hot_update
+    assert 'current_runtime_image' in hot_update
+    assert 'assert_agent_runtime_image_locked "$desired_runtime_image"' in hot_update
+    assert '--force-recreate agent-runtime' in hot_update
+    assert 'wait_for_healthy "Agent Runtime" "check_agent_runtime_health"' in hot_update
     assert 'check_and_report "Knowledge worker" check_knowledge_worker_health' in status
     makefile = Path("Makefile").read_text(encoding="utf-8")
     assert re.search(r"dev-compose:.*?knowledge-service knowledge-worker frontend", makefile, re.S)

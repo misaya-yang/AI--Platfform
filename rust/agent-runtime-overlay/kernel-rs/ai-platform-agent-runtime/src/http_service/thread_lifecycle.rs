@@ -10,6 +10,7 @@ use codex_app_server_protocol::ThreadArchiveParams;
 use codex_app_server_protocol::ThreadArchiveResponse;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
+use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadUnarchiveParams;
 use codex_app_server_protocol::ThreadUnarchiveResponse;
 use codex_app_server_protocol::TurnInterruptParams;
@@ -22,6 +23,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use super::RuntimeHttpState;
+use super::apply_model_limits;
 use super::security::RuntimeError;
 use super::security::SESSION_HEADER;
 use super::security::TENANT_HEADER;
@@ -39,6 +41,10 @@ pub(super) struct EmptyLifecycleRequest {}
 pub(super) struct ResumeThreadRequest {
     model: Option<String>,
     model_plane_base_url: Option<String>,
+    model_context_window: Option<i64>,
+    auto_compact_token_limit: Option<i64>,
+    base_instructions: Option<String>,
+    developer_instructions: Option<String>,
 }
 
 pub(super) async fn resume_thread(
@@ -92,13 +98,29 @@ fn resume_params(
     thread_id: ThreadId,
     body: ResumeThreadRequest,
 ) -> Result<ThreadResumeParams, RuntimeError> {
-    let (model, model_plane_base_url) = match (body.model, body.model_plane_base_url) {
-        (None, None) => {
+    let ResumeThreadRequest {
+        model,
+        model_plane_base_url,
+        model_context_window,
+        auto_compact_token_limit,
+        base_instructions,
+        developer_instructions,
+    } = body;
+    validate_instructions(base_instructions.as_deref(), "base_instructions")?;
+    validate_instructions(developer_instructions.as_deref(), "developer_instructions")?;
+    let (model, model_plane_base_url) = match (model, model_plane_base_url) {
+        (None, None)
+            if model_context_window.is_none()
+                && auto_compact_token_limit.is_none()
+                && base_instructions.is_none()
+                && developer_instructions.is_none() =>
+        {
             return Ok(ThreadResumeParams {
                 thread_id: thread_id.to_string(),
                 ..Default::default()
             });
         }
+        (None, None) => return Err(RuntimeError::bad_request("invalid_thread_resume_config")),
         (Some(model), Some(model_plane_base_url)) => (model, model_plane_base_url),
         _ => return Err(RuntimeError::bad_request("invalid_thread_resume_config")),
     };
@@ -128,13 +150,37 @@ fn resume_params(
             }
         }),
     );
-    Ok(ThreadResumeParams {
+    let mut params = ThreadResumeParams {
         thread_id: thread_id.to_string(),
         model: Some(model),
         model_provider: Some(provider_id.to_string()),
         config: Some(config),
+        base_instructions,
+        developer_instructions,
         ..Default::default()
-    })
+    };
+    let mut limit_start = ThreadStartParams {
+        config: params.config.take(),
+        ..Default::default()
+    };
+    apply_model_limits(
+        &mut limit_start,
+        model_context_window,
+        auto_compact_token_limit,
+    )?;
+    params.config = limit_start.config;
+    Ok(params)
+}
+
+fn validate_instructions(value: Option<&str>, field: &str) -> Result<(), RuntimeError> {
+    if value.is_some_and(|value| value.trim().is_empty() || value.len() > 256 * 1024) {
+        return Err(RuntimeError::bad_request(if field == "base_instructions" {
+            "invalid_base_instructions"
+        } else {
+            "invalid_developer_instructions"
+        }));
+    }
+    Ok(())
 }
 
 fn valid_model_plane_base_url(value: &str) -> bool {

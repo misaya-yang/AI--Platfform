@@ -135,6 +135,38 @@ print(f"ai-gateway-agent-runtime:local-{upstream[:12]}-{overlay[:12]}")
 PY
 }
 
+assert_agent_runtime_image_locked() {
+    local task_image="$1"
+    if ! docker image inspect "$task_image" >/dev/null 2>&1; then
+        log_error "Configured Agent Runtime image is not available locally: $task_image"
+        return 1
+    fi
+    if ! python3 "$PROJECT_ROOT/scripts/harness/agent_runtime_supply_chain.py" validate \
+        --repo-root "$PROJECT_ROOT" \
+        --lock "$PROJECT_ROOT/deploy/agent-runtime-source/lock.json" \
+        --require-artifact agent_runtime >/dev/null; then
+        log_error "Agent Runtime source/image lock validation failed"
+        return 1
+    fi
+
+    local task_locked_digest
+    local task_image_digest
+    task_locked_digest="$(python3 - "$PROJECT_ROOT/deploy/agent-runtime-source/lock.json" <<'PY'
+import json
+import sys
+
+lock = json.load(open(sys.argv[1], encoding="utf-8"))
+print(lock["oci"]["artifacts"]["agent_runtime"]["image_digest"] or "")
+PY
+)"
+    task_image_digest="$(docker image inspect "$task_image" --format '{{.Id}}')"
+    if [ -z "$task_locked_digest" ] || [ "$task_image_digest" != "$task_locked_digest" ]; then
+        log_error "Configured Agent Runtime image digest does not match the locked artifact"
+        return 1
+    fi
+    return 0
+}
+
 # -- Compose ownership guard -------------------------------------------------
 assert_compose_owner() {
     local expected_owner="${1:-$PROJECT_ROOT}"

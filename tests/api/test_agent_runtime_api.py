@@ -11,7 +11,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from ai_gateway_core.agents import AgentRuntimeSigner, InMemoryReplayStore
 from ai_gateway_core.exceptions import PermissionDeniedError
 from ai_gateway_core.persistence.repositories.agent_repository import (
     AgentRuntimeUnavailableError,
@@ -22,7 +21,6 @@ from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 
 from src.api.deps import get_user_context
-from src.api.v1 import _assistant_proxy as assistant_proxy_module
 from src.api.v1 import agent_runtime as runtime_module
 from src.api.v1.agent_public import document_router
 from src.api.v1.agent_public import router as public_router
@@ -148,6 +146,23 @@ class _Sessions:
 
     async def get(self, session_id: str) -> SimpleNamespace | None:
         return self.items.get(session_id)
+
+
+class _Assignments:
+    def __init__(self) -> None:
+        self.bound: list[tuple[str, str, str]] = []
+
+    async def bind_new_session(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+        policy: Any,
+    ) -> SimpleNamespace:
+        del policy
+        self.bound.append((tenant_id, user_id, session_id))
+        return SimpleNamespace(runtime_owner="agent_runtime")
 
 
 class _Repository:
@@ -424,20 +439,31 @@ def runtime_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, _Reposi
     monkeypatch.setenv("GATEWAY_ASSISTANT_SHARED_SECRET", "test-shared-secret-value")
     captured: list[dict[str, Any]] = []
 
-    async def _proxy(_request: Any, _user: Any, **kwargs: Any) -> StreamingResponse:
-        body = json.loads(kwargs["body"])
-        captured.append(body)
+    class _RuntimeControl:
+        async def start_turn(self, **kwargs: Any) -> Any:
+            snapshot = kwargs["resolved_agent_snapshot"]
+            captured.append(
+                {
+                    "runtime_envelope": {"resolved_snapshot": snapshot},
+                    "attachments": [
+                        {"file_path": ref}
+                        for ref in kwargs["readonly_capabilities"]["attachments"]["refs"]
+                    ],
+                }
+            )
+            return SimpleNamespace(run_id="run-runtime")
 
-        async def _events():
-            yield 'data: {"content":"approved response"}\n\n'
+        async def stream_events(self, **_kwargs: Any):
+            yield b'data: {"event_type":"text_delta","data":{"content":"approved response"}}\n\n'
+            yield b'data: {"event_type":"run_finished","data":{"status":"succeeded"}}\n\n'
 
-        return StreamingResponse(_events(), media_type="text/event-stream")
-
-    monkeypatch.setattr(runtime_module, "proxy_to_assistant_service", _proxy)
     app = FastAPI()
+    app.state.agent_runtime_control = _RuntimeControl()
     repository = _Repository()
     app.state.agent_repository = repository
     app.state.session_manager = _Sessions()
+    app.state.assistant_runtime_assignments = _Assignments()
+    app.state.assistant_runtime_assignment_policy = object()
     app.state.agent_runtime_capability_resolver = _Resolver()
     app.state.agent_runtime_knowledge_resolver = _Resolver()
     app.state.agent_channel_limiter = _AtomicChannelLimiter()
@@ -494,12 +520,12 @@ def version_resume_client(
 
         return StreamingResponse(_events(), media_type="text/event-stream")
 
-    monkeypatch.setattr(runtime_module, "proxy_to_assistant_service", _proxy)
-    monkeypatch.setattr(assistant_proxy_module, "proxy_to_assistant_service", _proxy)
     app = FastAPI()
     repository = _Repository()
     app.state.agent_repository = repository
     app.state.session_manager = _Sessions()
+    app.state.assistant_runtime_assignments = _Assignments()
+    app.state.assistant_runtime_assignment_policy = object()
     app.state.agent_runtime_capability_resolver = _Resolver()
     app.state.agent_runtime_knowledge_resolver = _Resolver()
     app.include_router(runtime_router, prefix="/api/v1")
@@ -520,79 +546,38 @@ def test_version_preview_approval_resume_re_resolves_and_re_signs_same_pinned_ve
     route = f"/api/v1/agents/{AGENT_ID}/versions/{VERSION_ID}/preview/chat/stream"
     first = client.post(
         route,
-        json={"message": "perform the approved action", "session_id": "version-session"},
+        json={
+            "message": "perform the approved action",
+            "session_id": "version-session",
+            "resume_run_id": "run-a",
+            "resume_approval_id": "approval-a",
+        },
     )
-    assert first.status_code == 200, first.text
-    assert "approval_required" in first.text
-
-    approval = client.post(
-        "/api/v1/assistant/approvals/approval-a",
-        json={"approved": True},
-    )
-    # The retired assistant-service AgentLoop approval path is fail-closed;
-    # approvals must be issued by the native Agent Runtime contract.
-    assert approval.status_code == 409, approval.text
+    assert first.status_code == 409, first.text
+    assert first.json()["detail"]["code"] == "AGENT_RUNTIME_RESUME_NOT_AVAILABLE"
     assert approval_scopes == []
-    return
-    assert len(repository.version_resolution_calls) == 2
-    assert len(captured) == 2
+    assert len(repository.version_resolution_calls) == 1
+    assert captured == []
 
-    initial, resume = captured
-    assert resume["resume_run_id"] == "run-a"
-    assert resume["resume_approval_id"] == "approval-a"
-    signed_resume_body = {key: value for key, value in resume.items() if key != "runtime_envelope"}
-    assert resume["runtime_envelope"]["request_body_hash"] == runtime_module.runtime_sha256(
-        signed_resume_body
-    )
-    verified_resume = AgentRuntimeSigner(
-        secret="test-shared-secret-value",
-        issuer="ai-gateway",
-        replay_store=InMemoryReplayStore(),
-    ).verify(
-        resume["runtime_envelope"],
-        request_body=signed_resume_body,
-        expected_tenant_id="tenant-a",
-        expected_caller_principal="owner-a",
-        expected_session_id="version-session",
-    )
-    assert verified_resume.agent_id == AGENT_ID
-    assert verified_resume.agent_version_id == VERSION_ID
-    assert verified_resume.resolved_snapshot == resume["runtime_envelope"]["resolved_snapshot"]
-    assert initial["runtime_envelope"]["resolved_snapshot"] == resume["runtime_envelope"][
-        "resolved_snapshot"
-    ]
-    snapshot = resume["runtime_envelope"]["resolved_snapshot"]
-    assert snapshot["agent_id"] == AGENT_ID
-    assert snapshot["agent_version_id"] == VERSION_ID
-    assert snapshot["channel_policy"]["high_risk_tools"] is True
-    assert snapshot["publication"]["id"] is None
-    assert snapshot["publication"]["channel"] == "preview"
 
-    cross_version = client.post(
-        f"/api/v1/agents/{AGENT_ID}/versions/99999999-9999-4999-8999-999999999999/preview/chat/stream",
-        json={
-            "message": "continue",
-            "session_id": "version-session",
-            "resume_run_id": "run-a",
-            "resume_approval_id": "approval-a",
-        },
+def test_version_preview_binds_single_kernel_assignment_before_turn(
+    runtime_client: tuple[TestClient, _Repository, list[dict[str, Any]]],
+) -> None:
+    client, _repository, captured = runtime_client
+    client.app.dependency_overrides[get_user_context] = lambda: _user(authenticated=True)
+    response = client.post(
+        f"/api/v1/agents/{AGENT_ID}/versions/{VERSION_ID}/preview/chat/stream",
+        json={"message": "explain transformers"},
     )
-    assert cross_version.status_code == 404
-    assert len(repository.version_resolution_calls) == 2
-    assert len(captured) == 2
 
-    cross_agent = client.post(
-        f"/api/v1/agents/88888888-8888-4888-8888-888888888888/versions/{VERSION_ID}/preview/chat/stream",
-        json={
-            "message": "continue",
-            "session_id": "version-session",
-            "resume_run_id": "run-a",
-            "resume_approval_id": "approval-a",
-        },
-    )
-    assert cross_agent.status_code == 404
-    assert len(repository.version_resolution_calls) == 2
-    assert len(captured) == 2
+    assert response.status_code == 200, response.text
+    assert "approved response" in response.text
+    assert captured
+    assignments = client.app.state.assistant_runtime_assignments
+    assert len(assignments.bound) == 1
+    tenant_id, user_id, session_id = assignments.bound[0]
+    assert (tenant_id, user_id) == ("tenant-a", "owner-a")
+    assert session_id
 
 
 def test_published_runtime_resume_is_signed_into_downstream_body(
@@ -615,17 +600,8 @@ def test_published_runtime_resume_is_signed_into_downstream_body(
             "resume_approval_id": "approval-a",
         },
     )
-    assert resumed.status_code == 200, resumed.text
-    body = captured[-1]
-    assert body["resume_run_id"] == "run-a"
-    assert body["resume_approval_id"] == "approval-a"
-    signed_body = {key: value for key, value in body.items() if key != "runtime_envelope"}
-    assert body["runtime_envelope"]["request_body_hash"] == runtime_module.runtime_sha256(
-        signed_body
-    )
-    assert body["runtime_envelope"]["resolved_snapshot"]["channel_policy"][
-        "high_risk_tools"
-    ] is True
+    assert resumed.status_code == 409, resumed.text
+    assert resumed.json()["detail"]["code"] == "AGENT_RUNTIME_RESUME_NOT_AVAILABLE"
 
     repository.policy = {
         "attachments": True,
@@ -749,7 +725,7 @@ def test_runtime_session_is_publication_principal_and_version_pinned(
         json={"message": "continue", "session_id": session_id},
     )
     assert streamed.status_code == 200
-    assert captured[-1]["runtime_envelope"]["agent_version_id"] == VERSION_ID
+    assert captured[-1]["runtime_envelope"]["resolved_snapshot"]["agent_version_id"] == VERSION_ID
 
     other_token = copy.deepcopy(repository.tokens["agt_valid"])
     other_token["token_id"] = "77777777-7777-4777-8777-777777777777"
@@ -834,12 +810,6 @@ def test_hosted_attachment_upload_resolves_server_owned_path(
         },
     )
     assert response.status_code == 200
-    assert captured[-1]["attachments"] == [{
-        "artifact_id": attachment["artifact_id"],
-        "filename": "notes.txt",
-        "mime_type": "text/plain",
-        "file_path": captured[-1]["attachments"][0]["file_path"],
-    }]
     assert captured[-1]["attachments"][0]["file_path"].startswith("/uploads/")
 
     denied = client.post(

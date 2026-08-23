@@ -1,5 +1,7 @@
 import baseConfig from "./playwright.config";
 
+process.env.E2E_DOCKER_LIVE_STACK = "1";
+
 /**
  * Regression config for running Playwright against the ALREADY-RUNNING Docker
  * stack (frontend :8081, gateway :8080, knowledge :8092).

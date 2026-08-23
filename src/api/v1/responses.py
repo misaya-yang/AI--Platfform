@@ -1,25 +1,34 @@
-"""Public ``POST /v1/responses`` boundary.
+"""Public ``POST /v1/responses`` boundary backed by the Agent Runtime.
 
-The gateway owns authentication, tenant/model authorization and rate limiting;
-assistant-service owns request validation and the Responses event projection.
+The Gateway owns authentication, tenant/model authorization, request
+validation, idempotency, and the Responses compatibility projection.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import time
+import uuid
+from collections.abc import AsyncIterator
 from typing import Any
 
+from ai_gateway_core.comm.idempotency import (
+    CachedResponse,
+    InMemoryIdempotencyStore,
+    RedisIdempotencyStore,
+)
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from ...core.auth.user_resolver import UserContext
 from ..deps import enforce_rate_limit, get_user_context
-from ._assistant_proxy import (
-    proxy_to_assistant_service,
-    reject_client_agent_forgery,
+from ._assistant_proxy import reject_client_agent_forgery
+from .assistant import (
+    _check_model_permission,
+    _ensure_agent_runtime_session,
 )
-from .assistant import _check_model_permission
 
 router = APIRouter(tags=["Responses"])
 logger = logging.getLogger(__name__)
@@ -58,11 +67,299 @@ def _has_authenticated_tenant(user: UserContext) -> bool:
     )
 
 
+def _responses_message(payload: dict[str, Any]) -> str:
+    value = payload.get("input")
+    if isinstance(value, str) and value.strip():
+        return value
+    if not isinstance(value, list) or not value:
+        raise HTTPException(status_code=400, detail="input must be a non-empty string or message list")
+    parts: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=400, detail="input items must be objects")
+        item_type = item.get("type", "message")
+        if item_type not in {"message", "input_text"}:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "responses_input_item_not_migrated", "item_type": item_type},
+            )
+        content = item.get("content", item.get("text", ""))
+        if isinstance(content, str):
+            parts.append(content)
+            continue
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict) or part.get("type") not in {"input_text", "text"}:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={"code": "responses_input_item_not_migrated"},
+                    )
+                text = part.get("text")
+                if not isinstance(text, str):
+                    raise HTTPException(status_code=400, detail="input text must be a string")
+                parts.append(text)
+            continue
+        raise HTTPException(status_code=400, detail="input content is invalid")
+    message = "\n".join(part for part in parts if part)
+    if not message:
+        raise HTTPException(status_code=400, detail="input must contain text")
+    return message
+
+
+def _reject_unmigrated_fields(payload: dict[str, Any]) -> None:
+    unsupported = {
+        "previous_response_id",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "attachments",
+        "conversation",
+        "store",
+    }
+    present = sorted(
+        key
+        for key in unsupported
+        if key in payload
+        and (
+            payload[key] not in (None, False)
+            if key == "store"
+            else payload[key] not in (None, [], "")
+        )
+    )
+    if present:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "responses_fields_not_migrated", "fields": present},
+        )
+
+
+def _runtime_control(request: Request) -> Any:
+    control = getattr(request.app.state, "agent_runtime_control", None)
+    if control is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "agent_runtime_unavailable"},
+        )
+    return control
+
+
+async def _runtime_events(
+    control: Any,
+    *,
+    turn: Any,
+    user: UserContext,
+    session_id: str,
+) -> AsyncIterator[dict[str, Any]]:
+    async for frame in control.stream_events(
+        turn=turn,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        session_id=session_id,
+    ):
+        for line in frame.decode("utf-8", errors="replace").splitlines():
+            if not line.startswith("data:"):
+                continue
+            try:
+                event = json.loads(line[5:].strip())
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                yield event
+
+
+def _response_id(turn: Any) -> str:
+    return f"resp_{turn.run_id.replace('-', '')}"
+
+
+def _completed_response(
+    *,
+    response_id: str,
+    model: str,
+    text: str,
+    status: str = "completed",
+    usage: dict[str, Any] | None = None,
+    error: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized_usage = _responses_usage(usage)
+    return {
+        "id": response_id,
+        "object": "response",
+        "created_at": int(time.time()),
+        "status": status,
+        "error": error,
+        "incomplete_details": None,
+        "model": model,
+        "output": [
+            {
+                "id": f"msg_{response_id[5:]}",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed" if status == "completed" else "incomplete",
+                "content": [{"type": "output_text", "text": text, "annotations": []}],
+            }
+        ],
+        "output_text": text,
+        "parallel_tool_calls": False,
+        "tool_choice": "none",
+        "tools": [],
+        "usage": normalized_usage,
+    }
+
+
+def _responses_usage(value: dict[str, Any] | None) -> dict[str, Any]:
+    value = value if isinstance(value, dict) else {}
+
+    def token(*names: str) -> int:
+        for name in names:
+            raw = value.get(name)
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+                return raw
+        return 0
+
+    input_tokens = token("input_tokens", "prompt_tokens")
+    output_tokens = token("output_tokens", "completion_tokens")
+    details = value.get("input_tokens_details")
+    cached_tokens = token("cached_input_tokens")
+    if isinstance(details, dict):
+        raw_cached = details.get("cached_tokens")
+        if isinstance(raw_cached, int) and not isinstance(raw_cached, bool) and raw_cached >= 0:
+            cached_tokens = raw_cached
+    cached_tokens = min(cached_tokens, input_tokens)
+    return {
+        "input_tokens": input_tokens,
+        "input_tokens_details": {"cached_tokens": cached_tokens},
+        "output_tokens": output_tokens,
+        "output_tokens_details": {"reasoning_tokens": token("reasoning_tokens")},
+        "total_tokens": input_tokens + output_tokens,
+    }
+
+
+def _sse(event_type: str, payload: dict[str, Any], sequence_number: int) -> bytes:
+    event = {"type": event_type, "sequence_number": sequence_number, **payload}
+    return (
+        f"event: {event_type}\ndata: "
+        f"{json.dumps(event, ensure_ascii=False, separators=(',', ':'))}\n\n"
+    ).encode()
+
+
+def _response_idempotency_store(request: Request):
+    existing = getattr(request.app.state, "responses_idempotency_store", None)
+    if existing is not None:
+        return existing
+    redis = getattr(request.app.state, "redis", None)
+    native = None
+    if redis is not None:
+        getter = getattr(redis, "get_native_client", None)
+        native = getter() if callable(getter) else redis
+    store = (
+        RedisIdempotencyStore(native, prefix="ai-gateway:responses:idem")
+        if native is not None
+        else InMemoryIdempotencyStore()
+    )
+    request.app.state.responses_idempotency_store = store
+    return store
+
+
+async def _begin_idempotent_response(
+    request: Request,
+    user: UserContext,
+    body: bytes,
+) -> tuple[Any, str, str] | Response | None:
+    raw_key = request.headers.get("Idempotency-Key", "").strip()
+    if not raw_key:
+        return None
+    if len(raw_key) > 255 or any(ord(char) < 0x21 or ord(char) > 0x7E for char in raw_key):
+        return _error(
+            status_code=400,
+            code="invalid_idempotency_key",
+            message="Idempotency-Key must contain 1-255 visible ASCII characters.",
+        )
+    digest = hashlib.sha256(body).hexdigest()
+    scope_key = hashlib.sha256(
+        "\n".join((user.tenant_id, user.user_id, "/v1/responses", raw_key)).encode()
+    ).hexdigest()
+    store = _response_idempotency_store(request)
+    cached = await store.get_cached(scope_key)
+    if cached is not None:
+        if cached.request_body_digest != digest:
+            return _error(
+                status_code=409,
+                code="idempotency_key_conflict",
+                message="Idempotency-Key was already used with a different request body.",
+            )
+        headers = {
+            name.decode("latin-1"): value.decode("latin-1")
+            for name, value in cached.headers
+            if name.lower() not in {b"content-length", b"transfer-encoding"}
+        }
+        headers["x-idempotency-replayed"] = "true"
+        return Response(
+            content=cached.body,
+            status_code=cached.status_code,
+            headers=headers,
+            media_type="application/json",
+        )
+    if not await store.try_begin(scope_key, 86_400):
+        cached = await store.wait_for_cached(
+            scope_key,
+            timeout_seconds=5.0,
+            poll_seconds=0.05,
+        )
+        if cached is None:
+            return _error(
+                status_code=409,
+                code="idempotency_request_in_progress",
+                message="An identical request is still in progress.",
+            )
+        if cached.request_body_digest != digest:
+            return _error(
+                status_code=409,
+                code="idempotency_key_conflict",
+                message="Idempotency-Key was already used with a different request body.",
+            )
+        return Response(
+            content=cached.body,
+            status_code=cached.status_code,
+            headers={"x-idempotency-replayed": "true"},
+            media_type="application/json",
+        )
+    return store, scope_key, digest
+
+
+async def _finish_idempotent_response(
+    state: tuple[Any, str, str] | None,
+    response: JSONResponse,
+) -> None:
+    if state is None:
+        return
+    store, scope_key, digest = state
+    if response.status_code >= 500:
+        await store.abort(scope_key)
+        return
+    await store.store_response(
+        scope_key,
+        CachedResponse(
+            status_code=response.status_code,
+            headers=list(response.raw_headers),
+            body=bytes(response.body),
+            request_body_digest=digest,
+        ),
+        86_400,
+    )
+
+
+async def _abort_idempotent_response(state: tuple[Any, str, str] | None) -> None:
+    if state is None:
+        return
+    store, scope_key, _digest = state
+    await store.abort(scope_key)
+
+
 @router.post("/responses")
 async def create_response(
     request: Request,
     user: UserContext = Depends(get_user_context),
-):
+) -> Response:
     """Proxy one authenticated Responses request to the canonical Assistant runtime."""
 
     if not _has_authenticated_tenant(user):
@@ -162,11 +459,341 @@ async def create_response(
             error_type="server_error",
         )
 
-    return await proxy_to_assistant_service(
-        request,
-        user,
-        path="responses",
-        body=body,
+    try:
+        _reject_unmigrated_fields(payload)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        return _error(
+            status_code=exc.status_code,
+            code=str(detail.get("code") or "responses_fields_not_migrated"),
+            message="Some Responses fields are not available on the Agent Runtime.",
+        )
+    try:
+        message = _responses_message(payload)
+    except HTTPException as exc:
+        if isinstance(exc.detail, dict):
+            return _error(
+                status_code=exc.status_code,
+                code=str(exc.detail.get("code") or "invalid_input"),
+                message="The Responses input is not supported by the Agent Runtime.",
+            )
+        return _error(status_code=exc.status_code, code="invalid_input", message=str(exc.detail))
+    instructions = payload.get("instructions")
+    if instructions is not None and (
+        not isinstance(instructions, str) or not instructions.strip() or len(instructions) > 256 * 1024
+    ):
+        return _error(
+            status_code=400,
+            code="invalid_instructions",
+            message="instructions must be a non-empty string",
+            param="instructions",
+        )
+    model_id = model.strip()
+    session_id = str(payload.get("session_id") or uuid.uuid4())
+    reasoning = payload.get("reasoning")
+    reasoning_option = None
+    if isinstance(reasoning, dict):
+        effort = reasoning.get("effort")
+        if effort is not None and not isinstance(effort, str):
+            return _error(status_code=400, code="invalid_reasoning", message="reasoning.effort must be a string")
+        reasoning_option = effort
+    elif reasoning is not None:
+        return _error(status_code=400, code="invalid_reasoning", message="reasoning must be an object")
+    max_output_tokens = payload.get("max_output_tokens")
+    if max_output_tokens is not None and (
+        isinstance(max_output_tokens, bool)
+        or not isinstance(max_output_tokens, int)
+        or max_output_tokens < 1
+    ):
+        return _error(
+            status_code=400,
+            code="invalid_max_output_tokens",
+            message="max_output_tokens must be a positive integer",
+            param="max_output_tokens",
+        )
+    temperature = payload.get("temperature")
+    if temperature is not None and (
+        isinstance(temperature, bool)
+        or not isinstance(temperature, int | float)
+        or not 0 <= float(temperature) <= 2
+    ):
+        return _error(
+            status_code=400,
+            code="invalid_temperature",
+            message="temperature must be between 0 and 2",
+            param="temperature",
+        )
+    stream = payload.get("stream", False)
+    if not isinstance(stream, bool):
+        return _error(
+            status_code=400,
+            code="invalid_stream",
+            message="stream must be a boolean",
+            param="stream",
+        )
+    if stream and request.headers.get("Idempotency-Key", "").strip():
+        return _error(
+            status_code=409,
+            code="streaming_idempotency_not_supported",
+            message="Idempotency-Key is currently supported only for non-streaming Responses.",
+        )
+    idempotency = await _begin_idempotent_response(request, user, body)
+    if isinstance(idempotency, Response):
+        return idempotency
+    try:
+        await _ensure_agent_runtime_session(request, user, session_id)
+    except Exception as exc:
+        await _abort_idempotent_response(idempotency)
+        logger.error(
+            "Responses Runtime session preparation failed (exception_type=%s)",
+            type(exc).__name__,
+        )
+        return _error(
+            status_code=503,
+            code="agent_runtime_session_unavailable",
+            message="Agent Runtime session storage is temporarily unavailable.",
+            error_type="server_error",
+        )
+    try:
+        control = _runtime_control(request)
+    except HTTPException as exc:
+        await _abort_idempotent_response(idempotency)
+        return _error(
+            status_code=exc.status_code,
+            code="agent_runtime_unavailable",
+            message="Agent Runtime is temporarily unavailable.",
+            error_type="server_error",
+        )
+    try:
+        turn = await control.start_turn(
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            session_id=session_id,
+            message=message,
+            model_id=model_id,
+            reasoning_option=reasoning_option,
+            legacy_thinking_level=None,
+            max_tokens=max_output_tokens,
+            temperature=temperature,
+            readonly_capabilities={},
+            developer_instructions=instructions,
+            memory_mode="off",
+            enable_dynamic_tools=False,
+        )
+    except HTTPException as exc:
+        await _abort_idempotent_response(idempotency)
+        return _error(
+            status_code=exc.status_code,
+            code="agent_runtime_rejected",
+            message="Agent Runtime rejected the request.",
+        )
+    except Exception as exc:
+        await _abort_idempotent_response(idempotency)
+        from ...services.agent_runtime import AgentRuntimeControlError
+
+        if isinstance(exc, AgentRuntimeControlError):
+            return _error(
+                status_code=exc.status_code,
+                code=exc.code.lower(),
+                message="Agent Runtime rejected the request.",
+                error_type="server_error" if exc.status_code >= 500 else "invalid_request_error",
+            )
+        logger.error("Responses Agent Runtime start failed (exception_type=%s)", type(exc).__name__)
+        return _error(
+            status_code=503,
+            code="agent_runtime_unavailable",
+            message="Agent Runtime is temporarily unavailable.",
+            error_type="server_error",
+        )
+
+    response_id = _response_id(turn)
+    if not stream:
+        text_parts: list[str] = []
+        terminal_status: str | None = None
+        usage: dict[str, Any] | None = None
+        try:
+            async for event in _runtime_events(
+                control, turn=turn, user=user, session_id=session_id
+            ):
+                event_type = str(event.get("event_type") or "")
+                data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                if event_type == "text_delta" and isinstance(data.get("content"), str):
+                    text_parts.append(data["content"])
+                elif event_type == "run_error":
+                    terminal_status = str(data.get("status") or "failed")
+                    usage = data.get("usage") if isinstance(data.get("usage"), dict) else None
+                    break
+                elif event_type == "run_finished":
+                    terminal_status = "completed"
+                    usage = data.get("usage") if isinstance(data.get("usage"), dict) else None
+                    break
+        except Exception as exc:
+            await _abort_idempotent_response(idempotency)
+            logger.error(
+                "Responses Runtime event stream failed (exception_type=%s)",
+                type(exc).__name__,
+            )
+            return _error(
+                status_code=503,
+                code="agent_runtime_event_stream_failed",
+                message="Agent Runtime event stream is temporarily unavailable.",
+                error_type="server_error",
+            )
+        if terminal_status is None:
+            response = _error(
+                status_code=502,
+                code="agent_runtime_stream_incomplete",
+                message="Agent Runtime ended without a terminal event.",
+                error_type="server_error",
+            )
+        else:
+            failed = terminal_status != "completed"
+            response = JSONResponse(
+                _completed_response(
+                    response_id=response_id,
+                    model=model_id,
+                    text="".join(text_parts),
+                    status="failed" if failed else "completed",
+                    usage=usage,
+                    error=(
+                        {
+                            "code": terminal_status,
+                            "message": "The response could not be completed.",
+                            "type": "server_error",
+                        }
+                        if failed
+                        else None
+                    ),
+                )
+            )
+        await _finish_idempotent_response(idempotency, response)
+        return response
+
+    async def stream_events() -> AsyncIterator[bytes]:
+        text_parts: list[str] = []
+        usage: dict[str, Any] | None = None
+        sequence = 0
+        item_id = f"msg_{response_id[5:]}"
+
+        def emit(event_type: str, **payload_out: Any) -> bytes:
+            nonlocal sequence
+            encoded = _sse(event_type, payload_out, sequence)
+            sequence += 1
+            return encoded
+
+        in_progress = {
+            "id": response_id,
+            "object": "response",
+            "created_at": int(time.time()),
+            "status": "in_progress",
+            "model": model_id,
+            "output": [],
+            "usage": None,
+        }
+        yield emit("response.created", response=in_progress)
+        yield emit("response.in_progress", response=in_progress)
+        yield emit(
+            "response.output_item.added",
+            output_index=0,
+            item={
+                "id": item_id,
+                "type": "message",
+                "role": "assistant",
+                "status": "in_progress",
+                "content": [],
+            },
+        )
+        yield emit(
+            "response.content_part.added",
+            item_id=item_id,
+            output_index=0,
+            content_index=0,
+            part={"type": "output_text", "text": "", "annotations": []},
+        )
+        async for event in _runtime_events(control, turn=turn, user=user, session_id=session_id):
+            event_type = str(event.get("event_type") or "")
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            if event_type == "text_delta" and isinstance(data.get("content"), str):
+                text_parts.append(data["content"])
+                yield emit(
+                    "response.output_text.delta",
+                    item_id=item_id,
+                    output_index=0,
+                    content_index=0,
+                    delta=data["content"],
+                    logprobs=[],
+                )
+                continue
+            if event_type not in {"run_finished", "run_error"}:
+                continue
+            usage = data.get("usage") if isinstance(data.get("usage"), dict) else None
+            text = "".join(text_parts)
+            failed = event_type == "run_error"
+            item_status = "incomplete" if failed else "completed"
+            part = {"type": "output_text", "text": text, "annotations": []}
+            yield emit(
+                "response.output_text.done",
+                item_id=item_id,
+                output_index=0,
+                content_index=0,
+                text=text,
+                logprobs=[],
+            )
+            yield emit(
+                "response.content_part.done",
+                item_id=item_id,
+                output_index=0,
+                content_index=0,
+                part=part,
+            )
+            yield emit(
+                "response.output_item.done",
+                output_index=0,
+                item={
+                    "id": item_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "status": item_status,
+                    "content": [part],
+                },
+            )
+            status = str(data.get("status") or "failed")
+            response = _completed_response(
+                response_id=response_id,
+                model=model_id,
+                text=text,
+                status="failed" if failed else "completed",
+                usage=usage,
+                error=(
+                    {
+                        "code": status,
+                        "message": "The response could not be completed.",
+                        "type": "server_error",
+                    }
+                    if failed
+                    else None
+                ),
+            )
+            yield emit("response.failed" if failed else "response.completed", response=response)
+            return
+        response = _completed_response(
+            response_id=response_id,
+            model=model_id,
+            text="".join(text_parts),
+            status="failed",
+            usage=usage,
+            error={
+                "code": "agent_runtime_stream_incomplete",
+                "message": "Agent Runtime ended without a terminal event.",
+                "type": "server_error",
+            },
+        )
+        yield emit("response.failed", response=response)
+
+    return StreamingResponse(
+        stream_events(),
+        media_type="text/event-stream",
+        headers={"cache-control": "no-cache", "x-accel-buffering": "no"},
     )
 
 

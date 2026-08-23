@@ -5,14 +5,13 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import inspect
-import json
 import os
 import re
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
-from ai_gateway_core.agents import AgentRuntimeSigner, runtime_sha256
+from ai_gateway_core.agents import runtime_sha256
 from ai_gateway_core.agents.spec import render_agent_outcome_contract
 from ai_gateway_core.exceptions import PermissionDeniedError
 from ai_gateway_core.logging import get_logger
@@ -39,10 +38,7 @@ from ..schemas.agent_runtime import (
     AgentVersionPreviewChatRequest,
     AgentVersionPreviewSessionRequest,
 )
-from ._assistant_proxy import (
-    proxy_to_assistant_service,
-    reject_client_agent_forgery,
-)
+from ._assistant_proxy import reject_client_agent_forgery
 from .files import MAX_FILE_SIZE_BYTES, _stream_upload_file, get_mime_type, validate_file_extension
 
 router = APIRouter(tags=["Agent Studio Runtime"])
@@ -189,23 +185,6 @@ def _session_manager(request: Request) -> Any:
             "Agent session storage unavailable",
         )
     return manager
-
-
-def _runtime_signer(request: Request) -> AgentRuntimeSigner:
-    signer = getattr(request.app.state, "agent_runtime_signer", None)
-    if signer is not None:
-        return signer
-    secret = os.getenv("GATEWAY_ASSISTANT_SHARED_SECRET", "").strip()
-    if not secret:
-        _raise_runtime_error(
-            request,
-            503,
-            "AGENT_RUNTIME_SIGNING_UNAVAILABLE",
-            "Agent runtime signing is unavailable",
-        )
-    signer = AgentRuntimeSigner(secret=secret, issuer="ai-gateway")
-    request.app.state.agent_runtime_signer = signer
-    return signer
 
 
 def _prefixed_hash(value: Any) -> str:
@@ -768,6 +747,20 @@ async def _build_snapshot(
         memory_mode = "session"
     if not user.is_authenticated and channel in {"hosted", "embed"}:
         memory_mode = "session"
+    agent_spec = {
+        "agentId": str(resolution["agent"]["agent_id"]),
+        "agentVersionId": str(agent_version_id) if agent_version_id else None,
+        "channel": channel,
+        "developerInstructions": instructions,
+        "model": {
+            "id": str(model["id"]),
+            "provider": str(model["provider"]),
+            "parameters": dict(model["parameters"]),
+        },
+        "knowledge": {"datasets": dataset_ids, "retrieval": retrieval},
+        "capabilities": capabilities,
+        "memory": {"mode": memory_mode},
+    }
     return {
         "schema_version": "agent-runtime/v1",
         "tenant_id": str(resolution["agent"]["tenant_id"]),
@@ -785,8 +778,10 @@ async def _build_snapshot(
         },
         "instructions": {
             "agent": instructions,
+            "developerInstructions": instructions,
             "prompt_hash": runtime_sha256(instructions),
         },
+        "agent_spec": agent_spec,
         "capabilities": capabilities,
         "knowledge": {"datasets": dataset_ids, "retrieval": retrieval},
         "memory": {"mode": memory_mode},
@@ -1174,8 +1169,18 @@ async def _bind_session(
     draft_revision: int | None,
 ) -> Any:
     publication = snapshot["publication"]
+    assignment_store = getattr(request.app.state, "assistant_runtime_assignments", None)
+    if assignment_store is None:
+        _raise_runtime_error(
+            request,
+            503,
+            "AGENT_RUNTIME_ASSIGNMENT_UNAVAILABLE",
+            "Agent Runtime ownership is unavailable",
+        )
+    session_manager = _session_manager(request)
+    existing_before = await session_manager.get(session_id)
     try:
-        return await _session_manager(request).bind_agent_runtime(
+        bound_session = await session_manager.bind_agent_runtime(
             session_id=session_id,
             user_id=user.user_id,
             tenant_id=user.tenant_id,
@@ -1194,6 +1199,41 @@ async def _bind_session(
             "AGENT_RUNTIME_SESSION_NOT_FOUND",
             "Agent runtime session not found",
         )
+    try:
+        policy = getattr(request.app.state, "assistant_runtime_assignment_policy", None)
+        if policy is not None and hasattr(assignment_store, "bind_new_session"):
+            assignment = await assignment_store.bind_new_session(
+                tenant_id=user.tenant_id,
+                user_id=user.user_id,
+                session_id=session_id,
+                policy=policy,
+            )
+        else:
+            assignment = await assignment_store.bind(
+                tenant_id=user.tenant_id,
+                user_id=user.user_id,
+                session_id=session_id,
+                runtime_owner="agent_runtime",
+                kernel_revision=getattr(
+                    request.app.state,
+                    "assistant_runtime_kernel_revision",
+                    None,
+                ),
+                assignment_reason="single_kernel_agent_channel",
+            )
+        if assignment.runtime_owner != "agent_runtime":
+            _raise_runtime_error(
+                request,
+                409,
+                "AGENT_RUNTIME_ASSIGNMENT_MISMATCH",
+                "Agent Runtime session ownership is invalid",
+            )
+    except BaseException:
+        if existing_before is None:
+            with contextlib.suppress(Exception):
+                await session_manager.delete(session_id)
+        raise
+    return bound_session
 
 
 async def _existing_session(request: Request, session_id: str | None) -> Any | None:
@@ -1285,39 +1325,96 @@ def _map_repository_error(request: Request, exc: Exception) -> None:
     raise exc
 
 
-async def _proxy_runtime_stream(
+async def _start_runtime_stream(
     request: Request,
     user: UserContext,
     *,
     body: dict[str, Any],
     snapshot: dict[str, Any],
-    draft_revision: int | None,
 ) -> Any:
-    publication = snapshot["publication"]
-    envelope = _runtime_signer(request).sign(
-        tenant_id=user.tenant_id,
-        caller_principal=user.user_id,
-        agent_id=snapshot["agent_id"],
-        agent_version_id=snapshot["agent_version_id"],
-        draft_revision=draft_revision,
-        publication_id=publication["id"],
-        channel=publication["channel"],
-        session_id=body["session_id"],
-        resolved_snapshot=snapshot,
-        request_body=body,
-        spec_hash=snapshot["fingerprints"]["spec"],
-    )
-    internal_body = {**body, "runtime_envelope": envelope}
-    return await proxy_to_assistant_service(
-        request,
-        user,
-        path="agent-runtime/chat/stream",
-        body=json.dumps(
-            internal_body,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8"),
+    if body.get("resume_run_id") or body.get("resume_approval_id"):
+        _raise_runtime_error(
+            request,
+            409,
+            "AGENT_RUNTIME_RESUME_NOT_AVAILABLE",
+            "This Runtime turn cannot resume an approval from the retired Agent loop",
+        )
+    control = getattr(request.app.state, "agent_runtime_control", None)
+    if control is None or not hasattr(control, "start_turn"):
+        _raise_runtime_error(
+            request,
+            503,
+            "AGENT_RUNTIME_UNAVAILABLE",
+            "Agent Runtime control plane is unavailable",
+        )
+    model = snapshot.get("model") if isinstance(snapshot.get("model"), dict) else {}
+    parameters = model.get("parameters") if isinstance(model.get("parameters"), dict) else {}
+    knowledge = snapshot.get("knowledge") if isinstance(snapshot.get("knowledge"), dict) else {}
+    retrieval = knowledge.get("retrieval") if isinstance(knowledge.get("retrieval"), dict) else {}
+    attachments = body.get("attachments") if isinstance(body.get("attachments"), list) else []
+    readonly = {
+        "knowledge": {
+            "dataset_ids": list(knowledge.get("datasets") or []),
+            "mode": str(retrieval.get("mode") or "off"),
+            "top_k": int(retrieval.get("top_k") or 5),
+            "score_threshold": float(retrieval.get("threshold") or 0.4),
+        },
+        "attachments": {
+            "refs": [
+                str(item.get("file_path") or item.get("artifact_id"))
+                for item in attachments
+                if isinstance(item, dict) and (item.get("file_path") or item.get("artifact_id"))
+            ]
+        },
+    }
+    try:
+        turn = await control.start_turn(
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            session_id=str(body["session_id"]),
+            message=str(body["message"]),
+            model_id=str(model.get("id") or ""),
+            reasoning_option=None,
+            legacy_thinking_level=str(parameters.get("thinking_mode") or "") or None,
+            max_tokens=(
+                int(parameters["max_tokens"])
+                if isinstance(parameters.get("max_tokens"), int)
+                and not isinstance(parameters.get("max_tokens"), bool)
+                else None
+            ),
+            temperature=(
+                float(parameters["temperature"])
+                if isinstance(parameters.get("temperature"), int | float)
+                and not isinstance(parameters.get("temperature"), bool)
+                else None
+            ),
+            readonly_capabilities=readonly,
+            resolved_agent_snapshot=snapshot,
+        )
+    except Exception as exc:
+        from ...services.agent_runtime import AgentRuntimeControlError
+
+        if isinstance(exc, AgentRuntimeControlError):
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": "Agent Runtime rejected the turn"},
+            ) from None
+        raise
+    return StreamingResponse(
+        control.stream_events(
+            turn=turn,
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            session_id=str(body["session_id"]),
+        ),
+        media_type="text/event-stream",
+        headers={
+            "cache-control": "no-cache",
+            "x-accel-buffering": "no",
+            "x-ai-agent-kernel": "agent_runtime",
+            "x-session-id": str(body["session_id"]),
+            "x-run-id": str(turn.run_id),
+        },
     )
 
 
@@ -1423,12 +1520,11 @@ async def preview_chat_stream(
         resume_run_id=payload.resume_run_id,
         resume_approval_id=payload.resume_approval_id,
     )
-    return await _proxy_runtime_stream(
+    return await _start_runtime_stream(
         request,
         user,
         body=body,
         snapshot=snapshot,
-        draft_revision=payload.draft_revision,
     )
 
 
@@ -1529,12 +1625,11 @@ async def version_preview_chat_stream(
         resume_run_id=payload.resume_run_id,
         resume_approval_id=payload.resume_approval_id,
     )
-    return await _proxy_runtime_stream(
+    return await _start_runtime_stream(
         request,
         user,
         body=body,
         snapshot=snapshot,
-        draft_revision=None,
     )
 
 
@@ -1738,12 +1833,11 @@ async def published_chat_stream(
             resume_run_id=payload.resume_run_id,
             resume_approval_id=payload.resume_approval_id,
         )
-        response = await _proxy_runtime_stream(
+        response = await _start_runtime_stream(
             request,
             user,
             body=body,
             snapshot=snapshot,
-            draft_revision=None,
         )
         if reservation_key:
             if not isinstance(response, StreamingResponse) or not 200 <= response.status_code < 300:

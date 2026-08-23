@@ -172,6 +172,7 @@ warn_dependency_changes() {
 }
 
 restart_services=()
+UPDATE_AGENT_RUNTIME=false
 
 log_step "Copying source into running containers"
 warn_dependency_changes
@@ -184,7 +185,7 @@ if [ "$UPDATE_GATEWAY" = true ]; then
     copy_dir "database" "$gateway" "/app/database" "appuser:appuser"
     copy_dir "packages/ai-gateway-core/src/ai_gateway_core" "$gateway" "$gateway_site/ai_gateway_core"
     restart_services+=("gateway")
-    restart_services+=("agent-runtime")
+    UPDATE_AGENT_RUNTIME=true
 fi
 
 if [ "$UPDATE_ASSISTANT" = true ]; then
@@ -241,6 +242,19 @@ else
         # shellcheck disable=SC2086
         $COMPOSE_CMD --env-file "$ENV_FILE" restart "${restart_services[@]}"
     fi
+    if [ "$UPDATE_AGENT_RUNTIME" = true ]; then
+        desired_runtime_image="${AI_PLATFORM_AGENT_RUNTIME_IMAGE:-$(agent_runtime_image_tag)}"
+        assert_agent_runtime_image_locked "$desired_runtime_image"
+        current_runtime_image="$(docker inspect -f '{{.Config.Image}}' "$(agent_runtime_container)" 2>/dev/null || true)"
+        if [ "$current_runtime_image" != "$desired_runtime_image" ]; then
+            log_step "Recreating Agent Runtime with the configured locked image"
+            # shellcheck disable=SC2086
+            $COMPOSE_CMD --env-file "$ENV_FILE" up -d --no-deps --force-recreate agent-runtime
+        else
+            # shellcheck disable=SC2086
+            $COMPOSE_CMD --env-file "$ENV_FILE" restart agent-runtime
+        fi
+    fi
 fi
 
 log_step "Runtime health checks"
@@ -256,6 +270,9 @@ if [ "$UPDATE_DOCGEN" = true ] && [ "$UPDATE_ASSISTANT" != true ]; then
 fi
 if [ "$UPDATE_GATEWAY" = true ]; then
     wait_for_healthy "Gateway" "check_gateway_health" 60 || log_warn "Gateway may still be starting"
+fi
+if [ "$UPDATE_AGENT_RUNTIME" = true ]; then
+    wait_for_healthy "Agent Runtime" "check_agent_runtime_health" 60 || log_warn "Agent Runtime may still be starting"
 fi
 if [ "$UPDATE_FRONTEND" = true ]; then
     wait_for_healthy "Frontend" "check_frontend_health" 30 || log_warn "Frontend may still be starting"

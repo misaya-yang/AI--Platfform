@@ -41,11 +41,6 @@ def _app(user: UserContext) -> FastAPI:
 def test_public_responses_requires_authenticated_tenant_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def should_not_proxy(*_args: Any, **_kwargs: Any):
-        raise AssertionError("unauthenticated request must not be proxied")
-
-    monkeypatch.setattr(responses_route, "proxy_to_assistant_service", should_not_proxy)
-
     with TestClient(_app(_user(authenticated=False))) as client:
         response = client.post(
             "/v1/responses",
@@ -56,24 +51,19 @@ def test_public_responses_requires_authenticated_tenant_identity(
     assert response.json()["error"]["type"] == "authentication_error"
 
 
-def test_public_responses_accepts_authenticated_default_tenant(
+def test_public_responses_requires_runtime_for_authenticated_default_tenant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from starlette.responses import JSONResponse
+    async def ensure_session(*_args: Any, **_kwargs: Any) -> None:
+        return None
 
-    captured: dict[str, Any] = {}
-
-    async def response_proxy(request, user, *, path: str, body: bytes):
-        captured.update(user=user, path=path, body=body)
-        return JSONResponse({"ok": True})
-
+    monkeypatch.setattr(responses_route, "_ensure_agent_runtime_session", ensure_session)
     class DefaultModelMeta:
         async def get_access_level(self, tenant_id: str, model_id: str) -> str | None:
             assert tenant_id == "default"
             assert model_id == "qwen3.7-plus"
             return "public"
 
-    monkeypatch.setattr(responses_route, "proxy_to_assistant_service", response_proxy)
     app = _app(_user(tenant_id="default"))
     app.state.model_meta = DefaultModelMeta()
 
@@ -83,19 +73,13 @@ def test_public_responses_accepts_authenticated_default_tenant(
             json={"model": "qwen3.7-plus", "input": "hello"},
         )
 
-    assert response.status_code == 200
-    assert captured["user"].tenant_id == "default"
-    assert captured["path"] == "responses"
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "agent_runtime_unavailable"
 
 
 def test_public_responses_rejects_public_tenant_even_when_authenticated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def should_not_proxy(*_args: Any, **_kwargs: Any):
-        raise AssertionError("public tenant must not reach assistant-service")
-
-    monkeypatch.setattr(responses_route, "proxy_to_assistant_service", should_not_proxy)
-
     with TestClient(_app(_user(tenant_id="public"))) as client:
         response = client.post(
             "/v1/responses",
@@ -109,25 +93,10 @@ def test_public_responses_rejects_public_tenant_even_when_authenticated(
 def test_public_responses_proxies_exact_body_and_preserves_idempotency_header(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, Any] = {}
+    async def ensure_session(*_args: Any, **_kwargs: Any) -> None:
+        return None
 
-    async def fake_proxy(request, user, *, path: str, body: bytes):
-        captured.update(request=request, user=user, path=path, body=body)
-        return SimpleNamespace(
-            status_code=200,
-            headers={},
-            body=b"",
-            __call__=lambda *_args, **_kwargs: None,
-        )
-
-    # A real Starlette Response keeps this an HTTP-layer contract test.
-    from starlette.responses import JSONResponse
-
-    async def response_proxy(request, user, *, path: str, body: bytes):
-        captured.update(request=request, user=user, path=path, body=body)
-        return JSONResponse({"ok": True})
-
-    monkeypatch.setattr(responses_route, "proxy_to_assistant_service", response_proxy)
+    monkeypatch.setattr(responses_route, "_ensure_agent_runtime_session", ensure_session)
     payload = {"model": "qwen3.7-plus", "input": "hello", "store": False}
 
     with TestClient(_app(_user())) as client:
@@ -137,21 +106,13 @@ def test_public_responses_proxies_exact_body_and_preserves_idempotency_header(
             headers={"Idempotency-Key": "idem-1"},
         )
 
-    assert response.status_code == 200
-    assert captured["path"] == "responses"
-    assert json_bytes(captured["body"]) == payload
-    assert captured["request"].headers["idempotency-key"] == "idem-1"
-    assert captured["user"].tenant_id == "tenant-1"
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "agent_runtime_unavailable"
 
 
 def test_public_responses_checks_model_permission_before_proxy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def should_not_proxy(*_args: Any, **_kwargs: Any):
-        raise AssertionError("unknown model must not be proxied")
-
-    monkeypatch.setattr(responses_route, "proxy_to_assistant_service", should_not_proxy)
-
     with TestClient(_app(_user())) as client:
         response = client.post(
             "/v1/responses",
@@ -165,10 +126,6 @@ def test_public_responses_checks_model_permission_before_proxy(
 def test_public_responses_fails_closed_when_model_authorizer_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def should_not_proxy(*_args: Any, **_kwargs: Any):
-        raise AssertionError("request must not bypass unavailable model authorization")
-
-    monkeypatch.setattr(responses_route, "proxy_to_assistant_service", should_not_proxy)
     app = _app(_user())
     app.state.model_meta = None
 
@@ -194,10 +151,6 @@ def test_public_responses_fails_closed_when_model_authorizer_errors(
         async def get_access_level(self, _tenant_id: str, _model_id: str) -> str | None:
             raise RuntimeError("database connection contains private diagnostics")
 
-    async def should_not_proxy(*_args: Any, **_kwargs: Any):
-        raise AssertionError("request must not bypass a failed model authorization query")
-
-    monkeypatch.setattr(responses_route, "proxy_to_assistant_service", should_not_proxy)
     app = _app(_user())
     app.state.model_meta = BrokenModelMeta()
 
@@ -215,10 +168,6 @@ def test_public_responses_fails_closed_when_model_authorizer_errors(
 def test_public_responses_rejects_query_parameters_and_agent_forgery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def should_not_proxy(*_args: Any, **_kwargs: Any):
-        raise AssertionError("invalid request must not be proxied")
-
-    monkeypatch.setattr(responses_route, "proxy_to_assistant_service", should_not_proxy)
     with TestClient(_app(_user())) as client:
         query = client.post(
             "/v1/responses?foo=bar",
@@ -246,6 +195,180 @@ def test_gateway_application_registers_exact_v1_responses_path() -> None:
     assert "/v1/responses" in paths
     assert set(paths["/v1/responses"]) == {"post"}
     assert "/api/v1/responses" not in paths
+
+
+def test_public_responses_uses_agent_runtime_for_nonstream_and_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RuntimeControl:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def start_turn(self, **kwargs: Any) -> Any:
+            self.calls.append(kwargs)
+            return SimpleNamespace(run_id="11111111-1111-4111-8111-111111111111")
+
+        async def stream_events(self, **_kwargs: Any):
+            yield b'data: {"event_type":"text_delta","data":{"content":"hello"}}\n\n'
+            yield b'data: {"event_type":"run_finished","data":{"status":"succeeded"}}\n\n'
+
+    control = RuntimeControl()
+    app = _app(_user())
+    app.state.agent_runtime_control = control
+
+    async def ensure_session(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(responses_route, "_ensure_agent_runtime_session", ensure_session)
+    with TestClient(app) as client:
+        nonstream = client.post(
+            "/v1/responses",
+            json={
+                "model": "qwen3.7-plus",
+                "input": "hello",
+                "instructions": "Use the signed runtime contract.",
+            },
+        )
+        stream = client.post(
+            "/v1/responses",
+            json={"model": "qwen3.7-plus", "input": "hello", "stream": True},
+        )
+
+    assert nonstream.status_code == 200
+    assert nonstream.json()["output_text"] == "hello"
+    assert stream.status_code == 200
+    assert "response.output_text.delta" in stream.text
+    assert "response.content_part.added" in stream.text
+    assert "response.content_part.done" in stream.text
+    assert "response.completed" in stream.text
+    assert len(control.calls) == 2
+    assert control.calls[0]["developer_instructions"] == "Use the signed runtime contract."
+    assert control.calls[0]["enable_dynamic_tools"] is False
+    assert control.calls[0]["memory_mode"] == "off"
+
+
+def test_public_responses_rejects_unimplemented_store_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def ensure_session(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("store=true must fail before Runtime session creation")
+
+    monkeypatch.setattr(responses_route, "_ensure_agent_runtime_session", ensure_session)
+    with TestClient(_app(_user())) as client:
+        response = client.post(
+            "/v1/responses",
+            json={"model": "qwen3.7-plus", "input": "hello", "store": True},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "responses_fields_not_migrated"
+
+
+def test_public_responses_nonstream_idempotency_replays_without_second_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RuntimeControl:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def start_turn(self, **_kwargs: Any) -> Any:
+            self.calls += 1
+            return SimpleNamespace(run_id="11111111-1111-4111-8111-111111111111")
+
+        async def stream_events(self, **_kwargs: Any):
+            yield b'data: {"event_type":"text_delta","data":{"content":"hello"}}\n\n'
+            yield b'data: {"event_type":"run_finished","data":{"status":"succeeded"}}\n\n'
+
+    control = RuntimeControl()
+    app = _app(_user())
+    app.state.agent_runtime_control = control
+
+    async def ensure_session(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(responses_route, "_ensure_agent_runtime_session", ensure_session)
+    headers = {"Idempotency-Key": "idem-1"}
+    with TestClient(app) as client:
+        first = client.post(
+            "/v1/responses",
+            json={"model": "qwen3.7-plus", "input": "hello"},
+            headers=headers,
+        )
+        replay = client.post(
+            "/v1/responses",
+            json={"model": "qwen3.7-plus", "input": "hello"},
+            headers=headers,
+        )
+
+    assert first.status_code == 200
+    assert replay.status_code == 200
+    assert replay.headers["x-idempotency-replayed"] == "true"
+    assert replay.json() == first.json()
+    assert control.calls == 1
+
+
+def test_public_responses_stream_without_terminal_fails_in_band(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RuntimeControl:
+        async def start_turn(self, **_kwargs: Any) -> Any:
+            return SimpleNamespace(run_id="11111111-1111-4111-8111-111111111111")
+
+        async def stream_events(self, **_kwargs: Any):
+            yield b'data: {"event_type":"text_delta","data":{"content":"partial"}}\n\n'
+
+    app = _app(_user())
+    app.state.agent_runtime_control = RuntimeControl()
+
+    async def ensure_session(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(responses_route, "_ensure_agent_runtime_session", ensure_session)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/responses",
+            json={"model": "qwen3.7-plus", "input": "hello", "stream": True},
+        )
+
+    assert response.status_code == 200
+    assert "response.failed" in response.text
+    assert "response.completed" not in response.text
+    assert "agent_runtime_stream_incomplete" in response.text
+
+
+def test_public_responses_runtime_error_releases_idempotency_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RuntimeControl:
+        async def start_turn(self, **_kwargs: Any) -> Any:
+            return SimpleNamespace(run_id="11111111-1111-4111-8111-111111111111")
+
+        async def stream_events(self, **_kwargs: Any):
+            raise RuntimeError("transport failed")
+            yield  # pragma: no cover
+
+    app = _app(_user())
+    app.state.agent_runtime_control = RuntimeControl()
+
+    async def ensure_session(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(responses_route, "_ensure_agent_runtime_session", ensure_session)
+    with TestClient(app) as client:
+        first = client.post(
+            "/v1/responses",
+            json={"model": "qwen3.7-plus", "input": "hello"},
+            headers={"Idempotency-Key": "retryable"},
+        )
+        second = client.post(
+            "/v1/responses",
+            json={"model": "qwen3.7-plus", "input": "hello"},
+            headers={"Idempotency-Key": "retryable"},
+        )
+
+    assert first.status_code == 503
+    assert second.status_code == 503
+    assert second.json()["error"]["code"] == "agent_runtime_event_stream_failed"
 
 
 def json_bytes(value: bytes) -> dict[str, Any]:

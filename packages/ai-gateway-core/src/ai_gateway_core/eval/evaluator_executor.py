@@ -1252,6 +1252,7 @@ class EvaluatorExecutor:
                 )
                 and hard_blockers_passed
                 and attempted == completed
+                and fingerprints_complete
                 and all(
                     item.get("explicit_performance_pass", True) is True for item in trial_results
                 )

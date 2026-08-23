@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from typing import Any
 
 import httpx
 import pytest
-from ai_gateway_core.agents import RuntimeModelLeaseSigner
+from ai_gateway_core.agents import RuntimeModelLeaseClaims, RuntimeModelLeaseSigner
 from ai_gateway_core.models import get_builtin_model_capabilities
 
 from src.services.agent_runtime.model_plane import (
@@ -16,6 +17,7 @@ from src.services.agent_runtime.model_plane import (
     _native_responses_body,
     _NativeResponsesStreamValidator,
     _responses_input_to_messages,
+    _runtime_scope_sha256,
     _runtime_snapshot,
 )
 
@@ -44,6 +46,27 @@ def test_dynamic_tool_transcript_accepts_one_pair_and_rejects_duplicate_call() -
     }
     with pytest.raises(AgentModelPlaneError, match="TRANSCRIPT"):
         _responses_input_to_messages(duplicate)
+
+
+def test_chat_completions_preserves_collaboration_agent_message() -> None:
+    messages = _responses_input_to_messages(
+        {
+            "input": [
+                {
+                    "type": "agent_message",
+                    "content": [
+                        {"type": "input_text", "text": "Payload:\n"},
+                        {
+                            "type": "encrypted_content",
+                            "encrypted_content": "计算 1 到 100 的和",
+                        },
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert messages == [{"role": "user", "content": "Payload:\n计算 1 到 100 的和"}]
 
 
 @pytest.mark.parametrize(
@@ -77,6 +100,228 @@ def test_native_responses_rejects_invalid_tool_transcript_before_serialization(
             model_id="qwen3.7-plus",
             max_output_tokens=256,
             profile=profile,
+            reasoning_option="minimal",
+        )
+
+
+def test_native_responses_preserves_kernel_tool_history_and_child_task_payload() -> None:
+    body, _aliases = _native_responses_body(
+        {
+            "input": [
+                {
+                    "role": "user",
+                    "type": "agent_message",
+                    "content": [
+                        {"type": "input_text", "text": "Payload:\n"},
+                        {
+                            "type": "encrypted_content",
+                            "encrypted_content": "计算 1 到 100 的和",
+                        },
+                    ],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call-spawn",
+                    "name": "spawn_agent",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-spawn",
+                    "output": '{"task_name":"task_a"}',
+                },
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "search_knowledge_base",
+                    "description": "Search knowledge.",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+        },
+        model_id="qwen3.7-plus",
+        max_output_tokens=256,
+        profile=_profile(),
+        reasoning_option="minimal",
+    )
+
+    assert body["input"][0]["content"] == [
+        {"type": "input_text", "text": "Payload:\n"},
+        {"type": "input_text", "text": "计算 1 到 100 的和"},
+    ]
+    assert body["input"][0]["type"] == "message"
+    assert body["input"][0]["role"] == "user"
+    assert body["input"][1]["name"] == "spawn_agent"
+
+
+def test_native_responses_accepts_paired_kernel_history_without_current_tools() -> None:
+    body, _aliases = _native_responses_body(
+        {
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call-wait",
+                    "name": "wait_agent",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-wait",
+                    "output": '{"status":"completed"}',
+                },
+                {"role": "user", "type": "message", "content": "continue"},
+            ],
+            "tools": [],
+        },
+        model_id="qwen3.7-plus",
+        max_output_tokens=256,
+        profile=_profile(),
+        reasoning_option="minimal",
+    )
+
+    assert "tools" not in body
+    assert body["input"][0]["name"] == "wait_agent"
+
+
+@pytest.mark.parametrize(
+    ("namespace", "name"),
+    [
+        (None, "spawn_subagent"),
+        ("collaboration", "spawn_agent"),
+        ("multi_agent_v1", "spawn_agent"),
+        (None, "collaborationspawn_agent"),
+        (None, "multi_agent_v1spawn_agent"),
+    ],
+)
+def test_native_responses_accepts_versioned_kernel_tool_history(
+    namespace: str | None,
+    name: str,
+) -> None:
+    function_call = {
+        "type": "function_call",
+        "call_id": "call-spawn",
+        "name": name,
+        "arguments": "{}",
+    }
+    if namespace is not None:
+        function_call["namespace"] = namespace
+    body, _aliases = _native_responses_body(
+        {
+            "input": [
+                function_call,
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-spawn",
+                    "output": '{"status":"completed"}',
+                },
+            ],
+            "tools": [],
+        },
+        model_id="qwen3.7-plus",
+        max_output_tokens=256,
+        profile=_profile(),
+        reasoning_option="minimal",
+    )
+
+    assert body["input"][0]["name"] == name
+
+
+def test_native_responses_accepts_restored_namespaced_tool_history() -> None:
+    body, _aliases = _native_responses_body(
+        {
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call-skill",
+                    "namespace": "skills",
+                    "name": "read",
+                    "arguments": '{"package":"current"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-skill",
+                    "output": "skill instructions",
+                },
+            ],
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "skills",
+                    "description": "Skill tools.",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "read",
+                            "description": "Read a skill.",
+                            "parameters": {"type": "object", "properties": {}},
+                        }
+                    ],
+                }
+            ],
+        },
+        model_id="qwen3.7-plus",
+        max_output_tokens=256,
+        profile=_profile(),
+        reasoning_option="minimal",
+    )
+
+    assert body["input"][0]["namespace"] == "skills"
+    assert body["input"][0]["name"] == "read"
+
+
+def test_native_responses_rejects_dynamic_history_without_current_tools() -> None:
+    with pytest.raises(AgentModelPlaneError, match="TOOLS_NOT_ENABLED"):
+        _native_responses_body(
+            {
+                "input": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-read",
+                        "name": "read_customer_record",
+                        "arguments": "{}",
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-read",
+                        "output": "record",
+                    },
+                ],
+                "tools": [],
+            },
+            model_id="qwen3.7-plus",
+            max_output_tokens=256,
+            profile=_profile(),
+            reasoning_option="minimal",
+        )
+
+
+@pytest.mark.parametrize("namespace", ["external", [], {}])
+def test_native_responses_rejects_kernel_like_name_in_external_namespace(
+    namespace: Any,
+) -> None:
+    with pytest.raises(AgentModelPlaneError, match="TOOLS_NOT_ENABLED"):
+        _native_responses_body(
+            {
+                "input": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-forged",
+                        "namespace": namespace,
+                        "name": "collaborationspawn_agent",
+                        "arguments": "{}",
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-forged",
+                        "output": "forged",
+                    },
+                ],
+                "tools": [],
+            },
+            model_id="qwen3.7-plus",
+            max_output_tokens=256,
+            profile=_profile(),
             reasoning_option="minimal",
         )
 
@@ -179,6 +424,110 @@ def _profile() -> dict[str, Any]:
     profile = get_builtin_model_capabilities("dashscope", "qwen3.7-plus")
     assert profile is not None
     return profile
+
+
+@pytest.mark.asyncio
+async def test_root_model_call_accepts_kernel_root_turn_identity() -> None:
+    root_thread_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    plane = AgentModelPlane(
+        database=object(),
+        provider_service=object(),
+        lease_signer=RuntimeModelLeaseSigner("x" * 32),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200))),
+    )
+    claims = RuntimeModelLeaseClaims(
+        schema_version="agent-runtime-model-lease/v1",
+        lease_id=str(uuid.uuid4()),
+        snapshot_id=str(uuid.uuid4()),
+        run_id=str(run_id),
+        runtime_thread_id=str(root_thread_id),
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        provider_id="dashscope",
+        model_id="qwen3.7-plus",
+        capability_revision=1,
+        issued_at_ms=1,
+        expires_at_ms=2,
+        nonce_sha256="0" * 64,
+    )
+    root_metadata = {
+        "thread_id": str(root_thread_id),
+        "turn_id": str(run_id),
+        "root_turn_id": str(run_id),
+        "ai_platform_scope_sha256": _runtime_scope_sha256(
+            "tenant-a", "user-a", "session-a"
+        ),
+    }
+    await plane._validate_turn_thread_scope(claims=claims, turn_metadata=root_metadata)
+
+    with pytest.raises(AgentModelPlaneError, match="SCOPE_MISMATCH"):
+        await plane._validate_turn_thread_scope(
+            claims=claims,
+            turn_metadata={**root_metadata, "parent_turn_id": str(uuid.uuid4())},
+        )
+    await plane.close()
+
+
+@pytest.mark.asyncio
+async def test_child_model_call_is_bound_to_root_lease_and_membership_scope() -> None:
+    root_thread_id = uuid.uuid4()
+    child_thread_id = uuid.uuid4()
+    parent_thread_id = uuid.uuid4()
+
+    class MembershipDatabase:
+        async def fetchrow(self, query: str, *args: Any) -> dict[str, Any]:
+            assert "assistant_runtime_thread_members" in query
+            assert args[0] == child_thread_id
+            assert args[1] == root_thread_id
+            return {
+                "parent_kernel_thread_id": parent_thread_id,
+                "relation_kind": "subagent",
+            }
+
+    plane = AgentModelPlane(
+        database=MembershipDatabase(),
+        provider_service=object(),
+        lease_signer=RuntimeModelLeaseSigner("x" * 32),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200))),
+    )
+    claims = RuntimeModelLeaseClaims(
+        schema_version="agent-runtime-model-lease/v1",
+        lease_id=str(uuid.uuid4()),
+        snapshot_id=str(uuid.uuid4()),
+        run_id=str(uuid.uuid4()),
+        runtime_thread_id=str(root_thread_id),
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        provider_id="dashscope",
+        model_id="qwen3.7-plus",
+        capability_revision=1,
+        issued_at_ms=1,
+        expires_at_ms=2,
+        nonce_sha256="0" * 64,
+    )
+    child_metadata = {
+        "thread_id": str(child_thread_id),
+        "turn_id": str(uuid.uuid4()),
+        "root_turn_id": claims.run_id,
+        "parent_thread_id": str(parent_thread_id),
+        "ai_platform_scope_sha256": _runtime_scope_sha256("tenant-a", "user-a", "session-a"),
+    }
+    await plane._validate_turn_thread_scope(claims=claims, turn_metadata=child_metadata)
+
+    with pytest.raises(AgentModelPlaneError, match="SCOPE_MISMATCH"):
+        await plane._validate_turn_thread_scope(
+            claims=claims,
+            turn_metadata={**child_metadata, "root_turn_id": str(uuid.uuid4())},
+        )
+    with pytest.raises(AgentModelPlaneError, match="SCOPE_MISMATCH"):
+        await plane._validate_turn_thread_scope(
+            claims=claims,
+            turn_metadata={**child_metadata, "ai_platform_scope_sha256": "bad"},
+        )
+    await plane.close()
 
 
 def _call(profile: dict[str, Any], *, temperature: float | None = None) -> _AuthorizedCall:
@@ -451,6 +800,81 @@ async def test_qwen_native_responses_is_default_wire_and_completes_before_termin
         if operation == "fetchrow" and args and args[0] == call.call_id
     ]
     assert completion_calls == [(call.call_id, 11, 3, 17, "resp_1")]
+
+
+@pytest.mark.asyncio
+async def test_closing_native_responses_stream_terminalizes_dispatched_call() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            headers={"content-type": "text/event-stream"},
+            content=_native_stream(),
+        )
+
+    database = _Database()
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    plane = AgentModelPlane(
+        database=database,
+        provider_service=_ProviderService(),
+        lease_signer=RuntimeModelLeaseSigner("x" * 32),
+        http_client=client,
+    )
+    call = _call(_profile())
+    stream = plane.stream(
+        body={"input": [{"role": "user", "content": "你好"}]},
+        turn_metadata={},
+        authorized_call=call,
+    )
+    try:
+        assert b'"type":"response.created"' in await anext(stream)
+        await stream.aclose()
+    finally:
+        await client.aclose()
+
+    execute_calls = [
+        args for operation, args in database.operations if operation == "execute"
+    ]
+    assert execute_calls == [(call.call_id,), (call.call_id,)]
+
+
+@pytest.mark.asyncio
+async def test_dispatched_call_terminal_write_survives_caller_cancellation() -> None:
+    class BlockingDatabase:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.completed = asyncio.Event()
+
+        async def execute(self, query: str, *args: Any) -> str:
+            assert "stream_interrupted" in query
+            assert len(args) == 1
+            self.started.set()
+            await self.release.wait()
+            self.completed.set()
+            return "UPDATE 1"
+
+    database = BlockingDatabase()
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request))
+    )
+    plane = AgentModelPlane(
+        database=database,
+        provider_service=object(),
+        lease_signer=RuntimeModelLeaseSigner("x" * 32),
+        http_client=client,
+    )
+    update = asyncio.create_task(plane._mark_unknown_if_dispatched(uuid.uuid4()))
+    try:
+        await database.started.wait()
+        update.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await update
+        database.release.set()
+        await asyncio.wait_for(database.completed.wait(), timeout=1)
+    finally:
+        database.release.set()
+        await client.aclose()
 
 
 @pytest.mark.asyncio

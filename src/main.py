@@ -1012,6 +1012,7 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
             runtime_internal_token=runtime_internal_token,
             model_plane_base_url=model_plane_runtime_base_url,
             kernel_revision=str(app.state.assistant_runtime_kernel_revision or ""),
+            memory_service=app.state.memory_service,
         )
         if (
             container.settings.database.enabled

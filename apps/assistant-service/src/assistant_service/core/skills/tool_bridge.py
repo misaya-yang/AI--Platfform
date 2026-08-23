@@ -87,6 +87,14 @@ class SkillToolBridge:
             max_retries=1,
             is_async=True,
             required_permissions=skill.permissions,
+            # Preserve the manifest's exact local JSON Schema.  The registry
+            # validates this schema at invocation time; the parameter list is
+            # only the compact level-0 projection used for discovery.
+            argument_schema=(
+                dict(skill.tool_schema)
+                if isinstance(skill.tool_schema, dict)
+                else None
+            ),
         )
         definition.capability_metadata = self._capability_metadata(skill, tool_name, risk_level)
 

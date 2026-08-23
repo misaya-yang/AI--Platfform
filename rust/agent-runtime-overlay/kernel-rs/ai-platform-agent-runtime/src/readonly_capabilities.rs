@@ -95,8 +95,63 @@ pub struct CapabilityDescriptor {
     pub protocol: String,
     #[serde(default = "default_general_category")]
     pub category: String,
+    /// Stable AgentSpec capability identity. These fields are optional for
+    /// legacy catalog entries, but dynamic invocation rejects a descriptor
+    /// that cannot be bound to the signed allowlist.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_hash: Option<String>,
     #[serde(default)]
     pub metadata: Map<String, Value>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CapabilityAllowlistEntry {
+    #[serde(rename = "type")]
+    pub capability_type: String,
+    pub name: String,
+    pub id: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub schema_hash: Option<String>,
+}
+
+impl CapabilityAllowlistEntry {
+    fn validate(&self) -> Result<(), ReadonlyCapabilityError> {
+        if self.capability_type.is_empty()
+            || self.name.is_empty()
+            || self.id.is_empty()
+            || self.version.as_deref().is_some_and(str::is_empty)
+            || !valid_schema_hash(self.schema_hash.as_deref())
+        {
+            return Err(ReadonlyCapabilityError::new(
+                "runtime_capability_allowlist_entry_invalid",
+            ));
+        }
+        if matches!(self.capability_type.as_str(), "mcp" | "skill")
+            && (self.version.is_none() || self.schema_hash.is_none())
+        {
+            return Err(ReadonlyCapabilityError::new(
+                "runtime_capability_allowlist_binding_invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn valid_schema_hash(value: Option<&str>) -> bool {
+    value
+        .and_then(|value| value.strip_prefix("sha256:"))
+        .is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
 }
 
 fn default_tool_kind() -> String {
@@ -162,8 +217,11 @@ fn descriptor_is_valid(
 ) -> Result<(), ReadonlyCapabilityError> {
     validate_binding(scope, &descriptor.tenant_id, descriptor.capability_revision)?;
     if descriptor.name.is_empty()
+        || descriptor.id.is_empty()
         || descriptor.source.is_empty()
         || descriptor.description.is_empty()
+        || !valid_schema_hash(descriptor.schema_hash.as_deref())
+        || matches!(descriptor.kind.as_str(), "mcp" | "skill") && descriptor.version.is_none()
     {
         return Err(ReadonlyCapabilityError::new(
             "runtime_capability_descriptor_invalid",
@@ -180,6 +238,109 @@ fn descriptor_is_valid(
         ));
     }
     Ok(())
+}
+
+fn capability_allowlist(
+    payload: &Value,
+) -> Result<Vec<CapabilityAllowlistEntry>, ReadonlyCapabilityError> {
+    let entries = payload
+        .get("capability_allowlist")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ReadonlyCapabilityError::new("runtime_capability_allowlist_missing"))?;
+    let mut result = Vec::with_capacity(entries.len());
+    let mut identities = BTreeSet::new();
+    for value in entries {
+        let entry: CapabilityAllowlistEntry =
+            serde_json::from_value(value.clone()).map_err(|_| {
+                ReadonlyCapabilityError::new("runtime_capability_allowlist_entry_invalid")
+            })?;
+        entry.validate()?;
+        let identity = (
+            entry.capability_type.clone(),
+            entry.name.clone(),
+            entry.id.clone(),
+            entry.version.clone(),
+            entry.schema_hash.clone(),
+        );
+        if !identities.insert(identity) {
+            return Err(ReadonlyCapabilityError::new(
+                "runtime_capability_allowlist_collision",
+            ));
+        }
+        result.push(entry);
+    }
+    Ok(result)
+}
+
+fn descriptor_allowlist_entry(
+    descriptor: &CapabilityDescriptor,
+    allowlist: &[CapabilityAllowlistEntry],
+) -> Result<CapabilityAllowlistEntry, ReadonlyCapabilityError> {
+    let candidates = allowlist
+        .iter()
+        .filter(|entry| {
+            entry.capability_type.as_str() == descriptor.kind.as_str()
+                && entry.name.as_str() == descriptor.name.as_str()
+                && entry.id.as_str() == descriptor.id.as_str()
+                && entry.version.as_ref() == descriptor.version.as_ref()
+                && entry.schema_hash.as_ref() == descriptor.schema_hash.as_ref()
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if candidates.len() != 1 {
+        return Err(ReadonlyCapabilityError::new(
+            "runtime_capability_allowlist_scope_mismatch",
+        ));
+    }
+    Ok(candidates.into_iter().next().expect("one candidate"))
+}
+
+/// Resolve a dynamic tool against the immutable snapshot descriptor and its
+/// signed AgentSpec allowlist. The model supplies only the tool name and
+/// arguments; all identity/version/schema fields come from this payload.
+pub fn resolve_dynamic_tool(
+    payload: &Value,
+    namespace: Option<&str>,
+    tool_name: &str,
+) -> Result<(Vec<CapabilityAllowlistEntry>, CapabilityAllowlistEntry), ReadonlyCapabilityError> {
+    if tool_name.is_empty() {
+        return Err(ReadonlyCapabilityError::new("runtime_dynamic_tool_invalid"));
+    }
+    let mut candidates = Vec::new();
+    for key in ["tools", "mcp"] {
+        for value in payload
+            .get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let descriptor: CapabilityDescriptor =
+                serde_json::from_value(value.clone()).map_err(|_| {
+                    ReadonlyCapabilityError::new("runtime_capability_descriptor_invalid")
+                })?;
+            if descriptor.read_only
+                && descriptor.name == tool_name
+                && namespace.is_none_or(|requested| {
+                    descriptor
+                        .metadata
+                        .get("namespace")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| value == requested)
+                        || descriptor.source == requested
+                })
+            {
+                candidates.push(descriptor);
+            }
+        }
+    }
+    if candidates.len() != 1 {
+        return Err(ReadonlyCapabilityError::new(
+            "runtime_dynamic_tool_not_authorized",
+        ));
+    }
+    let allowlist = capability_allowlist(payload)?;
+    let expected = descriptor_allowlist_entry(&candidates[0], &allowlist)?;
+    Ok((allowlist, expected))
 }
 
 fn matches_filter(descriptor: &CapabilityDescriptor, filter: &MetadataFilter) -> bool {
@@ -258,6 +419,9 @@ pub fn render_turn_input(
                 "runtime_readonly_payload_invalid",
             ));
         }
+    }
+    if object.get("capability_allowlist").is_some() {
+        capability_allowlist(payload)?;
     }
     if let Some(items) = object.get("items").and_then(Value::as_array) {
         for item in items {
@@ -489,6 +653,9 @@ mod tests {
             tags: vec!["retrieval".to_string(), "read".to_string()],
             protocol: "internal".to_string(),
             category: "retrieval".to_string(),
+            id: format!("{source}:{name}"),
+            version: Some("v1".to_string()),
+            schema_hash: Some(format!("sha256:{}", "a".repeat(64))),
             metadata: Map::new(),
         }
     }
@@ -603,5 +770,44 @@ mod tests {
         payload["mcp"] =
             serde_json::json!([serde_json::to_value(descriptor("search", "mcp:docs")).unwrap()]);
         assert!(!allows_dynamic_tool(&payload, None, "search"));
+    }
+
+    #[test]
+    fn dynamic_tool_resolution_requires_snapshot_allowlist_identity() {
+        let descriptor = descriptor("search", "knowledge");
+        let mut payload = serde_json::json!({
+            "tools": [serde_json::to_value(&descriptor).unwrap()],
+            "capability_allowlist": [{
+                "type": "knowledge",
+                "name": "search",
+                "id": "knowledge:search",
+                "version": "v1",
+                "schema_hash": format!("sha256:{}", "a".repeat(64))
+            }]
+        });
+        let (allowlist, expected) =
+            resolve_dynamic_tool(&payload, None, "search").expect("allowlisted tool");
+        assert_eq!(allowlist.len(), 1);
+        assert_eq!(expected.id, "knowledge:search");
+        assert_eq!(expected.schema_hash, descriptor.schema_hash);
+
+        payload["capability_allowlist"][0]["schema_hash"] =
+            Value::String(format!("sha256:{}", "b".repeat(64)));
+        assert_eq!(
+            resolve_dynamic_tool(&payload, None, "search")
+                .expect_err("schema drift must fail closed")
+                .to_string(),
+            "runtime_capability_allowlist_scope_mismatch"
+        );
+        payload
+            .as_object_mut()
+            .unwrap()
+            .remove("capability_allowlist");
+        assert_eq!(
+            resolve_dynamic_tool(&payload, None, "search")
+                .expect_err("missing allowlist must fail closed")
+                .to_string(),
+            "runtime_capability_allowlist_missing"
+        );
     }
 }

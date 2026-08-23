@@ -106,7 +106,7 @@ def _reject_unmigrated_turn_capabilities(body: TurnCreateRequest) -> None:
 
     unsupported = (
         body.execution_profile != "safe"
-        or body.memory_mode != "auto"
+        or body.memory_mode not in {"auto", "strict", "off"}
         or body.system_prompt is not None
         or body.os_agent_enabled
         or body.local_node_device_id is not None
@@ -328,6 +328,7 @@ async def create_turn(
             legacy_thinking_level=body.thinking_level,
             max_tokens=body.max_tokens,
             temperature=body.temperature,
+            memory_mode=body.memory_mode,
             readonly_capabilities={
                 "knowledge": {
                     "dataset_ids": body.kb_dataset_ids,

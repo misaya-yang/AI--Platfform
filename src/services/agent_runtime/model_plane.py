@@ -8,6 +8,7 @@ protocol consumed by the Agent kernel.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import copy
 import json
@@ -30,6 +31,73 @@ from ai_gateway_core.agents import (
     canonical_runtime_json,
 )
 from ai_gateway_core.models import ReasoningWireError, apply_reasoning_wire
+
+KERNEL_TOOL_TRANSCRIPT_NAMES = frozenset(
+    {
+        "update_plan",
+        # Retired Python-loop alias. It may appear in a provider retry before
+        # the model selects collaboration.spawn_agent. The Runtime still
+        # rejects dispatch; the paired failure must remain replayable.
+        "spawn_subagent",
+        "spawn_agent",
+        "send_input",
+        "wait",
+        "close_agent",
+        "resume_agent",
+        "send_message",
+        "followup_task",
+        "wait_agent",
+        "list_agents",
+        "interrupt_agent",
+    }
+)
+KERNEL_TOOL_TRANSCRIPT_NAMESPACES = frozenset({"collaboration", "multi_agent_v1"})
+
+
+def _is_unnamespaced(value: Any) -> bool:
+    return value is None or value == ""
+
+
+def _is_kernel_tool_identity(name: Any, namespace: Any = None) -> bool:
+    if not isinstance(name, str):
+        return False
+    if _is_unnamespaced(namespace) and name in KERNEL_TOOL_TRANSCRIPT_NAMES:
+        return True
+    if (
+        isinstance(namespace, str)
+        and namespace in KERNEL_TOOL_TRANSCRIPT_NAMESPACES
+        and name in KERNEL_TOOL_TRANSCRIPT_NAMES
+    ):
+        return True
+    if not _is_unnamespaced(namespace):
+        return False
+    return any(
+        name == f"{prefix}{tool_name}"
+        for prefix in KERNEL_TOOL_TRANSCRIPT_NAMESPACES
+        for tool_name in KERNEL_TOOL_TRANSCRIPT_NAMES
+    )
+
+
+def _is_allowed_tool_identity(
+    name: Any,
+    namespace: Any,
+    *,
+    allowed_tool_names: set[str] | None,
+    allowed_namespaced_tools: set[tuple[str, str]] | None,
+) -> bool:
+    if allowed_tool_names is None:
+        return True
+    if _is_kernel_tool_identity(name, namespace):
+        return True
+    if not isinstance(name, str):
+        return False
+    if _is_unnamespaced(namespace):
+        return name in allowed_tool_names
+    return (
+        isinstance(namespace, str)
+        and allowed_namespaced_tools is not None
+        and (namespace, name) in allowed_namespaced_tools
+    )
 
 
 class _Database(Protocol):
@@ -297,30 +365,43 @@ def _native_responses_body(
     reasoning_option: str,
 ) -> tuple[dict[str, Any], dict[str, tuple[str, str]]]:
     validated_tools = _validated_native_tools(body.get("tools"), profile)
-    allow_function_transcript = any(
-        tool.get("type") == "function" for tool in validated_tools.tools
+    function_tool_names = {
+        str(tool["name"])
+        for tool in validated_tools.tools
+        if tool.get("type") == "function"
+    }
+    raw_input = body.get("input")
+    input_items = raw_input if isinstance(raw_input, list) else []
+    has_tool_transcript = isinstance(raw_input, list) and any(
+        isinstance(item, Mapping)
+        and item.get("type") in {"function_call", "function_call_output"}
+        for item in raw_input
     )
+    transcript_calls = [
+        item
+        for item in input_items
+        if isinstance(item, Mapping)
+        and item.get("type") == "function_call"
+        and isinstance(item.get("name"), str)
+    ]
+    kernel_only_transcript = bool(transcript_calls) and all(
+        _is_kernel_tool_identity(item.get("name"), item.get("namespace"))
+        for item in transcript_calls
+    )
+    allow_function_transcript = bool(function_tool_names) or kernel_only_transcript
     _validate_phase2_responses_input(
         body,
         allow_tool_transcript=allow_function_transcript,
     )
-    raw_input = body.get("input")
-    if isinstance(raw_input, list) and any(
-        isinstance(item, Mapping)
-        and item.get("type") in {"function_call", "function_call_output"}
-        for item in raw_input
-    ):
+    if has_tool_transcript:
         _validate_tool_transcript(
             raw_input,
-            allowed_tool_names={
-                str(tool["name"])
-                for tool in validated_tools.tools
-                if tool.get("type") == "function"
-            },
+            allowed_tool_names=function_tool_names | KERNEL_TOOL_TRANSCRIPT_NAMES,
+            allowed_namespaced_tools=set(validated_tools.aliases.values()),
         )
     result: dict[str, Any] = {
         "model": model_id,
-        "input": copy.deepcopy(body["input"]),
+        "input": _native_responses_input(body["input"]),
         "stream": True,
         "store": False,
         "max_output_tokens": max_output_tokens,
@@ -363,15 +444,56 @@ def _content_text(value: Any) -> str:
     for part in value:
         if not isinstance(part, Mapping):
             continue
-        if part.get("type") in {"input_text", "output_text", "text"}:
-            text = part.get("text")
+        part_type = part.get("type")
+        if part_type in {"input_text", "output_text", "text", "encrypted_content"}:
+            text = (
+                part.get("encrypted_content")
+                if part_type == "encrypted_content"
+                else part.get("text")
+            )
             if isinstance(text, str):
                 parts.append(text)
     return "".join(parts)
 
 
+def _native_responses_input(value: Any) -> Any:
+    """Expose internal collaboration payloads on non-OpenAI Responses wires."""
+
+    if not isinstance(value, list):
+        return copy.deepcopy(value)
+    normalized: list[Any] = []
+    for raw_item in value:
+        item = copy.deepcopy(raw_item)
+        if not isinstance(item, dict) or not isinstance(item.get("content"), list):
+            normalized.append(item)
+            continue
+        content: list[Any] = []
+        for raw_part in item["content"]:
+            if (
+                isinstance(raw_part, Mapping)
+                and raw_part.get("type") == "encrypted_content"
+                and isinstance(raw_part.get("encrypted_content"), str)
+            ):
+                content.append(
+                    {"type": "input_text", "text": raw_part["encrypted_content"]}
+                )
+            else:
+                content.append(raw_part)
+        item["content"] = content
+        # Collaboration messages are kernel-internal input items.  A provider
+        # Responses endpoint does not understand that item type, so expose the
+        # already-authorized payload as an ordinary user message on the wire.
+        if item.get("type") == "agent_message":
+            item = {"type": "message", "role": "user", "content": content}
+        normalized.append(item)
+    return normalized
+
+
 def _validate_tool_transcript(
-    raw_input: list[Any], *, allowed_tool_names: set[str] | None = None
+    raw_input: list[Any],
+    *,
+    allowed_tool_names: set[str] | None = None,
+    allowed_namespaced_tools: set[tuple[str, str]] | None = None,
 ) -> None:
     pending_calls: dict[str, str] = {}
     completed_calls: set[str] = set()
@@ -382,7 +504,14 @@ def _validate_tool_transcript(
         if item_type == "function_call":
             call_id = item.get("call_id")
             name = item.get("name")
+            namespace = item.get("namespace")
             arguments = item.get("arguments")
+            allowed_identity = _is_allowed_tool_identity(
+                name,
+                namespace,
+                allowed_tool_names=allowed_tool_names,
+                allowed_namespaced_tools=allowed_namespaced_tools,
+            )
             if (
                 not isinstance(call_id, str)
                 or not call_id
@@ -391,7 +520,7 @@ def _validate_tool_transcript(
                 or not isinstance(arguments, str)
                 or call_id in pending_calls
                 or call_id in completed_calls
-                or (allowed_tool_names is not None and name not in allowed_tool_names)
+                or not allowed_identity
             ):
                 raise AgentModelPlaneError("RUNTIME_TOOL_TRANSCRIPT_INVALID", status_code=422)
             pending_calls[call_id] = name
@@ -428,8 +557,8 @@ def _responses_input_to_messages(body: Mapping[str, Any]) -> list[dict[str, Any]
         if not isinstance(item, Mapping):
             raise AgentModelPlaneError("RUNTIME_RESPONSES_INPUT_INVALID")
         item_type = item.get("type")
-        if item_type in {None, "message"}:
-            role = item.get("role")
+        if item_type in {None, "message", "agent_message"}:
+            role = "user" if item_type == "agent_message" else item.get("role")
             if role not in {"user", "assistant", "developer", "system"}:
                 continue
             text = _content_text(item.get("content"))
@@ -892,6 +1021,99 @@ class AgentModelPlane:
         if self._owns_http_client:
             await self.http_client.aclose()
 
+    async def _validate_turn_thread_scope(
+        self,
+        *,
+        claims: RuntimeModelLeaseClaims,
+        turn_metadata: Mapping[str, Any],
+    ) -> None:
+        """Bind model calls from root and sub-agent turns to one lease.
+
+        A child Responses turn has its own thread/turn identifiers.  It is
+        authorized only when the Runtime supplies the root turn plus the
+        immediate parent, and the immutable membership row proves that the
+        child belongs to the leased root thread and principal scope.
+        """
+
+        thread_id = str(turn_metadata.get("thread_id") or "")
+        turn_id = str(turn_metadata.get("turn_id") or "")
+        root_turn_id = str(turn_metadata.get("root_turn_id") or "")
+        parent_thread_id = str(turn_metadata.get("parent_thread_id") or "")
+        parent_turn_id = str(turn_metadata.get("parent_turn_id") or "")
+        if thread_id == claims.runtime_thread_id:
+            expected_metadata = {
+                "thread_id": claims.runtime_thread_id,
+                "turn_id": claims.run_id,
+                "ai_platform_scope_sha256": _runtime_scope_sha256(
+                    claims.tenant_id,
+                    claims.user_id,
+                    claims.session_id,
+                ),
+            }
+            if any(
+                str(turn_metadata.get(key) or "") != value
+                for key, value in expected_metadata.items()
+            ):
+                raise AgentModelPlaneError("RUNTIME_MODEL_LEASE_SCOPE_MISMATCH", status_code=403)
+            if (
+                root_turn_id not in {"", claims.run_id}
+                or parent_thread_id
+                or parent_turn_id
+            ):
+                raise AgentModelPlaneError("RUNTIME_MODEL_LEASE_SCOPE_MISMATCH", status_code=403)
+            return
+
+        if (
+            root_turn_id != claims.run_id
+            or not thread_id
+            or not turn_id
+            or thread_id == claims.runtime_thread_id
+            or not parent_thread_id
+            or parent_thread_id == thread_id
+        ):
+            raise AgentModelPlaneError("RUNTIME_MODEL_LEASE_SCOPE_MISMATCH", status_code=403)
+        if str(turn_metadata.get("ai_platform_scope_sha256") or "") != _runtime_scope_sha256(
+            claims.tenant_id,
+            claims.user_id,
+            claims.session_id,
+        ):
+            raise AgentModelPlaneError("RUNTIME_MODEL_LEASE_SCOPE_MISMATCH", status_code=403)
+        try:
+            child_thread_uuid = uuid.UUID(thread_id)
+            root_thread_uuid = uuid.UUID(claims.runtime_thread_id)
+            parent_thread_uuid = uuid.UUID(parent_thread_id)
+            uuid.UUID(turn_id)
+        except (ValueError, TypeError, AttributeError):
+            raise AgentModelPlaneError("RUNTIME_MODEL_LEASE_SCOPE_MISMATCH", status_code=403) from None
+        member = await self.database.fetchrow(
+            """
+            SELECT parent_kernel_thread_id, relation_kind
+              FROM assistant_runtime_thread_members
+             WHERE kernel_thread_id = $1
+               AND runtime_thread_id = $2
+               AND tenant_id = $3
+               AND user_id = $4
+               AND session_id = $5
+            """,
+            child_thread_uuid,
+            root_thread_uuid,
+            claims.tenant_id,
+            claims.user_id,
+            claims.session_id,
+        )
+        if not member:
+            raise AgentModelPlaneError("RUNTIME_MODEL_LEASE_SCOPE_MISMATCH", status_code=403)
+        relation_kind = str(member.get("relation_kind") or "")
+        stored_parent = member.get("parent_kernel_thread_id")
+        if relation_kind != "subagent" or stored_parent is None:
+            raise AgentModelPlaneError("RUNTIME_MODEL_LEASE_SCOPE_MISMATCH", status_code=403)
+        try:
+            stored_parent_uuid = uuid.UUID(str(stored_parent))
+        except (ValueError, TypeError, AttributeError):
+            raise AgentModelPlaneError("RUNTIME_MODEL_LEASE_SCOPE_MISMATCH", status_code=403) from None
+        if stored_parent_uuid != parent_thread_uuid:
+            raise AgentModelPlaneError("RUNTIME_MODEL_LEASE_SCOPE_MISMATCH", status_code=403)
+
     async def authorize_and_reserve(
         self,
         *,
@@ -953,19 +1175,7 @@ class AgentModelPlane:
         except RuntimeModelLeaseError as exc:
             raise AgentModelPlaneError(exc.code, status_code=401) from None
 
-        expected_metadata = {
-            "thread_id": claims.runtime_thread_id,
-            "turn_id": claims.run_id,
-            "ai_platform_scope_sha256": _runtime_scope_sha256(
-                claims.tenant_id,
-                claims.user_id,
-                claims.session_id,
-            ),
-        }
-        if any(
-            str(turn_metadata.get(key) or "") != value for key, value in expected_metadata.items()
-        ):
-            raise AgentModelPlaneError("RUNTIME_MODEL_LEASE_SCOPE_MISMATCH", status_code=403)
+        await self._validate_turn_thread_scope(claims=claims, turn_metadata=turn_metadata)
         if str(body.get("model") or "") != claims.model_id:
             raise AgentModelPlaneError("RUNTIME_MODEL_LEASE_MODEL_MISMATCH", status_code=403)
         snapshot = _runtime_snapshot(data.get("snapshot"))
@@ -1070,6 +1280,7 @@ class AgentModelPlane:
                     yield chunk
             finally:
                 api_key = ""
+                await self._mark_unknown_if_dispatched(call.call_id)
             return
         if wire_protocol != "chat_completions":
             await self._fail_call(call.call_id, "wire_protocol_unsupported", dispatched=False)
@@ -1173,16 +1384,11 @@ class AgentModelPlane:
             )
             for chunk in terminal_chunks:
                 yield chunk
-        except AgentModelPlaneError:
-            await self._mark_unknown_if_dispatched(call.call_id)
-            raise
-        except BaseException:
-            await self._mark_unknown_if_dispatched(call.call_id)
-            raise
         finally:
             # Drop the local reference promptly; never retain tenant credentials
             # in caches, snapshots, exceptions, or telemetry.
             api_key = ""
+            await self._mark_unknown_if_dispatched(call.call_id)
 
     async def _stream_native_responses(
         self,
@@ -1235,46 +1441,39 @@ class AgentModelPlane:
             ),
         )
         header_request_id: str | None = None
-        try:
-            async with self.http_client.stream(
-                "POST",
-                _responses_url(base_url),
-                headers=_provider_headers(profile, api_key),
-                json=provider_body,
-            ) as response:
-                header_request_id = response.headers.get("x-request-id")
-                if response.status_code >= 400:
-                    await response.aread()
-                    await self._fail_call(
-                        call.call_id,
-                        f"provider_http_{response.status_code}",
-                        dispatched=True,
-                    )
-                    raise AgentModelPlaneError("RUNTIME_PROVIDER_REJECTED", status_code=502)
-                async for line in response.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    payload = line[5:].strip()
-                    if not payload:
-                        continue
-                    event = validator.consume(payload)
-                    if event is not None:
-                        yield event
-            terminal = validator.finish()
-            await self._complete_call(
-                call=call,
-                input_tokens=terminal.input_tokens,
-                output_tokens=terminal.output_tokens,
-                provider_request_id=terminal.provider_request_id or header_request_id,
-            )
-            yield terminal.event
-            yield b"data: [DONE]\n\n"
-        except AgentModelPlaneError:
-            await self._mark_unknown_if_dispatched(call.call_id)
-            raise
-        except BaseException:
-            await self._mark_unknown_if_dispatched(call.call_id)
-            raise
+        async with self.http_client.stream(
+            "POST",
+            _responses_url(base_url),
+            headers=_provider_headers(profile, api_key),
+            json=provider_body,
+        ) as response:
+            header_request_id = response.headers.get("x-request-id")
+            if response.status_code >= 400:
+                await response.aread()
+                await self._fail_call(
+                    call.call_id,
+                    f"provider_http_{response.status_code}",
+                    dispatched=True,
+                )
+                raise AgentModelPlaneError("RUNTIME_PROVIDER_REJECTED", status_code=502)
+            async for line in response.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if not payload:
+                    continue
+                event = validator.consume(payload)
+                if event is not None:
+                    yield event
+        terminal = validator.finish()
+        await self._complete_call(
+            call=call,
+            input_tokens=terminal.input_tokens,
+            output_tokens=terminal.output_tokens,
+            provider_request_id=terminal.provider_request_id or header_request_id,
+        )
+        yield terminal.event
+        yield b"data: [DONE]\n\n"
 
     async def _complete_call(
         self,
@@ -1314,16 +1513,23 @@ class AgentModelPlane:
         )
 
     async def _mark_unknown_if_dispatched(self, call_id: uuid.UUID) -> None:
-        with contextlib.suppress(Exception):
-            await self.database.execute(
-                """
-                UPDATE assistant_runtime_model_calls
-                   SET status = 'unknown', error_code = 'stream_interrupted',
-                       completed_at = NOW(), updated_at = NOW()
-                 WHERE call_id = $1 AND status = 'dispatched'
-                """,
-                call_id,
-            )
+        async def mark_unknown() -> None:
+            with contextlib.suppress(Exception):
+                await self.database.execute(
+                    """
+                    UPDATE assistant_runtime_model_calls
+                       SET status = 'unknown', error_code = 'stream_interrupted',
+                           completed_at = NOW(), updated_at = NOW()
+                     WHERE call_id = $1 AND status = 'dispatched'
+                    """,
+                    call_id,
+                )
+
+        # The request task can be cancelled when a client disconnects or a
+        # parent turn accepts a sub-agent result. Keep the idempotent terminal
+        # write alive so a dispatched call never remains permanently open.
+        update_task = asyncio.create_task(mark_unknown())
+        await asyncio.shield(update_task)
 
 
 __all__ = ["AgentModelPlane", "AgentModelPlaneError"]

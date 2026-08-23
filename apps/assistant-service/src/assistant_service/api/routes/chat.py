@@ -1462,7 +1462,12 @@ async def agent_runtime_chat_stream(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ):
-    """Verify a Gateway-authored Agent Envelope before any model execution."""
+    """Retired Agent Studio model ingress kept as an explicit compatibility tombstone."""
+
+    raise HTTPException(
+        status_code=410,
+        detail={"code": "AGENT_RUNTIME_ONLY", "message": "Use the Gateway Agent Runtime."},
+    )
 
     if not _startup_flag(request, "AGENT_STUDIO_RUNTIME_ENABLED", default=True):
         raise HTTPException(

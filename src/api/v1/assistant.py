@@ -792,6 +792,7 @@ async def _start_agent_runtime_turn(
             legacy_thinking_level=body.thinking_level,
             max_tokens=body.max_tokens,
             temperature=body.temperature,
+            memory_mode=body.memory_mode,
             readonly_capabilities=_agent_runtime_readonly_capabilities(body),
         )
     except Exception as exc:

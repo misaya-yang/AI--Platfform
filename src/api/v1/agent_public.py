@@ -45,12 +45,12 @@ from .agent_runtime import (
     _existing_session,
     _is_tenant_admin,
     _map_repository_error,
-    _proxy_runtime_stream,
     _raise_runtime_error,
     _repository,
     _request_id,
     _resolve_runtime_attachments,
     _runtime_body,
+    _start_runtime_stream,
     _store_runtime_attachment,
 )
 
@@ -473,7 +473,7 @@ async def public_agent_chat_stream(
         snapshot=snapshot,
         draft_revision=None,
     )
-    return await _proxy_runtime_stream(
+    return await _start_runtime_stream(
         request,
         caller,
         body=_runtime_body(
@@ -484,7 +484,6 @@ async def public_agent_chat_stream(
             resume_approval_id=payload.resume_approval_id,
         ),
         snapshot=snapshot,
-        draft_revision=None,
     )
 
 

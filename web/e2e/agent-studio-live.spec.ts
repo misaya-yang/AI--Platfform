@@ -3,7 +3,9 @@ import path from "node:path";
 
 import { expect, test, type Page } from "@playwright/test";
 
-const liveEnabled = process.env.E2E_LIVE_AGENT_STUDIO === "1";
+const liveEnabled =
+  process.env.E2E_LIVE_AGENT_STUDIO === "1" &&
+  process.env.E2E_DOCKER_LIVE_STACK === "1";
 const liveDisabledEnabled = process.env.E2E_LIVE_AGENT_STUDIO_DISABLED === "1";
 
 async function deleteCreatedAgent(page: Page, agentId: string): Promise<void> {
@@ -23,7 +25,10 @@ async function deleteCreatedAgent(page: Page, agentId: string): Promise<void> {
 }
 
 test.describe("Agent Studio live stack", () => {
-  test.skip(!liveEnabled, "Set E2E_LIVE_AGENT_STUDIO=1 to run against the authenticated local stack.");
+  test.skip(
+    !liveEnabled,
+    "Use playwright.live.config.ts with E2E_LIVE_AGENT_STUDIO=1 against the authenticated Docker stack.",
+  );
 
   test("creates, saves, previews, renders responsively, and cleans up a real Draft", async ({ page }) => {
     page.setDefaultTimeout(15_000);
@@ -67,10 +72,14 @@ test.describe("Agent Studio live stack", () => {
       await expect(page.getByLabel("Welcome message")).toHaveValue("Welcome to the AS-05 live Preview.");
       await page.locator(".agent-preview-header").getByRole("button", { name: "New session" }).click();
       const startedSession = page.getByText(/New isolated session · Draft r\d+/);
-      const unavailableModel = page
-        .getByRole("alert")
-        .filter({ hasText: /Preview failed.*Model unavailable: Agent model is unavailable/ });
-      await expect(startedSession.or(unavailableModel)).toBeVisible();
+      await expect(startedSession).toBeVisible();
+      await page.getByLabel("Message this agent").fill("Explain why Transformer training can be parallelized in three sentences.");
+      await page.getByLabel("Send Preview message").click();
+      const assistantResponse = page.locator(".agent-preview-message-assistant p").last();
+      await expect(assistantResponse).toBeVisible();
+      await expect(assistantResponse).not.toHaveText(/Generating|completed without a text response/);
+      await expect(assistantResponse).not.toHaveText("Agent E2E stub response");
+      await expect(page.locator(".agent-preview-error")).toHaveCount(0);
       await page.screenshot({
         path: path.join(evidenceDir, "studio-desktop.png"),
         fullPage: true,

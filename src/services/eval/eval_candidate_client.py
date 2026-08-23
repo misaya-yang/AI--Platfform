@@ -1,4 +1,10 @@
-"""Internal streaming client used by live Agent eval runs."""
+"""V2 Agent Runtime client used by live Agent eval runs.
+
+The eval candidate must exercise the same public Thread/Turn/Item boundary as
+the product.  Calling the legacy assistant-service stream here would make the
+quality gate prove the old Python loop instead of the Runtime that is being
+rolled out.
+"""
 
 from __future__ import annotations
 
@@ -9,9 +15,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
-from ai_gateway_core.auth.gateway_secret import GatewaySecret
+from ai_gateway_core.eval.runtime_contract import assert_runtime_observation
 
-ASSISTANT_STREAM_PATH = "/api/v1/assistant/chat/stream"
+V2_THREADS_PATH = "/api/v2/agent/threads"
 EVAL_CANDIDATE_USER_ID = "eval-candidate"
 
 
@@ -69,11 +75,18 @@ class EvalCandidateResult:
 
 class EvalCandidateClient:
     def __init__(self) -> None:
-        self.base_url = os.getenv("ASSISTANT_SERVICE_URL", "http://assistant-service:8093").rstrip(
-            "/"
+        self.base_url = os.getenv(
+            "AGENT_EVAL_GATEWAY_URL",
+            os.getenv("GATEWAY_URL", "http://gateway:8080"),
+        ).rstrip("/")
+        self.token = (
+            os.getenv("AGENT_EVAL_AUTH_TOKEN", "").strip()
+            or os.getenv("GATEWAY_TOKEN", "").strip()
+            or os.getenv("GATEWAY_ADMIN_JWT", "").strip()
         )
-        secret = os.getenv("GATEWAY_ASSISTANT_SHARED_SECRET", "").strip()
-        self.signer = GatewaySecret(secret=secret) if secret else None
+        self.api_key = os.getenv("AGENT_EVAL_API_KEY", "").strip() or os.getenv(
+            "GATEWAY_API_KEY", ""
+        ).strip()
 
     async def run(
         self,
@@ -84,101 +97,154 @@ class EvalCandidateClient:
         config: dict[str, Any],
         on_run_started: Callable[[str], Awaitable[None]] | None = None,
     ) -> EvalCandidateResult:
-        if self.signer is None:
-            raise RuntimeError("GATEWAY_ASSISTANT_SHARED_SECRET is required for live eval")
-        model_id = str(config.get("model_id") or "").strip()
-        if not model_id or model_id == "current":
-            model_id = "qwen3.7-plus"
-        body = {
-            "message": message,
-            "session_id": run_case_id,
-            "history": [],
-            "model_id": model_id,
-            "temperature": config.get("temperature", 0.7),
-            "max_tokens": config.get("max_tokens"),
-            "kb_dataset_ids": config.get("kb_dataset_ids") or [],
-            "kb_mode": config.get("kb_mode") or "auto",
-            "kb_top_k": config.get("kb_top_k") or 5,
-            "web_search_enabled": bool(config.get("web_search_enabled", False)),
-            "web_search_max_results": config.get("web_search_max_results") or 5,
-            "execution_profile": config.get("execution_profile") or "safe",
-            "memory_mode": "off",
-            "memory_profile": "off",
-            "runtime_mode": config.get("runtime_mode") or "compat",
-            "context_detail": True,
-            "eval_run": True,
-            "eval_system_prompt_override": config.get("system_prompt_override"),
-        }
-        body = {key: value for key, value in body.items() if value is not None}
-        encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-            "X-User-Id": EVAL_CANDIDATE_USER_ID,
-            "X-Tenant-Id": tenant_id,
-            "X-User-Tier": "normal",
-            "X-User-Type": "system",
-            "X-User-Roles": "admin",
-        }
-        headers[self.signer.header_name] = self.signer.sign(
-            method="POST",
-            path=ASSISTANT_STREAM_PATH,
-            query="",
-            body=encoded,
+        if not self.token and not self.api_key:
+            raise RuntimeError(
+                "AGENT_EVAL_AUTH_TOKEN/GATEWAY_TOKEN/GATEWAY_ADMIN_JWT or "
+                "AGENT_EVAL_API_KEY/GATEWAY_API_KEY is required for V2 live eval"
+            )
+        if config.get("system_prompt_override"):
+            raise RuntimeError(
+                "V2 Agent Runtime does not support eval system_prompt_override; "
+                "refusing to evaluate a different prompt"
+            )
+        configured_model_id = str(config.get("model_id") or "").strip()
+        model_id = configured_model_id if configured_model_id not in {"", "current"} else None
+        headers = self._auth_headers()
+        headers.update(
+            {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                # The token remains the authority; these headers make the
+                # eval scope explicit for request tracing and test servers.
+                "X-Tenant-Id": tenant_id,
+                "X-User-Id": EVAL_CANDIDATE_USER_ID,
+            }
         )
+        thread_body: dict[str, Any] = {"session_id": run_case_id}
+        if model_id is not None:
+            thread_body["model_id"] = model_id
 
         trace_id = ""
         output_parts: list[str] = []
         usage: dict[str, Any] = {}
         fingerprint: dict[str, Any] = {}
         terminal_error: str | None = None
+        terminal_events: list[str] = []
+        observed_events: list[dict[str, Any]] = []
         timeout = httpx.Timeout(connect=5.0, read=300.0, write=30.0, pool=10.0)
-        async with (
-            httpx.AsyncClient(base_url=self.base_url, timeout=timeout) as client,
-            client.stream(
-                "POST", ASSISTANT_STREAM_PATH, headers=headers, content=encoded
-            ) as response,
-        ):
-            if response.status_code >= 400:
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=timeout) as client:
+            thread_response = await client.post(
+                V2_THREADS_PATH, headers=headers, json=thread_body
+            )
+            if thread_response.status_code >= 400:
                 raise RuntimeError(
-                    f"assistant-service candidate stream failed with HTTP {response.status_code}"
+                    f"Agent Runtime thread create failed with HTTP {thread_response.status_code}"
                 )
-            async for line in response.aiter_lines():
-                if not line.startswith("data:"):
-                    continue
-                raw = line[5:].strip()
-                if not raw:
-                    continue
-                try:
-                    event = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                event_type = str(event.get("event_type") or "")
-                data = event.get("data")
-                if event_type == "run_started" and isinstance(data, dict):
-                    trace_id = str(data.get("run_id") or trace_id)
-                    if trace_id and on_run_started is not None:
-                        await on_run_started(trace_id)
-                elif event_type == "context_budget" and isinstance(data, dict):
-                    fingerprint = candidate_fingerprint_from_context(data)
-                elif event_type == "text_delta":
-                    if isinstance(data, str):
-                        output_parts.append(data)
-                    elif isinstance(data, dict):
-                        output_parts.append(str(data.get("delta") or data.get("content") or ""))
-                elif event_type == "usage" and isinstance(data, dict):
-                    usage = dict(data)
-                elif event_type in {"done", "run_completed", "run_stopped", "run_finished"}:
-                    if isinstance(data, dict) and isinstance(data.get("usage"), dict):
-                        usage = dict(data["usage"])
-                elif event_type in {"error", "run_error"}:
-                    terminal_error = (
-                        str(data.get("message") or data.get("error") or "")
-                        if isinstance(data, dict)
-                        else str(data or "")
+            thread_payload = thread_response.json()
+            thread = thread_payload.get("thread") if isinstance(thread_payload, dict) else None
+            runtime = thread.get("runtime") if isinstance(thread, dict) else None
+            if not isinstance(runtime, dict) or runtime.get("owner") != "agent_runtime":
+                raise RuntimeError("Agent Eval candidate is not owned by agent_runtime")
+            thread_id = str((thread or {}).get("thread_id") or (thread or {}).get("id") or "")
+            if not thread_id:
+                raise RuntimeError("Agent Runtime thread response has no thread_id")
+
+            turn_body = {
+                "message": message,
+                "model_id": model_id,
+                "reasoning_option": config.get("reasoning_option"),
+                "thinking_level": config.get("thinking_level"),
+                "temperature": config.get("temperature"),
+                "max_tokens": config.get("max_tokens"),
+                "kb_dataset_ids": config.get("kb_dataset_ids") or [],
+                "kb_mode": config.get("kb_mode") or "off",
+                "kb_top_k": config.get("kb_top_k") or 5,
+                "web_search_enabled": bool(config.get("web_search_enabled", False)),
+                "web_search_max_results": config.get("web_search_max_results") or 5,
+            }
+            turn_body = {key: value for key, value in turn_body.items() if value is not None}
+            turn_response = await client.post(
+                f"{V2_THREADS_PATH}/{thread_id}/turns", headers=headers, json=turn_body
+            )
+            if turn_response.status_code >= 400:
+                raise RuntimeError(
+                    f"Agent Runtime turn create failed with HTTP {turn_response.status_code}"
+                )
+            turn_payload = turn_response.json()
+            turn = turn_payload.get("turn") if isinstance(turn_payload, dict) else None
+            turn_id = str((turn or {}).get("id") or "")
+            if not turn_id:
+                raise RuntimeError("Agent Runtime turn response has no turn_id")
+            events_path = str((turn or {}).get("events_url") or "")
+            if not events_path:
+                raise RuntimeError("Agent Runtime turn response has no events_url")
+            if events_path.startswith("http"):
+                events_path = events_path.split(self.base_url, 1)[-1]
+            async with client.stream("GET", events_path, headers={**headers, "Accept": "text/event-stream"}) as response:
+                if response.status_code >= 400:
+                    raise RuntimeError(
+                        f"Agent Runtime event stream failed with HTTP {response.status_code}"
                     )
+                frame: list[str] = []
+                async for line in response.aiter_lines():
+                    if line:
+                        frame.append(line)
+                        continue
+                    if not frame:
+                        continue
+                    raw_line = next((value[5:].strip() for value in frame if value.startswith("data:")), "")
+                    frame = []
+                    if not raw_line:
+                        continue
+                    try:
+                        envelope = json.loads(raw_line)
+                    except json.JSONDecodeError:
+                        continue
+                    event = envelope.get("event") if isinstance(envelope, dict) else None
+                    if isinstance(envelope, dict):
+                        observed_events.append(envelope)
+                    raw = event.get("payload") if isinstance(event, dict) else None
+                    if not isinstance(raw, dict):
+                        continue
+                    event_type = str(raw.get("event_type") or "")
+                    data = raw.get("data")
+                    if event_type == "run_started" and isinstance(data, dict):
+                        trace_id = str(data.get("run_id") or trace_id or turn_id)
+                        if data.get("kernel_revision") is not None:
+                            fingerprint["runtime_revision"] = data["kernel_revision"]
+                        if trace_id and on_run_started is not None:
+                            await on_run_started(trace_id)
+                    elif event_type == "context_budget" and isinstance(data, dict):
+                        fingerprint = candidate_fingerprint_from_context(data)
+                    elif event_type == "text_delta":
+                        if isinstance(data, str):
+                            output_parts.append(data)
+                        elif isinstance(data, dict):
+                            output_parts.append(str(data.get("delta") or data.get("content") or ""))
+                    elif event_type == "usage" and isinstance(data, dict):
+                        usage = dict(data)
+                    elif event_type in {"run_finished", "run_error", "cancelled"}:
+                        terminal_events.append(event_type)
+                        if isinstance(data, dict) and isinstance(data.get("usage"), dict):
+                            usage = dict(data["usage"])
+                    if event_type in {"error", "run_error", "cancelled"}:
+                        terminal_error = (
+                            str(data.get("message") or data.get("error") or "")
+                            if isinstance(data, dict)
+                            else str(data or "")
+                        )
+        if len(terminal_events) != 1:
+            raise RuntimeError(
+                "Agent Runtime event stream must contain exactly one terminal "
+                "event (run_finished, run_error, or cancelled); "
+                f"observed {terminal_events or 'none'}"
+            )
+        try:
+            assert_runtime_observation(thread, observed_events)
+        except ValueError as exc:
+            raise RuntimeError(f"Agent Runtime observation contract failed: {exc}") from exc
         if not trace_id:
-            raise RuntimeError(terminal_error or "assistant candidate stream returned no run_id")
+            raise RuntimeError(terminal_error or "Agent Runtime event stream returned no run_id")
         return EvalCandidateResult(
             trace_id=trace_id,
             output="".join(output_parts),
@@ -186,3 +252,10 @@ class EvalCandidateClient:
             fingerprint=fingerprint,
             error=terminal_error or None,
         )
+
+    def _auth_headers(self) -> dict[str, str]:
+        if self.token:
+            return {"Authorization": f"Bearer {self.token}"}
+        if self.api_key:
+            return {"X-API-Key": self.api_key}
+        return {}

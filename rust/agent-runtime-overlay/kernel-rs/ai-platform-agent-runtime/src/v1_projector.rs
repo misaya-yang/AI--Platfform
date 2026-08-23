@@ -78,6 +78,35 @@ pub fn project_server_notification(
                 }),
             )]
         }
+        ServerNotification::PlanDelta(delta) => vec![AssistantTurnEventV1::new(
+            "plan_update",
+            json!({
+                "run_id": delta.turn_id,
+                "session_id": context.session_id,
+                "thread_id": delta.thread_id,
+                "item_id": delta.item_id,
+                "delta": delta.delta,
+            }),
+        )],
+        ServerNotification::TurnPlanUpdated(plan) => vec![AssistantTurnEventV1::new(
+            "plan_update",
+            json!({
+                "run_id": plan.turn_id,
+                "session_id": context.session_id,
+                "thread_id": plan.thread_id,
+                "explanation": plan.explanation,
+                "plan": plan.plan,
+            }),
+        )],
+        ServerNotification::ContextCompacted(compacted) => vec![AssistantTurnEventV1::new(
+            "context_compaction",
+            json!({
+                "run_id": compacted.turn_id,
+                "session_id": context.session_id,
+                "thread_id": compacted.thread_id,
+                "compacted": true,
+            }),
+        )],
         // Raw reasoning is intentionally not a product event. Only provider-approved
         // reasoning summaries may reach the V1 compatibility stream.
         ServerNotification::ReasoningTextDelta(_) => Vec::new(),
@@ -131,6 +160,9 @@ pub fn server_notification_thread_id(notification: &ServerNotification) -> Optio
         ServerNotification::TurnStarted(value) => Some(&value.thread_id),
         ServerNotification::AgentMessageDelta(value) => Some(&value.thread_id),
         ServerNotification::ReasoningSummaryTextDelta(value) => Some(&value.thread_id),
+        ServerNotification::PlanDelta(value) => Some(&value.thread_id),
+        ServerNotification::TurnPlanUpdated(value) => Some(&value.thread_id),
+        ServerNotification::ContextCompacted(value) => Some(&value.thread_id),
         ServerNotification::ReasoningTextDelta(value) => Some(&value.thread_id),
         ServerNotification::ItemStarted(value) => Some(&value.thread_id),
         ServerNotification::ItemCompleted(value) => Some(&value.thread_id),
@@ -200,8 +232,10 @@ fn project_tool_item(
     context: &V1ProjectionContext,
     phase: ToolProjectionPhase,
 ) -> Vec<AssistantTurnEventV1> {
+    let mut events =
+        project_collab_item(item, thread_id, turn_id, context, phase).unwrap_or_default();
     let Some(mut tool) = tool_data(item) else {
-        return Vec::new();
+        return events;
     };
     tool.insert("run_id".to_string(), turn_id.into());
     tool.insert("session_id".to_string(), context.session_id.clone().into());
@@ -209,10 +243,10 @@ fn project_tool_item(
     match phase {
         ToolProjectionPhase::Started => {
             tool.insert("status".to_string(), "started".into());
-            vec![AssistantTurnEventV1::new(
+            events.push(AssistantTurnEventV1::new(
                 "tool_call_start",
                 Value::Object(tool),
-            )]
+            ));
         }
         ToolProjectionPhase::Completed => {
             let failed = tool_terminal_failed(tool.get("status").and_then(Value::as_str));
@@ -222,12 +256,108 @@ fn project_tool_item(
             );
             tool.insert("success".to_string(), (!failed).into());
             let data = Value::Object(tool);
-            vec![
-                AssistantTurnEventV1::new("tool_call_result", data.clone()),
-                AssistantTurnEventV1::new("tool_call_end", data),
-            ]
+            events.push(AssistantTurnEventV1::new("tool_call_result", data.clone()));
+            events.push(AssistantTurnEventV1::new("tool_call_end", data));
         }
     }
+    events
+}
+
+/// Project the kernel's collaboration item into the stable child-agent
+/// lifecycle already consumed by the Assistant workbench. Receiver thread IDs
+/// are the child identity; unlike the parent tool-call ID they remain stable
+/// across reconnects and history replay.
+fn project_collab_item(
+    item: &ThreadItem,
+    thread_id: &str,
+    turn_id: &str,
+    context: &V1ProjectionContext,
+    phase: ToolProjectionPhase,
+) -> Option<Vec<AssistantTurnEventV1>> {
+    let value = serde_json::to_value(item).ok()?;
+    let object = value.as_object()?;
+    if object.get("type")?.as_str()? != "collabAgentToolCall" {
+        return None;
+    }
+    let call_id = object.get("id")?.as_str()?;
+    let tool = object
+        .get("tool")
+        .and_then(Value::as_str)
+        .unwrap_or("collaboration");
+    let prompt = object.get("prompt").cloned().unwrap_or(Value::Null);
+    let mut receiver_ids = object
+        .get("receiverThreadIds")
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if receiver_ids.is_empty() {
+        receiver_ids = object
+            .get("agentsStates")
+            .and_then(Value::as_object)
+            .map(|states| states.keys().cloned().collect())
+            .unwrap_or_default();
+    }
+    // A spawn item without a receiver identity must remain a normal tool
+    // event. Using the parent call ID here would create a phantom child that
+    // cannot be correlated with the later receiver thread.
+    if receiver_ids.is_empty() {
+        return None;
+    }
+    let raw_status = object
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("failed");
+    let status = match raw_status {
+        "completed" => "completed",
+        "inProgress" => "running",
+        _ => "failed",
+    };
+    let agent_type = "task";
+    Some(
+        receiver_ids
+            .into_iter()
+            .flat_map(|agent_id| {
+                let data = json!({
+                    "agent_id": agent_id,
+                    "agent_type": agent_type,
+                    "description": prompt,
+                    "call_id": call_id,
+                    "parent_task_id": thread_id,
+                    "task_id": turn_id,
+                    "session_id": context.session_id,
+                    "thread_id": thread_id,
+                    "tool": tool,
+                    "status": status,
+                });
+                let event_type = match (tool, phase) {
+                    ("spawnAgent", ToolProjectionPhase::Started) => "subagent_started",
+                    ("spawnAgent", ToolProjectionPhase::Completed) => "subagent_finished",
+                    (_, _) => "subagent_step",
+                };
+                let data = if tool == "spawnAgent" {
+                    data
+                } else {
+                    let mut step = data;
+                    step["step"] = prompt.clone();
+                    step["status"] = if matches!(phase, ToolProjectionPhase::Started) {
+                        "running".into()
+                    } else if status == "failed" {
+                        "failed".into()
+                    } else {
+                        "completed".into()
+                    };
+                    step
+                };
+                vec![AssistantTurnEventV1::new(event_type, data)]
+            })
+            .collect(),
+    )
 }
 
 fn tool_data(item: &ThreadItem) -> Option<serde_json::Map<String, Value>> {
