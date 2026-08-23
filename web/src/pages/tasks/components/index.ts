@@ -3,4 +3,4 @@
  */
 
 export { TaskQueryTab } from "./TaskQueryTab";
-export { ScheduledTasksTab } from "./ScheduledTasksTab";
+export { TaskInboxTab } from "./TaskInboxTab";

@@ -420,7 +420,7 @@ def test_migrate_shell_guards_legacy_version_tracking_duplicate_prefixes():
     assert "assert_unique_forward_migration_versions()" in script
     assert "guard_legacy_version_tracking()" in script
     assert "Duplicate migration version prefix" in script
-    assert "treating as historical duplicate" in script
+    assert "treating as historical duplicate" not in script
     assert "legacy_tracking_has_dirty()" in script
     assert "INSERT INTO public.schema_migrations (version) VALUES" in script
     assert "table_schema = 'public'" in script
@@ -428,3 +428,26 @@ def test_migrate_shell_guards_legacy_version_tracking_duplicate_prefixes():
     assert "to_regclass('gateway.services')" in script
     assert "to_regclass('knowledge.datasets')" in script
     assert script.count("guard_legacy_version_tracking") >= 3
+
+
+def test_migrate_filename_tracking_uses_exact_legacy_aliases() -> None:
+    script = _read("scripts/new/migrate.sh")
+
+    assert "legacy_filename_alias()" in script
+    assert "089_codex_runtime_thread_store.sql" in script
+    assert "094_codex_runtime_legacy_import_normalization.sql" in script
+    assert "LIKE '${prefix}\\_%'" not in script
+
+
+def test_deploy_builds_and_pins_the_agent_runtime_image() -> None:
+    deploy = _read("scripts/new/deploy.sh")
+    compose = _read("docker-compose.yml")
+    example = _read(".env.example")
+
+    assert "agent_runtime_kernel_revision" in deploy
+    assert "agent_runtime_image_tag" in deploy
+    assert "build_agent_runtime_image.sh" in deploy
+    assert "AI_PLATFORM_AGENT_RUNTIME_SOURCE is required for --build" in deploy
+    assert 'AI_PLATFORM_AGENT_RUNTIME_IMAGE_TAG' in deploy
+    assert "AI_PLATFORM_AGENT_RUNTIME_IMAGE" in compose
+    assert "AI_PLATFORM_AGENT_RUNTIME_IMAGE=" in example

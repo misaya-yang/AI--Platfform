@@ -109,6 +109,31 @@ knowledge_container() { echo "${KNOWLEDGE_CONTAINER:-ai-gateway-knowledge-servic
 knowledge_worker_container() { echo "${KNOWLEDGE_WORKER_CONTAINER:-ai-gateway-knowledge-worker}"; }
 gateway_container()   { echo "${GATEWAY_CONTAINER:-ai-gateway-backend}"; }
 frontend_container()  { echo "${FRONTEND_CONTAINER:-ai-gateway-frontend}"; }
+agent_runtime_container() { echo "${AGENT_RUNTIME_CONTAINER:-ai-gateway-agent-runtime}"; }
+
+agent_runtime_kernel_revision() {
+    python3 - "$PROJECT_ROOT/deploy/agent-runtime-source/source-receipt.json" <<'PY'
+import json
+import sys
+
+receipt = json.load(open(sys.argv[1], encoding="utf-8"))
+source = receipt["source"]["upstream_sha"]
+overlay = receipt["overlay"]["sha256"]
+print(f"{source}+{overlay[:12]}")
+PY
+}
+
+agent_runtime_image_tag() {
+    python3 - "$PROJECT_ROOT/deploy/agent-runtime-source/source-receipt.json" <<'PY'
+import json
+import sys
+
+receipt = json.load(open(sys.argv[1], encoding="utf-8"))
+upstream = receipt["source"]["upstream_sha"]
+overlay = receipt["overlay"]["sha256"]
+print(f"ai-gateway-agent-runtime:local-{upstream[:12]}-{overlay[:12]}")
+PY
+}
 
 # -- Compose ownership guard -------------------------------------------------
 assert_compose_owner() {
@@ -122,6 +147,7 @@ assert_compose_owner() {
         "$(assistant_container)"
         "$(knowledge_container)"
         "$(knowledge_worker_container)"
+        "$(agent_runtime_container)"
         # Legacy/other-checkout names that have caused local stack confusion.
         ai-gateway-mcp-docgen-server
         assistant-service
@@ -254,6 +280,10 @@ check_knowledge_health() {
 
 check_knowledge_worker_health() {
     docker exec "$(knowledge_worker_container)" curl -sf "http://127.0.0.1:8092/health/ready" &>/dev/null
+}
+
+check_agent_runtime_health() {
+    docker exec "$(agent_runtime_container)" curl -sf "http://127.0.0.1:8094/health/ready" &>/dev/null
 }
 
 check_assistant_health() {

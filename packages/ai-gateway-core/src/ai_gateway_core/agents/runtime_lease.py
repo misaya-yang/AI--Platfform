@@ -1,4 +1,4 @@
-"""Signed, secret-free leases for the Codex model data plane.
+"""Signed, secret-free leases for the Agent model data plane.
 
 The lease signature authenticates a row that already exists in PostgreSQL; it
 is not a bearer credential for a provider.  Provider secrets remain inside the
@@ -16,7 +16,7 @@ from typing import Final
 
 from .runtime import canonical_runtime_json
 
-RUNTIME_MODEL_LEASE_SCHEMA_VERSION: Final = "codex-runtime-model-lease/v1"
+RUNTIME_MODEL_LEASE_SCHEMA_VERSION: Final = "agent-runtime-model-lease/v1"
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -79,7 +79,7 @@ class RuntimeModelLeaseClaims:
 
 
 class RuntimeModelLeaseSigner:
-    """HMAC signer whose output fits Codex's bounded turn metadata value."""
+    """HMAC signer whose output fits Agent's bounded turn metadata value."""
 
     def __init__(self, secret: str) -> None:
         if not secret or len(secret) < 16:

@@ -1441,6 +1441,7 @@ class DatabaseStorage:
                 json.dumps(session.get("history", [])),
                 json.dumps(session.get("metadata", {})),
                 json.dumps(session.get("config", {})),
+                session.get("status", "active"),
                 session.get("expires_at"),
             )
 

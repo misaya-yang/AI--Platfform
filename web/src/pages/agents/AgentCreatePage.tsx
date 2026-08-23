@@ -46,6 +46,9 @@ interface AgentTemplate {
   welcomeMessage: string;
   suggestedPrompts: string[];
   detail: string;
+  goal: string;
+  triggers: string[];
+  successCriteria: string[];
 }
 
 function getAgentTemplates(t: TFunction): Record<AgentTemplateKey, AgentTemplate> {
@@ -57,6 +60,9 @@ function getAgentTemplates(t: TFunction): Record<AgentTemplateKey, AgentTemplate
       instructions: t("agents.create.templates.blank.instructions"),
       welcomeMessage: "",
       suggestedPrompts: [],
+      goal: "",
+      triggers: [],
+      successCriteria: [],
     },
     support: {
       title: t("agents.create.templates.support.title"),
@@ -65,6 +71,9 @@ function getAgentTemplates(t: TFunction): Record<AgentTemplateKey, AgentTemplate
       instructions: t("agents.create.templates.support.instructions"),
       welcomeMessage: t("agents.create.templates.support.welcome"),
       suggestedPrompts: [t("agents.create.templates.support.promptOne"), t("agents.create.templates.support.promptTwo")],
+      goal: t("agents.create.templates.support.goal"),
+      triggers: [t("agents.create.templates.support.trigger")],
+      successCriteria: [t("agents.create.templates.support.success")],
     },
     knowledge: {
       title: t("agents.create.templates.knowledge.title"),
@@ -73,6 +82,9 @@ function getAgentTemplates(t: TFunction): Record<AgentTemplateKey, AgentTemplate
       instructions: t("agents.create.templates.knowledge.instructions"),
       welcomeMessage: t("agents.create.templates.knowledge.welcome"),
       suggestedPrompts: [t("agents.create.templates.knowledge.promptOne"), t("agents.create.templates.knowledge.promptTwo")],
+      goal: t("agents.create.templates.knowledge.goal"),
+      triggers: [t("agents.create.templates.knowledge.trigger")],
+      successCriteria: [t("agents.create.templates.knowledge.success")],
     },
   };
 }
@@ -86,8 +98,18 @@ function specForTemplate(template: AgentTemplate): AgentSpec {
       welcome_message: template.welcomeMessage,
       suggested_prompts: [...template.suggestedPrompts],
     },
+    outcome: {
+      ...spec.outcome,
+      goal: template.goal,
+      triggers: [...template.triggers],
+      success_criteria: [...template.successCriteria],
+    },
     instructions: template.instructions,
   };
+}
+
+function lines(value: string, limit: number): string[] {
+  return value.split("\n").map((item) => item.trim()).filter(Boolean).slice(0, limit);
 }
 
 function isSafeIconUrl(value: string | null | undefined): boolean {
@@ -240,6 +262,25 @@ export function AgentCreatePage() {
               <Form.Item label={t("agents.create.instructions")} required validateStatus={!spec.instructions.trim() ? "error" : undefined} help={!spec.instructions.trim() ? t("agents.create.instructionsRequired") : t("agents.create.characterCount", { count: spec.instructions.length, limit: 100000 })}>
                 <Input.TextArea aria-label={t("agents.create.instructions")} aria-invalid={!spec.instructions.trim()} value={spec.instructions} rows={8} maxLength={100000} onChange={(event) => setSpec((current) => ({ ...current, instructions: event.target.value }))} placeholder={t("agents.create.instructionsPlaceholder")} />
               </Form.Item>
+              <div className="agent-form-grid">
+                <Form.Item label={t("agents.create.outcome.goal")} help={t("agents.create.outcome.goalHelp")}>
+                  <Input.TextArea aria-label={t("agents.create.outcome.goal")} value={spec.outcome.goal} rows={3} maxLength={4000} onChange={(event) => setSpec((current) => ({ ...current, outcome: { ...current.outcome, goal: event.target.value } }))} placeholder={t("agents.create.outcome.goalPlaceholder")} />
+                </Form.Item>
+                <Form.Item label={t("agents.create.outcome.successCriteria")} help={t("agents.create.outcome.onePerLine")}>
+                  <Input.TextArea aria-label={t("agents.create.outcome.successCriteria")} value={spec.outcome.success_criteria.join("\n")} rows={3} onChange={(event) => setSpec((current) => ({ ...current, outcome: { ...current.outcome, success_criteria: lines(event.target.value, 32) } }))} placeholder={t("agents.create.outcome.successCriteriaPlaceholder")} />
+                </Form.Item>
+              </div>
+              <Form.Item label={t("agents.create.outcome.triggers")} help={t("agents.create.outcome.onePerLine")}>
+                <Input.TextArea aria-label={t("agents.create.outcome.triggers")} value={spec.outcome.triggers.join("\n")} rows={2} onChange={(event) => setSpec((current) => ({ ...current, outcome: { ...current.outcome, triggers: lines(event.target.value, 16) } }))} placeholder={t("agents.create.outcome.triggersPlaceholder")} />
+              </Form.Item>
+              <div className="agent-form-grid">
+                <Form.Item label={t("agents.create.outcome.inputs")} help={t("agents.create.outcome.onePerLine")}>
+                  <Input.TextArea aria-label={t("agents.create.outcome.inputs")} value={spec.outcome.inputs.join("\n")} rows={2} onChange={(event) => setSpec((current) => ({ ...current, outcome: { ...current.outcome, inputs: lines(event.target.value, 32) } }))} placeholder={t("agents.create.outcome.inputsPlaceholder")} />
+                </Form.Item>
+                <Form.Item label={t("agents.create.outcome.humanBoundaries")} help={t("agents.create.outcome.onePerLine")}>
+                  <Input.TextArea aria-label={t("agents.create.outcome.humanBoundaries")} value={spec.outcome.human_boundaries.join("\n")} rows={2} onChange={(event) => setSpec((current) => ({ ...current, outcome: { ...current.outcome, human_boundaries: lines(event.target.value, 32) } }))} placeholder={t("agents.create.outcome.humanBoundariesPlaceholder")} />
+                </Form.Item>
+              </div>
               <div className="agent-form-grid">
                 <Form.Item label={t("agents.create.provider")} required>
                   <Select aria-label={t("agents.create.provider")} value={spec.model.provider_id || undefined} options={Array.from(new Set(modelRows.map((model) => model.provider))).map((provider) => ({ value: provider, label: provider === "dashscope" ? "DashScope" : provider }))} onChange={(value) => setSpec((current) => ({ ...current, model: { ...current.model, provider_id: value, model_id: "" } }))} />

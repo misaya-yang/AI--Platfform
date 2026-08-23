@@ -8,6 +8,7 @@ const MANIFEST_PATH = path.join(DIST_DIR, ".vite", "manifest.json");
 const PUBLIC_GZIP_LIMIT = 330_000;
 const ASSISTANT_INCREMENT_GZIP_LIMIT = 220_000;
 const ASSISTANT_RESTORED_GZIP_LIMIT = 220_000;
+const ASSISTANT_GFM_GZIP_LIMIT = 220_000;
 const ROUTE_RAW_LIMIT = 500_000;
 const ROUTE_SOURCES = new Set([
   "src/pages/dashboard/index.tsx",
@@ -104,6 +105,13 @@ for (const file of collectStaticClosure(streamOutputEntry)) {
   if (!publicFiles.has(file)) restoredConversationFiles.add(file);
 }
 const assistantRestoredConversation = sizeOf(restoredConversationFiles);
+const gfmEntry = entryForSource("src/components/GfmMarkdownBlock.tsx");
+if (!gfmEntry) throw new Error("Manifest entry missing for GfmMarkdownBlock");
+const gfmConversationFiles = new Set(restoredConversationFiles);
+for (const file of collectStaticClosure(gfmEntry)) {
+  if (!publicFiles.has(file)) gfmConversationFiles.add(file);
+}
+const assistantGfmConversation = sizeOf(gfmConversationFiles);
 const mathEntry = entryForSource("src/components/MathMarkdownBlock.tsx");
 const optionalMathFiles = new Set(restoredConversationFiles);
 if (mathEntry) {
@@ -131,11 +139,13 @@ const report = {
   publicEntry: publicBudget.size,
   assistantIncrement,
   assistantRestoredConversation,
+  assistantGfmConversation,
   assistantMathConversation,
   limits: {
     publicGzip: PUBLIC_GZIP_LIMIT,
     assistantIncrementGzip: ASSISTANT_INCREMENT_GZIP_LIMIT,
     assistantRestoredGzip: ASSISTANT_RESTORED_GZIP_LIMIT,
+    assistantGfmGzip: ASSISTANT_GFM_GZIP_LIMIT,
     routeRaw: ROUTE_RAW_LIMIT,
   },
   oversizedRoutes,
@@ -155,6 +165,9 @@ if (assistantRestoredConversation.gzip > ASSISTANT_RESTORED_GZIP_LIMIT) {
   failures.push(
     `Assistant restored conversation gzip ${assistantRestoredConversation.gzip} > ${ASSISTANT_RESTORED_GZIP_LIMIT}`,
   );
+}
+if (assistantGfmConversation.gzip > ASSISTANT_GFM_GZIP_LIMIT) {
+  failures.push(`Assistant GFM conversation gzip ${assistantGfmConversation.gzip} > ${ASSISTANT_GFM_GZIP_LIMIT}`);
 }
 if (oversizedRoutes.length > 0) {
   failures.push(`new route chunks exceed ${ROUTE_RAW_LIMIT} raw bytes`);

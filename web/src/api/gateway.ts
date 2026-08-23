@@ -104,6 +104,15 @@ export async function getTask(taskId: string) {
   return data;
 }
 
+export async function listTasks(params?: {
+  status?: string;
+  limit?: number;
+  offset?: number;
+}) {
+  const { data } = await api.get<Task[]>("/api/v1/tasks", { params });
+  return data;
+}
+
 export async function getTaskResult(taskId: string) {
   const { data } = await api.get<UnifiedResponse>(
     `/api/v1/tasks/${taskId}/result`

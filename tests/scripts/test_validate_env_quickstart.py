@@ -907,10 +907,11 @@ def test_frontend_builder_matches_ci_toolchain() -> None:
 def test_deploy_app_includes_application_microservices() -> None:
     script = Path("scripts/new/deploy.sh").read_text()
     match = re.search(
-        r'elif \[ "\$APP_ONLY" = true \]; then\s+SERVICES="([^"]+)"',
+        r'^FULL_APP_SERVICES="([^"]+)"',
         script,
+        re.MULTILINE,
     )
-    assert match, "deploy.sh missing --app service selection"
+    assert match, "deploy.sh missing full application service selection"
 
     services = set(match.group(1).split())
     assert {
@@ -919,6 +920,7 @@ def test_deploy_app_includes_application_microservices() -> None:
         "knowledge-service",
         "knowledge-worker",
         "assistant-service",
+        "agent-runtime",
     }.issubset(services)
     assert "mcp-docgen-server" not in services
 
@@ -1047,7 +1049,7 @@ def test_knowledge_worker_is_first_class_in_runtime_scripts() -> None:
     assert "knowledge-worker" in re.search(
         r'FULL_APP_SERVICES="([^"]+)"', deploy
     ).group(1).split()
-    assert 'SERVICES="gateway frontend knowledge-service knowledge-worker assistant-service"' in deploy
+    assert 'SERVICES="$FULL_APP_SERVICES"' in deploy
     assert 'wait_for_healthy "Knowledge worker" "check_knowledge_worker_health"' in deploy
     assert (
         'wait_for_healthy "Knowledge worker" "check_knowledge_worker_health" 60 '

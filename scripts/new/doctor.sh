@@ -118,7 +118,7 @@ if [ "$DOCKER_UP" = true ]; then
     for container in \
         "$(pg_container)" "$(redis_container)" "$(qdrant_container)" \
         "$(gateway_container)" "$(frontend_container)" \
-        "$(assistant_container)" "$(knowledge_container)"; do
+        "$(assistant_container)" "$(knowledge_container)" "$(agent_runtime_container)"; do
         docker inspect "$container" >/dev/null 2>&1 || continue
         STACK_RUNNING=true
         owner="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$container" 2>/dev/null || true)"

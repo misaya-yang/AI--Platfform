@@ -41,6 +41,10 @@
 .agent-public-brand p { margin: 3px 0 0; color: var(--agent-public-muted); font-size: 12px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; max-width: 54vw; }
 .agent-public-header > button { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 14px; border: 1px solid var(--agent-public-line); border-radius: 12px; color: var(--agent-public-ink); background: white; cursor: pointer; }
 .agent-public-header button svg { width: 17px; }
+.agent-public-trust { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; color: var(--agent-public-muted); font-size: 11px; }
+.agent-public-trust li { display: inline-flex; align-items: center; gap: 4px; padding: 4px 7px; border: 1px solid var(--agent-public-line); border-radius: 999px; background: color-mix(in srgb, white 84%, transparent); }
+.agent-public-trust li.is-verified { color: #087443; border-color: color-mix(in srgb, #087443 25%, var(--agent-public-line)); }
+.agent-public-trust svg { width: 13px; height: 13px; }
 
 .agent-public-conversation { min-height: 0; overflow-y: auto; padding: clamp(28px, 5vw, 72px) 18px; }
 .agent-public-welcome, .agent-public-messages { width: min(760px, 100%); margin: 0 auto; }
@@ -96,6 +100,7 @@
   .agent-public-header > button span { display: none; }
   .agent-public-header > button { width: 40px; padding: 0; justify-content: center; }
   .agent-public-brand p { max-width: 54vw; }
+  .agent-public-trust { display: none; }
   .agent-public-conversation { padding: 24px 12px; }
   .agent-public-suggestions { grid-template-columns: 1fr; }
   .agent-public-message { max-width: 92%; }

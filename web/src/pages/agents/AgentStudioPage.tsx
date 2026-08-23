@@ -486,6 +486,25 @@ function AgentStudioWorkspace({
           {!canEdit && <ReadOnlyNotice />}
           <Alert type="info" showIcon title={t("agents.studio.instructions.safetyTitle")} description={t("agents.studio.instructions.safetyDescription")} />
           <Form layout="vertical" disabled={!canEdit}>
+            <div className="agent-form-grid">
+              <Form.Item label={t("agents.studio.instructions.outcomeGoal")} help={t("agents.studio.instructions.outcomeHelp")}>
+                <Input.TextArea aria-label={t("agents.studio.instructions.outcomeGoal")} value={spec.outcome.goal} rows={3} maxLength={4000} onChange={(event) => setSpec((current) => ({ ...current, outcome: { ...current.outcome, goal: event.target.value } }))} />
+              </Form.Item>
+              <Form.Item label={t("agents.studio.instructions.successCriteria")} help={t("agents.studio.instructions.onePerLine")}>
+                <Input.TextArea aria-label={t("agents.studio.instructions.successCriteria")} value={spec.outcome.success_criteria.join("\n")} rows={3} onChange={(event) => setSpec((current) => ({ ...current, outcome: { ...current.outcome, success_criteria: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean).slice(0, 32) } }))} />
+              </Form.Item>
+            </div>
+            <Form.Item label={t("agents.studio.instructions.triggers")} help={t("agents.studio.instructions.onePerLine")}>
+              <Input.TextArea aria-label={t("agents.studio.instructions.triggers")} value={spec.outcome.triggers.join("\n")} rows={2} onChange={(event) => setSpec((current) => ({ ...current, outcome: { ...current.outcome, triggers: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean).slice(0, 16) } }))} />
+            </Form.Item>
+            <div className="agent-form-grid">
+              <Form.Item label={t("agents.studio.instructions.inputs")} help={t("agents.studio.instructions.onePerLine")}>
+                <Input.TextArea aria-label={t("agents.studio.instructions.inputs")} value={spec.outcome.inputs.join("\n")} rows={2} onChange={(event) => setSpec((current) => ({ ...current, outcome: { ...current.outcome, inputs: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean).slice(0, 32) } }))} />
+              </Form.Item>
+              <Form.Item label={t("agents.studio.instructions.humanBoundaries")} help={t("agents.studio.instructions.onePerLine")}>
+                <Input.TextArea aria-label={t("agents.studio.instructions.humanBoundaries")} value={spec.outcome.human_boundaries.join("\n")} rows={2} onChange={(event) => setSpec((current) => ({ ...current, outcome: { ...current.outcome, human_boundaries: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean).slice(0, 32) } }))} />
+              </Form.Item>
+            </div>
             <Form.Item label={t("agents.studio.instructions.label")} required validateStatus={!spec.instructions.trim() || fieldErrors.instructions ? "error" : undefined} help={fieldErrors.instructions || (!spec.instructions.trim() ? t("agents.studio.instructions.required") : t("agents.studio.instructions.count", { count: spec.instructions.length, tokens: Math.max(1, Math.ceil(spec.instructions.length / 4)) }))}>
               <Input.TextArea aria-label={t("agents.studio.instructions.label")} aria-invalid={!spec.instructions.trim()} className="agent-instructions-editor" value={spec.instructions} rows={18} maxLength={100000} onChange={(event) => setSpec((current) => ({ ...current, instructions: event.target.value }))} placeholder={t("agents.studio.instructions.placeholder")} />
             </Form.Item>

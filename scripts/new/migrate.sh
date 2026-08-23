@@ -128,17 +128,8 @@ assert_unique_forward_migration_versions() {
         existing_line=$(printf "%s" "$seen_entries" | grep -E "^${version}:" || true)
         if [ -n "$existing_line" ]; then
             existing_file="${existing_line#*:}"
-            if legacy_tracking_has_dirty; then
-                applied_query="SELECT 1 FROM public.schema_migrations WHERE version = ${version} AND dirty = FALSE;"
-            else
-                applied_query="SELECT 1 FROM public.schema_migrations WHERE version = ${version};"
-            fi
-            if run_sql "$applied_query" 2>/dev/null | grep -q "1"; then
-                log_warn "Duplicate migration version prefix ${version} is already recorded in legacy tracking; treating as historical duplicate: ${existing_file} and ${filename}"
-                continue
-            fi
             log_error "Duplicate migration version prefix ${version}: ${existing_file} and ${filename}"
-            log_error "This database uses legacy version tracking; reconcile schema_migrations before running shell migrations."
+            log_error "Legacy numeric tracking cannot prove which duplicate filename ran; reconcile schema_migrations before running shell migrations."
             return 1
         fi
         seen_entries="${seen_entries}${version}:${filename}"$'\n'
@@ -201,6 +192,16 @@ ensure_base_schema() {
 }
 
 # -- Check if migration was already applied ----------------------------------
+legacy_filename_alias() {
+    case "$1" in
+        089_agent_runtime_thread_store.sql) printf '%s\n' '089_codex_runtime_thread_store.sql' ;;
+        090_agent_runtime_model_leases.sql) printf '%s\n' '090_codex_runtime_model_leases.sql' ;;
+        092_agent_runtime_legacy_import.sql) printf '%s\n' '092_codex_runtime_legacy_import.sql' ;;
+        093_agent_runtime_assistant_session_fks.sql) printf '%s\n' '093_codex_runtime_assistant_session_fks.sql' ;;
+        094_agent_runtime_legacy_import_normalization.sql) printf '%s\n' '094_codex_runtime_legacy_import_normalization.sql' ;;
+    esac
+}
+
 is_applied() {
     local filename="$1"
     # Sanitize filename: only allow alphanumeric, underscore, hyphen, dot
@@ -215,6 +216,13 @@ is_applied() {
         result=$(run_sql "SELECT 1 FROM public.schema_migrations WHERE version = ${version};" 2>/dev/null | grep -c "1" || true)
     else
         result=$(run_sql "SELECT 1 FROM public.schema_migrations WHERE filename = '${filename}';" 2>/dev/null | grep -c "1" || true)
+        if [ "$result" -eq 0 ]; then
+            local alias
+            alias="$(legacy_filename_alias "$filename")"
+            if [ -n "$alias" ]; then
+                result=$(run_sql "SELECT 1 FROM public.schema_migrations WHERE filename = '${alias}';" 2>/dev/null | grep -c "1" || true)
+            fi
+        fi
     fi
     [ "$result" -gt 0 ]
 }

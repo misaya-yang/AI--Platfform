@@ -19,6 +19,11 @@ export interface PublicAgentConfig {
     suggested_prompts?: string[];
   };
   attachments: boolean;
+  version_number: number;
+  capability_count: number;
+  knowledge_count: number;
+  release_gate_verified: boolean;
+  published_at?: string | null;
   request_id: string;
 }
 

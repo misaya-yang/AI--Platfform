@@ -8,6 +8,7 @@ import {
   chatStream,
   getArtifactDownloadUrl,
   getAssistantRunStatus,
+  getSessionHistory as getAssistantSessionHistory,
   deleteSession as deleteAssistantSession,
   prepareAssistantRunResume,
   type AssistantMessage,
@@ -19,7 +20,6 @@ import { SSEEventType } from "../sse-events";
 import {
   listSessions,
   createSession,
-  getSessionHistory,
   updateSession,
   getSession,
   type SessionSummary,
@@ -845,7 +845,8 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
             setHistoryRestoreState("loading");
             setHistoryRestoreError(null);
             const detailsPromise = getSession(savedSessionId);
-            const historyPromise = getSessionHistory(savedSessionId, { limit: 200 });
+            const historyPromise = getAssistantSessionHistory(savedSessionId, 200)
+              .then((response) => response.messages);
             const artifactsPromise = getSessionArtifacts(savedSessionId).catch(() => []);
             try {
               const [sessionDetails, history] = await Promise.all([
@@ -1019,7 +1020,8 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       setHistoryRestoreError(null);
       setMessages([]);
       const detailsPromise = getSession(sessionId);
-      const historyPromise = getSessionHistory(sessionId, { limit: 200 });
+      const historyPromise = getAssistantSessionHistory(sessionId, 200)
+        .then((response) => response.messages);
       const artifactsPromise = getSessionArtifacts(sessionId).catch(() => []);
       const [sessionDetails, history] = await Promise.all([
         detailsPromise,

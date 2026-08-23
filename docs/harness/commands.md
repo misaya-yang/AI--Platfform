@@ -25,15 +25,15 @@ Never mix package managers: **pnpm for `web/`, uv for Python.** No `npm install`
 | Purpose | Command |
 | --- | --- |
 | Preflight the machine before anything else | `make doctor` |
-| Verify the pinned Codex Harness release unit | `make codex-harness-contract` |
-| Verify the pinned Rust Agent Runtime image | `make codex-runtime-contract` |
-| Verify the Codex PostgreSQL ThreadStore | `CODEX_HARNESS_FORK=/path/to/fork make codex-thread-store-contract` |
-| Build the pinned local Codex image and probe initialize | `CODEX_HARNESS_FORK=/absolute/fork make codex-harness-build-local` |
-| Build the pinned Rust Agent Runtime image | `CODEX_HARNESS_FORK=/absolute/fork make codex-runtime-build-local` |
-| Smoke-test the Rust Runtime in an isolated Docker network | `CODEX_RUNTIME_IMAGE=... make codex-runtime-smoke` |
-| Run real Qwen Responses simple/long/resumed text gate | `ENV_FILE=/path/to/.env CODEX_RUNTIME_IMAGE=... make codex-runtime-text-gate` |
-| Verify CHR-03 tenant/revision-bound read-only capability bridge | `make codex-runtime-readonly-gate` |
-| Run Codex tool side-effect and interruption contract gate | `CODEX_HARNESS_FORK=/absolute/fork make codex-runtime-write-gate` |
+| Verify the pinned Agent Runtime source release unit | `make agent-runtime-source-contract` |
+| Verify the pinned Rust Agent Runtime image | `make agent-runtime-contract` |
+| Verify the Agent PostgreSQL ThreadStore | `AI_PLATFORM_AGENT_RUNTIME_SOURCE=/path/to/fork make agent-thread-store-contract` |
+| Build the pinned local Agent image and probe initialize | `AI_PLATFORM_AGENT_RUNTIME_SOURCE=/absolute/fork make agent-runtime-source-build-local` |
+| Build the pinned Rust Agent Runtime image | `AI_PLATFORM_AGENT_RUNTIME_SOURCE=/absolute/fork make agent-runtime-build-local` |
+| Smoke-test the Rust Runtime in an isolated Docker network | `AI_PLATFORM_AGENT_RUNTIME_IMAGE=... make agent-runtime-smoke` |
+| Run real Qwen Responses simple/long/resumed text gate | `ENV_FILE=/path/to/.env AI_PLATFORM_AGENT_RUNTIME_IMAGE=... make agent-runtime-text-gate` |
+| Verify CHR-03 tenant/revision-bound read-only capability bridge | `make agent-runtime-readonly-gate` |
+| Run Agent tool side-effect and interruption contract gate | `AI_PLATFORM_AGENT_RUNTIME_SOURCE=/absolute/fork make agent-runtime-write-gate` |
 | First run: generate `.env`, pull images, start, migrate, validate | `make quickstart` |
 | Maintainer first run from current source | `make quickstart-build` |
 | Validate `.env` + Compose without starting | `make validate-config` |
@@ -128,13 +128,13 @@ Run the gate that matches what you touched. These are the same commands CI runs.
 | You changed | Gate |
 | --- | --- |
 | Harness files, docs contract | `make harness-check` |
-| Codex Harness source/schema/SBOM/image lock | `make codex-harness-contract` |
-| Codex Rust Runtime image identity | `make codex-runtime-contract` |
-| Codex Rust Runtime Docker lifecycle | `CODEX_RUNTIME_IMAGE=... make codex-runtime-smoke` |
-| Codex Runtime real Qwen text path | `ENV_FILE=/path/to/.env CODEX_RUNTIME_IMAGE=... make codex-runtime-text-gate` |
-| Codex Runtime read-only capability bridge | `make codex-runtime-readonly-gate` |
-| Codex Runtime tool side-effect safety | `CODEX_HARNESS_FORK=/absolute/fork make codex-runtime-write-gate` |
-| Codex ThreadStore fresh/idempotent/live contract | `CODEX_HARNESS_FORK=/path/to/fork make codex-thread-store-contract` |
+| Agent Runtime source source/schema/SBOM/image lock | `make agent-runtime-source-contract` |
+| Agent Rust Runtime image identity | `make agent-runtime-contract` |
+| Agent Rust Runtime Docker lifecycle | `AI_PLATFORM_AGENT_RUNTIME_IMAGE=... make agent-runtime-smoke` |
+| Agent Runtime real Qwen text path | `ENV_FILE=/path/to/.env AI_PLATFORM_AGENT_RUNTIME_IMAGE=... make agent-runtime-text-gate` |
+| Agent Runtime read-only capability bridge | `make agent-runtime-readonly-gate` |
+| Agent Runtime tool side-effect safety | `AI_PLATFORM_AGENT_RUNTIME_SOURCE=/absolute/fork make agent-runtime-write-gate` |
+| Agent ThreadStore fresh/idempotent/live contract | `AI_PLATFORM_AGENT_RUNTIME_SOURCE=/path/to/fork make agent-thread-store-contract` |
 | Assistant runtime | `make verify-assistant-runtime-dev` |
 | Eval / trace pipeline | `make eval-e1-gate`, then `make verify-eval-dev` for the wider branch gate |
 | Agent core / subagents | `make agent-eval-core-gate` |

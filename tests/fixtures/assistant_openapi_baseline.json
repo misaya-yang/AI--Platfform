@@ -1044,6 +1044,118 @@
         "title": "CancelActionRequest",
         "type": "object"
       },
+      "CapabilityCatalogRequest": {
+        "properties": {
+          "capability_revision": {
+            "minimum": 1.0,
+            "title": "Capability Revision",
+            "type": "integer"
+          },
+          "model_id": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Model Id",
+            "type": "string"
+          },
+          "session_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "tenant_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Tenant Id",
+            "type": "string"
+          },
+          "user_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tenant_id",
+          "user_id",
+          "session_id",
+          "capability_revision",
+          "model_id"
+        ],
+        "title": "CapabilityCatalogRequest",
+        "type": "object"
+      },
+      "CapabilityInvokeRequest": {
+        "properties": {
+          "arguments": {
+            "additionalProperties": true,
+            "title": "Arguments",
+            "type": "object"
+          },
+          "bound_dataset_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 8,
+            "title": "Bound Dataset Ids",
+            "type": "array"
+          },
+          "capability_revision": {
+            "minimum": 1.0,
+            "title": "Capability Revision",
+            "type": "integer"
+          },
+          "run_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "session_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "snapshot_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Snapshot Id",
+            "type": "string"
+          },
+          "tenant_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Tenant Id",
+            "type": "string"
+          },
+          "tool": {
+            "maxLength": 160,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_.:/-]+$",
+            "title": "Tool",
+            "type": "string"
+          },
+          "user_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tenant_id",
+          "user_id",
+          "session_id",
+          "capability_revision",
+          "snapshot_id",
+          "run_id",
+          "tool"
+        ],
+        "title": "CapabilityInvokeRequest",
+        "type": "object"
+      },
       "CapabilityState": {
         "properties": {
           "name": {
@@ -1099,372 +1211,6 @@
           "state"
         ],
         "title": "CapabilityState",
-        "type": "object"
-      },
-      "ChatRequest": {
-        "properties": {
-          "confirm_plan": {
-            "const": false,
-            "default": false,
-            "title": "Confirm Plan",
-            "type": "boolean"
-          },
-          "context_detail": {
-            "default": false,
-            "title": "Context Detail",
-            "type": "boolean"
-          },
-          "enable_task_planning": {
-            "default": false,
-            "title": "Enable Task Planning",
-            "type": "boolean"
-          },
-          "eval_run": {
-            "default": false,
-            "title": "Eval Run",
-            "type": "boolean"
-          },
-          "eval_system_prompt_override": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Eval System Prompt Override"
-          },
-          "execution_profile": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Execution Profile"
-          },
-          "file_paths": {
-            "anyOf": [
-              {
-                "items": {
-                  "type": "string"
-                },
-                "maxItems": 20,
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "File Paths"
-          },
-          "history": {
-            "anyOf": [
-              {
-                "items": {
-                  "additionalProperties": {
-                    "type": "string"
-                  },
-                  "type": "object"
-                },
-                "maxItems": 200,
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "History"
-          },
-          "kb_dataset_ids": {
-            "anyOf": [
-              {
-                "items": {
-                  "type": "string"
-                },
-                "maxItems": 8,
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Kb Dataset Ids"
-          },
-          "kb_include_images": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Kb Include Images"
-          },
-          "kb_mode": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": "auto",
-            "title": "Kb Mode"
-          },
-          "kb_score_threshold": {
-            "anyOf": [
-              {
-                "maximum": 1.0,
-                "minimum": 0.0,
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Kb Score Threshold"
-          },
-          "kb_top_k": {
-            "anyOf": [
-              {
-                "maximum": 20.0,
-                "minimum": 1.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Kb Top K"
-          },
-          "local_node_device_id": {
-            "anyOf": [
-              {
-                "maxLength": 128,
-                "minLength": 1,
-                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Local Node Device Id"
-          },
-          "local_node_grant_ids": {
-            "items": {
-              "type": "string"
-            },
-            "maxItems": 16,
-            "title": "Local Node Grant Ids",
-            "type": "array"
-          },
-          "max_tokens": {
-            "anyOf": [
-              {
-                "maximum": 32768.0,
-                "minimum": 1.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Max Tokens"
-          },
-          "memory_mode": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Memory Mode"
-          },
-          "memory_profile": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Memory Profile"
-          },
-          "message": {
-            "maxLength": 200000,
-            "minLength": 1,
-            "title": "Message",
-            "type": "string"
-          },
-          "model_id": {
-            "default": "qwen3.7-plus",
-            "title": "Model Id",
-            "type": "string"
-          },
-          "os_agent_enabled": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Os Agent Enabled"
-          },
-          "output_format": {
-            "default": "text",
-            "enum": [
-              "text",
-              "json"
-            ],
-            "title": "Output Format",
-            "type": "string"
-          },
-          "queue_mode": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Queue Mode"
-          },
-          "reasoning_option": {
-            "anyOf": [
-              {
-                "maxLength": 32,
-                "minLength": 1,
-                "pattern": "^[a-z][a-z0-9_-]{0,31}$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Reasoning Option"
-          },
-          "resume_approval_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Resume Approval Id"
-          },
-          "resume_run_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Resume Run Id"
-          },
-          "runtime_mode": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Runtime Mode"
-          },
-          "session_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Session Id"
-          },
-          "skills_enabled": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Skills Enabled"
-          },
-          "stream": {
-            "default": false,
-            "title": "Stream",
-            "type": "boolean"
-          },
-          "system_prompt": {
-            "anyOf": [
-              {
-                "maxLength": 100000,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "System Prompt"
-          },
-          "temperature": {
-            "default": 0.7,
-            "title": "Temperature",
-            "type": "number"
-          },
-          "thinking_level": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Thinking Level"
-          },
-          "web_search_enabled": {
-            "default": false,
-            "title": "Web Search Enabled",
-            "type": "boolean"
-          },
-          "web_search_max_results": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Web Search Max Results"
-          }
-        },
-        "required": [
-          "message"
-        ],
-        "title": "ChatRequest",
         "type": "object"
       },
       "DeviceCapabilitiesResponse": {
@@ -4145,86 +3891,6 @@
         ]
       }
     },
-    "/api/v1/assistant/chat": {
-      "post": {
-        "description": "Non-streaming chat completion.",
-        "operationId": "chat_api_v1_assistant_chat_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ChatRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Chat",
-        "tags": [
-          "Chat"
-        ]
-      }
-    },
-    "/api/v1/assistant/chat/stream": {
-      "post": {
-        "description": "SSE streaming chat completion.",
-        "operationId": "chat_stream_api_v1_assistant_chat_stream_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ChatRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Chat Stream",
-        "tags": [
-          "Chat"
-        ]
-      }
-    },
     "/api/v1/assistant/config": {
       "get": {
         "description": "Get assistant-level configuration.\n\nMatches the gateway's ``AssistantConfigResponse`` shape:\n``{default_model_id, available_providers[], kb_enabled,\n   web_search_enabled, tools_available[]}``",
@@ -5775,26 +5441,6 @@
         ]
       }
     },
-    "/api/v1/assistant/responses": {
-      "post": {
-        "description": "Create one ephemeral response using the platform's canonical AgentLoop.",
-        "operationId": "create_response_api_v1_assistant_responses_post",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Create Response",
-        "tags": [
-          "Responses"
-        ]
-      }
-    },
     "/api/v1/assistant/runs/{run_id}": {
       "get": {
         "description": "Return run status for the current user/tenant.\n\nShape matches gateway's ``RunStatusResponse``: ``{\"run\": {...}}``.",
@@ -6215,6 +5861,84 @@
           }
         },
         "summary": "Health Ready"
+      }
+    },
+    "/internal/v1/capabilities/catalog": {
+      "post": {
+        "operationId": "capability_catalog_internal_v1_capabilities_catalog_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CapabilityCatalogRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Capability Catalog",
+        "tags": [
+          "Internal Capabilities"
+        ]
+      }
+    },
+    "/internal/v1/capabilities/invoke": {
+      "post": {
+        "operationId": "capability_invoke_internal_v1_capabilities_invoke_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CapabilityInvokeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Capability Invoke",
+        "tags": [
+          "Internal Capabilities"
+        ]
       }
     }
   }

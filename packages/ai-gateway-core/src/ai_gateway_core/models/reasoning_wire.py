@@ -1,7 +1,7 @@
 """Shared provider reasoning wire serialization.
 
 Profiles own option data; this adapter only serializes validated settings. It
-is imported by both the Python control runtime and the private Codex model
+is imported by both the Python control runtime and the private Agent model
 plane so a capability revision cannot produce two different outbound bodies.
 """
 

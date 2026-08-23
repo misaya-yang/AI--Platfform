@@ -585,6 +585,8 @@ def structured_agent_release_diff(
     after = after_spec if isinstance(after_spec, dict) else {}
     before_identity = before.get("identity") if isinstance(before.get("identity"), dict) else {}
     after_identity = after.get("identity") if isinstance(after.get("identity"), dict) else {}
+    before_outcome = before.get("outcome") if isinstance(before.get("outcome"), dict) else {}
+    after_outcome = after.get("outcome") if isinstance(after.get("outcome"), dict) else {}
     before_model = before.get("model") if isinstance(before.get("model"), dict) else {}
     after_model = after.get("model") if isinstance(after.get("model"), dict) else {}
     before_capabilities = _binding_summary(before.get("capabilities"), kind="capability")
@@ -603,6 +605,7 @@ def structured_agent_release_diff(
                 if before_identity.get(key) != after_identity.get(key)
             ],
         ),
+        "outcome": _section(before_outcome, after_outcome, changed_paths=["outcome"]),
         "prompt": {
             **_section(
                 str(before.get("instructions") or ""),

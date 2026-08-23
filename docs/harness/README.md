@@ -20,7 +20,7 @@
 | 5 | [`runtime-and-secrets.md`](runtime-and-secrets.md) | Mandatory before any Docker, deploy, or E2E action. |
 | 6 | [`docs/README.md`](../README.md) | Index of everything else: designs, plans, runbooks, reports. |
 
-`CLAUDE.md` adds Claude Code specifics on top of `AGENTS.md`. Codex, Cursor, and other tools read
+`CLAUDE.md` adds Claude Code specifics on top of `AGENTS.md`. Agent, Cursor, and other tools read
 `AGENTS.md` directly.
 
 ## The five principles

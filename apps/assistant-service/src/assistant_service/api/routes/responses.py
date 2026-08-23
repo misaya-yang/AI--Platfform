@@ -24,7 +24,7 @@ from ai_gateway_core.proxy.sse_heartbeat import (
     DEFAULT_HEARTBEAT_INTERVAL_S,
     with_sse_heartbeat,
 )
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ...auth import UserContext, get_user_context
@@ -562,7 +562,16 @@ async def create_response(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ):
-    """Create one ephemeral response using the platform's canonical AgentLoop."""
+    """Retired generic Responses ingress.
+
+    Responses requests are now owned by the Gateway model plane and the
+    single Agent Runtime.  This explicit 410 is safer than leaving a second
+    Python AgentLoop reachable through an internal route.
+    """
+    raise HTTPException(
+        status_code=410,
+        detail={"code": "AGENT_RUNTIME_ONLY", "message": "Use the Gateway Agent Runtime."},
+    )
 
     if getattr(request.state, "gateway_secret_verified", False) is not True:
         return _error_response(

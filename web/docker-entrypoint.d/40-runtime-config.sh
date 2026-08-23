@@ -18,6 +18,5 @@ window.__AI_GATEWAY_RUNTIME_CONFIG__ = {
   telemetryEndpoint: "$(js_escape "${VITE_TELEMETRY_ENDPOINT:-}")",
   sseDebug: "$(js_escape "${VITE_SSE_DEBUG:-}")",
   agentStudioEnabled: "$(js_escape "${VITE_AGENT_STUDIO_ENABLED:-true}")",
-  agentRuntimeV2Enabled: "$(js_escape "${VITE_AGENT_RUNTIME_V2_ENABLED:-false}")"
 };
 EOF

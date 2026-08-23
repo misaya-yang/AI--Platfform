@@ -1,4 +1,4 @@
-"""Private, read-only capability plane for the Codex Runtime.
+"""Private, read-only capability plane for the Agent Runtime.
 
 The endpoint deliberately has no model access and no Agent loop. It reuses
 the canonical RegistryToolInvoker so tenant policy, argument validation, audit,
@@ -149,7 +149,7 @@ async def _authorized_tools(
                    AND lease.status = 'active'
                    AND lease.expires_at > NOW()
                    AND run.status = 'running'
-                   AND run.engine = 'codex_harness'
+                   AND run.engine = 'agent_runtime'
                    AND NOT EXISTS (
                        SELECT 1 FROM assistant_runtime_snapshot_revocations AS revoked
                         WHERE revoked.snapshot_id = lease.snapshot_id
@@ -220,7 +220,7 @@ async def capability_catalog(request: Request, payload: CapabilityCatalogRequest
         for definition in sorted(definitions, key=lambda item: item.name.casefold())
     ]
     return {
-        "schema_version": "codex-readonly-capability/v1",
+        "schema_version": "agent-readonly-capability/v1",
         "tenant_id": payload.tenant_id,
         "capability_revision": payload.capability_revision,
         "tools": [item for item in descriptors if item["kind"] != "mcp"],
@@ -255,7 +255,7 @@ async def capability_invoke(request: Request, payload: CapabilityInvokeRequest):
     result = await invoker.invoke(payload.tool, arguments, context)
     output = result.result if result.success else result.error or "read-only capability failed"
     return {
-        "schema_version": "codex-readonly-capability-result/v1",
+        "schema_version": "agent-readonly-capability-result/v1",
         "tool": payload.tool,
         "tool_call_id": result.call_id,
         "success": result.success,

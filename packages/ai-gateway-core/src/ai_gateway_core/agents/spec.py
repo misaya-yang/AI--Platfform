@@ -14,6 +14,7 @@ _AGENT_SPEC_ROOT_KEYS: Final = frozenset(
     {
         "schema_version",
         "identity",
+        "outcome",
         "instructions",
         "model",
         "capabilities",
@@ -23,6 +24,9 @@ _AGENT_SPEC_ROOT_KEYS: Final = frozenset(
 )
 _AGENT_IDENTITY_KEYS: Final = frozenset(
     {"icon_url", "theme_color", "welcome_message", "suggested_prompts"}
+)
+_AGENT_OUTCOME_KEYS: Final = frozenset(
+    {"goal", "triggers", "inputs", "human_boundaries", "success_criteria"}
 )
 _AGENT_MODEL_KEYS: Final = frozenset(
     {"model_id", "provider_id", "temperature", "max_tokens", "thinking_mode"}
@@ -149,6 +153,7 @@ def agent_spec_safety_errors(spec: dict[str, Any]) -> list[dict[str, str]]:
 
     _reject_unknown(spec, _AGENT_SPEC_ROOT_KEYS, "spec")
     _reject_unknown(spec.get("identity"), _AGENT_IDENTITY_KEYS, "spec.identity")
+    _reject_unknown(spec.get("outcome"), _AGENT_OUTCOME_KEYS, "spec.outcome")
     _reject_unknown(spec.get("model"), _AGENT_MODEL_KEYS, "spec.model")
     capabilities = spec.get("capabilities")
     if isinstance(capabilities, list):
@@ -215,6 +220,8 @@ def redact_agent_spec_for_read(spec: dict[str, Any]) -> dict[str, Any]:
         result["schema_version"] = copy.deepcopy(spec["schema_version"])
     if "identity" in spec:
         result["identity"] = _redact_structured_mapping(spec["identity"], _AGENT_IDENTITY_KEYS)
+    if "outcome" in spec:
+        result["outcome"] = _redact_structured_mapping(spec["outcome"], _AGENT_OUTCOME_KEYS)
     if "instructions" in spec:
         result["instructions"] = copy.deepcopy(spec["instructions"])
     if "model" in spec:
@@ -246,7 +253,7 @@ def sanitize_agent_copy_spec(spec: dict[str, Any]) -> dict[str, Any]:
     """
 
     public = redact_agent_spec_for_read(spec)
-    return {
+    copied = {
         "schema_version": AGENT_SPEC_SCHEMA_VERSION,
         "identity": _redact_structured_mapping(public.get("identity"), _AGENT_IDENTITY_KEYS),
         "instructions": (
@@ -257,6 +264,11 @@ def sanitize_agent_copy_spec(spec: dict[str, Any]) -> dict[str, Any]:
         "knowledge": [],
         "memory": {},
     }
+    if "outcome" in public:
+        copied["outcome"] = _redact_structured_mapping(
+            public.get("outcome"), _AGENT_OUTCOME_KEYS
+        )
+    return copied
 
 
 def validate_agent_spec(spec: dict[str, Any]) -> list[dict[str, str]]:
@@ -282,6 +294,30 @@ def validate_agent_spec(spec: dict[str, Any]) -> list[dict[str, str]]:
                 "message": "instructions must be a non-empty string",
             }
         )
+    outcome = spec.get("outcome")
+    if outcome is not None and not isinstance(outcome, dict):
+        errors.append({
+            "field": "outcome",
+            "code": "AGENT_OUTCOME_INVALID",
+            "message": "outcome must be an object",
+        })
+    if isinstance(outcome, dict):
+        if not isinstance(outcome.get("goal", ""), str):
+            errors.append({
+                "field": "outcome.goal",
+                "code": "AGENT_OUTCOME_GOAL_INVALID",
+                "message": "outcome.goal must be a string",
+            })
+        for key in ("triggers", "inputs", "human_boundaries", "success_criteria"):
+            values = outcome.get(key, [])
+            if not isinstance(values, list) or any(
+                not isinstance(value, str) or not value.strip() for value in values
+            ):
+                errors.append({
+                    "field": f"outcome.{key}",
+                    "code": "AGENT_OUTCOME_LIST_INVALID",
+                    "message": f"outcome.{key} must contain non-empty strings",
+                })
     model = spec.get("model")
     if (
         not isinstance(model, dict)
@@ -403,12 +439,43 @@ def validate_agent_spec(spec: dict[str, Any]) -> list[dict[str, str]]:
     return errors
 
 
+def render_agent_outcome_contract(spec: dict[str, Any]) -> str:
+    """Render structured outcomes into a stable runtime instruction prefix."""
+
+    outcome = spec.get("outcome")
+    if not isinstance(outcome, dict):
+        return ""
+    goal = str(outcome.get("goal") or "").strip()
+    sections: list[tuple[str, list[str]]] = []
+    for label, key in (
+        ("Triggers", "triggers"),
+        ("Required inputs", "inputs"),
+        ("Human boundaries", "human_boundaries"),
+        ("Success criteria", "success_criteria"),
+    ):
+        raw = outcome.get(key)
+        values = [str(value).strip() for value in raw] if isinstance(raw, list) else []
+        values = [value for value in values if value]
+        if values:
+            sections.append((label, values))
+    if not goal and not sections:
+        return ""
+    lines = ["[Agent outcome contract]"]
+    if goal:
+        lines.append(f"Goal: {goal}")
+    for label, values in sections:
+        lines.append(f"{label}:")
+        lines.extend(f"- {value}" for value in values)
+    return "\n".join(lines)
+
+
 __all__ = [
     "AGENT_SPEC_SCHEMA_VERSION",
     "agent_spec_safety_errors",
     "canonical_spec",
     "hash_agent_spec",
     "redact_agent_spec_for_read",
+    "render_agent_outcome_contract",
     "sanitize_agent_copy_spec",
     "unsafe_agent_spec_paths",
     "validate_agent_spec",

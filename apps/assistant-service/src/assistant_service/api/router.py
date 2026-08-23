@@ -8,7 +8,6 @@ from .routes.local_node_device_channel import router as local_node_device_channe
 from .routes.local_nodes import router as local_nodes_router
 from .routes.mcp import router as mcp_router
 from .routes.models import router as models_router
-from .routes.responses import router as responses_router
 from .routes.runs_approvals import router as runs_approvals_router
 from .routes.runtime_cleanup import router as runtime_cleanup_router
 from .routes.sessions import router as sessions_router
@@ -16,10 +15,17 @@ from .routes.tools import router as tools_router
 
 router = APIRouter()
 
+# The generic chat handlers are retired: Gateway V1 is a compatibility
+# projection over the single Agent Runtime.  Keep only task cancellation and
+# the explicit platform-agent capability route from this module.
+chat_router.routes = [
+    route
+    for route in chat_router.routes
+    if route.path not in {"/chat", "/chat/stream"}
+]
 router.include_router(chat_router, tags=["Chat"])
 router.include_router(sessions_router, tags=["Sessions"])
 router.include_router(models_router, tags=["Models"])
-router.include_router(responses_router, tags=["Responses"])
 router.include_router(tools_router, tags=["Tools"])
 router.include_router(runs_approvals_router, tags=["Runs+Approvals"])
 router.include_router(runtime_cleanup_router, tags=["Internal"])

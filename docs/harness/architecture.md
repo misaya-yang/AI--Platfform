@@ -24,21 +24,22 @@ The gateway and frontend are the only public entry points. Local Compose publish
 Assistant service stays private to the Docker network; infrastructure ports bind to `127.0.0.1`.
 Do not publish a service that is currently internal without an explicit decision recorded in an ADR.
 
-### Target topology under the Codex migration program
+### Target topology under the Agent Runtime program
 
-ADR-006 and ADR-007 define an additive candidate topology. Until its phase
-gates pass, the table above remains the running control topology.
+ADR-006 and ADR-007 define the additive single-kernel topology. The Gateway
+compatibility surface projects every turn onto the Agent Runtime; the legacy
+Python loop is not a registered execution route.
 
-| Candidate component | Role | Exposure |
+| Component | Role | Exposure |
 | --- | --- | --- |
-| Codex Agent Runtime | Single target Thread/Turn/Item kernel and V1/V2 event projection | Docker-internal only |
+| Agent Agent Runtime | Single target Thread/Turn/Item kernel and V1/V2 event projection | Docker-internal only |
 | Assistant capability service | Tools, approvals, Artifacts, Local Node, and Python-native capability implementations; no model loop | Docker-internal only |
 | Gateway private model plane | Provider routing, credentials, capability adapters, quota, billing, and model-only streaming | Service-authenticated internal route only |
 
-The candidate must use an isolated `CODEX_HOME`. It may not inherit host
+The Agent Runtime must use an isolated runtime home. It may not inherit host
 instructions, plugins, MCP servers, credentials, or filesystem state. App
 Server WebSocket is not a production service boundary; the platform Runtime is
-an HTTP/SSE service built on the in-process Codex crates.
+an HTTP/SSE service built on the in-process Agent crates.
 
 ## 2. Code layout and ownership
 
@@ -54,7 +55,7 @@ an HTTP/SSE service built on the in-process Codex crates.
 | `web/` | React console | Generated API clients that belong in `sdk/` |
 | `sdk/` | Published client SDKs and `openapi.json` | Server-side code |
 | `database/` | `schema.sql` and ordered `migrations/` | Runtime queries |
-| `deploy/codex-harness/` | Immutable external-fork source/schema/SBOM/image lock and notice | Runtime or business code |
+| `deploy/agent-runtime-source/` | Immutable external-fork source/schema/SBOM/image lock and notice | Runtime or business code |
 
 ## 3. Dependency direction
 
@@ -109,5 +110,5 @@ Existing:
 
 - [ADR-004 — bounded plugin subagent delegation](../architecture/ADR-004-bounded-plugin-subagent-delegation.md)
 - [ADR-005 — tenant-configurable model capability profiles](../architecture/ADR-005-model-capability-profiles.md)
-- [ADR-006 — Codex Open Harness single target kernel](../architecture/ADR-006-codex-harness-single-kernel.md)
-- [ADR-007 — Codex Runtime data boundaries](../architecture/ADR-007-codex-runtime-data-boundaries.md)
+- [ADR-006 — Agent Runtime single target kernel](../architecture/ADR-006-agent-runtime-single-kernel.md)
+- [ADR-007 — Agent Runtime data boundaries](../architecture/ADR-007-agent-runtime-data-boundaries.md)

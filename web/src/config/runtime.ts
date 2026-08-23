@@ -6,7 +6,6 @@ type RuntimeConfig = {
   telemetryEndpoint?: string;
   sseDebug?: string;
   agentStudioEnabled?: string;
-  agentRuntimeV2Enabled?: string;
 };
 
 declare global {
@@ -82,15 +81,4 @@ export function isAgentStudioEnabled(): boolean {
     "true",
   ).toLowerCase();
   return !["0", "false", "no", "off"].includes(value);
-}
-
-/** Candidate-gated V2 Thread/Turn/Item path; V1 remains the default. */
-export function isAgentRuntimeV2Enabled(): boolean {
-  const runtime = readRuntimeConfig();
-  const value = firstNonEmpty(
-    runtime.agentRuntimeV2Enabled,
-    import.meta.env.VITE_AGENT_RUNTIME_V2_ENABLED,
-    "false",
-  ).toLowerCase();
-  return ["1", "true", "yes", "on"].includes(value);
 }

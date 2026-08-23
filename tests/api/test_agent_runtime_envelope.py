@@ -575,6 +575,36 @@ async def test_gateway_snapshot_intersects_model_capability_and_knowledge_policy
 
 
 @pytest.mark.asyncio
+async def test_gateway_snapshot_compiles_outcome_before_detailed_instructions() -> None:
+    class ModelResolver:
+        def resolve(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"id": "qwen3.7-plus", "provider": "dashscope"}
+
+    class CapabilityResolver:
+        def resolve(self, **kwargs: Any) -> list[dict[str, Any]]:
+            return list(kwargs["bindings"])
+
+    resolution = runtime_resolution()
+    resolution["spec"]["outcome"] = {
+        "goal": "Classify the request and make ownership explicit.",
+        "triggers": ["A support request arrives"],
+        "inputs": ["Request text"],
+        "human_boundaries": ["Do not issue refunds without approval"],
+        "success_criteria": ["Queue and owner are named"],
+    }
+    request = gateway_request(
+        agent_runtime_model_resolver=ModelResolver(),
+        agent_runtime_capability_resolver=CapabilityResolver(),
+        agent_runtime_knowledge_resolver=_AuthorizedKnowledgeResolver(),
+    )
+    user = UserContext(user_id="user-a", tenant_id="tenant-a", is_authenticated=True)
+    snapshot = await _build_snapshot(request, resolution, user, channel="api")
+    instructions = snapshot["instructions"]["agent"]
+    assert instructions.startswith("[Agent outcome contract]\nGoal: Classify the request")
+    assert "[Detailed instructions]\nUse only the immutable Agent instructions." in instructions
+
+
+@pytest.mark.asyncio
 async def test_gateway_capability_resolver_cannot_mutate_bound_metadata() -> None:
     resolution = runtime_resolution()
     resolution["capabilities"][0].update(

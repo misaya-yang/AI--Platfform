@@ -62,6 +62,7 @@ check_and_report "Docgen plugin" check_docgen_health
 check_and_report "Gateway" check_gateway_health
 check_and_report "Gateway metrics" check_gateway_metrics
 check_and_report "Frontend" check_frontend_health
+check_and_report "Agent Runtime" check_agent_runtime_health
 
 echo ""
 

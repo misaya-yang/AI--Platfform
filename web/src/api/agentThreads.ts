@@ -1,6 +1,13 @@
 import { api } from "@/lib/api";
 import { sseFetch } from "@/lib/sse";
 import type { ChatRequest, StreamEvent } from "@/api/assistant";
+import {
+  buildAgentTurnPayload,
+  type AgentTurnRequestOptions,
+} from "./agentTurnPayload";
+
+export { buildAgentTurnPayload } from "./agentTurnPayload";
+export type { AgentTurnRequestOptions } from "./agentTurnPayload";
 
 export interface AgentV2Thread {
   schema_version: "agent-thread/v2";
@@ -28,7 +35,10 @@ export interface AgentV2Event {
   timestamp: string;
 }
 
-export function projectAgentV2Event(event: AgentV2Event): StreamEvent | null {
+export function projectAgentV2Event(
+  event: AgentV2Event,
+  runtimeSessionId?: string,
+): StreamEvent | null {
   const payload = event.event.payload;
   const nested = payload && typeof payload === "object" ? payload : {};
   const nestedEventType = typeof nested.event_type === "string" ? nested.event_type : "";
@@ -37,8 +47,11 @@ export function projectAgentV2Event(event: AgentV2Event): StreamEvent | null {
     const lifecycleData = nestedEventType === "run_started"
       ? {
           ...(data as Record<string, unknown>),
+          ...((data as Record<string, unknown>).session_id || !runtimeSessionId
+            ? {}
+            : { session_id: runtimeSessionId }),
           task_id: null,
-          runtime: "codex_v2",
+          runtime: "agent_runtime_v2",
           reasoning: {
             requested_option: (data as Record<string, unknown>).requested_reasoning_option,
             effective_option: (data as Record<string, unknown>).effective_reasoning_option,
@@ -78,21 +91,14 @@ export function projectAgentV2Event(event: AgentV2Event): StreamEvent | null {
   return null;
 }
 
-export class AgentRuntimeV2AssignmentFallback extends Error {
-  constructor(cause: unknown) {
-    super("V2 Agent Runtime is not assigned to this session");
-    this.name = "AgentRuntimeV2AssignmentFallback";
-    this.cause = cause;
-  }
-  readonly cause: unknown;
-}
-
-export function isAgentRuntimeV2AssignmentFallback(error: unknown): boolean {
-  return error instanceof AgentRuntimeV2AssignmentFallback;
-}
-
-export async function createAgentThread(sessionId?: string): Promise<AgentV2Thread> {
-  const { data } = await api.post<{ thread: AgentV2Thread }>("/api/v2/agent/threads", sessionId ? { session_id: sessionId } : {});
+export async function createAgentThread(
+  sessionId?: string,
+  modelId?: string,
+): Promise<AgentV2Thread> {
+  const { data } = await api.post<{ thread: AgentV2Thread }>("/api/v2/agent/threads", {
+    ...(sessionId ? { session_id: sessionId } : {}),
+    ...(modelId ? { model_id: modelId } : {}),
+  });
   return data.thread;
 }
 
@@ -106,30 +112,12 @@ export async function startAgentTurn(
   message: string,
   modelId?: string,
   reasoningOption?: string,
-  request?: {
-    max_tokens?: number;
-    kb_dataset_ids?: string[];
-    kb_mode?: "auto" | "tool" | "off";
-    kb_top_k?: number;
-    kb_score_threshold?: number;
-    web_search_enabled?: boolean;
-    web_search_max_results?: number;
-    file_paths?: string[];
-  },
-) {
-  const { data } = await api.post(`/api/v2/agent/threads/${encodeURIComponent(threadId)}/turns`, {
-    message,
-    ...(modelId ? { model_id: modelId } : {}),
-    ...(reasoningOption ? { reasoning_option: reasoningOption } : {}),
-    ...(request?.max_tokens != null ? { max_tokens: request.max_tokens } : {}),
-    kb_dataset_ids: request?.kb_dataset_ids || [],
-    kb_mode: request?.kb_mode || "off",
-    kb_top_k: request?.kb_top_k || 5,
-    kb_score_threshold: request?.kb_score_threshold ?? 0.4,
-    web_search_enabled: request?.web_search_enabled || false,
-    web_search_max_results: request?.web_search_max_results || 5,
-    file_paths: request?.file_paths || [],
-  });
+  request?: AgentTurnRequestOptions,
+): Promise<{ turn?: { id?: string; events_url?: string } }> {
+  const { data } = await api.post<{ turn?: { id?: string; events_url?: string } }>(
+    `/api/v2/agent/threads/${encodeURIComponent(threadId)}/turns`,
+    buildAgentTurnPayload(message, modelId, reasoningOption, request),
+  );
   return data;
 }
 
@@ -145,21 +133,7 @@ export async function* streamAgentRuntimeV2(
   request: ChatRequest,
   signal?: AbortSignal,
 ): AsyncGenerator<StreamEvent, void, void> {
-  if (!request.session_id) throw new Error("V2 Agent Runtime requires a stable session_id");
-  let thread: AgentV2Thread;
-  try {
-    thread = await createAgentThread(request.session_id);
-  } catch (error) {
-    const response = (error as { response?: { status?: number; data?: unknown } } | null)?.response;
-    const detail = response?.data && typeof response.data === "object"
-      ? (response.data as { detail?: unknown }).detail
-      : undefined;
-    const code = detail && typeof detail === "object" ? (detail as { code?: unknown }).code : undefined;
-    if ((response?.status === 404 || response?.status === 409) && (
-      code === "CODEX_RUNTIME_NOT_ASSIGNED" || code === "CODEX_RUNTIME_ASSIGNMENT_NOT_FOUND"
-    )) throw new AgentRuntimeV2AssignmentFallback(error);
-    throw error;
-  }
+  const thread = await createAgentThread(request.session_id, request.model_id);
   const started = await startAgentTurn(
     thread.thread_id, request.message, request.model_id,
     request.reasoning_option || request.thinking_level, request,
@@ -172,7 +146,7 @@ export async function* streamAgentRuntimeV2(
       method: "GET", headers: { Accept: "text/event-stream" }, signal,
     });
     for await (const item of stream) {
-      const projected = projectAgentV2Event(item);
+      const projected = projectAgentV2Event(item, thread.session_id);
       if (!projected) continue;
       if (["run_finished", "run_error", "cancelled"].includes(projected.event_type)) terminal = true;
       yield projected;

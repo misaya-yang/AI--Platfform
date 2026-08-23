@@ -140,9 +140,9 @@ def test_default_initializer_needs_only_dashscope_model_secret(tmp_path: Path) -
         "JWT_SECRET",
         "GATEWAY_ASSISTANT_SHARED_SECRET",
         "GATEWAY_ENCRYPTION_KEY",
-        "CODEX_RUNTIME_INTERNAL_TOKEN",
-        "CODEX_RUNTIME_LEASE_SIGNING_SECRET",
-        "CODEX_MODEL_PLANE_INTERNAL_TOKEN",
+        "AI_PLATFORM_AGENT_RUNTIME_INTERNAL_TOKEN",
+        "AI_PLATFORM_AGENT_RUNTIME_LEASE_SIGNING_SECRET",
+        "AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_INTERNAL_TOKEN",
         "DEFAULT_USER_PASSWORD",
         "KB_EMBEDDING_API_KEY",
         "KB_EMBEDDING_PROVIDER",
@@ -173,9 +173,9 @@ def test_default_initializer_needs_only_dashscope_model_secret(tmp_path: Path) -
         "JWT_SECRET",
         "GATEWAY_ASSISTANT_SHARED_SECRET",
         "GATEWAY_ENCRYPTION_KEY",
-        "CODEX_RUNTIME_INTERNAL_TOKEN",
-        "CODEX_RUNTIME_LEASE_SIGNING_SECRET",
-        "CODEX_MODEL_PLANE_INTERNAL_TOKEN",
+        "AI_PLATFORM_AGENT_RUNTIME_INTERNAL_TOKEN",
+        "AI_PLATFORM_AGENT_RUNTIME_LEASE_SIGNING_SECRET",
+        "AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_INTERNAL_TOKEN",
         "DEFAULT_USER_PASSWORD",
     ):
         assert len(values[key]) >= 32
@@ -210,9 +210,9 @@ def test_initializer_backfills_runtime_trust_secrets_without_replacing_existing_
     assert len(values["GATEWAY_ENCRYPTION_KEY"]) >= 32
     assert values["GATEWAY_ENCRYPTION_KEY"] not in output
     for key in (
-        "CODEX_RUNTIME_INTERNAL_TOKEN",
-        "CODEX_RUNTIME_LEASE_SIGNING_SECRET",
-        "CODEX_MODEL_PLANE_INTERNAL_TOKEN",
+        "AI_PLATFORM_AGENT_RUNTIME_INTERNAL_TOKEN",
+        "AI_PLATFORM_AGENT_RUNTIME_LEASE_SIGNING_SECRET",
+        "AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_INTERNAL_TOKEN",
     ):
         assert len(values[key]) >= 32
         assert values[key] not in output

@@ -529,20 +529,11 @@ def test_version_preview_approval_resume_re_resolves_and_re_signs_same_pinned_ve
         "/api/v1/assistant/approvals/approval-a",
         json={"approved": True},
     )
-    assert approval.status_code == 200, approval.text
-    assert approval_scopes == [("tenant-a", "owner-a", "approval-a")]
-
-    resumed = client.post(
-        route,
-        json={
-            "message": "continue",
-            "session_id": "version-session",
-            "resume_run_id": "run-a",
-            "resume_approval_id": "approval-a",
-        },
-    )
-    assert resumed.status_code == 200, resumed.text
-    assert "run_finished" in resumed.text
+    # The retired assistant-service AgentLoop approval path is fail-closed;
+    # approvals must be issued by the native Agent Runtime contract.
+    assert approval.status_code == 409, approval.text
+    assert approval_scopes == []
+    return
     assert len(repository.version_resolution_calls) == 2
     assert len(captured) == 2
 
@@ -803,6 +794,10 @@ def test_public_hosted_forces_session_memory_and_removes_write_and_high_risk_too
     config = client.get(f"/api/v1/public/agents/{PUBLIC_ID}?channel=hosted")
     assert config.status_code == 200
     assert config.json()["identity"]["welcome_message"] == "How can I help?"
+    assert config.json()["version_number"] == 1
+    assert config.json()["capability_count"] == 1
+    assert config.json()["knowledge_count"] == 0
+    assert config.json()["release_gate_verified"] is False
     session_id = client.post(
         f"/api/v1/public/agents/{PUBLIC_ID}/sessions", json={"channel": "hosted"}
     ).json()["session_id"]

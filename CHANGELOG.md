@@ -21,13 +21,13 @@
 
 ### Platform architecture
 
-- Accepted ADR-006 and ADR-007: Codex Open Harness is the single target Agent
-  kernel, with a bounded external fork, immutable source/schema/SBOM/OCI lock,
+- Accepted ADR-006 and ADR-007: Agent Runtime is the single target Agent
+  kernel, with a bounded external source, immutable source/schema/SBOM/OCI lock,
   an internal model-only Gateway plane, append-only PostgreSQL ThreadStore, and
   a Python capability service that cannot own a model loop. Added the
-  `codex-harness-runtime-migration` program and fail-closed
-  `make codex-harness-contract` supply-chain gate; no runtime traffic is moved
-  by this checkpoint.
+  `agent-runtime-single-kernel` program and fail-closed
+  `make agent-runtime-source-contract` supply-chain gate; no runtime traffic is
+  moved by this checkpoint.
 - Added tenant-configurable model capability profiles and typed Provider
   Capability Adapters. Reasoning options, budgets, prompt caching, and native
   search now flow from the Gateway model control plane through Assistant and

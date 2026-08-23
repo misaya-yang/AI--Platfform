@@ -1,10 +1,10 @@
 import { lazy, memo, Suspense, useEffect, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { ImageIcon, Download, ExternalLink, FileDown } from "lucide-react";
 import { useLatexCopy } from "@/hooks/useLatexCopy";
 import { useTranslation } from "react-i18next";
 import { api } from "@/lib/api";
+import { needsGfmPlugin } from "./gfmDetection";
 import { splitStreamingMarkdownBlocks } from "./streamingMarkdown";
 
 /**
@@ -52,10 +52,13 @@ interface StreamOutputProps {
   isStreaming?: boolean;
 }
 
-const MARKDOWN_REMARK_PLUGINS = [remarkGfm] as const;
 const MathMarkdownBlock = lazy(async () => {
   const module = await import("./MathMarkdownBlock");
   return { default: module.MathMarkdownBlock };
+});
+const GfmMarkdownBlock = lazy(async () => {
+  const module = await import("./GfmMarkdownBlock");
+  return { default: module.GfmMarkdownBlock };
 });
 const MARKDOWN_COMPONENTS = {
   img: ({ src, alt }: { src?: string; alt?: string }) => (
@@ -387,7 +390,6 @@ function isRtlText(text: string): boolean {
 const MarkdownBlock = memo(function MarkdownBlock({ text }: { text: string }) {
   return (
     <ReactMarkdown
-      remarkPlugins={MARKDOWN_REMARK_PLUGINS}
       urlTransform={allowDataUrlTransform}
       components={MARKDOWN_COMPONENTS}
     >
@@ -441,6 +443,10 @@ export const StreamOutput = memo(function StreamOutput({
         hasMath ? (
           <Suspense key={`${index}:${block.length}`} fallback={<MarkdownBlock text={block} />}>
             <MathMarkdownBlock text={block} components={MARKDOWN_COMPONENTS} />
+          </Suspense>
+        ) : needsGfmPlugin(block) ? (
+          <Suspense key={`${index}:${block.length}`} fallback={<MarkdownBlock text={block} />}>
+            <GfmMarkdownBlock text={block} components={MARKDOWN_COMPONENTS} />
           </Suspense>
         ) : (
           <MarkdownBlock key={`${index}:${block.length}`} text={block} />

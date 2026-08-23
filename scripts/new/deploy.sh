@@ -91,8 +91,18 @@ compose() {
 
 cd "$PROJECT_ROOT"
 
+# Keep the Gateway and Runtime on the same immutable source/overlay identity.
+# This also upgrades older local env files that still have an empty revision
+# without writing secrets or mutating the environment file in place.
+if [ -z "${AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION:-}" ]; then
+    export AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION="$(agent_runtime_kernel_revision)"
+fi
+if [ -z "${AI_PLATFORM_AGENT_RUNTIME_IMAGE:-}" ]; then
+    export AI_PLATFORM_AGENT_RUNTIME_IMAGE="$(agent_runtime_image_tag)"
+fi
+
 INFRA_SERVICES="postgres redis qdrant"
-FULL_APP_SERVICES="gateway frontend knowledge-service knowledge-worker assistant-service"
+FULL_APP_SERVICES="gateway frontend knowledge-service knowledge-worker assistant-service agent-runtime"
 
 assert_compose_owner
 
@@ -101,7 +111,7 @@ SERVICES=""
 if [ "$INFRA_ONLY" = true ]; then
     SERVICES="$INFRA_SERVICES"
 elif [ "$APP_ONLY" = true ]; then
-    SERVICES="gateway frontend knowledge-service knowledge-worker assistant-service"
+    SERVICES="$FULL_APP_SERVICES"
 fi
 
 # -- Pull base images --------------------------------------------------------
@@ -124,6 +134,22 @@ if [ "$BUILD" = true ]; then
         export PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
         export NPM_REGISTRY=https://registry.npmmirror.com
         export DEBIAN_MIRROR=https://mirrors.tuna.tsinghua.edu.cn
+    fi
+
+    if [ "$INFRA_ONLY" != true ]; then
+        if [ -z "${AI_PLATFORM_AGENT_RUNTIME_SOURCE:-}" ]; then
+            log_error "AI_PLATFORM_AGENT_RUNTIME_SOURCE is required for --build so the pinned Agent Runtime image can be built."
+            exit 2
+        fi
+        log_step "Building pinned Agent Runtime image"
+        runtime_build_output="$(bash scripts/harness/build_agent_runtime_image.sh)"
+        printf '%s\n' "$runtime_build_output"
+        runtime_image="$(printf '%s\n' "$runtime_build_output" | awk -F= '$1 == "AI_PLATFORM_AGENT_RUNTIME_IMAGE_TAG" {print $2; exit}')"
+        if [ -z "$runtime_image" ]; then
+            log_error "Pinned Agent Runtime build did not report an image tag."
+            exit 1
+        fi
+        export AI_PLATFORM_AGENT_RUNTIME_IMAGE="$runtime_image"
     fi
     # shellcheck disable=SC2086
     compose build "${BUILD_ARGS[@]}" $SERVICES
@@ -196,6 +222,7 @@ if [ "$INFRA_ONLY" != true ]; then
     wait_for_healthy "Bundled docgen plugin" "check_docgen_health" 60 || log_warn "Bundled docgen plugin may still be starting"
     wait_for_healthy "Gateway" "check_gateway_health" 60 || log_warn "Gateway may still be starting"
     wait_for_healthy "Frontend" "check_frontend_health" 30 || log_warn "Frontend may still be starting"
+    wait_for_healthy "Agent Runtime" "check_agent_runtime_health" 60 || log_warn "Agent Runtime may still be starting"
 fi
 
 if [ "$INFRA_ONLY" = true ]; then

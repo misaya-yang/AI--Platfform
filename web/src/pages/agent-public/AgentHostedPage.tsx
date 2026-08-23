@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { Bot, MessageCirclePlus, Paperclip, Send, ThumbsDown, ThumbsUp, X } from "lucide-react";
+import { Bot, Clock3, Database, MessageCirclePlus, Paperclip, Send, ShieldCheck, ThumbsDown, ThumbsUp, Wrench, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
   createPublicAgentSession,
@@ -233,6 +233,18 @@ export function AgentHostedPage() {
           <MessageCirclePlus aria-hidden="true" />
           <span>{t("agents.public.newChat")}</span>
         </button>
+        <ul className="agent-public-trust" aria-label={t("agents.public.trustSummary")}>
+          <li className={config.release_gate_verified ? "is-verified" : ""}>
+            <ShieldCheck aria-hidden="true" />
+            {config.release_gate_verified
+              ? t("agents.public.releaseVerified", { version: config.version_number })
+              : t("agents.public.releaseUnverified", { version: config.version_number })}
+          </li>
+          <li><Wrench aria-hidden="true" />{t("agents.public.capabilityCount", { count: config.capability_count })}</li>
+          <li><Database aria-hidden="true" />{t("agents.public.knowledgeCount", { count: config.knowledge_count })}</li>
+          <li><ShieldCheck aria-hidden="true" />{t(`agents.public.authModes.${config.auth_mode}`)}</li>
+          {config.published_at && <li><Clock3 aria-hidden="true" />{t("agents.public.updated", { date: new Date(config.published_at).toLocaleDateString() })}</li>}
+        </ul>
       </header>
 
       <section className="agent-public-conversation" aria-label={t("agents.public.conversation")}>

@@ -90,7 +90,10 @@
         "title": "空白 Agent",
         "description": "从安全默认值开始，自定义每个分区。",
         "detail": "不复制任何资源",
-        "instructions": "完成 Agent 名称和描述中定义的用途。遵守已配置的能力、知识库、记忆和安全策略。"
+        "instructions": "完成 Agent 名称和描述中定义的用途。遵守已配置的能力、知识库、记忆和安全策略。",
+        "goal": "",
+        "trigger": "",
+        "success": ""
       },
       "support": {
         "title": "支持分流",
@@ -99,7 +102,10 @@
         "instructions": "对支持请求进行分类，说明所选队列，并主动询问缺失信息。只使用已配置的能力和知识库来源。",
         "welcome": "请描述需要分流的支持请求。",
         "promptOne": "分类一个账单问题",
-        "promptTwo": "分流一个产品问题"
+        "promptTwo": "分流一个产品问题",
+        "goal": "准确分类支持请求，明确队列、负责人和路由理由。",
+        "trigger": "收到新的客户支持请求",
+        "success": "明确队列、负责人、理由和缺失信息"
       },
       "knowledge": {
         "title": "知识向导",
@@ -108,7 +114,10 @@
         "instructions": "基于已配置的知识库来源回答。引用检索证据，区分证据与推断；可用来源不足时要明确说明。",
         "welcome": "你想从工作区知识库中查找什么？",
         "promptOne": "总结一项已批准政策",
-        "promptTwo": "查找流程问题的证据"
+        "promptTwo": "查找流程问题的证据",
+        "goal": "基于授权知识和可追溯证据回答，并明确区分证据与推断。",
+        "trigger": "用户提出需要工作区知识的问题",
+        "success": "引用可用证据，并明确说明证据不足"
       }
     },
     "templateSafetyTitle": "模板绝不复制凭证或访问权",
@@ -125,7 +134,7 @@
     "iconUrl": "图标 URL",
     "iconHelp": "可选的公开 HTTPS 图片地址，不能包含凭证、查询参数或片段。",
     "iconError": "请使用无凭证、查询参数和片段的公开 HTTPS 地址。",
-    "behaviorDescription": "定义自定义 Instructions 和有界模型设置。",
+    "behaviorDescription": "先定义结果契约，再补充详细 Instructions 和模型设置。",
     "modelCatalogError": "实时模型目录不可用",
     "modelCatalogFallback": "当前显示已配置的 Qwen 备用模型。",
     "instructions": "Agent Instructions",
@@ -133,6 +142,20 @@
     "instructionsPlaceholder": "定义 Agent 的角色、边界、决策规则和回复风格。",
     "instructionsSafetyTitle": "平台安全规则始终生效",
     "instructionsSafetyDescription": "支持以文本方式使用 Markdown；不会执行嵌入的 HTML。自定义 Instructions 无法覆盖租户策略、授权或运行时安全控制。",
+    "outcome": {
+      "goal": "业务目标",
+      "goalHelp": "描述可验证的结果，而不是模型人格。",
+      "goalPlaceholder": "例如：正确路由支持请求并明确负责人和下一步。",
+      "triggers": "触发条件",
+      "triggersPlaceholder": "收到新的支持请求",
+      "inputs": "必需输入",
+      "inputsPlaceholder": "请求文本\n客户等级",
+      "humanBoundaries": "人工边界",
+      "humanBoundariesPlaceholder": "退款前必须获得人工审批",
+      "successCriteria": "成功标准",
+      "successCriteriaPlaceholder": "明确队列和负责人",
+      "onePerLine": "每行一项。这些字段会成为结构化运行时结果契约。"
+    },
     "provider": "提供商",
     "model": "模型",
     "temperature": "Temperature · {{value}}",
@@ -208,7 +231,14 @@
       "memory": "记忆"
     },
     "instructions": {
-      "description": "仅应用于此 Agent 运行时的自定义系统提示词。",
+      "description": "先定义结果契约，再补充此 Agent 运行时的详细 Instructions。",
+      "outcomeGoal": "业务目标",
+      "outcomeHelp": "结构化结果契约会被编译为稳定的运行时前缀。",
+      "triggers": "触发条件",
+      "inputs": "必需输入",
+      "humanBoundaries": "人工边界",
+      "successCriteria": "成功标准",
+      "onePerLine": "每行一项。",
       "label": "Agent Instructions",
       "required": "创建版本前必须填写 Instructions。",
       "count": "{{count}} / 100000 字符 · 约 {{tokens}} Token",
@@ -619,6 +649,18 @@
     "unavailable": "该发布可能为私有、已停用或已撤回。",
     "signIn": "登录后继续",
     "newChat": "新对话",
+    "trustSummary": "Agent 发布可信摘要",
+    "releaseVerified": "v{{version}} 已通过发布门禁",
+    "releaseUnverified": "v{{version}} 尚无门禁记录",
+    "capabilityCount": "{{count}} 项能力",
+    "knowledgeCount": "{{count}} 个知识源",
+    "updated": "更新于 {{date}}",
+    "authModes": {
+      "private": "私有访问",
+      "tenant": "租户访问",
+      "public": "公开访问",
+      "token": "Token 访问"
+    },
     "conversation": "Agent 对话",
     "defaultWelcome": "{{name}} 可以如何帮助你？",
     "you": "你",

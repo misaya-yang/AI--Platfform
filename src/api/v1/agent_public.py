@@ -298,7 +298,7 @@ async def get_public_agent_config(
 ) -> AgentPublicConfigResponse:
     if channel not in {"hosted", "embed"}:
         _raise_runtime_error(request, 422, "PUBLICATION_CHANNEL_INVALID", "Invalid channel")
-    resolution, _caller = await _public_resolution(
+    resolution, caller = await _public_resolution(
         request,
         user,
         public_id=public_id,
@@ -306,6 +306,8 @@ async def get_public_agent_config(
         embed_token=request.headers.get("X-Agent-Embed-Token"),
     )
     publication = resolution["publication"]
+    version = resolution.get("version") or {}
+    snapshot = await _build_snapshot(request, resolution, caller, channel=channel)
     identity = resolution["spec"].get("identity")
     identity = identity if isinstance(identity, dict) else {}
     policy = publication.get("policy") if isinstance(publication.get("policy"), dict) else {}
@@ -322,6 +324,11 @@ async def get_public_agent_config(
             if identity.get(key) is not None
         },
         attachments=bool(policy.get("attachments", False)),
+        version_number=int(version.get("version_number") or 1),
+        capability_count=len(snapshot.get("capabilities") or []),
+        knowledge_count=len((snapshot.get("knowledge") or {}).get("datasets") or []),
+        release_gate_verified=bool(version.get("release_evaluation_id")),
+        published_at=publication.get("updated_at") or publication.get("created_at"),
         request_id=_request_id(request),
     )
 

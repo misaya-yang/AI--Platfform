@@ -48,6 +48,23 @@ class AgentModelSpec(BaseModel):
     thinking_mode: str | None = Field(None, max_length=64)
 
 
+class AgentOutcomeSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    goal: str = Field("", max_length=4000)
+    triggers: list[str] = Field(default_factory=list, max_length=16)
+    inputs: list[str] = Field(default_factory=list, max_length=32)
+    human_boundaries: list[str] = Field(default_factory=list, max_length=32)
+    success_criteria: list[str] = Field(default_factory=list, max_length=32)
+
+    @field_validator("triggers", "inputs", "human_boundaries", "success_criteria")
+    @classmethod
+    def _validate_lines(cls, value: list[str]) -> list[str]:
+        if any(not item.strip() or len(item) > 500 for item in value):
+            raise ValueError("outcome list items must be 1..500 characters")
+        return value
+
+
 class AgentCapabilityBinding(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -72,6 +89,7 @@ class AgentSpec(BaseModel):
 
     schema_version: Literal["agent-spec/v1"] = "agent-spec/v1"
     identity: AgentIdentitySpec = Field(default_factory=AgentIdentitySpec)
+    outcome: AgentOutcomeSpec = Field(default_factory=AgentOutcomeSpec)
     instructions: str = Field("", max_length=100_000)
     model: AgentModelSpec = Field(default_factory=AgentModelSpec)
     capabilities: list[AgentCapabilityBinding] = Field(default_factory=list, max_length=256)
@@ -228,6 +246,7 @@ class AgentSummary(BaseModel):
     status: AgentStatus
     caller_role: AgentRole
     draft_revision: int | None = None
+    published_channels: list[AgentChannel] = Field(default_factory=list)
     created_at: datetime | str
     updated_at: datetime | str
 

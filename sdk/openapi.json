@@ -5854,6 +5854,80 @@
         }
       }
     },
+    "/api/v1/tasks": {
+      "get": {
+        "summary": "List Tasks",
+        "operationId": "list_tasks_api_v1_tasks_get",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^(pending|processing|completed|failed|cancelled)$"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TaskSchema"
+                  },
+                  "title": "Response List Tasks Api V1 Tasks Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/tasks/{task_id}": {
       "get": {
         "summary": "Get Task",
@@ -8625,52 +8699,13 @@
       }
     },
     "/api/v1/langgraph/{full_path}": {
-      "get": {
+      "delete": {
         "tags": [
           "LangGraph"
         ],
         "summary": "Passthrough",
         "description": "LangGraph CLI / LangSmith Deployment API is evolving quickly.\nThis catch-all route forwards any unimplemented endpoint to the selected\nupstream instance so the gateway stays compatible with upstream `/docs`.",
-        "operationId": "passthrough_api_v1_langgraph__full_path__get",
-        "parameters": [
-          {
-            "name": "full_path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Full Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "LangGraph"
-        ],
-        "summary": "Passthrough",
-        "description": "LangGraph CLI / LangSmith Deployment API is evolving quickly.\nThis catch-all route forwards any unimplemented endpoint to the selected\nupstream instance so the gateway stays compatible with upstream `/docs`.",
-        "operationId": "passthrough_api_v1_langgraph__full_path__get",
+        "operationId": "passthrough_api_v1_langgraph__full_path__delete",
         "parameters": [
           {
             "name": "full_path",
@@ -8709,7 +8744,7 @@
         ],
         "summary": "Passthrough",
         "description": "LangGraph CLI / LangSmith Deployment API is evolving quickly.\nThis catch-all route forwards any unimplemented endpoint to the selected\nupstream instance so the gateway stays compatible with upstream `/docs`.",
-        "operationId": "passthrough_api_v1_langgraph__full_path__get",
+        "operationId": "passthrough_api_v1_langgraph__full_path__delete",
         "parameters": [
           {
             "name": "full_path",
@@ -8742,13 +8777,52 @@
           }
         }
       },
-      "delete": {
+      "post": {
         "tags": [
           "LangGraph"
         ],
         "summary": "Passthrough",
         "description": "LangGraph CLI / LangSmith Deployment API is evolving quickly.\nThis catch-all route forwards any unimplemented endpoint to the selected\nupstream instance so the gateway stays compatible with upstream `/docs`.",
-        "operationId": "passthrough_api_v1_langgraph__full_path__get",
+        "operationId": "passthrough_api_v1_langgraph__full_path__delete",
+        "parameters": [
+          {
+            "name": "full_path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Full Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "LangGraph"
+        ],
+        "summary": "Passthrough",
+        "description": "LangGraph CLI / LangSmith Deployment API is evolving quickly.\nThis catch-all route forwards any unimplemented endpoint to the selected\nupstream instance so the gateway stays compatible with upstream `/docs`.",
+        "operationId": "passthrough_api_v1_langgraph__full_path__delete",
         "parameters": [
           {
             "name": "full_path",
@@ -8787,7 +8861,7 @@
         ],
         "summary": "Passthrough",
         "description": "LangGraph CLI / LangSmith Deployment API is evolving quickly.\nThis catch-all route forwards any unimplemented endpoint to the selected\nupstream instance so the gateway stays compatible with upstream `/docs`.",
-        "operationId": "passthrough_api_v1_langgraph__full_path__get",
+        "operationId": "passthrough_api_v1_langgraph__full_path__delete",
         "parameters": [
           {
             "name": "full_path",
@@ -8822,61 +8896,13 @@
       }
     },
     "/api/v1/proxy/{service_name}/{path}": {
-      "get": {
+      "delete": {
         "tags": [
           "Transparent Proxy"
         ],
         "summary": "透明代理",
         "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
-        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__get",
-        "parameters": [
-          {
-            "name": "service_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Name"
-            }
-          },
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "Transparent Proxy"
-        ],
-        "summary": "透明代理",
-        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
-        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__get",
+        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__delete",
         "parameters": [
           {
             "name": "service_name",
@@ -8924,103 +8950,7 @@
         ],
         "summary": "透明代理",
         "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
-        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__get",
-        "parameters": [
-          {
-            "name": "service_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Name"
-            }
-          },
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "options": {
-        "tags": [
-          "Transparent Proxy"
-        ],
-        "summary": "透明代理",
-        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
-        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__get",
-        "parameters": [
-          {
-            "name": "service_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Name"
-            }
-          },
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "Transparent Proxy"
-        ],
-        "summary": "透明代理",
-        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
-        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__get",
+        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__delete",
         "parameters": [
           {
             "name": "service_name",
@@ -9068,7 +8998,151 @@
         ],
         "summary": "透明代理",
         "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
-        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__get",
+        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__delete",
+        "parameters": [
+          {
+            "name": "service_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Name"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Transparent Proxy"
+        ],
+        "summary": "透明代理",
+        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
+        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__delete",
+        "parameters": [
+          {
+            "name": "service_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Name"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Transparent Proxy"
+        ],
+        "summary": "透明代理",
+        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
+        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__delete",
+        "parameters": [
+          {
+            "name": "service_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Name"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "options": {
+        "tags": [
+          "Transparent Proxy"
+        ],
+        "summary": "透明代理",
+        "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
+        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__delete",
         "parameters": [
           {
             "name": "service_name",
@@ -9116,7 +9190,7 @@
         ],
         "summary": "透明代理",
         "description": "透明代理路由，将请求转发至目标服务。\n\n    - `service_name`: 服务名称（对应数据库中的 service_id 或 name）\n    - `path`: 请求路径（将被转发至上游服务）\n\n    支持：\n    - 所有 HTTP 方法\n    - SSE 流式响应（自动检测）\n    - 请求体透传\n    - 查询参数透传",
-        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__get",
+        "operationId": "transparent_proxy_handler_api_v1_proxy__service_name___path__delete",
         "parameters": [
           {
             "name": "service_name",
@@ -9160,52 +9234,13 @@
       }
     },
     "/api/v1/proxy/{service_name}": {
-      "get": {
+      "delete": {
         "tags": [
           "Transparent Proxy"
         ],
         "summary": "透明代理（根路径）",
         "description": "透明代理路由，转发至服务根路径。",
-        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__get",
-        "parameters": [
-          {
-            "name": "service_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Name"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "Transparent Proxy"
-        ],
-        "summary": "透明代理（根路径）",
-        "description": "透明代理路由，转发至服务根路径。",
-        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__get",
+        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__delete",
         "parameters": [
           {
             "name": "service_name",
@@ -9244,85 +9279,7 @@
         ],
         "summary": "透明代理（根路径）",
         "description": "透明代理路由，转发至服务根路径。",
-        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__get",
-        "parameters": [
-          {
-            "name": "service_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Name"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "options": {
-        "tags": [
-          "Transparent Proxy"
-        ],
-        "summary": "透明代理（根路径）",
-        "description": "透明代理路由，转发至服务根路径。",
-        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__get",
-        "parameters": [
-          {
-            "name": "service_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Name"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "Transparent Proxy"
-        ],
-        "summary": "透明代理（根路径）",
-        "description": "透明代理路由，转发至服务根路径。",
-        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__get",
+        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__delete",
         "parameters": [
           {
             "name": "service_name",
@@ -9361,7 +9318,124 @@
         ],
         "summary": "透明代理（根路径）",
         "description": "透明代理路由，转发至服务根路径。",
-        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__get",
+        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__delete",
+        "parameters": [
+          {
+            "name": "service_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Transparent Proxy"
+        ],
+        "summary": "透明代理（根路径）",
+        "description": "透明代理路由，转发至服务根路径。",
+        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__delete",
+        "parameters": [
+          {
+            "name": "service_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Transparent Proxy"
+        ],
+        "summary": "透明代理（根路径）",
+        "description": "透明代理路由，转发至服务根路径。",
+        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__delete",
+        "parameters": [
+          {
+            "name": "service_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "options": {
+        "tags": [
+          "Transparent Proxy"
+        ],
+        "summary": "透明代理（根路径）",
+        "description": "透明代理路由，转发至服务根路径。",
+        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__delete",
         "parameters": [
           {
             "name": "service_name",
@@ -9400,7 +9474,7 @@
         ],
         "summary": "透明代理（根路径）",
         "description": "透明代理路由，转发至服务根路径。",
-        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__get",
+        "operationId": "transparent_proxy_root_handler_api_v1_proxy__service_name__delete",
         "parameters": [
           {
             "name": "service_name",
@@ -9537,50 +9611,12 @@
       }
     },
     "/api/v1/knowledge/{path}": {
-      "get": {
+      "delete": {
         "tags": [
           "Knowledge Base"
         ],
         "summary": "Proxy to Knowledge Base Service",
-        "operationId": "proxy_knowledge_api_v1_knowledge__path__get",
-        "parameters": [
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "Knowledge Base"
-        ],
-        "summary": "Proxy to Knowledge Base Service",
-        "operationId": "proxy_knowledge_api_v1_knowledge__path__get",
+        "operationId": "proxy_knowledge_api_v1_knowledge__path__delete",
         "parameters": [
           {
             "name": "path",
@@ -9618,7 +9654,7 @@
           "Knowledge Base"
         ],
         "summary": "Proxy to Knowledge Base Service",
-        "operationId": "proxy_knowledge_api_v1_knowledge__path__get",
+        "operationId": "proxy_knowledge_api_v1_knowledge__path__delete",
         "parameters": [
           {
             "name": "path",
@@ -9651,12 +9687,50 @@
           }
         }
       },
-      "delete": {
+      "post": {
         "tags": [
           "Knowledge Base"
         ],
         "summary": "Proxy to Knowledge Base Service",
-        "operationId": "proxy_knowledge_api_v1_knowledge__path__get",
+        "operationId": "proxy_knowledge_api_v1_knowledge__path__delete",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Knowledge Base"
+        ],
+        "summary": "Proxy to Knowledge Base Service",
+        "operationId": "proxy_knowledge_api_v1_knowledge__path__delete",
         "parameters": [
           {
             "name": "path",
@@ -9694,7 +9768,7 @@
           "Knowledge Base"
         ],
         "summary": "Proxy to Knowledge Base Service",
-        "operationId": "proxy_knowledge_api_v1_knowledge__path__get",
+        "operationId": "proxy_knowledge_api_v1_knowledge__path__delete",
         "parameters": [
           {
             "name": "path",
@@ -9729,52 +9803,13 @@
       }
     },
     "/api/v1/kb-tools/{path}": {
-      "get": {
+      "delete": {
         "tags": [
           "KB Tools"
         ],
         "summary": "Proxy KB Tools to KB Service",
         "description": "Forward /kb-tools/* requests with the standard knowledge rate limit.",
-        "operationId": "proxy_kb_tools_api_v1_kb_tools__path__get",
-        "parameters": [
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "KB Tools"
-        ],
-        "summary": "Proxy KB Tools to KB Service",
-        "description": "Forward /kb-tools/* requests with the standard knowledge rate limit.",
-        "operationId": "proxy_kb_tools_api_v1_kb_tools__path__get",
+        "operationId": "proxy_kb_tools_api_v1_kb_tools__path__delete",
         "parameters": [
           {
             "name": "path",
@@ -9813,7 +9848,7 @@
         ],
         "summary": "Proxy KB Tools to KB Service",
         "description": "Forward /kb-tools/* requests with the standard knowledge rate limit.",
-        "operationId": "proxy_kb_tools_api_v1_kb_tools__path__get",
+        "operationId": "proxy_kb_tools_api_v1_kb_tools__path__delete",
         "parameters": [
           {
             "name": "path",
@@ -9846,13 +9881,52 @@
           }
         }
       },
-      "delete": {
+      "post": {
         "tags": [
           "KB Tools"
         ],
         "summary": "Proxy KB Tools to KB Service",
         "description": "Forward /kb-tools/* requests with the standard knowledge rate limit.",
-        "operationId": "proxy_kb_tools_api_v1_kb_tools__path__get",
+        "operationId": "proxy_kb_tools_api_v1_kb_tools__path__delete",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "KB Tools"
+        ],
+        "summary": "Proxy KB Tools to KB Service",
+        "description": "Forward /kb-tools/* requests with the standard knowledge rate limit.",
+        "operationId": "proxy_kb_tools_api_v1_kb_tools__path__delete",
         "parameters": [
           {
             "name": "path",
@@ -9891,7 +9965,7 @@
         ],
         "summary": "Proxy KB Tools to KB Service",
         "description": "Forward /kb-tools/* requests with the standard knowledge rate limit.",
-        "operationId": "proxy_kb_tools_api_v1_kb_tools__path__get",
+        "operationId": "proxy_kb_tools_api_v1_kb_tools__path__delete",
         "parameters": [
           {
             "name": "path",
@@ -15753,7 +15827,7 @@
           "assistant"
         ],
         "summary": "Prepare Run Resume",
-        "description": "Thin proxy — validate checkpoint/approval state without executing tools.",
+        "description": "Reject legacy resume instead of dispatching to a second AgentLoop.",
         "operationId": "prepare_run_resume_api_v1_assistant_runs__run_id__resume_post",
         "parameters": [
           {
@@ -20527,7 +20601,7 @@
           "Agent Runtime V2"
         ],
         "summary": "Get Thread Approval",
-        "description": "Read a pending approval through the owning Codex Runtime.\n\nThe thread lookup is deliberately performed before forwarding the request;\nthis keeps approval IDs from becoming a cross-tenant oracle and binds the\nRuntime scope to the session that owns the thread.",
+        "description": "Read a pending approval through the owning Agent Runtime.\n\nThe thread lookup is deliberately performed before forwarding the request;\nthis keeps approval IDs from becoming a cross-tenant oracle and binds the\nRuntime scope to the session that owns the thread.",
         "operationId": "get_thread_approval_api_v2_agent_threads__thread_id__approvals__approval_id__get",
         "parameters": [
           {
@@ -20762,50 +20836,12 @@
       }
     },
     "/v1/knowledge/{path}": {
-      "get": {
+      "delete": {
         "tags": [
           "Knowledge Base"
         ],
         "summary": "Proxy to Knowledge Base Service",
-        "operationId": "proxy_knowledge_v1_knowledge__path__get",
-        "parameters": [
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "Knowledge Base"
-        ],
-        "summary": "Proxy to Knowledge Base Service",
-        "operationId": "proxy_knowledge_v1_knowledge__path__get",
+        "operationId": "proxy_knowledge_v1_knowledge__path__delete",
         "parameters": [
           {
             "name": "path",
@@ -20843,7 +20879,7 @@
           "Knowledge Base"
         ],
         "summary": "Proxy to Knowledge Base Service",
-        "operationId": "proxy_knowledge_v1_knowledge__path__get",
+        "operationId": "proxy_knowledge_v1_knowledge__path__delete",
         "parameters": [
           {
             "name": "path",
@@ -20876,12 +20912,50 @@
           }
         }
       },
-      "delete": {
+      "post": {
         "tags": [
           "Knowledge Base"
         ],
         "summary": "Proxy to Knowledge Base Service",
-        "operationId": "proxy_knowledge_v1_knowledge__path__get",
+        "operationId": "proxy_knowledge_v1_knowledge__path__delete",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Knowledge Base"
+        ],
+        "summary": "Proxy to Knowledge Base Service",
+        "operationId": "proxy_knowledge_v1_knowledge__path__delete",
         "parameters": [
           {
             "name": "path",
@@ -20919,7 +20993,7 @@
           "Knowledge Base"
         ],
         "summary": "Proxy to Knowledge Base Service",
-        "operationId": "proxy_knowledge_v1_knowledge__path__get",
+        "operationId": "proxy_knowledge_v1_knowledge__path__delete",
         "parameters": [
           {
             "name": "path",
@@ -22124,6 +22198,18 @@
             ],
             "title": "Draft Revision"
           },
+          "published_channels": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "hosted",
+                "embed",
+                "api"
+              ]
+            },
+            "type": "array",
+            "title": "Published Channels"
+          },
           "created_at": {
             "anyOf": [
               {
@@ -23215,6 +23301,51 @@
         ],
         "title": "AgentOperationsTrace"
       },
+      "AgentOutcomeSpec": {
+        "properties": {
+          "goal": {
+            "type": "string",
+            "maxLength": 4000,
+            "title": "Goal",
+            "default": ""
+          },
+          "triggers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 16,
+            "title": "Triggers"
+          },
+          "inputs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 32,
+            "title": "Inputs"
+          },
+          "human_boundaries": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 32,
+            "title": "Human Boundaries"
+          },
+          "success_criteria": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 32,
+            "title": "Success Criteria"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "AgentOutcomeSpec"
+      },
       "AgentPageResponse": {
         "properties": {
           "items": {
@@ -23456,6 +23587,41 @@
             "type": "boolean",
             "title": "Attachments",
             "default": false
+          },
+          "version_number": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Version Number",
+            "default": 1
+          },
+          "capability_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Capability Count",
+            "default": 0
+          },
+          "knowledge_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Knowledge Count",
+            "default": 0
+          },
+          "release_gate_verified": {
+            "type": "boolean",
+            "title": "Release Gate Verified",
+            "default": false
+          },
+          "published_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published At"
           },
           "request_id": {
             "type": "string",
@@ -24580,6 +24746,9 @@
           "identity": {
             "$ref": "#/components/schemas/AgentIdentitySpec"
           },
+          "outcome": {
+            "$ref": "#/components/schemas/AgentOutcomeSpec"
+          },
           "instructions": {
             "type": "string",
             "maxLength": 100000,
@@ -24690,6 +24859,18 @@
               }
             ],
             "title": "Draft Revision"
+          },
+          "published_channels": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "hosted",
+                "embed",
+                "api"
+              ]
+            },
+            "type": "array",
+            "title": "Published Channels"
           },
           "created_at": {
             "anyOf": [
@@ -39303,6 +39484,92 @@
               }
             ],
             "title": "Thinking Level"
+          },
+          "temperature": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 2.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temperature"
+          },
+          "execution_profile": {
+            "type": "string",
+            "maxLength": 32,
+            "title": "Execution Profile",
+            "default": "safe"
+          },
+          "memory_mode": {
+            "type": "string",
+            "maxLength": 32,
+            "title": "Memory Mode",
+            "default": "auto"
+          },
+          "system_prompt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Prompt"
+          },
+          "os_agent_enabled": {
+            "type": "boolean",
+            "title": "Os Agent Enabled",
+            "default": false
+          },
+          "local_node_device_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Node Device Id"
+          },
+          "local_node_grant_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "title": "Local Node Grant Ids"
+          },
+          "resume_run_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resume Run Id"
+          },
+          "resume_approval_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resume Approval Id"
           },
           "max_tokens": {
             "anyOf": [

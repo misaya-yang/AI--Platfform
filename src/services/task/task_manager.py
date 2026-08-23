@@ -25,7 +25,16 @@ class TaskStorage:
     async def get(self, task_id: str) -> Task:
         raise NotImplementedError
 
-    async def list(self) -> builtins.list[Task]:
+    async def list(
+        self,
+        *,
+        user_id: str | None = None,
+        tenant_id: str | None = None,
+        service_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> builtins.list[Task]:
         raise NotImplementedError
 
 
@@ -42,8 +51,27 @@ class MemoryTaskStorage(TaskStorage):
             raise TaskNotFoundError(task_id)
         return task
 
-    async def list(self) -> builtins.list[Task]:
-        return list(self._tasks.values())
+    async def list(
+        self,
+        *,
+        user_id: str | None = None,
+        tenant_id: str | None = None,
+        service_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> builtins.list[Task]:
+        tasks = list(self._tasks.values())
+        if user_id:
+            tasks = [task for task in tasks if task.user_id == user_id]
+        if tenant_id:
+            tasks = [task for task in tasks if task.tenant_id == tenant_id]
+        if service_id:
+            tasks = [task for task in tasks if task.service_id == service_id]
+        if status:
+            tasks = [task for task in tasks if task.status.value == status]
+        tasks.sort(key=lambda task: (task.created_at, task.task_id), reverse=True)
+        return tasks[offset : offset + limit]
 
 
 class TaskManager:
@@ -112,6 +140,23 @@ class TaskManager:
 
     async def get_task(self, task_id: str) -> Task:
         return await self.storage.get(task_id)
+
+    async def list_tasks(
+        self,
+        *,
+        user_id: str,
+        tenant_id: str,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> builtins.list[Task]:
+        return await self.storage.list(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
 
     async def update_status(
         self,

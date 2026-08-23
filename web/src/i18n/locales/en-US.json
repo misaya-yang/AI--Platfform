@@ -2486,8 +2486,10 @@
   },
   "tasks": {
     "createdAt": "Created At",
-    "description": "Query and track async task execution status",
+    "description": "View async tasks submitted by your account and their execution status",
     "errorInfo": "Error Info",
+    "progress": "Progress",
+    "scopeNotice": "Only real gateway tasks visible to the current account and tenant appear here. Status comes from runtime data; queue depth and capacity are not inferred.",
     "query": "Query",
     "querying": "Querying",
     "ribbon": {
@@ -2519,13 +2521,28 @@
     "status": {
       "completed": "Completed",
       "running": "Running",
+      "processing": "Processing",
       "pending": "Pending",
       "failed": "Failed",
       "cancelled": "Cancelled"
     },
     "tabs": {
-      "scheduled": "Scheduled Tasks",
+      "inbox": "Task Inbox",
       "query": "Task Query"
+    },
+    "inbox": {
+      "filterLabel": "Filter tasks by status",
+      "loadFailed": "Task inbox could not be loaded",
+      "empty": "No matching tasks",
+      "emptyDescription": "Tasks submitted through async services appear here; Assistant chat runs remain managed in their sessions.",
+      "filters": {
+        "all": "All",
+        "pending": "Pending",
+        "processing": "Processing",
+        "completed": "Completed",
+        "failed": "Failed",
+        "cancelled": "Cancelled"
+      }
     },
     "taskDetail": "Task Details",
     "taskResult": "Execution Result",

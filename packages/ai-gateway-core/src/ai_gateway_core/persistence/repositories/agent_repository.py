@@ -648,7 +648,7 @@ class DatabaseAgentRepository(BaseRepository):
             conditions.append(
                 "EXISTS (SELECT 1 FROM agent_publications p "
                 "WHERE p.tenant_id = a.tenant_id AND p.agent_id = a.agent_id "
-                f"AND p.channel = ${len(params)})"
+                f"AND p.channel = ${len(params)} AND p.status = 'active')"
             )
         if cursor:
             cursor_time, cursor_id = _decode_cursor(cursor)
@@ -658,7 +658,15 @@ class DatabaseAgentRepository(BaseRepository):
         rows = await self.fetch(
             f"""
             SELECT a.*, COALESCE(self_member.role, 'owner') AS caller_role,
-                   d.revision AS draft_revision
+                   d.revision AS draft_revision,
+                   ARRAY(
+                       SELECT DISTINCT publication.channel
+                       FROM agent_publications publication
+                       WHERE publication.tenant_id = a.tenant_id
+                         AND publication.agent_id = a.agent_id
+                         AND publication.status = 'active'
+                       ORDER BY publication.channel
+                   ) AS published_channels
             FROM agents a
             LEFT JOIN agent_members self_member
               ON self_member.tenant_id = a.tenant_id

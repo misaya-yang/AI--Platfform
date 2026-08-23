@@ -6,10 +6,10 @@
 #   make doctor          环境体检 (工具/内存/端口/compose 归属，只读不改动)
 #   make quickstart      首次一键启动 (生成 .env + 拉镜像 + 启动 + 迁移 + 校验)
 #   make harness-check   校验 harness.yml 契约与文档预算
-#   make codex-harness-contract 校验 Codex Harness 源码/Schema/SBOM/OCI 锁
+#   make agent-runtime-source-contract 校验 Agent Runtime 源码/Schema/SBOM/OCI 锁
 #
 #   make deploy          部署全部服务 (启动+迁移+健康检查，不默认重建镜像)
-#   make deploy-build    部署并强制重新构建镜像
+#   make deploy-build    部署并强制重新构建镜像 (需要 AI_PLATFORM_AGENT_RUNTIME_SOURCE)
 #   make deploy-cn       使用国内镜像构建部署
 #   make validate-config 校验 .env 和 Compose 配置
 #   make validate-example-config 校验开源示例配置和 Compose 渲染
@@ -55,7 +55,7 @@ export COMPOSE_PARALLEL_LIMIT
 
 # -- Quick Start --------------------------------------------------------------
 
-.PHONY: doctor harness-check codex-harness-build-local codex-harness-contract codex-runtime-build-local codex-runtime-contract codex-runtime-smoke codex-runtime-text-gate codex-runtime-canary-gate codex-runtime-cutover-gate codex-runtime-readonly-gate codex-runtime-write-gate codex-thread-store-contract sdk-sse-contract snapshot-gateway-openapi quickstart quickstart-build validate-config validate-example-config validate seed-demo seed-demo-apply
+.PHONY: doctor harness-check agent-runtime-source-build-local agent-runtime-source-contract agent-runtime-build-local agent-runtime-contract agent-runtime-smoke agent-runtime-text-gate agent-runtime-single-kernel-gate agent-runtime-readonly-gate agent-runtime-write-gate agent-thread-store-contract sdk-sse-contract snapshot-gateway-openapi quickstart quickstart-build validate-config validate-example-config validate seed-demo seed-demo-apply
 
 doctor:                     ## 环境体检: 工具/Docker/内存/端口/compose 归属 (只读)
 	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/doctor.sh --env "$(ENV_FILE)"
@@ -63,68 +63,62 @@ doctor:                     ## 环境体检: 工具/Docker/内存/端口/compose
 harness-check:              ## 校验 harness.yml 契约: 命令存在、必备文档、指令文件行数预算
 	@python3 scripts/harness/check_harness.py
 
-codex-harness-contract:     ## 校验 Codex Harness 不可变源码、Schema、SBOM、许可证和 OCI 身份
-	@python3 scripts/harness/codex_harness_supply_chain.py validate \
+agent-runtime-source-contract: ## 校验 Agent Runtime 不可变源码、Schema、SBOM、许可证和 OCI 身份
+	@python3 scripts/harness/agent_runtime_supply_chain.py validate \
 		--repo-root . \
-		--lock deploy/codex-harness/lock.json \
+		--lock deploy/agent-runtime-source/lock.json \
 		--require-artifact app_server
 	@uv run --all-packages --extra test pytest -q --no-cov \
-		tests/harness/test_codex_harness_supply_chain.py
+		tests/harness/test_agent_runtime_supply_chain.py
 
-codex-runtime-contract:     ## 校验 Rust Agent Runtime 已锁到独立、可运行的 OCI 制品
-	@python3 scripts/harness/codex_harness_supply_chain.py validate \
+agent-runtime-contract:     ## 校验 Rust Agent Runtime 已锁到独立、可运行的 OCI 制品
+	@python3 scripts/harness/agent_runtime_supply_chain.py validate \
 		--repo-root . \
-		--lock deploy/codex-harness/lock.json \
+		--lock deploy/agent-runtime-source/lock.json \
 		--require-artifact app_server
-	@python3 scripts/harness/codex_harness_supply_chain.py validate \
+	@python3 scripts/harness/agent_runtime_supply_chain.py validate \
 		--repo-root . \
-		--lock deploy/codex-harness/lock.json \
+		--lock deploy/agent-runtime-source/lock.json \
 		--require-artifact agent_runtime
 
-codex-runtime-build-local:  ## 从干净受控 fork 构建 Rust Agent Runtime 镜像
-	@bash scripts/harness/build_codex_runtime_image.sh
+agent-runtime-build-local:  ## 从干净受控 fork 构建 Rust Agent Runtime 镜像
+	@bash scripts/harness/build_agent_runtime_image.sh
 
-codex-runtime-smoke:        ## 在隔离 PostgreSQL/Docker 网络验证 Runtime 健康、Thread 和重启恢复
-	@bash scripts/harness/smoke_codex_runtime_image.sh
+agent-runtime-smoke:        ## 在隔离 PostgreSQL/Docker 网络验证 Runtime 健康、Thread 和重启恢复
+	@bash scripts/harness/smoke_agent_runtime_image.sh
 
-codex-runtime-text-gate:    ## 真实 Qwen Responses：简单、长输出与重启后多轮恢复
+agent-runtime-text-gate:    ## 真实 Qwen Responses：简单、长输出与重启后多轮恢复
 	@uv run --all-packages --extra test python \
-		scripts/harness/codex_runtime_text_gate.py \
+		scripts/harness/agent_runtime_text_gate.py \
 		--env-file "$(ENV_FILE)" \
-		--runtime-image "$(CODEX_RUNTIME_IMAGE)"
+		--runtime-image "$(AI_PLATFORM_AGENT_RUNTIME_IMAGE)"
 
-codex-runtime-canary-gate: ## CHR-05 代码合同；真实 Docker/provider/canary 窗口另行验收
-	@python3 scripts/harness/codex_runtime_canary_gate.py
+agent-runtime-single-kernel-gate: ## 验证唯一 Rust Agent 内核、V1/V2 投影和迁移合同
+	@python3 scripts/harness/agent_runtime_single_kernel_gate.py
 	@ENV_FILE="$(ENV_FILE)" uv run --all-packages --extra test pytest -q --no-cov \
 		tests/services/assistant/test_runtime_assignment.py \
-		tests/services/codex_runtime/test_thread_store.py \
+		tests/services/agent_runtime/test_thread_store.py \
 		tests/api/test_agent_v2.py \
-		tests/database/test_codex_runtime_thread_store_migration.py
-
-codex-runtime-cutover-gate: ## CHR-06 代码合同；不伪造全量切主或旧 loop 删除证据
-	@python3 scripts/harness/codex_runtime_cutover_gate.py
-	@uv run --all-packages --extra test pytest -q --no-cov \
-		tests/api/test_agent_v2.py \
-		tests/services/codex_runtime/test_cutover_guard.py \
+		tests/database/test_agent_runtime_thread_store_migration.py \
 		tests/contract/test_openapi_schema_compat.py
 
-codex-runtime-readonly-gate: ## CHR-03：Context/Knowledge/Tool/MCP/Artifact 只读桥合同
-	@uv run --all-packages --extra test python scripts/harness/codex_runtime_readonly_gate.py
+agent-runtime-readonly-gate: ## Context/Knowledge/Tool/MCP/Artifact 只读桥合同
+	@uv run --all-packages --extra test python scripts/harness/agent_runtime_readonly_gate.py
 	@uv run --all-packages --extra test pytest -q --no-cov \
-		tests/services/codex_runtime/test_readonly_capabilities.py \
-		tests/harness/test_codex_runtime_readonly_gate.py
+		tests/services/agent_runtime/test_readonly_capabilities.py \
+		tests/harness/test_agent_runtime_readonly_gate.py
 
-codex-runtime-write-gate:   ## 校验工具审批、dispatch fence、幂等和中断恢复闭环
+agent-runtime-write-gate:   ## 校验工具审批、dispatch fence、幂等和中断恢复闭环
 	@uv run --all-packages --extra test python \
-		scripts/harness/codex_runtime_write_gate.py \
-		--fork "$(CODEX_HARNESS_FORK)"
+		scripts/harness/agent_runtime_write_gate.py \
+		--fork "$(AI_PLATFORM_AGENT_RUNTIME_SOURCE)"
 
-codex-thread-store-contract: ## 在真实 PostgreSQL 验证 Codex ThreadStore 与预授权根线程闭环
-	@ENV_FILE="$(ENV_FILE)" CODEX_HARNESS_FORK="$(CODEX_HARNESS_FORK)" \
-		bash scripts/harness/codex_thread_store_contract.sh
+agent-thread-store-contract: ## 在真实 PostgreSQL 验证 Agent ThreadStore 与预授权根线程闭环
+	@ENV_FILE="$(ENV_FILE)" AI_PLATFORM_AGENT_RUNTIME_SOURCE="$(AI_PLATFORM_AGENT_RUNTIME_SOURCE)" \
+		bash scripts/harness/agent_thread_store_contract.sh
 
-codex-harness-build-local:  ## 低内存构建本地 Codex App Server 镜像并验证源码/Schema 标签与 initialize
-	@bash scripts/harness/build_codex_harness_image.sh
+agent-runtime-source-build-local: ## 低内存构建本地 Agent Runtime 源码镜像并验证源码/Schema 标签与 initialize
+	@bash scripts/harness/build_agent_runtime_source_image.sh
 
 sdk-sse-contract:           ## 验证四端 SSE 合同；发布 CI 要求 Maven/Dart 必须存在
 	@uv run --all-packages --extra test pytest -q --no-cov \
@@ -189,7 +183,7 @@ deploy-cn:                  ## 使用国内镜像构建部署
 deploy-infra:               ## 仅部署基础设施 (postgres/redis/qdrant)
 	@bash $(SCRIPTS)/deploy.sh --env "$(ENV_FILE)" --infra $(ARGS)
 
-deploy-app:                 ## 仅部署应用服务 (gateway/frontend/assistant/knowledge/docgen)
+deploy-app:                 ## 仅部署应用服务 (gateway/frontend/assistant/knowledge/Agent Runtime)
 	@bash $(SCRIPTS)/deploy.sh --env "$(ENV_FILE)" --app $(ARGS)
 
 stop:                       ## 停止所有服务

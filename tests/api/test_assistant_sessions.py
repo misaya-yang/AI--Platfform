@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 from src.api.v1 import assistant as assistant_api
 from src.api.v1.assistant import _browser_artifact_download_url, _list_assistant_sessions
 from src.core.auth.user_resolver import UserContext
-from src.models.session import Session
+from src.models.session import Session, SessionMessage
 
 
 @pytest.mark.asyncio
@@ -85,7 +85,7 @@ async def test_create_session_persists_runtime_assignment() -> None:
     assignment_store = AsyncMock()
     request = _build_request(session_manager, method="POST")
     request.app.state.assistant_runtime_assignments = assignment_store
-    request.app.state.assistant_runtime_default_owner = "codex_candidate"
+    request.app.state.assistant_runtime_default_owner = "agent_runtime"
     request.app.state.assistant_runtime_kernel_revision = "fork-sha"
 
     response = await assistant_api.create_session(None, user, request)
@@ -95,7 +95,7 @@ async def test_create_session_persists_runtime_assignment() -> None:
         tenant_id=user.tenant_id,
         user_id=user.user_id,
         session_id=session.session_id,
-        runtime_owner="codex_candidate",
+        runtime_owner="agent_runtime",
         kernel_revision="fork-sha",
     )
 
@@ -126,33 +126,26 @@ async def test_create_session_removes_row_when_runtime_assignment_fails() -> Non
 
 
 @pytest.mark.asyncio
-async def test_codex_assigned_session_never_falls_through_to_python_control() -> None:
+async def test_agent_runtime_assignment_is_accepted_without_python_fallback() -> None:
     user = UserContext(user_id="user_1", tenant_id="tenant_1", is_authenticated=True)
     request = _build_request(AsyncMock(), method="POST")
     assignment_store = AsyncMock()
-    assignment_store.resolve.return_value = SimpleNamespace(runtime_owner="codex_candidate")
+    assignment_store.resolve.return_value = SimpleNamespace(runtime_owner="agent_runtime")
     request.app.state.assistant_runtime_assignments = assignment_store
 
-    with pytest.raises(HTTPException) as exc_info:
-        await assistant_api._session_runtime_assignment(
-            request,
-            user,
-            "session-1",
-        )
-
-    assert exc_info.value.status_code == 503
-    assert exc_info.value.detail["code"] == "CODEX_RUNTIME_UNAVAILABLE"
+    resolved = await assistant_api._session_runtime_assignment(request, user, "session-1")
+    assert resolved.runtime_owner == "agent_runtime"
 
 
 @pytest.mark.asyncio
-async def test_codex_assignment_is_returned_only_when_control_plane_is_ready() -> None:
+async def test_agent_assignment_is_returned_only_when_control_plane_is_ready() -> None:
     user = UserContext(user_id="user_1", tenant_id="tenant_1", is_authenticated=True)
     request = _build_request(AsyncMock(), method="POST")
-    assignment = SimpleNamespace(runtime_owner="codex_candidate")
+    assignment = SimpleNamespace(runtime_owner="agent_runtime")
     assignment_store = AsyncMock()
     assignment_store.resolve.return_value = assignment
     request.app.state.assistant_runtime_assignments = assignment_store
-    request.app.state.codex_runtime_control = SimpleNamespace()
+    request.app.state.agent_runtime_control = SimpleNamespace()
 
     resolved = await assistant_api._session_runtime_assignment(
         request,
@@ -161,6 +154,48 @@ async def test_codex_assignment_is_returned_only_when_control_plane_is_ready() -
     )
 
     assert resolved is assignment
+
+
+@pytest.mark.asyncio
+async def test_session_history_appends_runtime_item_projection() -> None:
+    user = UserContext(user_id="user_1", tenant_id="tenant_1", is_authenticated=True)
+    session = Session(
+        session_id="session-1",
+        user_id=user.user_id,
+        tenant_id=user.tenant_id,
+        history=[SessionMessage(role="user", content="legacy")],
+    )
+    session_manager = AsyncMock()
+    session_manager.get.return_value = session
+    request = _build_request(session_manager)
+    request.app.state.database = AsyncMock()
+    store = AsyncMock()
+    store.get_for_session.return_value = SimpleNamespace(runtime_thread_id="runtime-1")
+    store.history_messages.return_value = (
+        [
+            {
+                "role": "assistant",
+                "content": "runtime answer",
+                "timestamp": None,
+                "metadata": {"runtime_sequence": 2},
+            }
+        ],
+        1,
+    )
+    request.app.state.agent_thread_store = store
+
+    response = await assistant_api.get_session_history(
+        "session-1",
+        limit=100,
+        user=user,
+        request=request,
+    )
+
+    assert response.total == 2
+    assert [(message.role, message.content) for message in response.messages] == [
+        ("user", "legacy"),
+        ("assistant", "runtime answer"),
+    ]
 
 
 @pytest.mark.asyncio

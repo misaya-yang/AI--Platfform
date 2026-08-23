@@ -184,6 +184,7 @@ if [ "$UPDATE_GATEWAY" = true ]; then
     copy_dir "database" "$gateway" "/app/database" "appuser:appuser"
     copy_dir "packages/ai-gateway-core/src/ai_gateway_core" "$gateway" "$gateway_site/ai_gateway_core"
     restart_services+=("gateway")
+    restart_services+=("agent-runtime")
 fi
 
 if [ "$UPDATE_ASSISTANT" = true ]; then

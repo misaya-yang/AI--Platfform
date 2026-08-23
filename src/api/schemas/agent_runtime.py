@@ -116,6 +116,11 @@ class AgentPublicConfigResponse(_ClosedRuntimeModel):
     description: str = ""
     identity: dict[str, Any] = Field(default_factory=dict)
     attachments: bool = False
+    version_number: int = Field(default=1, ge=1)
+    capability_count: int = Field(default=0, ge=0)
+    knowledge_count: int = Field(default=0, ge=0)
+    release_gate_verified: bool = False
+    published_at: datetime | None = None
     request_id: str
 
 

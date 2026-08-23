@@ -93,6 +93,13 @@ class InMemoryAgentRepository:
         result = copy.deepcopy(record["agent"])
         result["caller_role"] = role
         result["draft_revision"] = record["draft"]["revision"]
+        result["published_channels"] = sorted(
+            {
+                publication.get("channel")
+                for publication in record["publications"]
+                if publication.get("status") == "active" and publication.get("channel")
+            }
+        )
         return result
 
     async def create_agent(self, **kwargs: Any) -> dict[str, Any]:
@@ -465,6 +472,15 @@ def test_create_list_get_and_cursor_pagination() -> None:
     assert detail.json()["tenant_id"] == "tenant-a"
     assert detail.json()["caller_role"] == "owner"
     assert detail.json()["draft"]["revision"] == 1
+
+    record = client.app.state.agent_repository.records[("tenant-a", first["agent_id"])]
+    record["publications"] = [
+        {"channel": "hosted", "status": "disabled"},
+        {"channel": "embed", "status": "active"},
+    ]
+    refreshed = client.get("/agents", params={"search": "Agent One"})
+    assert refreshed.status_code == 200
+    assert refreshed.json()["items"][0]["published_channels"] == ["embed"]
 
 
 def test_create_materializes_empty_model_before_validation_and_versioning() -> None:

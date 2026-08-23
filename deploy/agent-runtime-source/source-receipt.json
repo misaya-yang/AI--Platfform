@@ -1,0 +1,37 @@
+{
+  "license": {
+    "license_sha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc",
+    "spdx": "Apache-2.0",
+    "upstream_notice_sha256": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915"
+  },
+  "overlay": {
+    "file_count": 49,
+    "sha256": "49230d811181b4be1768c3033413b5b1283ee88e584b0e77dc6d3e365a59a192",
+    "source_revision": "c84c011f403a18be3db3e6c0f2cb603ee7ea1cdd",
+    "upstream_sha": "93c54bca38996b56d344a2ca65f01627b1953b27"
+  },
+  "sbom": {
+    "component_count": 1359,
+    "format": "CycloneDX-1.5",
+    "sha256": "41a6a321a0d412353f65891015976f430bafe239f57ac2ee77b10aab290aa607"
+  },
+  "schema_bundle": {
+    "file_count": 292,
+    "sha256": "d6fc70952574166e7c69d6524601065a81fc94d26a1b99d180d7c3918c46e3f7",
+    "total_bytes": 3032964
+  },
+  "schema_version": "ai-platform/agent-runtime-source-receipt/v1",
+  "source": {
+    "branch": "ai-platform/main",
+    "fork_sha": "c84c011f403a18be3db3e6c0f2cb603ee7ea1cdd",
+    "git_tree_sha": "4c0ebd059212af3f9e0f28ab219606201540616f",
+    "upstream_sha": "93c54bca38996b56d344a2ca65f01627b1953b27",
+    "upstream_url": "https://github.com/openai/codex.git"
+  },
+  "toolchain": {
+    "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
+    "cargo_lock_sha256": "13a58d438af37ce092236233832aa8441ee0a2e01e3b934b28b4c5cfd8c5ab66",
+    "rust_toolchain_sha256": "570656042681cfd8795403a455baf9a33035331a07db0645e866bbcea89a3d64",
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)"
+  }
+}

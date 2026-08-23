@@ -1,8 +1,8 @@
 """Native V2 Thread/Turn/Item boundary.
 
-V1 remains the compatibility surface.  V2 is intentionally thin: ownership,
+V1 remains a compatibility projection.  V2 is intentionally thin: ownership,
 assignment, legacy import, and durable cursor reads live in the Gateway while
-the Codex Runtime remains the only Agent loop for candidate-owned sessions.
+the Agent Runtime remains the only Agent loop for every session.
 """
 
 from __future__ import annotations
@@ -19,9 +19,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ...core.auth.user_resolver import UserContext
-from ...services.codex_runtime.control_plane import CodexRuntimeControlError
-from ...services.codex_runtime.thread_store import (
-    CodexThreadStore,
+from ...services.agent_runtime.control_plane import AgentRuntimeControlError
+from ...services.agent_runtime.thread_store import (
+    AgentThreadStore,
     RuntimeThread,
 )
 from ..deps import get_user_context
@@ -43,6 +43,15 @@ class TurnCreateRequest(BaseModel):
     model_id: str | None = Field(default=None, min_length=1, max_length=255)
     reasoning_option: str | None = Field(default=None, max_length=100)
     thinking_level: str | None = Field(default=None, max_length=100)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    execution_profile: str = Field(default="safe", max_length=32)
+    memory_mode: str = Field(default="auto", max_length=32)
+    system_prompt: str | None = Field(default=None, max_length=100_000)
+    os_agent_enabled: bool = False
+    local_node_device_id: str | None = Field(default=None, max_length=128)
+    local_node_grant_ids: list[str] = Field(default_factory=list, max_length=100)
+    resume_run_id: str | None = Field(default=None, max_length=255)
+    resume_approval_id: str | None = Field(default=None, max_length=255)
     max_tokens: int | None = Field(default=None, ge=1, le=1_000_000)
     kb_dataset_ids: list[str] = Field(default_factory=list, max_length=100)
     kb_mode: str = Field(default="off", max_length=20)
@@ -74,14 +83,14 @@ class ApprovalDecisionRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
 
 
-def _store(request: Request) -> CodexThreadStore:
+def _store(request: Request) -> AgentThreadStore:
     database = getattr(request.app.state, "database", None)
     if database is None:
-        raise HTTPException(status_code=503, detail={"code": "CODEX_RUNTIME_STORAGE_UNAVAILABLE"})
-    value = getattr(request.app.state, "codex_thread_store", None)
+        raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_STORAGE_UNAVAILABLE"})
+    value = getattr(request.app.state, "agent_thread_store", None)
     if value is None:
-        value = CodexThreadStore(database)
-        request.app.state.codex_thread_store = value
+        value = AgentThreadStore(database)
+        request.app.state.agent_thread_store = value
     return value
 
 
@@ -92,19 +101,42 @@ def _require_actor(user: UserContext) -> None:
         raise HTTPException(status_code=403, detail={"code": "TENANT_REQUIRED"})
 
 
+def _reject_unmigrated_turn_capabilities(body: TurnCreateRequest) -> None:
+    """Keep V2 fail-closed until these controls have a runtime contract."""
+
+    unsupported = (
+        body.execution_profile != "safe"
+        or body.memory_mode != "auto"
+        or body.system_prompt is not None
+        or body.os_agent_enabled
+        or body.local_node_device_id is not None
+        or bool(body.local_node_grant_ids)
+        or body.resume_run_id is not None
+        or body.resume_approval_id is not None
+    )
+    if unsupported:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "AGENT_RUNTIME_CAPABILITY_NOT_MIGRATED",
+                "message": "This capability is not available on the Agent Runtime yet",
+            },
+        )
+
+
 async def _assignment(request: Request, user: UserContext, session_id: str) -> Any:
     assignments = getattr(request.app.state, "assistant_runtime_assignments", None)
     if assignments is None:
-        raise HTTPException(status_code=503, detail={"code": "CODEX_RUNTIME_ASSIGNMENT_UNAVAILABLE"})
+        raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_ASSIGNMENT_UNAVAILABLE"})
     assignment = await assignments.resolve(
         tenant_id=user.tenant_id, user_id=user.user_id, session_id=session_id
     )
     if assignment is None:
-        raise HTTPException(status_code=404, detail={"code": "CODEX_RUNTIME_ASSIGNMENT_NOT_FOUND"})
-    if assignment.runtime_owner != "codex_candidate":
+        raise HTTPException(status_code=404, detail={"code": "AGENT_RUNTIME_ASSIGNMENT_NOT_FOUND"})
+    if assignment.runtime_owner != "agent_runtime":
         raise HTTPException(
             status_code=409,
-            detail={"code": "CODEX_RUNTIME_NOT_ASSIGNED", "runtime_owner": assignment.runtime_owner},
+            detail={"code": "AGENT_RUNTIME_NOT_ASSIGNED", "runtime_owner": assignment.runtime_owner},
         )
     return assignment
 
@@ -112,7 +144,7 @@ async def _assignment(request: Request, user: UserContext, session_id: str) -> A
 async def _bind_new_assignment(request: Request, user: UserContext, session_id: str) -> Any:
     assignments = getattr(request.app.state, "assistant_runtime_assignments", None)
     if assignments is None:
-        raise HTTPException(status_code=503, detail={"code": "CODEX_RUNTIME_ASSIGNMENT_UNAVAILABLE"})
+        raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_ASSIGNMENT_UNAVAILABLE"})
     policy = getattr(request.app.state, "assistant_runtime_assignment_policy", None)
     if policy is not None and hasattr(assignments, "bind_new_session"):
         return await assignments.bind_new_session(
@@ -121,7 +153,7 @@ async def _bind_new_assignment(request: Request, user: UserContext, session_id: 
         )
     return await assignments.bind(
         tenant_id=user.tenant_id, user_id=user.user_id, session_id=session_id,
-        runtime_owner="codex_candidate",
+        runtime_owner="agent_runtime",
         kernel_revision=getattr(request.app.state, "assistant_runtime_kernel_revision", None),
         assignment_reason="v2_thread_create",
     )
@@ -182,7 +214,7 @@ async def create_thread(
                 await session_manager.delete(session_id)
             raise HTTPException(
                 status_code=409,
-                detail={"code": "CODEX_RUNTIME_ASSIGNMENT_CONFLICT"},
+                detail={"code": "AGENT_RUNTIME_ASSIGNMENT_CONFLICT"},
             ) from exc
     else:
         session = await session_manager.create(
@@ -199,21 +231,21 @@ async def create_thread(
             raise
     assignments = getattr(request.app.state, "assistant_runtime_assignments", None)
     if assignments is None:
-        raise HTTPException(status_code=503, detail={"code": "CODEX_RUNTIME_ASSIGNMENT_UNAVAILABLE"})
+        raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_ASSIGNMENT_UNAVAILABLE"})
     assignment = await _assignment(request, user, session_id)
     del assignment
     store = _store(request)
     existing = await store.get_for_session(
         tenant_id=user.tenant_id, user_id=user.user_id, session_id=session_id
     )
-    control = getattr(request.app.state, "codex_runtime_control", None)
+    control = getattr(request.app.state, "agent_runtime_control", None)
     settings = getattr(request.app.state, "settings", None)
     model_id = body.model_id or str(getattr(settings, "default_model", "") or "").strip()
     if not model_id:
-        raise HTTPException(status_code=503, detail={"code": "CODEX_RUNTIME_MODEL_UNAVAILABLE"})
+        raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_MODEL_UNAVAILABLE"})
     if existing:
         if control is None:
-            raise HTTPException(status_code=503, detail={"code": "CODEX_RUNTIME_UNAVAILABLE"})
+            raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_UNAVAILABLE"})
         await control.verify_thread(
             runtime_thread_id=existing.runtime_thread_id,
             tenant_id=user.tenant_id,
@@ -223,7 +255,7 @@ async def create_thread(
         )
         return {"thread": _thread_payload(existing)}
     if control is None:
-        raise HTTPException(status_code=503, detail={"code": "CODEX_RUNTIME_UNAVAILABLE"})
+        raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_UNAVAILABLE"})
     try:
         runtime_thread = await control.ensure_thread(
             tenant_id=user.tenant_id,
@@ -231,14 +263,14 @@ async def create_thread(
             session_id=session_id,
             model_id=model_id,
         )
-    except CodexRuntimeControlError as exc:
+    except AgentRuntimeControlError as exc:
         raise HTTPException(
             status_code=exc.status_code,
             detail={"code": exc.code},
         ) from exc
     kernel_thread_id = str(runtime_thread["runtime_thread_id"])
     # Import legacy history against the Runtime-authorized root so resume
-    # hydrates the real Codex ThreadStore instead of creating an orphan UUID.
+    # hydrates the real Agent ThreadStore instead of creating an orphan UUID.
     history = await session_manager.history(session_id, limit=1)
     if history:
         thread = await store.import_legacy(
@@ -279,14 +311,15 @@ async def create_turn(
     user: UserContext = Depends(get_user_context),
 ) -> dict[str, Any]:
     _require_actor(user)
+    _reject_unmigrated_turn_capabilities(body)
     thread = await _get_thread(request, user, thread_id)
-    control = getattr(request.app.state, "codex_runtime_control", None)
+    control = getattr(request.app.state, "agent_runtime_control", None)
     if control is None:
-        raise HTTPException(status_code=503, detail={"code": "CODEX_RUNTIME_UNAVAILABLE"})
+        raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_UNAVAILABLE"})
     settings = getattr(request.app.state, "settings", None)
     model_id = body.model_id or str(getattr(settings, "default_model", "") or "").strip()
     if not model_id:
-        raise HTTPException(status_code=503, detail={"code": "CODEX_RUNTIME_MODEL_UNAVAILABLE"})
+        raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_MODEL_UNAVAILABLE"})
     try:
         turn = await control.start_turn(
             tenant_id=user.tenant_id, user_id=user.user_id, session_id=thread.session_id,
@@ -294,6 +327,7 @@ async def create_turn(
             reasoning_option=body.reasoning_option,
             legacy_thinking_level=body.thinking_level,
             max_tokens=body.max_tokens,
+            temperature=body.temperature,
             readonly_capabilities={
                 "knowledge": {
                     "dataset_ids": body.kb_dataset_ids,
@@ -335,10 +369,10 @@ async def interrupt_turn(
 ) -> dict[str, Any]:
     _require_actor(user)
     thread = await _get_thread(request, user, thread_id)
-    control = getattr(request.app.state, "codex_runtime_control", None)
+    control = getattr(request.app.state, "agent_runtime_control", None)
     interrupt = getattr(control, "interrupt_turn", None)
     if interrupt is None:
-        raise HTTPException(status_code=501, detail={"code": "CODEX_RUNTIME_INTERRUPT_UNAVAILABLE"})
+        raise HTTPException(status_code=501, detail={"code": "AGENT_RUNTIME_INTERRUPT_UNAVAILABLE"})
     try:
         await interrupt(
             runtime_thread_id=thread.runtime_thread_id,
@@ -348,7 +382,7 @@ async def interrupt_turn(
             session_id=thread.session_id,
             reason=body.reason,
         )
-    except CodexRuntimeControlError as exc:
+    except AgentRuntimeControlError as exc:
         raise HTTPException(
             status_code=exc.status_code,
             detail={"code": exc.code},
@@ -363,7 +397,7 @@ async def get_thread_approval(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ) -> dict[str, Any]:
-    """Read a pending approval through the owning Codex Runtime.
+    """Read a pending approval through the owning Agent Runtime.
 
     The thread lookup is deliberately performed before forwarding the request;
     this keeps approval IDs from becoming a cross-tenant oracle and binds the
@@ -371,9 +405,9 @@ async def get_thread_approval(
     """
     _require_actor(user)
     thread = await _get_thread(request, user, thread_id)
-    control = getattr(request.app.state, "codex_runtime_control", None)
+    control = getattr(request.app.state, "agent_runtime_control", None)
     if control is None:
-        raise HTTPException(status_code=503, detail={"code": "CODEX_RUNTIME_UNAVAILABLE"})
+        raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_UNAVAILABLE"})
     try:
         approval = await control.get_approval(
             approval_id=approval_id,
@@ -381,7 +415,7 @@ async def get_thread_approval(
             user_id=user.user_id,
             session_id=thread.session_id,
         )
-    except CodexRuntimeControlError as exc:
+    except AgentRuntimeControlError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
     if approval is None:
         raise HTTPException(status_code=404, detail={"code": "APPROVAL_NOT_FOUND"})
@@ -399,9 +433,9 @@ async def decide_thread_approval(
     """Consume one Runtime approval decision, preserving tenant/thread scope."""
     _require_actor(user)
     thread = await _get_thread(request, user, thread_id)
-    control = getattr(request.app.state, "codex_runtime_control", None)
+    control = getattr(request.app.state, "agent_runtime_control", None)
     if control is None:
-        raise HTTPException(status_code=503, detail={"code": "CODEX_RUNTIME_UNAVAILABLE"})
+        raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_UNAVAILABLE"})
     try:
         result = await control.decide_approval(
             approval_id=approval_id,
@@ -411,7 +445,7 @@ async def decide_thread_approval(
             user_id=user.user_id,
             session_id=thread.session_id,
         )
-    except CodexRuntimeControlError as exc:
+    except AgentRuntimeControlError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
     return {
         "schema_version": "agent-approval/v2",
@@ -437,9 +471,9 @@ async def thread_events(
     _require_actor(user)
     thread = await _get_thread(request, user, thread_id)
 
-    control = getattr(request.app.state, "codex_runtime_control", None)
+    control = getattr(request.app.state, "agent_runtime_control", None)
     if control is None:
-        raise HTTPException(status_code=503, detail={"code": "CODEX_RUNTIME_UNAVAILABLE"})
+        raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_UNAVAILABLE"})
     turn_id_value = str(turn_id) if turn_id else None
     turn_metadata = (
         await _store(request).turn_metadata(

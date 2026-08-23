@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from ai_gateway_core.agents import AgentRuntimeSigner, runtime_sha256
+from ai_gateway_core.agents.spec import render_agent_outcome_contract
 from ai_gateway_core.exceptions import PermissionDeniedError
 from ai_gateway_core.logging import get_logger
 from ai_gateway_core.persistence.repositories.agent_repository import (
@@ -591,6 +592,9 @@ async def _build_snapshot(
     spec = resolution["spec"]
     model = await _resolved_model(request, resolution, user)
     instructions = str(spec.get("instructions") or "")
+    outcome_contract = render_agent_outcome_contract(spec)
+    if outcome_contract:
+        instructions = f"{outcome_contract}\n\n[Detailed instructions]\n{instructions}"
     publication = resolution.get("publication") or {}
     version = resolution.get("version") or {}
     draft = resolution.get("draft") or {}

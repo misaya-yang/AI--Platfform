@@ -1,0 +1,157 @@
+//! Fixed internal bridge from Agent dynamic tool calls to assistant-service.
+
+use std::net::IpAddr;
+
+use codex_app_server_protocol::DynamicToolCallParams;
+use codex_protocol::ThreadId;
+use reqwest::Url;
+use serde_json::Value;
+
+use crate::PlatformThreadIdentity;
+
+fn endpoint(base_url: &str) -> Result<Url, String> {
+    let mut url = Url::parse(base_url).map_err(|_| "capability_plane_url_invalid".to_string())?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err("capability_plane_url_invalid".to_string());
+    }
+    if url.username() != ""
+        || url.password().is_some()
+        || url
+            .host_str()
+            .is_some_and(|host| host.parse::<IpAddr>().is_ok_and(|ip| ip.is_unspecified()))
+    {
+        return Err("capability_plane_url_invalid".to_string());
+    }
+    if !url.path().ends_with("/invoke") {
+        let path = format!("{}/invoke", url.path().trim_end_matches('/'));
+        url.set_path(&path);
+    }
+    Ok(url)
+}
+
+/// Invoke exactly one dynamic read-only capability and return the Codex
+/// DynamicToolCallResponse-shaped JSON. The model loop remains in Codex; this
+/// helper only handles the capability-service hop and response projection.
+#[allow(clippy::too_many_arguments)]
+pub async fn invoke_dynamic_tool(
+    client: &reqwest::Client,
+    params: &DynamicToolCallParams,
+    identity: &PlatformThreadIdentity,
+    capability_plane_url: &str,
+    internal_token: &str,
+    capability_revision: i64,
+    snapshot_id: &str,
+    bound_dataset_ids: &[String],
+) -> Result<Value, String> {
+    let url = endpoint(capability_plane_url)?;
+    if internal_token.is_empty() {
+        return Err("capability_plane_token_missing".to_string());
+    }
+    let thread_id = ThreadId::from_string(&params.thread_id)
+        .map_err(|_| "capability_plane_thread_invalid".to_string())?;
+    if thread_id != identity.runtime_thread_id {
+        return Err("capability_plane_thread_scope_mismatch".to_string());
+    }
+    let response = client
+        .post(url)
+        .header("x-ai-platform-internal-token", internal_token)
+        .header("x-ai-tenant-id", &identity.tenant_id)
+        .header("x-ai-user-id", &identity.user_id)
+        .header("x-ai-session-id", &identity.session_id)
+        .json(&serde_json::json!({
+            "tenant_id": identity.tenant_id,
+            "user_id": identity.user_id,
+            "session_id": identity.session_id,
+            "capability_revision": capability_revision,
+            "snapshot_id": snapshot_id,
+            "run_id": params.turn_id,
+            "tool": params.tool,
+            "arguments": params.arguments,
+            "bound_dataset_ids": bound_dataset_ids,
+        }))
+        .send()
+        .await
+        .map_err(|_| "capability_plane_unavailable".to_string())?;
+    if !response.status().is_success() {
+        return Err("capability_plane_rejected".to_string());
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|_| "capability_plane_response_invalid".to_string())?;
+    if bytes.len() > 1_048_576 {
+        return Err("capability_plane_response_too_large".to_string());
+    }
+    let body: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| "capability_plane_response_invalid".to_string())?;
+    if !body.get("content_items").is_some_and(Value::is_array)
+        || !body.get("success").is_some_and(Value::is_boolean)
+    {
+        return Err("capability_plane_response_invalid".to_string());
+    }
+    Ok(serde_json::json!({
+        "contentItems": body["content_items"],
+        "success": body["success"],
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_app_server_protocol::DynamicToolCallParams;
+    use codex_protocol::ThreadId;
+
+    #[test]
+    fn rejects_userinfo_and_invalid_scheme() {
+        assert!(endpoint("file:///tmp/capability").is_err());
+        assert!(endpoint("http://user:pass@example/capability").is_err());
+        assert!(endpoint("http://127.0.0.1:8093/internal/v1/capabilities").is_ok());
+    }
+
+    #[tokio::test]
+    async fn dynamic_call_projects_fake_knowledge_result_for_next_turn() {
+        let app = axum::Router::new().route(
+            "/invoke",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "content_items": [{"type": "input_text", "text": "Knowledge result"}],
+                    "success": true
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fake capability listener");
+        let address = listener.local_addr().expect("fake capability address");
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let thread_id = ThreadId::new();
+        let identity = PlatformThreadIdentity::new(thread_id, "tenant-a", "user-a", "session-a");
+        let params = DynamicToolCallParams {
+            thread_id: thread_id.to_string(),
+            turn_id: "turn-a".to_string(),
+            call_id: "call-a".to_string(),
+            namespace: None,
+            tool: "search_knowledge_base".to_string(),
+            arguments: serde_json::json!({"query": "transformer"}),
+        };
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("fake capability client");
+        let response = invoke_dynamic_tool(
+            &client,
+            &params,
+            &identity,
+            &format!("http://{address}"),
+            "runtime-token",
+            7,
+            "snapshot-a",
+            &["dataset-a".to_string()],
+        )
+        .await
+        .expect("dynamic call should resolve");
+        assert_eq!(response["success"], true);
+        assert_eq!(response["contentItems"][0]["text"], "Knowledge result");
+        server.abort();
+    }
+}

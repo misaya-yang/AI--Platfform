@@ -1062,7 +1062,18 @@ async def chat(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ):
-    """Non-streaming chat completion."""
+    """Retired generic chat ingress.
+
+    The Gateway now projects this contract onto the single Agent Runtime.
+    Keeping a fail-closed handler prevents an internal caller from silently
+    reactivating the Python AgentLoop during rollout.
+    """
+    raise HTTPException(
+        status_code=410,
+        detail={"code": "AGENT_RUNTIME_ONLY", "message": "Use the Gateway Agent Runtime."},
+    )
+    # Unreachable legacy implementation is intentionally retained below for
+    # source-level rollback archaeology until the deletion evidence gate.
     _validate_eval_prompt_override(body, user)
     session_id = body.session_id or str(uuid.uuid4())
     stub_text = _build_e2e_memory_stub_response(
@@ -1127,7 +1138,13 @@ async def chat_stream(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ):
-    """SSE streaming chat completion."""
+    """Retired generic chat stream; the Gateway owns the Agent Runtime."""
+    raise HTTPException(
+        status_code=410,
+        detail={"code": "AGENT_RUNTIME_ONLY", "message": "Use the Gateway Agent Runtime."},
+    )
+    # Unreachable legacy implementation is intentionally retained below for
+    # source-level rollback archaeology until the deletion evidence gate.
     _validate_eval_prompt_override(body, user)
     session_id = body.session_id or str(uuid.uuid4())
     stub_text = _build_e2e_memory_stub_response(

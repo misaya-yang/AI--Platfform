@@ -2486,8 +2486,10 @@
   },
   "tasks": {
     "createdAt": "创建时间",
-    "description": "查询和追踪异步任务的执行状态",
+    "description": "查看当前账号提交的异步任务及其执行状态",
     "errorInfo": "错误信息",
+    "progress": "进度",
+    "scopeNotice": "这里只展示当前租户与当前账号可见的真实网关任务；状态来自运行数据，不推测队列深度或并发容量。",
     "query": "查询",
     "querying": "查询中",
     "ribbon": {
@@ -2519,13 +2521,28 @@
     "status": {
       "completed": "已完成",
       "running": "运行中",
+      "processing": "执行中",
       "pending": "等待中",
       "failed": "失败",
       "cancelled": "已取消"
     },
     "tabs": {
-      "scheduled": "定时任务",
+      "inbox": "任务收件箱",
       "query": "任务查询"
+    },
+    "inbox": {
+      "filterLabel": "按任务状态筛选",
+      "loadFailed": "无法加载任务收件箱",
+      "empty": "当前没有匹配的任务",
+      "emptyDescription": "通过异步服务提交的任务会出现在这里；Assistant 的聊天运行仍在对应会话中管理。",
+      "filters": {
+        "all": "全部",
+        "pending": "等待中",
+        "processing": "执行中",
+        "completed": "已完成",
+        "failed": "失败",
+        "cancelled": "已取消"
+      }
     },
     "taskDetail": "任务详情",
     "taskResult": "执行结果",

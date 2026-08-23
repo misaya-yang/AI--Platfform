@@ -88,32 +88,35 @@ commands:
   harness_check:
     make: harness-check
     purpose: Verify this contract still matches the repository.
-  codex_harness_contract:
-    make: codex-harness-contract
-    purpose: Verify the immutable Codex source, schema, SBOM, license, and OCI release identity.
-  codex_runtime_contract:
-    make: codex-runtime-contract
+  agent_runtime_source_contract:
+    make: agent-runtime-source-contract
+    purpose: Verify the immutable Agent source, schema, SBOM, license, and OCI release identity.
+  agent_runtime_contract:
+    make: agent-runtime-contract
     purpose: Verify the Rust Agent Runtime has its own immutable runnable OCI identity.
-  codex_runtime_build_local:
-    make: codex-runtime-build-local
+  agent_runtime_build_local:
+    make: agent-runtime-build-local
     purpose: Build the Rust Agent Runtime from one clean controlled-fork revision.
-  codex_runtime_smoke:
-    make: codex-runtime-smoke
+  agent_runtime_smoke:
+    make: agent-runtime-smoke
     purpose: Verify the Runtime image against isolated PostgreSQL across a process restart.
-  codex_runtime_text_gate:
-    make: codex-runtime-text-gate
+  agent_runtime_text_gate:
+    make: agent-runtime-text-gate
     purpose: Verify native Qwen Responses text, long output, accounting, and restart-resumed context.
-  codex_runtime_readonly_gate:
-    make: codex-runtime-readonly-gate
+  agent_runtime_single_kernel_gate:
+    make: agent-runtime-single-kernel-gate
+    purpose: Verify every Assistant session and V1/V2 turn is owned by the single Rust Agent Runtime.
+  agent_runtime_readonly_gate:
+    make: agent-runtime-readonly-gate
     purpose: Verify tenant/revision-bound Context, Knowledge, Tool, MCP, citation, artifact, and office-read contributors.
-  codex_runtime_write_gate:
-    make: codex-runtime-write-gate
+  agent_runtime_write_gate:
+    make: agent-runtime-write-gate
     purpose: Verify approval binding, dispatch fences, idempotency, interruption recovery, and tool pairing.
-  codex_thread_store_contract:
-    make: codex-thread-store-contract
-    purpose: Verify pre-authorized Codex thread creation and durable PostgreSQL history against an isolated schema.
-  codex_harness_build_local:
-    make: codex-harness-build-local
+  agent_thread_store_contract:
+    make: agent-thread-store-contract
+    purpose: Verify pre-authorized Agent thread creation and durable PostgreSQL history against an isolated schema.
+  agent_runtime_source_build_local:
+    make: agent-runtime-source-build-local
     purpose: Build the pinned App Server locally and verify source/schema labels plus initialize.
   sdk_sse_contract:
     make: sdk-sse-contract
@@ -124,18 +127,21 @@ gates:
   harness:
     make: harness-check
     triggers: [AGENTS.md, CLAUDE.md, harness.yml, docs/harness/**]
-  codex_harness:
-    make: codex-harness-contract
-    triggers: [deploy/codex-harness/**, docs/architecture/ADR-006*, docs/architecture/ADR-007*, scripts/harness/codex_harness_supply_chain.py]
-  codex_runtime_image:
-    make: codex-runtime-contract
-    triggers: [deploy/codex-harness/Dockerfile.runtime, scripts/harness/build_codex_runtime_image.sh, scripts/harness/smoke_codex_runtime_image.sh]
-  codex_runtime_readonly:
-    make: codex-runtime-readonly-gate
-    triggers: [src/services/codex_runtime/readonly_capabilities.py, tests/services/codex_runtime/test_readonly_capabilities.py, scripts/harness/codex_runtime_readonly_gate.py, tests/harness/test_codex_runtime_readonly_gate.py]
-  codex_thread_store:
-    make: codex-thread-store-contract
-    triggers: [database/migrations/089*, tests/database/test_codex_runtime_thread_store_migration.py, scripts/harness/codex_thread_store_contract.sh]
+  agent_runtime_source:
+    make: agent-runtime-source-contract
+    triggers: [deploy/agent-runtime-source/**, docs/architecture/ADR-006*, docs/architecture/ADR-007*, scripts/harness/agent_runtime_supply_chain.py]
+  agent_runtime_image:
+    make: agent-runtime-contract
+    triggers: [deploy/agent-runtime-source/Dockerfile.runtime, scripts/harness/build_agent_runtime_image.sh, scripts/harness/smoke_agent_runtime_image.sh]
+  agent_runtime_readonly:
+    make: agent-runtime-readonly-gate
+    triggers: [src/services/agent_runtime/readonly_capabilities.py, tests/services/agent_runtime/test_readonly_capabilities.py, scripts/harness/agent_runtime_readonly_gate.py, tests/harness/test_agent_runtime_readonly_gate.py]
+  agent_thread_store:
+    make: agent-thread-store-contract
+    triggers: [database/migrations/089*, database/migrations/090*, database/migrations/092*, database/migrations/093*, database/migrations/094*, database/migrations/095*, tests/database/test_agent_runtime_thread_store_migration.py, scripts/harness/agent_thread_store_contract.sh]
+  agent_runtime_single_kernel:
+    make: agent-runtime-single-kernel-gate
+    triggers: [src/api/v1/assistant.py, src/api/v2/agent.py, src/services/assistant_runtime_assignment.py, database/migrations/095*, docker-compose.yml]
   service_boundaries:
     make: test-isolation
     triggers: ["src/**", "apps/**", "packages/ai-gateway-core/**"]

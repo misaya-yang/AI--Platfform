@@ -38,6 +38,7 @@ class _Connection:
     def __init__(self, search_path: tuple[str, ...]) -> None:
         self.search_path = search_path
         self.queries: list[str] = []
+        self.execute_args: list[tuple[Any, ...]] = []
         self.rows = {
             "gateway.sessions": {
                 "session_id": "session-1",
@@ -68,8 +69,9 @@ class _Connection:
         self.queries.append(query)
         return self.rows.get(self._relation(query, "FROM"))
 
-    async def execute(self, query: str, *_args: Any) -> str:
+    async def execute(self, query: str, *args: Any) -> str:
         self.queries.append(query)
+        self.execute_args.append(args)
         self._relation(query, "INSERT INTO")
         return "INSERT 0 1"
 
@@ -122,6 +124,9 @@ async def test_shared_session_storage_ignores_search_path_shadow(
     assert direct is not None and direct["metadata"]["source"] == "canonical"
     assert extracted is not None and extracted["metadata"]["source"] == "canonical"
     assert all("assistant.sessions" in query for query in connection.queries)
+    assert len(connection.execute_args[0]) == 10
+    assert connection.execute_args[0][8] == "active"
+    assert connection.execute_args[0][9] is None
 
 
 @pytest.mark.parametrize("source", CANONICAL_SESSION_SQL_SOURCES, ids=lambda path: path.name)

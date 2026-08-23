@@ -90,7 +90,10 @@
         "title": "Blank agent",
         "description": "Start from the safe default and customize every section.",
         "detail": "No resources copied",
-        "instructions": "Fulfill the Agent purpose described in its name and description. Follow the configured capability, knowledge, memory, and safety policies."
+        "instructions": "Fulfill the Agent purpose described in its name and description. Follow the configured capability, knowledge, memory, and safety policies.",
+        "goal": "",
+        "trigger": "",
+        "success": ""
       },
       "support": {
         "title": "Support triage",
@@ -99,7 +102,10 @@
         "instructions": "Classify support requests, explain the selected queue, and ask for missing context. Use only configured capabilities and Knowledge sources.",
         "welcome": "Describe the support request you want me to triage.",
         "promptOne": "Classify a billing issue",
-        "promptTwo": "Route a product question"
+        "promptTwo": "Route a product question",
+        "goal": "Classify support requests accurately with an explicit queue, owner, and routing reason.",
+        "trigger": "A new customer support request arrives",
+        "success": "Queue, owner, rationale, and missing information are explicit"
       },
       "knowledge": {
         "title": "Knowledge guide",
@@ -108,7 +114,10 @@
         "instructions": "Answer from the configured Knowledge sources. Cite retrieved evidence, distinguish evidence from inference, and say when the available sources are insufficient.",
         "welcome": "What would you like to find in the workspace Knowledge sources?",
         "promptOne": "Summarize an approved policy",
-        "promptTwo": "Find evidence for a process question"
+        "promptTwo": "Find evidence for a process question",
+        "goal": "Answer from authorized knowledge with traceable evidence and a clear boundary between evidence and inference.",
+        "trigger": "A user asks a question that needs workspace knowledge",
+        "success": "Available evidence is cited and insufficient evidence is stated explicitly"
       }
     },
     "templateSafetyTitle": "Templates never copy credentials or access",
@@ -125,7 +134,7 @@
     "iconUrl": "Icon URL",
     "iconHelp": "Optional public HTTPS image URL without credentials, query, or fragment.",
     "iconError": "Use public HTTPS without credentials, query, or fragment.",
-    "behaviorDescription": "Define the custom Instructions and bounded model settings.",
+    "behaviorDescription": "Define the outcome contract first, then add detailed instructions and model settings.",
     "modelCatalogError": "Live model catalog is unavailable",
     "modelCatalogFallback": "Showing the configured Qwen fallback model.",
     "instructions": "Agent instructions",
@@ -133,6 +142,20 @@
     "instructionsPlaceholder": "Define the Agent role, boundaries, decision rules, and response style.",
     "instructionsSafetyTitle": "Platform safety rules remain in force",
     "instructionsSafetyDescription": "Markdown is supported as text. Embedded HTML is never executed, and custom Instructions cannot override tenant policy, authorization, or runtime safety controls.",
+    "outcome": {
+      "goal": "Business goal",
+      "goalHelp": "Describe a verifiable result, not a model persona.",
+      "goalPlaceholder": "Route support requests correctly with an owner and next step.",
+      "triggers": "Triggers",
+      "triggersPlaceholder": "A new support request arrives",
+      "inputs": "Required inputs",
+      "inputsPlaceholder": "Request text\nCustomer tier",
+      "humanBoundaries": "Human boundaries",
+      "humanBoundariesPlaceholder": "Require human approval before issuing a refund",
+      "successCriteria": "Success criteria",
+      "successCriteriaPlaceholder": "Queue and owner are explicit",
+      "onePerLine": "One item per line. These fields become a structured runtime outcome contract."
+    },
     "provider": "Provider",
     "model": "Model",
     "temperature": "Temperature · {{value}}",
@@ -208,7 +231,14 @@
       "memory": "Memory"
     },
     "instructions": {
-      "description": "The custom system prompt applied only to this Agent runtime.",
+      "description": "Define the outcome contract first, then add detailed instructions for this Agent runtime.",
+      "outcomeGoal": "Business goal",
+      "outcomeHelp": "The structured outcome contract is compiled into a stable runtime prefix.",
+      "triggers": "Triggers",
+      "inputs": "Required inputs",
+      "humanBoundaries": "Human boundaries",
+      "successCriteria": "Success criteria",
+      "onePerLine": "One item per line.",
       "label": "Agent instructions",
       "required": "Instructions are required before version creation.",
       "count": "{{count}} / 100000 characters · about {{tokens}} tokens",
@@ -619,6 +649,18 @@
     "unavailable": "The publication may be private, disabled, or withdrawn.",
     "signIn": "Sign in to continue",
     "newChat": "New chat",
+    "trustSummary": "Agent publication trust summary",
+    "releaseVerified": "v{{version}} release-gated",
+    "releaseUnverified": "v{{version}} gate not recorded",
+    "capabilityCount": "{{count}} capabilities",
+    "knowledgeCount": "{{count}} knowledge sources",
+    "updated": "Updated {{date}}",
+    "authModes": {
+      "private": "Private access",
+      "tenant": "Tenant access",
+      "public": "Public access",
+      "token": "Token access"
+    },
     "conversation": "Agent conversation",
     "defaultWelcome": "How can {{name}} help?",
     "you": "You",

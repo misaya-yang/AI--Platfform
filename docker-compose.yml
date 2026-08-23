@@ -275,17 +275,12 @@ services:
       # value must be set on the assistant-service block. Both sides
       # load it via env_file in prod.
       ASSISTANT_SERVICE_URL: "${ASSISTANT_SERVICE_URL:-http://assistant-service:8093}"
-      CODEX_RUNTIME_INTERNAL_TOKEN: "${CODEX_RUNTIME_INTERNAL_TOKEN:-}"
-      CODEX_RUNTIME_LEASE_SIGNING_SECRET: "${CODEX_RUNTIME_LEASE_SIGNING_SECRET:-}"
-      CODEX_MODEL_PLANE_INTERNAL_TOKEN: "${CODEX_MODEL_PLANE_INTERNAL_TOKEN:-}"
-      CODEX_MODEL_PLANE_RUNTIME_BASE_URL: "${CODEX_MODEL_PLANE_RUNTIME_BASE_URL:-http://gateway:8080/internal/v1/codex-model-plane}"
-      ASSISTANT_RUNTIME_DEFAULT_OWNER: "${ASSISTANT_RUNTIME_DEFAULT_OWNER:-python_control}"
-      ASSISTANT_RUNTIME_CANARY_PERCENT: "${ASSISTANT_RUNTIME_CANARY_PERCENT:-0}"
-      ASSISTANT_RUNTIME_CANARY_E2E_TENANTS: "${ASSISTANT_RUNTIME_CANARY_E2E_TENANTS:-}"
-      ASSISTANT_RUNTIME_CANARY_KILL_SWITCH: "${ASSISTANT_RUNTIME_CANARY_KILL_SWITCH:-false}"
-      ASSISTANT_RUNTIME_CANARY_SALT: "${ASSISTANT_RUNTIME_CANARY_SALT:-}"
-      CODEX_RUNTIME_KERNEL_REVISION: "${CODEX_RUNTIME_KERNEL_REVISION:-}"
-      CODEX_RUNTIME_URL: "${CODEX_RUNTIME_URL:-http://codex-agent-runtime:8094}"
+      AI_PLATFORM_AGENT_RUNTIME_INTERNAL_TOKEN: "${AI_PLATFORM_AGENT_RUNTIME_INTERNAL_TOKEN:-}"
+      AI_PLATFORM_AGENT_RUNTIME_LEASE_SIGNING_SECRET: "${AI_PLATFORM_AGENT_RUNTIME_LEASE_SIGNING_SECRET:-}"
+      AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_INTERNAL_TOKEN: "${AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_INTERNAL_TOKEN:-}"
+      AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_RUNTIME_BASE_URL: "${AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_RUNTIME_BASE_URL:-http://gateway:8080/internal/v1/agent-model-plane}"
+      AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION: "${AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION:-}"
+      AI_PLATFORM_AGENT_RUNTIME_URL: "${AI_PLATFORM_AGENT_RUNTIME_URL:-http://agent-runtime:8094}"
       AI_PLATFORM_CAPABILITY_PLANE_URL: "${AI_PLATFORM_CAPABILITY_PLANE_URL:-http://assistant-service:8093/internal/v1/capabilities}"
       ASSISTANT_ROUTE_SESSIONS_PROXIED: "${ASSISTANT_ROUTE_SESSIONS_PROXIED:-true}"
       AGENT_STUDIO_RUNTIME_ENABLED: "${AGENT_STUDIO_RUNTIME_ENABLED:-true}"
@@ -561,7 +556,7 @@ services:
       ASSISTANT_APP__ALLOW_ANONYMOUS: "${ASSISTANT_APP__ALLOW_ANONYMOUS:-false}"
       # Explicit local test transport; disabled by default and never calls a provider.
       ASSISTANT_E2E_STUB_LLM: "${ASSISTANT_E2E_STUB_LLM:-false}"
-      AI_PLATFORM_INTERNAL_TOKEN: "${CODEX_RUNTIME_INTERNAL_TOKEN:-}"
+      AI_PLATFORM_INTERNAL_TOKEN: "${AI_PLATFORM_AGENT_RUNTIME_INTERNAL_TOKEN:-}"
       AGENT_STUDIO_RUNTIME_ENABLED: "${AGENT_STUDIO_RUNTIME_ENABLED:-true}"
       AGENT_STUDIO_MCP_ENABLED: "${AGENT_STUDIO_MCP_ENABLED:-true}"
       ASSISTANT_MCP_CLIENT_CACHE_TTL_SECONDS: "${ASSISTANT_MCP_CLIENT_CACHE_TTL_SECONDS:-60}"
@@ -669,32 +664,30 @@ services:
     mem_limit: "${ASSISTANT_MEMORY_LIMIT:-640m}"
     init: true
 
-  # Candidate-only Rust Agent kernel. It never starts in the default profile
-  # and does not receive user traffic until a durable session assignment says
-  # codex_candidate. Python assistant-service remains the rollback control.
-  codex-agent-runtime:
-    profiles: ["codex-runtime"]
-    container_name: ai-gateway-codex-agent-runtime
-    image: "${CODEX_RUNTIME_IMAGE:-ai-gateway-codex-agent-runtime:unavailable}"
+  # Rust Agent Runtime. It is the sole Agent kernel for new and resumed turns.
+  agent-runtime:
+    container_name: ai-gateway-agent-runtime
+    image: "${AI_PLATFORM_AGENT_RUNTIME_IMAGE:-ai-gateway-agent-runtime:local-93c54bca3899-49230d811181}"
     expose:
       - "8094"
     environment:
       <<: *container-proxy-env
-      AI_PLATFORM_INTERNAL_TOKEN: "${CODEX_RUNTIME_INTERNAL_TOKEN:-}"
+      AI_PLATFORM_INTERNAL_TOKEN: "${AI_PLATFORM_AGENT_RUNTIME_INTERNAL_TOKEN:-}"
       AI_PLATFORM_CAPABILITY_PLANE_URL: "${AI_PLATFORM_CAPABILITY_PLANE_URL:-http://assistant-service:8093/internal/v1/capabilities}"
-      CODEX_MODEL_PLANE_INTERNAL_TOKEN: "${CODEX_MODEL_PLANE_INTERNAL_TOKEN:-}"
+      AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_INTERNAL_TOKEN: "${AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_INTERNAL_TOKEN:-}"
+      AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION: "${AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION:-}"
       AI_PLATFORM_RUNTIME_BIND: "0.0.0.0:8094"
       AI_PLATFORM_RUNTIME_WORKDIR: "/workspace"
-      AI_PLATFORM_CODEX_HOME: "/var/lib/ai-platform-codex/runtime-home"
+      AI_PLATFORM_AGENT_HOME: "/var/lib/ai-platform-agent-runtime/runtime-home"
       POSTGRES_HOST: "postgres"
       POSTGRES_PORT: "5432"
       POSTGRES_USER: "${POSTGRES_USER:-postgres}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
       POSTGRES_DB: "${POSTGRES_DB:-gateway}"
-      AI_PLATFORM_RUNTIME_DB_POOL_MAX_SIZE: "${CODEX_RUNTIME_DB_POOL_MAX_SIZE:-10}"
-      AI_PLATFORM_RUNTIME_CHANNEL_CAPACITY: "${CODEX_RUNTIME_CHANNEL_CAPACITY:-256}"
+      AI_PLATFORM_RUNTIME_DB_POOL_MAX_SIZE: "${AI_PLATFORM_AGENT_RUNTIME_DB_POOL_MAX_SIZE:-10}"
+      AI_PLATFORM_RUNTIME_CHANNEL_CAPACITY: "${AI_PLATFORM_AGENT_RUNTIME_CHANNEL_CAPACITY:-256}"
     volumes:
-      - codex-runtime-home:/var/lib/ai-platform-codex/runtime-home
+      - agent-runtime-home:/var/lib/ai-platform-agent-runtime/runtime-home
     networks:
       - ai-gateway-net
     depends_on:
@@ -707,7 +700,7 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
-    mem_limit: "${CODEX_RUNTIME_MEMORY_LIMIT:-256m}"
+    mem_limit: "${AI_PLATFORM_AGENT_RUNTIME_MEMORY_LIMIT:-256m}"
     init: true
 
 # =============================================================================
@@ -728,6 +721,6 @@ volumes:
   gateway-logs: {}
   gateway-data: {}
   assistant-memory-data: {}
-  codex-runtime-home: {}
+  agent-runtime-home: {}
   kb-data: {}
   tempo-data: {}

@@ -31,6 +31,14 @@ export interface AgentModelSpec {
   thinking_mode?: string | null;
 }
 
+export interface AgentOutcomeSpec {
+  goal: string;
+  triggers: string[];
+  inputs: string[];
+  human_boundaries: string[];
+  success_criteria: string[];
+}
+
 export interface AgentCapabilityBinding {
   type: AgentCapabilityType;
   resource_id: string;
@@ -52,6 +60,7 @@ export interface AgentKnowledgeBinding {
 export interface AgentSpec {
   schema_version: "agent-spec/v1";
   identity: AgentIdentitySpec;
+  outcome: AgentOutcomeSpec;
   instructions: string;
   model: AgentModelSpec;
   capabilities: AgentCapabilityBinding[];
@@ -543,6 +552,13 @@ export function createDefaultAgentSpec(): AgentSpec {
       welcome_message: "",
       suggested_prompts: [],
     },
+    outcome: {
+      goal: "",
+      triggers: [],
+      inputs: [],
+      human_boundaries: [],
+      success_criteria: [],
+    },
     instructions: DEFAULT_AGENT_INSTRUCTIONS,
     model: {
       model_id: "", // empty → the server applies its deployment default
@@ -553,5 +569,19 @@ export function createDefaultAgentSpec(): AgentSpec {
     capabilities: [],
     knowledge: [],
     memory: { mode: "session" },
+  };
+}
+
+export function normalizeAgentSpec(spec: Partial<AgentSpec>): AgentSpec {
+  const defaults = createDefaultAgentSpec();
+  return {
+    ...defaults,
+    ...spec,
+    identity: { ...defaults.identity, ...(spec.identity ?? {}) },
+    outcome: { ...defaults.outcome, ...(spec.outcome ?? {}) },
+    model: { ...defaults.model, ...(spec.model ?? {}) },
+    capabilities: Array.isArray(spec.capabilities) ? spec.capabilities : [],
+    knowledge: Array.isArray(spec.knowledge) ? spec.knowledge : [],
+    memory: spec.memory && typeof spec.memory === "object" ? spec.memory : defaults.memory,
   };
 }

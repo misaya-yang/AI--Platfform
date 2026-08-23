@@ -4,59 +4,28 @@ import pytest
 
 from src.services.assistant_runtime_assignment import (
     AssistantRuntimeAssignmentStore,
-    RuntimeAssignmentConflict,
     RuntimeAssignmentPolicy,
     runtime_assignment_policy_from_env,
 )
 
 
-def test_canary_policy_is_stable_and_prompt_agnostic() -> None:
-    policy = RuntimeAssignmentPolicy(
-        default_owner="python_control",
-        kernel_revision="kernel-1",
-        canary_percent=25,
-        e2e_tenants=frozenset(),
-        kill_switch=False,
-        salt="test-salt",
+def test_single_kernel_policy_is_stable_and_prompt_agnostic() -> None:
+    policy = RuntimeAssignmentPolicy(default_owner="agent_runtime", kernel_revision="kernel-1")
+    assert policy.choose(tenant_id="tenant-a", session_id="session-a") == (
+        "agent_runtime", "single_kernel"
     )
-    first = policy.choose(tenant_id="tenant-a", session_id="session-a")
-    assert first == policy.choose(tenant_id="tenant-a", session_id="session-a")
-    assert first[0] in {"python_control", "codex_candidate"}
-    full = RuntimeAssignmentPolicy(
-        default_owner="python_control", kernel_revision="kernel-1", canary_percent=100,
-        e2e_tenants=frozenset(), kill_switch=False, salt="test",
-    )
-    assert full.choose(tenant_id="tenant-a", session_id="session-a") == (
-        "codex_candidate", "canary_100"
+    assert policy.choose(tenant_id="other", session_id="other") == (
+        "agent_runtime", "single_kernel"
     )
 
 
-def test_env_allows_control_default_with_candidate_revision_for_canary(monkeypatch) -> None:
+def test_rollout_environment_cannot_select_a_second_owner(monkeypatch) -> None:
     monkeypatch.setenv("ASSISTANT_RUNTIME_DEFAULT_OWNER", "python_control")
-    monkeypatch.setenv("CODEX_RUNTIME_KERNEL_REVISION", "kernel-1")
     monkeypatch.setenv("ASSISTANT_RUNTIME_CANARY_PERCENT", "25")
-    monkeypatch.setenv("ASSISTANT_RUNTIME_CANARY_SALT", "server-secret-derived")
+    monkeypatch.setenv("AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION", "kernel-1")
     policy = RuntimeAssignmentPolicy.from_env()
-    assert policy.default_owner == "python_control"
+    assert policy.default_owner == "agent_runtime"
     assert policy.kernel_revision == "kernel-1"
-    assert policy.canary_percent == 25
-
-
-def test_canary_override_and_kill_switch_only_affect_new_assignment() -> None:
-    override = RuntimeAssignmentPolicy(
-        default_owner="python_control", kernel_revision="kernel-1", canary_percent=0,
-        e2e_tenants=frozenset({"e2e-tenant"}), kill_switch=False, salt="test",
-    )
-    assert override.choose(tenant_id="e2e-tenant", session_id="any") == (
-        "codex_candidate", "e2e_tenant_override"
-    )
-    killed = RuntimeAssignmentPolicy(
-        default_owner="codex_candidate", kernel_revision="kernel-1", canary_percent=100,
-        e2e_tenants=frozenset({"e2e-tenant"}), kill_switch=True, salt="test",
-    )
-    assert killed.choose(tenant_id="e2e-tenant", session_id="any") == (
-        "python_control", "canary_kill_switch"
-    )
 
 
 class _FakeDatabase:
@@ -82,65 +51,33 @@ class _FakeDatabase:
 async def test_runtime_assignment_is_idempotent_and_scope_bound() -> None:
     store = AssistantRuntimeAssignmentStore(_FakeDatabase())
     first = await store.bind(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        session_id="session-a",
-        runtime_owner="python_control",
-        kernel_revision=None,
+        tenant_id="tenant-a", user_id="user-a", session_id="session-a",
+        runtime_owner="agent_runtime", kernel_revision=None,
     )
     replay = await store.bind(
-        tenant_id="tenant-a",
-        user_id="user-a",
-        session_id="session-a",
-        runtime_owner="python_control",
-        kernel_revision=None,
+        tenant_id="tenant-a", user_id="user-a", session_id="session-a",
+        runtime_owner="agent_runtime", kernel_revision=None,
     )
     assert first == replay
-    assert (
-        await store.resolve(
-            tenant_id="tenant-b",
-            user_id="user-a",
-            session_id="session-a",
-        )
-        is None
-    )
+    assert await store.resolve(
+        tenant_id="tenant-b", user_id="user-a", session_id="session-a"
+    ) is None
 
-    with pytest.raises(RuntimeAssignmentConflict):
-        await store.bind(
-            tenant_id="tenant-a",
-            user_id="user-a",
-            session_id="session-a",
-            runtime_owner="codex_candidate",
-            kernel_revision="fork-sha",
-        )
-
-
-def test_runtime_assignment_policy_requires_pinned_candidate(monkeypatch) -> None:
-    monkeypatch.setenv("ASSISTANT_RUNTIME_DEFAULT_OWNER", "codex_candidate")
-    monkeypatch.delenv("CODEX_RUNTIME_KERNEL_REVISION", raising=False)
-    with pytest.raises(ValueError, match="pinned kernel revision"):
-        runtime_assignment_policy_from_env()
-
-    monkeypatch.setenv("CODEX_RUNTIME_KERNEL_REVISION", "fork-sha")
-    assert runtime_assignment_policy_from_env() == ("codex_candidate", "fork-sha")
+def test_runtime_assignment_policy_uses_new_revision_name(monkeypatch) -> None:
+    monkeypatch.setenv("AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION", "kernel-1")
+    assert runtime_assignment_policy_from_env() == ("agent_runtime", "kernel-1")
 
 
 @pytest.mark.asyncio
-async def test_bind_new_session_uses_one_policy_and_existing_assignment_wins() -> None:
+async def test_bind_new_session_is_single_kernel_and_existing_assignment_wins() -> None:
     store = AssistantRuntimeAssignmentStore(_FakeDatabase())
-    policy = RuntimeAssignmentPolicy(
-        default_owner="python_control", kernel_revision="kernel-1", canary_percent=0,
-        e2e_tenants=frozenset(), kill_switch=False, salt="test",
-    )
     first = await store.bind_new_session(
-        tenant_id="tenant-a", user_id="user-a", session_id="session-a", policy=policy
-    )
-    assert first.runtime_owner == "python_control"
-    candidate_policy = RuntimeAssignmentPolicy(
-        default_owner="codex_candidate", kernel_revision="kernel-2", canary_percent=100,
-        e2e_tenants=frozenset(), kill_switch=False, salt="test",
+        tenant_id="tenant-a", user_id="user-a", session_id="session-a",
+        policy=RuntimeAssignmentPolicy(default_owner="agent_runtime", kernel_revision="kernel-1"),
     )
     replay = await store.bind_new_session(
-        tenant_id="tenant-a", user_id="user-a", session_id="session-a", policy=candidate_policy
+        tenant_id="tenant-a", user_id="user-a", session_id="session-a",
+        policy=RuntimeAssignmentPolicy(default_owner="agent_runtime", kernel_revision="kernel-2"),
     )
+    assert first.runtime_owner == "agent_runtime"
     assert replay == first

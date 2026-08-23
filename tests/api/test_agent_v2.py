@@ -11,6 +11,7 @@ from src.api.v2.agent import (
     ThreadCreateRequest,
     TurnCreateRequest,
     _get_thread,
+    _reject_unmigrated_turn_capabilities,
     create_thread,
     create_turn,
     decide_thread_approval,
@@ -19,7 +20,7 @@ from src.api.v2.agent import (
     thread_events,
 )
 from src.core.auth.user_resolver import UserContext
-from src.services.codex_runtime.control_plane import CodexRuntimeControlError
+from src.services.agent_runtime.control_plane import AgentRuntimeControlError
 
 
 def test_v2_routes_are_additive_and_cursor_based() -> None:
@@ -41,7 +42,7 @@ class _Database:
             self.thread = {
                 "runtime_thread_id": args[0], "tenant_id": args[1],
                 "user_id": args[2], "session_id": args[3],
-                "kernel_owner": "codex", "source_kind": "native",
+                "kernel_owner": "agent", "source_kind": "native",
                 "import_status": "not_required", "last_sequence": 0,
             }
             return {"ok": True}
@@ -95,12 +96,12 @@ async def test_create_thread_provisions_kernel_then_imports_legacy_history() -> 
 
     class _Assignments:
         async def bind(self, **kwargs):
-            assert kwargs["runtime_owner"] == "codex_candidate"
-            return SimpleNamespace(runtime_owner="codex_candidate", kernel_revision="kernel-1")
+            assert kwargs["runtime_owner"] == "agent_runtime"
+            return SimpleNamespace(runtime_owner="agent_runtime", kernel_revision="kernel-1")
 
         async def resolve(self, **kwargs):
             assert kwargs["tenant_id"] == "tenant-a"
-            return SimpleNamespace(runtime_owner="codex_candidate", kernel_revision="kernel-1")
+            return SimpleNamespace(runtime_owner="agent_runtime", kernel_revision="kernel-1")
 
     class _Control:
         async def ensure_thread(self, **_kwargs):
@@ -108,7 +109,7 @@ async def test_create_thread_provisions_kernel_then_imports_legacy_history() -> 
             db.thread = {
                 "runtime_thread_id": runtime_thread_id, "tenant_id": "tenant-a",
                 "user_id": "user-a", "session_id": "session-a",
-                "kernel_owner": "codex", "source_kind": "native",
+                "kernel_owner": "agent", "source_kind": "native",
                 "import_status": "pending", "last_sequence": 0,
             }
             return {"runtime_thread_id": runtime_thread_id, "last_sequence": 0}
@@ -117,9 +118,9 @@ async def test_create_thread_provisions_kernel_then_imports_legacy_history() -> 
         database=db,
         session_manager=_Sessions(),
         assistant_runtime_assignments=_Assignments(),
-        assistant_runtime_default_owner="codex_candidate",
+        assistant_runtime_default_owner="agent_runtime",
         assistant_runtime_kernel_revision="kernel-1",
-        codex_runtime_control=_Control(),
+        agent_runtime_control=_Control(),
         settings=SimpleNamespace(default_model="qwen3.7-plus"),
     )
     response = await create_thread(
@@ -140,7 +141,7 @@ async def test_v2_thread_lookup_does_not_cross_user_scope() -> None:
     db = _Database()
     db.thread = {
         "runtime_thread_id": uuid4(), "tenant_id": "tenant-a", "user_id": "user-a",
-        "session_id": "session-a", "kernel_owner": "codex", "source_kind": "native",
+        "session_id": "session-a", "kernel_owner": "agent", "source_kind": "native",
         "import_status": "not_required", "last_sequence": 0,
     }
     state = SimpleNamespace(database=db, assistant_runtime_assignments=SimpleNamespace())
@@ -159,13 +160,13 @@ async def test_v2_events_use_runtime_live_stream_and_preserve_terminal() -> None
     runtime_thread_id = str(uuid4())
     db.thread = {
         "runtime_thread_id": runtime_thread_id, "tenant_id": "tenant-a", "user_id": "user-a",
-        "session_id": "session-a", "kernel_owner": "codex", "source_kind": "native",
+        "session_id": "session-a", "kernel_owner": "agent", "source_kind": "native",
         "import_status": "not_required", "last_sequence": 4,
     }
 
     class _Assignments:
         async def resolve(self, **_kwargs):
-            return SimpleNamespace(runtime_owner="codex_candidate", kernel_revision="kernel-1")
+            return SimpleNamespace(runtime_owner="agent_runtime", kernel_revision="kernel-1")
 
     class _Control:
         async def stream_thread_events(self, **_kwargs):
@@ -189,7 +190,7 @@ async def test_v2_events_use_runtime_live_stream_and_preserve_terminal() -> None
     state = SimpleNamespace(
         database=db,
         assistant_runtime_assignments=_Assignments(),
-        codex_runtime_control=_Control(),
+        agent_runtime_control=_Control(),
     )
     response = await thread_events(
         runtime_thread_id,
@@ -215,17 +216,18 @@ async def test_v2_turn_uses_gateway_default_when_model_is_omitted() -> None:
     runtime_thread_id = str(uuid4())
     db.thread = {
         "runtime_thread_id": runtime_thread_id, "tenant_id": "tenant-a", "user_id": "user-a",
-        "session_id": "session-a", "kernel_owner": "codex", "source_kind": "native",
+        "session_id": "session-a", "kernel_owner": "agent", "source_kind": "native",
         "import_status": "not_required", "last_sequence": 4,
     }
 
     class _Assignments:
         async def resolve(self, **_kwargs):
-            return SimpleNamespace(runtime_owner="codex_candidate", kernel_revision="kernel-1")
+            return SimpleNamespace(runtime_owner="agent_runtime", kernel_revision="kernel-1")
 
     class _Control:
         async def start_turn(self, **kwargs):
             assert kwargs["model_id"] == "qwen-default"
+            assert kwargs["temperature"] is None
             return SimpleNamespace(
                 run_id=str(uuid4()), runtime_thread_id=runtime_thread_id,
                 requested_reasoning_option="auto", effective_reasoning_option="minimal",
@@ -234,13 +236,46 @@ async def test_v2_turn_uses_gateway_default_when_model_is_omitted() -> None:
 
     state = SimpleNamespace(
         database=db, assistant_runtime_assignments=_Assignments(),
-        codex_runtime_control=_Control(), settings=SimpleNamespace(default_model="qwen-default"),
+        agent_runtime_control=_Control(), settings=SimpleNamespace(default_model="qwen-default"),
     )
     response = await create_turn(
         runtime_thread_id, TurnCreateRequest(message="hello"), _request(state),
         UserContext(user_id="user-a", tenant_id="tenant-a", tier="normal", is_authenticated=True, roles=["user"], ip="127.0.0.1"),
     )
     assert response["turn"]["status"] == "in_progress"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("execution_profile", "balanced"),
+        ("memory_mode", "strict"),
+        ("system_prompt", "custom instructions"),
+        ("os_agent_enabled", True),
+        ("local_node_device_id", "node-a"),
+        ("local_node_grant_ids", ["grant-a"]),
+        ("resume_run_id", "run-a"),
+        ("resume_approval_id", "approval-a"),
+    ],
+)
+async def test_v2_turn_rejects_unmigrated_capabilities(
+    field: str, value: object,
+) -> None:
+    body = TurnCreateRequest(message="hello", **{field: value})
+    with pytest.raises(Exception) as exc_info:
+        _reject_unmigrated_turn_capabilities(body)
+    assert getattr(exc_info.value, "status_code", None) == 409
+
+
+def test_v2_turn_accepts_safe_auto_and_temperature() -> None:
+    body = TurnCreateRequest(
+        message="hello",
+        temperature=0.2,
+        execution_profile="safe",
+        memory_mode="auto",
+    )
+    _reject_unmigrated_turn_capabilities(body)
 
 
 @pytest.mark.asyncio
@@ -277,12 +312,12 @@ async def test_v2_existing_session_is_bound_before_thread_creation() -> None:
     class _Assignments:
         async def bind_new_session(self, **kwargs):
             bound.append(kwargs["session_id"])
-            return SimpleNamespace(runtime_owner="codex_candidate", kernel_revision="kernel-1")
+            return SimpleNamespace(runtime_owner="agent_runtime", kernel_revision="kernel-1")
 
         async def resolve(self, **_kwargs):
             if not bound:
                 return None
-            return SimpleNamespace(runtime_owner="codex_candidate", kernel_revision="kernel-1")
+            return SimpleNamespace(runtime_owner="agent_runtime", kernel_revision="kernel-1")
 
     class _Control:
         async def ensure_thread(self, **_kwargs):
@@ -291,7 +326,7 @@ async def test_v2_existing_session_is_bound_before_thread_creation() -> None:
                 "tenant_id": "tenant-a",
                 "user_id": "user-a",
                 "session_id": "existing-session",
-                "kernel_owner": "codex",
+                "kernel_owner": "agent",
                 "source_kind": "native",
                 "import_status": "not_required",
                 "last_sequence": 0,
@@ -303,7 +338,7 @@ async def test_v2_existing_session_is_bound_before_thread_creation() -> None:
         session_manager=_Sessions(),
         assistant_runtime_assignments=_Assignments(),
         assistant_runtime_assignment_policy=SimpleNamespace(),
-        codex_runtime_control=_Control(),
+        agent_runtime_control=_Control(),
         settings=SimpleNamespace(default_model="qwen3.7-plus"),
     )
     response = await create_thread(
@@ -352,13 +387,13 @@ async def test_v2_approval_routes_forward_the_thread_scope_and_reject_repeat_dec
     thread_id = str(uuid4())
     db.thread = {
         "runtime_thread_id": thread_id, "tenant_id": "tenant-a", "user_id": "user-a",
-        "session_id": "session-a", "kernel_owner": "codex", "source_kind": "native",
+        "session_id": "session-a", "kernel_owner": "agent", "source_kind": "native",
         "import_status": "not_required", "last_sequence": 4,
     }
 
     class _Assignments:
         async def resolve(self, **_kwargs):
-            return SimpleNamespace(runtime_owner="codex_candidate", kernel_revision="kernel-1")
+            return SimpleNamespace(runtime_owner="agent_runtime", kernel_revision="kernel-1")
 
     class _Control:
         def __init__(self) -> None:
@@ -373,14 +408,14 @@ async def test_v2_approval_routes_forward_the_thread_scope_and_reject_repeat_dec
         async def decide_approval(self, **kwargs):
             self.decisions.append(kwargs)
             if len(self.decisions) > 1:
-                raise CodexRuntimeControlError("CODEX_RUNTIME_APPROVAL_DECISION_FAILED", status_code=409)
+                raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_APPROVAL_DECISION_FAILED", status_code=409)
             return {"approval_id": kwargs["approval_id"], "status": "consumed"}
 
     control = _Control()
     state = SimpleNamespace(
         database=db,
         assistant_runtime_assignments=_Assignments(),
-        codex_runtime_control=control,
+        agent_runtime_control=control,
     )
     user = UserContext(
         user_id="user-a", tenant_id="tenant-a", tier="normal",
@@ -406,13 +441,13 @@ async def test_v2_approval_route_does_not_leak_cross_tenant_approval() -> None:
     db = _Database()
     db.thread = {
         "runtime_thread_id": str(uuid4()), "tenant_id": "tenant-a", "user_id": "user-a",
-        "session_id": "session-a", "kernel_owner": "codex", "source_kind": "native",
+        "session_id": "session-a", "kernel_owner": "agent", "source_kind": "native",
         "import_status": "not_required", "last_sequence": 0,
     }
     state = SimpleNamespace(
         database=db,
         assistant_runtime_assignments=SimpleNamespace(resolve=lambda **_: None),
-        codex_runtime_control=SimpleNamespace(),
+        agent_runtime_control=SimpleNamespace(),
     )
     user = UserContext(
         user_id="user-b", tenant_id="tenant-b", tier="normal",
