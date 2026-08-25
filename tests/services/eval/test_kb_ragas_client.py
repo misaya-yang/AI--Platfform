@@ -105,11 +105,11 @@ async def test_kb_ragas_client_rejects_sensitive_judge_overrides_before_transpor
 
 
 @pytest.mark.asyncio
-async def test_kb_ragas_client_uses_knowledge_shared_secret_fallback(monkeypatch) -> None:
+async def test_kb_ragas_client_uses_internal_platform_token(monkeypatch) -> None:
     import src.services.eval.kb_ragas_client as kb_ragas_client_module
 
-    monkeypatch.delenv("GATEWAY_ASSISTANT_SHARED_SECRET", raising=False)
-    monkeypatch.setenv("GATEWAY_KNOWLEDGE_SHARED_SECRET", "knowledge-secret")
+    monkeypatch.delenv("AI_PLATFORM_INTERNAL_TOKEN", raising=False)
+    monkeypatch.setenv("AI_PLATFORM_INTERNAL_TOKEN", "knowledge-secret")
     kb_ragas_client_module._gateway_secret_signer = None
 
     signer = kb_ragas_client_module._get_signer()

@@ -7,7 +7,7 @@
 - 匿名用户（基于 IP）
 
 ``UserContext`` itself is declared in ``ai_gateway_core.auth`` so the
-assistant-service can build identical records without a gateway import.
+internal services can build identical records without a Gateway import.
 Re-exported below so existing ``from src.core.auth.user_resolver import
 UserContext`` call sites keep working.
 """
@@ -18,9 +18,9 @@ from dataclasses import dataclass
 from typing import Any
 
 import jwt
+from ai_gateway_core.auth import UserContext  # noqa: F401 — re-export
 from fastapi import Request
 
-from ai_gateway_core.auth import UserContext  # noqa: F401 — re-export
 from ..client_ip import get_client_ip_from_request
 
 
@@ -127,7 +127,7 @@ class UserResolver:
 
             # Optional claims — absent in some JWTs, so default to safe values.
             # These populate the X-User-Type / X-User-Email / X-User-Name
-            # headers that the Phase 5a proxy forwards to assistant-service.
+            # headers forwarded to authenticated internal services.
             user_type = payload.get("user_type", "user")
             email = payload.get("email", "")
             name = payload.get("name", "")
@@ -226,7 +226,7 @@ class AnonymousMemoryPolicy:
 
         return thread
 
-    async def cleanup_expired_threads(self, langgraph_proxy) -> int:
+    async def cleanup_expired_threads(self, _langgraph_proxy) -> int:
         """
         定时清理过期的匿名 Thread
         返回清理的数量

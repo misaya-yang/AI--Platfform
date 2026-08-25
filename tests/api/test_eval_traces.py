@@ -129,7 +129,7 @@ def _trace_row(**overrides: Any) -> dict[str, Any]:
         "metadata": {"redacted": True},
         "metrics": {"total_latency_ms": 980},
         "privacy": {"payloads": "bounded_redacted_preview"},
-        "source_adapter": "assistant-service",
+        "source_adapter": "agent-runtime",
         "scores_count": 0,
         "created_at": now,
         "updated_at": now,

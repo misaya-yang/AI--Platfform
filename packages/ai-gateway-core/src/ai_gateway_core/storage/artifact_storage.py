@@ -7,7 +7,9 @@ Artifacts include: images, documents, charts, code files, etc.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -22,6 +24,7 @@ from .image_storage import (
     S3StorageBackend,
     StorageBackend,
     StorageConfig,
+    StorageObjectInfo,
 )
 
 if TYPE_CHECKING:
@@ -191,6 +194,110 @@ class ArtifactStorageService:
         safe_filename = "".join(c for c in filename if c.isalnum() or c in "._-")
         return f"artifacts/{tenant_id}/{session_id}/{artifact_id}_{safe_filename}"
 
+    @staticmethod
+    def image_blob_storage_key(owner_scope: str, blob_id: str, filename: str) -> str:
+        """Build an opaque, traversal-safe key for a direct image upload."""
+
+        if not re.fullmatch(r"iblob_[0-9a-f]{24}", blob_id):
+            raise ValueError("image blob id is invalid")
+        if not owner_scope or any(ord(character) < 32 for character in owner_scope):
+            raise ValueError("image blob owner is invalid")
+        owner_hash = hashlib.sha256(owner_scope.encode("utf-8")).hexdigest()[:24]
+        safe_filename = "".join(
+            character if character.isalnum() or character in "._-" else "_"
+            for character in filename.replace("\x00", "")
+        ).strip("._")
+        safe_filename = safe_filename[:180] or "reference.png"
+        return f"image-blobs/{owner_hash}/{blob_id}/{safe_filename}"
+
+    async def create_image_blob_upload_url(
+        self,
+        *,
+        owner_scope: str,
+        blob_id: str,
+        filename: str,
+        mime_type: str,
+        expiry_seconds: int = 900,
+    ) -> tuple[str, dict[str, str] | None]:
+        """Create a direct-upload URL without exposing the storage backend."""
+
+        if not mime_type.startswith("image/") or not 60 <= expiry_seconds <= 3600:
+            raise ValueError("image blob upload parameters are invalid")
+        storage_key = self.image_blob_storage_key(owner_scope, blob_id, filename)
+        upload = await self._backend.generate_presigned_upload_url(
+            key=storage_key,
+            content_type=mime_type,
+            expiry_seconds=expiry_seconds,
+            metadata={
+                "blob-id": blob_id,
+                "owner-scope-sha256": hashlib.sha256(owner_scope.encode("utf-8")).hexdigest(),
+            },
+        )
+        return storage_key, upload
+
+    async def inspect_image_blob_object(
+        self,
+        storage_key: str,
+        *,
+        max_bytes: int,
+    ) -> StorageObjectInfo | None:
+        """Head one broker-created image blob and reject oversized objects."""
+
+        if (
+            not storage_key.startswith("image-blobs/")
+            or ".." in storage_key
+            or "\x00" in storage_key
+            or not 1 <= max_bytes <= 32 * 1024 * 1024
+        ):
+            raise ValueError("image blob storage key is invalid")
+        info = await self._backend.head(storage_key)
+        if info is not None and (info.size_bytes <= 0 or info.size_bytes > max_bytes):
+            raise ValueError("image blob exceeds size limit")
+        return info
+
+    async def store_image_blob_object(
+        self,
+        storage_key: str,
+        *,
+        content: bytes,
+        mime_type: str,
+        metadata: dict[str, str] | None = None,
+        max_bytes: int,
+    ) -> None:
+        """Persist a bounded broker-created image blob without exposing credentials."""
+
+        if (
+            not content
+            or len(content) > max_bytes
+            or not mime_type.startswith("image/")
+        ):
+            raise ValueError("image blob content is invalid")
+        # Reuse the same key and size policy enforced by the read path.
+        if (
+            not storage_key.startswith("image-blobs/")
+            or ".." in storage_key
+            or "\x00" in storage_key
+            or not 1 <= max_bytes <= 32 * 1024 * 1024
+        ):
+            raise ValueError("image blob storage key is invalid")
+        await self._backend.upload(
+            key=storage_key,
+            content=content,
+            content_type=mime_type,
+            metadata=metadata,
+        )
+
+    async def read_image_blob_object(self, storage_key: str, *, max_bytes: int) -> bytes:
+        """Read a previously headed image blob while preserving the byte bound."""
+
+        info = await self.inspect_image_blob_object(storage_key, max_bytes=max_bytes)
+        if info is None:
+            raise FileNotFoundError("image blob object not found")
+        content = await self._backend.download(storage_key)
+        if len(content) != info.size_bytes or len(content) > max_bytes:
+            raise ValueError("image blob size changed during verification")
+        return content
+
     async def create_artifact(
         self,
         session_id: str,
@@ -214,6 +321,7 @@ class ArtifactStorageService:
         provider: str | None = None,
         model_id: str | None = None,
         prompt: str | None = None,
+        artifact_id: str | None = None,
     ) -> ArtifactInfo:
         """
         Create a new artifact: upload to storage and save metadata to database.
@@ -234,9 +342,52 @@ class ArtifactStorageService:
         Returns:
             ArtifactInfo with created artifact details
         """
-        artifact_id = self.generate_artifact_id()
+        idempotent_artifact = artifact_id is not None
+        artifact_id = artifact_id or self.generate_artifact_id()
+        if not re.fullmatch(r"art_[0-9a-f]{16}", artifact_id):
+            raise ValueError("artifact_id is invalid")
         storage_key = self._generate_storage_key(tenant_id, session_id, artifact_id, filename)
         mime_type = get_mime_type(format)
+        artifact_metadata = dict(metadata or {})
+        if idempotent_artifact:
+            content_sha256 = artifact_metadata.get("content_sha256")
+            if not isinstance(content_sha256, str) or not re.fullmatch(
+                r"[0-9a-f]{64}", content_sha256
+            ):
+                raise ValueError("idempotent artifact requires content_sha256")
+            if self.database and self.database._pool:
+                existing = await self.get_artifact(artifact_id)
+                if existing is not None:
+                    if (
+                        existing.tenant_id != tenant_id
+                        or existing.user_id != user_id
+                        or existing.session_id != session_id
+                        or existing.type != type
+                        or existing.format != format
+                        or existing.title != title
+                        or existing.filename != filename
+                        or existing.storage_key != storage_key
+                        or existing.size_bytes != len(content)
+                        or existing.mime_type != mime_type
+                        or existing.source != source
+                        or existing.message_id != message_id
+                        or existing.variant != variant
+                        or existing.parent_artifact_id != parent_artifact_id
+                        or existing.turn_id != turn_id
+                        or existing.owner_scope != owner_scope
+                        or existing.width != width
+                        or existing.height != height
+                        or existing.provider != provider
+                        or existing.model_id != model_id
+                        or existing.prompt != prompt
+                        or existing.metadata.get("content_sha256") != content_sha256
+                        or any(
+                            existing.metadata.get(key) != value
+                            for key, value in artifact_metadata.items()
+                        )
+                    ):
+                        raise ValueError("artifact idempotency conflict")
+                    return existing
 
         # Upload to storage
         await self._backend.upload(
@@ -268,7 +419,7 @@ class ArtifactStorageService:
             mime_type=mime_type,
             source=source,
             message_id=message_id,
-            metadata=metadata or {},
+            metadata=artifact_metadata,
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
             variant=variant,
@@ -441,7 +592,11 @@ class ArtifactStorageService:
         if owner_scope is None:
             return True
         if artifact.owner_scope:
-            return artifact.owner_scope == owner_scope
+            return (
+                artifact.owner_scope == owner_scope
+                and (tenant_id is None or artifact.tenant_id == tenant_id)
+                and (user_id is None or artifact.user_id == user_id)
+            )
         return bool(
             tenant_id
             and user_id

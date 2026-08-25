@@ -1,11 +1,9 @@
-"""Concrete ``UserContext`` dataclass — shared by ai-gateway and
-assistant-service.
+"""Concrete ``UserContext`` dataclass shared by platform services.
 
 Only the pure-data record lives here. Request-resolution machinery
 (JWT decoding, API-key lookup, the ``UserResolver`` class) stays in the
-gateway at ``src.core.auth.user_resolver`` — the assistant process
-never re-does that work; it trusts the gateway-forwarded ``X-User-*``
-headers and builds a ``UserContext`` directly from them.
+gateway at ``src.core.auth.user_resolver``. Internal services trust only
+Gateway-bound identity headers and scoped leases.
 """
 
 from __future__ import annotations
@@ -22,8 +20,7 @@ class UserContext:
     explicit registration.
 
     ``user_type`` / ``email`` / ``name`` populate the matching X-User-*
-    identity headers the gateway proxy forwards to assistant-service
-    (Phase 5a expanded the canonical 7-header set). They're optional
+    identity headers used on internal calls. They're optional
     defaults so existing callers continue to construct UserContext with
     just ``user_id`` + ``tenant_id``.
     """

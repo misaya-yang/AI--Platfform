@@ -3,7 +3,7 @@ LLM Model Management API — admin CRUD.
 
 Phase 5e: gateway no longer owns an in-process ``ModelRegistry``.
 Admin writes (create/update/delete/toggle) persist to the
-``llm_models`` table via ``ModelService``; assistant-service's own
+``llm_models`` table via ``ModelService``; Runtime request construction
 ModelRegistry refreshes on demand on the next request (loads
 lazily from the DB), so the old gateway-side
 ``load_models_from_database`` cache-refresh calls are no-ops here.

@@ -141,7 +141,7 @@ VALUES (
     'text/plain',
     'completed',
     100,
-    'The local quickstart starts the gateway, frontend, assistant service, knowledge service, PostgreSQL, Redis, Qdrant, and MCP docgen server. Use make validate before sharing a deployment.',
+    'The local quickstart starts the gateway, frontend, Agent Runtime, Capability Worker, knowledge service, PostgreSQL, Redis, and Qdrant. Use make validate before sharing a deployment.',
     '{"seed":"open-source-demo","route":"/knowledge/demo-kb-ai-gateway"}'::jsonb,
     TRUE,
     27,

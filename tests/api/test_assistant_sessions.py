@@ -1,7 +1,6 @@
 """Assistant session listing compatibility tests."""
 
 import base64
-import json
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -9,7 +8,6 @@ from unittest.mock import AsyncMock
 import asyncpg
 import pytest
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
 
 from src.api.v1 import assistant as assistant_api
 from src.api.v1.assistant import _browser_artifact_download_url, _list_assistant_sessions
@@ -199,11 +197,7 @@ async def test_session_history_appends_runtime_item_projection() -> None:
 
 
 @pytest.mark.asyncio
-async def test_delete_session_proxies_to_runtime_cleanup_route_when_enabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from src.api.v1 import _assistant_proxy
-
+async def test_delete_session_tombstones_gateway_runtime_before_deleting_row() -> None:
     user = UserContext(user_id="user_1", tenant_id="tenant_1", is_authenticated=True)
     session_manager = AsyncMock()
     request = _build_request(
@@ -211,33 +205,29 @@ async def test_delete_session_proxies_to_runtime_cleanup_route_when_enabled(
         method="DELETE",
         path="/api/v1/assistant/sessions/session-1",
     )
-    observed: dict[str, object] = {}
-
-    async def proxy(request_arg, user_arg, *, path: str):
-        observed.update(request=request_arg, user=user_arg, path=path)
-        return JSONResponse({"status": "deleted"})
-
-    monkeypatch.setenv("ASSISTANT_ROUTE_SESSIONS_PROXIED", "true")
-    monkeypatch.setattr(_assistant_proxy, "proxy_to_assistant_service", proxy)
     session_manager.get.side_effect = [
         SimpleNamespace(user_id=user.user_id, tenant_id=user.tenant_id),
         None,
     ]
+    control = AsyncMock()
+    control.cleanup_session.return_value = True
+    request.app.state.agent_runtime_control = control
 
     response = await assistant_api.delete_session("session-1", user, request)
 
-    assert response.status_code == 200
-    assert observed == {"request": request, "user": user, "path": "sessions/session-1"}
+    assert response == {"session_id": "session-1", "status": "deleted"}
+    control.cleanup_session.assert_awaited_once_with(
+        tenant_id="tenant_1",
+        user_id="user_1",
+        session_id="session-1",
+    )
     session_manager.delete.assert_awaited_once_with("session-1")
     assert session_manager.get.await_count == 2
 
 
 @pytest.mark.asyncio
 async def test_delete_session_preserves_gateway_row_when_runtime_cleanup_fails(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from src.api.v1 import _assistant_proxy
-
     user = UserContext(user_id="user_1", tenant_id="tenant_1", is_authenticated=True)
     session_manager = AsyncMock()
     session_manager.get.return_value = SimpleNamespace(
@@ -250,15 +240,14 @@ async def test_delete_session_preserves_gateway_row_when_runtime_cleanup_fails(
         path="/api/v1/assistant/sessions/session-1",
     )
 
-    async def proxy(*_args, **_kwargs):
-        return JSONResponse({"detail": "cleanup unavailable"}, status_code=503)
+    control = AsyncMock()
+    control.cleanup_session.side_effect = RuntimeError("runtime unavailable")
+    request.app.state.agent_runtime_control = control
 
-    monkeypatch.setenv("ASSISTANT_ROUTE_SESSIONS_PROXIED", "true")
-    monkeypatch.setattr(_assistant_proxy, "proxy_to_assistant_service", proxy)
+    with pytest.raises(HTTPException) as error:
+        await assistant_api.delete_session("session-1", user, request)
 
-    response = await assistant_api.delete_session("session-1", user, request)
-
-    assert response.status_code == 503
+    assert error.value.status_code == 500
     session_manager.delete.assert_not_awaited()
 
 
@@ -472,34 +461,27 @@ async def test_download_artifact_streams_local_content_instead_of_file_redirect(
 
 
 @pytest.mark.asyncio
-async def test_cancel_task_proxies_to_owning_assistant_process(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from src.api.v1 import _assistant_proxy
-
+async def test_cancel_task_interrupts_owning_agent_runtime_turn() -> None:
     task_id = "task-private-identifier"
     user_id = "user-private-identifier"
-    reason = "private cancellation reason " + ("x" * 5000)
+    reason = "client requested cancellation"
     user = UserContext(user_id=user_id, tenant_id="tenant_1", is_authenticated=True)
     request = _build_request(
         AsyncMock(),
         method="POST",
         path=f"/api/v1/assistant/tasks/{task_id}/cancel",
     )
-    observed: dict[str, object] = {}
-
-    async def proxy(request_arg, user_arg, *, path: str, body: bytes):
-        observed.update(request=request_arg, user=user_arg, path=path, body=body)
-        return JSONResponse(
-            {
-                "task_id": task_id,
-                "session_id": "session-private-identifier",
-                "cancelled": True,
-                "message": "Cancellation requested",
-            }
-        )
-
-    monkeypatch.setattr(_assistant_proxy, "proxy_to_assistant_service", proxy)
+    database = AsyncMock()
+    database.fetchrow.return_value = {
+        "run_id": "00000000-0000-0000-0000-000000000001",
+        "session_id": "session-private-identifier",
+        "harness_thread_id": "thread-private-identifier",
+        "harness_turn_id": task_id,
+        "status": "running",
+    }
+    control = AsyncMock()
+    request.app.state.database = database
+    request.app.state.agent_runtime_control = control
     response = await assistant_api.cancel_task(
         task_id=task_id,
         request=request,
@@ -507,8 +489,13 @@ async def test_cancel_task_proxies_to_owning_assistant_process(
         user=user,
     )
 
-    assert response.status_code == 200
-    assert observed["request"] is request
-    assert observed["user"] is user
-    assert observed["path"] == f"tasks/{task_id}/cancel"
-    assert json.loads(observed["body"]) == {"reason": reason}
+    assert response.cancelled is True
+    assert response.session_id == "session-private-identifier"
+    control.interrupt_turn.assert_awaited_once_with(
+        runtime_thread_id="thread-private-identifier",
+        turn_id=task_id,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        session_id="session-private-identifier",
+        reason=reason,
+    )

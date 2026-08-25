@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -24,7 +25,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from ...core.auth.user_resolver import UserContext
 from ..deps import enforce_rate_limit, get_user_context
-from ._assistant_proxy import reject_client_agent_forgery
+from ._agent_runtime_headers import reject_client_agent_forgery
 from .assistant import (
     _check_model_permission,
     _ensure_agent_runtime_session,
@@ -32,6 +33,91 @@ from .assistant import (
 
 router = APIRouter(tags=["Responses"])
 logger = logging.getLogger(__name__)
+
+_RESPONSES_TOOL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_MAX_RESPONSES_TOOLS = 128
+
+
+def _responses_tool_config(payload: dict[str, Any]) -> dict[str, Any]:
+    """Validate the public tool controls and project them to Runtime metadata.
+
+    The Runtime executes only descriptors from the tenant-scoped capability
+    catalog.  Responses function definitions are therefore selectors, not an
+    escape hatch for client-supplied executors or schemas.  The control plane
+    resolves these names against its immutable catalog before creating the
+    kernel thread.
+    """
+
+    raw_tools = payload.get("tools")
+    if raw_tools is None:
+        tool_names: list[str] | None = None
+        public_tools: list[dict[str, Any]] = []
+    else:
+        if not isinstance(raw_tools, list) or len(raw_tools) > _MAX_RESPONSES_TOOLS:
+            raise HTTPException(status_code=400, detail="tools must be an array of at most 128 items")
+        tool_names = []
+        public_tools = []
+        for raw in raw_tools:
+            if not isinstance(raw, dict) or raw.get("type") != "function":
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "responses_tool_type_not_migrated"},
+                )
+            function = raw.get("function") if isinstance(raw.get("function"), dict) else raw
+            name = function.get("name")
+            if not isinstance(name, str) or not _RESPONSES_TOOL_NAME.fullmatch(name):
+                raise HTTPException(status_code=400, detail="function tool name is invalid")
+            description = function.get("description", "")
+            if not isinstance(description, str) or len(description) > 20_000:
+                raise HTTPException(status_code=400, detail="function tool description is invalid")
+            parameters = function.get("parameters", {"type": "object", "properties": {}})
+            if not isinstance(parameters, dict):
+                raise HTTPException(status_code=400, detail="function tool parameters must be an object")
+            if name in tool_names:
+                raise HTTPException(status_code=400, detail="function tool names must be unique")
+            tool_names.append(name)
+            # Keep the public shape for the compatibility response.  No
+            # client-provided executable fields cross the Runtime boundary.
+            public_tools.append(
+                {
+                    "type": "function",
+                    "name": name,
+                    "description": description,
+                    "parameters": parameters,
+                    **({"strict": function["strict"]} if isinstance(function.get("strict"), bool) else {}),
+                }
+            )
+
+    raw_choice = payload.get("tool_choice", "auto")
+    if raw_choice is None:
+        raw_choice = "auto"
+    if not isinstance(raw_choice, str) or raw_choice not in {"auto", "none", "required"}:
+        if not isinstance(raw_choice, dict) or raw_choice.get("type") != "function":
+            raise HTTPException(status_code=400, detail="tool_choice is invalid")
+        choice_function = raw_choice.get("function")
+        choice_name = (
+            choice_function.get("name")
+            if isinstance(choice_function, dict)
+            else raw_choice.get("name")
+        )
+        if not isinstance(choice_name, str) or not _RESPONSES_TOOL_NAME.fullmatch(choice_name):
+            raise HTTPException(status_code=400, detail="tool_choice function name is invalid")
+        raw_choice = {"type": "function", "name": choice_name}
+    if tool_names is not None:
+        choice_name = raw_choice.get("name") if isinstance(raw_choice, dict) else None
+        if choice_name and choice_name not in tool_names:
+            raise HTTPException(status_code=400, detail="tool_choice references an unavailable tool")
+        if raw_choice == "required" and not tool_names:
+            raise HTTPException(status_code=400, detail="required tool_choice needs at least one tool")
+    parallel = payload.get("parallel_tool_calls", True)
+    if not isinstance(parallel, bool):
+        raise HTTPException(status_code=400, detail="parallel_tool_calls must be a boolean")
+    return {
+        "tool_names": tool_names,
+        "public_tools": public_tools,
+        "tool_choice": raw_choice,
+        "parallel_tool_calls": parallel,
+    }
 
 
 def _error(
@@ -109,9 +195,6 @@ def _responses_message(payload: dict[str, Any]) -> str:
 def _reject_unmigrated_fields(payload: dict[str, Any]) -> None:
     unsupported = {
         "previous_response_id",
-        "tools",
-        "tool_choice",
-        "parallel_tool_calls",
         "attachments",
         "conversation",
         "store",
@@ -179,8 +262,22 @@ def _completed_response(
     status: str = "completed",
     usage: dict[str, Any] | None = None,
     error: dict[str, Any] | None = None,
+    tool_calls: list[dict[str, Any]] | None = None,
+    requested_tools: list[dict[str, Any]] | None = None,
+    tool_choice: Any = "auto",
+    parallel_tool_calls: bool = True,
 ) -> dict[str, Any]:
     normalized_usage = _responses_usage(usage)
+    output: list[dict[str, Any]] = list(tool_calls or [])
+    output.append(
+        {
+            "id": f"msg_{response_id[5:]}",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed" if status == "completed" else "incomplete",
+            "content": [{"type": "output_text", "text": text, "annotations": []}],
+        }
+    )
     return {
         "id": response_id,
         "object": "response",
@@ -189,20 +286,32 @@ def _completed_response(
         "error": error,
         "incomplete_details": None,
         "model": model,
-        "output": [
-            {
-                "id": f"msg_{response_id[5:]}",
-                "type": "message",
-                "role": "assistant",
-                "status": "completed" if status == "completed" else "incomplete",
-                "content": [{"type": "output_text", "text": text, "annotations": []}],
-            }
-        ],
+        "output": output,
         "output_text": text,
-        "parallel_tool_calls": False,
-        "tool_choice": "none",
-        "tools": [],
+        "parallel_tool_calls": parallel_tool_calls,
+        "tool_choice": tool_choice,
+        "tools": requested_tools or [],
         "usage": normalized_usage,
+    }
+
+
+def _response_function_call(data: dict[str, Any]) -> dict[str, Any] | None:
+    call_id = data.get("tool_call_id") or data.get("call_id")
+    name = data.get("tool_name") or data.get("name")
+    if not isinstance(call_id, str) or not call_id or not isinstance(name, str) or not name:
+        return None
+    arguments = data.get("arguments", "")
+    if isinstance(arguments, (dict, list)):
+        arguments = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+    if not isinstance(arguments, str):
+        arguments = str(arguments)
+    return {
+        "id": str(call_id),
+        "type": "function_call",
+        "status": "completed" if data.get("status") in {"completed", "succeeded"} else "in_progress",
+        "call_id": str(call_id),
+        "name": name,
+        "arguments": arguments,
     }
 
 
@@ -469,6 +578,16 @@ async def create_response(
             message="Some Responses fields are not available on the Agent Runtime.",
         )
     try:
+        tool_config = _responses_tool_config(payload)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        return _error(
+            status_code=exc.status_code,
+            code=str(detail.get("code") or "invalid_tools"),
+            message="The requested tools are not available on the Agent Runtime.",
+            param="tools" if "tool" in str(exc.detail) else None,
+        )
+    try:
         message = _responses_message(payload)
     except HTTPException as exc:
         if isinstance(exc.detail, dict):
@@ -565,6 +684,13 @@ async def create_response(
             error_type="server_error",
         )
     try:
+        requested_tools = tool_config["tool_names"]
+        readonly_capabilities: dict[str, Any] = {
+            "responses_tool_choice": tool_config["tool_choice"],
+            "responses_parallel_tool_calls": tool_config["parallel_tool_calls"],
+        }
+        if requested_tools is not None:
+            readonly_capabilities["responses_tool_names"] = requested_tools
         turn = await control.start_turn(
             tenant_id=user.tenant_id,
             user_id=user.user_id,
@@ -575,10 +701,12 @@ async def create_response(
             legacy_thinking_level=None,
             max_tokens=max_output_tokens,
             temperature=temperature,
-            readonly_capabilities={},
+            readonly_capabilities=readonly_capabilities,
             developer_instructions=instructions,
             memory_mode="off",
-            enable_dynamic_tools=False,
+            # The Rust Runtime owns discovery and execution.  A Responses
+            # request with tool_choice=none is the one explicit opt-out.
+            enable_dynamic_tools=tool_config["tool_choice"] != "none",
         )
     except HTTPException as exc:
         await _abort_idempotent_response(idempotency)
@@ -609,6 +737,7 @@ async def create_response(
     response_id = _response_id(turn)
     if not stream:
         text_parts: list[str] = []
+        tool_calls: dict[str, dict[str, Any]] = {}
         terminal_status: str | None = None
         usage: dict[str, Any] | None = None
         try:
@@ -619,6 +748,18 @@ async def create_response(
                 data = event.get("data") if isinstance(event.get("data"), dict) else {}
                 if event_type == "text_delta" and isinstance(data.get("content"), str):
                     text_parts.append(data["content"])
+                elif event_type == "tool_call_start":
+                    call = _response_function_call(data)
+                    if call is not None:
+                        tool_calls[call["call_id"]] = call
+                elif event_type == "tool_call_result":
+                    call_id = data.get("tool_call_id") or data.get("call_id")
+                    if isinstance(call_id, str) and call_id in tool_calls:
+                        tool_calls[call_id]["status"] = (
+                            "completed"
+                            if data.get("status") in {"completed", "succeeded"}
+                            else "failed"
+                        )
                 elif event_type == "run_error":
                     terminal_status = str(data.get("status") or "failed")
                     usage = data.get("usage") if isinstance(data.get("usage"), dict) else None
@@ -655,6 +796,10 @@ async def create_response(
                     text="".join(text_parts),
                     status="failed" if failed else "completed",
                     usage=usage,
+                    tool_calls=list(tool_calls.values()),
+                    requested_tools=tool_config["public_tools"],
+                    tool_choice=tool_config["tool_choice"],
+                    parallel_tool_calls=tool_config["parallel_tool_calls"],
                     error=(
                         {
                             "code": terminal_status,
@@ -671,6 +816,7 @@ async def create_response(
 
     async def stream_events() -> AsyncIterator[bytes]:
         text_parts: list[str] = []
+        tool_calls: dict[str, dict[str, Any]] = {}
         usage: dict[str, Any] | None = None
         sequence = 0
         item_id = f"msg_{response_id[5:]}"
@@ -688,6 +834,9 @@ async def create_response(
             "status": "in_progress",
             "model": model_id,
             "output": [],
+            "parallel_tool_calls": tool_config["parallel_tool_calls"],
+            "tool_choice": tool_config["tool_choice"],
+            "tools": tool_config["public_tools"],
             "usage": None,
         }
         yield emit("response.created", response=in_progress)
@@ -723,6 +872,62 @@ async def create_response(
                     delta=data["content"],
                     logprobs=[],
                 )
+                continue
+            if event_type == "thinking_delta" and isinstance(data.get("content"), str):
+                yield emit(
+                    "response.reasoning_summary_text.delta",
+                    item_id=str(data.get("item_id") or f"reasoning_{response_id[5:]}"),
+                    output_index=0,
+                    summary_index=int(data.get("summary_index") or 0),
+                    delta=data["content"],
+                )
+                continue
+            if event_type == "tool_call_start":
+                call = _response_function_call(data)
+                if call is None:
+                    continue
+                call_id = call["call_id"]
+                tool_calls[call_id] = call
+                output_index = len(tool_calls)
+                yield emit(
+                    "response.output_item.added",
+                    output_index=output_index,
+                    item=call,
+                )
+                arguments = call["arguments"]
+                if arguments:
+                    yield emit(
+                        "response.function_call_arguments.delta",
+                        item_id=call_id,
+                        output_index=output_index,
+                        delta=arguments,
+                    )
+                yield emit(
+                    "response.function_call_arguments.done",
+                    item_id=call_id,
+                    output_index=output_index,
+                    name=call["name"],
+                    arguments=arguments,
+                )
+                continue
+            if event_type == "tool_call_result":
+                call_id = data.get("tool_call_id") or data.get("call_id")
+                if isinstance(call_id, str) and call_id in tool_calls:
+                    tool_calls[call_id]["status"] = (
+                        "completed"
+                        if data.get("status") in {"completed", "succeeded"}
+                        else "failed"
+                    )
+                continue
+            if event_type == "tool_call_end":
+                call_id = data.get("tool_call_id") or data.get("call_id")
+                if isinstance(call_id, str) and call_id in tool_calls:
+                    output_index = list(tool_calls).index(call_id) + 1
+                    yield emit(
+                        "response.output_item.done",
+                        output_index=output_index,
+                        item=tool_calls[call_id],
+                    )
                 continue
             if event_type not in {"run_finished", "run_error"}:
                 continue
@@ -764,6 +969,10 @@ async def create_response(
                 text=text,
                 status="failed" if failed else "completed",
                 usage=usage,
+                tool_calls=list(tool_calls.values()),
+                requested_tools=tool_config["public_tools"],
+                tool_choice=tool_config["tool_choice"],
+                parallel_tool_calls=tool_config["parallel_tool_calls"],
                 error=(
                     {
                         "code": status,
@@ -782,6 +991,10 @@ async def create_response(
             text="".join(text_parts),
             status="failed",
             usage=usage,
+            tool_calls=list(tool_calls.values()),
+            requested_tools=tool_config["public_tools"],
+            tool_choice=tool_config["tool_choice"],
+            parallel_tool_calls=tool_config["parallel_tool_calls"],
             error={
                 "code": "agent_runtime_stream_incomplete",
                 "message": "Agent Runtime ended without a terminal event.",

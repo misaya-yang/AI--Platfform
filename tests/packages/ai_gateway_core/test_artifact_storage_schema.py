@@ -10,7 +10,7 @@ from ai_gateway_core.storage.artifact_storage import ArtifactStorageService
 
 
 def test_artifact_sql_targets_the_authoritative_assistant_schema() -> None:
-    """Gateway and Assistant use opposite search paths but must share receipts."""
+    """Gateway and capability worker must share authoritative receipts."""
 
     source = inspect.getsource(ArtifactStorageService)
     unqualified_artifact_sql = re.compile(
@@ -26,7 +26,6 @@ def test_runtime_python_has_no_unqualified_artifact_table_sql() -> None:
     root = Path(__file__).resolve().parents[3]
     runtime_roots = (
         root / "src",
-        root / "apps" / "assistant-service" / "src",
         root / "packages" / "ai-gateway-core" / "src",
     )
     unqualified_artifact_sql = re.compile(

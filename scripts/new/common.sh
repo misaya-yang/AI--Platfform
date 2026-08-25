@@ -52,6 +52,12 @@ load_env() {
                 if [[ "$value" =~ ^\".*\"$ ]] || [[ "$value" =~ ^\'.*\'$ ]]; then
                     value="${value:1:${#value}-2}"
                 fi
+                # Callers may pin a release/runtime image explicitly. Keep
+                # those exported values authoritative; the env file supplies
+                # defaults only for variables that are not already present.
+                if [[ ${!key+x} ]]; then
+                    continue
+                fi
                 export "$key=$value"
             fi
         done < "$env_file"
@@ -104,7 +110,6 @@ pg_database() { echo "${POSTGRES_DB:-gateway}"; }
 pg_container()     { echo "${POSTGRES_CONTAINER:-ai-gateway-pg}"; }
 redis_container()  { echo "${REDIS_CONTAINER:-ai-gateway-redis}"; }
 qdrant_container() { echo "${QDRANT_CONTAINER:-ai-gateway-qdrant}"; }
-assistant_container() { echo "${ASSISTANT_CONTAINER:-ai-gateway-assistant-service}"; }
 knowledge_container() { echo "${KNOWLEDGE_CONTAINER:-ai-gateway-knowledge-service}"; }
 knowledge_worker_container() { echo "${KNOWLEDGE_WORKER_CONTAINER:-ai-gateway-knowledge-worker}"; }
 gateway_container()   { echo "${GATEWAY_CONTAINER:-ai-gateway-backend}"; }
@@ -132,6 +137,18 @@ receipt = json.load(open(sys.argv[1], encoding="utf-8"))
 upstream = receipt["source"]["upstream_sha"]
 overlay = receipt["overlay"]["sha256"]
 print(f"ai-gateway-agent-runtime:local-{upstream[:12]}-{overlay[:12]}")
+PY
+}
+
+agent_capability_worker_image_tag() {
+    python3 - "$PROJECT_ROOT/deploy/agent-runtime-source/source-receipt.json" <<'PY'
+import json
+import sys
+
+receipt = json.load(open(sys.argv[1], encoding="utf-8"))
+upstream = receipt["source"]["upstream_sha"]
+overlay = receipt["overlay"]["sha256"]
+print(f"ai-gateway-agent-capability-worker:local-{upstream[:12]}-{overlay[:12]}")
 PY
 }
 
@@ -176,15 +193,12 @@ assert_compose_owner() {
         "$(qdrant_container)"
         "$(gateway_container)"
         "$(frontend_container)"
-        "$(assistant_container)"
         "$(knowledge_container)"
         "$(knowledge_worker_container)"
         "$(agent_runtime_container)"
-        # Legacy/other-checkout names that have caused local stack confusion.
-        ai-gateway-mcp-docgen-server
-        assistant-service
+        # Legacy/other-checkout names are intentionally not part of this
+        # repository's runtime ownership check.
         ai-gateway-knowledge
-        mcp-docgen-server
         islamic-content-service
     )
     local container owner project service mismatch=false
@@ -318,16 +332,6 @@ check_agent_runtime_health() {
     docker exec "$(agent_runtime_container)" curl -sf "http://127.0.0.1:8094/health/ready" &>/dev/null
 }
 
-check_assistant_health() {
-    docker exec "$(assistant_container)" curl -sf "http://127.0.0.1:8093/health/ready" &>/dev/null
-}
-
-check_docgen_health() {
-    docker exec "$(assistant_container)" python -c \
-        'from pathlib import Path; assert any("mcp_docgen_server" in p.read_bytes().decode("utf-8", "ignore") for p in Path("/proc").glob("[0-9]*/cmdline"))' \
-        &>/dev/null
-}
-
 # -- Python workspace packages -----------------------------------------------
 sync_workspace_packages() {
     log_step "Syncing workspace Python packages"
@@ -349,7 +353,7 @@ sync_workspace_packages() {
     if [ -n "$pip_cmd" ]; then
         (
             cd "$PROJECT_ROOT"
-            "$pip_cmd" install -e packages/ai-gateway-core -e apps/assistant-service -q
+            "$pip_cmd" install -e packages/ai-gateway-core -q
         ) && log_success "Workspace packages synced via editable pip installs" && return 0
     fi
 

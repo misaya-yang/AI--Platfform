@@ -16,10 +16,9 @@ Qdrant; Docker Compose in every environment.
 | Path | Owns |
 | --- | --- |
 | `src/` | Gateway service — public API (`api/`), auth/routing/proxy/middleware (`core/`), gateway services (`services/`) |
-| `apps/assistant-service/` | Assistant runtime — agent loop, tools, MCP, prompts, traces |
 | `apps/knowledge-service/` | KB CRUD, ingestion, chunking, embedding, retrieval |
 | `packages/ai-gateway-core/` | Shared primitives imported by every Python service |
-| `packages/mcp-docgen-server/` | Bundled docgen MCP server |
+| `rust/agent-runtime-overlay/` | Rust Agent Runtime, capability worker, Office renderer, and shared capability contract |
 | `web/` | React console (pnpm 10.33.0, Node 22); **all Playwright specs go in `web/e2e/`** |
 | `sdk/` | Published client SDKs + `openapi.json` |
 | `database/` | `schema.sql` + ordered `migrations/` |
@@ -88,6 +87,9 @@ Use `uv` for Python and `pnpm` for `web/`. Never `npm install`, never bare `pip 
   [`docs/harness/runtime-and-secrets.md`](docs/harness/runtime-and-secrets.md).** It covers compose
   ownership across checkouts, rebuild policy, low-memory limits, and provider readiness — getting
   these wrong mutates the wrong runtime or leaks keys.
+- Local Docker and authenticated browser acceptance may use the dedicated E2E
+  account without reconfirmation. Read its credentials only at execution time;
+  never print, copy, commit, or store them in documentation or memory.
 
 ## Communication
 

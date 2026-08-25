@@ -19,12 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "tests/fixtures/agent-studio/regression_manifest.json"
 DEFAULT_OUTPUT = ROOT / "reports/agent-studio/agent-studio-regression-v1-result.json"
 REPORT_PREFIXES = ("reports/", "web/playwright-report/", "web/test-results/")
-REPORT_EXCLUDE_PATHSPECS = tuple(
-    f":(exclude){prefix}**" for prefix in REPORT_PREFIXES
-)
-SKIP_SUMMARY_PATTERN = re.compile(
-    r"(?im)(?<![\w.])([1-9]\d*)\s+skipped(?:\s|,|$)"
-)
+REPORT_EXCLUDE_PATHSPECS = tuple(f":(exclude){prefix}**" for prefix in REPORT_PREFIXES)
+SKIP_SUMMARY_PATTERN = re.compile(r"(?im)(?<![\w.])([1-9]\d*)\s+skipped(?:\s|,|$)")
 
 
 def _now() -> str:
@@ -52,7 +48,10 @@ def _load_manifest(path: Path) -> dict[str, Any]:
         seen.add(key)
         if gate.get("required") is not True:
             raise ValueError(f"manifest gate is not required: {key}")
-        if not all(isinstance(gate.get(field), str) and gate[field] for field in ("phase", "id", "cwd", "command")):
+        if not all(
+            isinstance(gate.get(field), str) and gate[field]
+            for field in ("phase", "id", "cwd", "command")
+        ):
             raise ValueError(f"manifest gate is incomplete: {key}")
         cwd = (ROOT / gate["cwd"]).resolve()
         if cwd != ROOT and ROOT not in cwd.parents:
@@ -61,9 +60,7 @@ def _load_manifest(path: Path) -> dict[str, Any]:
 
 
 def _git_bytes(*args: str) -> bytes:
-    result = subprocess.run(
-        ["git", *args], cwd=ROOT, check=True, capture_output=True
-    )
+    result = subprocess.run(["git", *args], cwd=ROOT, check=True, capture_output=True)
     return result.stdout
 
 
@@ -107,6 +104,35 @@ def _run_gate(gate: dict[str, Any], log_dir: Path) -> dict[str, Any]:
     log_path = log_dir / f"{key}.log"
     env = os.environ.copy()
     env.setdefault("COMPOSE_PARALLEL_LIMIT", "1")
+    # This aggregate is intentionally a low-resource, deterministic release
+    # gate. Playwright treats CI as a single-worker environment, which avoids
+    # spawning several Chromium renderers alongside the local Docker stack.
+    env.setdefault("CI", "1")
+    env.setdefault("GATEWAY_BASE_URL", "http://127.0.0.1:8080")
+    local_no_proxy = "localhost,127.0.0.1,::1"
+    for key in ("NO_PROXY", "no_proxy"):
+        current = env.get(key, "")
+        entries = [item.strip() for item in current.split(",") if item.strip()]
+        for local_host in local_no_proxy.split(","):
+            if local_host not in entries:
+                entries.append(local_host)
+        env[key] = ",".join(entries)
+    # Local live acceptance uses the ignored dedicated E2E account. Read it
+    # only for this process and never print or persist its values. CI and
+    # operators can continue to provide the equivalent environment variables.
+    credential_path = ROOT / "web/.playwright/e2e-user.json"
+    if credential_path.is_file() and not (
+        env.get("ASSISTANT_E2E_USER1_EMAIL") and env.get("ASSISTANT_E2E_PASSWORD")
+    ):
+        try:
+            credentials = json.loads(credential_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            credentials = {}
+        email = credentials.get("email") if isinstance(credentials, dict) else None
+        password = credentials.get("password") if isinstance(credentials, dict) else None
+        if isinstance(email, str) and isinstance(password, str) and email and password:
+            env["ASSISTANT_E2E_USER1_EMAIL"] = email
+            env["ASSISTANT_E2E_PASSWORD"] = password
     started_at = _now()
     started = time.monotonic()
     print(f"\n[Agent Studio] START {gate['phase']}:{gate['id']}", flush=True)

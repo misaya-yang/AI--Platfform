@@ -9,7 +9,6 @@ from fastapi import HTTPException
 
 from src.api.deps import AuthContext
 from src.api.schemas.providers import ModelCreate, ProviderCreate
-from src.api.v1 import _assistant_proxy as assistant_proxy
 from src.api.v1 import assistant as assistant_routes
 from src.api.v1 import metrics as metrics_routes
 from src.api.v1 import quota as quota_routes
@@ -67,11 +66,6 @@ def _user(*permissions: str) -> UserContext:
     )
 
 
-class _BodyRequest(SimpleNamespace):
-    async def body(self) -> bytes:
-        return b'{"approval_id":"approval-1"}'
-
-
 @pytest.mark.parametrize(
     ("capability_name", "permission"),
     [
@@ -117,7 +111,9 @@ async def test_metrics_read_accepts_gateway_metrics_permission(monkeypatch) -> N
 
 
 @pytest.mark.asyncio
-async def test_assistant_resume_proxy_enforces_rate_limit(monkeypatch) -> None:
+async def test_legacy_assistant_resume_enforces_rate_limit_and_rejects_second_loop(
+    monkeypatch,
+) -> None:
     from src.api import deps
 
     calls: list[tuple[str, str]] = []
@@ -125,27 +121,19 @@ async def test_assistant_resume_proxy_enforces_rate_limit(monkeypatch) -> None:
     async def fake_enforce_rate_limit(request, user, operation: str):
         calls.append((user.user_id, operation))
 
-    async def fake_proxy_to_assistant_service(request, user, path: str, body: bytes):
-        assert path == "runs/run-1/resume"
-        assert body == b'{"approval_id":"approval-1"}'
-        return {"resume": {"run_id": "run-1", "status": "ready"}}
-
     monkeypatch.setattr(deps, "enforce_rate_limit", fake_enforce_rate_limit)
-    monkeypatch.setattr(
-        assistant_proxy,
-        "proxy_to_assistant_service",
-        fake_proxy_to_assistant_service,
-    )
 
-    result = await assistant_routes.prepare_run_resume(
-        run_id="run-1",
-        request=_BodyRequest(),
-        body=None,
-        user=_user("conversation:playground:access"),
-    )
+    with pytest.raises(HTTPException) as exc:
+        await assistant_routes.prepare_run_resume(
+            run_id="run-1",
+            request=SimpleNamespace(),
+            body=None,
+            user=_user("conversation:playground:access"),
+        )
 
     assert calls == [("user-capability", "assistant_resume")]
-    assert result["resume"]["status"] == "ready"
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "AGENT_RUNTIME_ONLY"
 
 
 @pytest.mark.asyncio

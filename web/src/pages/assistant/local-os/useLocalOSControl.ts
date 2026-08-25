@@ -10,7 +10,6 @@ import {
   listLocalNodeEventsAfter,
   listLocalNodeGrants,
   listLocalNodes,
-  revokeLocalNode,
   revokeLocalNodeGrant,
   type LocalNodeDeviceSummary,
   type LocalNodeEvent,
@@ -200,10 +199,10 @@ function grantModel(grants: LocalNodeGrant[]): LocalOSControlSurfaceModel["grant
         status: grant.status,
       })),
     domains: grants
-      .filter((grant) => grant.kind === "domain" && Boolean(grant.domain))
+      .filter((grant) => grant.kind === "domain" && Boolean(grant.domain ?? grant.resource_ref))
       .map((grant) => ({
         id: grant.grant_id,
-        origin: grant.domain as string,
+        origin: (grant.domain ?? grant.resource_ref) as string,
         capabilities: grant.capabilities.flatMap((capability) => {
           if (!capability.startsWith("network.")) return [];
           const value = capability.slice("network.".length) as DomainGrantCapability;
@@ -322,13 +321,21 @@ function actionEvents(events: LocalNodeEvent[]): LocalActionEvent[] {
   return events.map((event) => ({
     id: event.event_id,
     sequence: event.sequence,
-    timestamp: event.occurred_at,
-    kind: eventKind(event.event_type),
-    title: event.event_type,
-    detail: event.summary ?? undefined,
+    timestamp: event.occurred_at ?? event.created_at ?? new Date(0).toISOString(),
+    kind: eventKind(event.event_type ?? event.event ?? "system"),
+    title: event.event_type ?? event.event ?? "Local Node event",
+    detail: event.summary ?? (
+      event.payload && typeof event.payload.summary === "string"
+        ? event.payload.summary
+        : undefined
+    ),
     status: event.status ?? "observed",
-    artifactRefs: event.artifact_refs,
-    errorCode: event.error_code ?? undefined,
+    artifactRefs: event.artifact_refs ?? [],
+    errorCode: event.error_code ?? (
+      event.payload && typeof event.payload.error_code === "string"
+        ? event.payload.error_code
+        : undefined
+    ),
   }));
 }
 
@@ -403,8 +410,12 @@ export function useLocalOSControl(): LocalOSControlState {
       );
       const status = statusResult.status === "fulfilled" ? statusResult.value.device : undefined;
       const capabilities =
-        capabilitiesResult.status === "fulfilled"
-          ? capabilitiesResult.value.capabilities
+          capabilitiesResult.status === "fulfilled"
+          ? capabilitiesResult.value.capabilities.map((capability) =>
+              typeof capability === "string"
+                ? { name: capability, state: "ready" as const }
+                : capability,
+            )
           : [];
       const permissions =
         doctorResult.status === "fulfilled"
@@ -426,9 +437,9 @@ export function useLocalOSControl(): LocalOSControlState {
           summary.device_id === selectedDeviceId
             ? status?.last_seen_at ?? summary.last_seen_at ?? undefined
             : summary.last_seen_at ?? undefined,
-        capabilities:
-          summary.device_id === selectedDeviceId
-            ? capabilities
+          capabilities:
+            summary.device_id === selectedDeviceId
+              ? capabilities
                 .filter((capability) => capability.state === "ready")
                 .map((capability) => capability.name)
             : [],
@@ -501,8 +512,8 @@ export function useLocalOSControl(): LocalOSControlState {
 
   const pair = useCallback(async () => {
     const result = await createLocalNodePairingChallenge();
-    setPairingCode(result.challenge.user_code);
-    setPairingExpiresAt(result.challenge.expires_at);
+    setPairingCode(result.user_code);
+    setPairingExpiresAt(result.expires_at);
   }, []);
 
   useEffect(() => {
@@ -616,10 +627,6 @@ export function useLocalOSControl(): LocalOSControlState {
       },
       onRefreshDevice: (deviceId) => {
         void refreshForDevice(deviceId);
-      },
-      onRevokeDevice: (deviceId) => {
-        disableSessionOptIn();
-        void revokeLocalNode(deviceId).then(() => refreshForDevice());
       },
       onRevokeWorkspaceGrant: (grantId) => {
         const deviceId = selectedDeviceRef.current;

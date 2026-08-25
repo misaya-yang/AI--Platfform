@@ -32,42 +32,6 @@ def _calls_in_function(source: str, function_name: str) -> set[str]:
     return set()
 
 
-def _forbidden_route_literals(source: str) -> set[str]:
-    """Extract route literals from the assistant router's route filter AST."""
-
-    tree = ast.parse(source)
-    paths: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Set):
-            continue
-        for value in node.elts:
-            if (
-                isinstance(value, ast.Constant)
-                and isinstance(value.value, str)
-                and value.value
-                in {"/chat", "/chat/stream", "/responses", "/agent-runtime/chat/stream"}
-            ):
-                paths.add(value.value)
-    return paths
-
-
-def _function_starts_with_raise(source: str, function_name: str) -> bool:
-    tree = ast.parse(source)
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or node.name != function_name:
-            continue
-        statements = list(node.body)
-        if (
-            statements
-            and isinstance(statements[0], ast.Expr)
-            and isinstance(statements[0].value, ast.Constant)
-            and isinstance(statements[0].value.value, str)
-        ):
-            statements = statements[1:]
-        return bool(statements and isinstance(statements[0], ast.Raise))
-    return False
-
-
 def main() -> int:
     assignment = (ROOT / "src/services/assistant_runtime_assignment.py").read_text()
     gateway_v1 = (ROOT / "src/api/v1/assistant.py").read_text()
@@ -75,25 +39,26 @@ def main() -> int:
     agent_runtime_v1 = (ROOT / "src/api/v1/agent_runtime.py").read_text()
     agent_public_v1 = (ROOT / "src/api/v1/agent_public.py").read_text()
     gateway_v2 = (ROOT / "src/api/v2/agent.py").read_text()
-    assistant_router = (
-        ROOT / "apps/assistant-service/src/assistant_service/api/router.py"
-    ).read_text()
     compose = (ROOT / "docker-compose.yml").read_text()
 
     assert 'RuntimeOwner = Literal["agent_runtime"]' in assignment
     assert "CANARY_PERCENT" not in assignment
     assert "python_control" not in assignment
     assert "codex_candidate" not in assignment
-    assert "proxy_to_assistant_service(request, user, path=\"chat" not in gateway_v1
+    assert not any(
+        "proxy" in call and "assistant" in call
+        for call in _calls_in_function(gateway_v1, "_start_agent_runtime_turn")
+    )
     assert "_start_agent_runtime_turn" in gateway_v1
     # Public model-producing functions must all enter the V2 Runtime.  Check
     # call targets in those functions rather than banning harmless management
-    # references to assistant-service across an entire module.
-    assert "proxy_to_assistant_service" not in _calls_in_function(
-        responses_v1, "create_response"
+    assert not any(
+        "proxy" in call and "assistant" in call
+        for call in _calls_in_function(responses_v1, "create_response")
     )
-    assert "proxy_to_assistant_service" not in _calls_in_function(
-        agent_runtime_v1, "_start_runtime_stream"
+    assert not any(
+        "proxy" in call and "assistant" in call
+        for call in _calls_in_function(agent_runtime_v1, "_start_runtime_stream")
     )
     for function_name in (
         "preview_chat_stream",
@@ -106,18 +71,6 @@ def main() -> int:
     assert "_start_runtime_stream" in _calls_in_function(
         agent_public_v1, "public_agent_chat_stream"
     )
-    # The old direct Assistant model entrypoints may remain as compatibility
-    # symbols during deletion, but they must be unreachable (410/no route),
-    # never active routes in the assistant router.
-    assert _forbidden_route_literals(assistant_router) >= {
-        "/chat",
-        "/chat/stream",
-        "/responses",
-    }
-    assistant_chat = (
-        ROOT / "apps/assistant-service/src/assistant_service/api/routes/chat.py"
-    ).read_text()
-    assert _function_starts_with_raise(assistant_chat, "agent_runtime_chat_stream")
     assert "agent_runtime_control" in gateway_v2
     assert "\n  agent-runtime:\n" in compose
     runtime_block = compose.split("\n  agent-runtime:\n", 1)[1].split("\nnetworks:", 1)[0]

@@ -49,7 +49,7 @@ async def test_memory_task_queue_priority_ordering() -> None:
 def test_task_envelope_serialization_roundtrip() -> None:
     req = UnifiedRequest(
         request_id="req_test_123",
-        service_id="assistant-service",
+        service_id="agent-runtime",
         inputs=[ContentItem(type=ContentType.TEXT, data="Hello world!")],
         session_id="sess_abc",
         priority=5,
@@ -62,7 +62,7 @@ def test_task_envelope_serialization_roundtrip() -> None:
 
     assert task_id == "task_xyz"
     assert deserialized_req.request_id == "req_test_123"
-    assert deserialized_req.service_id == "assistant-service"
+    assert deserialized_req.service_id == "agent-runtime"
     assert deserialized_req.session_id == "sess_abc"
     assert deserialized_req.priority == 5
     assert len(deserialized_req.inputs) == 1

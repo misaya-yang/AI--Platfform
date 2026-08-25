@@ -202,9 +202,9 @@ class DataSourceType(str, Enum):
 
 
 class ModelProvider(str, Enum):
-    """Supported LLM providers. Shared across gateway and assistant-service
+    """Supported LLM providers shared across Gateway and model adapters
     so gateway routes (e.g. ``/health/providers``) can enumerate them
-    without importing from ``assistant_service``."""
+    without importing from a runtime implementation."""
 
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
@@ -216,7 +216,7 @@ class ModelProvider(str, Enum):
 
 class ModelAccessLevel(str, Enum):
     """Model access permission tiers. Shared to keep gateway's admin
-    role-check consistent with assistant-service's runtime gating."""
+    role-check consistent with Runtime gating."""
 
     PUBLIC = "public"
     PREMIUM = "premium"

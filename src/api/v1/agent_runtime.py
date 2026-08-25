@@ -38,7 +38,7 @@ from ..schemas.agent_runtime import (
     AgentVersionPreviewChatRequest,
     AgentVersionPreviewSessionRequest,
 )
-from ._assistant_proxy import reject_client_agent_forgery
+from ._agent_runtime_headers import reject_client_agent_forgery
 from .files import MAX_FILE_SIZE_BYTES, _stream_upload_file, get_mime_type, validate_file_extension
 
 router = APIRouter(tags=["Agent Studio Runtime"])

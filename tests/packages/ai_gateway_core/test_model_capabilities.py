@@ -109,6 +109,17 @@ def test_native_web_search_wire_requires_enabled_profile_capability() -> None:
         validate_model_capability_profile(profile)
 
 
+def test_qwen_responses_catalog_declares_provider_native_web_search() -> None:
+    profile = get_builtin_model_capabilities("dashscope-intl", "qwen3.7-plus")
+    assert profile is not None
+    assert profile["native_search"] == {
+        "adapter_id": "search/dashscope-native-v1",
+        "enabled": True,
+        "config": {},
+    }
+    assert profile["tools"]["web_search_wire"] == "native"
+
+
 def test_adapter_catalog_is_typed_and_has_unique_ids() -> None:
     adapters = list_model_capability_adapters()
     ids = [adapter["id"] for adapter in adapters]

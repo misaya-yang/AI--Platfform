@@ -156,21 +156,21 @@ start_containers() {
     log_step "Starting dev containers"
 
     ensure_container "$DEV_PG_CONTAINER" "$DEV_POSTGRES_IMAGE" \
-        --memory "${POSTGRES_MEMORY_LIMIT:-384m}" \
+        --memory "${POSTGRES_MEMORY_LIMIT:-320m}" \
         -e POSTGRES_USER="$PG_USER" \
         -e POSTGRES_PASSWORD="$PG_PASS" \
         -e POSTGRES_DB="$PG_DB" \
         -p "127.0.0.1:${PG_PORT}:5432"
 
     ensure_container "$DEV_REDIS_CONTAINER" "$DEV_REDIS_IMAGE" \
-        --memory "${REDIS_MEMORY_LIMIT:-256m}" \
+        --memory "${REDIS_MEMORY_LIMIT:-192m}" \
         -e REDIS_PASSWORD="$REDIS_PASS" \
         -p "127.0.0.1:${REDIS_DEV_PORT}:6379" \
         -- redis-server --requirepass "$REDIS_PASS" \
-            --maxmemory "${REDIS_MAXMEMORY:-192mb}" --maxmemory-policy allkeys-lru
+            --maxmemory "${REDIS_MAXMEMORY:-128mb}" --maxmemory-policy allkeys-lru
 
     ensure_container "$DEV_QDRANT_CONTAINER" "$DEV_QDRANT_IMAGE" \
-        --memory "${QDRANT_MEMORY_LIMIT:-384m}" \
+        --memory "${QDRANT_MEMORY_LIMIT:-352m}" \
         -p "127.0.0.1:${QDRANT_DEV_PORT}:6333" \
         -p "127.0.0.1:${QDRANT_GRPC_DEV_PORT}:6334"
 }

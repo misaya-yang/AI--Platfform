@@ -67,6 +67,8 @@
       "contextUsedWindow": "Context used: {{used}} / {{window}}",
       "generatedArtifact": "Generated {{title}}",
       "historyDropped": "dropped {{count}} history messages",
+      "memoryLoaded": "Memory loaded",
+      "memoryLoadedBody": "Relevant cross-session memory was attached to this turn",
       "queueState": "Queue: {{state}}",
       "reject": "Reject",
       "retrievedContext": "Retrieved context",

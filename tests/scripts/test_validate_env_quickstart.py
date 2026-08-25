@@ -63,7 +63,6 @@ def _write_fake_runtime_commands(tmp_path: Path) -> Path:
         "        *) echo 1; exit 0 ;;\n"
         "      esac\n"
         "      ;;\n"
-        "    *mcp_docgen_server*) exit 0 ;;\n"
         "    *curl*) exit 0 ;;\n"
         "  esac\n"
         "fi\n"
@@ -222,13 +221,12 @@ def test_validate_env_default_model_optional_round_trip(tmp_path: Path) -> None:
     assert "DEFAULT_MODEL must be non-empty when set" in output
 
 
-def test_compose_injects_one_default_model_into_gateway_and_assistant() -> None:
+def test_compose_injects_the_default_model_into_the_gateway_model_plane() -> None:
     compose = Path("docker-compose.yml").read_text()
     expected = 'DEFAULT_MODEL: "${DEFAULT_MODEL:-qwen3.7-plus}"'
 
-    for service in ("gateway", "assistant-service"):
-        section = _compose_service_section(compose, service)
-        assert expected in section, f"{service} does not receive DEFAULT_MODEL"
+    section = _compose_service_section(compose, "gateway")
+    assert expected in section
 
 
 def test_validate_env_rejects_non_release_application_image_tag(
@@ -259,7 +257,7 @@ def test_validate_env_rejects_non_release_application_image_tag(
 
 def test_validate_env_example_mode_requires_public_env_shape(tmp_path: Path) -> None:
     example_text = re.sub(
-        r"^ASSISTANT_AGENT_PLUGIN_DATA_ROOT=.*\n",
+        r"^AI_PLATFORM_INTERNAL_TOKEN=.*\n",
         "",
         Path(".env.example").read_text(),
         flags=re.MULTILINE,
@@ -268,7 +266,7 @@ def test_validate_env_example_mode_requires_public_env_shape(tmp_path: Path) -> 
 
     output = result.stdout + result.stderr
     assert result.returncode == 1, output
-    assert "ASSISTANT_AGENT_PLUGIN_DATA_ROOT must be declared in the example env file" in output
+    assert "AI_PLATFORM_INTERNAL_TOKEN must be declared in the example env file" in output
     assert "change_me_generate_with_openssl" not in output
 
 
@@ -299,7 +297,7 @@ def test_validate_env_runtime_rejects_enabled_models_without_configured_provider
 
     output = result.stdout + result.stderr
     assert result.returncode == 1, output
-    assert "No enabled assistant models match configured chat providers" in output
+    assert "No enabled chat models match configured providers" in output
     assert "Configured providers: dashscope" in output
     assert "Enabled model providers: google:5" in output
     assert secret not in output
@@ -320,7 +318,7 @@ def test_validate_env_runtime_accepts_enabled_model_for_configured_provider(
 
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert "Assistant model/provider alignment is valid (1 available model(s))." in output
+    assert "Chat model/provider alignment is valid (1 available model(s))." in output
     assert "Runtime validation passed" in output
     assert secret not in output
     assert chat_key not in output
@@ -347,7 +345,7 @@ def test_validate_env_runtime_accepts_vertex_chat_provider(
 
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert "Assistant model/provider alignment is valid (2 available model(s))." in output
+    assert "Chat model/provider alignment is valid (2 available model(s))." in output
     assert secret not in output
     assert chat_key not in output
 
@@ -373,7 +371,7 @@ def test_validate_env_runtime_accepts_google_models_on_vertex_chat_backend(
 
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert "Assistant model/provider alignment is valid (2 available model(s))." in output
+    assert "Chat model/provider alignment is valid (2 available model(s))." in output
     assert secret not in output
     assert chat_key not in output
 
@@ -450,7 +448,7 @@ def test_validate_env_infra_only_does_not_require_application_secrets(
     assert result.returncode == 0, output
     assert "Infrastructure configuration validation passed" in output
     assert "JWT_SECRET" not in output
-    assert "GATEWAY_ASSISTANT_SHARED_SECRET" not in output
+    assert "AI_PLATFORM_INTERNAL_TOKEN" not in output
     assert secret not in output
 
     script = Path("scripts/new/validate-env.sh").read_text()
@@ -476,10 +474,12 @@ def test_compose_keeps_internal_service_ports_private() -> None:
         for binding in bindings:
             assert binding in section, f"{service} does not bind {binding}"
 
-    assistant = _compose_service_section(compose, "assistant-service")
-    assert "\n    ports:" not in assistant
-    assert '\n    expose:\n      - "8093"' in assistant
-    assert "\n  mcp-docgen-server:" not in compose
+    runtime = _compose_service_section(compose, "agent-runtime")
+    worker = _compose_service_section(compose, "agent-capability-worker")
+    assert "\n    ports:" not in runtime
+    assert '\n    expose:\n      - "8094"' in runtime
+    assert "\n    ports:" not in worker
+    assert '\n    expose:\n      - "8095"' in worker
     assert "8765" not in compose
 
 
@@ -508,10 +508,6 @@ def test_validate_env_rejects_localhost_cors_for_non_local_auth_domain(
     assert result.returncode == 1, output
     assert (
         "KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON must not include localhost origins "
-        "when AUTH_ALLOWED_EMAIL_DOMAIN is non-local."
-    ) in output
-    assert (
-        "ASSISTANT_CORS_ALLOW_ORIGINS_JSON must not include localhost origins "
         "when AUTH_ALLOWED_EMAIL_DOMAIN is non-local."
     ) in output
     assert secret not in output
@@ -553,7 +549,7 @@ def test_validate_env_rejects_non_http_cors_origin(
     )
     env_text = _set_env_value(
         env_text,
-        "ASSISTANT_CORS_ALLOW_ORIGINS_JSON",
+        "KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON",
         '["chrome-extension://ai-gateway"]',
     )
 
@@ -562,7 +558,7 @@ def test_validate_env_rejects_non_http_cors_origin(
     output = result.stdout + result.stderr
     assert result.returncode == 1, output
     assert (
-        "ASSISTANT_CORS_ALLOW_ORIGINS_JSON must be a JSON array of explicit http(s) origins."
+        "KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON must be a JSON array of explicit http(s) origins."
     ) in output
     assert secret not in output
     assert chat_key not in output
@@ -583,11 +579,6 @@ def test_validate_env_rejects_http_cors_for_non_local_auth_domain(
         "KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON",
         '["http://ai.myapp.test"]',
     )
-    env_text = _set_env_value(
-        env_text,
-        "ASSISTANT_CORS_ALLOW_ORIGINS_JSON",
-        '["http://ai.myapp.test"]',
-    )
 
     result = _run_validate_env(tmp_path, env_text, args=["--config-only"])
 
@@ -595,10 +586,6 @@ def test_validate_env_rejects_http_cors_for_non_local_auth_domain(
     assert result.returncode == 1, output
     assert (
         "KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON must use https origins "
-        "when AUTH_ALLOWED_EMAIL_DOMAIN is non-local."
-    ) in output
-    assert (
-        "ASSISTANT_CORS_ALLOW_ORIGINS_JSON must use https origins "
         "when AUTH_ALLOWED_EMAIL_DOMAIN is non-local."
     ) in output
     assert secret not in output
@@ -846,7 +833,7 @@ def test_validate_env_infra_only_ignores_missing_app_only_compose_vars(
     for key in [
         "DEFAULT_USER_PASSWORD",
         "JWT_SECRET",
-        "GATEWAY_ASSISTANT_SHARED_SECRET",
+        "AI_PLATFORM_INTERNAL_TOKEN",
         "AUTH_ALLOWED_EMAIL_DOMAIN",
     ]:
         env_text = re.sub(rf"^{key}=.*\n?", "", env_text, flags=re.MULTILINE)
@@ -919,10 +906,9 @@ def test_deploy_app_includes_application_microservices() -> None:
         "frontend",
         "knowledge-service",
         "knowledge-worker",
-        "assistant-service",
         "agent-runtime",
+        "agent-capability-worker",
     }.issubset(services)
-    assert "mcp-docgen-server" not in services
 
 
 def test_deploy_pull_uses_selected_service_scope() -> None:
@@ -1030,11 +1016,10 @@ def test_runtime_checks_microservice_readiness_not_only_liveness() -> None:
     common = Path("scripts/new/common.sh").read_text()
 
     assert "http://127.0.0.1:8092/health/ready" in common
-    assert "http://127.0.0.1:8093/health/ready" in common
-    assert '"mcp_docgen_server" in p.read_bytes().decode' in common
+    assert "http://127.0.0.1:8094/health/ready" in common
     assert "127.0.0.1:8765" not in common
     assert 'http://127.0.0.1:8092/health" &>/dev/null' not in common
-    assert 'http://127.0.0.1:8093/health" &>/dev/null' not in common
+    assert 'http://127.0.0.1:8094/health" &>/dev/null' not in common
     assert "assert_agent_runtime_image_locked()" in common
     assert "--require-artifact agent_runtime" in common
     assert 'docker image inspect "$task_image" --format \'{{.Id}}\'' in common
@@ -1060,18 +1045,29 @@ def test_knowledge_worker_is_first_class_in_runtime_scripts() -> None:
         in Path("scripts/new/validate-env.sh").read_text()
     )
     assert 'knowledge_worker="$(knowledge_worker_container)"' in hot_update
+    assert (
+        '"$gateway" "/app/src/core/data/platform_catalog_v1.json" "appuser:appuser"'
+        in hot_update
+    )
     assert 'restart_services+=("knowledge-service" "knowledge-worker")' in hot_update
     assert hot_update.count('copy_dir "apps/knowledge-service/src/knowledge_service"') >= 2
     assert 'wait_for_healthy "Knowledge worker" "check_knowledge_worker_health"' in hot_update
     assert 'current_runtime_image' in hot_update
+    common = Path("scripts/new/common.sh").read_text()
+    init_env = Path("scripts/new/init-env.sh").read_text()
+    assert "agent_capability_worker_image_tag()" in common
+    assert 'existing_worker_image="$(awk -F=' in init_env
+    assert 'AGENT_CAPABILITY_WORKER_IMAGE=%s\\n' in init_env
     assert 'assert_agent_runtime_image_locked "$desired_runtime_image"' in hot_update
     assert '--force-recreate agent-runtime' in hot_update
     assert 'wait_for_healthy "Agent Runtime" "check_agent_runtime_health"' in hot_update
     assert 'check_and_report "Knowledge worker" check_knowledge_worker_health' in status
     makefile = Path("Makefile").read_text(encoding="utf-8")
-    assert re.search(r"dev-compose:.*?knowledge-service knowledge-worker frontend", makefile, re.S)
     assert re.search(
-        r"dev-compose-logs:.*?knowledge-service knowledge-worker frontend",
+        r"dev-compose:.*?knowledge-service knowledge-worker .*?frontend", makefile, re.S
+    )
+    assert re.search(
+        r"dev-compose-logs:.*?knowledge-service knowledge-worker .*?frontend",
         makefile,
         re.S,
     )

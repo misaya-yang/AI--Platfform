@@ -789,6 +789,15 @@ fn effective_tool_effect(
         }
         return codex_tools::ToolEffect::Unknown;
     }
+    if invocation.tool_name.namespace.as_deref() == Some("skills")
+        && matches!(invocation.tool_name.name.as_str(), "list" | "read")
+    {
+        // The upstream extension adapter currently falls back to Unknown
+        // instead of forwarding these tools' declared read-only effect. Keep
+        // platform approval and interruption semantics conservative without
+        // misclassifying metadata reads as writes.
+        return codex_tools::ToolEffect::ReadOnly;
+    }
     tool.effect()
 }
 

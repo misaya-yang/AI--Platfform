@@ -280,22 +280,22 @@ def _ensure_started(name: str):
 
 
 # ---------------------------------------------------------------------------
-# Test 1 — assistant-service down, gateway + others survive
+# Test 1 — Agent Runtime down, Gateway + others survive
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_assistant_service_down_isolation(
+async def test_agent_runtime_down_isolation(
     compose_stack: dict[str, Any],
     http: httpx.AsyncClient,
 ) -> None:
-    """AS down → gateway /health 200 fast, assistant proxy 502/503 fast, then recovers."""
+    """Runtime down leaves Gateway live while Agent turns fail closed, then recover."""
     if compose_stack["live_stack"]:
         pytest.skip("INTEGRATION_USE_LIVE_STACK=true; skipping docker stop/start tests")
-    if not _service_in_stack(compose_stack, "assistant-service"):
-        pytest.skip("assistant-service not in running compose stack")
+    if not _service_in_stack(compose_stack, "agent-runtime"):
+        pytest.skip("agent-runtime not in running compose stack")
 
-    with _ensure_started("assistant-service"):
-        _stop_service("assistant-service")
+    with _ensure_started("agent-runtime"):
+        _stop_service("agent-runtime")
 
         # 1. Gateway /health stays 200 inside the 2 s budget.
         health_resp, health_elapsed = await _measure_latency(
@@ -304,7 +304,7 @@ async def test_assistant_service_down_isolation(
         assert health_resp.status_code == 200, health_resp.text
         assert health_elapsed < _HEALTH_BUDGET, f"/health took {health_elapsed:.2f}s"
 
-        # 2. Non-AS gateway endpoint still responds (auth/login is the
+        # 2. A non-Agent Gateway endpoint still responds (auth/login is the
         # canonical "is the gateway alive" probe — a 401/422 reply means
         # the route is alive; we just want it to NOT 5xx).
         login_resp = await _async_post(
@@ -314,48 +314,39 @@ async def test_assistant_service_down_isolation(
             timeout=5.0,
         )
         assert login_resp.status_code < 500, (
-            f"auth/login returned 5xx with AS down: {login_resp.status_code} {login_resp.text}"
+            f"auth/login returned 5xx with Runtime down: {login_resp.status_code} {login_resp.text}"
         )
 
-        # 3. A proxy-only assistant endpoint returns 502/503 cleanly
-        # within the 10 s budget. Avoid /assistant/chat here because
-        # gateway model-permission checks can fail before the request
-        # reaches assistant-service.
+        # 3. A new Agent turn fails closed and promptly. An unauthenticated
+        # edge rejection is also acceptable because it happens before Runtime.
         assistant_resp, assistant_elapsed = await _measure_latency(
-            lambda: _async_get(
+            lambda: _async_post(
                 http,
-                f"{_API_PREFIX}/assistant/config",
+                f"{_API_PREFIX}/assistant/chat",
+                json={"message": "ping"},
                 timeout=_FAIL_FAST_BUDGET,
             )
         )
         assert assistant_elapsed < _FAIL_FAST_BUDGET, (
-            f"/assistant/config hung for {assistant_elapsed:.2f}s "
+            f"/assistant/chat hung for {assistant_elapsed:.2f}s "
             f"(budget {_FAIL_FAST_BUDGET}s)"
         )
-        assert assistant_resp.status_code in {502, 503}, (
-            f"expected clean 502/503 with AS down; "
+        assert assistant_resp.status_code in {401, 403, 502, 503}, (
+            f"expected an edge rejection or clean upstream failure with Runtime down; "
             f"got {assistant_resp.status_code}: {assistant_resp.text[:200]}"
         )
-        assert assistant_resp.status_code != 500, "AS down must NOT bubble up as a 500"
+        assert assistant_resp.status_code != 500, "Runtime down must not bubble up as a 500"
 
-        # 4. Restart AS and wait for healthy.
-        _start_service("assistant-service")
+        # 4. Restart Runtime and wait for Gateway readiness.
+        _start_service("agent-runtime")
         recovered = await _wait_for_health(
-            http, f"{_GATEWAY_URL}/health", timeout=_RESTART_HEALTHY_BUDGET
+            http, f"{_GATEWAY_URL}/health/ready", timeout=_RESTART_HEALTHY_BUDGET
         )
-        assert recovered, f"gateway not healthy {_RESTART_HEALTHY_BUDGET}s after AS restart"
-        assistant_proxy_recovered = await _wait_for_health(
-            http,
-            f"{_API_PREFIX}/assistant/config",
-            timeout=_RESTART_HEALTHY_BUDGET,
-        )
-        assert assistant_proxy_recovered, (
-            "assistant proxy route did not recover after assistant-service restart"
-        )
+        assert recovered, f"Gateway not ready {_RESTART_HEALTHY_BUDGET}s after Runtime restart"
 
 
 # ---------------------------------------------------------------------------
-# Test 2 — knowledge-service down, gateway + AS survive (degraded chat)
+# Test 2 — knowledge-service down, Gateway + Runtime survive (degraded chat)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -378,7 +369,7 @@ async def test_knowledge_service_down_isolation(
         assert health_resp.status_code == 200
 
         # 2. AS config via gateway still returns 200; a knowledge-service
-        # outage must not poison an unrelated assistant-service proxy route.
+        # outage must not poison an unrelated Gateway-owned control route.
         config_resp = await _async_get(
             http, f"{_API_PREFIX}/assistant/config", timeout=5.0
         )
@@ -460,7 +451,7 @@ async def test_langgraph_agent_down_isolation(
         assert gw_health.status_code == 200
 
         # 2. AS config surface via gateway. 200 proves an unrelated
-        # assistant-service route is alive and not gated by LangGraph.
+        # Agent control route is alive and not gated by LangGraph.
         as_health = await _async_get(
             http, f"{_API_PREFIX}/assistant/config", timeout=5.0
         )

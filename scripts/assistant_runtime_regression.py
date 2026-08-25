@@ -27,48 +27,48 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 # ---------------------------------------------------------------------------
-# Test group definitions (AHR phase → test paths)
+# Test group definitions (Runtime phase → Gateway/Rust contract paths)
 # ---------------------------------------------------------------------------
 
 TEST_GROUPS: list[dict[str, Any]] = [
     {
-        "id": "ahr-01-turn-contract",
-        "phase": "AHR-01",
-        "label": "Entry Session And Turn Contract",
-        "runner": "pytest",
-        "extra_args": ["--package", "assistant-service"],
-        "paths": [
-            "tests/services/assistant/test_agentloop_streaming_first_contract.py",
-        ],
-    },
-    {
-        "id": "ahr-02-memory-lifecycle",
-        "phase": "AHR-02",
-        "label": "Memory Context And Compaction Lineage",
-        "runner": "pytest",
-        "extra_args": ["--package", "assistant-service"],
-        "paths": [
-            "tests/services/assistant/test_memory_manager.py",
-        ],
-    },
-    {
-        "id": "ahr-03-tool-safety",
-        "phase": "AHR-03",
-        "label": "Tool Permission And Runtime Safety",
-        "runner": "pytest",
-        "extra_args": ["--package", "assistant-service"],
-        "paths": [
-            "tests/services/assistant/tools/test_tool_runtime_safety.py",
-        ],
-    },
-    {
-        "id": "ahr-04-trace-eval",
-        "phase": "AHR-04",
-        "label": "Observability Eval And Regression Cockpit",
+        "id": "runtime-v2-turn-contract",
+        "phase": "V2",
+        "label": "Runtime Thread/Turn/Item Contract",
         "runner": "pytest",
         "extra_args": [],
         "paths": [
-            "tests/services/assistant/test_agent_trace_capture.py",
+            "tests/services/eval/test_agent_runtime_eval_contract.py",
+        ],
+    },
+    {
+        "id": "runtime-control-plane",
+        "phase": "V2",
+        "label": "Gateway Runtime Control Plane",
+        "runner": "pytest",
+        "extra_args": [],
+        "paths": [
+            "tests/services/agent_runtime/test_control_plane.py",
+            "tests/services/agent_runtime/test_runtime_configuration.py",
+        ],
+    },
+    {
+        "id": "runtime-capability-contract",
+        "phase": "V2",
+        "label": "Gateway Capability Boundary",
+        "runner": "pytest",
+        "extra_args": [],
+        "paths": [
+            "tests/services/agent_runtime/test_readonly_capabilities.py",
+        ],
+    },
+    {
+        "id": "runtime-eval-contract",
+        "phase": "V2",
+        "label": "Gateway Eval And Observation Contract",
+        "runner": "pytest",
+        "extra_args": [],
+        "paths": [
             "tests/services/eval/test_golden_regression_gate.py",
             "tests/services/eval/test_trace_feedback.py",
             "tests/api/test_eval_traces.py",

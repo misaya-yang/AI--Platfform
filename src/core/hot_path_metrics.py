@@ -1,6 +1,6 @@
 """Process-local counters for gateway hot-path round-trips.
 
-Follows the same pattern as ``assistant_service.core.runtime.memory.index_metrics``:
+Uses the same bounded-label pattern as other Runtime metrics:
 exercisable counters on the shipped path, used by tests to prove RTT ceilings
 (SPO-02 gate: warm chat/proxy path ≤ 4 Redis round-trips).
 """

@@ -3,6 +3,6 @@
 
 mcp_servers: []
 
-# Built-in document generation is distributed as agent-plugins/ai-docgen and
-# launched by assistant-service over stdio. Keep this file for platform-managed
-# remote Streamable HTTP servers; tenant registrations remain HTTPS-only.
+# Built-in document generation is a capability-worker tool. This file is only
+# for platform-managed remote Streamable HTTP servers; tenant registrations
+# remain HTTPS-only.

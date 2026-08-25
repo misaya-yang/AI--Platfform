@@ -40,6 +40,8 @@ export const EventType = {
   RUN_FINISHED: "run_finished",
   RUN_ERROR: "run_error",
   CANCELLED: "cancelled",
+  ITEM: "item",
+  ACTIVITY: "activity",
 
   // Step lifecycle
   STEP_STARTED: "step_started",

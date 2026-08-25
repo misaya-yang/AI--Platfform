@@ -386,6 +386,11 @@ fn tool_data(item: &ThreadItem) -> Option<serde_json::Map<String, Value>> {
     }
     if let Some(status) = object.get("status") {
         projected.insert("status".to_string(), status.clone());
+    } else if item_type == "webSearch" {
+        // WebSearchItem has no status field. Receiving it through
+        // ItemCompleted is the authoritative terminal-success signal; the
+        // Started projection overwrites this value with `started` above.
+        projected.insert("status".to_string(), "completed".into());
     }
     if let Some(duration_ms) = object.get("durationMs") {
         projected.insert("duration_ms".to_string(), duration_ms.clone());

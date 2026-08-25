@@ -13,7 +13,7 @@
 | --- | --- | --- | --- |
 | Frontend | `ai-gateway-frontend` | React console (nginx) | `http://localhost:8081` |
 | Gateway | `ai-gateway-backend` | Public API, auth, proxy, sessions, quota | `http://localhost:8080` |
-| Assistant service | `ai-gateway-assistant-service` | General agent runtime, tools, MCP, traces | Docker-internal `:8093` |
+| Agent Runtime | `ai-gateway-agent-runtime` | Rust Thread/Turn kernel and event projection | Docker-internal `:8094` |
 | Knowledge service | `ai-gateway-knowledge-service` | KB CRUD, ingestion, retrieval | `127.0.0.1:8092` |
 | PostgreSQL | `ai-gateway-pg` | Primary relational store | `127.0.0.1:5432` |
 | Redis | `ai-gateway-redis` | Cache, sessions, queues | `127.0.0.1:6379` |
@@ -21,7 +21,7 @@
 
 The gateway and frontend are the only public entry points. Local Compose publishes them on
 `127.0.0.1` so the host browser can reach `localhost` without exposing the stack on the LAN.
-Assistant service stays private to the Docker network; infrastructure ports bind to `127.0.0.1`.
+Agent Runtime stays private to the Docker network; infrastructure ports bind to `127.0.0.1`.
 Do not publish a service that is currently internal without an explicit decision recorded in an ADR.
 
 ### Target topology under the Agent Runtime program
@@ -33,7 +33,7 @@ Python loop is not a registered execution route.
 | Component | Role | Exposure |
 | --- | --- | --- |
 | Agent Agent Runtime | Single target Thread/Turn/Item kernel and V1/V2 event projection | Docker-internal only |
-| Assistant capability service | Tools, approvals, Artifacts, Local Node, and Python-native capability implementations; no model loop | Docker-internal only |
+| Capability Worker | Tools, approvals, Artifacts, Local Node, and capability implementations; no model loop | Docker-internal only |
 | Gateway private model plane | Provider routing, credentials, capability adapters, quota, billing, and model-only streaming | Service-authenticated internal route only |
 
 The Agent Runtime must use an isolated runtime home. It may not inherit host
@@ -48,10 +48,8 @@ an HTTP/SSE service built on the in-process Agent crates.
 | `src/api/` | Public HTTP surface, routers, request/response schemas | Business logic |
 | `src/core/` | Gateway internals: auth, routing, proxy, middleware, observability | Assistant or KB domain logic |
 | `src/services/` | Gateway-side services: registry, session, billing, eval, storage, task | Direct HTTP handling |
-| `apps/assistant-service/` | Agent loop, tool invocation, MCP clients, prompts, trace writing | Anything the gateway must import |
 | `apps/knowledge-service/` | Document ingestion, chunking, embedding, retrieval | Agent runtime concerns |
 | `packages/ai-gateway-core/` | Shared primitives: persistence, models, eval, security, skills, tracing | Service-specific behaviour |
-| `packages/mcp-docgen-server/` | Bundled docgen MCP server (stdio child of assistant) | Assistant runtime code |
 | `web/` | React console | Generated API clients that belong in `sdk/` |
 | `sdk/` | Published client SDKs and `openapi.json` | Server-side code |
 | `database/` | `schema.sql` and ordered `migrations/` | Runtime queries |
@@ -71,15 +69,13 @@ Hard rules:
 3. `packages/ai-gateway-core` **must not** import from `src/` or `apps/*`. It is the leaf.
 4. `web/` talks to the gateway's public API only — never directly to assistant or knowledge.
 
-`tests/integration/test_assistant_isolation_contract.py` and
-`tests/integration/test_assistant_core_isolation.py` enforce rules 1–3; `make test-isolation`
-runs them.
+The dependency-direction tests enforce rules 1–3; `make test-isolation` runs them.
 
 ## 4. Contracts that must not drift silently
 
 | Contract | Source of truth | Gate |
 | --- | --- | --- |
-| Assistant OpenAPI | `sdk/openapi.json`, snapshot baseline | `make snapshot-assistant-openapi`, `make test-isolation` |
+| Public OpenAPI | `sdk/openapi.json` | `make snapshot-gateway-openapi`, `make test-isolation` |
 | Turn/stream envelope | `assistant-turn-contract/v1` | `make verify-assistant-runtime-dev` |
 | Eval golden + RAG fixtures | `tests/fixtures/eval/**` | `make eval-e1-gate` |
 | Agent Studio behaviour | `deploy/runbooks/agent-studio-prd/architecture-contract.md` | `make verify-agent-studio` |

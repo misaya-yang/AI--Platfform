@@ -49,13 +49,3 @@ services:
         DEBIAN_MIRROR: "${DEBIAN_MIRROR:-https://deb.debian.org}"
         PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}"
         PIP_TRUSTED_HOST: "${PIP_TRUSTED_HOST:-}"
-
-  assistant-service:
-    build:
-      context: .
-      dockerfile: apps/assistant-service/Dockerfile
-      args:
-        PYTHON_BASE_IMAGE: "${PYTHON_BASE_IMAGE:-python:3.12-slim-bookworm}"
-        DEBIAN_MIRROR: "${DEBIAN_MIRROR:-https://deb.debian.org}"
-        PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}"
-        PIP_TRUSTED_HOST: "${PIP_TRUSTED_HOST:-}"

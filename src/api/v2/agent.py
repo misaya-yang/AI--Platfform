@@ -8,6 +8,7 @@ the Agent Runtime remains the only Agent loop for every session.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from typing import Any
@@ -27,6 +28,7 @@ from ...services.agent_runtime.thread_store import (
 from ..deps import get_user_context
 
 router = APIRouter(prefix="/agent", tags=["Agent Runtime V2"])
+logger = logging.getLogger(__name__)
 
 
 class ThreadCreateRequest(BaseModel):
@@ -345,6 +347,11 @@ async def create_turn(
         )
     except Exception as exc:
         if hasattr(exc, "code"):
+            logger.warning(
+                "Agent Runtime turn rejected code=%s status=%s",
+                getattr(exc, "code", "AGENT_RUNTIME_ERROR"),
+                int(getattr(exc, "status_code", 503)),
+            )
             raise HTTPException(status_code=int(getattr(exc, "status_code", 503)), detail={"code": exc.code}) from exc
         raise
     return {

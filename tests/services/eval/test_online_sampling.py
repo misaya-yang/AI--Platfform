@@ -132,7 +132,7 @@ async def test_schedule_online_eval_enqueues_matching_evaluator(monkeypatch: pyt
             "trace_id": trace_id,
             "trace_family": "assistant",
             "status": "succeeded",
-            "source_adapter": "assistant-service",
+            "source_adapter": "agent-runtime-v2",
         },
     )
 

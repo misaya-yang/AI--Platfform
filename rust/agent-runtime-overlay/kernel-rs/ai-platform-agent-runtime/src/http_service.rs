@@ -46,6 +46,7 @@ use tokio::sync::Semaphore;
 use tokio::sync::broadcast;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -56,12 +57,18 @@ use crate::SequencedAssistantTurnEventV1;
 use crate::V1ProjectionContext;
 use crate::approval_control::ApprovalBroker;
 use crate::approval_control::ApprovalDecisionRequest;
+use crate::capability_execution::{
+    CapabilityExecutionOutcome, ReadonlyCapabilityBinding, execute_capability,
+};
+use crate::capability_worker::CapabilityWorkerClient;
 use crate::postgres_store::PlatformLifecycleEvent;
 use crate::project_server_notification;
 use crate::readonly_capabilities::RuntimeCapabilityScope;
 use crate::readonly_capabilities::render_turn_input;
-use crate::readonly_capabilities::resolve_dynamic_tool;
+use crate::readonly_capabilities::validate_platform_config;
 use crate::server_notification_thread_id;
+use ai_platform_capability_contract::CapabilityEffect;
+use ai_platform_capability_contract::CapabilityExecutionStatus;
 
 mod security;
 mod thread_lifecycle;
@@ -88,6 +95,7 @@ pub struct RuntimeHttpState {
     internal_token: Arc<str>,
     kernel_ready: Arc<AtomicBool>,
     readonly_by_turn: Arc<Mutex<HashMap<String, ReadonlyTurnBinding>>>,
+    turn_cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -221,6 +229,20 @@ pub struct RuntimeHttpService {
     event_task: JoinHandle<()>,
 }
 
+impl RuntimeHttpState {
+    pub(super) fn cancel_turn(&self, turn_id: &str) {
+        if let Some(token) = self
+            .turn_cancellations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(turn_id)
+            .cloned()
+        {
+            token.cancel();
+        }
+    }
+}
+
 impl RuntimeHttpService {
     pub fn start(
         kernel: AgentKernel,
@@ -249,6 +271,7 @@ impl RuntimeHttpService {
             });
         }
         let readonly_by_turn = Arc::new(Mutex::new(HashMap::new()));
+        let turn_cancellations = Arc::new(Mutex::new(HashMap::new()));
         let capability_client = reqwest::Client::builder()
             .no_proxy()
             .connect_timeout(std::time::Duration::from_secs(2))
@@ -262,6 +285,7 @@ impl RuntimeHttpService {
             events.clone(),
             Arc::clone(&kernel_ready),
             Arc::clone(&readonly_by_turn),
+            Arc::clone(&turn_cancellations),
             capability_client,
             shutdown_rx,
         ));
@@ -274,6 +298,7 @@ impl RuntimeHttpService {
                 internal_token: internal_token.into(),
                 kernel_ready,
                 readonly_by_turn,
+                turn_cancellations,
             },
             shutdown_tx: Some(shutdown_tx),
             event_task,
@@ -285,6 +310,10 @@ impl RuntimeHttpService {
             .route("/health/live", get(live))
             .route("/health/ready", get(ready))
             .route("/internal/v1/threads", post(create_thread))
+            .route(
+                "/internal/v1/sessions/{session_id}/cleanup",
+                post(cleanup_session),
+            )
             .route("/internal/v1/approvals/{approval_id}", get(get_approval))
             .route(
                 "/internal/v1/approvals/{approval_id}/decision",
@@ -426,6 +455,50 @@ async fn create_thread(
         .map_err(|_| RuntimeError::internal("invalid_agent_thread_start_response"))
 }
 
+#[derive(Serialize)]
+struct SessionCleanupResponse {
+    session_id: String,
+    status: &'static str,
+}
+
+/// Tombstone the Runtime projection and root identity for one platform
+/// session. Items remain append-only for audit/recovery, and scope is bound
+/// both to the authenticated headers and the path session id.
+async fn cleanup_session(
+    State(state): State<RuntimeHttpState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<SessionCleanupResponse>, RuntimeError> {
+    authorize(&headers, &state.internal_token)?;
+    if session_id.is_empty()
+        || session_id.len() > 255
+        || session_id.bytes().any(|byte| byte.is_ascii_control())
+    {
+        return Err(RuntimeError::bad_request("invalid_session_id"));
+    }
+    let tenant_id = required_header(&headers, TENANT_HEADER)?;
+    let user_id = required_header(&headers, USER_HEADER)?;
+    let header_session_id = required_header(&headers, SESSION_HEADER)?;
+    if [tenant_id.as_str(), user_id.as_str()]
+        .into_iter()
+        .any(|value| value.len() > 255 || value.bytes().any(|byte| byte.is_ascii_control()))
+    {
+        return Err(RuntimeError::bad_request("invalid_runtime_scope"));
+    }
+    if header_session_id != session_id {
+        return Err(RuntimeError::not_found("session_not_found"));
+    }
+    let deleted = state
+        .store
+        .cleanup_session(&tenant_id, &user_id, &session_id)
+        .await
+        .map_err(RuntimeError::from_store)?;
+    Ok(Json(SessionCleanupResponse {
+        session_id,
+        status: if deleted { "deleted" } else { "not_found" },
+    }))
+}
+
 fn validate_memory_mode(mode: Option<ThreadMemoryMode>) -> Result<(), RuntimeError> {
     if matches!(mode, Some(ThreadMemoryMode::Enabled)) {
         // The upstream memory generator persists into a process-local SQLite
@@ -501,6 +574,8 @@ struct StartTurnRequest {
     capability_revision: i64,
     #[serde(default)]
     readonly: Option<serde_json::Value>,
+    #[serde(default)]
+    platform_config: Option<serde_json::Value>,
 }
 
 async fn start_turn(
@@ -531,6 +606,31 @@ async fn start_turn(
         })
         .transpose()
         .map_err(|_| RuntimeError::bad_request("invalid_readonly_capability_payload"))?;
+    if let Some(platform_config) = body.platform_config.as_ref() {
+        validate_platform_config(
+            &RuntimeCapabilityScope {
+                tenant_id: tenant_id.clone(),
+                user_id: user_id.clone(),
+                session_id: session_id.clone(),
+                capability_revision: body.capability_revision,
+                snapshot_id: body.snapshot_id.to_string(),
+            },
+            platform_config,
+        )
+        .map_err(|_| RuntimeError::bad_request("invalid_platform_runtime_config"))?;
+        if body
+            .readonly
+            .as_ref()
+            .and_then(|value| value.get("platform_config"))
+            != Some(platform_config)
+        {
+            return Err(RuntimeError::bad_request(
+                "platform_runtime_config_mismatch",
+            ));
+        }
+    } else {
+        return Err(RuntimeError::bad_request("platform_runtime_config_missing"));
+    }
     let authorized = sqlx::query_scalar::<_, bool>(
         r#"
         SELECT EXISTS (
@@ -623,16 +723,19 @@ async fn start_turn(
         runtime_scope_sha256(&tenant_id, &user_id, &session_id),
     );
     let mut input = Vec::with_capacity(2);
+    // Keep the stable user/developer prompt first.  Gateway-selected
+    // capabilities, skills, grants and attachments are dynamic lower-trust
+    // context and must remain after the user turn.
+    input.push(UserInput::Text {
+        text: body.message,
+        text_elements: Vec::new(),
+    });
     if let Some(readonly_input) = readonly_input.flatten() {
         input.push(UserInput::Text {
             text: readonly_input,
             text_elements: Vec::new(),
         });
     }
-    input.push(UserInput::Text {
-        text: body.message,
-        text_elements: Vec::new(),
-    });
     let params = TurnStartParams {
         thread_id: thread_id.to_string(),
         input,
@@ -849,9 +952,10 @@ async fn decide_approval(
         root_thread_id: projection.root_thread_id,
         event: projection.event,
     });
-    Ok(Json(
-        json!({"approval_id": approval_id, "status": "consumed"}),
-    ))
+    Ok(Json(json!({
+        "approval_id": approval_id,
+        "status": projection.status,
+    })))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -862,21 +966,39 @@ async fn route_kernel_events(
     events: broadcast::Sender<RuntimeBroadcastEvent>,
     kernel_ready: Arc<AtomicBool>,
     readonly_by_turn: Arc<Mutex<HashMap<String, ReadonlyTurnBinding>>>,
+    turn_cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
     capability_client: reqwest::Client,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
     let request_handle = kernel.request_handle();
     let dynamic_tool_slots = Arc::new(Semaphore::new(16));
+    let runtime_cancel = CancellationToken::new();
     let mut text_projection = TextProjectionState::default();
     loop {
         tokio::select! {
-            _ = &mut shutdown_rx => break,
+            _ = &mut shutdown_rx => {
+                runtime_cancel.cancel();
+                break;
+            },
             event = kernel.next_event() => {
                 let Some(event) = event else {
+                    runtime_cancel.cancel();
                     break;
                 };
                 match event {
                     InProcessServerEvent::ServerNotification(notification) => {
+                        if let codex_app_server_protocol::ServerNotification::TurnCompleted(
+                            completed,
+                        ) = notification.as_ref()
+                        {
+                            let token = turn_cancellations
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .remove(&completed.turn.id);
+                            if let Some(token) = token {
+                                token.cancel();
+                            }
+                        }
                         persist_projected_events(
                             notification.as_ref(),
                             &store,
@@ -908,8 +1030,16 @@ async fn route_kernel_events(
                             let store = Arc::clone(&store);
                             let readonly_by_turn = Arc::clone(&readonly_by_turn);
                             let capability_client = capability_client.clone();
+                            let approvals = approvals.clone();
+                            let events = events.clone();
                             let request_id = request_id.clone();
                             let params = params.clone();
+                            let cancel = turn_cancellations
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .entry(params.turn_id.clone())
+                                .or_insert_with(|| runtime_cancel.child_token())
+                                .clone();
                             tokio::spawn(async move {
                                 let _permit = permit;
                                 let result = handle_dynamic_tool_call(
@@ -917,6 +1047,9 @@ async fn route_kernel_events(
                                     &store,
                                     &readonly_by_turn,
                                     &capability_client,
+                                    &approvals,
+                                    &events,
+                                    &cancel,
                                 )
                                 .await;
                                 match result {
@@ -974,6 +1107,9 @@ async fn handle_dynamic_tool_call(
     store: &PostgresThreadStore,
     readonly_by_turn: &Arc<Mutex<HashMap<String, ReadonlyTurnBinding>>>,
     capability_client: &reqwest::Client,
+    approvals: &ApprovalBroker,
+    events: &broadcast::Sender<RuntimeBroadcastEvent>,
+    cancel: &CancellationToken,
 ) -> Result<serde_json::Value, String> {
     let thread_id = ThreadId::from_string(&params.thread_id)
         .map_err(|_| "dynamic_tool_thread_invalid".to_string())?;
@@ -996,9 +1132,13 @@ async fn handle_dynamic_tool_call(
     {
         return Err("dynamic_tool_binding_changed".to_string());
     }
-    let (capability_allowlist, expected_tool) =
-        resolve_dynamic_tool(&binding.payload, params.namespace.as_deref(), &params.tool)
-            .map_err(|error| error.to_string())?;
+    let (capability_allowlist, expected_tool, descriptor, effect) =
+        crate::readonly_capabilities::resolve_dynamic_capability_descriptor(
+            &binding.payload,
+            params.namespace.as_deref(),
+            &params.tool,
+        )
+        .map_err(|error| error.to_string())?;
     let bound_dataset_ids = binding
         .payload
         .get("items")
@@ -1012,7 +1152,7 @@ async fn handle_dynamic_tool_call(
         .map(str::to_string)
         .collect::<Vec<_>>();
     let capability_plane_url = std::env::var("AI_PLATFORM_CAPABILITY_PLANE_URL")
-        .unwrap_or_else(|_| "http://assistant-service:8093/internal/v1/capabilities".to_string());
+        .unwrap_or_else(|_| "http://gateway:8080/internal/v2/agent-capabilities".to_string());
     let mut digest = Sha256::new();
     digest.update(
         serde_json::to_vec(&params.arguments).map_err(|_| "dynamic_tool_arguments_invalid")?,
@@ -1025,38 +1165,262 @@ async fn handle_dynamic_tool_call(
             item_id: Some(params.call_id.clone()),
             event_key: format!("tool-use/{}/{}", params.turn_id, params.call_id),
             item_type: "tool_use".to_string(),
-            status: "dispatched".to_string(),
+            status: if effect == CapabilityEffect::Read {
+                "dispatched".to_string()
+            } else {
+                "awaiting_approval".to_string()
+            },
             payload: serde_json::json!({
                 "schema_version": "agent-runtime-tool-lifecycle/v1",
                 "turn_id": params.turn_id,
                 "tool_call_id": params.call_id,
                 "tool_name": params.tool,
                 "arguments_sha256": arguments_sha256,
-                "lifecycle": "dispatched",
-                "dispatch_state": "dispatched",
-                "effect": "read_only",
+                "lifecycle": if effect == CapabilityEffect::Read {
+                    "dispatched"
+                } else {
+                    "awaiting_approval"
+                },
+                "effect": match effect {
+                    CapabilityEffect::Read => "read",
+                    CapabilityEffect::Write => "write",
+                    CapabilityEffect::Unknown => "unknown",
+                },
+                "dispatch_state": if effect == CapabilityEffect::Read {
+                    "dispatched"
+                } else {
+                    "awaiting_approval"
+                },
             }),
         })
         .await
         .map_err(|_| "dynamic_tool_dispatch_receipt_failed")?;
-    let result = crate::capability_plane::invoke_dynamic_tool(
-        capability_client,
-        params,
-        &identity,
-        &capability_plane_url,
-        &std::env::var("AI_PLATFORM_INTERNAL_TOKEN").unwrap_or_default(),
-        binding.capability_revision,
-        &binding.snapshot_id,
-        &bound_dataset_ids,
-        &capability_allowlist,
-        &expected_tool,
-    )
-    .await;
-    let (status, detail) = match &result {
-        Ok(_) => ("succeeded", "completed"),
-        Err(_) => ("failed", "capability_plane_failed"),
+    let worker_enabled = capability_worker_enabled(
+        std::env::var("AI_PLATFORM_CAPABILITY_WORKER_ENABLED")
+            .ok()
+            .as_deref(),
+    );
+    let worker_writes_enabled = capability_worker_enabled(
+        std::env::var("AI_PLATFORM_CAPABILITY_WORKER_WRITES_ENABLED")
+            .ok()
+            .as_deref(),
+    );
+    let worker_url = std::env::var("AI_PLATFORM_CAPABILITY_WORKER_URL").ok();
+    let lease_secret = std::env::var("AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET").ok();
+    if effect != CapabilityEffect::Read
+        && (!worker_enabled
+            || !worker_writes_enabled
+            || worker_url
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+            || lease_secret
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty()))
+    {
+        persist_dynamic_terminal_receipt(
+            params,
+            thread_id,
+            store,
+            "failed",
+            "capability_worker_not_ready",
+        )
+        .await
+        .map_err(|_| "dynamic_tool_terminal_receipt_failed".to_string())?;
+        return Ok(structured_capability_response(
+            false,
+            "capability worker is not ready for this capability",
+        ));
+    }
+    let mut approval_id = None;
+    if effect != CapabilityEffect::Read {
+        let (id, receiver) = approvals
+            .await_dynamic_tool(params, &expected_tool.id, &identity, store)
+            .await?;
+        approval_id = Some(id);
+        if let Err(error) =
+            persist_dynamic_approval_required(params, id, effect, &identity, store, events).await
+        {
+            approvals
+                .cancel_dynamic(
+                    id,
+                    &identity.tenant_id,
+                    &identity.user_id,
+                    &identity.session_id,
+                    "approval_receipt_failed",
+                    store,
+                )
+                .await;
+            persist_dynamic_terminal_receipt(
+                params,
+                thread_id,
+                store,
+                "failed",
+                "approval_receipt_failed",
+            )
+            .await
+            .map_err(|_| "dynamic_tool_terminal_receipt_failed".to_string())?;
+            return Ok(structured_capability_response(false, &error));
+        }
+        let decision = tokio::select! {
+            decision = tokio::time::timeout(Duration::from_secs(600), receiver) => {
+                decision.ok().and_then(Result::ok)
+            }
+            () = cancel.cancelled() => None,
+        };
+        let Some(decision) = decision else {
+            approvals
+                .cancel_dynamic(
+                    id,
+                    &identity.tenant_id,
+                    &identity.user_id,
+                    &identity.session_id,
+                    if cancel.is_cancelled() {
+                        "runtime_cancelled"
+                    } else {
+                        "approval_expired"
+                    },
+                    store,
+                )
+                .await;
+            persist_dynamic_terminal_receipt(
+                params,
+                thread_id,
+                store,
+                if cancel.is_cancelled() {
+                    "cancelled"
+                } else {
+                    "failed"
+                },
+                if cancel.is_cancelled() {
+                    "capability_execution_cancelled"
+                } else {
+                    "capability_execution_timeout"
+                },
+            )
+            .await
+            .map_err(|_| "dynamic_tool_terminal_receipt_failed".to_string())?;
+            return Ok(structured_capability_response(
+                false,
+                if cancel.is_cancelled() {
+                    "capability execution cancelled"
+                } else {
+                    "capability approval expired"
+                },
+            ));
+        };
+        if !decision.approved {
+            persist_dynamic_terminal_receipt(
+                params,
+                thread_id,
+                store,
+                "failed",
+                "capability_execution_rejected",
+            )
+            .await
+            .map_err(|_| "dynamic_tool_terminal_receipt_failed".to_string())?;
+            return Ok(structured_capability_response(
+                false,
+                decision
+                    .reason
+                    .as_deref()
+                    .unwrap_or("capability approval rejected"),
+            ));
+        }
+        store
+            .append_platform_lifecycle_event(PlatformLifecycleEvent {
+                kernel_thread_id: thread_id,
+                turn_id: params.turn_id.clone(),
+                item_id: Some(params.call_id.clone()),
+                event_key: format!("tool-dispatch/{}/{}", params.turn_id, params.call_id),
+                item_type: "tool_use".to_string(),
+                status: "dispatched".to_string(),
+                payload: serde_json::json!({
+                    "schema_version": "agent-runtime-tool-lifecycle/v1",
+                    "turn_id": params.turn_id,
+                    "tool_call_id": params.call_id,
+                    "tool_name": params.tool,
+                    "approval_id": id,
+                    "lifecycle": "dispatched",
+                    "dispatch_state": "dispatched",
+                    "effect": "write",
+                }),
+            })
+            .await
+            .map_err(|_| "dynamic_tool_dispatch_receipt_failed")?;
+    }
+    let internal_token = std::env::var("AI_PLATFORM_INTERNAL_TOKEN").unwrap_or_default();
+    let approval_id_string = approval_id.map(|id| id.to_string());
+    let result: Result<CapabilityExecutionOutcome, String> = if worker_enabled {
+        let worker_url = worker_url
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "capability_worker_url_missing".to_string());
+        let lease_secret = lease_secret
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "capability_worker_lease_secret_missing".to_string());
+        match (worker_url, lease_secret) {
+            (Ok(worker_url), Ok(lease_secret)) => {
+                let worker = CapabilityWorkerClient::new(
+                    capability_client.clone(),
+                    &worker_url,
+                    internal_token.clone(),
+                )
+                .map_err(|error| error.code().to_string());
+                match worker {
+                    Ok(worker) => execute_capability(
+                        &worker,
+                        &identity,
+                        &ReadonlyCapabilityBinding {
+                            capability_revision: binding.capability_revision as u64,
+                            allowlist: capability_allowlist.clone(),
+                            expected_tool: expected_tool.clone(),
+                            descriptor: descriptor.clone(),
+                        },
+                        params,
+                        lease_secret.as_bytes(),
+                        effect,
+                        approval_id_string.as_deref(),
+                        cancel,
+                    )
+                    .await
+                    .map_err(|error| error.code().to_string()),
+                    Err(error) => Err(error),
+                }
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        }
+    } else if effect == CapabilityEffect::Read {
+        crate::capability_plane::invoke_dynamic_tool(
+            capability_client,
+            params,
+            &identity,
+            &capability_plane_url,
+            &internal_token,
+            binding.capability_revision,
+            &binding.snapshot_id,
+            &bound_dataset_ids,
+            &capability_allowlist,
+            &expected_tool,
+        )
+        .await
+        .map(|response| CapabilityExecutionOutcome {
+            status: if response.get("success").and_then(serde_json::Value::as_bool) == Some(true) {
+                CapabilityExecutionStatus::Succeeded
+            } else {
+                CapabilityExecutionStatus::Failed
+            },
+            response,
+        })
+    } else {
+        Err("capability_worker_required_for_write".to_string())
     };
-    store
+    let (status, detail) = match &result {
+        Ok(outcome) => (
+            capability_status_name(outcome.status),
+            capability_result_detail(outcome),
+        ),
+        Err(error) => ("failed", error.as_str()),
+    };
+    let receipt = store
         .append_platform_lifecycle_event(PlatformLifecycleEvent {
             kernel_thread_id: thread_id,
             turn_id: params.turn_id.clone(),
@@ -1073,9 +1437,37 @@ async fn handle_dynamic_tool_call(
                 "detail": detail,
             }),
         })
-        .await
-        .map_err(|_| "dynamic_tool_result_receipt_failed")?;
-    result
+        .await;
+    if receipt.is_err() {
+        return Err("dynamic_tool_result_receipt_failed".to_string());
+    }
+    result.map(|outcome| outcome.response)
+}
+
+fn capability_worker_enabled(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.eq_ignore_ascii_case("true"))
+}
+
+fn capability_status_name(status: CapabilityExecutionStatus) -> &'static str {
+    match status {
+        CapabilityExecutionStatus::Succeeded => "succeeded",
+        CapabilityExecutionStatus::Failed => "failed",
+        CapabilityExecutionStatus::Cancelled => "cancelled",
+        CapabilityExecutionStatus::Timeout => "timeout",
+        CapabilityExecutionStatus::SideEffectUnknown => "side_effect_unknown",
+        _ => "failed",
+    }
+}
+
+fn capability_result_detail(outcome: &CapabilityExecutionOutcome) -> &'static str {
+    match outcome.status {
+        CapabilityExecutionStatus::Succeeded => "completed",
+        CapabilityExecutionStatus::Failed => "capability_execution_failed",
+        CapabilityExecutionStatus::Cancelled => "capability_execution_cancelled",
+        CapabilityExecutionStatus::Timeout => "capability_execution_timeout",
+        CapabilityExecutionStatus::SideEffectUnknown => "capability_execution_side_effect_unknown",
+        _ => "capability_execution_failed",
+    }
 }
 
 async fn load_readonly_turn_binding(
@@ -1205,6 +1597,88 @@ async fn persist_approval_required(
     }
 }
 
+async fn persist_dynamic_approval_required(
+    params: &codex_app_server_protocol::DynamicToolCallParams,
+    approval_id: Uuid,
+    effect: CapabilityEffect,
+    identity: &PlatformThreadIdentity,
+    store: &PostgresThreadStore,
+    events: &broadcast::Sender<RuntimeBroadcastEvent>,
+) -> Result<(), String> {
+    let arguments_hash = ai_platform_capability_contract::canonical_json_hash(&params.arguments)
+        .unwrap_or_else(|_| "sha256:invalid".to_string());
+    let effect = match effect {
+        CapabilityEffect::Read => "read",
+        CapabilityEffect::Write => "write",
+        CapabilityEffect::Unknown => "unknown",
+    };
+    let event = crate::AssistantTurnEventV1::new(
+        "approval_required",
+        json!({
+            "run_id": params.turn_id,
+            "session_id": identity.session_id,
+            "thread_id": identity.runtime_thread_id.to_string(),
+            "approval_id": approval_id,
+            "tool_call_id": params.call_id,
+            "tool_name": params.tool,
+            "arguments_hash": arguments_hash,
+            "effect": effect,
+            "status": "approval_required",
+            "approval_required": true,
+        }),
+    );
+    let event_key = format!("compat/approval/{approval_id}/required");
+    match store
+        .append_v1_event(identity.runtime_thread_id, approval_id, &event_key, &event)
+        .await
+    {
+        Ok(sequence) => {
+            let _ = events.send(RuntimeBroadcastEvent {
+                root_thread_id: identity.runtime_thread_id,
+                event: SequencedAssistantTurnEventV1 { sequence, event },
+            });
+            Ok(())
+        }
+        Err(error) => {
+            warn!(%error, "failed to project dynamic approval_required");
+            Err("approval_receipt_failed".to_string())
+        }
+    }
+}
+
+fn structured_capability_response(success: bool, message: &str) -> serde_json::Value {
+    crate::capability_execution::dynamic_tool_text_response(success, message)
+}
+
+async fn persist_dynamic_terminal_receipt(
+    params: &codex_app_server_protocol::DynamicToolCallParams,
+    thread_id: ThreadId,
+    store: &PostgresThreadStore,
+    status: &str,
+    detail: &str,
+) -> Result<(), ()> {
+    store
+        .append_platform_lifecycle_event(PlatformLifecycleEvent {
+            kernel_thread_id: thread_id,
+            turn_id: params.turn_id.clone(),
+            item_id: Some(params.call_id.clone()),
+            event_key: format!("tool-result/{}/{}", params.turn_id, params.call_id),
+            item_type: "tool_result".to_string(),
+            status: status.to_string(),
+            payload: serde_json::json!({
+                "schema_version": "agent-runtime-tool-lifecycle/v1",
+                "turn_id": params.turn_id,
+                "tool_call_id": params.call_id,
+                "lifecycle": "terminal",
+                "result_status": status,
+                "detail": detail,
+            }),
+        })
+        .await
+        .map(|_| ())
+        .map_err(|_| ())
+}
+
 async fn persist_projected_events(
     notification: &codex_app_server_protocol::ServerNotification,
     store: &PostgresThreadStore,
@@ -1254,21 +1728,22 @@ async fn persist_projected_events(
                 return;
             }
         };
-        for call_id in recovered {
+        for call in recovered {
             let data = json!({
                 "run_id": completed.turn.id,
                 "session_id": context.session_id,
                 "thread_id": completed.thread_id,
-                "tool_call_id": call_id,
-                "status": "side_effect_unknown",
+                "tool_call_id": call.call_id.clone(),
+                "status": call.result_status,
                 "success": false,
+                "detail": call.detail,
                 "recovery": "terminal_admission",
             });
             for event_type in ["tool_call_result", "tool_call_end"] {
                 let event = crate::AssistantTurnEventV1::new(event_type, data.clone());
                 let event_key = format!(
                     "compat/recovery/{}/{}/{}",
-                    completed.turn.id, call_id, event_type
+                    completed.turn.id, call.call_id, event_type
                 );
                 let event_id = stable_event_id(&event_key);
                 match store
@@ -1369,6 +1844,7 @@ mod turn_request_tests {
             effort: Some("minimal".to_string()),
             capability_revision: 1,
             readonly: None,
+            platform_config: None,
         }
     }
 
@@ -1388,6 +1864,33 @@ mod turn_request_tests {
         assert!(validate_start_turn_request(&uppercase).is_err());
         let oversized = request(format!("v1:{}", "a".repeat(65)));
         assert!(validate_start_turn_request(&oversized).is_err());
+    }
+
+    #[test]
+    fn capability_worker_requires_explicit_true_flag() {
+        assert!(capability_worker_enabled(Some("true")));
+        assert!(capability_worker_enabled(Some("TRUE")));
+        assert!(!capability_worker_enabled(None));
+        assert!(!capability_worker_enabled(Some("false")));
+        assert!(!capability_worker_enabled(Some("1")));
+        assert!(!capability_worker_enabled(Some(" true ")));
+    }
+
+    #[test]
+    fn capability_result_status_does_not_treat_failed_response_as_success() {
+        let failed = CapabilityExecutionOutcome {
+            response: serde_json::json!({
+                "contentItems": [{"type": "inputText", "text": "failed"}],
+                "success": false
+            }),
+            status: CapabilityExecutionStatus::Failed,
+        };
+        assert_eq!(capability_status_name(failed.status), "failed");
+        assert_eq!(
+            capability_result_detail(&failed),
+            "capability_execution_failed"
+        );
+        assert_ne!(capability_status_name(failed.status), "succeeded");
     }
 
     #[test]
@@ -1454,7 +1957,7 @@ mod turn_request_tests {
         assert_eq!(first.len(), 1);
         let duplicate = state.normalize_subagent_events(vec![crate::AssistantTurnEventV1::new(
             "subagent_started",
-            data.clone(),
+            data,
         )]);
         assert!(duplicate.is_empty());
         let finish = state.normalize_subagent_events(vec![crate::AssistantTurnEventV1::new(

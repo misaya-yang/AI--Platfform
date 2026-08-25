@@ -128,34 +128,35 @@ impl PostgresThreadStore {
         .collect()
     }
 
-    /// Admission check for a turn terminal. Any dispatched call without a
-    /// result is closed durably as unknown before the caller may project the
+    /// Admission check for a turn terminal. Every published call must have a
+    /// durable, phase/effect-specific result before the caller may project the
     /// terminal envelope.
     pub(crate) async fn admit_turn_terminal(
         &self,
         kernel_thread_id: ThreadId,
         turn_id: &str,
-    ) -> ThreadStoreResult<Vec<String>> {
+    ) -> ThreadStoreResult<Vec<crate::platform_lifecycle::RecoveredToolCall>> {
         let events = self
             .read_platform_lifecycle_events(kernel_thread_id, turn_id)
             .await?;
-        let unclosed = crate::platform_lifecycle::unclosed_tool_call_ids(&events);
-        for call_id in &unclosed {
+        let unclosed = crate::platform_lifecycle::unclosed_tool_calls(&events);
+        for call in &unclosed {
             let payload = serde_json::json!({
                 "schema_version": "agent-runtime-tool-lifecycle/v1",
                 "turn_id": turn_id,
-                "tool_call_id": call_id,
+                "tool_call_id": call.call_id,
                 "lifecycle": "terminal",
-                "result_status": "side_effect_unknown",
+                "result_status": call.result_status,
+                "detail": call.detail,
                 "recovery": "terminal_admission",
             });
             self.append_platform_lifecycle_event(PlatformLifecycleEvent {
                 kernel_thread_id,
                 turn_id: turn_id.to_string(),
-                item_id: Some(call_id.clone()),
-                event_key: format!("tool-result/{turn_id}/{call_id}"),
+                item_id: Some(call.call_id.clone()),
+                event_key: format!("tool-result/{turn_id}/{}", call.call_id),
                 item_type: "tool_result".to_string(),
-                status: "side_effect_unknown".to_string(),
+                status: call.result_status.to_string(),
                 payload,
             })
             .await?;

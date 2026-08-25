@@ -67,6 +67,8 @@
       "contextUsedWindow": "已用上下文：{{used}} / {{window}}",
       "generatedArtifact": "已生成 {{title}}",
       "historyDropped": "已丢弃 {{count}} 条历史消息",
+      "memoryLoaded": "已加载记忆",
+      "memoryLoadedBody": "已为本轮附加相关的跨会话记忆",
       "queueState": "队列：{{state}}",
       "reject": "拒绝",
       "retrievedContext": "已检索上下文",

@@ -1,6 +1,9 @@
 import { api } from "@/lib/api";
 
-const LOCAL_NODES_PATH = "/api/v1/assistant/local-nodes";
+// Local Nodes are a Gateway-owned control plane, not a legacy assistant route
+// route. Keeping this path under /assistant made every status/pairing request
+// 404 after the Runtime cutover.
+const LOCAL_NODES_PATH = "/api/v1/local-nodes";
 
 export type LocalNodeDeviceState = "online" | "offline" | "stale" | "revoked";
 export type LocalNodeHealthState =
@@ -33,7 +36,7 @@ export interface LocalNodeDeviceStatus {
 export interface LocalNodeCapabilities {
   device_id: string;
   revision: number;
-  capabilities: Array<{
+  capabilities: Array<string | {
     name: string;
     state: LocalNodeHealthState;
     reason_code?: string | null;
@@ -42,7 +45,8 @@ export interface LocalNodeCapabilities {
 
 export interface LocalNodeDoctor {
   device_id: string;
-  checked_at: string;
+  checked_at?: string;
+  status?: LocalNodeHealthState;
   permissions: Array<{
     permission: string;
     state: LocalNodeHealthState;
@@ -68,10 +72,13 @@ export interface LocalNodeGrant {
 
 export interface LocalNodeEvent {
   event_id: string;
-  device_id: string;
+  device_id?: string;
   sequence: number;
-  event_type: string;
-  occurred_at: string;
+  event_type?: string;
+  /** Gateway Local Node API uses `event` and `created_at` on the wire. */
+  event?: string | null;
+  occurred_at?: string;
+  created_at?: string;
   action_id?: string | null;
   status?:
     | "proposed"
@@ -87,17 +94,16 @@ export interface LocalNodeEvent {
     | "unknown"
     | null;
   summary?: string | null;
+  payload?: Record<string, unknown> | null;
   result_digest?: string | null;
-  artifact_refs: string[];
+  artifact_refs?: string[];
   error_code?: string | null;
 }
 
 export interface PairingChallenge {
-  challenge: {
-    challenge_id: string;
-    user_code: string;
-    expires_at: string;
-  };
+  challenge_id: string;
+  user_code: string;
+  expires_at: string;
 }
 
 function devicePath(deviceId: string, suffix: string): string {
@@ -165,14 +171,10 @@ export async function revokeLocalNodeGrant(
   await api.delete(devicePath(deviceId, `/grants/${encodeURIComponent(grantId)}`));
 }
 
-export async function revokeLocalNode(deviceId: string): Promise<void> {
-  await api.post(devicePath(deviceId, "/revoke"), { reason: "user_requested" });
-}
-
 export async function createLocalNodePairingChallenge(): Promise<PairingChallenge> {
   const { data } = await api.post<PairingChallenge>(
     `${LOCAL_NODES_PATH}/pairing/challenges`,
-    { ttl_seconds: 180 },
+    { expires_in_seconds: 180 },
   );
   return data;
 }

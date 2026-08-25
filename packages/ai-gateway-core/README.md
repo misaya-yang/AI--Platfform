@@ -1,6 +1,6 @@
 # ai-gateway-core
 
-Shared primitives consumed by `ai-gateway` (the monolith) and `assistant-service` (the extracted microservice).
+Shared primitives consumed by Gateway and Knowledge Python services.
 
 Scope is deliberately narrow:
 

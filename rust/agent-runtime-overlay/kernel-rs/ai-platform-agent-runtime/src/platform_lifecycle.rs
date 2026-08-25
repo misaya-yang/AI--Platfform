@@ -1,5 +1,6 @@
 //! Durable platform lifecycle hooks installed into the Agent kernel.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use codex_core::config::Config;
@@ -44,13 +45,15 @@ impl PlatformLifecycleContributor {
         else {
             return;
         };
-        for call_id in unclosed_tool_call_ids(&events) {
+        let identity = self.store.identity_for_kernel_thread(thread_id).await.ok();
+        for call in unclosed_tool_calls(&events) {
             let payload = json!({
                 "schema_version": "agent-runtime-tool-lifecycle/v1",
                 "turn_id": turn_id,
-                "tool_call_id": call_id,
+                "tool_call_id": call.call_id.clone(),
                 "lifecycle": "terminal",
-                "result_status": "side_effect_unknown",
+                "result_status": call.result_status,
+                "detail": call.detail,
                 "recovery": "runtime_restart_or_interrupt",
             });
             let _ = self
@@ -58,13 +61,36 @@ impl PlatformLifecycleContributor {
                 .append_platform_lifecycle_event(PlatformLifecycleEvent {
                     kernel_thread_id: thread_id,
                     turn_id: turn_id.to_string(),
-                    item_id: Some(call_id.clone()),
-                    event_key: format!("tool-result/{turn_id}/{call_id}"),
+                    item_id: Some(call.call_id.clone()),
+                    event_key: format!("tool-result/{turn_id}/{}", call.call_id),
                     item_type: "tool_result".to_string(),
-                    status: "side_effect_unknown".to_string(),
+                    status: call.result_status.to_string(),
                     payload,
                 })
                 .await;
+            if let Some(identity) = &identity {
+                let data = json!({
+                    "run_id": turn_id,
+                    "session_id": identity.session_id,
+                    "thread_id": identity.runtime_thread_id,
+                    "tool_call_id": call.call_id.clone(),
+                    "status": call.result_status,
+                    "success": false,
+                    "detail": call.detail,
+                    "recovery": "runtime_restart_or_interrupt",
+                });
+                for event_type in ["tool_call_result", "tool_call_end"] {
+                    let event = crate::AssistantTurnEventV1::new(event_type, data.clone());
+                    let event_key = format!(
+                        "compat/recovery/{}/{}/{}",
+                        turn_id, call.call_id, event_type
+                    );
+                    let _ = self
+                        .store
+                        .append_v1_event(thread_id, uuid::Uuid::now_v7(), &event_key, &event)
+                        .await;
+                }
+            }
         }
     }
 
@@ -79,29 +105,182 @@ impl PlatformLifecycleContributor {
                     .to_string(),
             })
     }
+
+    /// Dynamic capabilities have their own effect-aware lifecycle in the
+    /// Runtime HTTP broker. The upstream generic hook sees every dynamic tool
+    /// as read-only and would otherwise write conflicting receipts before the
+    /// broker can request approval. Query the immutable turn snapshot so each
+    /// call has exactly one lifecycle owner.
+    async fn is_dynamic_capability(
+        &self,
+        thread_id: ThreadId,
+        turn_id: &str,
+        tool_name: &str,
+    ) -> bool {
+        let Ok(turn_id) = uuid::Uuid::parse_str(turn_id) else {
+            return false;
+        };
+        let Ok(thread_id) = uuid::Uuid::parse_str(&thread_id.to_string()) else {
+            return false;
+        };
+        sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                  FROM assistant_runtime_snapshots AS snapshot
+                  CROSS JOIN LATERAL jsonb_array_elements(
+                      COALESCE(snapshot.snapshot->'readonly_capabilities'->'tools', '[]'::jsonb)
+                      || COALESCE(snapshot.snapshot->'readonly_capabilities'->'mcp', '[]'::jsonb)
+                      || COALESCE(snapshot.snapshot->'readonly_capabilities'->'deferred', '[]'::jsonb)
+                      || COALESCE(snapshot.snapshot->'readonly_capabilities'->'attachment_tools', '[]'::jsonb)
+                  ) AS descriptor
+                 WHERE snapshot.run_id = $1
+                   AND snapshot.runtime_thread_id = $2
+                   AND descriptor->>'name' = $3
+            )
+            "#,
+        )
+        .bind(turn_id)
+        .bind(thread_id)
+        .bind(tool_name)
+        .fetch_one(&self.store.pool)
+        .await
+        .unwrap_or(false)
+    }
 }
 
-/// Reconstructs the calls that have a durable dispatch receipt but no durable
-/// terminal result. This is intentionally pure so a Runtime restart and a
-/// live interrupt use the same recovery decision.
-pub(crate) fn unclosed_tool_call_ids(events: &[Value]) -> Vec<String> {
-    let mut started = std::collections::BTreeSet::new();
-    let mut finished = std::collections::BTreeSet::new();
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RecoveredToolCall {
+    pub(crate) call_id: String,
+    pub(crate) result_status: &'static str,
+    pub(crate) detail: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PersistedPhase {
+    Published,
+    AwaitingApproval,
+    Dispatched,
+    Terminal,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PersistedEffect {
+    Read,
+    Write,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PersistedCall {
+    phase: PersistedPhase,
+    effect: PersistedEffect,
+}
+
+fn persisted_effect(event: &Value) -> Option<PersistedEffect> {
+    match event
+        .get("effect")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("read" | "readonly" | "read_only") => Some(PersistedEffect::Read),
+        Some("write") => Some(PersistedEffect::Write),
+        Some("unknown") => Some(PersistedEffect::Unknown),
+        _ => None,
+    }
+}
+
+fn persisted_calls(events: &[Value]) -> BTreeMap<String, PersistedCall> {
+    let mut calls = BTreeMap::<String, PersistedCall>::new();
     for event in events {
         let Some(call_id) = event.get("tool_call_id").and_then(Value::as_str) else {
             continue;
         };
-        match event.get("lifecycle").and_then(Value::as_str) {
-            Some("dispatched") => {
-                started.insert(call_id.to_string());
+        let lifecycle = event
+            .get("lifecycle")
+            .and_then(Value::as_str)
+            .or_else(|| event.get("dispatch_state").and_then(Value::as_str));
+        let phase = match lifecycle {
+            Some("published") => PersistedPhase::Published,
+            Some("awaiting_approval") => PersistedPhase::AwaitingApproval,
+            Some("dispatched") => PersistedPhase::Dispatched,
+            Some("terminal") => PersistedPhase::Terminal,
+            _ => continue,
+        };
+        let effect = persisted_effect(event).unwrap_or(PersistedEffect::Unknown);
+        let current = calls
+            .entry(call_id.to_string())
+            .or_insert(PersistedCall { phase, effect });
+        if current.phase != PersistedPhase::Terminal {
+            current.phase = phase;
+            if persisted_effect(event).is_some() {
+                current.effect = effect;
             }
-            Some("terminal") => {
-                finished.insert(call_id.to_string());
-            }
-            _ => {}
         }
     }
-    started.difference(&finished).cloned().collect()
+    calls
+}
+
+/// Reconstructs every published tool call that lacks one durable terminal
+/// result. This is intentionally pure so Runtime restart, live interrupt, and
+/// terminal admission apply the same effect-aware recovery decision.
+pub(crate) fn unclosed_tool_calls(events: &[Value]) -> Vec<RecoveredToolCall> {
+    persisted_calls(events)
+        .into_iter()
+        .filter_map(|(call_id, call)| {
+            let (result_status, detail) = match (call.phase, call.effect) {
+                (PersistedPhase::Terminal, _) => return None,
+                (PersistedPhase::Published | PersistedPhase::AwaitingApproval, _) => {
+                    ("cancelled", "not_dispatched")
+                }
+                (PersistedPhase::Dispatched, PersistedEffect::Read) => {
+                    ("timeout", "dispatch_interrupted")
+                }
+                (PersistedPhase::Dispatched, PersistedEffect::Write | PersistedEffect::Unknown) => {
+                    ("side_effect_unknown", "dispatch_effect_unknown")
+                }
+            };
+            Some(RecoveredToolCall {
+                call_id,
+                result_status,
+                detail,
+            })
+        })
+        .collect()
+}
+
+fn terminal_outcome(
+    outcome: ToolCallOutcome,
+    persisted: Option<PersistedCall>,
+) -> (&'static str, &'static str) {
+    match outcome {
+        ToolCallOutcome::Completed { success: true } => ("succeeded", "completed"),
+        ToolCallOutcome::Completed { success: false } => ("failed", "completed_failed"),
+        ToolCallOutcome::Blocked => ("cancelled", "blocked_before_handler"),
+        ToolCallOutcome::Failed {
+            handler_executed: true,
+        } if persisted
+            .as_ref()
+            .is_some_and(|call| call.effect == PersistedEffect::Read) =>
+        {
+            ("failed", "read_handler_failed")
+        }
+        ToolCallOutcome::Failed {
+            handler_executed: true,
+        } => ("side_effect_unknown", "handler_failed_after_dispatch"),
+        ToolCallOutcome::Failed {
+            handler_executed: false,
+        } => ("failed", "handler_not_executed"),
+        ToolCallOutcome::Aborted
+            if persisted.as_ref().is_some_and(|call| {
+                call.phase == PersistedPhase::Dispatched && call.effect != PersistedEffect::Read
+            }) =>
+        {
+            ("side_effect_unknown", "dispatch_interrupted")
+        }
+        ToolCallOutcome::Aborted => ("cancelled", "aborted"),
+    }
 }
 
 fn command_argument(payload: &ToolPayload) -> Option<String> {
@@ -117,8 +296,11 @@ fn is_internal_agent_control_tool(tool_name: &str) -> bool {
     let unnamespaced = matches!(
         tool_name,
         "spawn_agent"
-            | "send_input"
+            | "spawn_subagent"
+            | "steer"
             | "wait"
+            | "interrupt"
+            | "send_input"
             | "close_agent"
             | "resume_agent"
             | "send_message"
@@ -127,7 +309,6 @@ fn is_internal_agent_control_tool(tool_name: &str) -> bool {
             | "list_agents"
             | "interrupt_agent"
             | "update_plan"
-            | "skillsread"
     );
     let collaboration_v2 = matches!(
         tool_name,
@@ -156,8 +337,8 @@ impl ThreadLifecycleContributor<Config> for PlatformLifecycleContributor {
                 return;
             };
             // A process kill can happen before the previous turn's abort hook
-            // runs. Revisit every durable turn receipt on resume and close any
-            // dispatched call that lacks a result as side_effect_unknown.
+            // runs. Revisit every durable turn receipt on resume and close
+            // every published call with the phase/effect-specific terminal.
             let Ok(turn_ids) = self.store.read_platform_lifecycle_turn_ids(thread_id).await else {
                 return;
             };
@@ -175,6 +356,40 @@ impl ToolLifecycleContributor for PlatformLifecycleContributor {
     ) -> codex_extension_api::ToolDispatchFuture<'a> {
         Box::pin(async move {
             let tool_name = input.tool_name.to_string();
+            let mut digest = Sha256::new();
+            digest.update(input.payload.log_payload().as_bytes());
+            let arguments_sha256 = format!("{:x}", digest.finalize());
+            let thread_id = ThreadId::from_string(input.thread_store.level_id()).map_err(|_| {
+                ToolDispatchError {
+                    code: "AI_PLATFORM_AGENT_RUNTIME_SCOPE_INVALID".to_string(),
+                    message: "tool scope is invalid".to_string(),
+                }
+            })?;
+            if self
+                .is_dynamic_capability(thread_id, input.turn_id, &tool_name)
+                .await
+            {
+                return Ok(());
+            }
+            self.append(PlatformLifecycleEvent {
+                kernel_thread_id: thread_id,
+                turn_id: input.turn_id.to_string(),
+                item_id: Some(input.call_id.to_string()),
+                event_key: format!("tool-use/{}/{}", input.turn_id, input.call_id),
+                item_type: "tool_use".to_string(),
+                status: "published".to_string(),
+                payload: json!({
+                    "schema_version": "agent-runtime-tool-lifecycle/v1",
+                    "turn_id": input.turn_id,
+                    "tool_call_id": input.call_id,
+                    "tool_name": tool_name,
+                    "arguments_sha256": arguments_sha256,
+                    "lifecycle": "published",
+                    "dispatch_state": "published",
+                    "effect": format!("{:?}", input.effect),
+                }),
+            })
+            .await?;
             if matches!(input.effect, ToolEffect::Write | ToolEffect::Unknown)
                 && !is_internal_agent_control_tool(&tool_name)
             {
@@ -183,13 +398,6 @@ impl ToolLifecycleContributor for PlatformLifecycleContributor {
                         code: "AI_PLATFORM_AGENT_RUNTIME_APPROVAL_REQUIRED".to_string(),
                         message: "write-capable tool requires an approved runtime action"
                             .to_string(),
-                    })?;
-                let thread_id =
-                    ThreadId::from_string(input.thread_store.level_id()).map_err(|_| {
-                        ToolDispatchError {
-                            code: "AI_PLATFORM_AGENT_RUNTIME_SCOPE_INVALID".to_string(),
-                            message: "tool scope is invalid".to_string(),
-                        }
                     })?;
                 let identity = self
                     .store
@@ -216,7 +424,7 @@ impl ToolLifecycleContributor for PlatformLifecycleContributor {
                     None
                 };
                 let claimed = sqlx::query(
-                    "UPDATE assistant_tool_approvals SET status='consumed', approved_at=COALESCE(approved_at, NOW()) WHERE approval_id IN (SELECT approval_id FROM assistant_tool_approvals WHERE run_id=$1 AND tenant_id=$2 AND user_id=$3 AND session_id=$4 AND tool_name=$5 AND arguments->>'itemId'=$6 AND ($7::text IS NULL OR arguments->>'command'=$7) AND status='approved' AND expires_at > NOW() ORDER BY approved_at NULLS LAST, approval_id LIMIT 1) AND status='approved' RETURNING approval_id",
+                    "UPDATE assistant_tool_approvals SET status='consumed', approved_at=COALESCE(approved_at, NOW()) WHERE approval_id IN (SELECT approval_id FROM assistant_tool_approvals WHERE run_id=$1 AND tenant_id=$2 AND user_id=$3 AND session_id=$4 AND tool_call_id=$6 AND tool_name=$5 AND arguments->>'itemId'=$6 AND ($7::text IS NULL OR arguments->>'command'=$7) AND status='approved' AND expires_at > NOW() ORDER BY approved_at NULLS LAST, approval_id LIMIT 1) AND status='approved' RETURNING approval_id",
                 )
                 .bind(run_id)
                 .bind(identity.tenant_id)
@@ -239,20 +447,11 @@ impl ToolLifecycleContributor for PlatformLifecycleContributor {
                     });
                 }
             }
-            let mut digest = Sha256::new();
-            digest.update(input.payload.log_payload().as_bytes());
-            let arguments_sha256 = format!("{:x}", digest.finalize());
-            let thread_id = ThreadId::from_string(input.thread_store.level_id()).map_err(|_| {
-                ToolDispatchError {
-                    code: "AI_PLATFORM_AGENT_RUNTIME_SCOPE_INVALID".to_string(),
-                    message: "tool scope is invalid".to_string(),
-                }
-            })?;
             self.append(PlatformLifecycleEvent {
                 kernel_thread_id: thread_id,
                 turn_id: input.turn_id.to_string(),
                 item_id: Some(input.call_id.to_string()),
-                event_key: format!("tool-use/{}/{}", input.turn_id, input.call_id),
+                event_key: format!("tool-dispatch/{}/{}", input.turn_id, input.call_id),
                 item_type: "tool_use".to_string(),
                 status: "dispatched".to_string(),
                 payload: json!({
@@ -276,18 +475,30 @@ impl ToolLifecycleContributor for PlatformLifecycleContributor {
 
     fn on_tool_finish<'a>(&'a self, input: ToolFinishInput<'a>) -> ToolLifecycleFuture<'a> {
         Box::pin(async move {
-            let (result_status, detail) = match input.outcome {
-                ToolCallOutcome::Completed { success: true } => ("succeeded", "completed"),
-                ToolCallOutcome::Completed { success: false } => ("failed", "completed_failed"),
-                ToolCallOutcome::Blocked => ("cancelled", "blocked_before_handler"),
-                ToolCallOutcome::Failed {
-                    handler_executed: true,
-                } => ("side_effect_unknown", "handler_failed_after_dispatch"),
-                ToolCallOutcome::Failed {
-                    handler_executed: false,
-                } => ("failed", "handler_not_executed"),
-                ToolCallOutcome::Aborted => ("cancelled", "aborted"),
+            let Ok(thread_id) = ThreadId::from_string(input.thread_store.level_id()) else {
+                return;
             };
+            if self
+                .is_dynamic_capability(thread_id, input.turn_id, &input.tool_name.to_string())
+                .await
+            {
+                return;
+            }
+            let persisted = if matches!(
+                input.outcome,
+                ToolCallOutcome::Failed {
+                    handler_executed: true
+                } | ToolCallOutcome::Aborted
+            ) {
+                self.store
+                    .read_platform_lifecycle_events(thread_id, input.turn_id)
+                    .await
+                    .ok()
+                    .and_then(|events| persisted_calls(&events).get(input.call_id).copied())
+            } else {
+                None
+            };
+            let (result_status, detail) = terminal_outcome(input.outcome, persisted);
             let payload = json!({
                 "schema_version": "agent-runtime-tool-lifecycle/v1",
                 "turn_id": input.turn_id,
@@ -297,9 +508,6 @@ impl ToolLifecycleContributor for PlatformLifecycleContributor {
                 "result_status": result_status,
                 "detail": detail,
             });
-            let Ok(thread_id) = ThreadId::from_string(input.thread_store.level_id()) else {
-                return;
-            };
             let _ = self
                 .append(PlatformLifecycleEvent {
                     kernel_thread_id: thread_id,
@@ -339,21 +547,102 @@ impl TurnLifecycleContributor for PlatformLifecycleContributor {
 
 #[cfg(test)]
 mod tests {
+    use super::PersistedEffect;
+    use super::PersistedPhase;
+    use super::RecoveredToolCall;
     use super::command_argument;
     use super::is_internal_agent_control_tool;
-    use super::unclosed_tool_call_ids;
+    use super::persisted_calls;
+    use super::terminal_outcome;
+    use super::unclosed_tool_calls;
+    use codex_extension_api::ToolCallOutcome;
     use codex_tools::ToolPayload;
     use serde_json::json;
 
     #[test]
-    fn restart_recovery_detects_only_unpaired_dispatched_calls() {
+    fn restart_recovery_classifies_every_unpaired_published_call() {
         let events = vec![
-            json!({"tool_call_id":"read-1", "lifecycle":"dispatched"}),
+            json!({"tool_call_id":"read-1", "lifecycle":"published", "effect":"read"}),
+            json!({"tool_call_id":"read-1", "lifecycle":"dispatched", "effect":"read"}),
             json!({"tool_call_id":"read-1", "lifecycle":"terminal"}),
-            json!({"tool_call_id":"write-1", "lifecycle":"dispatched"}),
-            json!({"tool_call_id":"pending", "lifecycle":"published"}),
+            json!({"tool_call_id":"write-1", "lifecycle":"published", "effect":"write"}),
+            json!({"tool_call_id":"write-1", "dispatch_state":"dispatched", "effect":"write"}),
+            json!({"tool_call_id":"pending", "lifecycle":"published", "effect":"read"}),
+            json!({"tool_call_id":"approval", "lifecycle":"awaiting_approval", "effect":"unknown"}),
+            json!({"tool_call_id":"read-2", "lifecycle":"dispatched", "effect":"Read"}),
         ];
-        assert_eq!(unclosed_tool_call_ids(&events), vec!["write-1"]);
+        assert_eq!(
+            unclosed_tool_calls(&events),
+            vec![
+                RecoveredToolCall {
+                    call_id: "approval".to_string(),
+                    result_status: "cancelled",
+                    detail: "not_dispatched",
+                },
+                RecoveredToolCall {
+                    call_id: "pending".to_string(),
+                    result_status: "cancelled",
+                    detail: "not_dispatched",
+                },
+                RecoveredToolCall {
+                    call_id: "read-2".to_string(),
+                    result_status: "timeout",
+                    detail: "dispatch_interrupted",
+                },
+                RecoveredToolCall {
+                    call_id: "write-1".to_string(),
+                    result_status: "side_effect_unknown",
+                    detail: "dispatch_effect_unknown",
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn persisted_call_reducer_preserves_effect_and_terminal_fence() {
+        let calls = persisted_calls(&[
+            json!({"tool_call_id":"read", "lifecycle":"published", "effect":"ReadOnly"}),
+            json!({"tool_call_id":"read", "lifecycle":"dispatched"}),
+            json!({"tool_call_id":"read", "lifecycle":"terminal"}),
+            json!({"tool_call_id":"read", "lifecycle":"dispatched", "effect":"write"}),
+        ]);
+        let read = calls.get("read").expect("persisted call");
+        assert_eq!(read.phase, PersistedPhase::Terminal);
+        assert_eq!(read.effect, PersistedEffect::Read);
+    }
+
+    #[test]
+    fn abnormal_terminal_status_respects_dispatch_effect() {
+        let read = Some(super::PersistedCall {
+            phase: PersistedPhase::Dispatched,
+            effect: PersistedEffect::Read,
+        });
+        let write = Some(super::PersistedCall {
+            phase: PersistedPhase::Dispatched,
+            effect: PersistedEffect::Write,
+        });
+        assert_eq!(
+            terminal_outcome(
+                ToolCallOutcome::Failed {
+                    handler_executed: true,
+                },
+                read,
+            ),
+            ("failed", "read_handler_failed")
+        );
+        assert_eq!(
+            terminal_outcome(ToolCallOutcome::Aborted, write),
+            ("side_effect_unknown", "dispatch_interrupted")
+        );
+        assert_eq!(
+            terminal_outcome(
+                ToolCallOutcome::Failed {
+                    handler_executed: false,
+                },
+                None,
+            ),
+            ("failed", "handler_not_executed")
+        );
     }
 
     #[test]
@@ -375,16 +664,24 @@ mod tests {
     fn native_agent_control_tools_do_not_require_external_action_approval() {
         for name in [
             "spawn_agent",
+            "spawn_subagent",
+            "steer",
+            "wait",
+            "interrupt",
             "collaborationspawn_agent",
             "send_message",
             "wait_agent",
             "interrupt_agent",
             "update_plan",
-            "skillsread",
         ] {
             assert!(is_internal_agent_control_tool(name));
         }
-        for name in ["exec_command", "apply_patch", "unknown_external_tool"] {
+        for name in [
+            "exec_command",
+            "apply_patch",
+            "skillsread",
+            "unknown_external_tool",
+        ] {
             assert!(!is_internal_agent_control_tool(name));
         }
     }

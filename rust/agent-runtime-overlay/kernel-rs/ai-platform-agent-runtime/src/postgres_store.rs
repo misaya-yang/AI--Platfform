@@ -77,6 +77,58 @@ struct ThreadProjection {
 }
 
 impl PostgresThreadStore {
+    /// Tombstone the root Runtime thread for one platform session while
+    /// retaining its append-only item log.  Session deletion is deliberately
+    /// idempotent: a missing or already-deleted thread is reported as false.
+    pub async fn cleanup_session(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        session_id: &str,
+    ) -> ThreadStoreResult<bool> {
+        let mut transaction = self.pool.begin().await.map_err(store_error)?;
+        let runtime_thread_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT runtime_thread_id FROM assistant_runtime_threads \
+             WHERE tenant_id=$1 AND user_id=$2 AND session_id=$3 \
+               AND deleted_at IS NULL ORDER BY created_at LIMIT 1 FOR UPDATE",
+        )
+        .bind(tenant_id)
+        .bind(user_id)
+        .bind(session_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(store_error)?;
+        let Some(runtime_thread_id) = runtime_thread_id else {
+            transaction.commit().await.map_err(store_error)?;
+            return Ok(false);
+        };
+
+        sqlx::query(
+            "UPDATE assistant_runtime_thread_projections \
+                SET deleted_at=NOW(), updated_at=NOW() \
+              WHERE kernel_thread_id=$1 AND deleted_at IS NULL",
+        )
+        .bind(runtime_thread_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(store_error)?;
+        let result = sqlx::query(
+            "UPDATE assistant_runtime_threads \
+                SET deleted_at=NOW(), updated_at=NOW() \
+              WHERE runtime_thread_id=$1 AND tenant_id=$2 AND user_id=$3 \
+                AND session_id=$4 AND deleted_at IS NULL",
+        )
+        .bind(runtime_thread_id)
+        .bind(tenant_id)
+        .bind(user_id)
+        .bind(session_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(store_error)?;
+        transaction.commit().await.map_err(store_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
     async fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreResult<()> {
         let kernel_thread_id = thread_uuid(params.thread_id)?;
         let (scope, relation_kind) = if let Some(parent_thread_id) = params.parent_thread_id {

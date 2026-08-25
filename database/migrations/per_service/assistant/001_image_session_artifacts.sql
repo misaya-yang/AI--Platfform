@@ -1,6 +1,6 @@
 -- =============================================================================
 -- Migration: assistant/001_image_session_artifacts
--- Owner    : assistant-service
+-- Owner    : gateway / capability-worker
 -- Purpose  : First-class multi-turn image generation primitives:
 --            * artifact variants (raw / display / thumbnail) + parent linkage
 --            * image_sessions  — focused per-(owner, session) state mirror
@@ -53,7 +53,7 @@ COMMENT ON COLUMN assistant.artifacts.variant IS
 COMMENT ON COLUMN assistant.artifacts.parent_artifact_id IS
     'For variant rows (display/thumbnail) points to the raw artifact_id; NULL for raw';
 COMMENT ON COLUMN assistant.artifacts.owner_scope IS
-    'Denormalized identity hash: f"{user_id}|{app_tenant_id}|{app_user_id}" or fallback to user_id';
+    'Opaque authenticated owner scope; never derive it from unverified request fields';
 
 -- ---------------------------------------------------------------------------
 -- 2. image_sessions: focused per-(owner, session) state mirror

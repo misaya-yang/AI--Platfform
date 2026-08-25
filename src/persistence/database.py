@@ -2,7 +2,7 @@
 
 The 7K-LOC asyncpg-backed concrete now lives at
 ``packages/ai-gateway-core/src/ai_gateway_core/persistence/database.py``
-so both the gateway and the assistant-service can reach it without the
+so platform services can reach it without the
 AS container needing ``COPY src/`` in its Dockerfile.
 
 This file is intentionally a thin re-export so existing import sites in

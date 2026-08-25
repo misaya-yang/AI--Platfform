@@ -12,6 +12,7 @@ use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::TurnStatus;
+use codex_app_server_protocol::WebSearchItem;
 use serde_json::json;
 use std::collections::HashMap;
 
@@ -110,6 +111,30 @@ fn dynamic_tool_item_projects_one_start_and_one_terminal_pair() {
 }
 
 #[test]
+fn hosted_web_search_completion_projects_success_without_a_status_field() {
+    let completed = project_server_notification(
+        &ServerNotification::ItemCompleted(ItemCompletedNotification {
+            item: ThreadItem::WebSearch(WebSearchItem {
+                id: "search-a".to_string(),
+                query: "OpenAI Responses API".to_string(),
+                action: None,
+                results: None,
+            }),
+            thread_id: "thread-a".to_string(),
+            turn_id: "turn-a".to_string(),
+            completed_at_ms: 2,
+        }),
+        &context(),
+    );
+
+    assert_eq!(completed.len(), 2);
+    assert_eq!(completed[0].event_type, "tool_call_result");
+    assert_eq!(completed[0].data["tool_name"], "web_search");
+    assert_eq!(completed[0].data["status"], "completed");
+    assert_eq!(completed[0].data["success"], true);
+}
+
+#[test]
 fn collaboration_item_projects_stable_child_lifecycle() {
     let item = ThreadItem::CollabAgentToolCall {
         id: "collab-call".to_string(),
@@ -124,7 +149,7 @@ fn collaboration_item_projects_stable_child_lifecycle() {
     };
     let started = project_server_notification(
         &ServerNotification::ItemStarted(ItemStartedNotification {
-            item: item.clone(),
+            item,
             thread_id: "thread-a".to_string(),
             turn_id: "turn-a".to_string(),
             started_at_ms: 1,

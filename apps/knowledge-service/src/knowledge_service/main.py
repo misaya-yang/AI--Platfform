@@ -32,6 +32,7 @@ from .config import Settings
 # up calling print() — which we redirect via stdlib by reconfiguring it
 # to use the standard logger factory).
 
+
 def configure_logging(level: str = "INFO") -> None:
     """Configure JSON/simple logging via the shared core machinery.
 
@@ -42,9 +43,7 @@ def configure_logging(level: str = "INFO") -> None:
     log_format = os.environ.get("LOG_FORMAT")
     if not log_format:
         log_format = (
-            "json"
-            if os.environ.get("ENVIRONMENT", "").lower() == "production"
-            else "simple"
+            "json" if os.environ.get("ENVIRONMENT", "").lower() == "production" else "simple"
         )
 
     configure_structured_logging(
@@ -78,6 +77,7 @@ logger = structlog.get_logger()
 # ---------------------------------------------------------------------------
 # Qdrant client helper
 # ---------------------------------------------------------------------------
+
 
 async def _init_qdrant(settings: Settings) -> Any:
     """Create and verify Qdrant async client connection."""
@@ -130,13 +130,34 @@ async def _database_is_ready(database: Any, *, timeout_seconds: float = 1.0) -> 
 
 OPENAPI_TAGS = [
     {"name": "Health", "description": "Liveness and readiness probes for container orchestration."},
-    {"name": "Datasets", "description": "Dataset CRUD — create, list, update, delete knowledge bases with configurable embedding and chunking."},
-    {"name": "Documents", "description": "Document management — upload (PDF/DOCX/TXT/HTML/images), text creation, batch operations, versioning, and status control."},
-    {"name": "Segments", "description": "Segment (chunk) management — list, create, update, enable/disable individual text segments within documents."},
-    {"name": "Retrieval", "description": "Vector similarity search and hybrid RAG retrieval — dense, BM25, hybrid (RRF/weighted), with optional reranking and MMR diversity."},
-    {"name": "QA", "description": "Question answering — RAG retrieval + LLM generation, with streaming and batch evaluation support."},
-    {"name": "Configuration", "description": "Dataset configuration — chunking strategy, retrieval parameters, embedding settings, and statistics."},
-    {"name": "Maintenance", "description": "Maintenance operations — deduplication, force-complete stuck documents, worker status monitoring."},
+    {
+        "name": "Datasets",
+        "description": "Dataset CRUD — create, list, update, delete knowledge bases with configurable embedding and chunking.",
+    },
+    {
+        "name": "Documents",
+        "description": "Document management — upload (PDF/DOCX/TXT/HTML/images), text creation, batch operations, versioning, and status control.",
+    },
+    {
+        "name": "Segments",
+        "description": "Segment (chunk) management — list, create, update, enable/disable individual text segments within documents.",
+    },
+    {
+        "name": "Retrieval",
+        "description": "Vector similarity search and hybrid RAG retrieval — dense, BM25, hybrid (RRF/weighted), with optional reranking and MMR diversity.",
+    },
+    {
+        "name": "QA",
+        "description": "Question answering — RAG retrieval + LLM generation, with streaming and batch evaluation support.",
+    },
+    {
+        "name": "Configuration",
+        "description": "Dataset configuration — chunking strategy, retrieval parameters, embedding settings, and statistics.",
+    },
+    {
+        "name": "Maintenance",
+        "description": "Maintenance operations — deduplication, force-complete stuck documents, worker status monitoring.",
+    },
     {"name": "Worker", "description": "Background ingestion worker status and queue monitoring."},
 ]
 
@@ -159,6 +180,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # connection is acquired. Idempotent across restarts. Endpoint
         # resolved from OTEL_EXPORTER_OTLP_ENDPOINT; unset → no-op spans.
         from ai_gateway_core.tracing import init_tracing
+
         init_tracing("knowledge-service")
 
         # Graceful drain — flip ``DRAIN`` on SIGTERM/SIGINT so DrainMiddleware
@@ -166,6 +188,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # ``yield``) we await ``DRAIN.wait_drained`` so in-flight retrieval /
         # ingestion requests get to finish before the worker + DB pool close.
         from ai_gateway_core.proxy.drain import DRAIN, install_signal_handlers
+
         install_signal_handlers(asyncio.get_running_loop())
 
         # --- startup ---
@@ -201,68 +224,99 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # Create a compatibility wrapper that maps KB Service flat config
             class _SettingsCompat:
                 """Adapts KB Service Settings to gateway Settings shape."""
+
                 def __init__(self, s):
                     self._s = s
                     embed = s.embeddings
-                    self.knowledge = type("K", (), {
-                        "enabled": True,
-                        "qdrant": type("Q", (), {
+                    self.knowledge = type(
+                        "K",
+                        (),
+                        {
                             "enabled": True,
-                            "url": s.qdrant.url,
-                            "api_key": s.qdrant.api_key,
-                            "timeout_seconds": s.qdrant.timeout_seconds,
-                            "interactive_deadline_seconds": (
-                                s.qdrant_interactive_deadline_seconds
-                            ),
-                            "prefer_grpc": s.qdrant.prefer_grpc,
-                            "max_retries": getattr(s.qdrant, "max_retries", 3),
-                            "retry_base_delay": getattr(s.qdrant, "retry_base_delay", 1.0),
-                            "bm25_v2_enabled": getattr(s.qdrant, "bm25_v2_enabled", False),
-                            "bm25_v2_capability_ttl_seconds": getattr(
-                                s.qdrant, "bm25_v2_capability_ttl_seconds", 300.0
-                            ),
-                            "bm25_v2_readiness_ttl_seconds": getattr(
-                                s.qdrant, "bm25_v2_readiness_ttl_seconds", 0.0
-                            ),
-                        })(),
-                        "dashscope": type("D", (), {
-                            "api_key": embed.dashscope_api_key or (embed.api_key if embed.provider == "dashscope" else ""),
-                            "model_name": embed.model if embed.provider == "dashscope" else "",
-                        })(),
-                        "gemini": type("G", (), {
-                            "api_key": embed.google_api_key or (embed.api_key if embed.provider == "gemini" else ""),
-                            "model_name": embed.model if embed.provider == "gemini" else "",
-                        })(),
-                        "siliconflow": type("SF", (), {
-                            "api_key": embed.siliconflow_api_key or (embed.api_key if embed.provider == "siliconflow" else ""),
-                            "base_url": embed.siliconflow_base_url or embed.base_url or "",
-                            "model_name": embed.model if embed.provider == "siliconflow" else "",
-                        })(),
-                        "ocr_enabled": s.ocr.enabled,
-                        "ocr_strategy": s.ocr.strategy,
-                        "worker_concurrency": s.processing.worker_concurrency,
-                        "document_worker_concurrency": s.processing.document_worker_concurrency,
-                        "retrieval_query_max_concurrency": s.processing.retrieval_query_max_concurrency,
-                        "retrieval_cache_ttl_seconds": s.processing.retrieval_cache_ttl_seconds,
-                        # Embedding config
-                        "text_embedding_dimension": embed.dimension,
-                        "text_embedding_batch_size": embed.batch_size,
-                        "text_embedding_max_concurrent": embed.max_concurrent,
-                        "text_embedding_config": {
-                            "provider": embed.provider,
-                            "model": embed.model,
-                            "api_key": embed.api_key,
-                            "dimension": embed.dimension,
-                            "base_url": embed.base_url or "",
+                            "qdrant": type(
+                                "Q",
+                                (),
+                                {
+                                    "enabled": True,
+                                    "url": s.qdrant.url,
+                                    "api_key": s.qdrant.api_key,
+                                    "timeout_seconds": s.qdrant.timeout_seconds,
+                                    "interactive_deadline_seconds": (
+                                        s.qdrant_interactive_deadline_seconds
+                                    ),
+                                    "prefer_grpc": s.qdrant.prefer_grpc,
+                                    "max_retries": getattr(s.qdrant, "max_retries", 3),
+                                    "retry_base_delay": getattr(s.qdrant, "retry_base_delay", 1.0),
+                                    "bm25_v2_enabled": getattr(s.qdrant, "bm25_v2_enabled", False),
+                                    "bm25_v2_capability_ttl_seconds": getattr(
+                                        s.qdrant, "bm25_v2_capability_ttl_seconds", 300.0
+                                    ),
+                                    "bm25_v2_readiness_ttl_seconds": getattr(
+                                        s.qdrant, "bm25_v2_readiness_ttl_seconds", 0.0
+                                    ),
+                                },
+                            )(),
+                            "dashscope": type(
+                                "D",
+                                (),
+                                {
+                                    "api_key": embed.dashscope_api_key
+                                    or (embed.api_key if embed.provider == "dashscope" else ""),
+                                    "model_name": embed.model
+                                    if embed.provider == "dashscope"
+                                    else "",
+                                },
+                            )(),
+                            "gemini": type(
+                                "G",
+                                (),
+                                {
+                                    "api_key": embed.google_api_key
+                                    or (embed.api_key if embed.provider == "gemini" else ""),
+                                    "model_name": embed.model if embed.provider == "gemini" else "",
+                                },
+                            )(),
+                            "siliconflow": type(
+                                "SF",
+                                (),
+                                {
+                                    "api_key": embed.siliconflow_api_key
+                                    or (embed.api_key if embed.provider == "siliconflow" else ""),
+                                    "base_url": embed.siliconflow_base_url or embed.base_url or "",
+                                    "model_name": embed.model
+                                    if embed.provider == "siliconflow"
+                                    else "",
+                                },
+                            )(),
+                            "ocr_enabled": s.ocr.enabled,
+                            "ocr_strategy": s.ocr.strategy,
+                            "worker_concurrency": s.processing.worker_concurrency,
+                            "document_worker_concurrency": s.processing.document_worker_concurrency,
+                            "retrieval_query_max_concurrency": s.processing.retrieval_query_max_concurrency,
+                            "retrieval_cache_ttl_seconds": s.processing.retrieval_cache_ttl_seconds,
+                            # Embedding config
+                            "text_embedding_dimension": embed.dimension,
+                            "text_embedding_batch_size": embed.batch_size,
+                            "text_embedding_max_concurrent": embed.max_concurrent,
+                            "text_embedding_config": {
+                                "provider": embed.provider,
+                                "model": embed.model,
+                                "api_key": embed.api_key,
+                                "dimension": embed.dimension,
+                                "base_url": embed.base_url or "",
+                            },
+                            "default_embedding_model": embed.model,
+                            "default_embedding_provider": embed.provider,
+                            # Multimodal (optional)
+                            "multimodal_embedding_model": getattr(
+                                s, "multimodal", type("M", (), {"model": ""})()
+                            ).model,
+                            "multimodal_embedding_max_concurrent": 5,
+                            # VLM
+                            "vlm_max_concurrent": getattr(s.ocr, "vlm_concurrency", 4),
                         },
-                        "default_embedding_model": embed.model,
-                        "default_embedding_provider": embed.provider,
-                        # Multimodal (optional)
-                        "multimodal_embedding_model": getattr(s, "multimodal", type("M", (), {"model": ""})()).model,
-                        "multimodal_embedding_max_concurrent": 5,
-                        # VLM
-                        "vlm_max_concurrent": getattr(s.ocr, "vlm_concurrency", 4),
-                    })()
+                    )()
+
                 def __getattr__(self, name):
                     return getattr(self._s, name)
 
@@ -281,6 +335,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     StorageBackend,
                     StorageConfig,
                 )
+
                 storage_cfg = resolved.storage
                 if storage_cfg.backend == "s3" and storage_cfg.s3.bucket:
                     sc = StorageConfig(
@@ -341,7 +396,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                 max_retries=3,
                             )
                     else:
-                        ocr_api_key = resolved.embeddings.api_key if ocr.vlm_provider == "gemini" else ocr.vlm_api_keys or resolved.embeddings.api_key
+                        ocr_api_key = (
+                            resolved.embeddings.api_key
+                            if ocr.vlm_provider == "gemini"
+                            else ocr.vlm_api_keys or resolved.embeddings.api_key
+                        )
                         if ocr_api_key:
                             vlm_ocr_service = VLMOCRService(
                                 api_key=ocr_api_key,
@@ -351,7 +410,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                 timeout_seconds=ocr.vlm_timeout_seconds,
                             )
                     if vlm_ocr_service:
-                        logger.info("vlm_ocr_initialized", provider=vlm_ocr_service.provider, model=vlm_ocr_service.model)
+                        logger.info(
+                            "vlm_ocr_initialized",
+                            provider=vlm_ocr_service.provider,
+                            model=vlm_ocr_service.model,
+                        )
                 except Exception as e:
                     logger.warning("vlm_ocr_init_failed", error=str(e))
 
@@ -359,6 +422,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             doc_detector = None
             try:
                 from .services.knowledge.document_detector import DocumentTypeDetector
+
                 doc_detector = DocumentTypeDetector()
                 logger.info("document_detector_initialized")
             except Exception as e:
@@ -474,8 +538,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     _origins = resolved.cors.allow_origins
     _credentials = "*" not in _origins
     if not _credentials:
-        logger.warning("cors_wildcard_with_credentials_disabled",
-                       hint="Set KNOWLEDGE_CORS__ALLOW_ORIGINS to explicit origins")
+        logger.warning(
+            "cors_wildcard_with_credentials_disabled",
+            hint="Set KNOWLEDGE_CORS__ALLOW_ORIGINS to explicit origins",
+        )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_origins,
@@ -490,15 +556,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # span sees ``request.state.request_id`` because RequestIDMiddleware
     # sits inside it (added after, executes first).
     from ai_gateway_core.tracing import OTelInboundMiddleware
+
     app.add_middleware(OTelInboundMiddleware)
 
     # Graceful drain — placed alongside ``RequestIDMiddleware`` (immediately
-    # below) for symmetry with assistant-service. ``DrainMiddleware`` excludes
+    # below) for symmetry with the Gateway. ``DrainMiddleware`` excludes
     # ``/health*`` + ``/metrics`` so probes still answer during drain (the LB
     # uses readiness flips to stop routing traffic). Starlette stacks
     # last-added → outermost; this position keeps drain checks inside the
     # CORS handler so OPTIONS preflight stays cheap.
     from ai_gateway_core.proxy import DrainMiddleware
+
     app.add_middleware(DrainMiddleware)
 
     # X-Request-Id middleware — bind incoming gateway request_id to
@@ -536,10 +604,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # knowledge-service directly. With this middleware enabled (and
     # ``allow_anonymous=false``) knowledge-service refuses such traffic.
     #
-    # Shares ``GATEWAY_ASSISTANT_SHARED_SECRET`` with assistant-service — a
-    # single rotated secret covers both gateway→microservice hops (simpler
-    # deployment; same trust boundary).
-    _gateway_secret_env = os.environ.get("GATEWAY_ASSISTANT_SHARED_SECRET", "").strip()
+    # Use the platform-wide internal token as the HMAC key for this private
+    # hop. The old Assistant-specific alias was removed with that service.
+    _gateway_secret_env = os.environ.get("AI_PLATFORM_INTERNAL_TOKEN", "").strip()
     from ai_gateway_core.auth.gateway_secret_middleware import (
         validate_gateway_auth_configuration,
     )
@@ -564,13 +631,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise RuntimeError("INTERNAL_AUTH_VERSION must be v2 for private service traffic")
         environment = os.environ.get("ENVIRONMENT", "").strip().lower()
         replay_backend = os.environ.get("INTERNAL_COMM_STATE_BACKEND", "redis").strip().lower()
-        if environment not in {"local", "dev", "development", "test", "testing"} and replay_backend != "redis":
-            raise RuntimeError("INTERNAL_COMM_STATE_BACKEND must be redis outside local development/test")
+        if (
+            environment not in {"local", "dev", "development", "test", "testing"}
+            and replay_backend != "redis"
+        ):
+            raise RuntimeError(
+                "INTERNAL_COMM_STATE_BACKEND must be redis outside local development/test"
+            )
         replay_store = InMemoryReplayStore()
         if replay_backend == "redis":
             redis_url = os.environ.get("INTERNAL_COMM_REDIS_URL", "").strip()
             if not redis_url:
-                if not os.environ.get("PYTEST_CURRENT_TEST") and environment not in {"local", "dev", "development", "test", "testing"}:
+                if not os.environ.get("PYTEST_CURRENT_TEST") and environment not in {
+                    "local",
+                    "dev",
+                    "development",
+                    "test",
+                    "testing",
+                }:
                     raise RuntimeError("Redis replay protection is configured without a URL")
             else:
                 replay_store = RedisReplayStore.from_url(redis_url)
@@ -583,6 +661,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 replay_store=replay_store,
             ),
             allow_anonymous=resolved.app.allow_anonymous,
+            separately_authenticated_prefixes=frozenset({"/internal/v2/capabilities/"}),
         )
         logger.info(
             "gateway_secret_middleware_active",
@@ -594,7 +673,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # a sibling container can impersonate any user. Refuse to
         # start in that configuration.
         raise RuntimeError(
-            "GATEWAY_ASSISTANT_SHARED_SECRET is unset AND "
+            "AI_PLATFORM_INTERNAL_TOKEN is unset AND "
             "KNOWLEDGE_APP__ALLOW_ANONYMOUS=false. This combination is a "
             "security hole: get_user_context trusts X-User-* headers with "
             "no HMAC check, so any sibling container can impersonate any "
@@ -650,9 +729,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # failures must abort application construction so the process cannot
     # become ready while serving only a reduced placeholder API.
     if resolved.runtime_role != "worker":
+        from .api.routes.capability_plane import router as capability_plane_router
         from .api.routes.eval import router as kb_eval_router
         from .api.routes.knowledge import router as full_knowledge_router
 
+        app.include_router(capability_plane_router)
         app.include_router(full_knowledge_router, prefix="/api/v1")
         app.include_router(kb_eval_router, prefix="/api/v1")
         logger.info("knowledge_routes_loaded", mode="full", endpoints=51)

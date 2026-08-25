@@ -1,5 +1,4 @@
-"""Shared ``ServiceProxy`` + ``CircuitBreaker`` used by the gateway's
-HTTP proxies to assistant-service and knowledge-service.
+"""Shared ``ServiceProxy`` + ``CircuitBreaker`` used by Gateway microservice proxies.
 
 Design reference: ``plans/SystemDesign-Assistant-Service-True-Extraction-Phase5-2026-04-23.md`` §5.1.
 
@@ -353,8 +352,8 @@ class ProxyError(Exception):
 
 @dataclass
 class ServiceProxyConfig:
-    name: str                                    # e.g. "assistant-service"
-    base_url: str                                 # e.g. "http://assistant-service:8093"
+    name: str                                    # e.g. "knowledge-service"
+    base_url: str                                 # e.g. "http://knowledge-service:8092"
     timeout: httpx.Timeout = field(
         default_factory=lambda: httpx.Timeout(
             connect=5.0, read=600.0, write=120.0, pool=30.0

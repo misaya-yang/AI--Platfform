@@ -1,11 +1,4 @@
-"""Shared LLM-chat model types used across gateway and assistant-service.
-
-Phase 5d extracted these out of ``assistant_service.core.models.model_registry``
-so downstream modules (quiz, skills, streaming writer, …) can depend on the
-dataclass without pulling in the full registry, and so gateway routes that
-reference the chat-message shape never need a compile-time dep on
-``assistant_service``.
-"""
+"""Shared LLM-chat model types used by Gateway and Agent Runtime adapters."""
 
 from .capabilities import (
     CHAT_COMPLETIONS_WIRE_PROTOCOL,

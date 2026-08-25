@@ -244,7 +244,8 @@ def _get_repository(request: Request) -> Any:
 def _get_runtime_cleanup_client(request: Request) -> AgentRuntimeCleanupClient:
     client = getattr(request.app.state, "agent_runtime_cleanup_client", None)
     if client is None:
-        client = AgentRuntimeCleanupClient()
+        database = getattr(request.app.state, "database", None)
+        client = AgentRuntimeCleanupClient(database=database)
         request.app.state.agent_runtime_cleanup_client = client
     return client
 

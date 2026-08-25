@@ -21,8 +21,6 @@
 #   make stop            停止所有服务
 #   make restart         重启所有服务
 #   make hot-update      热更新本地部署容器源码 (不 pip、不重建镜像)
-#   make code-executor-enable  启用可信本地代码沙箱
-#   make code-executor-test    实际执行代码与产物 smoke
 #
 #   make migrate         运行数据库迁移 (自动跳过已执行的)
 #   make migrate-init    首次初始化数据库 schema
@@ -55,13 +53,16 @@ export COMPOSE_PARALLEL_LIMIT
 
 # -- Quick Start --------------------------------------------------------------
 
-.PHONY: doctor harness-check agent-runtime-source-build-local agent-runtime-source-contract agent-runtime-build-local agent-runtime-contract agent-runtime-smoke agent-runtime-text-gate agent-runtime-single-kernel-gate agent-runtime-readonly-gate agent-runtime-write-gate agent-thread-store-contract sdk-sse-contract snapshot-gateway-openapi quickstart quickstart-build validate-config validate-example-config validate seed-demo seed-demo-apply
+.PHONY: doctor harness-check runtime-dependency-gate agent-runtime-source-build-local agent-runtime-source-contract agent-runtime-build-local agent-runtime-contract agent-runtime-smoke agent-runtime-text-gate agent-runtime-single-kernel-gate agent-runtime-readonly-gate agent-runtime-write-gate agent-thread-store-contract agent-capability-worker-build-local agent-capability-worker-smoke sdk-sse-contract snapshot-gateway-openapi quickstart quickstart-build validate-config validate-example-config validate seed-demo seed-demo-apply
 
 doctor:                     ## 环境体检: 工具/Docker/内存/端口/compose 归属 (只读)
 	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/doctor.sh --env "$(ENV_FILE)"
 
 harness-check:              ## 校验 harness.yml 契约: 命令存在、必备文档、指令文件行数预算
 	@python3 scripts/harness/check_harness.py
+
+runtime-dependency-gate:    ## 检查已退役 Python 执行面/docgen/OpenAPI 依赖未回流
+	@python3 scripts/harness/runtime_dependency_gate.py
 
 agent-runtime-source-contract: ## 校验 Agent Runtime 不可变源码、Schema、SBOM、许可证和 OCI 身份
 	@python3 scripts/harness/agent_runtime_supply_chain.py validate \
@@ -112,6 +113,13 @@ agent-runtime-write-gate:   ## 校验工具审批、dispatch fence、幂等和�
 agent-thread-store-contract: ## 在真实 PostgreSQL 验证 Agent ThreadStore 与预授权根线程闭环
 	@ENV_FILE="$(ENV_FILE)" AI_PLATFORM_AGENT_RUNTIME_SOURCE="$(AI_PLATFORM_AGENT_RUNTIME_SOURCE)" \
 		bash scripts/harness/agent_thread_store_contract.sh
+
+agent-capability-worker-build-local: ## 单 job 构建固定源码的 Rust capability worker 镜像
+	@AI_PLATFORM_AGENT_RUNTIME_SOURCE="$(AI_PLATFORM_AGENT_RUNTIME_SOURCE)" \
+		bash scripts/harness/build_agent_capability_worker_image.sh
+
+agent-capability-worker-smoke: ## 隔离 PostgreSQL 验证 capability worker 的租约、幂等、事件、取消和恢复
+	@bash scripts/harness/smoke_agent_capability_worker_image.sh
 
 agent-runtime-source-build-local: ## 低内存构建本地 Agent Runtime 源码镜像并验证源码/Schema 标签与 initialize
 	@bash scripts/harness/build_agent_runtime_source_image.sh
@@ -165,7 +173,7 @@ seed-demo-apply:            ## 写入本地 demo 数据 (仅用于开发/本地�
 
 # -- Deployment ---------------------------------------------------------------
 
-.PHONY: deploy deploy-build deploy-cn deploy-infra deploy-app stop logs restart status hot-update code-executor-enable code-executor-test code-executor-status code-executor-disable
+.PHONY: deploy deploy-build deploy-cn deploy-infra deploy-app stop logs restart status hot-update
 
 deploy:                     ## 部署全部服务 (启动+迁移+健康检查，不默认重建镜像)
 	@bash $(SCRIPTS)/deploy.sh --env "$(ENV_FILE)" $(ARGS)
@@ -179,7 +187,7 @@ deploy-cn:                  ## 使用国内镜像构建部署
 deploy-infra:               ## 仅部署基础设施 (postgres/redis/qdrant)
 	@bash $(SCRIPTS)/deploy.sh --env "$(ENV_FILE)" --infra $(ARGS)
 
-deploy-app:                 ## 仅部署应用服务 (gateway/frontend/assistant/knowledge/Agent Runtime)
+deploy-app:                 ## 仅部署应用服务 (gateway/frontend/knowledge/Agent Runtime/Worker)
 	@bash $(SCRIPTS)/deploy.sh --env "$(ENV_FILE)" --app $(ARGS)
 
 stop:                       ## 停止所有服务
@@ -196,18 +204,6 @@ status:                     ## 查看所有服务状态和健康检查
 
 hot-update:                 ## 热更新本地部署容器源码 (不 pip、不重建镜像)
 	@bash $(SCRIPTS)/hot-update.sh --env "$(ENV_FILE)" $(ARGS)
-
-code-executor-enable:       ## 启用可信本地代码沙箱（Docker Engine 权限，仅本机开发）
-	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/code-executor.sh enable
-
-code-executor-test:         ## 运行真实代码执行与文件产物 smoke
-	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/code-executor.sh test
-
-code-executor-status:       ## 查看本地代码沙箱状态
-	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/code-executor.sh status
-
-code-executor-disable:      ## 关闭本地代码沙箱并移除 Docker socket 挂载
-	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/code-executor.sh disable
 
 # -- Database Migrations ------------------------------------------------------
 
@@ -256,15 +252,15 @@ dev-status:                 ## 查看开发环境状态
 
 dev-compose:                ## 从源码构建并挂载后端服务，启用热重载
 	@bash $(SCRIPTS)/validate-env.sh --env "$(ENV_FILE)" --config-only
-	@$(DEV_COMPOSE) --env-file "$(ENV_FILE)" up -d --build --remove-orphans gateway assistant-service knowledge-service knowledge-worker frontend
+	@$(DEV_COMPOSE) --env-file "$(ENV_FILE)" up -d --build --remove-orphans gateway knowledge-service knowledge-worker agent-runtime agent-capability-worker frontend
 	@echo "Development compose is running with backend source mounts and uvicorn reload."
 
 dev-compose-logs:           ## 查看源码挂载开发服务日志
-	@$(DEV_COMPOSE) --env-file "$(ENV_FILE)" logs -f gateway assistant-service knowledge-service knowledge-worker frontend
+	@$(DEV_COMPOSE) --env-file "$(ENV_FILE)" logs -f gateway knowledge-service knowledge-worker agent-runtime agent-capability-worker frontend
 
 # -- Agent Trace / Eval Development Gates ------------------------------------
 
-.PHONY: verify-agent-studio verify-eval-dev agent-eval-core-gate agent-runtime-eval-contract-gate eval-e1-gate eval-e1-unit-gate eval-regression-gate rag-eval-regression-gate verify-assistant-runtime-dev test-isolation snapshot-assistant-openapi
+.PHONY: verify-agent-studio verify-eval-dev agent-eval-core-gate agent-runtime-eval-contract-gate eval-e1-gate eval-e1-unit-gate eval-regression-gate rag-eval-regression-gate verify-assistant-runtime-dev test-isolation
 
 EVAL_REGRESSION_REPORT_DIR ?= tmp/eval-regression
 EVAL_E1_ARTIFACT_DIR ?= tmp/eval-e1
@@ -298,13 +294,10 @@ verify-eval-dev:            ## 运行 Agent Trace/Eval dev 分支验证门禁
 		src/api/eval_export.py \
 		packages/ai-gateway-core/src/ai_gateway_core/eval \
 		packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/agent_trace_repository.py \
-		apps/assistant-service/src/assistant_service/core/assistant_service.py \
-		apps/assistant-service/src/assistant_service/core/trace_writer.py \
-		apps/assistant-service/src/assistant_service/core/trace_payloads.py \
 		tests/api/test_eval_traces.py \
 		tests/api/test_eval_api_trace_tree.py \
 		tests/services/eval \
-		tests/services/assistant/test_agent_trace_capture.py
+		tests/services/eval/test_agent_runtime_eval_contract.py
 	@$(EVAL_UV_RUN) pytest -q --no-cov \
 		tests/api/test_eval_traces.py \
 		tests/api/test_eval_api_trace_tree.py \
@@ -320,7 +313,7 @@ verify-eval-dev:            ## 运行 Agent Trace/Eval dev 分支验证门禁
 		tests/services/eval/test_drive_shipped_entrypoints.py
 	@$(MAKE) eval-e1-gate
 	@$(EVAL_UV_RUN) pytest -q --no-cov \
-		tests/services/assistant/test_agent_trace_capture.py
+		tests/services/eval/test_agent_runtime_eval_contract.py
 	@$(EVAL_UV_RUN) pytest -q --no-cov \
 		tests/services/eval/test_ingest_roundtrip.py \
 		tests/services/eval/test_trace_capture_helpers.py
@@ -354,17 +347,13 @@ eval-e1-gate:               ## 运行 Eval E1 离线 fixture-contract 门禁（A
 	@$(MAKE) eval-regression-gate
 	@$(MAKE) rag-eval-regression-gate
 
-# -- Assistant Service Isolation Gate (Phase 0 safety net) -------------------
+# -- Agent Runtime isolation gate --------------------------------------------
 
-test-isolation:             ## 运行 Assistant Service 隔离契约测试 (Phase 0 + Phase 4 gates)
+test-isolation:             ## 运行 Agent Runtime 与 Gateway 隔离契约测试
 	@uv run pytest -q --no-cov \
-		tests/integration/test_assistant_isolation_contract.py \
-		tests/integration/test_assistant_openapi_contract.py \
-		tests/integration/test_assistant_core_isolation.py \
-		tests/integration/test_gateway_boot.py
-
-snapshot-assistant-openapi: ## 重新生成 assistant-service OpenAPI 基线快照
-	@uv run python scripts/snapshot_assistant_openapi.py
+		tests/integration/test_gateway_openapi_contract.py \
+		tests/integration/test_gateway_boot.py \
+		tests/api/test_assistant_control_plane_routes.py
 
 # -- Help ---------------------------------------------------------------------
 

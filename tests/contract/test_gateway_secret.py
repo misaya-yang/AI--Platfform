@@ -1,6 +1,6 @@
 """Phase-5a contract tests for ``X-Gateway-Secret`` HMAC.
 
-Locks the sign/verify contract between gateway and assistant-service:
+Locks the sign/verify contract between Gateway and internal Python services:
 - round-trip succeeds with matching secrets
 - mismatched secret rejected
 - timestamp skew rejected

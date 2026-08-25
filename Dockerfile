@@ -51,6 +51,10 @@ RUN --mount=type=cache,id=ai-gateway-pip,target=/root/.cache/pip,sharing=locked 
 
 # Copy source code
 COPY src/ ./src/
+# The wheel force-includes the single catalog owned by the Rust worker. Keep
+# the canonical source available to Hatch without checking in a Python copy.
+COPY rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/platform_catalog_v1.json \
+    ./rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/platform_catalog_v1.json
 
 # Copy workspace member packages. ``pyproject.toml`` lists
 # ``ai-gateway-core`` as a dependency with ``{ workspace = true }`` — pip
@@ -62,17 +66,8 @@ RUN --mount=type=cache,id=ai-gateway-pip,target=/root/.cache/pip,sharing=locked 
     --index-url ${PIP_INDEX_URL} \
     ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
 
-# Phase 5e: assistant-service is no longer bundled into the gateway
-# image. All ``from assistant_service.core ...`` imports were replaced
-# across Phase 5d/5e (enums + style_presets + image helpers + quiz +
-# skills + memory + connectors + working_memory + task_manager +
-# context_metrics → ai_gateway_core; AssistantService / tool_registry
-# / MCPManager / tenant services deleted from gateway lifespan;
-# ModelRegistry replaced by a narrow ``GatewayModelMeta`` DB facade;
-# /generate-image + /image-task proxy to assistant-service). Gate
-# guarding the boundary:
-#   docker run ai-gateway:2.0.0 python -c "import assistant_service"
-#   → ModuleNotFoundError  ✓
+# The Gateway image contains control-plane and shared-domain code only. The
+# model/tool loop and capability execution ship in their pinned Rust images.
 
 RUN --mount=type=cache,id=ai-gateway-pip,target=/root/.cache/pip,sharing=locked \
     pip install ".[all]" \
@@ -116,6 +111,10 @@ ENV PATH="/opt/venv/bin:$PATH"
 COPY src/ ./src/
 COPY database/ ./database/
 COPY config/ ./config/
+# Gateway projects the same checked-in capability catalog consumed by the
+# Rust worker into its Python package data directory at image-build time.
+COPY rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/platform_catalog_v1.json \
+    ./src/core/data/platform_catalog_v1.json
 
 # Create necessary directories and fix permissions
 RUN mkdir -p /app/logs && \

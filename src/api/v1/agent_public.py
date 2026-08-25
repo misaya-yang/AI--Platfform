@@ -35,7 +35,7 @@ from ..schemas.agent_runtime import (
     AgentRuntimeFeedbackResponse,
     AgentRuntimeSessionResponse,
 )
-from ._assistant_proxy import reject_client_agent_forgery
+from ._agent_runtime_headers import reject_client_agent_forgery
 from .agent_runtime import (
     _assert_attachments_allowed,
     _assert_existing_pin,
@@ -71,7 +71,7 @@ def _b64decode(value: str) -> bytes:
 
 def _embed_secret(request: Request) -> bytes:
     value = os.getenv("AGENT_RUNTIME_TOKEN_SIGNING_KEY", "").strip() or os.getenv(
-        "GATEWAY_ASSISTANT_SHARED_SECRET", ""
+        "GATEWAY_ENCRYPTION_KEY", ""
     ).strip()
     if not value:
         _raise_runtime_error(

@@ -606,7 +606,7 @@ class Settings(BaseSettings):
 
     # Server-side default model applied when SDKs/console omit model_id.
     # Read from the unprefixed DEFAULT_MODEL env var (deployment-wide single
-    # default); mirrors apps/assistant-service/.../core/models/defaults.py.
+    # default); the Runtime receives this through the Gateway configuration snapshot.
     default_model: str = Field(default="qwen3.7-plus", validation_alias="DEFAULT_MODEL")
 
     # 数据库和缓存（可选）

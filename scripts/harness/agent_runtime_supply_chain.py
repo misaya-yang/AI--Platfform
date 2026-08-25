@@ -19,9 +19,13 @@ RECEIPT_SCHEMA = "ai-platform/agent-runtime-source-receipt/v1"
 ARTIFACT_BINARIES = {
     "app_server": "codex-app-server",
     "agent_runtime": "ai-platform-agent-runtime",
+    "capability_worker": "ai-platform-capability-worker",
 }
 _HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
+OVERLAY_MANIFEST_REL = "rust/agent-runtime-overlay/manifest.json"
+CAPABILITY_WORKER_SCHEMA_REL = "database/migrations/096_agent_capability_executions.sql"
+CAPABILITY_WORKER_SBOM_REL = "deploy/agent-runtime-source/capability-worker-sbom.cdx.json"
 
 
 class ContractError(ValueError):
@@ -106,6 +110,146 @@ def _cargo_components(metadata: dict[str, Any]) -> list[dict[str, Any]]:
             component["properties"] = [{"name": "cargo:source", "value": source}]
         components.append(component)
     return sorted(components, key=lambda item: (item["name"], item["version"], item["bom-ref"]))
+
+
+def _cargo_dependency_closure(
+    metadata: dict[str, Any], *, root_name: str
+) -> tuple[str, set[str], dict[str, str]]:
+    """Return the resolved package IDs and their deterministic SBOM references."""
+    packages = metadata.get("packages")
+    resolve = metadata.get("resolve")
+    if not isinstance(packages, list) or not isinstance(resolve, dict):
+        raise ContractError("cargo metadata must contain packages and resolve")
+    by_id = {
+        package.get("id"): package
+        for package in packages
+        if isinstance(package, dict) and isinstance(package.get("id"), str)
+    }
+    roots = [
+        package["id"]
+        for package in packages
+        if isinstance(package, dict) and package.get("name") == root_name
+    ]
+    if len(roots) != 1:
+        raise ContractError(f"cargo metadata must contain exactly one {root_name} package")
+    nodes = {
+        node.get("id"): node
+        for node in resolve.get("nodes", [])
+        if isinstance(node, dict) and isinstance(node.get("id"), str)
+    }
+    if roots[0] not in nodes:
+        raise ContractError(f"cargo metadata resolve graph does not contain {root_name}")
+
+    closure: set[str] = set()
+    pending = [roots[0]]
+    while pending:
+        package_id = pending.pop()
+        if package_id in closure:
+            continue
+        if package_id not in by_id or package_id not in nodes:
+            raise ContractError(
+                f"cargo metadata resolve graph references unknown package {package_id}"
+            )
+        closure.add(package_id)
+        dependencies = nodes[package_id].get("dependencies", [])
+        if not isinstance(dependencies, list):
+            raise ContractError(f"cargo metadata dependencies for {package_id} must be an array")
+        for dependency in dependencies:
+            dependency_id = dependency.get("pkg") if isinstance(dependency, dict) else dependency
+            if not isinstance(dependency_id, str):
+                raise ContractError(f"cargo metadata has an invalid dependency for {package_id}")
+            pending.append(dependency_id)
+
+    refs: dict[str, str] = {}
+    for package_id in sorted(closure):
+        package = by_id[package_id]
+        name = str(package["name"])
+        version = str(package["version"])
+        source = package.get("source")
+        # Cargo can resolve the same name/version from different sources. Keep
+        # refs unique without depending on package ordering or host paths.
+        suffix = ""
+        if isinstance(source, str) and source:
+            suffix = "?source=" + hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
+        refs[package_id] = f"pkg:cargo/{name}@{version}{suffix}"
+    if len(set(refs.values())) != len(refs):
+        raise ContractError("cargo metadata produced duplicate deterministic SBOM references")
+    return roots[0], closure, refs
+
+
+def _capability_worker_sbom(
+    metadata: dict[str, Any],
+    *,
+    overlay: dict[str, Any],
+    schema_sha: str,
+    cargo_lock_sha: str,
+    source: dict[str, Any],
+) -> dict[str, Any]:
+    root_id, closure, refs = _cargo_dependency_closure(
+        metadata, root_name=ARTIFACT_BINARIES["capability_worker"]
+    )
+    packages = {
+        package["id"]: package
+        for package in metadata["packages"]
+        if isinstance(package, dict) and isinstance(package.get("id"), str)
+    }
+    components = []
+    for package_id in sorted(closure, key=lambda item: refs[item]):
+        package = packages[package_id]
+        component: dict[str, Any] = {
+            "type": "library"
+            if package["name"] != ARTIFACT_BINARIES["capability_worker"]
+            else "application",
+            "bom-ref": refs[package_id],
+            "name": str(package["name"]),
+            "version": str(package["version"]),
+            "purl": refs[package_id],
+        }
+        license_value = package.get("license")
+        if isinstance(license_value, str) and license_value:
+            component["licenses"] = [{"expression": license_value}]
+        components.append(component)
+
+    nodes = {
+        node.get("id"): node
+        for node in metadata["resolve"].get("nodes", [])
+        if isinstance(node, dict) and isinstance(node.get("id"), str)
+    }
+    dependencies = []
+    for package_id in sorted(closure, key=lambda item: refs[item]):
+        depends_on = []
+        for dependency in nodes[package_id].get("dependencies", []):
+            dependency_id = dependency.get("pkg") if isinstance(dependency, dict) else dependency
+            if dependency_id in closure:
+                depends_on.append(refs[dependency_id])
+        dependencies.append({"ref": refs[package_id], "dependsOn": sorted(set(depends_on))})
+
+    serial = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        "ai-platform-capability-worker:"
+        f"{source.get('fork_sha')}:{overlay['sha256']}:{schema_sha}:{cargo_lock_sha}",
+    )
+    return {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.5",
+        "serialNumber": f"urn:uuid:{serial}",
+        "version": 1,
+        "metadata": {
+            "component": {
+                "type": "application",
+                "bom-ref": refs[root_id],
+                "name": ARTIFACT_BINARIES["capability_worker"],
+                "version": f"{source.get('upstream_sha')}+{overlay['sha256'][:12]}",
+                "properties": [
+                    {"name": "ai-platform:overlay.sha256", "value": overlay["sha256"]},
+                    {"name": "ai-platform:capability-schema.sha256", "value": schema_sha},
+                    {"name": "ai-platform:cargo-lock.sha256", "value": cargo_lock_sha},
+                ],
+            }
+        },
+        "components": components,
+        "dependencies": dependencies,
+    }
 
 
 def generate_receipt(*, fork: Path, schema_dir: Path, receipt_path: Path, sbom_path: Path) -> None:
@@ -322,12 +466,31 @@ def validate_lock(
         manifest = _load_object(
             overlay_root / "manifest.json", label="Agent Runtime overlay manifest"
         )
-        if manifest.get("sha256") != actual_overlay["sha256"] or manifest.get("file_count") != actual_overlay["file_count"]:
+        if (
+            manifest.get("sha256") != actual_overlay["sha256"]
+            or manifest.get("file_count") != actual_overlay["file_count"]
+        ):
             raise ContractError("Agent Runtime overlay manifest does not match its files")
-        if manifest.get("source_revision") != source.get("fork_sha") or manifest.get("upstream_sha") != source.get("upstream_sha"):
+        if manifest.get("source_revision") != source.get("fork_sha") or manifest.get(
+            "upstream_sha"
+        ) != source.get("upstream_sha"):
             raise ContractError("Agent Runtime overlay source identity does not match the lock")
-        if overlay.get("sha256") != actual_overlay["sha256"] or overlay.get("file_count") != actual_overlay["file_count"]:
+        if (
+            overlay.get("sha256") != actual_overlay["sha256"]
+            or overlay.get("file_count") != actual_overlay["file_count"]
+        ):
             raise ContractError("source receipt overlay identity does not match the overlay")
+        overlay_lock_sha = sha256_file(
+            repo_root / "rust/agent-runtime-overlay/kernel-rs/Cargo.lock"
+        )
+        if manifest.get("cargo_lock_sha256") != overlay_lock_sha:
+            raise ContractError(
+                "Agent Runtime overlay Cargo.lock digest does not match the manifest"
+            )
+        if overlay.get("cargo_lock_sha256") != overlay_lock_sha:
+            raise ContractError(
+                "source receipt overlay Cargo.lock digest does not match the overlay"
+            )
     receipt_source = receipt.get("source") or {}
     if (
         receipt_source.get("upstream_sha") != upstream_sha
@@ -354,10 +517,38 @@ def validate_lock(
     if receipt_sbom.get("sha256") != expected_sbom_sha:
         raise ContractError("source receipt SBOM digest does not match the lock")
     if build.get("overlay_manifest"):
-        if build.get("overlay_manifest") != "rust/agent-runtime-overlay/manifest.json":
-            raise ContractError("build.overlay_manifest must point to the Agent Runtime overlay manifest")
-        if build.get("overlay_sha256") != actual_overlay["sha256"]:
+        if build.get("overlay_manifest") != OVERLAY_MANIFEST_REL:
+            raise ContractError(
+                "build.overlay_manifest must point to the Agent Runtime overlay manifest"
+            )
+        if (
+            build.get("overlay_sha256") != actual_overlay["sha256"]
+            or build.get("overlay_file_count") != actual_overlay["file_count"]
+        ):
             raise ContractError("build.overlay_sha256 does not match the Agent Runtime overlay")
+        if build.get("overlay_cargo_lock_sha256") != overlay_lock_sha:
+            raise ContractError("build overlay Cargo.lock digest does not match the overlay")
+    capability_schema = build.get("capability_worker_schema_sha256")
+    expected_capability_schema = sha256_file(repo_root / CAPABILITY_WORKER_SCHEMA_REL)
+    if capability_schema != expected_capability_schema:
+        raise ContractError("capability worker schema digest does not match migration 096")
+    if receipt.get("capability_worker_schema_sha256") != expected_capability_schema:
+        raise ContractError(
+            "source receipt capability worker schema digest does not match migration 096"
+        )
+    capability_sbom_rel = build.get("capability_worker_sbom")
+    capability_sbom_sha = build.get("capability_worker_sbom_sha256")
+    receipt_capability_sbom = receipt.get("capability_worker_sbom") or {}
+    if not isinstance(capability_sbom_rel, str) or not capability_sbom_rel:
+        raise ContractError("capability worker SBOM path is required")
+    capability_sbom_path = repo_root / capability_sbom_rel
+    if (
+        not capability_sbom_path.is_file()
+        or sha256_file(capability_sbom_path) != capability_sbom_sha
+        or capability_sbom_sha != receipt_capability_sbom.get("sha256")
+        or capability_sbom_rel != receipt_capability_sbom.get("path")
+    ):
+        raise ContractError("capability worker SBOM does not match the source receipt")
 
     schema = receipt.get("schema_bundle") or {}
     _require_hex(schema.get("sha256"), length=64, label="schema bundle SHA")
@@ -388,7 +579,7 @@ def validate_lock(
 
     artifacts = oci.get("artifacts")
     if not isinstance(artifacts, dict) or set(artifacts) != set(ARTIFACT_BINARIES):
-        raise ContractError("oci.artifacts must define app_server and agent_runtime")
+        raise ContractError("oci.artifacts must define every locked runtime artifact")
     runnable = {
         artifact_id: _validate_oci_artifact(
             artifact_id=artifact_id,
@@ -435,6 +626,7 @@ def refresh_source_lock(*, repo_root: Path, lock_path: Path) -> None:
     schema = receipt.get("schema_bundle") or {}
     receipt_license = receipt.get("license") or {}
     receipt_sbom = receipt.get("sbom") or {}
+    receipt_capability_sbom = receipt.get("capability_worker_sbom") or {}
     _require_hex(source.get("upstream_sha"), length=40, label="source upstream SHA")
     _require_hex(source.get("fork_sha"), length=40, label="source fork SHA")
     _require_hex(source.get("git_tree_sha"), length=40, label="source tree SHA")
@@ -463,6 +655,11 @@ def refresh_source_lock(*, repo_root: Path, lock_path: Path) -> None:
         "cargo_lock_sha256": toolchain.get("cargo_lock_sha256"),
         "app_server_schema_sha256": schema.get("sha256"),
         "app_server_schema_file_count": schema.get("file_count"),
+        "capability_worker_schema_sha256": sha256_file(
+            repo_root / "database/migrations/096_agent_capability_executions.sql"
+        ),
+        "capability_worker_sbom": receipt_capability_sbom.get("path"),
+        "capability_worker_sbom_sha256": receipt_capability_sbom.get("sha256"),
         "source_receipt": receipt_rel,
         "source_receipt_sha256": sha256_file(receipt_path),
         "sbom": sbom_rel,
@@ -478,6 +675,149 @@ def refresh_source_lock(*, repo_root: Path, lock_path: Path) -> None:
         "upstream_license_sha256": receipt_license.get("license_sha256"),
         "upstream_notice_sha256": receipt_license.get("upstream_notice_sha256"),
     }
+    lock["release_state"] = "local_source_locked"
+    artifacts = (lock.get("oci") or {}).get("artifacts") or {}
+    for artifact_id, binary in ARTIFACT_BINARIES.items():
+        artifact = artifacts.get(artifact_id) or {}
+        artifacts[artifact_id] = {
+            "binary": binary,
+            "protocol": artifact.get("protocol"),
+            "candidate_start_allowed": False,
+            "image_ref": None,
+            "image_digest": None,
+            "platforms": artifact.get("platforms", ["linux/arm64"]),
+        }
+    lock["oci"] = {"artifacts": artifacts}
+    _write_object_atomic(lock_path, lock)
+    validate_lock(repo_root=repo_root, lock_path=lock_path)
+
+
+def refresh_overlay(*, repo_root: Path, lock_path: Path, cargo_workspace: Path) -> None:
+    """Refresh overlay identities and the Worker dependency SBOM atomically.
+
+    ``cargo_workspace`` is intentionally read-only: it is the already-composed,
+    controlled runtime source used only for ``cargo metadata --locked``. The
+    platform overlay and migration are hashed from the target repository, so a
+    changed source unit cannot accidentally retain an old runnable image.
+    """
+    lock = _load_object(lock_path, label="Agent Harness lock")
+    if lock.get("schema_version") != LOCK_SCHEMA:
+        raise ContractError("source lock must be upgraded before overlay refresh")
+    build = lock.get("build")
+    if not isinstance(build, dict):
+        raise ContractError("source lock build section is required")
+    receipt_rel = build.get("source_receipt")
+    if not isinstance(receipt_rel, str) or not receipt_rel:
+        raise ContractError("source receipt path is required before overlay refresh")
+    receipt_path = repo_root / receipt_rel
+    receipt = _load_object(receipt_path, label="Agent Harness source receipt")
+    if receipt.get("schema_version") != RECEIPT_SCHEMA:
+        raise ContractError("source receipt schema does not match the supported contract")
+
+    cargo_workspace = cargo_workspace.resolve()
+    cargo_cwd = cargo_workspace.parent if cargo_workspace.is_file() else cargo_workspace
+    cargo_manifest = (
+        cargo_workspace if cargo_workspace.is_file() else cargo_workspace / "Cargo.toml"
+    )
+    cargo_lock = cargo_cwd / "Cargo.lock"
+    if not cargo_manifest.is_file() or not cargo_lock.is_file():
+        raise ContractError("cargo workspace must contain Cargo.toml and Cargo.lock")
+    overlay_root = repo_root / "rust/agent-runtime-overlay"
+    overlay_workspace = overlay_root / "kernel-rs"
+    for relative in (
+        "Cargo.toml",
+        "Cargo.lock",
+        "ai-platform-capability-contract/Cargo.toml",
+        "ai-platform-capability-worker/Cargo.toml",
+    ):
+        composed_path = cargo_cwd / relative
+        overlay_path = overlay_workspace / relative
+        if (
+            not composed_path.is_file()
+            or not overlay_path.is_file()
+            or sha256_file(composed_path) != sha256_file(overlay_path)
+        ):
+            raise ContractError(f"cargo workspace does not contain the current overlay {relative}")
+    metadata = json.loads(
+        _run(
+            ["cargo", "metadata", "--locked", "--format-version", "1"],
+            cwd=cargo_cwd,
+        )
+    )
+    if not isinstance(metadata, dict):
+        raise ContractError("cargo metadata must return a JSON object")
+
+    overlay = overlay_identity(overlay_root)
+    overlay_lock_sha = sha256_file(overlay_root / "kernel-rs/Cargo.lock")
+    schema_sha = sha256_file(repo_root / CAPABILITY_WORKER_SCHEMA_REL)
+    source = receipt.get("source") or {}
+    upstream_sha = _require_hex(source.get("upstream_sha"), length=40, label="source upstream SHA")
+    fork_sha = _require_hex(source.get("fork_sha"), length=40, label="source fork SHA")
+    manifest_path = overlay_root / "manifest.json"
+    manifest = _load_object(manifest_path, label="Agent Runtime overlay manifest")
+    manifest.update(
+        {
+            "upstream_sha": upstream_sha,
+            "source_revision": fork_sha,
+            "file_count": overlay["file_count"],
+            "sha256": overlay["sha256"],
+            "cargo_lock_sha256": overlay_lock_sha,
+        }
+    )
+
+    capability_sbom_rel = build.get("capability_worker_sbom") or CAPABILITY_WORKER_SBOM_REL
+    if not isinstance(capability_sbom_rel, str) or not capability_sbom_rel:
+        raise ContractError("capability worker SBOM path is required")
+    capability_sbom_path = repo_root / capability_sbom_rel
+    capability_sbom = _capability_worker_sbom(
+        metadata,
+        overlay=overlay,
+        schema_sha=schema_sha,
+        cargo_lock_sha=overlay_lock_sha,
+        source=source,
+    )
+    _write_object_atomic(manifest_path, manifest)
+    _write_object_atomic(capability_sbom_path, capability_sbom)
+
+    receipt["overlay"] = {
+        "sha256": overlay["sha256"],
+        "file_count": overlay["file_count"],
+        "cargo_lock_sha256": overlay_lock_sha,
+        "source_revision": fork_sha,
+        "upstream_sha": upstream_sha,
+    }
+    receipt["capability_worker_schema_sha256"] = schema_sha
+    receipt["capability_worker_sbom"] = {
+        "format": "CycloneDX-1.5",
+        "path": capability_sbom_rel,
+        "sha256": sha256_file(capability_sbom_path),
+        "component_count": len(capability_sbom["components"]),
+    }
+    _write_object_atomic(receipt_path, receipt)
+
+    lock_source = lock.get("source") or {}
+    lock_source.update(
+        {
+            "upstream_url": source.get("upstream_url"),
+            "upstream_sha": upstream_sha,
+            "fork_sha": fork_sha,
+            "git_tree_sha": source.get("git_tree_sha"),
+        }
+    )
+    lock["source"] = lock_source
+    build.update(
+        {
+            "overlay_manifest": OVERLAY_MANIFEST_REL,
+            "overlay_sha256": overlay["sha256"],
+            "overlay_file_count": overlay["file_count"],
+            "overlay_cargo_lock_sha256": overlay_lock_sha,
+            "capability_worker_schema_sha256": schema_sha,
+            "capability_worker_sbom": capability_sbom_rel,
+            "capability_worker_sbom_sha256": sha256_file(capability_sbom_path),
+            "source_receipt_sha256": sha256_file(receipt_path),
+        }
+    )
+    lock["build"] = build
     lock["release_state"] = "local_source_locked"
     artifacts = (lock.get("oci") or {}).get("artifacts") or {}
     for artifact_id, binary in ARTIFACT_BINARIES.items():
@@ -517,12 +857,22 @@ def record_local_image(
     expected_revision = source["fork_sha"]
     if build.get("overlay_sha256"):
         expected_revision = f"{source['upstream_sha']}+{build['overlay_sha256'][:12]}"
-    expected_labels = {
-        "org.opencontainers.image.revision": expected_revision,
-        "com.misaya.ai-platform.agent-runtime.schema-sha256": build["app_server_schema_sha256"],
-        "com.misaya.ai-platform.agent-runtime.artifact": artifact_id,
-        "com.misaya.ai-platform.agent-runtime.binary": expected_binary,
-    }
+    if artifact_id == "capability_worker":
+        expected_labels = {
+            "org.opencontainers.image.revision": expected_revision,
+            "com.misaya.ai-platform.capability-worker.schema-sha256": build[
+                "capability_worker_schema_sha256"
+            ],
+            "com.misaya.ai-platform.capability-worker.artifact": artifact_id,
+            "com.misaya.ai-platform.capability-worker.binary": expected_binary,
+        }
+    else:
+        expected_labels = {
+            "org.opencontainers.image.revision": expected_revision,
+            "com.misaya.ai-platform.agent-runtime.schema-sha256": build["app_server_schema_sha256"],
+            "com.misaya.ai-platform.agent-runtime.artifact": artifact_id,
+            "com.misaya.ai-platform.agent-runtime.binary": expected_binary,
+        }
     if any(labels.get(key) != value for key, value in expected_labels.items()):
         raise ContractError("Docker image labels do not match the locked source/artifact identity")
     image_digest = image_info.get("Id")
@@ -570,6 +920,14 @@ def _parser() -> argparse.ArgumentParser:
     refresh.add_argument("--repo-root", type=Path, required=True)
     refresh.add_argument("--lock", type=Path, required=True)
 
+    refresh_overlay_parser = subparsers.add_parser(
+        "refresh-overlay",
+        help="refresh overlay identities and the deterministic capability-worker SBOM",
+    )
+    refresh_overlay_parser.add_argument("--repo-root", type=Path, required=True)
+    refresh_overlay_parser.add_argument("--lock", type=Path, required=True)
+    refresh_overlay_parser.add_argument("--cargo-workspace", type=Path, required=True)
+
     record = subparsers.add_parser(
         "record-local-image",
         help="record one locally built, label-verified OCI artifact",
@@ -601,6 +959,12 @@ def main() -> int:
             refresh_source_lock(
                 repo_root=args.repo_root.resolve(),
                 lock_path=args.lock.resolve(),
+            )
+        elif args.command == "refresh-overlay":
+            refresh_overlay(
+                repo_root=args.repo_root.resolve(),
+                lock_path=args.lock.resolve(),
+                cargo_workspace=args.cargo_workspace,
             )
         elif args.command == "record-local-image":
             record_local_image(

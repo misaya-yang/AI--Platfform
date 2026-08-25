@@ -338,13 +338,9 @@ async def upload_file(
                 f"key={file_info.storage_key}"
             )
 
-            # Phase 5d: async ``process_file`` pre-processing removed. The
-            # FileProcessor pipeline lives only in assistant-service now, and
-            # AS processes uploads on-demand on first reference in the chat
-            # path (PDF→images, OCR). The extra enqueue-then-preprocess round
-            # trip that existed here only optimised first-chat latency — its
-            # cost (a failing task silently logged) wasn't worth the gain
-            # after the lifespan cleanup.
+            # Attachment parsing is performed on demand through the
+            # scope-bound capability broker. Upload stays a storage-only
+            # operation and never starts a second model/tool loop.
 
             return FileUploadResponse(
                 file_id=file_info.file_id,

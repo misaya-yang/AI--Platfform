@@ -4,7 +4,6 @@ import re
 import shutil
 import stat
 import subprocess
-import zipfile
 from pathlib import Path
 
 import pytest
@@ -43,7 +42,7 @@ def _render_compose(**overrides: str) -> dict:
         "POSTGRES_PASSWORD": "a" * 64,
         "REDIS_PASSWORD": "b" * 64,
         "JWT_SECRET": "c" * 64,
-        "GATEWAY_ASSISTANT_SHARED_SECRET": "d" * 64,
+        "AI_PLATFORM_INTERNAL_TOKEN": "d" * 64,
         "DEFAULT_USER_PASSWORD": "f" * 64,
         "DASHSCOPE_API_KEY": "test-general-key",
         "DASHSCOPE_CHAT_API_KEY": "test-chat-key",
@@ -78,7 +77,6 @@ def test_base_compose_uses_versioned_published_images_without_build_contexts() -
     expected = {
         "gateway": "ghcr.io/misaya-yang/ai-gateway:2.0.0",
         "frontend": "ghcr.io/misaya-yang/ai-gateway-web:2.0.0",
-        "assistant-service": "ghcr.io/misaya-yang/ai-gateway-assistant-service:2.0.0",
         "knowledge-service": "ghcr.io/misaya-yang/ai-gateway-knowledge-service:2.0.0",
         "migrate": "ghcr.io/misaya-yang/ai-gateway-migrate:2.0.0",
     }
@@ -87,7 +85,6 @@ def test_base_compose_uses_versioned_published_images_without_build_contexts() -
         assert image in section
         assert ":latest" not in section
     assert "\n  mcp-docgen-server:" not in compose
-    assert "ai-gateway-mcp-docgen-server" not in compose
 
 
 def test_source_build_overlay_owns_every_compose_build_context() -> None:
@@ -95,7 +92,6 @@ def test_source_build_overlay_owns_every_compose_build_context() -> None:
     expected = {
         "gateway": "Dockerfile",
         "frontend": "Dockerfile",
-        "assistant-service": "apps/assistant-service/Dockerfile",
         "knowledge-service": "apps/knowledge-service/Dockerfile",
         "migrate": "docker/migrate/Dockerfile",
     }
@@ -111,15 +107,11 @@ def test_service_database_search_paths_follow_schema_ownership() -> None:
     services = rendered["services"]
 
     gateway_env = services["gateway"]["environment"]
-    assistant_env = services["assistant-service"]["environment"]
     knowledge_env = services["knowledge-service"]["environment"]
 
     assert gateway_env["GATEWAY_DATABASE__AUTO_INIT"] == "false"
     assert gateway_env["GATEWAY_DATABASE__DSN"].endswith(
         "?options=-csearch_path%3Dgateway%2Cassistant%2Cknowledge%2Cpublic"
-    )
-    assert assistant_env["DATABASE_URL"].endswith(
-        "?options=-csearch_path%3Dassistant%2Cgateway%2Cknowledge%2Cpublic"
     )
     assert knowledge_env["KNOWLEDGE_DATABASE__DSN"].endswith(
         "?options=-csearch_path%3Dknowledge%2Cgateway%2Cassistant%2Cpublic"
@@ -138,10 +130,9 @@ def test_default_initializer_needs_only_dashscope_model_secret(tmp_path: Path) -
         "POSTGRES_PASSWORD",
         "REDIS_PASSWORD",
         "JWT_SECRET",
-        "GATEWAY_ASSISTANT_SHARED_SECRET",
+        "AI_PLATFORM_INTERNAL_TOKEN",
         "GATEWAY_ENCRYPTION_KEY",
-        "AI_PLATFORM_AGENT_RUNTIME_INTERNAL_TOKEN",
-        "AI_PLATFORM_AGENT_RUNTIME_LEASE_SIGNING_SECRET",
+        "AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET",
         "AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_INTERNAL_TOKEN",
         "DEFAULT_USER_PASSWORD",
         "KB_EMBEDDING_API_KEY",
@@ -171,10 +162,9 @@ def test_default_initializer_needs_only_dashscope_model_secret(tmp_path: Path) -
         "POSTGRES_PASSWORD",
         "REDIS_PASSWORD",
         "JWT_SECRET",
-        "GATEWAY_ASSISTANT_SHARED_SECRET",
+        "AI_PLATFORM_INTERNAL_TOKEN",
         "GATEWAY_ENCRYPTION_KEY",
-        "AI_PLATFORM_AGENT_RUNTIME_INTERNAL_TOKEN",
-        "AI_PLATFORM_AGENT_RUNTIME_LEASE_SIGNING_SECRET",
+        "AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET",
         "AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_INTERNAL_TOKEN",
         "DEFAULT_USER_PASSWORD",
     ):
@@ -210,8 +200,8 @@ def test_initializer_backfills_runtime_trust_secrets_without_replacing_existing_
     assert len(values["GATEWAY_ENCRYPTION_KEY"]) >= 32
     assert values["GATEWAY_ENCRYPTION_KEY"] not in output
     for key in (
-        "AI_PLATFORM_AGENT_RUNTIME_INTERNAL_TOKEN",
-        "AI_PLATFORM_AGENT_RUNTIME_LEASE_SIGNING_SECRET",
+        "AI_PLATFORM_INTERNAL_TOKEN",
+        "AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET",
         "AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_INTERNAL_TOKEN",
     ):
         assert len(values[key]) >= 32
@@ -262,12 +252,10 @@ def test_generated_admin_password_is_hashed_before_database_bootstrap() -> None:
 def test_dockerfiles_do_not_accept_provider_secrets_as_build_arguments() -> None:
     dockerfiles = [
         ROOT / "Dockerfile",
-        ROOT / "apps/assistant-service/Dockerfile",
         ROOT / "apps/knowledge-service/Dockerfile",
         ROOT / "web/Dockerfile",
         ROOT / "docker/migrate/Dockerfile",
         ROOT / "docker/code-interpreter/Dockerfile",
-        ROOT / "docker/sandbox.Dockerfile",
     ]
     for path in dockerfiles:
         text = path.read_text()
@@ -277,77 +265,15 @@ def test_dockerfiles_do_not_accept_provider_secrets_as_build_arguments() -> None
 
     non_root = [
         ROOT / "Dockerfile",
-        ROOT / "apps/assistant-service/Dockerfile",
         ROOT / "apps/knowledge-service/Dockerfile",
         ROOT / "docker/migrate/Dockerfile",
         ROOT / "docker/code-interpreter/Dockerfile",
-        ROOT / "docker/sandbox.Dockerfile",
     ]
     for path in non_root:
         assert re.search(r"^USER\s+\S+", path.read_text(), re.MULTILINE)
 
-    standalone = ROOT / "packages/mcp-docgen-server/Dockerfile"
-    assert not standalone.exists()
-    assistant = (ROOT / "apps/assistant-service/Dockerfile").read_text()
-    assert 'pip install "./packages/mcp-docgen-server[mcp]"' in assistant
-    assert "COPY agent-plugins/ai-docgen/ /opt/agent-plugins/ai-docgen/" in assistant
-    assert "COPY agent-plugins/ai-quiz/ /opt/agent-plugins/ai-quiz/" in assistant
-    assert (
-        "COPY agent-plugins/community-doublecheck/ /opt/agent-plugins/community-doublecheck/"
-    ) in assistant
-    assert (
-        "COPY agent-plugins/community-engineering-reviewers/ "
-        "/opt/agent-plugins/community-engineering-reviewers/"
-    ) in assistant
-
-
-def test_assistant_docgen_wheel_contains_bundled_skill_runtime_data(
-    tmp_path: Path,
-) -> None:
-    uv = shutil.which("uv")
-    assert uv is not None, "uv is required for the offline wheel release guard"
-
-    package_source = ROOT / "packages/mcp-docgen-server"
-    isolated_source = tmp_path / "mcp-docgen-server"
-    shutil.copytree(
-        package_source,
-        isolated_source,
-        ignore=shutil.ignore_patterns("build", "dist", "*.egg-info", "__pycache__"),
-    )
-    wheel_dir = tmp_path / "wheel"
-    result = subprocess.run(
-        [
-            uv,
-            "build",
-            "--wheel",
-            "--offline",
-            "--no-progress",
-            "--out-dir",
-            str(wheel_dir),
-            str(isolated_source),
-        ],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-
-    wheels = list(wheel_dir.glob("*.whl"))
-    assert len(wheels) == 1
-    with zipfile.ZipFile(wheels[0]) as archive:
-        members = set(archive.namelist())
-
-    required_runtime_data = {
-        "docgen/_skills_data/docx/SKILL.md",
-        "docgen/_skills_data/pptx/SKILL.md",
-        "docgen/_skills_data/xlsx/SKILL.md",
-        "docgen/_skills_data/pdf/SKILL.md",
-        "docgen/_skills_data/docx/scripts/office/schemas/ISO-IEC29500-4_2016/wml.xsd",
-        "docgen/_skills_data/docx/scripts/templates/comments.xml",
-        "docgen/_skills_data/docx/LICENSE.txt",
-    }
-    assert required_runtime_data <= members
+    assert not (ROOT / "apps" / ("assistant" + "-service")).exists()
+    assert not (ROOT / "packages" / "mcp-docgen-server").exists()
 
 
 def test_redis_runtime_config_keeps_secrets_out_of_compose_command(
@@ -358,7 +284,7 @@ def test_redis_runtime_config_keeps_secrets_out_of_compose_command(
     common = (ROOT / "scripts/new/common.sh").read_text()
     entrypoint = (ROOT / "scripts/new/redis-entrypoint.sh").read_text()
 
-    assert 'REDIS_MAXMEMORY: "${REDIS_MAXMEMORY:-192mb}"' in redis
+    assert 'REDIS_MAXMEMORY: "${REDIS_MAXMEMORY:-128mb}"' in redis
     assert "command:\n      - /bin/sh\n      - /opt/ai-gateway/redis-entrypoint.sh" in redis
     command = redis.split("command:", 1)[1].split("ports:", 1)[0]
     assert "--requirepass" not in redis
@@ -417,10 +343,10 @@ def test_dashscope_endpoint_overrides_are_documented_and_injected() -> None:
     env_values = _env_values(ROOT / ".env.example")
     compose = (ROOT / "docker-compose.yml").read_text()
 
-    for key in (*credential_vars, *endpoint_vars, "DOCGEN_LLM_ENDPOINT"):
+    for key in (*credential_vars, *endpoint_vars):
         assert env_values[key] == ""
 
-    for service in ("gateway", "assistant-service", "knowledge-service"):
+    for service in ("gateway", "knowledge-service"):
         section = _service_section(compose, service)
         for key in (*credential_vars, *endpoint_vars):
             assert f'{key}: "${{{key}:-}}"' in section
@@ -438,9 +364,6 @@ def test_dashscope_endpoint_overrides_are_documented_and_injected() -> None:
         in _service_section(compose, "knowledge-service")
     )
 
-    assistant = _service_section(compose, "assistant-service")
-    assert 'DOCGEN_LLM_ENDPOINT: "${DOCGEN_LLM_ENDPOINT:-}"' in assistant
-
     initializer = (ROOT / "scripts/new/init-env.sh").read_text()
     copied_keys_match = re.search(
         r'^COPIED_KEYS=""\nfor key in (?P<keys>.*?); do$',
@@ -454,7 +377,6 @@ def test_dashscope_endpoint_overrides_are_documented_and_injected() -> None:
         *endpoint_vars,
         *rerank_vars,
         "DASHSCOPE_RERANK_REQUEST_SCHEMA",
-        "DOCGEN_LLM_ENDPOINT",
     ):
         assert key in initializer
     for key in (*rerank_vars, "DASHSCOPE_RERANK_REQUEST_SCHEMA"):
@@ -467,7 +389,7 @@ def test_dashscope_endpoint_overrides_are_documented_and_injected() -> None:
         "DASHSCOPE_IMAGE_API_KEY": "test-image-key",
         "DASHSCOPE_EMBEDDING_API_KEY": "test-embedding-key",
     }
-    for service in ("gateway", "assistant-service", "knowledge-service"):
+    for service in ("gateway", "knowledge-service"):
         environment = rendered["services"][service]["environment"]
         for key, expected in expected_credentials.items():
             assert environment[key] == expected
@@ -479,7 +401,7 @@ def test_dashscope_endpoint_overrides_are_documented_and_injected() -> None:
     )
 
 
-def test_qwen_responses_wire_default_reaches_the_assistant_execution_service() -> None:
+def test_qwen_responses_wire_default_is_owned_by_the_gateway_model_plane() -> None:
     env_values = _env_values(ROOT / ".env.example")
     compose = (ROOT / "docker-compose.yml").read_text()
 
@@ -487,13 +409,12 @@ def test_qwen_responses_wire_default_reaches_the_assistant_execution_service() -
     assert env_values["OPENAI_BASE_URL"] == ""
     assert env_values["OPENAI_WIRE_PROTOCOL"] == "chat_completions"
 
-    for service in ("gateway", "assistant-service"):
-        section = _service_section(compose, service)
-        assert (
-            'DASHSCOPE_CHAT_WIRE_PROTOCOL: "${DASHSCOPE_CHAT_WIRE_PROTOCOL:-responses_v1}"'
-        ) in section
-        assert 'OPENAI_BASE_URL: "${OPENAI_BASE_URL:-}"' in section
-        assert 'OPENAI_WIRE_PROTOCOL: "${OPENAI_WIRE_PROTOCOL:-chat_completions}"' in section
+    section = _service_section(compose, "gateway")
+    assert (
+        'DASHSCOPE_CHAT_WIRE_PROTOCOL: "${DASHSCOPE_CHAT_WIRE_PROTOCOL:-responses_v1}"'
+    ) in section
+    assert 'OPENAI_BASE_URL: "${OPENAI_BASE_URL:-}"' in section
+    assert 'OPENAI_WIRE_PROTOCOL: "${OPENAI_WIRE_PROTOCOL:-chat_completions}"' in section
 
     initializer = (ROOT / "scripts/new/init-env.sh").read_text()
     copied_keys_match = re.search(
@@ -516,14 +437,11 @@ def test_publish_workflow_covers_all_images_and_both_cpu_architectures() -> None
     for image in (
         "ai-gateway",
         "ai-gateway-web",
-        "ai-gateway-assistant-service",
         "ai-gateway-knowledge-service",
         "ai-gateway-migrate",
         "ai-gateway-code-interpreter",
-        "ai-gateway-docgen-sandbox",
     ):
         assert f"image: {image}" in workflow
-    assert "ai-gateway-mcp-docgen-server" not in workflow
     assert "platforms: linux/amd64,linux/arm64" in workflow
     assert "docker/setup-qemu-action@v3" in workflow
     assert "provenance: mode=max" in workflow
@@ -535,63 +453,24 @@ def test_publish_workflow_covers_all_images_and_both_cpu_architectures() -> None
     assert "islamic-content-service" not in workflow
 
 
-def test_sandbox_images_are_versioned_and_runnable_by_default() -> None:
-    fixed_image = "ghcr.io/misaya-yang/ai-gateway-docgen-sandbox:2.0.0"
-    for path in (
-        ROOT / "packages/mcp-docgen-server/src/docgen/sandbox/docker_backend.py",
-    ):
-        text = path.read_text()
-        assert fixed_image in text
-        assert "docgen-sandbox:latest" not in text
-        assert "json.dumps(code)" not in text
-        assert '["python3", "-c", code]' in text
-        assert '["node", "-e", code]' in text
-
+def test_code_interpreter_image_is_non_interactive_by_default() -> None:
     interpreter = (ROOT / "docker/code-interpreter/Dockerfile").read_text()
     assert 'CMD ["python"]' in interpreter
     assert "/workspace/main.py" not in interpreter
 
 
-def test_code_executor_is_an_explicit_local_overlay() -> None:
+def test_code_execution_is_owned_by_the_worker_without_a_docker_socket_overlay() -> None:
     base_compose = (ROOT / "docker-compose.yml").read_text()
-    assistant = _service_section(base_compose, "assistant-service")
-    overlay = (ROOT / "docker-compose.code-executor.yml").read_text()
-    script = (ROOT / "scripts/new/code-executor.sh").read_text()
     makefile = (ROOT / "Makefile").read_text()
+    catalog = (
+        ROOT
+        / "rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/platform_catalog_v1.json"
+    ).read_text()
 
-    assert (
-        'ASSISTANT_CODE_EXECUTOR_ENABLED: "${ASSISTANT_CODE_EXECUTOR_ENABLED:-false}"' in assistant
-    )
-    assert "/var/run/docker.sock" not in assistant
-
-    assert 'ASSISTANT_CODE_EXECUTOR_ENABLED: "true"' in overlay
-    assert "ASSISTANT_CODE_EXECUTOR_SOCKET" in overlay
-    assert (
-        'ASSISTANT_CODE_EXECUTOR_BACKEND: "${ASSISTANT_CODE_EXECUTOR_BACKEND:-docker}"' in overlay
-    )
-    assert "ASSISTANT_SANDBOX_WORKSPACE_HOST" in overlay
-    assert "DOCKER_SOCKET_GID" in overlay
-    assert "ai-gateway-docgen-sandbox:2.0.0" in overlay
-    assert "docgen-sandbox:latest" not in overlay
-    assert "/Users/" not in overlay
-
-    assert "assert_compose_owner" in script
-    assert 'COMPOSE_PARALLEL_LIMIT="${COMPOSE_PARALLEL_LIMIT:-1}"' in script
-    assert "sbx daemon start --detach --policy deny-all" in script
-    assert "nerdbox" in script
-    assert 'if [ "$backend" = "auto" ]; then' in script
-    assert 'backend="docker"' in script
-    assert 'command -v sbx >/dev/null 2>&1; then\n        backend="sbx"' not in script
-    assert 'docker save "$sandbox_image"' in script
-    assert 'ASSISTANT_ALLOW_RUNC_CODE_EXECUTOR: "true"' in overlay
-    assert "cap_drop" not in script  # enforced by CodeExecutorService itself
-    for target in (
-        "code-executor-enable:",
-        "code-executor-test:",
-        "code-executor-status:",
-        "code-executor-disable:",
-    ):
-        assert target in makefile
+    assert '"name": "execute_python_code"' in catalog
+    assert "/var/run/docker.sock" not in base_compose
+    assert not (ROOT / "docker-compose.code-executor.yml").exists()
+    assert "code-executor-enable:" not in makefile
 
 
 def test_default_quickstart_never_builds_source() -> None:
@@ -617,10 +496,11 @@ def test_default_complete_stack_memory_ceiling_stays_below_3_5_gib() -> None:
     compose = (ROOT / "docker-compose.yml").read_text()
     limits = [int(value) for value in re.findall(r'mem_limit: "\$\{[A-Z0-9_]+:-(\d+)m\}"', compose)]
 
-    assert len(limits) == 9
-    assert sum(limits) <= 3_584
+    assert len(limits) == 8
+    assert sum(limits) + 1_024 <= 3_584
+    assert 'mem_limit: "${AGENT_CAPABILITY_WORKER_MEMORY_LIMIT:-1g}"' in compose
     assert 'mem_limit: "${KNOWLEDGE_WORKER_MEMORY_LIMIT:-512m}"' in compose
-    assert 'REDIS_MAXMEMORY: "${REDIS_MAXMEMORY:-192mb}"' in compose
+    assert 'REDIS_MAXMEMORY: "${REDIS_MAXMEMORY:-128mb}"' in compose
     assert 'GATEWAY_TASK_WORKER_CONCURRENCY: "${GATEWAY_TASK_WORKER_CONCURRENCY:-1}"' in compose
     assert (
         'KNOWLEDGE_PROCESSING__WORKER_CONCURRENCY: "${GATEWAY_KNOWLEDGE__WORKER_CONCURRENCY:-1}"'
@@ -634,9 +514,9 @@ def test_standalone_dev_runtime_uses_pinned_images_and_memory_guards() -> None:
     assert 'DEV_QDRANT_IMAGE="${QDRANT_IMAGE:-qdrant/qdrant:v1.18.2}"' in script
     assert "qdrant/qdrant:latest" not in script
     assert "assert_compose_owner" in script
-    assert '--memory "${POSTGRES_MEMORY_LIMIT:-384m}"' in script
-    assert '--memory "${REDIS_MEMORY_LIMIT:-256m}"' in script
-    assert '--memory "${QDRANT_MEMORY_LIMIT:-384m}"' in script
+    assert '--memory "${POSTGRES_MEMORY_LIMIT:-320m}"' in script
+    assert '--memory "${REDIS_MEMORY_LIMIT:-192m}"' in script
+    assert '--memory "${QDRANT_MEMORY_LIMIT:-352m}"' in script
     assert "this checkout requires $image" in script
     assert '-p "127.0.0.1:${PG_PORT}:5432"' in script
     assert '-p "127.0.0.1:${REDIS_DEV_PORT}:6379"' in script

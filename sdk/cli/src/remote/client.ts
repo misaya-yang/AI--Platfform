@@ -186,6 +186,70 @@ export function parseSSEEvent(
   const timestamp = payload.timestamp ?? Date.now() / 1000;
   delete payload.timestamp;
 
+  // V2 cursor streams wrap the V1-compatible payload in an `item` envelope.
+  // Normalize it here so CLI consumers see the same event vocabulary from
+  // either endpoint.
+  if (eventType === EventType.ITEM && payload.schema_version === "agent-event/v2") {
+    const envelope = payload.event && typeof payload.event === "object"
+      ? payload.event as Record<string, any>
+      : payload;
+    const raw = envelope.payload && typeof envelope.payload === "object"
+      ? envelope.payload as Record<string, any>
+      : {};
+    const rawType = typeof raw.event_type === "string" ? raw.event_type : "";
+    const rawData = raw.data;
+    if (rawType && rawType !== "item" && rawType !== "rollout/item") {
+      const projected = rawData && typeof rawData === "object" && !Array.isArray(rawData)
+        ? rawData
+        : typeof rawData === "string" ? { content: rawData } : { value: rawData };
+      return { eventType: rawType, data: projected, timestamp: Number(timestamp) };
+    }
+    const item = rawData && typeof rawData === "object" && !Array.isArray(rawData)
+      ? rawData as Record<string, any>
+      : {};
+    const itemPayload = item.payload && typeof item.payload === "object"
+      ? item.payload as Record<string, any>
+      : item;
+    const text = typeof itemPayload.message === "string"
+      ? itemPayload.message
+      : typeof itemPayload.text === "string" ? itemPayload.text :
+        Array.isArray(itemPayload.content)
+          ? itemPayload.content.map((part: any) => part?.text ?? part?.content ?? "").join("")
+          : "";
+    if (text && (itemPayload.role === "assistant" || itemPayload.type === "agent_message")) {
+      return { eventType: EventType.TEXT_DELTA, data: { content: text }, timestamp: Number(timestamp) };
+    }
+    if (text && (itemPayload.role === "reasoning" || itemPayload.type === "reasoning")) {
+      return { eventType: EventType.THINKING_DELTA, data: { content: text }, timestamp: Number(timestamp) };
+    }
+    const toolName = itemPayload.name ?? itemPayload.tool;
+    if (toolName || ["function_call", "tool_use", "command_execution", "mcp_tool_call"].includes(String(item.type))) {
+      const status = String(item.status ?? itemPayload.status ?? "").toLowerCase();
+      const terminal = ["completed", "succeeded", "failed", "error", "cancelled"].includes(status);
+      return {
+        eventType: terminal ? EventType.TOOL_CALL_RESULT : EventType.TOOL_CALL_START,
+        data: {
+          tool_call_id: item.id ?? itemPayload.id,
+          tool_name: toolName ?? item.type,
+          arguments: itemPayload.arguments ?? itemPayload.input,
+          result: itemPayload.result ?? itemPayload.output,
+          status: item.status ?? itemPayload.status,
+        },
+        timestamp: Number(timestamp),
+      };
+    }
+    if (itemPayload.approval_id || item.type === "approval_request") {
+      return { eventType: EventType.APPROVAL_REQUIRED, data: itemPayload, timestamp: Number(timestamp) };
+    }
+    if (itemPayload.artifact_id || item.type === "artifact") {
+      return { eventType: EventType.ARTIFACT_CREATED, data: itemPayload, timestamp: Number(timestamp) };
+    }
+    if (item.type === "activity" || item.type === "event_msg") {
+      return { eventType: EventType.ACTIVITY, data: itemPayload, timestamp: Number(timestamp) };
+    }
+    return null;
+  }
+
   // Unwrap nested "data" — can be string (text_delta) or object
   const inner = payload.data !== undefined ? payload.data : payload;
 

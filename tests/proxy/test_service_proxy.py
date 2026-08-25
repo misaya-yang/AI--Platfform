@@ -282,9 +282,9 @@ async def test_service_proxy_retries_only_safe_or_idempotency_keyed_requests(
 
 
 def test_injected_identity_headers_cover_all_x_user() -> None:
-    """GATE G5a-3. Every header that assistant-service reads must be in
+    """GATE G5a-3. Every internal identity header must be in
     the gateway's strip list, otherwise a public client could smuggle
-    ``x-user-type: admin`` past the gateway and reach assistant-service
+    ``x-user-type: admin`` past the Gateway and reach a downstream service
     header verbatim."""
     from ai_gateway_core.proxy.base import _DEFAULT_INJECTED_IDENTITY_HEADERS
 

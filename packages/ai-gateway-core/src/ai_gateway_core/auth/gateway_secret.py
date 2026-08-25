@@ -160,8 +160,8 @@ class RedisReplayStore:
 class GatewaySecret:
     """Bi-directional HMAC ``X-Gateway-Secret`` handler.
 
-    Both gateway (signer) and assistant-service (verifier) construct
-    this with the same ``secret`` env var (``GATEWAY_ASSISTANT_SHARED_SECRET``).
+    Gateway and private services construct this with the same platform
+    internal token.
     """
 
     secret: str
@@ -175,9 +175,7 @@ class GatewaySecret:
 
     def __post_init__(self) -> None:
         if not self.secret or len(self.secret) < 16:
-            raise ValueError(
-                "GATEWAY_ASSISTANT_SHARED_SECRET must be at least 16 chars"
-            )
+            raise ValueError("internal service secret must be at least 16 chars")
         self.version = (
             self.version or "v2"
         ).strip().lower()

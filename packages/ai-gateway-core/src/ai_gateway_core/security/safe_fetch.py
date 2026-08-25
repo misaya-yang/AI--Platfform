@@ -421,8 +421,10 @@ async def safe_callback_post(
     url: str,
     *,
     json: dict[str, Any],
+    headers: Mapping[str, str] | None = None,
     timeout: float = 10.0,
     allowed_hosts: tuple[str, ...] | None = None,
+    allow_env_allowlist: bool = True,
 ) -> httpx.Response:
     """POST JSON to a user-controlled callback URL with DNS-pinned transport.
 
@@ -432,13 +434,13 @@ async def safe_callback_post(
     """
     scheme, host, port, _ = _split_url(url)
 
-    effective = _build_allowlist(allowed_hosts)
+    effective = _build_allowlist(allowed_hosts) if allow_env_allowlist else tuple(allowed_hosts or ())
     if effective and _host_matches(host, effective):
         async with httpx.AsyncClient(
             timeout=timeout,
             follow_redirects=False,
         ) as client:
-            return await client.post(url, json=json)
+            return await client.post(url, json=json, headers=headers)
 
     ok, pinned_ip = is_safe_destination(host, port)
     if not ok:
@@ -453,7 +455,7 @@ async def safe_callback_post(
         timeout=timeout,
         follow_redirects=False,
     ) as client:
-        return await client.post(url, json=json)
+        return await client.post(url, json=json, headers=headers)
 
 
 async def safe_form_post(

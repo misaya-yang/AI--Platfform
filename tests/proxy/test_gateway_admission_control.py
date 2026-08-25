@@ -87,7 +87,7 @@ async def test_adaptive_load_shedder_rejects_normal_priority_when_p99_is_high():
         shedder.record_latency(12_000)
 
     rejection = shedder.maybe_reject(
-        service_id="assistant-service",
+        service_id="agent-runtime",
         request_class="sync",
         priority=2,
     )

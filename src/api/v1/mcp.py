@@ -17,7 +17,6 @@ from ai_gateway_core.persistence.repositories.mcp_repository import (
 )
 from ai_gateway_core.security import is_safe_destination
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
 
 from ...core.auth.permissions import Capability
 from ...core.auth.user_resolver import UserContext
@@ -97,6 +96,10 @@ def _get_repository(request: Request) -> Any:
 
 
 def _map_repository_error(request: Request, exc: Exception) -> None:
+    from ...services.agent_runtime.mcp_gateway_broker import MCPGatewayBrokerError
+
+    if isinstance(exc, MCPGatewayBrokerError):
+        _raise_mcp_error(request, 502, exc.code, "MCP server unavailable")
     if isinstance(exc, MCPNotFoundError):
         _raise_mcp_error(request, 404, str(exc), "MCP resource not found")
     if isinstance(exc, MCPConflictError):
@@ -525,51 +528,28 @@ async def discover_mcp_server(
     auth: AuthContext = Depends(get_auth_context),
 ):
     _authorize_write(request, auth, user)
-    service = getattr(request.app.state, "mcp_discovery_service", None)
-    if service is not None:
-        try:
-            result = await service.discover(
-                tenant_id=user.tenant_id,
-                user_id=user.user_id,
-                server_id=server_id,
-                connection_id=payload.connection_id,
-                principal_type=payload.principal_type,
-                repository=_get_repository(request),
-            )
-        except Exception as exc:
-            _map_repository_error(request, exc)
-            raise
-        audit_ref = await _audit_mutation(
+    service = getattr(request.app.state, "mcp_gateway_broker", None)
+    if service is None:
+        service = getattr(request.app.state, "mcp_discovery_service", None)
+    if service is None or not callable(getattr(service, "discover", None)):
+        _raise_mcp_error(
             request,
-            user,
-            action="discover",
-            resource_type="mcp_server",
-            resource_id=server_id,
-            summary={
-                "changed": len(result.get("changed") or []),
-                "removed": len(result.get("removed") or []),
-                "breaking": bool(result.get("breaking")),
-            },
+            503,
+            "MCP_DISCOVERY_UNAVAILABLE",
+            "MCP discovery service unavailable",
         )
-        result = {
-            **result,
-            "request_id": _request_id(request),
-            "audit_ref": audit_ref,
-        }
-        return MCPDiscoveryResponse.model_validate(result)
-
-    # The protocol client lives in assistant-service. Gateway retains authz and
-    # identity, then signs and streams this exact management call internally.
-    from ._assistant_proxy import proxy_to_assistant_service
-
-    response = await proxy_to_assistant_service(
-        request,
-        user,
-        path=f"mcp/servers/{server_id}/discover",
-        body=payload.model_dump_json().encode("utf-8"),
-    )
-    if response.status_code < 200 or response.status_code >= 300:
-        return response
+    try:
+        result = await service.discover(
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            server_id=server_id,
+            connection_id=payload.connection_id,
+            principal_type=payload.principal_type,
+            repository=_get_repository(request),
+        )
+    except Exception as exc:
+        _map_repository_error(request, exc)
+        raise
     audit_ref = await _audit_mutation(
         request,
         user,
@@ -577,33 +557,18 @@ async def discover_mcp_server(
         resource_type="mcp_server",
         resource_id=server_id,
         summary={
-            "connection_id": payload.connection_id,
-            "principal_type": payload.principal_type,
+            "changed": len(result.get("changed") or []),
+            "removed": len(result.get("removed") or []),
+            "breaking": bool(result.get("breaking")),
         },
     )
-    request_id = _request_id(request)
-    body = getattr(response, "body", None)
-    if isinstance(body, bytes):
-        try:
-            result = json.loads(body)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            result = None
-        if isinstance(result, dict):
-            result["request_id"] = request_id
-            result["audit_ref"] = audit_ref
-            headers = {
-                key: value
-                for key, value in response.headers.items()
-                if key.lower() not in {"content-length", "content-type"}
-            }
-            return JSONResponse(
-                content=result,
-                status_code=response.status_code,
-                headers=headers,
-            )
-    response.headers["X-Request-Id"] = request_id
-    response.headers["X-Audit-Ref"] = audit_ref
-    return response
+    return MCPDiscoveryResponse.model_validate(
+        {
+            **result,
+            "request_id": _request_id(request),
+            "audit_ref": audit_ref,
+        }
+    )
 
 
 # Compatibility surface for the existing Assistant management callers. It now

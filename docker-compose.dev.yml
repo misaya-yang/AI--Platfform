@@ -3,7 +3,7 @@
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.build.yml \
 #     -f docker-compose.dev.yml --env-file .env up -d --build \
-#     gateway assistant-service knowledge-service knowledge-worker
+#     gateway knowledge-service knowledge-worker agent-runtime agent-capability-worker
 #
 # The base compose file remains the production-like quickstart. This override
 # bind-mounts source and runs uvicorn with --reload for local iteration.
@@ -16,13 +16,6 @@ services:
       - ./src:/app/src
       - ./database:/app/database
       - ./config:/app/config
-      - ./packages/ai-gateway-core/src/ai_gateway_core:/opt/venv/lib/python3.12/site-packages/ai_gateway_core
-
-  assistant-service:
-    command:
-      ["uvicorn", "assistant_service.main:app", "--host", "0.0.0.0", "--port", "8093", "--reload", "--timeout-keep-alive", "120"]
-    volumes:
-      - ./apps/assistant-service/src:/app/apps/assistant-service/src
       - ./packages/ai-gateway-core/src/ai_gateway_core:/opt/venv/lib/python3.12/site-packages/ai_gateway_core
 
   knowledge-service:

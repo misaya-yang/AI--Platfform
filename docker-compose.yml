@@ -17,11 +17,11 @@ x-container-proxy-env: &container-proxy-env
   HTTP_PROXY: "${CONTAINER_HTTP_PROXY:-}"
   HTTPS_PROXY: "${CONTAINER_HTTPS_PROXY:-${CONTAINER_HTTP_PROXY:-}}"
   ALL_PROXY: "${CONTAINER_ALL_PROXY:-${CONTAINER_HTTP_PROXY:-}}"
-  NO_PROXY: "${CONTAINER_NO_PROXY:-localhost,127.0.0.1,::1,postgres,redis,qdrant,gateway,frontend,knowledge-service,assistant-service}"
+  NO_PROXY: "${CONTAINER_NO_PROXY:-localhost,127.0.0.1,::1,postgres,redis,qdrant,gateway,frontend,knowledge-service,agent-runtime,agent-capability-worker}"
   http_proxy: "${CONTAINER_HTTP_PROXY:-}"
   https_proxy: "${CONTAINER_HTTPS_PROXY:-${CONTAINER_HTTP_PROXY:-}}"
   all_proxy: "${CONTAINER_ALL_PROXY:-${CONTAINER_HTTP_PROXY:-}}"
-  no_proxy: "${CONTAINER_NO_PROXY:-localhost,127.0.0.1,::1,postgres,redis,qdrant,gateway,frontend,knowledge-service,assistant-service}"
+  no_proxy: "${CONTAINER_NO_PROXY:-localhost,127.0.0.1,::1,postgres,redis,qdrant,gateway,frontend,knowledge-service,agent-runtime,agent-capability-worker}"
 
 services:
   # ===========================================================================
@@ -53,7 +53,7 @@ services:
       retries: 5
       start_period: 10s
     restart: unless-stopped
-    mem_limit: "${POSTGRES_MEMORY_LIMIT:-384m}"
+    mem_limit: "${POSTGRES_MEMORY_LIMIT:-320m}"
 
   # Redis - Cache & Session Store
   redis:
@@ -62,7 +62,7 @@ services:
     environment:
       # Pass password to container for healthcheck access
       REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
-      REDIS_MAXMEMORY: "${REDIS_MAXMEMORY:-192mb}"
+      REDIS_MAXMEMORY: "${REDIS_MAXMEMORY:-128mb}"
     command:
       - /bin/sh
       - /opt/ai-gateway/redis-entrypoint.sh
@@ -79,7 +79,7 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
-    mem_limit: "${REDIS_MEMORY_LIMIT:-256m}"
+    mem_limit: "${REDIS_MEMORY_LIMIT:-192m}"
 
   # Qdrant - Vector Database for Knowledge Base
   qdrant:
@@ -103,7 +103,7 @@ services:
       retries: 3
       start_period: 10s
     restart: unless-stopped
-    mem_limit: "${QDRANT_MEMORY_LIMIT:-384m}"
+    mem_limit: "${QDRANT_MEMORY_LIMIT:-352m}"
 
   # ===========================================================================
   # Migration Job (Phase 6) — opt-in
@@ -169,13 +169,15 @@ services:
     user: "0:0"
     command: >
       sh -ec
-      "mkdir -p /app/data/images /app/logs /app/assistant-memory &&
-       chown -R 1000:1000 /app/data /app/logs /app/assistant-memory &&
-       chmod 700 /app/assistant-memory"
+      "mkdir -p /app/data/images /app/logs /app/agent-memory &&
+       chown -R 1000:1000 /app/data /app/logs /app/agent-memory &&
+       chmod 700 /app/agent-memory"
     volumes:
       - gateway-logs:/app/logs
       - gateway-data:/app/data
-      - assistant-memory-data:/app/assistant-memory
+      # Keep the existing volume identity so pre-cutover memory remains
+      # reachable for governed deletion; only the owning service/path changes.
+      - assistant-memory-data:/app/agent-memory
     networks:
       - ai-gateway-net
     restart: "no"
@@ -239,8 +241,7 @@ services:
       # Embeddings API (DashScope / Gemini)
       GATEWAY_KNOWLEDGE__DASHSCOPE__API_KEY: "${DASHSCOPE_EMBEDDING_API_KEY:-${DASHSCOPE_API_KEY:-}}"
 
-      # LLM provider keys (assistant chat path — loaded by _init_assistant_service
-      # in main.py). Separate chat-specific overrides route chat to free Intl
+      # LLM provider keys (Gateway chat path). Separate chat-specific overrides route chat to free Intl
       # endpoint without affecting image_gen / embedding.
       DASHSCOPE_API_KEY: "${DASHSCOPE_API_KEY:-}"
       DASHSCOPE_CHAT_API_KEY: "${DASHSCOPE_CHAT_API_KEY:-}"
@@ -251,6 +252,11 @@ services:
       DASHSCOPE_CHAT_WIRE_PROTOCOL: "${DASHSCOPE_CHAT_WIRE_PROTOCOL:-responses_v1}"
       DASHSCOPE_EMBEDDING_BASE_URL: "${DASHSCOPE_EMBEDDING_BASE_URL:-}"
       DASHSCOPE_IMAGE_BASE_URL: "${DASHSCOPE_IMAGE_BASE_URL:-}"
+      DASHSCOPE_IMAGE_MODEL: "${DASHSCOPE_IMAGE_MODEL:-wan2.6-t2i}"
+      DASHSCOPE_IMAGE_PROTOCOL: "${DASHSCOPE_IMAGE_PROTOCOL:-wan26}"
+      DASHSCOPE_IMAGE_SUBMIT_PATH: "${DASHSCOPE_IMAGE_SUBMIT_PATH:-/services/aigc/image-generation/generation}"
+      IMAGE_GENERATION_PROVIDER: "${IMAGE_GENERATION_PROVIDER:-}"
+      IMAGE_GENERATION_RESULT_HOST_SUFFIXES: "${IMAGE_GENERATION_RESULT_HOST_SUFFIXES:-aliyuncs.com,alibabacloud.com,volces.com}"
       DASHSCOPE_RERANK_BASE_URL: "${DASHSCOPE_RERANK_BASE_URL:-}"
       DASHSCOPE_RERANK_REQUEST_SCHEMA: "${DASHSCOPE_RERANK_REQUEST_SCHEMA:-auto}"
       DASHSCOPE_RERANK_INSTRUCT: "${DASHSCOPE_RERANK_INSTRUCT:-}"
@@ -258,8 +264,14 @@ services:
       GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
       GOOGLE_API_BACKEND: "${GOOGLE_API_BACKEND:-}"
       GOOGLE_CHAT_BACKEND: "${GOOGLE_CHAT_BACKEND:-}"
+      GOOGLE_IMAGE_BACKEND: "${GOOGLE_IMAGE_BACKEND:-}"
+      GOOGLE_IMAGE_MODEL: "${GOOGLE_IMAGE_MODEL:-gemini-3.1-flash-image-preview}"
       VERTEX_API_KEY: "${VERTEX_API_KEY:-}"
       VERTEX_CHAT_API_KEY: "${VERTEX_CHAT_API_KEY:-}"
+      VERTEX_IMAGE_API_KEY: "${VERTEX_IMAGE_API_KEY:-}"
+      ARK_API_KEY: "${ARK_API_KEY:-}"
+      ARK_BASE_URL: "${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}"
+      DOUBAO_IMAGE_MODEL: "${DOUBAO_IMAGE_MODEL:-doubao-seedream-5-0-260128}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       OPENAI_BASE_URL: "${OPENAI_BASE_URL:-}"
       OPENAI_WIRE_PROTOCOL: "${OPENAI_WIRE_PROTOCOL:-chat_completions}"
@@ -271,18 +283,18 @@ services:
       GATEWAY_PROXY__ENABLED: "true"
       GATEWAY_PROXY__BILLING_ENABLED: "${PROXY_BILLING_ENABLED:-false}"
 
-      # Shared HMAC for gateway → assistant-service (Phase 5a). Same
-      # value must be set on the assistant-service block. Both sides
-      # load it via env_file in prod.
-      ASSISTANT_SERVICE_URL: "${ASSISTANT_SERVICE_URL:-http://assistant-service:8093}"
-      AI_PLATFORM_AGENT_RUNTIME_INTERNAL_TOKEN: "${AI_PLATFORM_AGENT_RUNTIME_INTERNAL_TOKEN:-}"
-      AI_PLATFORM_AGENT_RUNTIME_LEASE_SIGNING_SECRET: "${AI_PLATFORM_AGENT_RUNTIME_LEASE_SIGNING_SECRET:-}"
+      AI_PLATFORM_INTERNAL_TOKEN: "${AI_PLATFORM_INTERNAL_TOKEN:?AI_PLATFORM_INTERNAL_TOKEN is required}"
+      AI_PLATFORM_CAPABILITY_PROOF_SECRET: "${AI_PLATFORM_CAPABILITY_PROOF_SECRET:?AI_PLATFORM_CAPABILITY_PROOF_SECRET is required}"
+      AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET: "${AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET:?AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET is required}"
       AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_INTERNAL_TOKEN: "${AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_INTERNAL_TOKEN:-}"
       AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_RUNTIME_BASE_URL: "${AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_RUNTIME_BASE_URL:-http://gateway:8080/internal/v1/agent-model-plane}"
       AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION: "${AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION:-}"
       AI_PLATFORM_AGENT_RUNTIME_URL: "${AI_PLATFORM_AGENT_RUNTIME_URL:-http://agent-runtime:8094}"
-      AI_PLATFORM_CAPABILITY_PLANE_URL: "${AI_PLATFORM_CAPABILITY_PLANE_URL:-http://assistant-service:8093/internal/v1/capabilities}"
-      ASSISTANT_ROUTE_SESSIONS_PROXIED: "${ASSISTANT_ROUTE_SESSIONS_PROXIED:-true}"
+      AI_PLATFORM_CAPABILITY_WORKER_URL: "${AI_PLATFORM_CAPABILITY_WORKER_URL:-http://agent-capability-worker:8095}"
+      AI_PLATFORM_CAPABILITY_WORKER_WRITES_ENABLED: "${AI_PLATFORM_CAPABILITY_WORKER_WRITES_ENABLED:-true}"
+      AI_PLATFORM_CAPABILITY_PLANE_URL: "${AI_PLATFORM_CAPABILITY_PLANE_URL:-http://gateway:8080/internal/v2/agent-capabilities}"
+      AI_PLATFORM_CAPABILITY_WORKER_ENABLED: "${AI_PLATFORM_CAPABILITY_WORKER_ENABLED:-true}"
+      AGENT_RUNTIME_MEMORY_DIR: "${AGENT_RUNTIME_MEMORY_DIR:-/app/agent-memory}"
       AGENT_STUDIO_RUNTIME_ENABLED: "${AGENT_STUDIO_RUNTIME_ENABLED:-true}"
       AGENT_STUDIO_MANAGEMENT_ENABLED: "${AGENT_STUDIO_MANAGEMENT_ENABLED:-true}"
       AGENT_STUDIO_PUBLISH_ENABLED: "${AGENT_STUDIO_PUBLISH_ENABLED:-true}"
@@ -296,7 +308,6 @@ services:
       KB_PROXY_POOL_TIMEOUT_SECONDS: "${KB_PROXY_POOL_TIMEOUT_SECONDS:-10}"
       KB_PROXY_MAX_CONNECTIONS: "${KB_PROXY_MAX_CONNECTIONS:-50}"
       KB_PROXY_MAX_KEEPALIVE_CONNECTIONS: "${KB_PROXY_MAX_KEEPALIVE_CONNECTIONS:-10}"
-      GATEWAY_ASSISTANT_SHARED_SECRET: "${GATEWAY_ASSISTANT_SHARED_SECRET:?GATEWAY_ASSISTANT_SHARED_SECRET is required for gateway<->assistant-service auth}"
       GATEWAY_ENCRYPTION_KEY: "${GATEWAY_ENCRYPTION_KEY:?GATEWAY_ENCRYPTION_KEY is required}"
       INTERNAL_COMM_STATE_BACKEND: "${INTERNAL_COMM_STATE_BACKEND:-redis}"
       INTERNAL_COMM_REDIS_URL: "${INTERNAL_COMM_REDIS_URL:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/3}"
@@ -309,7 +320,7 @@ services:
       SERVICE_RETRY_BUDGET_RATIO: "${SERVICE_RETRY_BUDGET_RATIO:-0.1}"
       SERVICE_BREAKER_THRESHOLD: "${SERVICE_BREAKER_THRESHOLD:-3}"
       SERVICE_BREAKER_RECOVERY_TIMEOUT_SECONDS: "${SERVICE_BREAKER_RECOVERY_TIMEOUT_SECONDS:-30}"
-      INTERNAL_SERVICE_RATE_LIMITS: "${INTERNAL_SERVICE_RATE_LIMITS:-knowledge-service=100:100,assistant-service=50:50}"
+      INTERNAL_SERVICE_RATE_LIMITS: "${INTERNAL_SERVICE_RATE_LIMITS:-knowledge-service=100:100,agent-runtime=50:50,agent-capability-worker=50:50}"
       SERVICE_STREAMING_MAX_CONNECTIONS: "${SERVICE_STREAMING_MAX_CONNECTIONS:-16}"
       ADMISSION_TENANT_SHARE_RATIO: "${ADMISSION_TENANT_SHARE_RATIO:-0.2}"
       ADAPTIVE_LOAD_SHEDDING_WINDOW_SECONDS: "${ADAPTIVE_LOAD_SHEDDING_WINDOW_SECONDS:-30}"
@@ -338,6 +349,7 @@ services:
     volumes:
       - gateway-logs:/app/logs
       - gateway-data:/app/data
+      - assistant-memory-data:/app/agent-memory
     networks:
       - ai-gateway-net
     depends_on:
@@ -351,7 +363,9 @@ services:
         condition: service_healthy
       knowledge-service:
         condition: service_healthy
-      assistant-service:
+      agent-runtime:
+        condition: service_healthy
+      agent-capability-worker:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
@@ -360,7 +374,7 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
-    mem_limit: "${GATEWAY_MEMORY_LIMIT:-512m}"
+    mem_limit: "${GATEWAY_MEMORY_LIMIT:-384m}"
     init: true
 
   # AI Gateway Frontend (Web Console)
@@ -388,7 +402,7 @@ services:
       timeout: 10s
       retries: 3
     restart: unless-stopped
-    mem_limit: "${FRONTEND_MEMORY_LIMIT:-128m}"
+    mem_limit: "${FRONTEND_MEMORY_LIMIT:-96m}"
 
   # ===========================================================================
   # Microservices
@@ -450,10 +464,10 @@ services:
       KNOWLEDGE_STORAGE__S3__SECRET_KEY: "${GATEWAY_STORAGE__S3__SECRET_KEY:-}"
       KNOWLEDGE_STORAGE__S3__ENDPOINT_URL: "${GATEWAY_STORAGE__S3__ENDPOINT_URL:-}"
       KNOWLEDGE_STORAGE__KEY_PREFIX: "${GATEWAY_STORAGE__KEY_PREFIX:-dev}"
-      KNOWLEDGE_STORAGE__SIGNING_KEY: "${GATEWAY_ASSISTANT_SHARED_SECRET:?GATEWAY_ASSISTANT_SHARED_SECRET is required for local image URL signing}"
+      KNOWLEDGE_STORAGE__SIGNING_KEY: "${GATEWAY_ENCRYPTION_KEY:?GATEWAY_ENCRYPTION_KEY is required for local image URL signing}"
+      AI_PLATFORM_INTERNAL_TOKEN: "${AI_PLATFORM_INTERNAL_TOKEN:?AI_PLATFORM_INTERNAL_TOKEN is required}"
+      AI_PLATFORM_CAPABILITY_PROOF_SECRET: "${AI_PLATFORM_CAPABILITY_PROOF_SECRET:?AI_PLATFORM_CAPABILITY_PROOF_SECRET is required}"
       # Phase K5c: gateway HMAC verification (Polaris #6-KB). Same secret as
-      # assistant-service — single shared value across both gateway hops.
-      GATEWAY_ASSISTANT_SHARED_SECRET: "${GATEWAY_ASSISTANT_SHARED_SECRET:?GATEWAY_ASSISTANT_SHARED_SECRET is required for knowledge-service HMAC auth}"
       GATEWAY_ENCRYPTION_KEY: "${GATEWAY_ENCRYPTION_KEY:?GATEWAY_ENCRYPTION_KEY is required}"
       INTERNAL_COMM_STATE_BACKEND: "${INTERNAL_COMM_STATE_BACKEND:-redis}"
       INTERNAL_COMM_REDIS_URL: "${INTERNAL_COMM_REDIS_URL:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/3}"
@@ -466,7 +480,7 @@ services:
       SERVICE_RETRY_BUDGET_RATIO: "${SERVICE_RETRY_BUDGET_RATIO:-0.1}"
       SERVICE_BREAKER_THRESHOLD: "${SERVICE_BREAKER_THRESHOLD:-3}"
       SERVICE_BREAKER_RECOVERY_TIMEOUT_SECONDS: "${SERVICE_BREAKER_RECOVERY_TIMEOUT_SECONDS:-30}"
-      INTERNAL_SERVICE_RATE_LIMITS: "${INTERNAL_SERVICE_RATE_LIMITS:-knowledge-service=100:100,assistant-service=50:50}"
+      INTERNAL_SERVICE_RATE_LIMITS: "${INTERNAL_SERVICE_RATE_LIMITS:-knowledge-service=100:100,agent-runtime=50:50,agent-capability-worker=50:50}"
       SERVICE_STREAMING_MAX_CONNECTIONS: "${SERVICE_STREAMING_MAX_CONNECTIONS:-16}"
       INTERNAL_IDEMPOTENCY_BACKEND: "${INTERNAL_IDEMPOTENCY_BACKEND:-memory}"
       INTERNAL_IDEMPOTENCY_TTL_SECONDS: "${INTERNAL_IDEMPOTENCY_TTL_SECONDS:-86400}"
@@ -524,124 +538,32 @@ services:
     mem_limit: "${KNOWLEDGE_WORKER_MEMORY_LIMIT:-512m}"
     init: true
 
-  # ===========================================================================
-  # Assistant Service (extracted microservice)
-  # ===========================================================================
-  assistant-service:
-    container_name: ai-gateway-assistant-service
-    image: "${ASSISTANT_IMAGE:-ghcr.io/misaya-yang/ai-gateway-assistant-service:2.0.0}"
-    # Phase 5a: ``expose`` makes port 8093 reachable only on the docker
-    # bridge network (other compose services). Public access is not
-    # published to the host. See audit Finding H-4 + GATE G5a-6.
+  # Rust capability worker. It owns durable tool execution but never a model loop.
+  agent-capability-worker:
+    container_name: ai-gateway-agent-capability-worker
+    image: "${AGENT_CAPABILITY_WORKER_IMAGE:-ai-gateway-agent-capability-worker:local-93c54bca3899-24a61f5c9160}"
     expose:
-      - "8093"
+      - "8095"
     environment:
       <<: *container-proxy-env
-      ASSISTANT_IMAGE_REF: "${ASSISTANT_IMAGE:-ghcr.io/misaya-yang/ai-gateway-assistant-service:2.0.0}"
-      DEFAULT_MODEL: "${DEFAULT_MODEL:-qwen3.7-plus}"
-      ASSISTANT_CORS__ALLOW_ORIGINS: '${ASSISTANT_CORS_ALLOW_ORIGINS_JSON:-["http://localhost:80","http://localhost:3000","http://localhost:8081"]}'
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-gateway}?options=-csearch_path%3Dassistant%2Cgateway%2Cknowledge%2Cpublic"
-      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
-      KB_SERVICE_URL: "${KB_SERVICE_URL:-http://knowledge-service:8092}"
-      KB_PROXY_CONNECT_TIMEOUT_SECONDS: "${KB_PROXY_CONNECT_TIMEOUT_SECONDS:-5}"
-      KB_PROXY_READ_TIMEOUT_SECONDS: "${KB_PROXY_READ_TIMEOUT_SECONDS:-30}"
-      KB_PROXY_WRITE_TIMEOUT_SECONDS: "${KB_PROXY_WRITE_TIMEOUT_SECONDS:-10}"
-      KB_PROXY_POOL_TIMEOUT_SECONDS: "${KB_PROXY_POOL_TIMEOUT_SECONDS:-10}"
-      KB_PROXY_MAX_CONNECTIONS: "${KB_PROXY_MAX_CONNECTIONS:-50}"
-      KB_PROXY_MAX_KEEPALIVE_CONNECTIONS: "${KB_PROXY_MAX_KEEPALIVE_CONNECTIONS:-10}"
-      # Must be ``false`` in prod. When set to ``true`` (dev only) the
-      # gateway-secret middleware lets requests without an HMAC header
-      # through; get_user_context still demands X-User-Id/X-Tenant-Id.
-      ASSISTANT_APP__ALLOW_ANONYMOUS: "${ASSISTANT_APP__ALLOW_ANONYMOUS:-false}"
-      # Explicit local test transport; disabled by default and never calls a provider.
-      ASSISTANT_E2E_STUB_LLM: "${ASSISTANT_E2E_STUB_LLM:-false}"
-      AI_PLATFORM_INTERNAL_TOKEN: "${AI_PLATFORM_AGENT_RUNTIME_INTERNAL_TOKEN:-}"
-      AGENT_STUDIO_RUNTIME_ENABLED: "${AGENT_STUDIO_RUNTIME_ENABLED:-true}"
-      AGENT_STUDIO_MCP_ENABLED: "${AGENT_STUDIO_MCP_ENABLED:-true}"
-      ASSISTANT_MCP_CLIENT_CACHE_TTL_SECONDS: "${ASSISTANT_MCP_CLIENT_CACHE_TTL_SECONDS:-60}"
-      ASSISTANT_MCP_CLIENT_CACHE_MAX_ENTRIES: "${ASSISTANT_MCP_CLIENT_CACHE_MAX_ENTRIES:-100}"
-      AGENT_STUDIO_SKILLS_ENABLED: "${AGENT_STUDIO_SKILLS_ENABLED:-true}"
-      ASSISTANT_RUNTIME_MEMORY_DIR: "${ASSISTANT_RUNTIME_MEMORY_DIR:-/app/data/assistant-memory}"
-      ASSISTANT_RUNTIME_LEGACY_MEMORY_DIR: "${ASSISTANT_RUNTIME_LEGACY_MEMORY_DIR:-/app/legacy-data/assistant-memory}"
-      ASSISTANT_RUNTIME_QDRANT_URL: "${ASSISTANT_RUNTIME_QDRANT_URL:-http://qdrant:6333}"
-      ASSISTANT_RUNTIME_QDRANT_API_KEY: "${ASSISTANT_RUNTIME_QDRANT_API_KEY:-}"
-      ASSISTANT_RUNTIME_MEMORY_V2: "${ASSISTANT_RUNTIME_MEMORY_V2:-true}"
-      ASSISTANT_RUNTIME_CONTEXT_V2: "${ASSISTANT_RUNTIME_CONTEXT_V2:-true}"
-      ASSISTANT_RUNTIME_TOOL_POLICY_V2: "${ASSISTANT_RUNTIME_TOOL_POLICY_V2:-false}"
-      ASSISTANT_GATEWAY_ENABLED: "${ASSISTANT_GATEWAY_ENABLED:-true}"
-      ASSISTANT_RUNTIME_SKILLS: "${ASSISTANT_RUNTIME_SKILLS:-true}"
-      ASSISTANT_AGENT_PLUGIN_PATHS: "${ASSISTANT_AGENT_PLUGIN_PATHS:-/opt/agent-plugins/ai-docgen:/opt/agent-plugins/ai-quiz:/opt/agent-plugins/community-doublecheck:/opt/agent-plugins/community-engineering-reviewers}"
-      ASSISTANT_AGENT_PLUGIN_DATA_ROOT: "${ASSISTANT_AGENT_PLUGIN_DATA_ROOT:-/app/data/agent-plugins}"
-      ASSISTANT_TRUSTED_AGENT_PLUGINS: "${ASSISTANT_TRUSTED_AGENT_PLUGINS:-ai-docgen@1.0.0}"
-      ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS: "${ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS:-/opt/agent-plugins/ai-docgen}"
-      ASSISTANT_RUNTIME_SCHEDULER: "${ASSISTANT_RUNTIME_SCHEDULER:-false}"
-      ASSISTANT_RUNTIME_FAILOVER_V2: "${ASSISTANT_RUNTIME_FAILOVER_V2:-false}"
-      ASSISTANT_MODEL_FALLBACKS_JSON: "${ASSISTANT_MODEL_FALLBACKS_JSON:-{}}"
-      ASSISTANT_CODE_EXECUTOR_ENABLED: "${ASSISTANT_CODE_EXECUTOR_ENABLED:-false}"
-      ASSISTANT_TOOL_OUTPUT_SPILL_ENABLED: "${ASSISTANT_TOOL_OUTPUT_SPILL_ENABLED:-true}"
-      ASSISTANT_TOOL_OUTPUT_SPILL_THRESHOLD_CHARS: "${ASSISTANT_TOOL_OUTPUT_SPILL_THRESHOLD_CHARS:-100000}"
-      ASSISTANT_TOOL_ARTIFACT_READ_MAX_TOKENS: "${ASSISTANT_TOOL_ARTIFACT_READ_MAX_TOKENS:-8000}"
-      ASSISTANT_STAGED_COMPACTION_ENABLED: "${ASSISTANT_STAGED_COMPACTION_ENABLED:-false}"
-      ASSISTANT_STAGED_COMPACTION_MIN_SOURCE_TOKENS: "${ASSISTANT_STAGED_COMPACTION_MIN_SOURCE_TOKENS:-4000}"
-      ASSISTANT_READ_ONLY_TOOL_PARALLELISM: "${ASSISTANT_READ_ONLY_TOOL_PARALLELISM:-4}"
-      ASSISTANT_SUBAGENTS_ENABLED: "${ASSISTANT_SUBAGENTS_ENABLED:-false}"
-      # Shared HMAC for gateway↔assistant-service. Both services MUST
-      # have the same value; a mismatch yields 401 at the middleware.
-      GATEWAY_ASSISTANT_SHARED_SECRET: "${GATEWAY_ASSISTANT_SHARED_SECRET:?GATEWAY_ASSISTANT_SHARED_SECRET is required for gateway<->assistant-service auth}"
-      GATEWAY_ENCRYPTION_KEY: "${GATEWAY_ENCRYPTION_KEY:?GATEWAY_ENCRYPTION_KEY is required}"
-      INTERNAL_COMM_STATE_BACKEND: "${INTERNAL_COMM_STATE_BACKEND:-redis}"
-      INTERNAL_COMM_REDIS_URL: "${INTERNAL_COMM_REDIS_URL:-redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/3}"
-      INTERNAL_AUTH_VERSION: "${INTERNAL_AUTH_VERSION:-v2}"
-      INTERNAL_AUTH_ACTIVE_KEY_ID: "${INTERNAL_AUTH_ACTIVE_KEY_ID:-local}"
-      INTERNAL_AUTH_KEYS: "${INTERNAL_AUTH_KEYS:-}"
-      SERVICE_RETRY_MAX_ATTEMPTS: "${SERVICE_RETRY_MAX_ATTEMPTS:-2}"
-      SERVICE_RETRY_BASE_DELAY_MS: "${SERVICE_RETRY_BASE_DELAY_MS:-50}"
-      SERVICE_RETRY_MAX_DELAY_MS: "${SERVICE_RETRY_MAX_DELAY_MS:-500}"
-      SERVICE_RETRY_BUDGET_RATIO: "${SERVICE_RETRY_BUDGET_RATIO:-0.1}"
-      SERVICE_BREAKER_THRESHOLD: "${SERVICE_BREAKER_THRESHOLD:-3}"
-      SERVICE_BREAKER_RECOVERY_TIMEOUT_SECONDS: "${SERVICE_BREAKER_RECOVERY_TIMEOUT_SECONDS:-30}"
-      INTERNAL_SERVICE_RATE_LIMITS: "${INTERNAL_SERVICE_RATE_LIMITS:-knowledge-service=100:100,assistant-service=50:50}"
-      SERVICE_STREAMING_MAX_CONNECTIONS: "${SERVICE_STREAMING_MAX_CONNECTIONS:-16}"
-      INTERNAL_IDEMPOTENCY_BACKEND: "${INTERNAL_IDEMPOTENCY_BACKEND:-memory}"
-      INTERNAL_IDEMPOTENCY_TTL_SECONDS: "${INTERNAL_IDEMPOTENCY_TTL_SECONDS:-86400}"
-      DASHSCOPE_API_KEY: "${DASHSCOPE_API_KEY:-}"
-      DASHSCOPE_CHAT_API_KEY: "${DASHSCOPE_CHAT_API_KEY:-}"
-      DASHSCOPE_IMAGE_API_KEY: "${DASHSCOPE_IMAGE_API_KEY:-}"
-      DASHSCOPE_EMBEDDING_API_KEY: "${DASHSCOPE_EMBEDDING_API_KEY:-}"
-      DASHSCOPE_BASE_URL: "${DASHSCOPE_BASE_URL:-}"
-      DASHSCOPE_CHAT_BASE_URL: "${DASHSCOPE_CHAT_BASE_URL:-}"
-      DASHSCOPE_CHAT_WIRE_PROTOCOL: "${DASHSCOPE_CHAT_WIRE_PROTOCOL:-responses_v1}"
-      DASHSCOPE_EMBEDDING_BASE_URL: "${DASHSCOPE_EMBEDDING_BASE_URL:-}"
-      DASHSCOPE_IMAGE_BASE_URL: "${DASHSCOPE_IMAGE_BASE_URL:-}"
-      DOCGEN_LLM_MODEL: "${DOCGEN_LLM_MODEL:-}"
-      DOCGEN_LLM_ENDPOINT: "${DOCGEN_LLM_ENDPOINT:-}"
-      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
-      GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
-      GOOGLE_API_BACKEND: "${GOOGLE_API_BACKEND:-}"
-      GOOGLE_CHAT_BACKEND: "${GOOGLE_CHAT_BACKEND:-}"
-      VERTEX_API_KEY: "${VERTEX_API_KEY:-}"
-      VERTEX_CHAT_API_KEY: "${VERTEX_CHAT_API_KEY:-}"
-      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
-      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-}"
-      OPENAI_WIRE_PROTOCOL: "${OPENAI_WIRE_PROTOCOL:-chat_completions}"
-      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
-      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
-      TAVILY_API_KEY: "${TAVILY_API_KEY:-}"
-      # Same storage contract as Gateway so signed Agent attachment handles
-      # resolve in both local-volume and shared object-storage deployments.
-      GATEWAY_STORAGE__BACKEND: "${GATEWAY_STORAGE__BACKEND:-local}"
-      GATEWAY_STORAGE__LOCAL_BASE_PATH: "${GATEWAY_STORAGE__LOCAL_BASE_PATH:-/app/data/images}"
-      GATEWAY_STORAGE__S3__BUCKET: "${GATEWAY_STORAGE__S3__BUCKET:-${S3_BUCKET:-}}"
-      GATEWAY_STORAGE__S3__REGION: "${GATEWAY_STORAGE__S3__REGION:-us-east-1}"
-      GATEWAY_STORAGE__S3__ACCESS_KEY: "${GATEWAY_STORAGE__S3__ACCESS_KEY:-}"
-      GATEWAY_STORAGE__S3__SECRET_KEY: "${GATEWAY_STORAGE__S3__SECRET_KEY:-}"
-      GATEWAY_STORAGE__S3__ENDPOINT_URL: "${GATEWAY_STORAGE__S3__ENDPOINT_URL:-}"
-      GATEWAY_STORAGE__URL_EXPIRY_SECONDS: "${GATEWAY_STORAGE__URL_EXPIRY_SECONDS:-3600}"
-      GATEWAY_STORAGE__KEY_PREFIX: "${GATEWAY_STORAGE__KEY_PREFIX:-dev}"
+      AI_PLATFORM_INTERNAL_TOKEN: "${AI_PLATFORM_INTERNAL_TOKEN:?AI_PLATFORM_INTERNAL_TOKEN is required}"
+      AI_PLATFORM_CAPABILITY_PROOF_SECRET: "${AI_PLATFORM_CAPABILITY_PROOF_SECRET:?AI_PLATFORM_CAPABILITY_PROOF_SECRET is required}"
+      AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET: "${AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET:?AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET is required}"
+      AI_PLATFORM_CAPABILITY_WORKER_BIND: "0.0.0.0:8095"
+      AI_PLATFORM_CAPABILITY_WORKER_FIXTURES_ENABLED: "${AI_PLATFORM_CAPABILITY_WORKER_FIXTURES_ENABLED:-false}"
+      AI_PLATFORM_CAPABILITY_WORKER_WRITES_ENABLED: "${AI_PLATFORM_CAPABILITY_WORKER_WRITES_ENABLED:-true}"
+      AI_PLATFORM_OFFICE_FONT_PATHS: "${AI_PLATFORM_OFFICE_FONT_PATHS:-/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc}"
+      AI_PLATFORM_KNOWLEDGE_SERVICE_URL: "${AI_PLATFORM_KNOWLEDGE_SERVICE_URL:-http://knowledge-service:8092}"
+      AI_PLATFORM_GATEWAY_INTERNAL_URL: "${AI_PLATFORM_GATEWAY_INTERNAL_URL:-http://gateway:8080}"
+      AI_PLATFORM_CAPABILITY_WORKSPACE_ROOT: "/workspace"
+      POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: "${POSTGRES_USER:-postgres}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+      POSTGRES_DB: "${POSTGRES_DB:-gateway}"
+      AI_PLATFORM_CAPABILITY_WORKER_DB_POOL_MAX_SIZE: "${AI_PLATFORM_CAPABILITY_WORKER_DB_POOL_MAX_SIZE:-4}"
     volumes:
-      - gateway-data:/app/data
-      - assistant-memory-data:/app/data/assistant-memory
-      - gateway-data:/app/legacy-data
+      - agent-capability-workspaces:/workspace
     networks:
       - ai-gateway-net
     depends_on:
@@ -649,30 +571,33 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
       knowledge-service:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8093/health/ready"]
+      test: ["CMD", "ai-platform-capability-worker-health"]
       interval: 30s
-      timeout: 10s
+      timeout: 5s
       retries: 3
-      start_period: 30s
+      start_period: 10s
     restart: unless-stopped
-    mem_limit: "${ASSISTANT_MEMORY_LIMIT:-640m}"
+    mem_limit: "${AGENT_CAPABILITY_WORKER_MEMORY_LIMIT:-1g}"
+    cpus: "${AGENT_CAPABILITY_WORKER_CPUS:-1.0}"
     init: true
 
   # Rust Agent Runtime. It is the sole Agent kernel for new and resumed turns.
   agent-runtime:
     container_name: ai-gateway-agent-runtime
-    image: "${AI_PLATFORM_AGENT_RUNTIME_IMAGE:-ai-gateway-agent-runtime:local-93c54bca3899-c3add32732c2}"
+    image: "${AI_PLATFORM_AGENT_RUNTIME_IMAGE:-ai-gateway-agent-runtime:local-93c54bca3899-24a61f5c9160}"
     expose:
       - "8094"
     environment:
       <<: *container-proxy-env
-      AI_PLATFORM_INTERNAL_TOKEN: "${AI_PLATFORM_AGENT_RUNTIME_INTERNAL_TOKEN:-}"
-      AI_PLATFORM_CAPABILITY_PLANE_URL: "${AI_PLATFORM_CAPABILITY_PLANE_URL:-http://assistant-service:8093/internal/v1/capabilities}"
+      AI_PLATFORM_INTERNAL_TOKEN: "${AI_PLATFORM_INTERNAL_TOKEN:?AI_PLATFORM_INTERNAL_TOKEN is required}"
+      AI_PLATFORM_CAPABILITY_PLANE_URL: "${AI_PLATFORM_CAPABILITY_PLANE_URL:-http://gateway:8080/internal/v2/agent-capabilities}"
+      AI_PLATFORM_CAPABILITY_WORKER_URL: "${AI_PLATFORM_CAPABILITY_WORKER_URL:-http://agent-capability-worker:8095}"
+      AI_PLATFORM_CAPABILITY_WORKER_ENABLED: "${AI_PLATFORM_CAPABILITY_WORKER_ENABLED:-true}"
+      AI_PLATFORM_CAPABILITY_WORKER_WRITES_ENABLED: "${AI_PLATFORM_CAPABILITY_WORKER_WRITES_ENABLED:-true}"
+      AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET: "${AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET:?AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET is required}"
       AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_INTERNAL_TOKEN: "${AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_INTERNAL_TOKEN:-}"
       AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION: "${AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION:-}"
       AI_PLATFORM_RUNTIME_BIND: "0.0.0.0:8094"
@@ -692,6 +617,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      agent-capability-worker:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8094/health/ready"]
       interval: 30s
@@ -699,7 +626,7 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
-    mem_limit: "${AI_PLATFORM_AGENT_RUNTIME_MEMORY_LIMIT:-256m}"
+    mem_limit: "${AI_PLATFORM_AGENT_RUNTIME_MEMORY_LIMIT:-192m}"
     init: true
 
 # =============================================================================
@@ -721,5 +648,6 @@ volumes:
   gateway-data: {}
   assistant-memory-data: {}
   agent-runtime-home: {}
+  agent-capability-workspaces: {}
   kb-data: {}
   tempo-data: {}

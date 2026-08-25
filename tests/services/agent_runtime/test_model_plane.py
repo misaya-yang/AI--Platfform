@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import uuid
 from typing import Any
@@ -8,7 +9,7 @@ from typing import Any
 import httpx
 import pytest
 from ai_gateway_core.agents import RuntimeModelLeaseClaims, RuntimeModelLeaseSigner
-from ai_gateway_core.models import get_builtin_model_capabilities
+from ai_gateway_core.models import get_builtin_model_capabilities, safe_model_capability_profile
 
 from src.services.agent_runtime.model_plane import (
     AgentModelPlane,
@@ -19,6 +20,7 @@ from src.services.agent_runtime.model_plane import (
     _responses_input_to_messages,
     _runtime_scope_sha256,
     _runtime_snapshot,
+    _snapshot_responses_tool_controls,
 )
 
 
@@ -180,7 +182,7 @@ def test_native_responses_accepts_paired_kernel_history_without_current_tools() 
         reasoning_option="minimal",
     )
 
-    assert "tools" not in body
+    assert body["tools"] == [{"type": "web_search"}]
     assert body["input"][0]["name"] == "wait_agent"
 
 
@@ -228,7 +230,7 @@ def test_native_responses_accepts_versioned_kernel_tool_history(
 
 
 def test_native_responses_accepts_restored_namespaced_tool_history() -> None:
-    body, _aliases = _native_responses_body(
+    body, aliases = _native_responses_body(
         {
             "input": [
                 {
@@ -266,8 +268,53 @@ def test_native_responses_accepts_restored_namespaced_tool_history() -> None:
         reasoning_option="minimal",
     )
 
-    assert body["input"][0]["namespace"] == "skills"
-    assert body["input"][0]["name"] == "read"
+    assert "namespace" not in body["input"][0]
+    assert body["input"][0]["name"].startswith("ns_")
+    assert aliases[body["input"][0]["name"]] == ("skills", "read")
+
+
+def test_native_responses_restores_unique_bare_namespace_child_history() -> None:
+    body, aliases = _native_responses_body(
+        {
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call-skill",
+                    "name": "read",
+                    "arguments": '{"package":"current"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-skill",
+                    "output": "skill instructions",
+                },
+            ],
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "skills",
+                    "description": "Skill tools.",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "read",
+                            "description": "Read a skill.",
+                            "parameters": {"type": "object", "properties": {}},
+                        }
+                    ],
+                }
+            ],
+        },
+        model_id="qwen3.7-plus",
+        max_output_tokens=256,
+        profile=_profile(),
+        reasoning_option="minimal",
+    )
+
+    wire_name = body["input"][0]["name"]
+    assert wire_name.startswith("ns_")
+    assert aliases[wire_name] == ("skills", "read")
+    assert aliases["read"] == ("skills", "read")
 
 
 def test_native_responses_rejects_dynamic_history_without_current_tools() -> None:
@@ -390,6 +437,48 @@ def test_fake_responses_tool_call_then_capability_result_can_start_next_model_ro
     assert messages[-1]["content"] == "Knowledge result: attention."
 
 
+def test_native_responses_accepts_provider_hosted_web_search_items() -> None:
+    validator = _NativeResponsesStreamValidator(allow_tools=True)
+    validator.consume(
+        json.dumps(
+            {"type": "response.created", "sequence_number": 0, "response": {"id": "r1"}}
+        )
+    )
+    search_item = {
+        "id": "ws-1",
+        "type": "web_search_call",
+        "status": "completed",
+        "action": {
+            "query": "OpenAI Responses API",
+            "sources": [{"url": "https://platform.openai.com/docs/api-reference/responses"}],
+        },
+    }
+    assert validator.consume(
+        json.dumps(
+            {
+                "type": "response.output_item.added",
+                "sequence_number": 1,
+                "item": search_item,
+            }
+        )
+    )
+    validator.consume(
+        json.dumps(
+            {
+                "type": "response.completed",
+                "sequence_number": 2,
+                "response": {
+                    "id": "r1",
+                    "status": "completed",
+                    "output": [search_item],
+                    "usage": {"input_tokens": 10, "output_tokens": 2},
+                },
+            }
+        )
+    )
+    assert validator.finish().provider_request_id == "r1"
+
+
 class _Database:
     def __init__(self) -> None:
         self.operations: list[tuple[str, tuple[Any, ...]]] = []
@@ -423,6 +512,17 @@ class _ProviderService:
 def _profile() -> dict[str, Any]:
     profile = get_builtin_model_capabilities("dashscope", "qwen3.7-plus")
     assert profile is not None
+    return profile
+
+
+def _native_search_profile() -> dict[str, Any]:
+    profile = copy.deepcopy(_profile())
+    profile["native_search"] = {
+        "adapter_id": "search/dashscope-native-v1",
+        "enabled": True,
+        "config": {},
+    }
+    profile["tools"]["web_search_wire"] = "native"
     return profile
 
 
@@ -530,15 +630,23 @@ async def test_child_model_call_is_bound_to_root_lease_and_membership_scope() ->
     await plane.close()
 
 
-def _call(profile: dict[str, Any], *, temperature: float | None = None) -> _AuthorizedCall:
+def _call(
+    profile: dict[str, Any],
+    *,
+    temperature: float | None = None,
+    wire_protocol: str = "responses_v1",
+    readonly_capabilities: dict[str, Any] | None = None,
+) -> _AuthorizedCall:
     snapshot: dict[str, Any] = {
-        "model": {"wire_protocol": "responses_v1"},
+        "model": {"wire_protocol": wire_protocol},
         "capabilities": profile,
         "reasoning": {"effective_option": "minimal"},
         "pricing": {"input_price_per_1k": 0.001, "output_price_per_1k": 0.002},
     }
     if temperature is not None:
         snapshot["parameters"] = {"temperature": temperature}
+    if readonly_capabilities is not None:
+        snapshot["readonly_capabilities"] = readonly_capabilities
     return _AuthorizedCall(
         call_id=uuid.uuid4(),
         lease_id=uuid.uuid4(),
@@ -638,7 +746,7 @@ def test_qwen_tool_adapter_flattens_namespaces_without_prompt_routing() -> None:
         },
         model_id="qwen3.7-plus",
         max_output_tokens=128,
-        profile=_profile(),
+        profile=_native_search_profile(),
         reasoning_option="minimal",
     )
 
@@ -646,7 +754,115 @@ def test_qwen_tool_adapter_flattens_namespaces_without_prompt_routing() -> None:
     assert function_tool["type"] == "function"
     assert function_tool["name"].startswith("ns_")
     assert aliases[function_tool["name"]] == ("skills", "read")
+    assert aliases["read"] == ("skills", "read")
     assert body["tools"][1] == {"type": "web_search"}
+
+
+def test_qwen_native_search_is_injected_from_profile_at_final_serialization() -> None:
+    body, _aliases = _native_responses_body(
+        {"input": [{"role": "user", "content": "latest news"}], "tools": []},
+        model_id="qwen3.7-plus",
+        max_output_tokens=128,
+        profile=_native_search_profile(),
+        reasoning_option="minimal",
+    )
+    assert body["tools"] == [{"type": "web_search"}]
+
+    disabled, _aliases = _native_responses_body(
+        {"input": [{"role": "user", "content": "latest news"}], "tools": []},
+        model_id="qwen3.7-plus",
+        max_output_tokens=128,
+        profile=safe_model_capability_profile(),
+        reasoning_option="auto",
+    )
+    assert "tools" not in disabled
+
+
+def test_namespace_child_fallback_is_disabled_on_direct_name_collision() -> None:
+    _body, aliases = _native_responses_body(
+        {
+            "input": [{"role": "user", "content": "hello"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "read",
+                    "description": "Direct read.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+                {
+                    "type": "namespace",
+                    "name": "skills",
+                    "description": "Skill tools.",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "read",
+                            "description": "Read a skill.",
+                            "parameters": {"type": "object", "properties": {}},
+                        }
+                    ],
+                },
+            ],
+        },
+        model_id="qwen3.7-plus",
+        max_output_tokens=128,
+        profile=_profile(),
+        reasoning_option="minimal",
+    )
+
+    assert "read" not in aliases
+
+
+def test_responses_tool_choice_and_parallel_are_pinned_for_first_call_only() -> None:
+    tool = {
+        "type": "function",
+        "name": "lookup",
+        "description": "Look up one value.",
+        "parameters": {"type": "object", "properties": {}},
+    }
+    first, _ = _native_responses_body(
+        {"input": [{"role": "user", "content": "lookup"}], "tools": [tool]},
+        model_id="qwen3.7-plus",
+        max_output_tokens=128,
+        profile=_profile(),
+        reasoning_option="minimal",
+        allowed_tool_names={"lookup"},
+        tool_choice={"type": "function", "name": "lookup"},
+        parallel_tool_calls=False,
+    )
+    assert first["tool_choice"] == {"type": "function", "name": "lookup"}
+    assert first["parallel_tool_calls"] is False
+
+    follow_up, _ = _native_responses_body(
+        {
+            "input": [
+                {"type": "function_call", "call_id": "call-1", "name": "lookup", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call-1", "output": "ok"},
+            ],
+            "tools": [tool],
+        },
+        model_id="qwen3.7-plus",
+        max_output_tokens=128,
+        profile=_profile(),
+        reasoning_option="minimal",
+        allowed_tool_names={"lookup"},
+        tool_choice={"type": "function", "name": "lookup"},
+        parallel_tool_calls=False,
+    )
+    assert follow_up["tool_choice"] == "auto"
+    assert follow_up["parallel_tool_calls"] is True
+
+
+def test_snapshot_tool_choice_must_be_catalog_selected() -> None:
+    with pytest.raises(AgentModelPlaneError, match="TOOL_CHOICE_INVALID"):
+        _snapshot_responses_tool_controls(
+            {
+                "readonly_capabilities": {
+                    "responses_tool_names": ["lookup"],
+                    "responses_tool_choice": {"type": "function", "name": "other"},
+                }
+            }
+        )
 
 
 def test_web_search_alone_does_not_authorize_function_transcript() -> None:
@@ -665,7 +881,7 @@ def test_web_search_alone_does_not_authorize_function_transcript() -> None:
             },
             model_id="qwen3.7-plus",
             max_output_tokens=128,
-            profile=_profile(),
+            profile=_native_search_profile(),
             reasoning_option="minimal",
         )
 
@@ -785,9 +1001,11 @@ async def test_qwen_native_responses_is_default_wire_and_completes_before_termin
                     "required": ["query"],
                 },
                 "strict": True,
-            }
+            },
+            {"type": "web_search"},
         ],
         "tool_choice": "auto",
+        "parallel_tool_calls": True,
         "reasoning": {"effort": "minimal"},
     }
     terminal_index = next(
@@ -800,6 +1018,83 @@ async def test_qwen_native_responses_is_default_wire_and_completes_before_termin
         if operation == "fetchrow" and args and args[0] == call.call_id
     ]
     assert completion_calls == [(call.call_id, 11, 3, 17, "resp_1")]
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_receives_snapshot_tool_controls_and_projects_tool_call() -> None:
+    captured: dict[str, Any] = {}
+    chat_stream = (
+        b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1",'
+        b'"type":"function","function":{"name":"lookup","arguments":"{}"}}]}}]}\n\n'
+        b'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],'
+        b'"usage":{"prompt_tokens":7,"completion_tokens":2}}\n\n'
+        b"data: [DONE]\n\n"
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            request=request,
+            headers={"content-type": "text/event-stream"},
+            content=chat_stream,
+        )
+
+    database = _Database()
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    plane = AgentModelPlane(
+        database=database,
+        provider_service=_ProviderService(),
+        lease_signer=RuntimeModelLeaseSigner("x" * 32),
+        http_client=client,
+    )
+    tool = {
+        "type": "function",
+        "name": "lookup",
+        "description": "Look up one value.",
+        "parameters": {"type": "object", "properties": {}},
+    }
+    call = _call(
+        _profile(),
+        wire_protocol="chat_completions",
+        readonly_capabilities={
+            "responses_tool_names": ["lookup"],
+            "responses_tool_choice": {"type": "function", "name": "lookup"},
+            "responses_parallel_tool_calls": False,
+        },
+    )
+    try:
+        chunks = [
+            chunk
+            async for chunk in plane.stream(
+                body={
+                    "input": [{"role": "user", "content": "lookup"}],
+                    "tools": [tool],
+                },
+                turn_metadata={},
+                authorized_call=call,
+            )
+        ]
+    finally:
+        await client.aclose()
+
+    assert captured["body"]["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": "Look up one value.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    assert captured["body"]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "lookup"},
+    }
+    assert captured["body"]["parallel_tool_calls"] is False
+    assert any(b"response.function_call_arguments.delta" in chunk for chunk in chunks)
+    assert any(b'"type":"function_call"' in chunk for chunk in chunks)
 
 
 @pytest.mark.asyncio

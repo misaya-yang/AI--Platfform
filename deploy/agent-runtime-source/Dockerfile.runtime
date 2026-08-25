@@ -1,9 +1,5 @@
-# syntax=docker/dockerfile:1.7
-
 FROM rust:1.95.0-bookworm AS builder
 
-ARG AI_PLATFORM_AGENT_RUNTIME_FORK_SHA
-ARG AI_PLATFORM_AGENT_RUNTIME_SCHEMA_SHA256
 ARG CARGO_BUILD_JOBS=2
 ARG DEBIAN_MIRROR=https://mirrors.aliyun.com/debian
 ARG DEBIAN_SECURITY_MIRROR=https://mirrors.aliyun.com/debian-security
@@ -31,9 +27,9 @@ RUN for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sour
 WORKDIR /source/codex-rs
 COPY codex-rs/ ./
 
-RUN --mount=type=cache,id=ai-platform-codex-cargo-registry-v1,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=ai-platform-codex-cargo-git-v1,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=ai-platform-codex-runtime-target-rust-1-95-v1,target=/source/codex-rs/target,sharing=locked \
+RUN --mount=type=cache,id=ai-platform-capability-cargo-registry-v1,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=ai-platform-capability-cargo-git-v1,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=ai-platform-capability-target-rust-1-95-v1,target=/source/codex-rs/target,sharing=locked \
     CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS}" CARGO_INCREMENTAL=0 \
     RUSTFLAGS="-C link-arg=-fuse-ld=lld" \
     cargo build --locked --profile dev-small \

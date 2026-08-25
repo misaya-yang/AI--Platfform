@@ -1,7 +1,7 @@
 """Back-compat shim — RedisStorage moved to ai_gateway_core in Phase 6 hot-fix.
 
 The session-cache regression of 2026-04-28 surfaced because the
-assistant-service's DatabaseSessionManager was constructed without a
+the legacy session manager was constructed without a
 Redis client — its writes invalidated only an in-process dict, never
 the gateway-side Redis cache. The cache then served stale empty
 history to the frontend until TTL expiry. Moving RedisStorage to

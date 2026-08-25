@@ -76,6 +76,15 @@ class ImageUploadParams:
     metadata: dict[str, str] | None = None
 
 
+@dataclass(frozen=True)
+class StorageObjectInfo:
+    """Bounded object metadata used before downloading untrusted uploads."""
+
+    size_bytes: int
+    content_type: str | None = None
+    metadata: dict[str, str] | None = None
+
+
 @dataclass
 class StorageConfig:
     """Storage configuration"""
@@ -106,7 +115,7 @@ class StorageConfig:
     key_prefix: str = ""
 
     @classmethod
-    def from_env(cls) -> "StorageConfig":
+    def from_env(cls) -> StorageConfig:
         """Build a StorageConfig from GATEWAY_STORAGE__* env vars.
 
         AS and other services that need storage but don't want to drag the gateway
@@ -298,7 +307,15 @@ class BaseStorageBackend(ABC):
             Dictionary with 'url' and optional 'fields' for POST/PUT upload,
             or None if presigned URLs are not supported by this backend.
         """
+        del key, content_type, expiry_seconds, metadata
         return None  # Default: not supported
+
+    async def head(self, key: str) -> StorageObjectInfo | None:
+        """Return object metadata without reading the object body when supported."""
+
+        if not await self.exists(key):
+            return None
+        return None
 
     async def close(self) -> None:
         """
@@ -306,7 +323,7 @@ class BaseStorageBackend(ABC):
 
         Override in subclasses that need cleanup.
         """
-        pass
+        return None
 
 
 class LocalStorageBackend(BaseStorageBackend):
@@ -412,7 +429,42 @@ class LocalStorageBackend(BaseStorageBackend):
     async def exists(self, key: str) -> bool:
         return self._get_full_path(self._prefixed_key(key)).exists()
 
+    async def head(self, key: str) -> StorageObjectInfo | None:
+        full_path = self._get_full_path(self._prefixed_key(key))
+        if not full_path.is_file():
+            return None
+        size_bytes = (await asyncio.to_thread(full_path.stat)).st_size
+        content_type: str | None = None
+        metadata: dict[str, str] = {}
+        meta_path = full_path.with_suffix(full_path.suffix + ".meta")
+        if meta_path.is_file():
+            import json
+
+            try:
+                raw = await asyncio.to_thread(meta_path.read_text)
+                value = json.loads(raw)
+                if isinstance(value, dict):
+                    content_type = (
+                        str(value.get("content_type")) if value.get("content_type") else None
+                    )
+                    metadata = {
+                        str(name): str(item)
+                        for name, item in value.items()
+                        if name != "content_type"
+                    }
+            except (OSError, ValueError, TypeError):
+                logger.warning(
+                    "Local storage metadata unreadable (key_hash=%s)",
+                    storage_key_log_hash(key),
+                )
+        return StorageObjectInfo(
+            size_bytes=size_bytes,
+            content_type=content_type,
+            metadata=metadata,
+        )
+
     def get_url(self, key: str, expiry_seconds: int = 3600) -> str:
+        del expiry_seconds
         full_path = self._get_full_path(self._prefixed_key(key))
         return f"file://{full_path.absolute()}"
 
@@ -535,13 +587,12 @@ class S3StorageBackend(BaseStorageBackend):
             try:
                 import aiofiles
 
-                async with response["Body"] as stream:
-                    async with aiofiles.open(target, "wb") as handle:
-                        while True:
-                            chunk = await _read_chunk(stream, 1024 * 1024)
-                            if not chunk:
-                                break
-                            await handle.write(chunk)
+                async with response["Body"] as stream, aiofiles.open(target, "wb") as handle:
+                    while True:
+                        chunk = await _read_chunk(stream, 1024 * 1024)
+                        if not chunk:
+                            break
+                        await handle.write(chunk)
             except ImportError:
                 # Fallback to sync I/O
                 async with response["Body"] as stream:
@@ -623,8 +674,34 @@ class S3StorageBackend(BaseStorageBackend):
                 return False
             raise
 
+    async def head(self, key: str) -> StorageObjectInfo | None:
+        pkey = self._prefixed_key(key)
+        client = await self._get_client()
+        try:
+            response = await client.head_object(Bucket=self.bucket, Key=pkey)
+        except Exception as exc:
+            response_data = getattr(exc, "response", None)
+            error = response_data.get("Error", {}) if isinstance(response_data, dict) else {}
+            metadata = (
+                response_data.get("ResponseMetadata", {})
+                if isinstance(response_data, dict)
+                else {}
+            )
+            if (
+                str(error.get("Code") or "") in {"404", "NoSuchKey", "NotFound"}
+                or str(metadata.get("HTTPStatusCode") or "") == "404"
+            ):
+                return None
+            raise
+        return StorageObjectInfo(
+            size_bytes=int(response.get("ContentLength") or 0),
+            content_type=(str(response["ContentType"]) if response.get("ContentType") else None),
+            metadata={str(k): str(v) for k, v in (response.get("Metadata") or {}).items()},
+        )
+
     def get_url(self, key: str, expiry_seconds: int = 3600) -> str:
         """Get S3 URL (non-presigned for now, can be enhanced)"""
+        del expiry_seconds
         pkey = self._prefixed_key(key)
         if self.endpoint_url:
             return f"{self.endpoint_url}/{self.bucket}/{pkey}"
@@ -884,8 +961,31 @@ class OSSStorageBackend(BaseStorageBackend):
         bucket = self._get_bucket()
         return await asyncio.to_thread(bucket.object_exists, pkey)
 
+    async def head(self, key: str) -> StorageObjectInfo | None:
+        pkey = self._prefixed_key(key)
+        bucket = self._get_bucket()
+        try:
+            result = await asyncio.to_thread(bucket.head_object, pkey)
+        except Exception as exc:
+            if "NoSuchKey" in str(exc) or "404" in str(exc):
+                return None
+            raise
+        headers = getattr(result, "headers", {}) or {}
+        raw_metadata = {
+            str(name)[len("x-oss-meta-") :]: str(value)
+            for name, value in headers.items()
+            if str(name).lower().startswith("x-oss-meta-")
+        }
+        content_type = getattr(result, "content_type", None)
+        return StorageObjectInfo(
+            size_bytes=int(result.content_length or 0),
+            content_type=str(content_type) if content_type else None,
+            metadata=raw_metadata,
+        )
+
     def get_url(self, key: str, expiry_seconds: int = 3600) -> str:
         """Get OSS URL"""
+        del expiry_seconds
         pkey = self._prefixed_key(key)
         return f"https://{self.bucket_name}.{self.endpoint}/{quote(pkey)}"
 

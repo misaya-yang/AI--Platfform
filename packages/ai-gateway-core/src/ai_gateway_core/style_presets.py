@@ -1,11 +1,6 @@
 """
-Image Style Presets — shared between the public gateway API and the
-in-process assistant service. Single source of truth for the 9
-user-facing styles plus the neutral default.
-
-Moved from ``assistant_service.core.tools.style_presets`` in Phase 5d
-so gateway routes can import ``StylePreset`` / ``resolve_style_preset``
-without taking a compile-time dep on ``assistant_service``.
+Image Style Presets shared by the public Gateway API and capability worker.
+Single source of truth for the user-facing styles plus the neutral default.
 
 Because Gemini and Doubao have **no native style parameter**, style is
 realised via a curated English prompt modifier injected into the user

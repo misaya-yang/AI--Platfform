@@ -96,8 +96,8 @@
           "replay_policy": "discard_after_turn"
         },
         "prompt_cache": {"adapter_id": "cache/dashscope-session-v1", "config": {"enabled": true}},
-        "native_search": {"adapter_id": "search/dashscope-native-v1", "enabled": true, "config": {}},
-        "tools": {"function_calling": true, "parallel_calls": true, "strict_schema": false, "namespace_wire": "flatten", "web_search_wire": "native"},
+        "native_search": {"adapter_id": "search/none-v1", "enabled": false, "config": {}},
+        "tools": {"function_calling": true, "parallel_calls": true, "strict_schema": false, "namespace_wire": "flatten", "web_search_wire": "disabled"},
         "modalities": {"input": ["text"], "output": ["text"]},
         "streaming": {"text_deltas": true, "reasoning_deltas": true, "tool_call_deltas": true}
       }

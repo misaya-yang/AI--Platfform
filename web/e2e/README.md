@@ -26,7 +26,7 @@ All five configs live in `web/` and share `playwright.config.ts` as their base.
 
 | Config | Use | Stack |
 | --- | --- | --- |
-| `playwright.config.ts` | Default local run | Spawns its own dev stack via `webServer` |
+| `playwright.config.ts` | Default local run | Uses the repository-owned Docker stack |
 | `playwright.opensource.config.ts` | Route smoke run in CI — no provider key needed | Static build |
 | `playwright.live.config.ts` | Regression against an already-running Docker stack | Reuses `:8081`/`:8080`/`:8092`; no `webServer` |
 | `playwright.e2e-remote.config.ts` | Against a remote deployment | External |
@@ -42,7 +42,7 @@ pnpm -C web e2e:opensource      # CI smoke: routes, eval trace, agent studio, pu
 ```
 
 ```bash
-pnpm -C web e2e                 # full stack E2E via scripts/dev/start_e2e_stack.sh
+pnpm -C web e2e                 # full stack E2E against make quickstart/deploy
 ```
 
 ```bash

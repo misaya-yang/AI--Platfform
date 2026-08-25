@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,24 @@ GOLDEN_KEY = "coding-golden-key-for-live-tests-0000000002"
 HOST_KEY = "coding-host-test-key-for-live-tests-00000003"
 RUNTIME_ATTESTATION = "coding-runtime-attestation-fixture"
 SUITE_NONCE = "c" * 64
+
+
+def _require_pinned_sandbox_image() -> None:
+    """Skip live container tests when the exact local prerequisite is absent."""
+    image = validator_policy()["sandbox_image_reference"]
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", image],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pytest.skip("pinned coding sandbox image is not available locally")
+    if result.returncode != 0:
+        pytest.skip("pinned coding sandbox image is not available locally")
 
 
 def _reference_replacements() -> dict[str, str]:
@@ -453,6 +472,7 @@ def test_offline_contract_checks_overlap_but_cannot_promote_it_to_live_evidence(
 def test_reference_patch_runs_real_tests_only_in_restricted_container(
     tmp_path: Path,
 ) -> None:
+    _require_pinned_sandbox_image()
     workspace = tmp_path / "candidate"
     patch = materialize_candidate(workspace, _reference_replacements(), load_contract())
 
@@ -468,6 +488,7 @@ def test_reference_patch_runs_real_tests_only_in_restricted_container(
 
 
 def test_unsolved_patch_cannot_pass_from_candidate_claims(tmp_path: Path) -> None:
+    _require_pinned_sandbox_image()
     replacements = {
         path: (TEMPLATE / path).read_text(encoding="utf-8") + "\n# reviewed\n"
         for path in load_contract()["allowed_changes"]
@@ -582,6 +603,7 @@ def test_final_receipt_uses_independent_host_test_hmac_contract(
 def test_live_three_trial_verifier_runner_merge_and_judge_preflight_chain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _require_pinned_sandbox_image()
     host_payload, merged, _, _, host_receipt_path = _build_live_chain(
         tmp_path, monkeypatch, real_docker=True
     )

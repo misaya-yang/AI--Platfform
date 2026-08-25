@@ -29,7 +29,7 @@ def validate_gateway_auth_configuration(
     if secret.strip() and allow_anonymous:
         raise RuntimeError(
             f"{allow_anonymous_setting}=true cannot be combined with "
-            "GATEWAY_ASSISTANT_SHARED_SECRET. Anonymous mode bypasses the "
+            "AI_PLATFORM_INTERNAL_TOKEN. Anonymous mode bypasses the "
             "gateway signature and must only be used when the shared secret "
             "is intentionally unset for local development."
         )
@@ -45,8 +45,8 @@ def validate_gateway_auth_configuration(
 class GatewaySecretAuthMiddleware:
     """Verify ``X-Gateway-Secret`` on every non-probe request.
 
-    The same middleware protects assistant-service and knowledge-service so
-    the two internal service boundaries cannot drift in error shape, safe
+    The same middleware protects internal Python services so their boundaries
+    cannot drift in error shape, safe
     paths, or replay-verification behavior.
     """
 
@@ -61,11 +61,13 @@ class GatewaySecretAuthMiddleware:
         gateway_secret: GatewaySecret,
         allow_anonymous: bool = False,
         separately_authenticated_paths: frozenset[str] = frozenset(),
+        separately_authenticated_prefixes: frozenset[str] = frozenset(),
     ) -> None:
         self.app = app
         self._gateway_secret = gateway_secret
         self._allow_anonymous = allow_anonymous
         self._separately_authenticated_paths = separately_authenticated_paths
+        self._separately_authenticated_prefixes = separately_authenticated_prefixes
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] != "http":
@@ -73,7 +75,11 @@ class GatewaySecretAuthMiddleware:
             return
 
         path = scope.get("path", "")
-        if path in self._SAFE_PATHS or path in self._separately_authenticated_paths:
+        if (
+            path in self._SAFE_PATHS
+            or path in self._separately_authenticated_paths
+            or any(path.startswith(prefix) for prefix in self._separately_authenticated_prefixes)
+        ):
             await self.app(scope, receive, send)
             return
 

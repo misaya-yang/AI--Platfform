@@ -448,6 +448,43 @@ async def _refresh_token_if_needed(db, request: Request, connector: dict, config
     return connector["access_token"]
 
 
+async def resolve_catalog_connector_credential(
+    request: Request,
+    *,
+    tenant_id: str,
+    user_id: str,
+    provider: str,
+) -> dict[str, Any]:
+    """Resolve one connected OAuth credential for an authorized catalog call.
+
+    This is intentionally the same path used by the V1 connector search API:
+    tenant/user predicates, connected status, enabled provider config,
+    Gateway-owned decryption, and just-in-time refresh.  Callers receive the
+    live token only in-process; it is never suitable for a Runtime snapshot.
+    """
+
+    db = _get_db(request)
+    if db is None or getattr(db, "enabled", True) is not True:
+        raise RuntimeError("connector credential backend unavailable")
+    connector = await _get_user_connector(db, tenant_id, user_id, provider)
+    if not connector or connector.get("status") != "connected":
+        raise PermissionError("connected connector unavailable")
+    config = await _get_connector_config(db, provider, tenant_id)
+    if not config:
+        raise PermissionError("connector configuration unavailable")
+    config = _decrypt_connector_secret(request, config)
+    access_token = await _refresh_token_if_needed(db, request, connector, config)
+    metadata = connector.get("provider_metadata") or {}
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except json.JSONDecodeError:
+            metadata = {}
+    if not isinstance(metadata, dict) or not access_token:
+        raise RuntimeError("connector credential unavailable")
+    return {"access_token": str(access_token), "provider_metadata": metadata}
+
+
 # ─── Endpoints ────────────────────────────────────────────────────────
 
 @router.get("/available")

@@ -58,6 +58,28 @@ fn platform_resume_reinstates_the_private_responses_provider() {
         config["model_providers"]["ai-platform-gateway"]["supports_websockets"],
         false
     );
+    assert_eq!(config["web_search"], "disabled");
+    assert_eq!(config["features"]["standalone_web_search"], false);
+    assert_eq!(config["features"]["multi_agent_v2"]["enabled"], true);
+}
+
+#[test]
+fn platform_resume_preserves_profile_declared_native_web_search() {
+    let actual = resume_params(
+        ThreadId::new(),
+        ResumeThreadRequest {
+            model: Some("qwen3.7-plus".to_string()),
+            model_plane_base_url: Some(
+                "http://gateway:8080/internal/v1/agent-model-plane".to_string(),
+            ),
+            native_web_search_enabled: true,
+            ..Default::default()
+        },
+    )
+    .unwrap_or_else(|_| panic!("valid platform resume"));
+    let config = actual.config.expect("platform config");
+    assert_eq!(config["web_search"], "live");
+    assert_eq!(config["features"]["standalone_web_search"], false);
 }
 
 #[test]

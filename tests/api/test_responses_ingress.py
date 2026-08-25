@@ -243,8 +243,122 @@ def test_public_responses_uses_agent_runtime_for_nonstream_and_stream(
     assert "response.completed" in stream.text
     assert len(control.calls) == 2
     assert control.calls[0]["developer_instructions"] == "Use the signed runtime contract."
-    assert control.calls[0]["enable_dynamic_tools"] is False
+    assert control.calls[0]["enable_dynamic_tools"] is True
+    assert control.calls[0]["readonly_capabilities"] == {
+        "responses_tool_choice": "auto",
+        "responses_parallel_tool_calls": True,
+    }
     assert control.calls[0]["memory_mode"] == "off"
+
+
+def test_public_responses_projects_function_tools_to_runtime_capability_selectors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RuntimeControl:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def start_turn(self, **kwargs: Any) -> Any:
+            self.calls.append(kwargs)
+            return SimpleNamespace(run_id="11111111-1111-4111-8111-111111111111")
+
+        async def stream_events(self, **_kwargs: Any):
+            yield b'data: {"event_type":"run_finished","data":{"status":"succeeded"}}\n\n'
+
+    control = RuntimeControl()
+    app = _app(_user())
+    app.state.agent_runtime_control = control
+
+    async def ensure_session(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(responses_route, "_ensure_agent_runtime_session", ensure_session)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/responses",
+            json={
+                "model": "qwen3.7-plus",
+                "input": "look this up",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "search_knowledge_base",
+                        "description": "Search the configured knowledge base.",
+                        "parameters": {"type": "object", "properties": {}},
+                    }
+                ],
+                "tool_choice": {"type": "function", "name": "search_knowledge_base"},
+                "parallel_tool_calls": False,
+            },
+        )
+
+    assert response.status_code == 200
+    assert control.calls[0]["enable_dynamic_tools"] is True
+    assert control.calls[0]["readonly_capabilities"] == {
+        "responses_tool_names": ["search_knowledge_base"],
+        "responses_tool_choice": {"type": "function", "name": "search_knowledge_base"},
+        "responses_parallel_tool_calls": False,
+    }
+
+
+def test_public_responses_rejects_unknown_responses_tool_types() -> None:
+    with TestClient(_app(_user())) as client:
+        response = client.post(
+            "/v1/responses",
+            json={
+                "model": "qwen3.7-plus",
+                "input": "hello",
+                "tools": [{"type": "web_search_preview"}],
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "responses_tool_type_not_migrated"
+
+
+def test_public_responses_projects_runtime_tool_events_to_responses_sse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RuntimeControl:
+        async def start_turn(self, **_kwargs: Any) -> Any:
+            return SimpleNamespace(run_id="11111111-1111-4111-8111-111111111111")
+
+        async def stream_events(self, **_kwargs: Any):
+            yield (
+                b'data: {"event_type":"tool_call_start","data":'
+                b'{"tool_call_id":"call-1","tool_name":"search_knowledge_base",'
+                b'"arguments":"{\\"query\\":\\"transformer\\"}"}}\n\n'
+            )
+            yield (
+                b'data: {"event_type":"tool_call_result","data":'
+                b'{"tool_call_id":"call-1","status":"succeeded"}}\n\n'
+            )
+            yield (
+                b'data: {"event_type":"tool_call_end","data":'
+                b'{"tool_call_id":"call-1","status":"completed"}}\n\n'
+            )
+            yield b'data: {"event_type":"text_delta","data":{"content":"done"}}\n\n'
+            yield b'data: {"event_type":"run_finished","data":{"status":"succeeded"}}\n\n'
+
+    app = _app(_user())
+    app.state.agent_runtime_control = RuntimeControl()
+
+    async def ensure_session(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(responses_route, "_ensure_agent_runtime_session", ensure_session)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/responses",
+            json={"model": "qwen3.7-plus", "input": "use the tool", "stream": True},
+        )
+
+    assert response.status_code == 200
+    assert "response.output_item.added" in response.text
+    assert "response.function_call_arguments.delta" in response.text
+    assert "response.function_call_arguments.done" in response.text
+    assert "response.output_item.done" in response.text
+    assert "response.completed" in response.text
 
 
 def test_public_responses_rejects_unimplemented_store_semantics(

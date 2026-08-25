@@ -1,7 +1,7 @@
 -- 056 — partial index backing `_find_active_command`'s dedup hotpath.
 --
 -- ADR-004 §Decision: `_find_active_command` in
--- apps/assistant-service/.../core/gateway/execution_gateway.py is moving
+-- The durable command lifecycle is moving to the single Agent Runtime.
 -- from an in-memory dict scan to a single indexed SELECT. The existing
 -- 034-era idx_assistant_command_queue_command_key on (command_key, status)
 -- is a full-table index — this partial index is filtered to only
