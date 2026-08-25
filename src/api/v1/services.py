@@ -29,7 +29,6 @@ from ..deps import (
     get_user_context,
     require_platform_admin,
 )
-from ._assistant_status import get_assistant_health
 from ._langgraph_connector_config import _normalize_langgraph_connector_config
 from ._langgraph_model_policy import _validate_langgraph_model_override
 from ._route_trace import current_trace_id
@@ -314,8 +313,15 @@ async def list_services(
             user_policy=user_policy,
             is_admin=is_admin,
         ):
-            assistant_health = await get_assistant_health()
-            assistant_healthy = assistant_health.get("status") == "healthy"
+            runtime_ready = getattr(request.app.state, "agent_runtime_control", None) is not None
+            worker = getattr(request.app.state, "image_task_worker", None)
+            worker_ready = worker is not None and not getattr(
+                getattr(worker, "_loop_task", None), "done", lambda: True
+            )()
+            runtime_health = {
+                "status": "healthy" if runtime_ready else "unavailable",
+                "worker": "healthy" if worker_ready else "unavailable",
+            }
             virtual_services.append(
                 {
                     "service_id": "assistant",
@@ -326,12 +332,12 @@ async def list_services(
                     "supported_modes": ["chat", "stream"],
                     "accepted_content_types": ["application/json"],
                     "output_content_types": ["application/json", "text/event-stream"],
-                    "status": "active" if assistant_healthy else "unavailable",
+                    "status": "active" if runtime_ready and worker_ready else "unavailable",
                     "tags": ["builtin", "assistant", "rag", "tools"],
                     "metadata": {
                         "is_virtual": True,
                         "endpoint": "/api/v1/assistant",
-                        "health": assistant_health,
+                        "health": runtime_health,
                         "features": [
                             "chat",
                             "stream",

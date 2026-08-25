@@ -48,6 +48,17 @@ Refreshing source identity deliberately invalidates both prior images. The two
 builders record label-verified local digests atomically; the Runtime contract
 requires both artifacts from the same receipt before candidate startup.
 
+When the platform overlay or capability migration changes, refresh its derived
+identity and Worker dependency SBOM from the clean, controlled composed source
+workspace. This command only reads that workspace; it does not modify it:
+
+```bash
+python3 scripts/harness/agent_runtime_supply_chain.py refresh-overlay \
+  --repo-root . \
+  --lock deploy/agent-runtime-source/lock.json \
+  --cargo-workspace /absolute/path/to/composed/codex-rs
+```
+
 The source synchronization policy and kernel decision are recorded in
 `docs/architecture/ADR-006-agent-runtime-single-kernel.md`; model, state, and
 capability boundaries are in `ADR-007-agent-runtime-data-boundaries.md`.

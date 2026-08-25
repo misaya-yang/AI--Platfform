@@ -43,6 +43,11 @@ pub(super) struct ResumeThreadRequest {
     model_plane_base_url: Option<String>,
     model_context_window: Option<i64>,
     auto_compact_token_limit: Option<i64>,
+    /// Preserve the model profile's hosted Responses search capability when
+    /// reloading a Thread. This is profile data from Gateway, never inferred
+    /// from the model id or user prompt.
+    #[serde(default)]
+    native_web_search_enabled: bool,
     base_instructions: Option<String>,
     developer_instructions: Option<String>,
 }
@@ -67,9 +72,9 @@ pub(super) async fn resume_thread(
 }
 
 /// Interrupts one active turn after checking the platform-owned thread
-/// identity. Agent remains responsible for stopping its loop and emitting the
-/// terminal/interrupted item; this endpoint only forwards the typed request so
-/// a client disconnect cannot bypass the kernel's tool-result closure rules.
+/// identity. The local capability handler is cancelled before the typed
+/// request is forwarded so an interrupted turn cannot leave a Worker call
+/// waiting past the kernel's terminal/interrupted item.
 pub(super) async fn interrupt_turn(
     State(state): State<RuntimeHttpState>,
     Path((thread_id, turn_id)): Path<(String, String)>,
@@ -80,6 +85,7 @@ pub(super) async fn interrupt_turn(
     if turn_id.is_empty() || turn_id.len() > 255 {
         return Err(RuntimeError::bad_request("invalid_turn_id"));
     }
+    state.cancel_turn(&turn_id);
     request_typed(
         &state,
         ClientRequest::TurnInterrupt {
@@ -103,6 +109,7 @@ fn resume_params(
         model_plane_base_url,
         model_context_window,
         auto_compact_token_limit,
+        native_web_search_enabled,
         base_instructions,
         developer_instructions,
     } = body;
@@ -148,6 +155,24 @@ fn resume_params(
                 "request_max_retries": 0,
                 "stream_max_retries": 0,
             }
+        }),
+    );
+    config.insert(
+        "web_search".to_string(),
+        if native_web_search_enabled {
+            "live".into()
+        } else {
+            "disabled".into()
+        },
+    );
+    config.insert(
+        "features".to_string(),
+        json!({
+            "standalone_web_search": false,
+            "multi_agent_v2": {
+                "enabled": true,
+                "max_concurrent_threads_per_session": 6,
+            },
         }),
     );
     let mut params = ThreadResumeParams {

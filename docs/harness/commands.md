@@ -79,7 +79,6 @@ Restoring over shared data requires a current backup and explicit approval.
 | Start / stop / reset / inspect dev containers | `make dev-start` / `make dev-stop` / `make dev-reset` / `make dev-status` |
 | Run backend services from mounted source with reload | `make dev-compose` |
 | Follow mounted-source logs | `make dev-compose-logs` |
-| Enable / test / disable the trusted local code sandbox | `make code-executor-enable` / `-test` / `-disable` |
 
 ## 5. Python tests and lint
 
@@ -135,12 +134,12 @@ Run the gate that matches what you touched. These are the same commands CI runs.
 | Agent Runtime read-only capability bridge | `make agent-runtime-readonly-gate` |
 | Agent Runtime tool side-effect safety | `AI_PLATFORM_AGENT_RUNTIME_SOURCE=/absolute/fork make agent-runtime-write-gate` |
 | Agent ThreadStore fresh/idempotent/live contract | `AI_PLATFORM_AGENT_RUNTIME_SOURCE=/path/to/fork make agent-thread-store-contract` |
-| Assistant runtime | `make verify-assistant-runtime-dev` |
+| Agent runtime compatibility surface | `make verify-assistant-runtime-dev` |
 | Eval / trace pipeline | `make eval-e1-gate`, then `make verify-eval-dev` for the wider branch gate |
 | Agent core / subagents | `make agent-eval-core-gate` |
 | Agent Studio | `make verify-agent-studio` |
-| Service boundaries, assistant API surface | `make test-isolation` |
-| Assistant OpenAPI | `make snapshot-assistant-openapi` then `make test-isolation` |
+| Service boundaries, Agent API surface | `make test-isolation` |
+| Agent compatibility OpenAPI | `make test-isolation` |
 | RAG retrieval | `make rag-eval-regression-gate` |
 | Deploy scripts, `.env.example`, Compose | `make validate-example-config` |
 | Python / CLI / Java / Dart SDK streaming | `make sdk-sse-contract` |

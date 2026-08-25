@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import copy
 import json
+import logging
 import math
 import re
 import time
@@ -31,6 +32,10 @@ from ai_gateway_core.agents import (
     canonical_runtime_json,
 )
 from ai_gateway_core.models import ReasoningWireError, apply_reasoning_wire
+
+from ..metrics.redaction import redact_sensitive_text
+
+logger = logging.getLogger(__name__)
 
 KERNEL_TOOL_TRANSCRIPT_NAMES = frozenset(
     {
@@ -147,6 +152,53 @@ def _snapshot_parameters(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     return {"temperature": temperature}
 
 
+def _snapshot_responses_tool_controls(
+    snapshot: Mapping[str, Any],
+) -> tuple[set[str] | None, str | dict[str, str], bool]:
+    """Read the immutable Responses tool policy pinned for this Runtime turn."""
+
+    raw = snapshot.get("readonly_capabilities")
+    if raw is None:
+        return None, "auto", True
+    if not isinstance(raw, Mapping):
+        raise AgentModelPlaneError("RUNTIME_MODEL_SNAPSHOT_INVALID", status_code=503)
+    names_raw = raw.get("responses_tool_names")
+    names: set[str] | None
+    if names_raw is None:
+        names = None
+    elif (
+        isinstance(names_raw, list)
+        and len(names_raw) <= 128
+        and all(isinstance(name, str) and _TOOL_NAME_RE.fullmatch(name) for name in names_raw)
+        and len(set(names_raw)) == len(names_raw)
+    ):
+        names = set(names_raw)
+    else:
+        raise AgentModelPlaneError("RUNTIME_MODEL_SNAPSHOT_INVALID", status_code=503)
+    choice = raw.get("responses_tool_choice", "auto")
+    if isinstance(choice, str) and choice in {"auto", "none", "required"}:
+        normalized_choice: str | dict[str, str] = choice
+    elif (
+        isinstance(choice, Mapping)
+        and choice.get("type") == "function"
+        and isinstance(choice.get("name"), str)
+        and _TOOL_NAME_RE.fullmatch(choice["name"])
+    ):
+        normalized_choice = {"type": "function", "name": choice["name"]}
+    else:
+        raise AgentModelPlaneError("RUNTIME_MODEL_SNAPSHOT_INVALID", status_code=503)
+    if isinstance(normalized_choice, dict) and (
+        names is None or normalized_choice["name"] not in names
+    ):
+        raise AgentModelPlaneError("RUNTIME_TOOL_CHOICE_INVALID", status_code=422)
+    parallel = raw.get("responses_parallel_tool_calls", True)
+    if not isinstance(parallel, bool):
+        raise AgentModelPlaneError("RUNTIME_MODEL_SNAPSHOT_INVALID", status_code=503)
+    if normalized_choice == "required" and names == set():
+        raise AgentModelPlaneError("RUNTIME_TOOL_CHOICE_INVALID", status_code=422)
+    return names, normalized_choice, parallel
+
+
 @dataclass(frozen=True, slots=True)
 class _AuthorizedCall:
     call_id: uuid.UUID
@@ -252,6 +304,7 @@ _TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 class _ValidatedNativeTools:
     tools: list[dict[str, Any]]
     aliases: dict[str, tuple[str, str]]
+    wire_aliases: dict[tuple[str, str], str]
 
 
 def _function_tool(
@@ -290,7 +343,7 @@ def _namespace_alias(namespace: str, name: str) -> str:
 
 def _validated_native_tools(value: Any, profile: Mapping[str, Any]) -> _ValidatedNativeTools:
     if value in (None, []):
-        return _ValidatedNativeTools(tools=[], aliases={})
+        value = []
     if not isinstance(value, list) or len(value) > 256:
         raise AgentModelPlaneError("RUNTIME_TOOL_SCHEMA_INVALID", status_code=422)
     tool_capabilities = profile.get("tools")
@@ -301,6 +354,8 @@ def _validated_native_tools(value: Any, profile: Mapping[str, Any]) -> _Validate
     tools: list[dict[str, Any]] = []
     wire_names: set[str] = set()
     aliases: dict[str, tuple[str, str]] = {}
+    wire_aliases: dict[tuple[str, str], str] = {}
+    bare_namespace_candidates: dict[str, list[tuple[str, str]]] = {}
     for raw in value:
         if not isinstance(raw, Mapping):
             raise AgentModelPlaneError("RUNTIME_TOOL_SCHEMA_INVALID", status_code=422)
@@ -335,7 +390,10 @@ def _validated_native_tools(value: Any, profile: Mapping[str, Any]) -> _Validate
                 if alias in wire_names:
                     raise AgentModelPlaneError("RUNTIME_TOOL_SCHEMA_INVALID", status_code=422)
                 wire_names.add(alias)
-                aliases[alias] = (namespace, child_name)
+                identity = (namespace, child_name)
+                aliases[alias] = identity
+                wire_aliases[identity] = alias
+                bare_namespace_candidates.setdefault(child_name, []).append(identity)
                 tools.append(
                     _function_tool(
                         child,
@@ -353,7 +411,45 @@ def _validated_native_tools(value: Any, profile: Mapping[str, Any]) -> _Validate
         tools.append(_function_tool(raw))
     if len(tools) > 256:
         raise AgentModelPlaneError("RUNTIME_TOOL_SCHEMA_INVALID", status_code=422)
-    return _ValidatedNativeTools(tools=tools, aliases=aliases)
+    # Some OpenAI-compatible Responses providers return the namespace child
+    # name instead of the serialized wire alias. Restore it only when the
+    # child is unique and cannot collide with a direct function tool.
+    for child_name, identities in bare_namespace_candidates.items():
+        if len(identities) == 1 and child_name not in wire_names:
+            aliases[child_name] = identities[0]
+    return _ValidatedNativeTools(
+        tools=tools,
+        aliases=aliases,
+        wire_aliases=wire_aliases,
+    )
+
+
+def _native_tool_transcript(
+    value: Any,
+    *,
+    aliases: Mapping[str, tuple[str, str]],
+    wire_aliases: Mapping[tuple[str, str], str],
+) -> Any:
+    """Serialize restored namespace calls back to their provider wire names."""
+
+    normalized = _native_responses_input(value)
+    if not isinstance(normalized, list):
+        return normalized
+    for item in normalized:
+        if not isinstance(item, dict) or item.get("type") != "function_call":
+            continue
+        name = item.get("name")
+        namespace = item.get("namespace")
+        identity: tuple[str, str] | None = None
+        if isinstance(namespace, str) and isinstance(name, str):
+            identity = (namespace, name)
+        elif isinstance(name, str):
+            identity = aliases.get(name)
+        wire_name = wire_aliases.get(identity) if identity is not None else None
+        if wire_name is not None:
+            item["name"] = wire_name
+            item.pop("namespace", None)
+    return normalized
 
 
 def _native_responses_body(
@@ -363,14 +459,38 @@ def _native_responses_body(
     max_output_tokens: int,
     profile: Mapping[str, Any],
     reasoning_option: str,
+    allowed_tool_names: set[str] | None = None,
+    tool_choice: str | dict[str, str] = "auto",
+    parallel_tool_calls: bool = True,
 ) -> tuple[dict[str, Any], dict[str, tuple[str, str]]]:
     validated_tools = _validated_native_tools(body.get("tools"), profile)
+    serialized_tools = list(validated_tools.tools)
+    native_search = profile.get("native_search")
+    tool_capabilities = profile.get("tools")
+    if (
+        isinstance(native_search, Mapping)
+        and native_search.get("enabled") is True
+        and isinstance(tool_capabilities, Mapping)
+        and tool_capabilities.get("web_search_wire") == "native"
+        and not any(tool.get("type") == "web_search" for tool in serialized_tools)
+    ):
+        # Hosted tools are immutable profile data. Inject them in the one
+        # Responses serialization stage so a Thread resume cannot
+        # accidentally drop a Provider capability from the outbound request.
+        serialized_tools.append({"type": "web_search"})
     function_tool_names = {
         str(tool["name"])
-        for tool in validated_tools.tools
+        for tool in serialized_tools
         if tool.get("type") == "function"
     }
+    if allowed_tool_names is not None and not function_tool_names.issubset(allowed_tool_names):
+        raise AgentModelPlaneError("RUNTIME_TOOL_SCHEMA_SCOPE_MISMATCH", status_code=422)
     raw_input = body.get("input")
+    wire_input = _native_tool_transcript(
+        raw_input,
+        aliases=validated_tools.aliases,
+        wire_aliases=validated_tools.wire_aliases,
+    )
     input_items = raw_input if isinstance(raw_input, list) else []
     has_tool_transcript = isinstance(raw_input, list) and any(
         isinstance(item, Mapping)
@@ -395,13 +515,22 @@ def _native_responses_body(
     )
     if has_tool_transcript:
         _validate_tool_transcript(
-            raw_input,
+            wire_input,
             allowed_tool_names=function_tool_names | KERNEL_TOOL_TRANSCRIPT_NAMES,
             allowed_namespaced_tools=set(validated_tools.aliases.values()),
         )
+    # A required/specific choice applies to the initial model call only. Once
+    # the kernel supplies a completed tool transcript, forcing it again would
+    # create an unbounded post-tool loop.
+    effective_tool_choice = "auto" if has_tool_transcript else tool_choice
+    effective_parallel_tool_calls = True if has_tool_transcript else parallel_tool_calls
+    if isinstance(effective_tool_choice, dict) and effective_tool_choice["name"] not in function_tool_names:
+        raise AgentModelPlaneError("RUNTIME_TOOL_CHOICE_INVALID", status_code=422)
+    if effective_tool_choice == "required" and not function_tool_names:
+        raise AgentModelPlaneError("RUNTIME_TOOL_CHOICE_INVALID", status_code=422)
     result: dict[str, Any] = {
         "model": model_id,
-        "input": _native_responses_input(body["input"]),
+        "input": wire_input,
         "stream": True,
         "store": False,
         "max_output_tokens": max_output_tokens,
@@ -409,9 +538,10 @@ def _native_responses_body(
     instructions = body.get("instructions")
     if isinstance(instructions, str) and instructions:
         result["instructions"] = instructions
-    if validated_tools.tools:
-        result["tools"] = validated_tools.tools
-        result["tool_choice"] = "auto"
+    if serialized_tools:
+        result["tools"] = serialized_tools
+        result["tool_choice"] = effective_tool_choice
+        result["parallel_tool_calls"] = effective_parallel_tool_calls
     for key in ("temperature", "top_p"):
         value = body.get(key)
         if isinstance(value, int | float) and not isinstance(value, bool):
@@ -489,6 +619,34 @@ def _native_responses_input(value: Any) -> Any:
     return normalized
 
 
+def _chat_tools_from_runtime(
+    raw_tools: Any,
+    profile: Mapping[str, Any],
+    *,
+    allowed_tool_names: set[str] | None,
+) -> list[dict[str, Any]]:
+    """Convert the Runtime's Responses-shaped tools to Chat Completions."""
+
+    validated = _validated_native_tools(raw_tools, profile)
+    function_tools = [tool for tool in validated.tools if tool.get("type") == "function"]
+    if len(function_tools) != len(validated.tools):
+        raise AgentModelPlaneError("RUNTIME_TOOL_SCHEMA_UNSUPPORTED", status_code=422)
+    names = {str(tool["name"]) for tool in function_tools}
+    if allowed_tool_names is not None and not names.issubset(allowed_tool_names):
+        raise AgentModelPlaneError("RUNTIME_TOOL_SCHEMA_SCOPE_MISMATCH", status_code=422)
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": str(tool["name"]),
+                "description": str(tool.get("description") or ""),
+                "parameters": tool.get("parameters") or {},
+            },
+        }
+        for tool in function_tools
+    ]
+
+
 def _validate_tool_transcript(
     raw_input: list[Any],
     *,
@@ -538,7 +696,11 @@ def _validate_tool_transcript(
         raise AgentModelPlaneError("RUNTIME_TOOL_TRANSCRIPT_INVALID", status_code=422)
 
 
-def _responses_input_to_messages(body: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _responses_input_to_messages(
+    body: Mapping[str, Any],
+    *,
+    allowed_tool_names: set[str] | None = None,
+) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
     instructions = body.get("instructions")
     if isinstance(instructions, str) and instructions:
@@ -550,7 +712,14 @@ def _responses_input_to_messages(body: Mapping[str, Any]) -> list[dict[str, Any]
     if not isinstance(raw_input, list):
         raise AgentModelPlaneError("RUNTIME_RESPONSES_INPUT_INVALID")
 
-    _validate_tool_transcript(raw_input)
+    _validate_tool_transcript(
+        raw_input,
+        allowed_tool_names=(
+            (allowed_tool_names | KERNEL_TOOL_TRANSCRIPT_NAMES)
+            if allowed_tool_names is not None
+            else None
+        ),
+    )
 
     pending_calls: dict[str, str] = {}
     for item in raw_input:
@@ -628,6 +797,8 @@ class _ResponsesProjector:
         self.reasoning_closed = False
         self.message_open = False
         self.message_closed = False
+        self.tool_calls: dict[int, dict[str, Any]] = {}
+        self.tool_call_items_added: set[int] = set()
         self.output: list[dict[str, Any]] = []
         self.usage: dict[str, int] | None = None
 
@@ -790,6 +961,88 @@ class _ResponsesProjector:
             self._event("response.output_item.done", output_index=index, item=item),
         ]
 
+    def tool_call_delta(self, raw_calls: Any) -> list[bytes]:
+        if not isinstance(raw_calls, list):
+            raise AgentModelPlaneError("RUNTIME_PROVIDER_STREAM_INVALID", status_code=502)
+        events = self.close_reasoning()
+        for raw in raw_calls:
+            if not isinstance(raw, Mapping):
+                raise AgentModelPlaneError("RUNTIME_PROVIDER_STREAM_INVALID", status_code=502)
+            index = raw.get("index", 0)
+            if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+                raise AgentModelPlaneError("RUNTIME_PROVIDER_STREAM_INVALID", status_code=502)
+            function = raw.get("function")
+            if not isinstance(function, Mapping):
+                raise AgentModelPlaneError("RUNTIME_PROVIDER_STREAM_INVALID", status_code=502)
+            call = self.tool_calls.setdefault(
+                index,
+                {
+                    "id": str(raw.get("id") or f"call_{index}"),
+                    "type": "function_call",
+                    "status": "in_progress",
+                    "call_id": str(raw.get("id") or f"call_{index}"),
+                    "name": "",
+                    "arguments": "",
+                },
+            )
+            name = function.get("name")
+            if name is not None:
+                if not isinstance(name, str) or not _TOOL_NAME_RE.fullmatch(name):
+                    raise AgentModelPlaneError("RUNTIME_TOOL_SCHEMA_INVALID", status_code=422)
+                if not call["name"]:
+                    call["name"] = name
+            if index not in self.tool_call_items_added and call["name"]:
+                self.tool_call_items_added.add(index)
+                events.append(
+                    self._event(
+                        "response.output_item.added",
+                        output_index=len(self.output) + index,
+                        item=call,
+                    )
+                )
+            arguments = function.get("arguments", "")
+            if arguments:
+                if not isinstance(arguments, str):
+                    raise AgentModelPlaneError("RUNTIME_PROVIDER_STREAM_INVALID", status_code=502)
+                if not call["name"]:
+                    raise AgentModelPlaneError("RUNTIME_PROVIDER_STREAM_INVALID", status_code=502)
+                call["arguments"] += arguments
+                events.append(
+                    self._event(
+                        "response.function_call_arguments.delta",
+                        item_id=call["call_id"],
+                        output_index=len(self.output) + index,
+                        delta=arguments,
+                    )
+                )
+        return events
+
+    def close_tool_calls(self) -> list[bytes]:
+        events: list[bytes] = []
+        base_index = len(self.output)
+        for index, call in sorted(self.tool_calls.items()):
+            if not call["name"]:
+                raise AgentModelPlaneError("RUNTIME_PROVIDER_STREAM_INVALID", status_code=502)
+            output_index = base_index + index
+            events.extend(
+                [
+                    self._event(
+                        "response.function_call_arguments.done",
+                        item_id=call["call_id"],
+                        output_index=output_index,
+                        name=call["name"],
+                        arguments=call["arguments"],
+                    ),
+                    self._event(
+                        "response.output_item.done",
+                        output_index=output_index,
+                        item={**call, "status": "completed"},
+                    ),
+                ]
+            )
+            self.output.append({**call, "status": "completed"})
+        return events
+
     def set_usage(self, raw: Any) -> None:
         if not isinstance(raw, Mapping):
             return
@@ -807,8 +1060,9 @@ class _ResponsesProjector:
 
     def complete(self) -> list[bytes]:
         events = self.close_reasoning()
+        events.extend(self.close_tool_calls())
         events.extend(self.close_message())
-        if not self.text:
+        if not self.text and not self.tool_calls:
             raise AgentModelPlaneError("RUNTIME_PROVIDER_EMPTY_RESPONSE", status_code=502)
         usage = self.usage or {
             "input_tokens": self.estimated_input_tokens,
@@ -913,7 +1167,7 @@ class _NativeResponsesStreamValidator:
         item = event.get("item")
         allowed = {None, "message", "reasoning"}
         if self.allow_tools:
-            allowed.add("function_call")
+            allowed.update({"function_call", "web_search_call"})
         if isinstance(item, Mapping) and item.get("type") not in allowed:
             raise AgentModelPlaneError(
                 "RUNTIME_TOOLS_NOT_ENABLED_FOR_PHASE",
@@ -954,6 +1208,19 @@ class _NativeResponsesStreamValidator:
             "response.incomplete",
             "response.cancelled",
         }:
+            error = event.get("error")
+            if not isinstance(error, Mapping):
+                response = event.get("response")
+                error = response.get("error") if isinstance(response, Mapping) else None
+            error = error if isinstance(error, Mapping) else {}
+            logger.warning(
+                "Agent provider stream rejected event=%s type=%s code=%s param=%s message=%s",
+                event_type,
+                redact_sensitive_text(str(error.get("type") or ""))[:128],
+                redact_sensitive_text(str(error.get("code") or ""))[:128],
+                redact_sensitive_text(str(error.get("param") or ""))[:128],
+                redact_sensitive_text(str(error.get("message") or ""))[:512],
+            )
             raise AgentModelPlaneError("RUNTIME_PROVIDER_REJECTED", status_code=502)
         if (
             any(marker in event_type for marker in ("function_call", "_search_call", "mcp_call"))
@@ -977,7 +1244,7 @@ class _NativeResponsesStreamValidator:
                 self._restore_tool_namespace(item)
                 allowed = {"message", "reasoning"}
                 if self.allow_tools:
-                    allowed.add("function_call")
+                    allowed.update({"function_call", "web_search_call"})
                 if isinstance(item, Mapping) and item.get("type") not in allowed:
                     raise AgentModelPlaneError(
                         "RUNTIME_TOOLS_NOT_ENABLED_FOR_PHASE",
@@ -1266,6 +1533,9 @@ class AgentModelPlane:
             await self._fail_call(call.call_id, "snapshot_invalid", dispatched=False)
             raise AgentModelPlaneError("RUNTIME_MODEL_SNAPSHOT_INVALID", status_code=503)
         snapshot_parameters = _snapshot_parameters(call.snapshot)
+        allowed_tool_names, tool_choice, parallel_tool_calls = _snapshot_responses_tool_controls(
+            call.snapshot
+        )
         wire_protocol = str(snapshot_model.get("wire_protocol") or "")
         if wire_protocol == "responses_v1":
             try:
@@ -1276,6 +1546,9 @@ class AgentModelPlane:
                     reasoning=reasoning,
                     api_key=api_key,
                     base_url=base_url,
+                    allowed_tool_names=allowed_tool_names,
+                    tool_choice=tool_choice,
+                    parallel_tool_calls=parallel_tool_calls,
                 ):
                     yield chunk
             finally:
@@ -1288,11 +1561,42 @@ class AgentModelPlane:
 
         chat_body: dict[str, Any] = {
             "model": call.model_id,
-            "messages": _responses_input_to_messages(body),
+            "messages": _responses_input_to_messages(body, allowed_tool_names=allowed_tool_names),
             "stream": True,
             "stream_options": {"include_usage": True},
             "max_tokens": call.reserved_output_tokens,
         }
+        chat_tools = _chat_tools_from_runtime(
+            body.get("tools"), profile, allowed_tool_names=allowed_tool_names
+        )
+        raw_input = body.get("input")
+        has_tool_transcript = isinstance(raw_input, list) and any(
+            isinstance(item, Mapping)
+            and item.get("type") in {"function_call", "function_call_output"}
+            for item in raw_input
+        )
+        effective_tool_choice = "auto" if has_tool_transcript else tool_choice
+        effective_parallel_tool_calls = True if has_tool_transcript else parallel_tool_calls
+        chat_names = {
+            item["function"]["name"]
+            for item in chat_tools
+            if isinstance(item.get("function"), Mapping)
+        }
+        if isinstance(effective_tool_choice, dict) and effective_tool_choice["name"] not in chat_names:
+            raise AgentModelPlaneError("RUNTIME_TOOL_CHOICE_INVALID", status_code=422)
+        if effective_tool_choice == "required" and not chat_tools:
+            raise AgentModelPlaneError("RUNTIME_TOOL_CHOICE_INVALID", status_code=422)
+        if chat_tools:
+            chat_body["tools"] = chat_tools
+            chat_body["tool_choice"] = (
+                {
+                    "type": "function",
+                    "function": {"name": effective_tool_choice["name"]},
+                }
+                if isinstance(effective_tool_choice, dict)
+                else effective_tool_choice
+            )
+            chat_body["parallel_tool_calls"] = effective_parallel_tool_calls
         chat_body.update(snapshot_parameters)
         try:
             apply_reasoning_wire(
@@ -1359,10 +1663,8 @@ class AgentModelPlane:
                         if not isinstance(delta, dict):
                             continue
                         if delta.get("tool_calls"):
-                            raise AgentModelPlaneError(
-                                "RUNTIME_TOOLS_NOT_ENABLED_FOR_PHASE",
-                                status_code=502,
-                            )
+                            for chunk in projector.tool_call_delta(delta["tool_calls"]):
+                                yield chunk
                         reasoning_delta = delta.get("reasoning_content")
                         if isinstance(reasoning_delta, str) and reasoning_delta:
                             for chunk in projector.reasoning_delta(reasoning_delta):
@@ -1399,6 +1701,9 @@ class AgentModelPlane:
         reasoning: Mapping[str, Any],
         api_key: str,
         base_url: str,
+        allowed_tool_names: set[str] | None = None,
+        tool_choice: str | dict[str, str] = "auto",
+        parallel_tool_calls: bool = True,
     ) -> AsyncIterator[bytes]:
         try:
             provider_body, tool_aliases = _native_responses_body(
@@ -1407,6 +1712,9 @@ class AgentModelPlane:
                 max_output_tokens=call.reserved_output_tokens,
                 profile=profile,
                 reasoning_option=str(reasoning.get("effective_option") or "auto"),
+                allowed_tool_names=allowed_tool_names,
+                tool_choice=tool_choice,
+                parallel_tool_calls=parallel_tool_calls,
             )
         except ReasoningWireError:
             await self._fail_call(call.call_id, "reasoning_wire_invalid", dispatched=False)
@@ -1417,6 +1725,16 @@ class AgentModelPlane:
         except AgentModelPlaneError:
             await self._fail_call(call.call_id, "responses_request_invalid", dispatched=False)
             raise
+
+        logger.info(
+            "Agent provider dispatch wire=responses model=%s tool_types=%s",
+            call.model_id,
+            [
+                str(tool.get("type") or "")
+                for tool in provider_body.get("tools", [])
+                if isinstance(tool, Mapping)
+            ],
+        )
 
         await self.database.execute(
             """
@@ -1436,8 +1754,7 @@ class AgentModelPlane:
             tool_aliases,
             reasoning_visibility=reasoning_visibility,
             allow_tools=any(
-                isinstance(tool, Mapping) and tool.get("type") == "function"
-                for tool in provider_body.get("tools", [])
+                isinstance(tool, Mapping) for tool in provider_body.get("tools", [])
             ),
         )
         header_request_id: str | None = None

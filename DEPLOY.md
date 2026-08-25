@@ -24,11 +24,12 @@ The default stack contains:
 - `redis`: cache, sessions, and queues
 - `qdrant`: vector database for the knowledge base
 - `knowledge-service`: KB CRUD, ingestion, indexing, and retrieval
-- `assistant-service`: general AI assistant plus bundled Agent Plugin runtime
+- `agent-runtime`: the sole Agent Thread/Turn/Item and model/tool loop
+- `agent-capability-worker`: tools, Office, code, connectors, and long jobs
 - `gateway`: public API, auth, proxy, sessions, and readiness
 - `frontend`: web console
 
-The gateway and frontend are the public entry points. Assistant service remains private to the Docker network. Infrastructure ports are bound to `127.0.0.1` by default.
+The gateway and frontend are the public entry points. Runtime and worker remain private to the Docker network. Infrastructure ports are bound to `127.0.0.1` by default.
 
 ## Required Configuration
 
@@ -53,7 +54,9 @@ Fill these required values:
 - `POSTGRES_PASSWORD`
 - `REDIS_PASSWORD`
 - `JWT_SECRET`
-- `GATEWAY_ASSISTANT_SHARED_SECRET`
+- `AI_PLATFORM_INTERNAL_TOKEN`
+- `AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET`
+- `AI_PLATFORM_CAPABILITY_PROOF_SECRET`
 - At least one chat provider key
 - `KB_EMBEDDING_PROVIDER`
 - `KB_EMBEDDING_API_KEY`
@@ -226,8 +229,8 @@ For production-like deployments:
 - Configure explicit CORS origins for your frontend domain.
 - Use S3-compatible storage by setting `GATEWAY_STORAGE__BACKEND=s3` and filling the S3 variables.
 - Monitor gateway `/health/ready`; it checks DB, Redis, knowledge service, and
-  Assistant. Runtime validation also verifies the bundled docgen stdio child
-  inside the Assistant container.
+  the Rust Agent Runtime. Runtime validation also probes the Capability Worker
+  catalog and execution endpoints.
 - Scrape gateway `/metrics` from your monitoring system and include it in release smoke checks; `gateway_up` should be present after startup.
 
 ## Troubleshooting
@@ -262,7 +265,7 @@ Logs:
 ```bash
 docker compose --env-file .env logs --tail=200 gateway
 docker compose --env-file .env logs --tail=200 knowledge-service
-docker compose --env-file .env logs --tail=200 assistant-service
+docker compose --env-file .env logs --tail=200 agent-runtime agent-capability-worker
 docker compose --env-file .env logs --tail=200 qdrant
 ```
 

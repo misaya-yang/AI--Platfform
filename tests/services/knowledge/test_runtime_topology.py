@@ -17,7 +17,7 @@ def test_runtime_role_defaults_to_all_and_rejects_unknown() -> None:
 
 @pytest.mark.asyncio
 async def test_database_readiness_runs_bounded_select(monkeypatch) -> None:
-    monkeypatch.setenv("GATEWAY_ASSISTANT_SHARED_SECRET", "unit-test-shared-secret")
+    monkeypatch.setenv("AI_PLATFORM_INTERNAL_TOKEN", "unit-test-shared-secret")
     monkeypatch.setenv("KNOWLEDGE_APP__ALLOW_ANONYMOUS", "false")
     from knowledge_service.main import _database_is_ready
 
@@ -36,7 +36,7 @@ async def test_database_readiness_runs_bounded_select(monkeypatch) -> None:
 
 
 def test_worker_role_exposes_health_without_business_routes(monkeypatch) -> None:
-    monkeypatch.setenv("GATEWAY_ASSISTANT_SHARED_SECRET", "unit-test-shared-secret")
+    monkeypatch.setenv("AI_PLATFORM_INTERNAL_TOKEN", "unit-test-shared-secret")
     monkeypatch.setenv("KNOWLEDGE_APP__ALLOW_ANONYMOUS", "false")
 
     from knowledge_service import main
@@ -74,7 +74,7 @@ async def test_runtime_role_uses_one_pool_and_closes_owned_resources(
     role: str,
     worker_starts: bool,
 ) -> None:
-    monkeypatch.setenv("GATEWAY_ASSISTANT_SHARED_SECRET", "unit-test-shared-secret")
+    monkeypatch.setenv("AI_PLATFORM_INTERNAL_TOKEN", "unit-test-shared-secret")
     monkeypatch.setenv("KNOWLEDGE_APP__ALLOW_ANONYMOUS", "false")
 
     from ai_gateway_core import tracing

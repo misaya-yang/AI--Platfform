@@ -39,20 +39,23 @@ CONTENT_REVISION_MIGRATION = (
 @pytest_asyncio.fixture
 async def binding_pool() -> AsyncIterator[asyncpg.Pool]:
     config = _postgres_config()
-    schema_name = f"agent_skill_kb_test_{uuid.uuid4().hex}"
+    database_name = f"agent_skill_kb_test_{uuid.uuid4().hex}"
     admin = await asyncpg.connect(**config)
-    await admin.execute(f'CREATE SCHEMA "{schema_name}"')
+    await admin.execute(f'CREATE DATABASE "{database_name}"')
     await admin.close()
+    test_config = {**config, "database": database_name}
     pool = await asyncpg.create_pool(
-        **config,
+        **test_config,
         min_size=1,
         max_size=2,
-        server_settings={"search_path": f'"{schema_name}",public'},
+        server_settings={"search_path": "assistant,public"},
     )
     try:
         async with pool.acquire() as connection:
             await connection.execute(
                 """
+                CREATE EXTENSION IF NOT EXISTS pgcrypto;
+                CREATE SCHEMA assistant;
                 CREATE TABLE datasets (
                     dataset_id VARCHAR(255) PRIMARY KEY,
                     tenant_id VARCHAR(255) NOT NULL,
@@ -180,6 +183,13 @@ async def binding_pool() -> AsyncIterator[asyncpg.Pool]:
             sql = BINDING_MIGRATION.read_text(encoding="utf-8")
             await connection.execute(sql)
             await connection.execute(sql)
+            await connection.execute(
+                """
+                CREATE TABLE public.assistant_skill_version_revocations AS
+                SELECT * FROM assistant.assistant_skill_version_revocations
+                WITH NO DATA
+                """
+            )
             revision_sql = CONTENT_REVISION_MIGRATION.read_text(encoding="utf-8")
             await connection.execute(revision_sql)
             await connection.execute(revision_sql)
@@ -196,7 +206,7 @@ async def binding_pool() -> AsyncIterator[asyncpg.Pool]:
     finally:
         await pool.close()
         admin = await asyncpg.connect(**config)
-        await admin.execute(f'DROP SCHEMA "{schema_name}" CASCADE')
+        await admin.execute(f'DROP DATABASE "{database_name}"')
         await admin.close()
 
 

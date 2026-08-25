@@ -24,6 +24,8 @@ nginx = (root / "web/nginx.conf").read_text(encoding="utf-8")
 helm = (root / "deploy/helm/ai-gateway/templates/frontend-configmap.yaml").read_text(encoding="utf-8")
 ingress = (root / "deploy/helm/ai-gateway/templates/ingress.yaml").read_text(encoding="utf-8")
 main = (root / "src/main.py").read_text(encoding="utf-8")
+security = (root / "src/core/middleware/_streaming/security_headers.py").read_text(encoding="utf-8")
+agent_public = (root / "src/api/v1/agent_public.py").read_text(encoding="utf-8")
 
 def location_block(source: str, marker: str) -> str:
     start = source.index(marker)
@@ -50,8 +52,11 @@ assert "frame-ancestors 'self'" in nginx
 assert 'add_header X-Frame-Options "SAMEORIGIN" always;' in helm
 assert "frame-ancestors 'self'" in helm
 assert "- path: /embed/agents" in ingress and "-gateway" in ingress
-assert 'request.url.path.startswith("/embed/agents/")' in main
-assert 'del response.headers["X-Frame-Options"]' in main
+assert "app.include_router(agent_embed_document_router)" in main
+assert '_EMBED_PREFIX = "/embed/agents/"' in security
+assert "allow_embed_frame = path.startswith(_EMBED_PREFIX)" in security
+assert 'response.headers["Content-Security-Policy"]' in agent_public
+assert "frame-ancestors {ancestors}" in agent_public
 print("Agent Embed config/header contract passed")
 PY
 }

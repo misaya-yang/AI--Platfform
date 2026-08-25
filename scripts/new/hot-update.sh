@@ -7,7 +7,7 @@
 #
 # Usage:
 #   make hot-update
-#   make hot-update ARGS="--assistant --gateway"
+#   make hot-update ARGS="--gateway"
 #   make hot-update ARGS="--frontend"
 #
 # For dependency, Dockerfile, base image, or lockfile changes, use a rebuild.
@@ -17,9 +17,7 @@
 source "$(dirname "$0")/common.sh"
 
 UPDATE_GATEWAY=false
-UPDATE_ASSISTANT=false
 UPDATE_KNOWLEDGE=false
-UPDATE_DOCGEN=false
 UPDATE_FRONTEND=false
 NO_RESTART=false
 EXPLICIT_SERVICE=false
@@ -31,11 +29,9 @@ Usage: scripts/new/hot-update.sh [OPTIONS]
 
 Options:
   --gateway       Copy gateway src/config/database and shared core, restart gateway
-  --assistant     Copy assistant-service src and shared core, restart assistant
   --knowledge     Copy knowledge-service package and shared core, restart API and worker
-  --docgen        Copy bundled docgen/plugin source into Assistant, restart Assistant
   --frontend      Build web/dist locally and copy it into the nginx container
-  --python        Update all Python services (gateway, assistant, knowledge, bundled docgen)
+  --python        Update all Python services (gateway and knowledge)
   --all           Update all supported services, including frontend
   --no-restart    Copy files only
   --env FILE      Use a specific env file instead of .env
@@ -48,23 +44,17 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --gateway) UPDATE_GATEWAY=true; EXPLICIT_SERVICE=true; shift ;;
-        --assistant) UPDATE_ASSISTANT=true; EXPLICIT_SERVICE=true; shift ;;
         --knowledge) UPDATE_KNOWLEDGE=true; EXPLICIT_SERVICE=true; shift ;;
-        --docgen) UPDATE_DOCGEN=true; EXPLICIT_SERVICE=true; shift ;;
         --frontend) UPDATE_FRONTEND=true; EXPLICIT_SERVICE=true; shift ;;
         --python)
             UPDATE_GATEWAY=true
-            UPDATE_ASSISTANT=true
             UPDATE_KNOWLEDGE=true
-            UPDATE_DOCGEN=true
             EXPLICIT_SERVICE=true
             shift
             ;;
         --all)
             UPDATE_GATEWAY=true
-            UPDATE_ASSISTANT=true
             UPDATE_KNOWLEDGE=true
-            UPDATE_DOCGEN=true
             UPDATE_FRONTEND=true
             EXPLICIT_SERVICE=true
             shift
@@ -86,9 +76,7 @@ done
 
 if [ "$EXPLICIT_SERVICE" != true ]; then
     UPDATE_GATEWAY=true
-    UPDATE_ASSISTANT=true
     UPDATE_KNOWLEDGE=true
-    UPDATE_DOCGEN=true
 fi
 
 if [ "$EXPLICIT_ENV_FILE" = true ]; then
@@ -153,6 +141,26 @@ copy_dir() {
     log_success "Copied $source -> $container:$destination"
 }
 
+copy_file() {
+    local source="$1"
+    local container="$2"
+    local destination="$3"
+    local owner="${4:-}"
+
+    if [ ! -f "$source" ]; then
+        log_error "Source file not found: $source"
+        exit 1
+    fi
+
+    container_must_run "$container"
+    docker exec -u root "$container" mkdir -p "$(dirname "$destination")"
+    docker cp "$source" "$container:$destination"
+    if [ -n "$owner" ]; then
+        docker exec -u root "$container" chown "$owner" "$destination" >/dev/null 2>&1 || true
+    fi
+    log_success "Copied $source -> $container:$destination"
+}
+
 warn_dependency_changes() {
     if ! command -v git >/dev/null 2>&1 || ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         return 0
@@ -161,9 +169,7 @@ warn_dependency_changes() {
     local changed
     changed="$(git diff --name-only -- \
         pyproject.toml uv.lock Dockerfile docker-compose.yml docker-compose.dev.yml \
-        apps/assistant-service/pyproject.toml apps/assistant-service/Dockerfile \
         apps/knowledge-service/pyproject.toml apps/knowledge-service/Dockerfile \
-        packages/mcp-docgen-server/pyproject.toml \
         web/package.json web/pnpm-lock.yaml web/Dockerfile 2>/dev/null || true)"
     if [ -n "$changed" ]; then
         log_warn "Dependency/Docker/build files changed; hot-update will not install dependencies or rebuild images."
@@ -181,19 +187,14 @@ if [ "$UPDATE_GATEWAY" = true ]; then
     gateway="$(gateway_container)"
     gateway_site="$(site_packages "$gateway")"
     copy_dir "src" "$gateway" "/app/src" "appuser:appuser"
+    copy_file \
+        "rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/platform_catalog_v1.json" \
+        "$gateway" "/app/src/core/data/platform_catalog_v1.json" "appuser:appuser"
     copy_dir "config" "$gateway" "/app/config" "appuser:appuser"
     copy_dir "database" "$gateway" "/app/database" "appuser:appuser"
     copy_dir "packages/ai-gateway-core/src/ai_gateway_core" "$gateway" "$gateway_site/ai_gateway_core"
     restart_services+=("gateway")
     UPDATE_AGENT_RUNTIME=true
-fi
-
-if [ "$UPDATE_ASSISTANT" = true ]; then
-    assistant="$(assistant_container)"
-    assistant_site="$(site_packages "$assistant")"
-    copy_dir "apps/assistant-service/src/assistant_service" "$assistant" "/app/apps/assistant-service/src/assistant_service" "appuser:appuser"
-    copy_dir "packages/ai-gateway-core/src/ai_gateway_core" "$assistant" "$assistant_site/ai_gateway_core"
-    restart_services+=("assistant-service")
 fi
 
 if [ "$UPDATE_KNOWLEDGE" = true ]; then
@@ -206,20 +207,6 @@ if [ "$UPDATE_KNOWLEDGE" = true ]; then
     copy_dir "apps/knowledge-service/src/knowledge_service" "$knowledge_worker" "$knowledge_worker_site/knowledge_service"
     copy_dir "packages/ai-gateway-core/src/ai_gateway_core" "$knowledge_worker" "$knowledge_worker_site/ai_gateway_core"
     restart_services+=("knowledge-service" "knowledge-worker")
-fi
-
-if [ "$UPDATE_DOCGEN" = true ]; then
-    assistant="$(assistant_container)"
-    assistant_site="$(site_packages "$assistant")"
-    copy_dir "packages/mcp-docgen-server/src/docgen" "$assistant" "$assistant_site/docgen" "appuser:appuser"
-    copy_dir "packages/mcp-docgen-server/src/mcp_docgen_server" "$assistant" "$assistant_site/mcp_docgen_server" "appuser:appuser"
-    copy_dir "agent-plugins/ai-docgen" "$assistant" "/opt/agent-plugins/ai-docgen"
-    copy_dir "agent-plugins/ai-quiz" "$assistant" "/opt/agent-plugins/ai-quiz"
-    copy_dir "agent-plugins/community-doublecheck" "$assistant" "/opt/agent-plugins/community-doublecheck"
-    copy_dir "agent-plugins/community-engineering-reviewers" "$assistant" "/opt/agent-plugins/community-engineering-reviewers"
-    if [ "$UPDATE_ASSISTANT" != true ]; then
-        restart_services+=("assistant-service")
-    fi
 fi
 
 if [ "$UPDATE_FRONTEND" = true ]; then
@@ -261,12 +248,6 @@ log_step "Runtime health checks"
 if [ "$UPDATE_KNOWLEDGE" = true ]; then
     wait_for_healthy "Knowledge service" "check_knowledge_health" 60 || log_warn "Knowledge service may still be starting"
     wait_for_healthy "Knowledge worker" "check_knowledge_worker_health" 60 || log_warn "Knowledge worker may still be starting"
-fi
-if [ "$UPDATE_ASSISTANT" = true ]; then
-    wait_for_healthy "Assistant service" "check_assistant_health" 60 || log_warn "Assistant service may still be starting"
-fi
-if [ "$UPDATE_DOCGEN" = true ] && [ "$UPDATE_ASSISTANT" != true ]; then
-    wait_for_healthy "Assistant service with bundled docgen" "check_assistant_health" 60 || log_warn "Assistant service may still be starting"
 fi
 if [ "$UPDATE_GATEWAY" = true ]; then
     wait_for_healthy "Gateway" "check_gateway_health" 60 || log_warn "Gateway may still be starting"

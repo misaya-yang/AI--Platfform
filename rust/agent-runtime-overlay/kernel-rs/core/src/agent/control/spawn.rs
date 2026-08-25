@@ -416,22 +416,20 @@ impl AgentControl {
         if matches!(
             session_source.as_ref(),
             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. }))
-        ) {
-            if let (Some(parent_thread_id), Some(parent_turn_id)) =
-                (options.parent_thread_id, options.parent_turn_id.as_deref())
-                && let Ok(parent_thread) = state.get_thread(parent_thread_id).await
-                && let Some(parent_turn) = parent_thread
-                    .session
-                    .turn_context_for_sub_id(parent_turn_id)
-                    .await
-                && let Some(source) = session_source.as_ref()
-            {
-                config.responses_api_metadata.extend(
-                    parent_turn
-                        .turn_metadata_state
-                        .platform_lease_metadata_for_child(source),
-                );
-            }
+        ) && let (Some(parent_thread_id), Some(parent_turn_id)) =
+            (options.parent_thread_id, options.parent_turn_id.as_deref())
+            && let Ok(parent_thread) = state.get_thread(parent_thread_id).await
+            && let Some(parent_turn) = parent_thread
+                .session
+                .turn_context_for_sub_id(parent_turn_id)
+                .await
+            && let Some(source) = session_source.as_ref()
+        {
+            config.responses_api_metadata.extend(
+                parent_turn
+                    .turn_metadata_state
+                    .platform_lease_metadata_for_child(source),
+            );
         }
         let multi_agent_version = state
             .effective_multi_agent_version_for_spawn(

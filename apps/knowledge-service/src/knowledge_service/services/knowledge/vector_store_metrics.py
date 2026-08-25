@@ -1,6 +1,6 @@
 """Process-local counters for the knowledge vector store hot path.
 
-Follows the same pattern as ``assistant_service.core.runtime.memory.index_metrics``:
+Uses the same bounded-label pattern as other Runtime metrics:
 exercisable counters on the shipped retrieval path, used by tests to prove
 ``get_collection`` call ceilings (SPO-04 gate: ≤ 1 per interactive retrieve
 without rerank).

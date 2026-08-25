@@ -590,6 +590,21 @@ function buildLatestRunOutputFilesFromArtifacts(
   return [];
 }
 
+function toArtifact(artifact: ArtifactInfo): Artifact {
+  return {
+    id: artifact.artifact_id,
+    type: artifact.type as Artifact["type"],
+    format: artifact.format,
+    title: artifact.title,
+    url: artifact.download_url || getArtifactDownloadUrl(artifact.artifact_id),
+    createdAt: new Date(artifact.created_at),
+    filename: artifact.filename,
+    mimeType: artifact.mime_type,
+    sizeBytes: artifact.size_bytes,
+    source: artifact.source as Artifact["source"],
+  };
+}
+
 /** Async: load quiz data for messages that have _quizId, then update state */
 async function hydrateQuizData(
   messages: ChatMessageType[],
@@ -956,18 +971,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                 reconciliationPromise,
               ]);
               if (restoreEpoch !== restoreEpochRef.current) return;
-              const loadedArtifacts: Artifact[] = sessionArtifacts.map((artifact: ArtifactInfo) => ({
-                id: artifact.artifact_id,
-                type: artifact.type as any,
-                format: artifact.format,
-                title: artifact.title,
-                url: artifact.download_url || getArtifactDownloadUrl(artifact.artifact_id),
-                createdAt: new Date(artifact.created_at),
-                filename: artifact.filename,
-                mimeType: artifact.mime_type,
-                sizeBytes: artifact.size_bytes,
-                source: artifact.source as any,
-              }));
+              const loadedArtifacts = sessionArtifacts.map(toArtifact);
               setArtifacts(loadedArtifacts);
               setShowArtifacts(false);
               chatMessages = hydrateMessageArtifacts(
@@ -1133,18 +1137,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       ]);
       if (restoreEpoch !== restoreEpochRef.current) return;
 
-      const loadedArtifacts: Artifact[] = sessionArtifacts.map((a: ArtifactInfo) => ({
-        id: a.artifact_id,
-        type: a.type as any,
-        format: a.format,
-        title: a.title,
-        url: a.download_url || getArtifactDownloadUrl(a.artifact_id),
-        createdAt: new Date(a.created_at),
-        filename: a.filename,
-        mimeType: a.mime_type,
-        sizeBytes: a.size_bytes,
-        source: a.source as any,
-      }));
+      const loadedArtifacts = sessionArtifacts.map(toArtifact);
       setArtifacts(loadedArtifacts);
       setShowArtifacts(false);
       chatMessages = hydrateMessageArtifacts(
@@ -1880,6 +1873,24 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                }
             }
             break;
+
+          case SSEEventType.ACTIVITY: {
+            const activityData = (event.data || {}) as Record<string, unknown>;
+            const label =
+              (typeof activityData.summary === "string" && activityData.summary) ||
+              (typeof activityData.message === "string" && activityData.message) ||
+              (typeof activityData.name === "string" && activityData.name);
+            if (label) {
+              updateAssistantMessage((m) => ({
+                ...m,
+                processSummary: {
+                  ...(m.processSummary ?? initProcessSummary(undefined, now)),
+                  currentStep: sanitizeProgressLabel(label),
+                },
+              }));
+            }
+            break;
+          }
           
           case "context_retrieved":
             // KB 检索完成不计入 TTFT - 这是后台预处理阶段
@@ -2012,7 +2023,11 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
           case SSEEventType.APPROVAL_REQUIRED:
             const approvalData = (event.data || {}) as Record<string, unknown>;
             const approvalToolId =
-              typeof approvalData.tool_id === "string" ? approvalData.tool_id : "";
+              typeof approvalData.tool_id === "string"
+                ? approvalData.tool_id
+                : typeof approvalData.tool_call_id === "string"
+                  ? approvalData.tool_call_id
+                  : "";
             const approvalToolName =
               typeof approvalData.tool_name === "string"
                 ? approvalData.tool_name
@@ -2034,6 +2049,10 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                   ...prev,
                   collapsed: false,
                   runId,
+                  runtimeThreadId:
+                    typeof approvalData.thread_id === "string"
+                      ? approvalData.thread_id
+                      : prev.runtimeThreadId,
                   tools: upsertTool(prev.tools, {
                     id: approvalToolId,
                     name: toolName,
@@ -2164,6 +2183,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
             // Agent execution started - initialize working memory if needed
             const runStartedData = event.data as {
               run_id?: string;
+              thread_id?: string;
               session_id?: string;
               task_id?: string | null;
               timestamp?: number;
@@ -2209,6 +2229,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                   runStartedData?.timestamp ?? now,
                 ),
                 reasoning: runStartedData?.reasoning ?? undefined,
+                runtimeThreadId: runStartedData?.thread_id,
               },
             }));
             await persistAssistantRunId(runStartedData?.run_id);
@@ -2479,9 +2500,9 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                     id: existing.id,
                     name: existing.name,
                     status:
-                      existing.status === "running"
-                        ? (toolEndFailed ? "error" : "completed")
-                        : existing.status,
+                      existing.status === "completed" || existing.status === "error"
+                        ? existing.status
+                        : (toolEndFailed ? "error" : "completed"),
                     finishedAt: toolEndData.timestamp ?? now,
                     durationMs:
                       existing.startedAt != null
@@ -3165,6 +3186,45 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       flushTurnStateToMessage();
       activityQueue.flushNow();
 
+      // The append-only Runtime history is authoritative at turn terminal.
+      // Reconcile once after success so a transient SSE delivery gap around
+      // approval/tool execution cannot leave the final answer or artifact
+      // link missing until the user manually reloads the conversation.
+      if (terminalLatch.current() === "succeeded" && isCurrentStream()) {
+        try {
+          const [historyResponse, sessionArtifacts] = await Promise.all([
+            getAssistantSessionHistory(sessionId, 200),
+            getSessionArtifacts(sessionId).catch(() => []),
+          ]);
+          if (!isCurrentStream()) return;
+          const restoredMessages = historyResponse.messages.map((message, index) =>
+            restoreMessageMetadata(message, index, sessionId)
+          );
+          const restoredAssistant = [...restoredMessages]
+            .reverse()
+            .find((message) => message.role === "assistant");
+          if (restoredAssistant?.content.trim()) {
+            streamTurnState = {
+              ...streamTurnState,
+              content: restoredAssistant.content,
+            };
+            const hydrated = hydrateMessageArtifacts(
+              [restoredAssistant],
+              sessionArtifacts,
+            )[0];
+            updateAssistantMessage((message) => ({
+              ...message,
+              generatedArtifacts:
+                hydrated?.generatedArtifacts ?? message.generatedArtifacts,
+              _artifactIds: hydrated?._artifactIds ?? message._artifactIds,
+            }));
+          }
+          setArtifacts(sessionArtifacts.map(toArtifact));
+        } catch {
+          console.warn("Assistant terminal history reconciliation failed");
+        }
+      }
+
       // Final update
       const finishedAtMs = Date.now();
       streamTurnState = completeStreamTurn(streamTurnState, finishedAtMs);
@@ -3330,11 +3390,15 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       approvalId: string,
       approved: boolean,
     ) => {
-      if (!approvalId || isStreaming) return;
+      // Native Runtime V2 keeps the SSE cursor open while waiting for an
+      // approval. V1 still guards against a duplicate resume while another
+      // send is active, but the V2 decision must be allowed through.
+      if (!approvalId) return;
       const messageSnapshot = messagesRef.current;
       const targetIndex = messageSnapshot.findIndex((message) => message.id === messageId);
       const target = targetIndex >= 0 ? messageSnapshot[targetIndex] : undefined;
       const runId = target?.processSummary?.runId;
+      const runtimeThreadId = target?.processSummary?.runtimeThreadId;
       let resumeMessageContent = "";
       if (targetIndex > 0) {
         for (let index = targetIndex - 1; index >= 0; index -= 1) {
@@ -3345,13 +3409,20 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         }
       }
 
-      if (!runId) {
+      if (!runId && !runtimeThreadId) {
         console.warn("Approval action skipped because the run id is unavailable");
         return;
       }
 
       try {
-        await approveToolCall(approvalId, { approved });
+        if (runtimeThreadId) {
+          // Native V2 approvals are consumed by the Runtime and wake the
+          // existing turn; starting a second turn would duplicate execution.
+          const { decideAgentRuntimeApproval } = await import("@/api/agentThreads");
+          await decideAgentRuntimeApproval(runtimeThreadId, approvalId, approved);
+        } else {
+          await approveToolCall(approvalId, { approved });
+        }
       } catch {
         console.warn("Assistant tool approval submission failed");
         return;
@@ -3382,6 +3453,8 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       });
 
       if (!approved) return;
+
+      if (runtimeThreadId) return;
 
       try {
         const resumePlan = await prepareAssistantRunResume(runId, {
@@ -3478,7 +3551,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         targetAssistantMessageId: messageId,
       });
     },
-    [isStreaming, sendMessage],
+    [sendMessage],
   );
 
   return {

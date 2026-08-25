@@ -15,120 +15,6 @@ def _read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def test_port_scripts_fail_closed_on_untracked_manifest_entries(tmp_path: Path) -> None:
-    for script_name in ("generate-port-patch.sh", "verify-sync-port.sh"):
-        repo = tmp_path / script_name.removesuffix(".sh")
-        goal_dir = repo / "scripts" / "goal"
-        goal_dir.mkdir(parents=True)
-        (goal_dir / script_name).write_text(
-            _read(f"scripts/goal/{script_name}"),
-            encoding="utf-8",
-        )
-        (goal_dir / "sync-port-only.txt").write_text(
-            "src/new_startup_module.py\n",
-            encoding="utf-8",
-        )
-        (goal_dir / "workstream-a-paths.txt").write_text("", encoding="utf-8")
-        untracked_path = repo / "src" / "new_startup_module.py"
-        untracked_path.parent.mkdir()
-        untracked_path.write_text("VALUE = 1\n", encoding="utf-8")
-        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-
-        scratch = repo / "scratch"
-        result = subprocess.run(
-            ["bash", f"scripts/goal/{script_name}"],
-            cwd=repo,
-            env={**os.environ, "GROK_GOAL_SCRATCH": str(scratch)},
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-
-        output = result.stdout + result.stderr
-        assert result.returncode != 0
-        assert "PORT manifest contains untracked files" in output
-        assert "src/new_startup_module.py" in output
-        assert not (scratch / "port-only.patch").exists()
-
-
-def test_port_verifier_skips_deleted_python_paths_in_ruff_but_keeps_deletion(
-    tmp_path: Path,
-) -> None:
-    repo = tmp_path / "repo"
-    goal_dir = repo / "scripts" / "goal"
-    new_scripts_dir = repo / "scripts" / "new"
-    src_dir = repo / "src"
-    command_dir = tmp_path / "commands"
-    for directory in (goal_dir, new_scripts_dir, src_dir, command_dir):
-        directory.mkdir(parents=True)
-
-    (goal_dir / "verify-sync-port.sh").write_text(
-        _read("scripts/goal/verify-sync-port.sh"),
-        encoding="utf-8",
-    )
-    (goal_dir / "sync-port-only.txt").write_text(
-        "src/existing.py\nsrc/deleted.py\n",
-        encoding="utf-8",
-    )
-    (goal_dir / "workstream-a-paths.txt").write_text("", encoding="utf-8")
-    for script_name in ("port-only-diff.sh", "generate-port-patch.sh"):
-        (goal_dir / script_name).write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-    (goal_dir / "exercise-shipped-paths.py").write_text("", encoding="utf-8")
-    for script_name in ("migrate.sh", "deploy.sh"):
-        (new_scripts_dir / script_name).write_text(
-            "#!/usr/bin/env bash\nexit 0\n",
-            encoding="utf-8",
-        )
-    (new_scripts_dir / "gateway_preflight.py").write_text("", encoding="utf-8")
-    (src_dir / "existing.py").write_text("EXISTING = True\n", encoding="utf-8")
-    deleted_path = src_dir / "deleted.py"
-    deleted_path.write_text("DELETED = True\n", encoding="utf-8")
-
-    ruff_args_log = tmp_path / "ruff-args.log"
-    (command_dir / "ruff").write_text(
-        '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$RUFF_ARGS_LOG"\n',
-        encoding="utf-8",
-    )
-    for command_name in ("pytest", "python"):
-        (command_dir / command_name).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    for command_path in command_dir.iterdir():
-        command_path.chmod(0o755)
-
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    subprocess.run(
-        ["git", "config", "user.email", "port-guard@example.test"],
-        cwd=repo,
-        check=True,
-    )
-    subprocess.run(["git", "config", "user.name", "Port Guard"], cwd=repo, check=True)
-    subprocess.run(["git", "add", "."], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repo, check=True)
-    deleted_path.unlink()
-
-    scratch = tmp_path / "scratch"
-    result = subprocess.run(
-        ["bash", "scripts/goal/verify-sync-port.sh"],
-        cwd=repo,
-        env={
-            **os.environ,
-            "GROK_GOAL_SCRATCH": str(scratch),
-            "PATH": f"{command_dir}:/usr/bin:/bin",
-            "RUFF_ARGS_LOG": str(ruff_args_log),
-        },
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    ruff_args = ruff_args_log.read_text(encoding="utf-8")
-    assert "src/existing.py" in ruff_args
-    assert "src/deleted.py" not in ruff_args
-    diff_evidence = (scratch / "diff-head-port-only.txt").read_text(encoding="utf-8")
-    assert "diff --git a/src/deleted.py b/src/deleted.py" in diff_evidence
-    assert "deleted file mode" in diff_evidence
-
-
 def test_bundled_community_agent_plugins_are_pinned_read_only_data() -> None:
     expected_agents = {
         "community-doublecheck": {"./agents/doublecheck.md"},
@@ -214,14 +100,8 @@ def test_bundled_community_agent_plugins_are_pinned_read_only_data() -> None:
                 assert forbidden not in instructions.lower()
 
     env_example = _read(".env.example")
-    assert (
-        "ASSISTANT_AGENT_PLUGIN_PATHS=/opt/agent-plugins/ai-docgen:"
-        "/opt/agent-plugins/ai-quiz:"
-        "/opt/agent-plugins/community-doublecheck:"
-        "/opt/agent-plugins/community-engineering-reviewers"
-    ) in env_example
-    assert "ASSISTANT_TRUSTED_AGENT_PLUGINS=ai-docgen@1.0.0" in env_example
-    assert "ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS=/opt/agent-plugins/ai-docgen" in env_example
+    assert "ASSISTANT_AGENT_PLUGIN_PATHS" not in env_example
+    assert "ASSISTANT_TRUSTED_AGENT_PLUGINS" not in env_example
 
 
 def test_compose_uses_gateway_bucket_fallback_and_named_volume_data_dir():
@@ -240,10 +120,6 @@ def test_compose_uses_gateway_bucket_fallback_and_named_volume_data_dir():
         not in compose
     )
     assert "gateway-data:/app/data" in compose
-    assert (
-        'ASSISTANT_RUNTIME_MEMORY_DIR: "${ASSISTANT_RUNTIME_MEMORY_DIR:-/app/data/assistant-memory}"'
-        in compose
-    )
     assert "gateway-init:" in compose
     assert "service_completed_successfully" in compose
     assert "mkdir -p /app/data/images /app/logs" in compose
@@ -254,87 +130,30 @@ def test_compose_uses_gateway_bucket_fallback_and_named_volume_data_dir():
     assert "CONTAINER_NO_PROXY=" in env_example
 
 
-def test_compose_isolates_runtime_memory_and_wires_cleanup_provider():
+def test_compose_isolates_runtime_and_capability_worker_state():
     compose_text = _read("docker-compose.yml")
     compose = yaml.safe_load(compose_text)
     services = compose["services"]
-    assistant = services["assistant-service"]
-    assistant_volumes = assistant["volumes"]
-    assistant_environment = assistant["environment"]
-
-    assert "assistant-memory-data:/app/data/assistant-memory" in assistant_volumes
-    assert "gateway-data:/app/legacy-data" in assistant_volumes
-    assert "assistant-memory-data:/app/assistant-memory" in services["gateway-init"]["volumes"]
-    assert compose["volumes"]["assistant-memory-data"] == {}
-    for service_name, service in services.items():
-        if service_name in {"assistant-service", "gateway-init"}:
-            continue
-        assert not any(
-            str(volume).startswith("assistant-memory-data:")
-            for volume in service.get("volumes", [])
-        )
-    assert assistant_environment["ASSISTANT_RUNTIME_QDRANT_URL"] == (
-        "${ASSISTANT_RUNTIME_QDRANT_URL:-http://qdrant:6333}"
-    )
-    assert assistant_environment["ASSISTANT_RUNTIME_QDRANT_API_KEY"] == (
-        "${ASSISTANT_RUNTIME_QDRANT_API_KEY:-}"
-    )
-    assert assistant_environment["ASSISTANT_RUNTIME_MEMORY_V2"] == (
-        "${ASSISTANT_RUNTIME_MEMORY_V2:-true}"
-    )
-    assert assistant_environment["ASSISTANT_RUNTIME_CONTEXT_V2"] == (
-        "${ASSISTANT_RUNTIME_CONTEXT_V2:-true}"
-    )
-    for name in (
-        "ASSISTANT_RUNTIME_TOOL_POLICY_V2",
-        "ASSISTANT_RUNTIME_SCHEDULER",
-        "ASSISTANT_RUNTIME_FAILOVER_V2",
-        "ASSISTANT_SUBAGENTS_ENABLED",
-    ):
-        assert assistant_environment[name] == f"${{{name}:-false}}"
-    assert assistant_environment["ASSISTANT_RUNTIME_SKILLS"] == (
-        "${ASSISTANT_RUNTIME_SKILLS:-true}"
-    )
-    assert assistant_environment["ASSISTANT_AGENT_PLUGIN_PATHS"] == (
-        "${ASSISTANT_AGENT_PLUGIN_PATHS:-/opt/agent-plugins/ai-docgen:"
-        "/opt/agent-plugins/ai-quiz:"
-        "/opt/agent-plugins/community-doublecheck:"
-        "/opt/agent-plugins/community-engineering-reviewers}"
-    )
-    assert assistant_environment["ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS"] == (
-        "${ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS:-/opt/agent-plugins/ai-docgen}"
-    )
-    assert assistant_environment["ASSISTANT_TRUSTED_AGENT_PLUGINS"] == (
-        "${ASSISTANT_TRUSTED_AGENT_PLUGINS:-ai-docgen@1.0.0}"
-    )
-    assert "community-" not in assistant_environment["ASSISTANT_TRUSTED_AGENT_PLUGINS"]
-    assert "community-" not in assistant_environment["ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS"]
-    assert not any("/opt/agent-plugins" in str(volume) for volume in assistant_volumes)
-    assistant_dockerfile = _read("apps/assistant-service/Dockerfile")
-    assert "COPY agent-plugins/ai-docgen/ /opt/agent-plugins/ai-docgen/" in assistant_dockerfile
-    assert "COPY agent-plugins/ai-quiz/ /opt/agent-plugins/ai-quiz/" in assistant_dockerfile
-    assert (
-        "COPY agent-plugins/community-doublecheck/ /opt/agent-plugins/community-doublecheck/"
-    ) in assistant_dockerfile
-    assert (
-        "COPY agent-plugins/community-engineering-reviewers/ "
-        "/opt/agent-plugins/community-engineering-reviewers/"
-    ) in assistant_dockerfile
-    assert services["gateway"]["environment"]["ASSISTANT_ROUTE_SESSIONS_PROXIED"] == (
-        "${ASSISTANT_ROUTE_SESSIONS_PROXIED:-true}"
+    runtime = services["agent-runtime"]
+    worker = services["agent-capability-worker"]
+    assert "agent-runtime-home:/var/lib/ai-platform-agent-runtime/runtime-home" in runtime["volumes"]
+    assert "agent-capability-workspaces:/workspace" in worker["volumes"]
+    assert all("/var/run/docker.sock" not in str(volume) for volume in worker["volumes"])
+    assert compose["volumes"]["agent-runtime-home"] == {}
+    assert compose["volumes"]["agent-capability-workspaces"] == {}
+    assert runtime["environment"]["AI_PLATFORM_CAPABILITY_WORKER_URL"] == (
+        "${AI_PLATFORM_CAPABILITY_WORKER_URL:-http://agent-capability-worker:8095}"
     )
     assert "/Users/" not in compose_text
 
 
-def test_playwright_mcp_docgen_server_command_is_implemented() -> None:
+def test_playwright_uses_the_repository_owned_live_stack() -> None:
     config = _read("web/playwright.config.ts")
     script = _read("scripts/dev/start_e2e_stack.sh")
 
-    assert "`${stackScript} mcp-docgen`" in config
-    assert "run_mcp_docgen()" in script
-    assert "mcp-docgen)" in script
-    assert 'export MCP_TRANSPORT="sse"' in script
-    assert "uv run --package ai-docgen --extra mcp python -m mcp_docgen_server" in script
+    assert "webServer" not in config
+    assert "playwright.live.config.ts" in script
+    assert "assistant" + "_service" not in script
 
 
 def test_deploy_stops_app_services_before_migrations():
@@ -462,3 +281,28 @@ def test_deploy_builds_and_pins_the_agent_runtime_image() -> None:
     assert f"AI_PLATFORM_AGENT_RUNTIME_IMAGE:-{expected_image}" in compose
     assert f"AI_PLATFORM_AGENT_RUNTIME_IMAGE={expected_image}" in example
     assert f"AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION={expected_revision}" in example
+
+
+def test_common_load_env_preserves_explicit_runtime_image_and_reads_defaults(tmp_path: Path) -> None:
+    env_file = tmp_path / "runtime.env"
+    env_file.write_text(
+        "AI_PLATFORM_AGENT_RUNTIME_IMAGE=ai-gateway-agent-runtime:stale-file-value\n"
+        "RUNTIME_DEFAULT_FROM_FILE=from-file\n",
+        encoding="utf-8",
+    )
+    command = (
+        "source scripts/new/common.sh; "
+        f"ENV_FILE={env_file}; "
+        "export ENV_FILE AI_PLATFORM_AGENT_RUNTIME_IMAGE=explicit-runtime-value; "
+        "load_env; "
+        "printf '%s|%s' \"$AI_PLATFORM_AGENT_RUNTIME_IMAGE\" \"$RUNTIME_DEFAULT_FROM_FILE\""
+    )
+    result = subprocess.run(
+        ["bash", "-c", command],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "explicit-runtime-value|from-file"

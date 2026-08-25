@@ -10,7 +10,8 @@ The default Docker setup is intended for a local first run. `make quickstart` ge
 | --- | --- | --- |
 | Frontend | Web console | `http://localhost:8081` |
 | Gateway | Public API, auth, proxy, sessions | `http://localhost:8080` |
-| Assistant service | General AI assistant runtime | Internal: `http://assistant-service:8093` |
+| Agent Runtime | Sole Agent loop, Thread/Turn/Item lifecycle | Internal: `http://agent-runtime:8094` |
+| Capability worker | Tools, Office, code, MCP, and long jobs | Internal: `http://agent-capability-worker:8095` |
 | Knowledge service | KB CRUD, document ingestion, retrieval | `http://localhost:8092` |
 | PostgreSQL | Primary relational database | `127.0.0.1:5432` |
 | Redis | Cache, sessions, queues | `127.0.0.1:6379` |
@@ -55,7 +56,7 @@ make quickstart
 ```
 
 The initializer creates `.env` with mode `0600` and generates PostgreSQL,
-Redis, JWT, service-HMAC, provider-encryption, and bootstrap-admin secrets without
+Redis, JWT, internal-runtime, capability, provider-encryption, and bootstrap-admin secrets without
 printing their values. The same DashScope key is used for Qwen chat,
 `text-embedding-v4`, and document generation unless you explicitly configure a
 dedicated provider key. Never commit `.env`; only `.env.example` is public.
@@ -82,15 +83,17 @@ Generated automatically for local quickstart:
 - `POSTGRES_PASSWORD`
 - `REDIS_PASSWORD`
 - `JWT_SECRET`
-- `GATEWAY_ASSISTANT_SHARED_SECRET`
+- `AI_PLATFORM_INTERNAL_TOKEN`
+- `AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET`
+- `AI_PLATFORM_CAPABILITY_PROOF_SECRET`
 - `GATEWAY_ENCRYPTION_KEY`
 - `DEFAULT_USER_PASSWORD`
 
 Optional overrides remain available for custom providers, dedicated embedding
 credentials, ports, image references, and production scaling. Published image
 references use immutable `2.0.0` tags by default and can be replaced through
-`GATEWAY_IMAGE`, `FRONTEND_IMAGE`, `ASSISTANT_IMAGE`, `KNOWLEDGE_IMAGE`, and
-`MIGRATE_IMAGE`.
+`GATEWAY_IMAGE`, `FRONTEND_IMAGE`, `KNOWLEDGE_IMAGE`, `MIGRATE_IMAGE`,
+`AI_PLATFORM_AGENT_RUNTIME_IMAGE`, and `AGENT_CAPABILITY_WORKER_IMAGE`.
 
 3. Validate an existing configuration without starting containers:
 
@@ -178,7 +181,7 @@ make dev-compose-logs
 ```
 
 This combines `docker-compose.build.yml` and `docker-compose.dev.yml` to
-bind-mount the gateway, assistant-service, knowledge-service, and shared core
+bind-mount the Gateway, Knowledge service, and shared core
 package source into the containers and runs the Python services with
 `uvicorn --reload`. Rebuild only when
 dependencies, Dockerfiles, or image-level system packages change.
@@ -243,17 +246,20 @@ docker compose down -v --remove-orphans
 
 The compose file wires services through Docker DNS names:
 
-- Gateway to assistant: `ASSISTANT_SERVICE_URL=http://assistant-service:8093`
-- Gateway/assistant to knowledge service: `KB_SERVICE_URL=http://knowledge-service:8092`
+- Gateway to Agent Runtime: `AI_PLATFORM_AGENT_RUNTIME_URL=http://agent-runtime:8094`
+- Runtime to capability worker: `AI_PLATFORM_CAPABILITY_WORKER_URL=http://agent-capability-worker:8095`
+- Gateway/worker to knowledge service: `KB_SERVICE_URL=http://knowledge-service:8092`
 - Knowledge service to Qdrant: `http://qdrant:6333`
-- Gateway/assistant/knowledge to PostgreSQL and Redis through internal service names
+- Gateway/Runtime/worker/knowledge to PostgreSQL and Redis through internal service names
 
-Gateway-to-assistant and gateway-to-knowledge requests are protected by `GATEWAY_ASSISTANT_SHARED_SECRET` HMAC verification. Use the same value across gateway, assistant service, and knowledge service.
+Internal service requests use `AI_PLATFORM_INTERNAL_TOKEN` plus scoped runtime
+leases. Provider credentials remain in the Gateway model plane and are never
+sent to Runtime or capability-worker containers.
 
 Core service-to-service calls use the shared `ai-gateway-core` communication layer:
 
 - Gateway proxy routes use `ServiceProxy` for request-id/trace propagation, header stripping, HMAC signing, SSE pass-through, bounded timeouts, retry budget, and per-route circuit breaking.
-- Assistant-to-knowledge calls use `KBProxyClient`, backed by the same outbound client primitives.
+- Gateway-to-knowledge calls use `KBProxyClient`, backed by the same outbound client primitives.
 - `src/proxy/transparent_proxy.py` remains for external or dynamically registered proxy targets; do not add new core gateway-to-service hops there.
 - Internal clients apply bounded retry, optional token-bucket service limits, automatic idempotency keys for replay-safe non-GET calls, and low-cardinality service-call metrics.
 - Admission control separates global, per-tenant, streaming, and adapter-level capacity so one tenant, long SSE stream, or failed AI backend cannot consume all service slots.
@@ -274,7 +280,7 @@ INTERNAL_IDEMPOTENCY_BACKEND=redis
 Useful communication controls:
 
 ```env
-INTERNAL_SERVICE_RATE_LIMITS=knowledge-service=100:100,assistant-service=50:50
+INTERNAL_SERVICE_RATE_LIMITS=knowledge-service=100:100,agent-runtime=50:50,agent-capability-worker=50:50
 SERVICE_STREAMING_MAX_CONNECTIONS=16
 ADMISSION_TENANT_SHARE_RATIO=0.2
 SERVICE_BREAKER_RECOVERY_TIMEOUT_SECONDS=30
@@ -287,7 +293,6 @@ The CORS env values used by compose are JSON array strings:
 
 ```env
 KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON=["http://localhost:8081","http://localhost:3000"]
-ASSISTANT_CORS_ALLOW_ORIGINS_JSON=["http://localhost:8081","http://localhost:3000"]
 ```
 
 For shared or non-local deployments, replace those localhost origins with the
@@ -303,7 +308,7 @@ If you set `VITE_SUPPORT_EMAIL` for a non-local deployment, do not leave it as
 `admin@example.com`; use a real support mailbox or leave it blank for the
 default `admin@AUTH_ALLOWED_EMAIL_DOMAIN`.
 
-Compose startup waits for infrastructure and microservices to become healthy before starting dependent services. Gateway, knowledge-service, and assistant-service checks use `/health/ready`, not only shallow process liveness endpoints.
+Compose startup waits for infrastructure and microservices to become healthy before starting dependent services. Gateway, Knowledge, and Agent Runtime checks use `/health/ready`, not only shallow process liveness endpoints.
 
 ## Knowledge Base
 
@@ -326,11 +331,13 @@ Provider notes:
 
 ## General AI Assistant
 
-The assistant service is private to the Docker network. Public assistant traffic should go through the gateway/frontend path.
+The Rust Agent Runtime and Capability Worker are private to the Docker network.
+Public Agent traffic always goes through the gateway/frontend path.
 
-Set at least one chat provider key in `.env`. The runtime passes these provider
-variables to the gateway and Assistant where relevant. The bundled docgen child
-receives only its code-owned allowlist:
+Set at least one chat provider key in `.env`. Provider credentials stay in the
+Gateway model plane; the Runtime and Capability Worker use short-lived scoped
+leases and do not receive long-lived provider keys. Supported provider variables
+include:
 
 - `DASHSCOPE_API_KEY`
 - `DASHSCOPE_CHAT_API_KEY`
@@ -345,7 +352,7 @@ receives only its code-owned allowlist:
 
 ### Agent Plugins 1.0.0
 
-The Assistant implements portable Agent Plugins 1.0.0 Skills plus trusted stdio
+The Agent Runtime implements portable Agent Plugins 1.0.0 Skills plus trusted stdio
 and Streamable HTTP MCP components. It recognizes the canonical local schema identifiers,
 reads root `plugin.json` and `mcp.json`, and discovers immediate
 `skills/*/SKILL.md` children. It does not download schemas at runtime,
@@ -362,70 +369,23 @@ Validate a package without executing it:
 uv run python scripts/validate_agent_plugin.py /path/to/plugin
 ```
 
-The bundled `agent-plugins/ai-docgen` package is enabled by default in Compose.
-Its stdio MCP executable and document dependencies ship inside the Assistant
-image, so document generation requires no second application image, service,
-port, or signed-download endpoint. Generated files are imported directly into
-the Assistant artifact store. The legacy in-process generators remain a
-startup fallback when the plugin handshake fails.
+The bundled `agent-plugins/ai-docgen` package describes the Office skill used
+by the capability worker. Generated files are persisted as Runtime artifacts;
+there is no document-specific Agent loop or stdio child server.
 
 The bundled `agent-plugins/ai-quiz` package documents the assistant's built-in
 quiz capability: ask the assistant to create questions from knowledge-base
 content and it calls the `generate_quiz` tool, renders an interactive quiz card
 in chat, and supports public sharing through the artifact-share mechanism.
-Operators can install other packages by listing plugin roots with the operating
-system path separator:
+Plugin and skill bindings are versioned Agent Studio data. Package metadata
+cannot grant credentials, reduce risk, bypass approval, or add arbitrary
+request fields; Runtime snapshots carry only validated identities and grants.
 
-```env
-ASSISTANT_RUNTIME_SKILLS=true
-ASSISTANT_AGENT_PLUGIN_PATHS=/opt/agent-plugins/ai-docgen:/opt/operator-plugins/acme-tools
-ASSISTANT_AGENT_PLUGIN_DATA_ROOT=/app/data/agent-plugins
-ASSISTANT_TRUSTED_AGENT_PLUGINS=ai-docgen@1.0.0
-ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS=/opt/agent-plugins/ai-docgen
-```
+### Code execution
 
-The bundled package is copied into the Assistant image. For additional Docker
-plugins, mount an operator-controlled directory read-only and use container
-paths in `ASSISTANT_AGENT_PLUGIN_PATHS`:
-
-```yaml
-services:
-  assistant-service:
-    volumes:
-      - ./operator-plugins:/opt/operator-plugins:ro
-```
-
-Plugin paths are an operator installation boundary. Portable packages cannot
-grant themselves credentials, static read/write classifications, or tenant
-permissions. A remote package URL must follow the Agent Plugins TLS/loopback
-rules. Only built-in plugin identities explicitly listed in
-`ASSISTANT_TRUSTED_AGENT_PLUGINS` and loaded from a canonical root listed in
-`ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS` may receive platform-owned
-unattended/default-tenant policy. Third-party plugins remain
-confirmation-gated and require tenant enablement; copying a trusted package
-identity at a different path does not grant stdio execution or a low-risk
-policy.
-
-### Trusted local code sandbox
-
-The default quickstart does not grant the Assistant access to the host Docker
-Engine. Maintainers can enable real Python execution explicitly:
-
-```bash
-make code-executor-enable
-make code-executor-test
-```
-
-The overlay runs submitted code in a separate child container with networking
-disabled, all Linux capabilities dropped, privilege escalation disabled,
-bounded CPU/memory/PIDs, a read-only root filesystem, and an execution-scoped
-workspace. It uses `runsc` when the host provides gVisor; Docker Desktop falls
-back to hardened `runc` and is intended only for trusted local development.
-Disable the feature and remove the Docker socket mount with:
-
-```bash
-make code-executor-disable
-```
+Code execution is a capability-worker operation with a bounded execution
+workspace. The default stack never mounts the host Docker socket into an
+application service.
 
 ## Database and Qdrant Notes
 
@@ -458,7 +418,7 @@ Runtime fails:
 make status
 docker compose logs --tail=200 gateway
 docker compose logs --tail=200 knowledge-service
-docker compose logs --tail=200 assistant-service
+docker compose logs --tail=200 agent-runtime agent-capability-worker
 docker compose logs --tail=200 qdrant
 ```
 
@@ -479,13 +439,13 @@ curl -fsS http://localhost:8092/health/ready
 docker compose exec gateway printenv INTERNAL_AUTH_VERSION INTERNAL_COMM_STATE_BACKEND
 ```
 
-- `401 AUTH_DENIED` between services: confirm gateway, assistant-service, and knowledge-service have the same `GATEWAY_ASSISTANT_SHARED_SECRET`; if `INTERNAL_AUTH_VERSION=v2`, confirm `INTERNAL_AUTH_KEYS` and `INTERNAL_AUTH_ACTIVE_KEY_ID` match.
+- `401 AUTH_DENIED` between services: confirm all internal services receive the same `AI_PLATFORM_INTERNAL_TOKEN`; if canonical v2 signing is enabled, confirm `INTERNAL_AUTH_KEYS` and `INTERNAL_AUTH_ACTIVE_KEY_ID` match.
 - `429 Rate limit exceeded`: check local quickstart rate-limit env values and whether assistant chat is hitting `RATE_LIMIT_ASSISTANT_CHAT_LIMIT`.
 - `429 GATEWAY_TENANT_CAPACITY_EXHAUSTED`: a single tenant reached its per-tenant admission share; adjust `ADMISSION_TENANT_SHARE_RATIO` or the service capacity config.
-- `502` or `504`: check downstream service logs first, then `ASSISTANT_SERVICE_URL`, `KB_SERVICE_URL`, timeout env, and whether a circuit breaker is open after repeated failures.
+- `502` or `504`: check Agent Runtime, capability-worker, and knowledge-service logs, then their configured internal URLs and timeouts.
 - `503 GATEWAY_LOAD_SHED`: adaptive load shedding is active because recent p99 latency exceeded the configured threshold.
 - Duplicate POST response: check `Idempotency-Key`; internal clients generate a per-request key for non-GET service calls and reuse it only across retries of that same logical request. Services replay cached non-streaming responses for repeated keys.
-- SSE starts then stops: inspect assistant-service logs with the same `X-Request-Id`; streaming requests are not retried after bytes are emitted.
+- SSE starts then stops: inspect Gateway and Agent Runtime logs with the same `X-Request-Id`; streaming requests are not retried after bytes are emitted.
 - KB retrieval timeout: check knowledge-service health, Qdrant health, embedding provider key/quota, and `KB_PROXY_READ_TIMEOUT_SECONDS`.
 
 ## Identity and Sessions

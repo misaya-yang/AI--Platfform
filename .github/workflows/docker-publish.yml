@@ -5,11 +5,9 @@
 # arm64, then publishes matching immutable release tags:
 #   - ghcr.io/<owner>/ai-gateway
 #   - ghcr.io/<owner>/ai-gateway-web
-#   - ghcr.io/<owner>/ai-gateway-assistant-service
 #   - ghcr.io/<owner>/ai-gateway-knowledge-service
 #   - ghcr.io/<owner>/ai-gateway-migrate
 #   - ghcr.io/<owner>/ai-gateway-code-interpreter
-#   - ghcr.io/<owner>/ai-gateway-docgen-sandbox
 # =============================================================================
 
 name: Docker Publish
@@ -38,9 +36,6 @@ jobs:
           - image: ai-gateway-web
             context: ./web
             dockerfile: ./web/Dockerfile
-          - image: ai-gateway-assistant-service
-            context: .
-            dockerfile: ./apps/assistant-service/Dockerfile
           - image: ai-gateway-knowledge-service
             context: .
             dockerfile: ./apps/knowledge-service/Dockerfile
@@ -50,9 +45,6 @@ jobs:
           - image: ai-gateway-code-interpreter
             context: ./docker/code-interpreter
             dockerfile: ./docker/code-interpreter/Dockerfile
-          - image: ai-gateway-docgen-sandbox
-            context: .
-            dockerfile: ./docker/sandbox.Dockerfile
 
     steps:
       - name: Checkout repository

@@ -169,7 +169,10 @@ class InMemoryAgentRepository:
                 continue
             if kwargs.get("search"):
                 query = kwargs["search"].lower()
-                if query not in record["agent"]["name"].lower() and query not in record["agent"]["slug"]:
+                if (
+                    query not in record["agent"]["name"].lower()
+                    and query not in record["agent"]["slug"]
+                ):
                     continue
             items.append(self._summary(record, role))
         items.sort(key=lambda item: (item["updated_at"], item["agent_id"]), reverse=True)
@@ -324,9 +327,15 @@ class InMemoryAgentRepository:
                 raise AgentLastOwnerError("AGENT_LAST_OWNER")
         record["members"][principal_id] = kwargs["role"]
         record["member_created_by"].setdefault(principal_id, kwargs["user_id"])
-        if prior == "owner" and kwargs["role"] != "owner" and record["agent"]["owner_id"] == principal_id:
+        if (
+            prior == "owner"
+            and kwargs["role"] != "owner"
+            and record["agent"]["owner_id"] == principal_id
+        ):
             record["agent"]["owner_id"] = next(
-                member_id for member_id, member_role in record["members"].items() if member_role == "owner"
+                member_id
+                for member_id, member_role in record["members"].items()
+                if member_role == "owner"
             )
         timestamp = self._now()
         return {
@@ -351,7 +360,9 @@ class InMemoryAgentRepository:
         del record["members"][principal_id]
         if role == "owner" and record["agent"]["owner_id"] == principal_id:
             record["agent"]["owner_id"] = next(
-                member_id for member_id, member_role in record["members"].items() if member_role == "owner"
+                member_id
+                for member_id, member_role in record["members"].items()
+                if member_role == "owner"
             )
 
     async def copy_agent(self, **kwargs: Any) -> dict[str, Any]:
@@ -393,6 +404,7 @@ def make_client(
     actor = user or make_user()
     app.state.agent_repository = repo
     app.state.session_manager = InMemoryRuntimeSessionManager()
+    app.state.assistant_runtime_assignments = InMemoryRuntimeAssignmentStore()
     app.state.agent_runtime_model_resolver = RuntimeModelResolver()
     app.state.agent_runtime_capability_resolver = PassthroughCapabilityResolver()
     app.state.agent_runtime_knowledge_resolver = PassthroughKnowledgeResolver()
@@ -413,6 +425,11 @@ class InMemoryRuntimeSessionManager:
         if item is None:
             return None
         return type("RuntimeSession", (), item)()
+
+
+class InMemoryRuntimeAssignmentStore:
+    async def bind(self, **_kwargs: Any) -> Any:
+        return SimpleNamespace(runtime_owner="agent_runtime", kernel_revision="kernel-test")
 
 
 class RuntimeModelResolver:
@@ -510,9 +527,7 @@ def test_create_materializes_empty_model_before_validation_and_versioning() -> N
 
     version = client.post(f"/agents/{agent_id}/versions", headers={"If-Match": '"1"'})
     assert version.status_code == 201, version.text
-    assert version.json()["version"]["spec"]["model"]["model_id"] == (
-        "deployment-default-model"
-    )
+    assert version.json()["version"]["spec"]["model"]["model_id"] == ("deployment-default-model")
 
 
 @pytest.mark.parametrize(
@@ -553,9 +568,7 @@ def test_update_materializes_empty_model_before_repository_write() -> None:
     )
 
     assert response.status_code == 200, response.text
-    stored_model = repository.records[("tenant-a", agent["agent_id"])]["draft"]["spec"][
-        "model"
-    ]
+    stored_model = repository.records[("tenant-a", agent["agent_id"])]["draft"]["spec"]["model"]
     assert stored_model["model_id"] == "updated-default-model"
     assert stored_model["provider_id"] is None
 

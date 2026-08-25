@@ -1,6 +1,6 @@
 -- =============================================================================
 -- Migration: assistant/003_artifact_shares
--- Owner    : assistant-service
+-- Owner    : gateway / capability-worker
 -- Purpose  : Schema-split artifact sharing with legacy quiz-link compatibility.
 -- =============================================================================
 

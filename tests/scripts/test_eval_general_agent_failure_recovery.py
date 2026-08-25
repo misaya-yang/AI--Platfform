@@ -73,6 +73,7 @@ def test_failure_recovery_harness_runs_production_paths_end_to_end(tmp_path: Pat
             str(SUITE),
             "--output",
             str(report_path),
+            "--offline-fixture",
         ],
         cwd=ROOT,
         env=environment,

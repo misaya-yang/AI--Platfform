@@ -12,7 +12,7 @@ from src.services.llm.startup_seeder import ProviderSeedResult
 
 
 @pytest.mark.asyncio
-async def test_legacy_startup_wrapper_preserves_state_contract_and_order(
+async def test_agent_control_plane_seeds_models_and_preserves_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src import main
@@ -76,7 +76,7 @@ async def test_legacy_startup_wrapper_preserves_state_contract_and_order(
         knowledge=SimpleNamespace(dashscope=SimpleNamespace(api_key="legacy-dashscope-secret"))
     )
 
-    await main._init_assistant_service(app, settings)
+    await main._init_agent_control_plane(app, settings)
 
     assert events == ["seed", "catalog", "model_meta", "pricing"]
     assert seed_kwargs == {
@@ -93,19 +93,9 @@ async def test_legacy_startup_wrapper_preserves_state_contract_and_order(
         "log": log,
     }
     assert isinstance(app.state.model_meta, FakeGatewayModelMeta)
-    for attribute in (
-        "model_registry",
-        "assistant_service",
-        "assistant_gateway",
-        "tool_registry",
-        "assistant_client",
-        "mcp_manager",
-        "tenant_tool_policy",
-        "tenant_mcp_config",
-        "tool_audit",
-    ):
-        assert getattr(app.state, attribute) is None
-
-    assert main._init_assistant_service.__name__ == "_init_assistant_service"
-    assert list(inspect.signature(main._init_assistant_service).parameters) == ["app", "settings"]
+    assert main._init_agent_control_plane.__name__ == "_init_agent_control_plane"
+    assert list(inspect.signature(main._init_agent_control_plane).parameters) == [
+        "app",
+        "settings",
+    ]
     assert "legacy-dashscope-secret" not in repr(log.method_calls)

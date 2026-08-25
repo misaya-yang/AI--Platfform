@@ -1,8 +1,7 @@
 """Shared skill-management primitives.
 
-Phase 5d moved these out of ``assistant_service.core.{skills,runtime.skills}``
-so gateway routes (``src/api/v1/skills.py``) can load / parse / execute user
-skills without a compile-time dep on ``assistant_service``.
+Gateway routes and the Runtime capability bridge share these contracts without
+depending on an execution service.
 
 Layout:
   - ``models`` — SkillManifest, SkillSource, TriggerConfig, SkillRunRecord

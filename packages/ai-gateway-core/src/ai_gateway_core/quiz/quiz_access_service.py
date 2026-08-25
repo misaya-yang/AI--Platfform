@@ -1,6 +1,6 @@
-"""Shared quiz persistence boundary for gateway and assistant-service.
+"""Shared quiz persistence boundary for Gateway and capability execution.
 
-Quiz generation stays in assistant-service.  Reading, grading submissions,
+Quiz generation is worker-owned. Reading, grading submissions,
 listing attempts, and deletion are also used by the gateway's compatibility
 API, so those operations must live in the shared package rather than making
 the gateway import an application service.

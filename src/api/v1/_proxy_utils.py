@@ -1,9 +1,8 @@
 """Gateway → knowledge-service streaming proxy.
 
-Thin glue around ``ai_gateway_core.proxy.ServiceProxy`` — same shared
-implementation as ``_assistant_proxy.py``. Breaker, SSE pass-through,
-header strip/inject, and HMAC signing are defined once in the core
-module (Design doc §3.6 GATE-P1).
+Thin glue around ``ai_gateway_core.proxy.ServiceProxy``. Breaker, SSE
+pass-through, header strip/inject, and internal signing are defined once in
+the core module.
 
 Public entry point: ``proxy_to_kb_service(request, user, ...)``.
 """
@@ -170,9 +169,7 @@ async def _read_bounded_body(request: Request, *, limit_bytes: int) -> bytes:
 
 
 def _build_signer() -> GatewaySecret | None:
-    secret = os.getenv("GATEWAY_KNOWLEDGE_SHARED_SECRET", "").strip() or os.getenv(
-        "GATEWAY_ASSISTANT_SHARED_SECRET", ""
-    ).strip()
+    secret = os.getenv("AI_PLATFORM_INTERNAL_TOKEN", "").strip()
     if not secret:
         return None
     return GatewaySecret(secret=secret)

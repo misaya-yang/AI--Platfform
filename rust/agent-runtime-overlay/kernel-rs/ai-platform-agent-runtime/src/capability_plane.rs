@@ -1,4 +1,4 @@
-//! Fixed internal bridge from Agent dynamic tool calls to assistant-service.
+//! Fixed internal bridge from Agent dynamic tool calls to the Gateway capability plane.
 
 use std::net::IpAddr;
 
@@ -133,10 +133,11 @@ pub async fn invoke_dynamic_tool(
     {
         return Err("capability_plane_response_invalid".to_string());
     }
-    Ok(serde_json::json!({
-        "contentItems": body["content_items"],
-        "success": body["success"],
-    }))
+    crate::capability_execution::project_dynamic_response(
+        &body["content_items"],
+        body["success"].as_bool().unwrap_or(false),
+    )
+    .map_err(|_| "capability_plane_response_invalid".to_string())
 }
 
 #[cfg(test)]
@@ -152,6 +153,7 @@ mod tests {
             id: "knowledge:search".to_string(),
             version: Some("v1".to_string()),
             schema_hash: Some(format!("sha256:{}", "a".repeat(64))),
+            connector_binding: None,
         };
         (vec![expected.clone()], expected)
     }
@@ -191,7 +193,7 @@ mod tests {
     fn rejects_userinfo_and_invalid_scheme() {
         assert!(endpoint("file:///tmp/capability").is_err());
         assert!(endpoint("http://user:pass@example/capability").is_err());
-        assert!(endpoint("http://127.0.0.1:8093/internal/v1/capabilities").is_ok());
+        assert!(endpoint("http://127.0.0.1:8080/internal/v2/agent-capabilities").is_ok());
     }
 
     #[tokio::test]

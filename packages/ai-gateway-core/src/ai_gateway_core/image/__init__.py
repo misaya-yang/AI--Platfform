@@ -1,9 +1,7 @@
 """Shared image-generation helpers.
 
-Moved from ``assistant_service.core.tools.*`` in Phase 5d so gateway
-routes can import these pure utilities (size parsing, routing, history
-builders, watermarking, webhook callback) without a compile-time
-dependency on ``assistant_service``.
+Gateway routes import these pure utilities for size parsing, routing, history,
+watermarking, and callback handling.
 """
 
 from .callback import send_image_callback

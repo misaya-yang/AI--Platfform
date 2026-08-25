@@ -6,6 +6,7 @@ use std::sync::Arc;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_app_server_client::InProcessAppServerRequestHandle;
+use codex_app_server_protocol::DynamicToolCallParams;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerRequest;
 use serde::Deserialize;
@@ -16,6 +17,7 @@ use sha2::Digest;
 use sha2::Sha256;
 use sqlx::Row;
 use tokio::sync::Mutex;
+use tokio::sync::oneshot;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -33,7 +35,7 @@ pub(crate) struct ApprovalBroker {
 
 #[derive(Clone)]
 struct PendingApproval {
-    request_id: RequestId,
+    destination: ApprovalDestination,
     tenant_id: String,
     user_id: String,
     session_id: String,
@@ -41,6 +43,18 @@ struct PendingApproval {
     root_thread_id: codex_protocol::ThreadId,
     turn_id: String,
     call_id: String,
+}
+
+#[derive(Clone)]
+enum ApprovalDestination {
+    ServerRequest(RequestId),
+    Dynamic(Arc<Mutex<Option<oneshot::Sender<DynamicApprovalDecision>>>>),
+}
+
+#[derive(Debug)]
+pub(crate) struct DynamicApprovalDecision {
+    pub approved: bool,
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -76,12 +90,96 @@ pub(crate) struct ApprovalSummary {
 pub(crate) struct ApprovalProjection {
     pub root_thread_id: codex_protocol::ThreadId,
     pub event: SequencedAssistantTurnEventV1,
+    pub status: &'static str,
 }
 
 impl ApprovalBroker {
     pub(crate) fn new() -> Self {
         Self {
             pending: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Persist one dynamic write/unknown approval before waiting on its
+    /// decision. The waiter is process-local; the durable row is the
+    /// authority used by the capability worker when it consumes a lease.
+    pub(crate) async fn await_dynamic_tool(
+        &self,
+        params: &DynamicToolCallParams,
+        capability_id: &str,
+        identity: &crate::PlatformThreadIdentity,
+        store: &PostgresThreadStore,
+    ) -> Result<(Uuid, oneshot::Receiver<DynamicApprovalDecision>), String> {
+        let run_id =
+            Uuid::parse_str(&params.turn_id).map_err(|_| "approval_run_invalid".to_string())?;
+        if params.call_id.is_empty() || params.tool.is_empty() || !params.arguments.is_object() {
+            return Err("approval_call_invalid".to_string());
+        }
+        let thread_id = Uuid::parse_str(&params.thread_id)
+            .map_err(|_| "approval_thread_invalid".to_string())?;
+        let approval_id = Uuid::now_v7();
+        let arguments = params.arguments.clone();
+        sqlx::query(
+            "INSERT INTO assistant_tool_approvals (approval_id, tenant_id, user_id, session_id, run_id, tool_call_id, tool_name, arguments, status, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',NOW() + ($9 * INTERVAL '1 second'))",
+        )
+        .bind(approval_id)
+        .bind(&identity.tenant_id)
+        .bind(&identity.user_id)
+        .bind(&identity.session_id)
+        .bind(run_id)
+        .bind(&params.call_id)
+        .bind(capability_id)
+        .bind(&arguments)
+        .bind(APPROVAL_TTL_SECONDS)
+        .execute(&store.pool)
+        .await
+        .map_err(|_| "approval_persistence_failed".to_string())?;
+
+        let (sender, receiver) = oneshot::channel();
+        self.pending.lock().await.insert(
+            approval_id,
+            PendingApproval {
+                destination: ApprovalDestination::Dynamic(Arc::new(Mutex::new(Some(sender)))),
+                tenant_id: identity.tenant_id.clone(),
+                user_id: identity.user_id.clone(),
+                session_id: identity.session_id.clone(),
+                thread_id,
+                root_thread_id: identity.runtime_thread_id,
+                turn_id: params.turn_id.clone(),
+                call_id: params.call_id.clone(),
+            },
+        );
+        Ok((approval_id, receiver))
+    }
+
+    pub(crate) async fn cancel_dynamic(
+        &self,
+        approval_id: Uuid,
+        tenant_id: &str,
+        user_id: &str,
+        session_id: &str,
+        reason: &str,
+        store: &PostgresThreadStore,
+    ) {
+        let result = sqlx::query(
+            "UPDATE assistant_tool_approvals SET status='cancelled', reason=$2, approved_at=NOW() WHERE approval_id=$1 AND tenant_id=$3 AND user_id=$4 AND session_id=$5 AND status='pending'",
+        )
+        .bind(approval_id)
+        .bind(reason)
+        .bind(tenant_id)
+        .bind(user_id)
+        .bind(session_id)
+        .execute(&store.pool)
+        .await;
+        if result.is_ok_and(|result| result.rows_affected() == 1)
+            && let Some(pending) = self.pending.lock().await.remove(&approval_id)
+            && let ApprovalDestination::Dynamic(waiter) = pending.destination
+            && let Some(sender) = waiter.lock().await.take()
+        {
+            let _ = sender.send(DynamicApprovalDecision {
+                approved: false,
+                reason: Some(reason.to_string()),
+            });
         }
     }
 
@@ -102,7 +200,7 @@ impl ApprovalBroker {
             }
         };
         let rows = match sqlx::query(
-            "WITH eligible AS (SELECT a.approval_id, r.harness_thread_id, r.harness_turn_id FROM assistant_tool_approvals AS a JOIN assistant_runs AS r ON r.run_id=a.run_id WHERE r.engine='agent_runtime' AND r.status IN ('running','awaiting_approval') AND a.status='pending' AND a.created_at < $1), cancelled AS (UPDATE assistant_tool_approvals AS a SET status='cancelled', reason='runtime_restarted', approved_at=NOW() FROM eligible AS e WHERE a.approval_id=e.approval_id AND a.status='pending' RETURNING a.approval_id, a.run_id, a.tenant_id, a.user_id, a.session_id, a.tool_name) SELECT c.approval_id, c.run_id, c.tenant_id, c.user_id, c.session_id, c.tool_name, e.harness_thread_id, e.harness_turn_id FROM cancelled AS c JOIN eligible AS e ON e.approval_id=c.approval_id",
+            "WITH eligible AS (SELECT a.approval_id, a.tool_call_id, r.harness_thread_id, r.harness_turn_id FROM assistant_tool_approvals AS a JOIN assistant_runs AS r ON r.run_id=a.run_id WHERE r.engine='agent_runtime' AND r.status IN ('running','awaiting_approval') AND a.status='pending' AND a.created_at < $1), cancelled AS (UPDATE assistant_tool_approvals AS a SET status='cancelled', reason='runtime_restarted', approved_at=NOW() FROM eligible AS e WHERE a.approval_id=e.approval_id AND a.status='pending' RETURNING a.approval_id, a.run_id, a.tenant_id, a.user_id, a.session_id, a.tool_name) SELECT c.approval_id, c.run_id, c.tenant_id, c.user_id, c.session_id, c.tool_name, e.tool_call_id, e.harness_thread_id, e.harness_turn_id FROM cancelled AS c JOIN eligible AS e ON e.approval_id=c.approval_id",
         )
         .bind(startup_cutoff)
         .fetch_all(&mut *transaction)
@@ -175,7 +273,54 @@ impl ApprovalBroker {
             let tool_name: String = row
                 .try_get("tool_name")
                 .unwrap_or_else(|_| "unknown".to_string());
+            let tool_call_id: Option<String> = row.try_get("tool_call_id").ok();
             let root_thread_id = identity.runtime_thread_id;
+            if let Some(tool_call_id) = tool_call_id
+                .clone()
+                .filter(|value| !value.is_empty())
+                .filter(|_| !matches!(tool_name.as_str(), "command_execution" | "file_change"))
+            {
+                let _ = store
+                    .append_platform_lifecycle_event(PlatformLifecycleEvent {
+                        kernel_thread_id: root_thread_id,
+                        turn_id: turn_id.clone(),
+                        item_id: Some(tool_call_id.clone()),
+                        event_key: format!("tool-result/{turn_id}/{tool_call_id}"),
+                        item_type: "tool_result".to_string(),
+                        status: "cancelled".to_string(),
+                        payload: json!({
+                            "schema_version": "agent-runtime-tool-lifecycle/v1",
+                            "turn_id": turn_id.clone(),
+                            "tool_call_id": tool_call_id.clone(),
+                            "lifecycle": "terminal",
+                            "result_status": "cancelled",
+                            "detail": "runtime_restarted",
+                        }),
+                    })
+                    .await;
+                let terminal_data = json!({
+                    "run_id": turn_id.clone(),
+                    "session_id": identity.session_id,
+                    "thread_id": identity.runtime_thread_id,
+                    "tool_call_id": tool_call_id.clone(),
+                    "status": "cancelled",
+                    "success": false,
+                    "detail": "runtime_restarted",
+                });
+                for event_type in ["tool_call_result", "tool_call_end"] {
+                    let event = AssistantTurnEventV1::new(event_type, terminal_data.clone());
+                    let event_key = format!(
+                        "compat/recovery/{}/{}/{}",
+                        turn_id, tool_call_id, event_type
+                    );
+                    if let Err(error) = store
+                        .append_v1_event(root_thread_id, Uuid::now_v7(), &event_key, &event)
+                        .await
+                    {
+                        warn!(%error, %approval_id, "failed to project orphaned tool result");
+                    }
+                }
+            }
             let approval_event = AssistantTurnEventV1::new(
                 "approval_result",
                 json!({
@@ -184,6 +329,7 @@ impl ApprovalBroker {
                     "thread_id": identity.runtime_thread_id,
                     "approval_id": approval_id,
                     "tool_name": tool_name,
+                    "tool_call_id": tool_call_id,
                     "status": "cancelled",
                     "approved": false,
                     "reason": "runtime_restarted",
@@ -286,13 +432,14 @@ impl ApprovalBroker {
             .unwrap_or_else(Uuid::now_v7);
         let run_id = Uuid::parse_str(&turn_id).map_err(|_| "approval_run_invalid".to_string())?;
         let insert = sqlx::query(
-            "INSERT INTO assistant_tool_approvals (approval_id, tenant_id, user_id, session_id, run_id, tool_name, arguments, status, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',NOW() + ($8 * INTERVAL '1 second')) ON CONFLICT (approval_id) DO NOTHING",
+            "INSERT INTO assistant_tool_approvals (approval_id, tenant_id, user_id, session_id, run_id, tool_call_id, tool_name, arguments, status, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',NOW() + ($9 * INTERVAL '1 second')) ON CONFLICT (approval_id) DO NOTHING",
         )
         .bind(approval_id)
         .bind(&identity.tenant_id)
         .bind(&identity.user_id)
         .bind(&identity.session_id)
         .bind(run_id)
+        .bind(&call_id)
         .bind(&tool_name)
         .bind(params)
         .bind(APPROVAL_TTL_SECONDS)
@@ -301,7 +448,7 @@ impl ApprovalBroker {
         .map_err(|_| "approval_persistence_failed".to_string())?;
         if insert.rows_affected() == 0 {
             let existing = sqlx::query(
-                "SELECT tenant_id, user_id, session_id, run_id, tool_name, arguments, status FROM assistant_tool_approvals WHERE approval_id=$1",
+                "SELECT tenant_id, user_id, session_id, run_id, tool_call_id, tool_name, arguments, status FROM assistant_tool_approvals WHERE approval_id=$1",
             )
             .bind(approval_id)
             .fetch_optional(&store.pool)
@@ -322,6 +469,11 @@ impl ApprovalBroker {
                 || existing.try_get::<String, _>("session_id").ok().as_deref()
                     != Some(identity.session_id.as_str())
                 || existing_run_id != Some(run_id)
+                || existing
+                    .try_get::<String, _>("tool_call_id")
+                    .ok()
+                    .as_deref()
+                    != Some(call_id.as_str())
                 || existing.try_get::<String, _>("tool_name").ok().as_deref()
                     != Some(tool_name.as_str())
                 || existing_arguments != params.clone()
@@ -390,7 +542,7 @@ impl ApprovalBroker {
             .await
             .entry(approval_id)
             .or_insert(PendingApproval {
-                request_id: request.id().clone(),
+                destination: ApprovalDestination::ServerRequest(request.id().clone()),
                 tenant_id: identity.tenant_id,
                 user_id: identity.user_id,
                 session_id: identity.session_id,
@@ -468,12 +620,34 @@ impl ApprovalBroker {
         if result.rows_affected() != 1 {
             return Err("approval_expired_or_consumed".to_string());
         }
-        let decision_value = if accepted { "accept" } else { "decline" };
-        if requests
-            .resolve_server_request_async(pending.request_id, json!({"decision": decision_value}))
-            .await
-            .is_err()
-        {
+        let destination_failed = match &pending.destination {
+            ApprovalDestination::ServerRequest(request_id) => {
+                let decision_value = if accepted { "accept" } else { "decline" };
+                requests
+                    .resolve_server_request_async(
+                        request_id.clone(),
+                        json!({"decision": decision_value}),
+                    )
+                    .await
+                    .is_err()
+            }
+            ApprovalDestination::Dynamic(waiter) => {
+                waiter.lock().await.take().is_none_or(|sender| {
+                    sender
+                        .send(DynamicApprovalDecision {
+                            approved: accepted,
+                            reason: reason.map(str::to_string),
+                        })
+                        .is_err()
+                })
+            }
+        };
+        let projection_status = if matches!(pending.destination, ApprovalDestination::Dynamic(_)) {
+            if accepted { "approved" } else { "rejected" }
+        } else {
+            "consumed"
+        };
+        if destination_failed {
             let _ = sqlx::query(
                 "UPDATE assistant_tool_approvals SET status='cancelled', reason='runtime_resume_failed', approved_at=NOW() WHERE approval_id=$1 AND status='approved'",
             )
@@ -540,6 +714,7 @@ impl ApprovalBroker {
         Ok(ApprovalProjection {
             root_thread_id: pending.root_thread_id,
             event: SequencedAssistantTurnEventV1 { sequence, event },
+            status: projection_status,
         })
     }
 }

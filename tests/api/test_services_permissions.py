@@ -20,7 +20,6 @@ def _make_request(request_id: str = "req-services-001") -> SimpleNamespace:
     request.app = SimpleNamespace()
     request.app.state = SimpleNamespace()
     request.app.state.dispatcher = SimpleNamespace(rbac=RBAC(role_permissions=settings.rbac.roles))
-    request.app.state.assistant_service = None
     request.state = SimpleNamespace(request_id=request_id)
     return request
 
@@ -94,19 +93,13 @@ async def test_list_services_accepts_manager_role() -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_services_uses_remote_assistant_health(monkeypatch) -> None:
+async def test_list_services_uses_runtime_and_worker_health() -> None:
     request = _make_request()
     registry = SimpleNamespace(list=AsyncMock(return_value=[]))
-
-    async def fake_assistant_health():
-        return {
-            "status": "healthy",
-            "latency": 0.01,
-            "last_check": "2026-05-26T00:00:00",
-            "error": None,
-        }
-
-    monkeypatch.setattr("src.api.v1.services.get_assistant_health", fake_assistant_health)
+    request.app.state.agent_runtime_control = object()
+    request.app.state.image_task_worker = SimpleNamespace(
+        _loop_task=SimpleNamespace(done=lambda: False)
+    )
 
     result = await list_services(
         request=request,

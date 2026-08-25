@@ -88,6 +88,9 @@ commands:
   harness_check:
     make: harness-check
     purpose: Verify this contract still matches the repository.
+  runtime_dependency_gate:
+    make: runtime-dependency-gate
+    purpose: Reject reintroduction of the retired Python Agent/docgen execution ownership and stale OpenAPI snapshot entrypoints.
   agent_runtime_source_contract:
     make: agent-runtime-source-contract
     purpose: Verify the immutable Agent source, schema, SBOM, license, and OCI release identity.
@@ -115,6 +118,12 @@ commands:
   agent_thread_store_contract:
     make: agent-thread-store-contract
     purpose: Verify pre-authorized Agent thread creation and durable PostgreSQL history against an isolated schema.
+  agent_capability_worker_build_local:
+    make: agent-capability-worker-build-local
+    purpose: Build the pinned Rust capability worker with one Cargo job and resource guards.
+  agent_capability_worker_smoke:
+    make: agent-capability-worker-smoke
+    purpose: Verify signed leases, idempotency, scoped events, cancellation, and restart recovery.
   agent_runtime_source_build_local:
     make: agent-runtime-source-build-local
     purpose: Build the pinned App Server locally and verify source/schema labels plus initialize.
@@ -146,11 +155,11 @@ gates:
     make: test-isolation
     triggers: ["src/**", "apps/**", "packages/ai-gateway-core/**"]
   assistant_runtime:
-    make: verify-assistant-runtime-dev
-    triggers: ["apps/assistant-service/**"]
+    make: runtime-dependency-gate
+    triggers: ["scripts/harness/runtime_dependency_gate.py", "scripts/eval_general_agent_failure_recovery.py", "tests/services/eval/**"]
   agent_core:
-    make: agent-eval-core-gate
-    triggers: ["apps/assistant-service/src/assistant_service/core/**"]
+    make: runtime-dependency-gate
+    triggers: ["scripts/**", "tests/**", "pyproject.toml"]
   eval_contract:
     make: eval-e1-gate
     triggers: ["src/services/eval/**", "packages/ai-gateway-core/src/ai_gateway_core/eval/**", "tests/fixtures/eval/**"]

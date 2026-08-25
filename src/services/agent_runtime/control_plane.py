@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import secrets
 import uuid
@@ -13,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from typing import Any, Protocol
+from urllib.parse import quote
 
 import httpx
 from ai_gateway_core.agents import (
@@ -27,12 +29,32 @@ from ai_gateway_core.agents.system_prompt import (
 )
 from ai_gateway_core.models import resolve_reasoning_option
 
+from .runtime_configuration import (
+    RuntimePlatformConfigError,
+    build_runtime_platform_config,
+    runtime_platform_config_hash,
+)
+
+logger = logging.getLogger(__name__)
+
 # Stable, provider-neutral instructions for the generic Assistant. These are
 # sent through the Runtime's typed ThreadResume contract, not as user input.
 BASE_AGENT_INSTRUCTIONS_V1 = CORE_ASSISTANT_PROMPT
 GENERIC_AGENT_INSTRUCTIONS_V1 = GENERIC_AGENT_INSTRUCTIONS
 DISCOVERY_BRIDGE_NAMES = frozenset({"tool_search", "tool_describe", "tool_call"})
-KERNEL_OWNED_AGENT_TOOL_ALIASES = frozenset({"spawn_subagent"})
+KERNEL_OWNED_AGENT_TOOL_ALIASES = frozenset(
+    {
+        # The Rust kernel owns deferred tool search/call and compaction. Keep
+        # the public compatibility records, but never install a second set of
+        # dynamic functions that would recurse through the Worker.
+        "tool_search",
+        "tool_describe",
+        "tool_call",
+        "context_compact",
+        # The kernel exposes the native spawn_agent lifecycle.
+        "spawn_subagent",
+    }
+)
 
 
 class _Database(Protocol):
@@ -60,6 +82,65 @@ class AgentRuntimeControlError(RuntimeError):
         self.code = code
         self.status_code = status_code
         super().__init__(code)
+
+
+def _project_child_runtime_event(
+    envelope: dict[str, Any], parent_turn_id: str
+) -> dict[str, Any] | None:
+    """Project real child runs into the stable Assistant subagent vocabulary."""
+
+    data = envelope.get("data")
+    if not isinstance(data, dict):
+        return None
+    run_id = str(data.get("run_id") or "")
+    if not run_id:
+        return None
+    if run_id == parent_turn_id:
+        return envelope
+    agent_id = str(data.get("thread_id") or "")
+    if not agent_id:
+        return None
+    event_type = str(envelope.get("event_type") or "")
+    common = {
+        "agent_id": agent_id,
+        "agent_type": "task",
+        "call_id": run_id,
+        "parent_task_id": parent_turn_id,
+        "task_id": run_id,
+        "session_id": data.get("session_id"),
+        "thread_id": agent_id,
+    }
+    if event_type == "run_started":
+        return {
+            **envelope,
+            "event_type": "subagent_started",
+            "data": {
+                **common,
+                "description": "Delegated child task",
+                "status": "running",
+            },
+        }
+    if event_type in {"run_finished", "run_error", "cancelled"}:
+        raw_status = str(data.get("status") or "failed").lower()
+        status = (
+            "completed"
+            if event_type == "run_finished" and raw_status in {"completed", "succeeded"}
+            else "cancelled"
+            if raw_status == "cancelled" or event_type == "cancelled"
+            else "failed"
+        )
+        return {
+            **envelope,
+            "event_type": "subagent_finished",
+            "data": {**common, "status": status, "result": data.get("exit")},
+        }
+    if event_type == "text_delta" and isinstance(data.get("content"), str):
+        return {
+            **envelope,
+            "event_type": "subagent_text_delta",
+            "data": {**common, "content": data["content"], "status": "running"},
+        }
+    return None
 
 
 def _provider_revision(value: Any) -> str:
@@ -96,7 +177,9 @@ class AgentRuntimeControlPlane:
         self.runtime_url = runtime_url.rstrip("/")
         self.runtime_internal_token = runtime_internal_token
         self.model_plane_base_url = model_plane_base_url.rstrip("/")
-        self.capability_plane_url = os.getenv("AI_PLATFORM_CAPABILITY_PLANE_URL", "").strip().rstrip("/")
+        self.capability_plane_url = (
+            os.getenv("AI_PLATFORM_CAPABILITY_PLANE_URL", "").strip().rstrip("/")
+        )
         self.kernel_revision = kernel_revision
         self.memory_service = memory_service
         if self.memory_service is None:
@@ -127,6 +210,47 @@ class AgentRuntimeControlPlane:
     async def close(self) -> None:
         if self._owns_http_client:
             await self.http_client.aclose()
+
+    async def cleanup_session(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+    ) -> bool:
+        """Tombstone one Runtime-owned session without mutating its item log."""
+
+        if (
+            not session_id
+            or len(session_id) > 255
+            or any(ord(character) < 32 for character in session_id)
+        ):
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_SESSION_ID_INVALID", status_code=400
+            )
+        response = await self.http_client.post(
+            f"{self.runtime_url}/internal/v1/sessions/{quote(session_id, safe='')}/cleanup",
+            headers={
+                "x-ai-platform-internal-token": self.runtime_internal_token,
+                "x-ai-tenant-id": tenant_id,
+                "x-ai-user-id": user_id,
+                "x-ai-session-id": session_id,
+            },
+            json={},
+        )
+        if response.status_code == 404:
+            return False
+        if response.status_code >= 400:
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_SESSION_CLEANUP_FAILED",
+                status_code=503 if response.status_code >= 500 else 409,
+            )
+        payload = response.json()
+        if not isinstance(payload, dict) or payload.get("session_id") != session_id:
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_SESSION_CLEANUP_INVALID", status_code=503
+            )
+        return payload.get("status") == "deleted"
 
     async def _assignment(self, tenant_id: str, user_id: str, session_id: str):
         assignment = await self.assignment_store.resolve(
@@ -239,11 +363,22 @@ class AgentRuntimeControlPlane:
             raise error from last_error
         raise error
 
-    def _runtime_model_config(self, model_id: str) -> dict[str, Any]:
+    def _runtime_model_config(
+        self, model_id: str, *, native_web_search_enabled: bool = False
+    ) -> dict[str, Any]:
         return {
             "model_provider": "ai-platform-gateway",
             "model": model_id,
+            # Hosted search is exposed only when the immutable model profile
+            # declares its native wire. Provider adapters still own the final
+            # request serialization, so unsupported models never receive it.
+            "web_search": "live" if native_web_search_enabled else "disabled",
             "features": {
+                # The platform Gateway provider exposes Qwen's hosted
+                # Responses search directly. Do not replace it with the
+                # upstream standalone extension, which has a different auth
+                # plane and would bypass the tenant model snapshot.
+                "standalone_web_search": False,
                 "multi_agent_v2": {
                     "enabled": True,
                     # The root thread occupies one slot; five child workers
@@ -267,18 +402,48 @@ class AgentRuntimeControlPlane:
 
     @staticmethod
     def _dynamic_tools(readonly: dict[str, Any]) -> list[dict[str, Any]]:
-        tools = [*(readonly.get("tools") or []), *(readonly.get("mcp") or [])]
+        tools = [
+            *(readonly.get("tools") or []),
+            *(readonly.get("mcp") or []),
+            *(readonly.get("deferred") or []),
+            *(readonly.get("attachment_tools") or []),
+        ]
         if not isinstance(tools, list):
-            raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400
+            )
         result: list[dict[str, Any]] = []
+        allowlist = readonly.get("capability_allowlist")
         for descriptor in tools:
-            if not isinstance(descriptor, dict) or descriptor.get("read_only") is not True:
-                raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+            if not isinstance(descriptor, dict):
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400
+                )
+            if descriptor.get("read_only") is not True and (
+                not isinstance(allowlist, list)
+                or sum(
+                    1
+                    for entry in allowlist
+                    if isinstance(entry, dict)
+                    and entry.get("id") == descriptor.get("id")
+                    and entry.get("name") == descriptor.get("name")
+                    and entry.get("version") == descriptor.get("version")
+                    and entry.get("schema_hash") == descriptor.get("schema_hash")
+                )
+                != 1
+            ):
+                continue
             name = descriptor.get("name")
             description = descriptor.get("description")
             schema = descriptor.get("schema")
-            if not isinstance(name, str) or not isinstance(description, str) or not isinstance(schema, dict):
-                raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+            if (
+                not isinstance(name, str)
+                or not isinstance(description, str)
+                or not isinstance(schema, dict)
+            ):
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400
+                )
             if name in KERNEL_OWNED_AGENT_TOOL_ALIASES:
                 continue
             result.append(
@@ -293,11 +458,18 @@ class AgentRuntimeControlPlane:
 
     @staticmethod
     def _validate_catalog_descriptor(
-        descriptor: Any, *, tenant_id: str, capability_revision: int
+        descriptor: Any,
+        *,
+        tenant_id: str,
+        capability_revision: int,
+        allow_deferred: bool = False,
     ) -> dict[str, Any]:
         if (
             not isinstance(descriptor, dict)
-            or descriptor.get("read_only") is not True
+            or (
+                descriptor.get("read_only") is not True
+                and not allow_deferred
+            )
             or descriptor.get("tenant_id") != tenant_id
             or descriptor.get("capability_revision") != capability_revision
             or not isinstance(descriptor.get("name"), str)
@@ -312,10 +484,12 @@ class AgentRuntimeControlPlane:
                 character not in "0123456789abcdef"
                 for character in descriptor.get("schema_hash")[7:]
             )
-            or descriptor.get("kind") not in {
+            or descriptor.get("kind")
+            not in {
                 "tool",
                 "knowledge",
                 "mcp",
+                "connector",
                 "office_read",
                 "platform_tool_discovery",
             }
@@ -350,7 +524,7 @@ class AgentRuntimeControlPlane:
                 actual_value = descriptor.get(field)
                 allow_platform_schema_resolution = (
                     field == "schema_hash"
-                    and expected.get("type") == "platform"
+                    and expected.get("type") in {"platform", "connector"}
                     and expected_value is None
                 )
                 if actual_value != expected_value and not allow_platform_schema_resolution:
@@ -365,7 +539,15 @@ class AgentRuntimeControlPlane:
     def _snapshot_capability_allowlist(
         snapshot: dict[str, Any] | None,
     ) -> list[dict[str, Any]] | None:
-        """Project signed AgentSpec capabilities into a catalog allowlist."""
+        """Project signed AgentSpec capabilities into a catalog allowlist.
+
+        Connector credentials are deliberately not part of this projection.
+        The resolver has already authorized the binding while building the
+        Agent snapshot, so only the non-secret principal identity is retained
+        for the worker's later, request-time revocation check.  In particular,
+        the channel comes from the signed AgentSpec and cannot be overridden by
+        connector config.
+        """
 
         if snapshot is None:
             return None
@@ -391,7 +573,7 @@ class AgentRuntimeControlPlane:
                 raise AgentRuntimeControlError(
                     "AI_PLATFORM_AGENT_RUNTIME_AGENT_SNAPSHOT_INVALID", status_code=409
                 )
-            if not schema_hash and capability_type != "platform":
+            if not schema_hash and capability_type not in {"platform", "connector"}:
                 raise AgentRuntimeControlError(
                     "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_BINDING_INVALID", status_code=409
                 )
@@ -399,15 +581,125 @@ class AgentRuntimeControlPlane:
             if key in seen:
                 continue
             seen.add(key)
-            allowlist.append(
-                {
-                    "type": capability_type,
-                    "name": name,
-                    "id": capability_id,
-                    "version": version or None,
-                    "schema_hash": schema_hash or None,
+            entry = {
+                "type": capability_type,
+                "name": name,
+                "id": capability_id,
+                "version": version or None,
+                "schema_hash": schema_hash or None,
+            }
+            if capability_type == "mcp":
+                if not isinstance(raw.get("config"), dict) or set(config) - {
+                    "connection_id",
+                    "principal_type",
+                    "risk",
+                }:
+                    raise AgentRuntimeControlError(
+                        "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_BINDING_INVALID", status_code=409
+                    )
+                connection_id = str(config.get("connection_id") or "")
+                principal_type = str(config.get("principal_type") or "")
+                risk_level = str(config.get("risk") or raw.get("risk") or "")
+                agent_spec = snapshot.get("agent_spec")
+                channel = agent_spec.get("channel") if isinstance(agent_spec, dict) else None
+                try:
+                    uuid.UUID(connection_id)
+                except (ValueError, AttributeError, TypeError):
+                    raise AgentRuntimeControlError(
+                        "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_BINDING_INVALID", status_code=409
+                    ) from None
+                if (
+                    principal_type not in {"service_account", "user_delegated"}
+                    or risk_level not in {"low", "medium", "high", "critical"}
+                    or channel
+                    not in {"preview", "hosted_private", "hosted_public", "embed", "api"}
+                    or len(schema_hash) != 71
+                    or not schema_hash.startswith("sha256:")
+                ):
+                    raise AgentRuntimeControlError(
+                        "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_BINDING_INVALID", status_code=409
+                    )
+                entry["connector_binding"] = {
+                    "binding_type": "grant",
+                    "provider": "mcp",
+                    "tool_name": name,
+                    "principal_type": principal_type,
+                    "grant_id": None,
+                    "connection_id": connection_id,
+                    "schema_hash": schema_hash,
+                    "risk_level": risk_level,
+                    "channel": channel,
                 }
-            )
+            elif capability_type == "connector":
+                if not isinstance(raw.get("config"), dict):
+                    raise AgentRuntimeControlError(
+                        "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_BINDING_INVALID", status_code=409
+                    )
+                connector_config = raw["config"]
+                if set(connector_config) - {
+                    "provider",
+                    "tool_name",
+                    "principal_type",
+                    "grant_id",
+                }:
+                    raise AgentRuntimeControlError(
+                        "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_BINDING_INVALID", status_code=409
+                    )
+                provider = connector_config.get("provider")
+                tool_name = connector_config.get("tool_name", name)
+                principal_type = connector_config.get("principal_type")
+                grant_id = connector_config.get("grant_id")
+                agent_spec = snapshot.get("agent_spec")
+                channel = agent_spec.get("channel") if isinstance(agent_spec, dict) else None
+                if (
+                    not isinstance(provider, str)
+                    or not provider
+                    or len(provider) > 128
+                    or not isinstance(tool_name, str)
+                    or tool_name != name
+                    or not isinstance(channel, str)
+                    or channel
+                    not in {
+                        "preview",
+                        "hosted",
+                        "hosted_private",
+                        "hosted_public",
+                        "embed",
+                        "api",
+                        "builtin",
+                    }
+                ):
+                    raise AgentRuntimeControlError(
+                        "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_BINDING_INVALID", status_code=409
+                    )
+                if (principal_type is None) != (grant_id is None):
+                    raise AgentRuntimeControlError(
+                        "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_BINDING_INVALID", status_code=409
+                    )
+                if principal_type is not None and (
+                    principal_type not in {"service_account", "user_delegated"}
+                    or not isinstance(grant_id, str)
+                    or not grant_id
+                ):
+                    raise AgentRuntimeControlError(
+                        "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_BINDING_INVALID", status_code=409
+                    )
+                if grant_id is not None:
+                    try:
+                        uuid.UUID(grant_id)
+                    except (ValueError, AttributeError, TypeError):
+                        raise AgentRuntimeControlError(
+                            "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_BINDING_INVALID", status_code=409
+                        ) from None
+                entry["connector_binding"] = {
+                    "binding_type": "grant" if grant_id is not None else "catalog",
+                    "provider": provider,
+                    "tool_name": tool_name,
+                    "principal_type": principal_type,
+                    "grant_id": grant_id,
+                    "channel": channel,
+                }
+            allowlist.append(entry)
         return allowlist
 
     async def ensure_thread(
@@ -419,6 +711,7 @@ class AgentRuntimeControlPlane:
         model_id: str,
         readonly_capabilities: dict[str, Any] | None = None,
         capability_allowlist: list[dict[str, Any]] | None = None,
+        native_web_search_enabled: bool = False,
     ) -> dict[str, Any]:
         if readonly_capabilities is None:
             model = await self.model_service.get_model(tenant_id, model_id)
@@ -474,7 +767,10 @@ class AgentRuntimeControlPlane:
                 # before any handler is allowed to dispatch.
                 "approvalPolicy": "on-request",
                 "sandbox": "read-only",
-                "config": self._runtime_model_config(model_id),
+                "config": self._runtime_model_config(
+                    model_id,
+                    native_web_search_enabled=native_web_search_enabled,
+                ),
                 "dynamicTools": self._dynamic_tools(readonly_capabilities or {}),
             }
             response = await self.http_client.post(
@@ -493,9 +789,7 @@ class AgentRuntimeControlPlane:
                 if existing:
                     return await self._bind_dynamic_tool_fingerprint(
                         existing=existing,
-                        fingerprint=self._dynamic_tool_fingerprint(
-                            readonly_capabilities or {}
-                        ),
+                        fingerprint=self._dynamic_tool_fingerprint(readonly_capabilities or {}),
                         tenant_id=tenant_id,
                         user_id=user_id,
                         session_id=session_id,
@@ -532,8 +826,101 @@ class AgentRuntimeControlPlane:
 
     @staticmethod
     def _dynamic_tool_fingerprint(readonly: dict[str, Any]) -> str:
-        tools = [*(readonly.get("tools") or []), *(readonly.get("mcp") or [])]
+        # Attachment refs are turn-scoped data inputs. Their read_attachment
+        # descriptor is rebuilt from the normalized refs for each turn and is
+        # authorized by the immutable snapshot/Worker lease; pinning that
+        # ephemeral descriptor to the Thread would make equivalent attachment
+        # normalization spuriously require Thread recreation.
+        tools = [
+            *(readonly.get("tools") or []),
+            *(readonly.get("mcp") or []),
+            *(readonly.get("deferred") or []),
+        ]
         return sha256(canonical_runtime_json(tools).encode()).hexdigest()
+
+    @staticmethod
+    def _attachment_tool_descriptor(
+        *, tenant_id: str, capability_revision: int, references: list[str]
+    ) -> dict[str, Any]:
+        schema = {
+            "type": "object",
+            "properties": {
+                "ref": {"type": "string", "enum": references},
+                "offset": {"type": "integer", "minimum": 0, "maximum": 2_000_000},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 8_000},
+            },
+            "required": ["ref"],
+            "additionalProperties": False,
+        }
+        schema_hash = "sha256:" + sha256(canonical_runtime_json(schema).encode()).hexdigest()
+        return {
+            "name": "read_attachment",
+            "description": "Read a bounded slice from an explicitly attached artifact reference.",
+            "schema": schema,
+            "tenant_id": tenant_id,
+            "capability_revision": capability_revision,
+            "source": "attachments",
+            "kind": "tool",
+            "category": "retrieval",
+            "protocol": "internal",
+            "id": "read_attachment",
+            "version": "v1",
+            "schema_hash": schema_hash,
+            "read_only": True,
+            "metadata": {"effect": "read", "attachment_refs": references},
+        }
+
+    @classmethod
+    def _attach_read_attachment_descriptors(
+        cls,
+        readonly: dict[str, Any],
+        *,
+        tenant_id: str,
+        capability_revision: int,
+    ) -> None:
+        refs = [
+            str(item["payload"].get("content_ref"))
+            for item in readonly.get("items", [])
+            if isinstance(item, dict)
+            and item.get("kind") == "attachment"
+            and isinstance(item.get("payload"), dict)
+            and item["payload"].get("content_ref")
+        ]
+        references = sorted(set(refs))
+        descriptors = (
+            [
+                cls._attachment_tool_descriptor(
+                    tenant_id=tenant_id,
+                    capability_revision=capability_revision,
+                    references=references,
+                )
+            ]
+            if references
+            else []
+        )
+        readonly["attachment_tools"] = descriptors
+        if descriptors:
+            entries = list(readonly.get("capability_allowlist") or [])
+            for descriptor in descriptors:
+                entries.append(
+                    {
+                        "type": "platform",
+                        "name": descriptor["name"],
+                        "id": descriptor["id"],
+                        "version": descriptor["version"],
+                        "schema_hash": descriptor["schema_hash"],
+                    }
+                )
+            readonly["capability_allowlist"] = entries
+
+    @staticmethod
+    def _worker_ready_for_writes() -> bool:
+        return (
+            os.getenv("AI_PLATFORM_CAPABILITY_WORKER_ENABLED", "").lower() == "true"
+            and os.getenv("AI_PLATFORM_CAPABILITY_WORKER_WRITES_ENABLED", "").lower() == "true"
+            and bool(os.getenv("AI_PLATFORM_CAPABILITY_WORKER_URL", "").strip())
+            and bool(os.getenv("AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET", "").strip())
+        )
 
     async def _resume_thread(
         self,
@@ -547,6 +934,7 @@ class AgentRuntimeControlPlane:
         developer_instructions: str | None = None,
         model_context_window: int | None = None,
         auto_compact_token_limit: int | None = None,
+        native_web_search_enabled: bool = False,
     ) -> None:
         if developer_instructions is not None and not developer_instructions.strip():
             developer_instructions = GENERIC_AGENT_INSTRUCTIONS_V1
@@ -565,6 +953,7 @@ class AgentRuntimeControlPlane:
                 "developerInstructions": developer_instructions,
                 "modelContextWindow": model_context_window,
                 "autoCompactTokenLimit": auto_compact_token_limit,
+                "nativeWebSearchEnabled": native_web_search_enabled,
             },
         )
         if response.status_code >= 400:
@@ -583,12 +972,22 @@ class AgentRuntimeControlPlane:
         model_id: str,
     ) -> None:
         """Verify that the durable Gateway identity is backed by a live kernel thread."""
+        model = await self.model_service.get_model(tenant_id, model_id)
+        profile = model.get("effective_capabilities") if isinstance(model, dict) else None
+        native_search = profile.get("native_search") if isinstance(profile, dict) else None
+        tools = profile.get("tools") if isinstance(profile, dict) else None
         await self._resume_thread(
             runtime_thread_id=uuid.UUID(str(runtime_thread_id)),
             tenant_id=tenant_id,
             user_id=user_id,
             session_id=session_id,
             model_id=model_id,
+            native_web_search_enabled=(
+                isinstance(native_search, dict)
+                and native_search.get("enabled") is True
+                and isinstance(tools, dict)
+                and tools.get("web_search_wire") == "native"
+            ),
         )
 
     @staticmethod
@@ -611,19 +1010,33 @@ class AgentRuntimeControlPlane:
             "web_search",
             "tools",
             "mcp",
+            "deferred",
             "memory_context",
             "capability_allowlist",
+            "platform_config",
+            "attachment_tools",
+            "responses_tool_names",
+            "responses_tool_choice",
+            "responses_parallel_tool_calls",
         }
         if set(raw) - allowed:
-            raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400
+            )
         items: list[dict[str, Any]] = []
         knowledge = raw.get("knowledge")
         if knowledge is not None and not isinstance(knowledge, dict):
-            raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400
+            )
         if isinstance(knowledge, dict):
             dataset_ids = knowledge.get("dataset_ids") or []
-            if not isinstance(dataset_ids, list) or any(not isinstance(item, str) for item in dataset_ids):
-                raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+            if not isinstance(dataset_ids, list) or any(
+                not isinstance(item, str) for item in dataset_ids
+            ):
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400
+                )
             for dataset_id in dataset_ids:
                 items.append(
                     {
@@ -637,11 +1050,15 @@ class AgentRuntimeControlPlane:
                 )
         attachments = raw.get("attachments")
         if attachments is not None and not isinstance(attachments, dict):
-            raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400
+            )
         if isinstance(attachments, dict):
             refs = attachments.get("refs") or []
             if not isinstance(refs, list) or any(not isinstance(item, str) for item in refs):
-                raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400
+                )
             for reference in refs:
                 items.append(
                     {
@@ -655,11 +1072,15 @@ class AgentRuntimeControlPlane:
                 )
         web_search = raw.get("web_search")
         if web_search is not None and not isinstance(web_search, dict):
-            raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400
+            )
         if isinstance(web_search, dict) and web_search.get("enabled"):
             max_results = web_search.get("max_results") or 5
             if isinstance(max_results, bool):
-                raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400
+                )
             try:
                 max_results = int(max_results)
             except (TypeError, ValueError) as exc:
@@ -695,7 +1116,14 @@ class AgentRuntimeControlPlane:
         tools = raw.get("tools") or []
         mcp = raw.get("mcp") or []
         if not isinstance(tools, list) or not isinstance(mcp, list):
-            raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400
+            )
+        deferred = raw.get("deferred") or []
+        if not isinstance(deferred, list):
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400
+            )
         for descriptor in [*tools, *mcp]:
             if (
                 not isinstance(descriptor, dict)
@@ -703,7 +1131,62 @@ class AgentRuntimeControlPlane:
                 or descriptor.get("tenant_id") != tenant_id
                 or int(descriptor.get("capability_revision") or 0) != capability_revision
             ):
-                raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400)
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400
+                )
+        attachment_tools = raw.get("attachment_tools") or []
+        if not isinstance(attachment_tools, list):
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400
+            )
+        for descriptor in attachment_tools:
+            if (
+                not isinstance(descriptor, dict)
+                or descriptor.get("read_only") is not True
+                or descriptor.get("tenant_id") != tenant_id
+                or int(descriptor.get("capability_revision") or 0) != capability_revision
+                or descriptor.get("name") != "read_attachment"
+            ):
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400
+                )
+        for descriptor in deferred:
+            if (
+                not isinstance(descriptor, dict)
+                or descriptor.get("read_only") is True
+                or descriptor.get("tenant_id") != tenant_id
+                or int(descriptor.get("capability_revision") or 0) != capability_revision
+            ):
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400
+                )
+        responses_tool_names = raw.get("responses_tool_names")
+        if responses_tool_names is not None and (
+            not isinstance(responses_tool_names, list)
+            or len(responses_tool_names) > 128
+            or any(not isinstance(name, str) or not name.strip() for name in responses_tool_names)
+            or len(set(responses_tool_names)) != len(responses_tool_names)
+        ):
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400
+            )
+        responses_tool_choice = raw.get("responses_tool_choice", "auto")
+        if not (
+            isinstance(responses_tool_choice, str)
+            and responses_tool_choice in {"auto", "none", "required"}
+        ) and not (
+            isinstance(responses_tool_choice, dict)
+            and responses_tool_choice.get("type") == "function"
+            and isinstance(responses_tool_choice.get("name"), str)
+        ):
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400
+            )
+        responses_parallel_tool_calls = raw.get("responses_parallel_tool_calls", True)
+        if not isinstance(responses_parallel_tool_calls, bool):
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_READONLY_PAYLOAD_INVALID", status_code=400
+            )
         capability_allowlist = raw.get("capability_allowlist")
         if capability_allowlist is not None and (
             not isinstance(capability_allowlist, list)
@@ -719,7 +1202,19 @@ class AgentRuntimeControlPlane:
             "items": items,
             "tools": tools,
             "mcp": mcp,
+            "deferred": deferred,
+            "attachment_tools": attachment_tools,
+            "responses_tool_names": responses_tool_names,
+            "responses_tool_choice": responses_tool_choice,
+            "responses_parallel_tool_calls": responses_parallel_tool_calls,
         }
+        platform_config = raw.get("platform_config")
+        if platform_config is not None:
+            if not isinstance(platform_config, dict):
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_PLATFORM_CONFIG_INVALID", status_code=409
+                )
+            normalized["platform_config"] = platform_config
         if capability_allowlist is not None:
             normalized["capability_allowlist"] = capability_allowlist
         return normalized
@@ -776,15 +1271,18 @@ class AgentRuntimeControlPlane:
             raise AgentRuntimeControlError(
                 "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_CATALOG_INVALID", status_code=503
             )
-        if capability_allowlist is not None and deferred:
-            # The dynamic Runtime bridge is deliberately read-only. Refuse an
-            # AgentSpec that binds write/unknown capabilities until its typed
-            # approval contributor is available instead of silently dropping
-            # requested authority and producing misleading Agent behavior.
+        attachment_tools = readonly.get("attachment_tools") or []
+        if not isinstance(attachment_tools, list):
             raise AgentRuntimeControlError(
-                "AI_PLATFORM_AGENT_RUNTIME_WRITE_CAPABILITY_NOT_MIGRATED",
-                status_code=409,
+                "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_CATALOG_INVALID", status_code=503
             )
+        if deferred and not self._worker_ready_for_writes():
+            if capability_allowlist is not None:
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_WRITE_CAPABILITY_NOT_MIGRATED",
+                    status_code=409,
+                )
+            deferred = []
         readonly["tools"] = [
             self._validate_catalog_descriptor(
                 descriptor,
@@ -801,40 +1299,113 @@ class AgentRuntimeControlPlane:
             )
             for descriptor in mcp
         ]
-        bridges = [
-            item for item in readonly["tools"] if item.get("name") in DISCOVERY_BRIDGE_NAMES
+        deferred = [
+            self._validate_catalog_descriptor(
+                descriptor,
+                tenant_id=tenant_id,
+                capability_revision=capability_revision,
+                allow_deferred=True,
+            )
+            for descriptor in deferred
         ]
+        requested_tool_names = readonly.get("responses_tool_names")
+        if requested_tool_names is not None:
+            catalog_by_name: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+            for kind, descriptors in (
+                ("tools", tools),
+                ("mcp", mcp),
+                ("deferred", deferred),
+            ):
+                for descriptor in descriptors:
+                    catalog_by_name.setdefault(str(descriptor["name"]), []).append(
+                        (kind, descriptor)
+                    )
+            selected_tools: list[dict[str, Any]] = []
+            selected_mcp: list[dict[str, Any]] = []
+            for name in requested_tool_names:
+                matches = catalog_by_name.get(name, [])
+                if len(matches) != 1:
+                    raise AgentRuntimeControlError(
+                        "AI_PLATFORM_AGENT_RUNTIME_RESPONSE_TOOL_NOT_FOUND", status_code=400
+                    )
+                kind, descriptor = matches[0]
+                if descriptor.get("read_only") is not True:
+                    # Public Responses cannot mint a write-capable descriptor;
+                    # those require a signed AgentSpec and approval contract.
+                    raise AgentRuntimeControlError(
+                        "AI_PLATFORM_AGENT_RUNTIME_RESPONSE_TOOL_NOT_READONLY", status_code=409
+                    )
+                if kind == "tools":
+                    selected_tools.append(descriptor)
+                else:
+                    selected_mcp.append(descriptor)
+            tools = selected_tools
+            mcp = selected_mcp
+            deferred = []
+            bridges: list[dict[str, Any]] = []
+        else:
+            bridges = [item for item in readonly["tools"] if item.get("name") in DISCOVERY_BRIDGE_NAMES]
         bound_tools = [
-            item for item in readonly["tools"] if item.get("name") not in DISCOVERY_BRIDGE_NAMES
+            item for item in tools if item.get("name") not in DISCOVERY_BRIDGE_NAMES
         ]
-        allowed_tools = self._allowlisted_catalog_descriptors(
-            bound_tools, capability_allowlist
-        )
-        allowed_mcp = self._allowlisted_catalog_descriptors(
-            readonly["mcp"], capability_allowlist
+        allowed_tools = self._allowlisted_catalog_descriptors(bound_tools, capability_allowlist)
+        allowed_mcp = self._allowlisted_catalog_descriptors(mcp, capability_allowlist)
+        allowed_deferred = (
+            self._allowlisted_catalog_descriptors(deferred, capability_allowlist)
+            if capability_allowlist is not None
+            else deferred
         )
         readonly["tools"] = allowed_tools + bridges
         readonly["mcp"] = allowed_mcp
-        if capability_allowlist is not None and len(allowed_tools) + len(allowed_mcp) != len(
-            capability_allowlist
+        readonly["deferred"] = allowed_deferred
+        if capability_allowlist is not None and (
+            len(allowed_tools) + len(allowed_mcp) + len(allowed_deferred)
+            != len(capability_allowlist)
         ):
             raise AgentRuntimeControlError(
                 "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_CATALOG_SCOPE_MISMATCH",
                 status_code=409,
             )
         # Every turn, including the generic Assistant without an AgentSpec,
-        # carries an exact live descriptor allowlist. The Runtime therefore
-        # never has to treat a missing allowlist as tenant-wide authority.
-        readonly["capability_allowlist"] = [
-            {
-                "type": str(item["kind"]),
-                "name": str(item["name"]),
-                "id": str(item["id"]),
-                "version": item.get("version"),
-                "schema_hash": item.get("schema_hash"),
-            }
-            for item in [*allowed_tools, *allowed_mcp, *bridges]
+        # carries an exact live descriptor allowlist. Preserve any signed
+        # connector binding while replacing only version/schema with the
+        # values from the live catalog (a connector may publish without a
+        # schema hash and receive it here).
+        live_descriptors = [
+            *allowed_tools,
+            *allowed_mcp,
+            *allowed_deferred,
+            *bridges,
+            *attachment_tools,
         ]
+        final_allowlist: list[dict[str, Any]] = []
+        for item in live_descriptors:
+            matches = [
+                entry
+                for entry in (capability_allowlist or [])
+                if str(entry.get("id") or "") == str(item.get("id") or "")
+            ]
+            if len(matches) > 1:
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_CATALOG_SCOPE_MISMATCH",
+                    status_code=409,
+                )
+            entry = dict(matches[0]) if matches else {}
+            entry.update(
+                {
+                    # Capability descriptors bind to their runtime kind.  A
+                    # read_attachment descriptor is an internal tool even
+                    # though it is implicit in the signed attachment refs.
+                    "type": str(item["kind"]),
+                    "name": str(item["name"]),
+                    "id": str(item["id"]),
+                    "version": item.get("version"),
+                    "schema_hash": item.get("schema_hash"),
+                }
+            )
+            final_allowlist.append(entry)
+        readonly["capability_allowlist"] = final_allowlist
+        readonly["attachment_tools"] = attachment_tools
 
     async def _load_memory_context(
         self,
@@ -914,16 +1485,21 @@ class AgentRuntimeControlPlane:
         resolved_agent_snapshot: dict[str, Any] | None = None,
         developer_instructions: str | None = None,
         memory_mode: str = "auto",
+        memory_profile: str | None = None,
         enable_dynamic_tools: bool = True,
     ) -> AgentTurn:
         assignment = await self._assignment(tenant_id, user_id, session_id)
         model = await self.model_service.get_model(tenant_id, model_id)
         if not model or not bool(model.get("is_enabled", True)):
-            raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_MODEL_NOT_FOUND", status_code=400)
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_MODEL_NOT_FOUND", status_code=400
+            )
         provider_id = str(model.get("provider_id") or "")
         provider = await self.provider_service.get_provider(tenant_id, provider_id)
         if not provider or not bool(provider.get("is_enabled")):
-            raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_PROVIDER_UNAVAILABLE", status_code=503)
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_PROVIDER_UNAVAILABLE", status_code=503
+            )
         profile = model.get("effective_capabilities")
         if not isinstance(profile, dict):
             raise AgentRuntimeControlError(
@@ -992,7 +1568,11 @@ class AgentRuntimeControlPlane:
         effective_reasoning_option = reasoning_option
         effective_legacy_thinking = legacy_thinking_level
         signed_thinking_mode = signed_parameters.get("thinking_mode")
-        if not effective_reasoning_option and not effective_legacy_thinking and signed_thinking_mode:
+        if (
+            not effective_reasoning_option
+            and not effective_legacy_thinking
+            and signed_thinking_mode
+        ):
             if not isinstance(signed_thinking_mode, str) or len(signed_thinking_mode) > 100:
                 raise AgentRuntimeControlError(
                     "AI_PLATFORM_AGENT_RUNTIME_AGENT_SNAPSHOT_INVALID", status_code=409
@@ -1043,6 +1623,37 @@ class AgentRuntimeControlPlane:
             raise AgentRuntimeControlError(
                 "AI_PLATFORM_AGENT_RUNTIME_MEMORY_MODE_INVALID", status_code=400
             )
+        signed_memory_profile = (
+            signed_memory.get("profile") if isinstance(signed_memory, dict) else None
+        )
+        selected_memory_profile_raw = (
+            signed_memory_profile
+            if signed_agent_spec is not None and signed_memory_profile is not None
+            else memory_profile or "basic"
+        )
+        if not isinstance(selected_memory_profile_raw, str):
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_MEMORY_PROFILE_INVALID", status_code=400
+            )
+        selected_memory_profile = selected_memory_profile_raw.strip().lower()
+        if selected_memory_profile not in {"off", "basic", "hybrid"}:
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_MEMORY_PROFILE_INVALID", status_code=400
+            )
+        memory_write_allowed = (
+            selected_memory_mode != "off"
+            if signed_agent_spec is None
+            else selected_memory_mode == "user"
+        )
+        memory_policy = (
+            {
+                "authoritative_profile": selected_memory_profile,
+                "agent_memory_mode": "user",
+                "memory_principal": user_id,
+            }
+            if memory_write_allowed
+            else None
+        )
         memory_context = await self._load_memory_context(
             tenant_id=tenant_id,
             user_id=user_id,
@@ -1080,6 +1691,40 @@ class AgentRuntimeControlPlane:
             tenant_id=tenant_id,
             capability_revision=capability_revision,
         )
+        try:
+            platform_config = build_runtime_platform_config(
+                {
+                    **(resolved_agent_snapshot or {}),
+                    "agent_spec": agent_spec,
+                    "capabilities": (
+                        resolved_agent_snapshot.get("capabilities", [])
+                        if isinstance(resolved_agent_snapshot, dict)
+                        else []
+                    ),
+                },
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=session_id,
+                attachment_refs=[
+                    str(item.get("payload", {}).get("content_ref"))
+                    for item in readonly.get("items", [])
+                    if isinstance(item, dict)
+                    and item.get("kind") == "attachment"
+                    and isinstance(item.get("payload"), dict)
+                    and item["payload"].get("content_ref")
+                ],
+            )
+        except RuntimePlatformConfigError as exc:
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_PLATFORM_CONFIG_INVALID", status_code=409
+            ) from exc
+        platform_config["config_hash"] = runtime_platform_config_hash(platform_config)
+        readonly["platform_config"] = platform_config
+        self._attach_read_attachment_descriptors(
+            readonly,
+            tenant_id=tenant_id,
+            capability_revision=capability_revision,
+        )
         if enable_dynamic_tools:
             await self._fetch_capability_catalog(
                 readonly,
@@ -1097,6 +1742,12 @@ class AgentRuntimeControlPlane:
             model_id=model_id,
             readonly_capabilities=readonly,
             capability_allowlist=capability_allowlist,
+            native_web_search_enabled=(
+                isinstance(profile.get("native_search"), dict)
+                and profile["native_search"].get("enabled") is True
+                and isinstance(profile.get("tools"), dict)
+                and profile["tools"].get("web_search_wire") == "native"
+            ),
         )
         runtime_thread_id = uuid.UUID(str(thread["runtime_thread_id"]))
         await self._resume_thread(
@@ -1117,6 +1768,12 @@ class AgentRuntimeControlPlane:
                     and not isinstance(profile.get("auto_compact_token_limit"), bool)
                     else None
                 )
+            ),
+            native_web_search_enabled=(
+                isinstance(profile.get("native_search"), dict)
+                and profile["native_search"].get("enabled") is True
+                and isinstance(profile.get("tools"), dict)
+                and profile["tools"].get("web_search_wire") == "native"
             ),
         )
         run_id = uuid.uuid4()
@@ -1149,6 +1806,7 @@ class AgentRuntimeControlPlane:
             "memory": {
                 "mode": selected_memory_mode,
                 "context_status": (memory_context or {}).get("status", "not_loaded"),
+                "policy": memory_policy,
             },
             "memory_context": memory_context,
             "reasoning": {
@@ -1166,9 +1824,7 @@ class AgentRuntimeControlPlane:
                 "max_model_calls": self.max_model_calls,
             },
             "parameters": (
-                {"temperature": effective_temperature}
-                if effective_temperature is not None
-                else {}
+                {"temperature": effective_temperature} if effective_temperature is not None else {}
             ),
             "pricing": {
                 "input_price_per_1k": float(model.get("input_price_per_1k") or 0),
@@ -1176,9 +1832,13 @@ class AgentRuntimeControlPlane:
             },
             "tools": {
                 "enabled": bool(readonly.get("tools") or readonly.get("mcp")),
-                "phase": "readonly" if readonly.get("items") or readonly.get("tools") or readonly.get("mcp") else "pure_text",
+                "phase": "readonly"
+                if readonly.get("items") or readonly.get("tools") or readonly.get("mcp")
+                else "pure_text",
             },
             "readonly_capabilities": readonly,
+            "platform_config": platform_config,
+            "platform_config_hash": runtime_platform_config_hash(platform_config),
         }
         # Keep compaction/model limits data-driven. Providers may omit an
         # explicit threshold; in that case the kernel uses its own bounded
@@ -1236,7 +1896,9 @@ class AgentRuntimeControlPlane:
             lease_id,
         )
         if lease_row is None:
-            raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_LEASE_ISSUE_FAILED", status_code=503)
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_LEASE_ISSUE_FAILED", status_code=503
+            )
         lease_data = dict(lease_row)
         claims = RuntimeModelLeaseClaims(
             schema_version=str(lease_data["schema_version"]),
@@ -1276,16 +1938,30 @@ class AgentRuntimeControlPlane:
                 "effort": effort,
                 "capabilityRevision": capability_revision,
                 "readonly": readonly,
+                "platformConfig": platform_config,
             },
         )
         if response.status_code >= 400:
+            try:
+                runtime_error = response.json().get("error")
+            except (ValueError, AttributeError):
+                runtime_error = None
+            logger.warning(
+                "Agent Runtime rejected turn start status=%s error=%s",
+                response.status_code,
+                str(runtime_error or "unknown")[:160],
+            )
             await self._fail_run(run_id, snapshot_id, "agent_turn_start_rejected")
-            raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_TURN_START_FAILED", status_code=503)
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_TURN_START_FAILED", status_code=503
+            )
         payload = response.json()
         returned_turn_id = str(((payload.get("turn") or {}).get("id")) or "")
         if returned_turn_id != str(run_id):
             await self._fail_run(run_id, snapshot_id, "agent_turn_identity_mismatch")
-            raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_TURN_IDENTITY_MISMATCH", status_code=503)
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_TURN_IDENTITY_MISMATCH", status_code=503
+            )
         return AgentTurn(
             runtime_thread_id=str(runtime_thread_id),
             run_id=str(run_id),
@@ -1327,7 +2003,9 @@ class AgentRuntimeControlPlane:
                     uuid.UUID(turn.snapshot_id),
                     "agent_event_stream_rejected",
                 )
-                raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_EVENT_STREAM_FAILED", status_code=503)
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_EVENT_STREAM_FAILED", status_code=503
+                )
             frame: list[str] = []
             async for line in response.aiter_lines():
                 if line:
@@ -1409,18 +2087,27 @@ class AgentRuntimeControlPlane:
         frame: list[str] = []
         terminal_status: str | None = None
         async with self.http_client.stream(
-            "GET", url, headers=headers,
-            params={"after_sequence": max(0, int(after_sequence)), "limit": max(1, min(int(limit), 1000))},
+            "GET",
+            url,
+            headers=headers,
+            params={
+                "after_sequence": max(0, int(after_sequence)),
+                "limit": max(1, min(int(limit), 1000)),
+            },
         ) as response:
             if response.status_code >= 400:
-                raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_EVENT_STREAM_FAILED", status_code=503)
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_EVENT_STREAM_FAILED", status_code=503
+                )
             async for line in response.aiter_lines():
                 if line:
                     frame.append(line)
                     continue
                 if not frame:
                     continue
-                data_raw = next((value[5:].strip() for value in frame if value.startswith("data:")), "")
+                data_raw = next(
+                    (value[5:].strip() for value in frame if value.startswith("data:")), ""
+                )
                 frame = []
                 if not data_raw:
                     continue
@@ -1429,17 +2116,16 @@ class AgentRuntimeControlPlane:
                     if not isinstance(envelope, dict):
                         continue
                     event_data = envelope.get("data")
-                    if turn_id and (
-                        not isinstance(event_data, dict)
-                        or str(event_data.get("run_id") or "") != turn_id
-                    ):
-                        continue
+                    if turn_id:
+                        projected = _project_child_runtime_event(envelope, turn_id)
+                        if projected is None:
+                            continue
+                        envelope = projected
+                        event_data = envelope.get("data")
                     event_type = str(envelope.get("event_type") or "")
                     yield envelope
                     if event_type in {"run_finished", "run_error"}:
-                        terminal_status = str(
-                            (event_data or {}).get("status") or "failed"
-                        )
+                        terminal_status = str((event_data or {}).get("status") or "failed")
                         break
         if terminal_status and turn_id:
             await self._complete_run(uuid.UUID(turn_id), terminal_status)
@@ -1502,7 +2188,9 @@ class AgentRuntimeControlPlane:
         if response.status_code == 404:
             return None
         if response.status_code >= 400:
-            raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_APPROVAL_LOOKUP_FAILED", status_code=503)
+            raise AgentRuntimeControlError(
+                "AI_PLATFORM_AGENT_RUNTIME_APPROVAL_LOOKUP_FAILED", status_code=503
+            )
         payload = response.json()
         return payload if isinstance(payload, dict) else None
 
@@ -1535,7 +2223,11 @@ class AgentRuntimeControlPlane:
                 "AI_PLATFORM_AGENT_RUNTIME_APPROVAL_DECISION_FAILED", status_code=status
             )
         payload = response.json()
-        return payload if isinstance(payload, dict) else {"approval_id": approval_id, "status": "consumed"}
+        return (
+            payload
+            if isinstance(payload, dict)
+            else {"approval_id": approval_id, "status": "consumed"}
+        )
 
     async def _complete_run(self, run_id: uuid.UUID, terminal_status: str) -> None:
         status = (

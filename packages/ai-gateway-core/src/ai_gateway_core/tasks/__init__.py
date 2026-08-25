@@ -1,9 +1,6 @@
 """Shared background-task primitives.
 
-Moved from ``assistant_service.core.tasks`` in Phase 5d so gateway's
-lifespan (``init_task_manager`` / ``shutdown_task_manager``) and
-``/assistant/tasks/{id}/cancel`` can run without a compile-time dep
-on ``assistant_service``.
+Gateway lifecycle and public task routes share these service-neutral contracts.
 """
 
 from .task_manager import (

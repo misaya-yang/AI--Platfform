@@ -13,6 +13,17 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from ._core import UserContext
+from .capability_proof import (
+    HEADER_NAME as CAPABILITY_PROOF_HEADER,
+)
+from .capability_proof import (
+    CapabilityProof,
+    CapabilityProofError,
+    canonical_body_hash,
+    canonical_json,
+    sign_capability_proof,
+    verify_capability_proof,
+)
 from .gateway_secret import (
     GatewaySecret,
     InMemoryReplayStore,
@@ -33,6 +44,13 @@ class UserContextLike(Protocol):
 __all__ = [
     "GatewaySecret",
     "GatewaySecretAuthMiddleware",
+    "CapabilityProof",
+    "CapabilityProofError",
+    "CAPABILITY_PROOF_HEADER",
+    "canonical_body_hash",
+    "canonical_json",
+    "sign_capability_proof",
+    "verify_capability_proof",
     "InMemoryReplayStore",
     "InvalidGatewaySecret",
     "ReplayStore",

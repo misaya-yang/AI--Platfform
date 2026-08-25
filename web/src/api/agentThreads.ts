@@ -35,15 +35,125 @@ export interface AgentV2Event {
   timestamp: string;
 }
 
+type JsonRecord = Record<string, unknown>;
+
+function asRecord(value: unknown): JsonRecord | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as JsonRecord
+    : undefined;
+}
+
+function textFromContent(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return "";
+  return value
+    .map((part) => {
+      const item = asRecord(part);
+      return typeof item?.text === "string"
+        ? item.text
+        : typeof item?.content === "string"
+          ? item.content
+          : "";
+    })
+    .join("");
+}
+
+/**
+ * Project a persisted Runtime item into the stable V1 event vocabulary.
+ * Runtime V2 exposes both compatibility events and `rollout/item` records;
+ * the latter must not be silently dropped by clients that render the V1 UI.
+ */
+function projectRuntimeItem(
+  item: JsonRecord,
+  event: AgentV2Event,
+  timestamp: number,
+): StreamEvent | null {
+  const payload = asRecord(item.payload) ?? item;
+  const itemType = typeof item.type === "string" ? item.type : "";
+  const payloadType = typeof payload.type === "string" ? payload.type : "";
+  const common = {
+    thread_id: event.thread_id,
+    item_id: event.event.item_id,
+    turn_id: event.event.turn_id,
+  };
+
+  const content = textFromContent(payload.content) ||
+    (typeof payload.message === "string" ? payload.message : "") ||
+    (typeof payload.text === "string" ? payload.text : "");
+  if (content && (payload.role === "assistant" || payloadType === "agent_message")) {
+    return { event_type: "text_delta", data: { ...common, content }, timestamp };
+  }
+  if (content && (payload.role === "reasoning" || payloadType === "reasoning")) {
+    return { event_type: "thinking_delta", data: { ...common, content }, timestamp };
+  }
+
+  const toolName = typeof payload.name === "string"
+    ? payload.name
+    : typeof payload.tool === "string" ? payload.tool : undefined;
+  const toolCallId = typeof item.id === "string"
+    ? item.id
+    : typeof payload.id === "string" ? payload.id : undefined;
+  if (toolName || ["function_call", "tool_use", "command_execution", "mcp_tool_call"].includes(itemType)) {
+    const terminal = ["completed", "succeeded", "failed", "error", "cancelled"].includes(
+      String(item.status ?? payload.status ?? "").toLowerCase(),
+    );
+    return {
+      event_type: terminal ? "tool_call_result" : "tool_call_start",
+      data: {
+        ...common,
+        tool_call_id: toolCallId,
+        tool_name: toolName ?? itemType,
+        arguments: payload.arguments ?? payload.input,
+        result: payload.result ?? payload.output,
+        status: item.status ?? payload.status,
+      },
+      timestamp,
+    };
+  }
+
+  const approvalId = typeof payload.approval_id === "string"
+    ? payload.approval_id
+    : typeof payload.approvalId === "string" ? payload.approvalId : undefined;
+  if (approvalId || itemType === "approval_request" || payloadType === "approval_request") {
+    return {
+      event_type: "approval_required",
+      data: { ...common, ...payload, approval_id: approvalId },
+      timestamp,
+    };
+  }
+
+  const artifactId = typeof payload.artifact_id === "string"
+    ? payload.artifact_id
+    : typeof payload.artifactId === "string" ? payload.artifactId : undefined;
+  if (artifactId || itemType === "artifact" || payloadType === "artifact") {
+    return {
+      event_type: "artifact_created",
+      data: { ...common, ...payload, artifact_id: artifactId },
+      timestamp,
+    };
+  }
+
+  // Keep activity records observable without pretending they are assistant text.
+  if (itemType === "activity" || payloadType === "activity" || payloadType === "event_msg") {
+    return { event_type: "activity", data: { ...common, ...payload }, timestamp };
+  }
+  return null;
+}
+
 export function projectAgentV2Event(
   event: AgentV2Event,
   runtimeSessionId?: string,
 ): StreamEvent | null {
-  const payload = event.event.payload;
-  const nested = payload && typeof payload === "object" ? payload : {};
+  const payload = asRecord(event.event.payload) ?? {};
+  const nested = payload;
   const nestedEventType = typeof nested.event_type === "string" ? nested.event_type : "";
   if (nestedEventType) {
-    const data = nested.data && typeof nested.data === "object" ? nested.data : {};
+    const rawData = nested.data;
+    const data = asRecord(rawData) ?? {};
+    if (nestedEventType === "rollout/item" || nestedEventType === "item") {
+      const projectedItem = asRecord(rawData);
+      return projectedItem ? projectRuntimeItem(projectedItem, event, Date.parse(event.timestamp) / 1000) : null;
+    }
     const lifecycleData = nestedEventType === "run_started"
       ? {
           ...(data as Record<string, unknown>),
@@ -60,12 +170,14 @@ export function projectAgentV2Event(
             fallback_reason: (data as Record<string, unknown>).reasoning_fallback_reason,
           },
         }
-      : data as Record<string, unknown>;
+      : data;
     const projectedData = (
       (nestedEventType === "text_delta" || nestedEventType === "thinking_delta")
-      && typeof (data as Record<string, unknown>).content === "string"
+      && typeof data.content === "string"
     )
-      ? (data as Record<string, unknown>).content as string
+      ? data.content
+      : (nestedEventType === "text_delta" || nestedEventType === "thinking_delta") && typeof rawData === "string"
+        ? rawData
       : lifecycleData;
     return {
       event_type: nestedEventType,
@@ -73,20 +185,8 @@ export function projectAgentV2Event(
       timestamp: Date.parse(event.timestamp) / 1000,
     };
   }
-  if (nested.type === "response_item") {
-    const response = nested.payload && typeof nested.payload === "object" ? nested.payload : {};
-    const content = Array.isArray(response.content) ? response.content : [];
-    const text = content
-      .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
-      .map((item) => typeof item.text === "string" ? item.text : "")
-      .join("");
-    if (response.role === "assistant" && text) {
-      return {
-        event_type: "text_delta",
-        data: { content: text, thread_id: event.thread_id, item_id: event.event.item_id },
-        timestamp: Date.parse(event.timestamp) / 1000,
-      };
-    }
+  if (nested.type === "response_item" || nested.type === "activity" || nested.type === "event_msg") {
+    return projectRuntimeItem(nested, event, Date.parse(event.timestamp) / 1000);
   }
   return null;
 }
@@ -125,6 +225,19 @@ export async function interruptAgentTurn(threadId: string, turnId: string, reaso
   const { data } = await api.post(
     `/api/v2/agent/threads/${encodeURIComponent(threadId)}/turns/${encodeURIComponent(turnId)}:interrupt`,
     { reason },
+  );
+  return data;
+}
+
+export async function decideAgentRuntimeApproval(
+  threadId: string,
+  approvalId: string,
+  approved: boolean,
+  reason?: string,
+) {
+  const { data } = await api.post(
+    `/api/v2/agent/threads/${encodeURIComponent(threadId)}/approvals/${encodeURIComponent(approvalId)}/decision`,
+    { approved, ...(reason ? { reason } : {}) },
   );
   return data;
 }

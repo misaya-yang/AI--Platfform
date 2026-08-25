@@ -12,8 +12,8 @@
 #   --cn         Use China mirrors (implies --build)
 #   --pull       Pull configured versioned images before deploy/build
 #   --infra      Deploy infrastructure only (postgres, redis, qdrant)
-#   --app        Deploy application services only (gateway, frontend, assistant,
-#                knowledge API/worker, docgen)
+#   --app        Deploy application services only (gateway, frontend, knowledge,
+#                Agent Runtime and capability worker)
 #   --no-migrate Skip database migration after deploy
 #   --env FILE   Use a specific env file instead of .env
 # =============================================================================
@@ -102,7 +102,7 @@ if [ -z "${AI_PLATFORM_AGENT_RUNTIME_IMAGE:-}" ]; then
 fi
 
 INFRA_SERVICES="postgres redis qdrant"
-FULL_APP_SERVICES="gateway frontend knowledge-service knowledge-worker assistant-service agent-runtime"
+FULL_APP_SERVICES="gateway frontend knowledge-service knowledge-worker agent-runtime agent-capability-worker"
 
 assert_compose_owner
 
@@ -222,8 +222,6 @@ fi
 if [ "$INFRA_ONLY" != true ]; then
     wait_for_healthy "Knowledge service" "check_knowledge_health" 60 || log_warn "Knowledge service may still be starting"
     wait_for_healthy "Knowledge worker" "check_knowledge_worker_health" 60 || log_warn "Knowledge worker may still be starting"
-    wait_for_healthy "Assistant service" "check_assistant_health" 60 || log_warn "Assistant service may still be starting"
-    wait_for_healthy "Bundled docgen plugin" "check_docgen_health" 60 || log_warn "Bundled docgen plugin may still be starting"
     wait_for_healthy "Gateway" "check_gateway_health" 60 || log_warn "Gateway may still be starting"
     wait_for_healthy "Frontend" "check_frontend_health" 30 || log_warn "Frontend may still be starting"
     wait_for_healthy "Agent Runtime" "check_agent_runtime_health" 60 || log_warn "Agent Runtime may still be starting"

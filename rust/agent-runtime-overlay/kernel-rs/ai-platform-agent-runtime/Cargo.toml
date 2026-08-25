@@ -17,6 +17,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+ai-platform-capability-contract = { path = "../ai-platform-capability-contract" }
 anyhow = { workspace = true }
 codex-context-fragments = { workspace = true }
 reqwest = { workspace = true }

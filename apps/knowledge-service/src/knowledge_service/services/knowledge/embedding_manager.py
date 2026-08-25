@@ -251,7 +251,7 @@ class EmbeddingManager:
             # Use the canonical per-domain resolver from ai_gateway_core
             # so ``DASHSCOPE_BASE_URL`` / ``DASHSCOPE_EMBEDDING_BASE_URL``
             # / per-key fallbacks all behave identically to the gateway
-            # and assistant-service paths. The resolver also normalises
+            # and Agent capability paths. The resolver also normalises
             # the URL suffix (``/compatible-mode`` → ``/api/v1`` for the
             # SDK) so a single operator env keeps all three domains
             # working — incident 2026-04-28.

@@ -1,7 +1,7 @@
 """V2 Agent Runtime client used by live Agent eval runs.
 
 The eval candidate must exercise the same public Thread/Turn/Item boundary as
-the product.  Calling the legacy assistant-service stream here would make the
+the product. Calling a parallel model/tool loop here would make the
 quality gate prove the old Python loop instead of the Runtime that is being
 rolled out.
 """

@@ -1,15 +1,11 @@
 """KB Proxy Client — HTTP client for the knowledge-service microservice.
 
-Both the gateway and the assistant-service are clients of the
-knowledge-service, so this lives in ai_gateway_core (shared) rather
-than in either service's own tree.
+Gateway-owned runtime paths call the knowledge-service through this shared
+client.
 
 Talks to KS over HTTP at ``KB_SERVICE_URL`` (default
 ``http://knowledge-service:8092``) with HMAC-signed requests via
-``GATEWAY_ASSISTANT_SHARED_SECRET``.
-
-Phase 5f Batch C moved this client into shared core so the
-assistant-service container no longer needs ``COPY src/`` for this dependency.
+``AI_PLATFORM_INTERNAL_TOKEN``.
 """
 
 from __future__ import annotations
@@ -47,7 +43,7 @@ _signer_lock = threading.Lock()
 
 
 def _get_signer() -> GatewaySecret | None:
-    """Return a signer if ``GATEWAY_ASSISTANT_SHARED_SECRET`` is set.
+    """Return a signer if ``AI_PLATFORM_INTERNAL_TOKEN`` is set.
 
     Returns ``None`` in dev environments without the secret configured;
     callers then skip the HMAC header and rely on
@@ -60,7 +56,7 @@ def _get_signer() -> GatewaySecret | None:
     with _signer_lock:
         if _gateway_secret_signer is not None:
             return _gateway_secret_signer
-        secret = os.environ.get("GATEWAY_ASSISTANT_SHARED_SECRET")
+        secret = os.environ.get("AI_PLATFORM_INTERNAL_TOKEN")
         if not secret:
             return None
         _gateway_secret_signer = GatewaySecret(secret=secret)
@@ -70,6 +66,7 @@ def _get_signer() -> GatewaySecret | None:
 @dataclass
 class ProxyRetrieveResult:
     """Mimics the local RetrieveResult interface for compatibility."""
+
     text: str
     score: float
     segment_id: str | None = None
@@ -197,10 +194,10 @@ class KBProxyClient:
             return data.get("datasets", data.get("data", []))
         except InternalServiceHTTPError as e:
             logger.warning("KB list_datasets failed: %s", e.status_code)
-            return []
+            raise
         except Exception as e:
             logger.warning(f"KB list_datasets error: {e}")
-            return []
+            raise
 
     async def retrieve(
         self,
@@ -280,17 +277,19 @@ class KBProxyClient:
 
             results = []
             for r in results_raw:
-                results.append(ProxyRetrieveResult(
-                    text=r.get("text", ""),
-                    score=float(r.get("score", 0.0)),
-                    segment_id=r.get("segment_id"),
-                    document_id=r.get("document_id"),
-                    metadata=r.get("metadata", {}),
-                    content_type=r.get("content_type", "text"),
-                    image_url=r.get("image_url"),
-                    vlm_description=r.get("vlm_description"),
-                    associated_images=tuple(r.get("associated_images") or ()),
-                ))
+                results.append(
+                    ProxyRetrieveResult(
+                        text=r.get("text", ""),
+                        score=float(r.get("score", 0.0)),
+                        segment_id=r.get("segment_id"),
+                        document_id=r.get("document_id"),
+                        metadata=r.get("metadata", {}),
+                        content_type=r.get("content_type", "text"),
+                        image_url=r.get("image_url"),
+                        vlm_description=r.get("vlm_description"),
+                        associated_images=tuple(r.get("associated_images") or ()),
+                    )
+                )
 
             return results, meta
 
@@ -334,7 +333,7 @@ class KBProxyClient:
         include_images: bool = True,
         **kwargs: Any,
     ) -> tuple[list[ProxyRetrieveResult], dict[str, Any]]:
-        """Intent-compatible wrapper for assistant-service callers."""
+        """Intent-compatible wrapper for Agent capability callers."""
         include_images = include_images and intent != "find_document"
         return await self.retrieve_with_images(
             user,
@@ -346,7 +345,9 @@ class KBProxyClient:
             **kwargs,
         )
 
-    async def require_dataset_access(self, user: Any, dataset_id: str, required: str = "viewer") -> dict:
+    async def require_dataset_access(
+        self, user: Any, dataset_id: str, required: str = "viewer"
+    ) -> dict:
         """Check dataset access — delegates to KB service.
 
         In proxy mode, the KB service handles auth via X-User-Id/X-Tenant-Id headers;

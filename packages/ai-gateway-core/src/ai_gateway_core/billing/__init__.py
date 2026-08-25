@@ -1,4 +1,4 @@
-"""Pricing + token-cost helpers shared by gateway and assistant-service.
+"""Pricing and token-cost helpers shared by Gateway and model adapters.
 
 Was at ``src/services/billing/`` until Phase 5f Batch C; moved here so
 metrics modules (also moved to ai_gateway_core) can resolve their

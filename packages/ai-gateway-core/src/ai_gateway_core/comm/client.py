@@ -316,7 +316,8 @@ def _rate_limiter_from_env(service_name: str) -> TokenBucketRateLimiter | None:
     configured = _parse_rate_limits(raw)
     default_rates = {
         "knowledge-service": (100.0, 100),
-        "assistant-service": (50.0, 50),
+        "agent-runtime": (50.0, 50),
+        "agent-capability-worker": (50.0, 50),
     }
     rate_burst = configured.get(service_name) or default_rates.get(service_name)
     if rate_burst is None:

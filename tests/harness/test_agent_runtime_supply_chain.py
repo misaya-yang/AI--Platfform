@@ -25,13 +25,19 @@ def _fixture(
     *,
     app_server_runnable: bool = True,
     agent_runtime_runnable: bool = True,
+    capability_worker_runnable: bool = False,
 ) -> Path:
     receipt_path = tmp_path / "deploy/agent-runtime-source/source-receipt.json"
     sbom_path = tmp_path / "deploy/agent-runtime-source/sbom.cdx.json"
+    capability_sbom_path = tmp_path / "deploy/agent-runtime-source/capability-worker-sbom.cdx.json"
     notice_path = tmp_path / "deploy/agent-runtime-source/NOTICE.md"
+    capability_schema_path = tmp_path / "database/migrations/096_agent_capability_executions.sql"
     sbom_path.parent.mkdir(parents=True, exist_ok=True)
     sbom_path.write_text("{}\n", encoding="utf-8")
+    capability_sbom_path.write_text("{}\n", encoding="utf-8")
     notice_path.write_text("OpenAI upstream notice\n", encoding="utf-8")
+    capability_schema_path.parent.mkdir(parents=True, exist_ok=True)
+    capability_schema_path.write_text("-- capability schema fixture\n", encoding="utf-8")
     sbom_sha = sha256_file(sbom_path)
     receipt = {
         "schema_version": "ai-platform/agent-runtime-source-receipt/v1",
@@ -54,10 +60,16 @@ def _fixture(
             "upstream_notice_sha256": "f" * 64,
         },
         "sbom": {"sha256": sbom_sha, "component_count": 1},
+        "capability_worker_schema_sha256": sha256_file(capability_schema_path),
+        "capability_worker_sbom": {
+            "format": "CycloneDX-1.5",
+            "path": "deploy/agent-runtime-source/capability-worker-sbom.cdx.json",
+            "sha256": sha256_file(capability_sbom_path),
+        },
     }
     _write_json(receipt_path, receipt)
     digest = "sha256:" + "1" * 64
-    any_runnable = app_server_runnable or agent_runtime_runnable
+    any_runnable = app_server_runnable or agent_runtime_runnable or capability_worker_runnable
     lock = {
         "schema_version": "ai-platform/agent-runtime-source-lock/v2",
         "release_state": "local_image_locked" if any_runnable else "local_source_locked",
@@ -79,6 +91,11 @@ def _fixture(
             "sbom_sha256": sbom_sha,
             "app_server_schema_sha256": "d" * 64,
             "app_server_schema_file_count": 2,
+            "capability_worker_schema_sha256": sha256_file(capability_schema_path),
+            "capability_worker_sbom": "deploy/agent-runtime-source/capability-worker-sbom.cdx.json",
+            "capability_worker_sbom_sha256": sha256_file(capability_sbom_path),
+            "overlay_file_count": 0,
+            "overlay_cargo_lock_sha256": "0" * 64,
         },
         "license": {
             "spdx": "Apache-2.0",
@@ -103,6 +120,16 @@ def _fixture(
                     "candidate_start_allowed": agent_runtime_runnable,
                     "image_digest": digest if agent_runtime_runnable else None,
                     "image_ref": f"local-image://{digest}" if agent_runtime_runnable else None,
+                    "platforms": ["linux/arm64"],
+                },
+                "capability_worker": {
+                    "binary": "ai-platform-capability-worker",
+                    "protocol": "ai-platform-capability-contract/v2",
+                    "candidate_start_allowed": capability_worker_runnable,
+                    "image_digest": digest if capability_worker_runnable else None,
+                    "image_ref": (
+                        f"local-image://{digest}" if capability_worker_runnable else None
+                    ),
                     "platforms": ["linux/arm64"],
                 },
             }
@@ -185,6 +212,136 @@ def test_source_refresh_invalidates_every_image(tmp_path: Path) -> None:
         assert artifact["candidate_start_allowed"] is False
         assert artifact["image_digest"] is None
         assert artifact["image_ref"] is None
+
+
+def test_refresh_overlay_rebuilds_manifest_receipt_lock_and_dependency_sbom(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_path = _fixture(tmp_path)
+    overlay_root = tmp_path / "rust/agent-runtime-overlay"
+    kernel_root = overlay_root / "kernel-rs"
+    kernel_root.mkdir(parents=True)
+    (kernel_root / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
+    (kernel_root / "Cargo.lock").write_text("overlay lock\n", encoding="utf-8")
+    for package in (
+        "ai-platform-capability-contract",
+        "ai-platform-capability-worker",
+    ):
+        package_root = kernel_root / package
+        package_root.mkdir()
+        (package_root / "Cargo.toml").write_text(
+            f'[package]\nname = "{package}"\nversion = "0.0.0"\n',
+            encoding="utf-8",
+        )
+    (kernel_root / "src.rs").write_text("overlay\n", encoding="utf-8")
+    _write_json(
+        overlay_root / "manifest.json",
+        {
+            "schema_version": "ai-platform/agent-runtime-overlay/v1",
+            "upstream_sha": "0" * 40,
+            "source_revision": "0" * 40,
+            "file_count": 0,
+            "sha256": "0" * 64,
+        },
+    )
+    receipt_path = tmp_path / "deploy/agent-runtime-source/source-receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["overlay"] = {
+        "sha256": "0" * 64,
+        "file_count": 0,
+        "cargo_lock_sha256": "0" * 64,
+        "source_revision": "b" * 40,
+        "upstream_sha": "a" * 40,
+    }
+    _write_json(receipt_path, receipt)
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    lock["build"].update(
+        {
+            "overlay_manifest": "rust/agent-runtime-overlay/manifest.json",
+            "overlay_sha256": "0" * 64,
+            "overlay_file_count": 0,
+            "overlay_cargo_lock_sha256": "0" * 64,
+            "source_receipt_sha256": sha256_file(receipt_path),
+        }
+    )
+    _write_json(lock_path, lock)
+
+    cargo_workspace = tmp_path / "controlled/codex-rs"
+    cargo_workspace.mkdir(parents=True)
+    for relative in (
+        "Cargo.toml",
+        "Cargo.lock",
+        "ai-platform-capability-contract/Cargo.toml",
+        "ai-platform-capability-worker/Cargo.toml",
+    ):
+        destination = cargo_workspace / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes((kernel_root / relative).read_bytes())
+    worker_id = "path+file:///controlled/codex-rs#ai-platform-capability-worker@0.0.0"
+    contract_id = "path+file:///controlled/codex-rs#ai-platform-capability-contract@0.0.0"
+    serde_id = "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.0"
+    metadata = {
+        "packages": [
+            {"id": worker_id, "name": "ai-platform-capability-worker", "version": "0.0.0"},
+            {"id": contract_id, "name": "ai-platform-capability-contract", "version": "0.0.0"},
+            {"id": serde_id, "name": "serde", "version": "1.0.0", "license": "MIT"},
+        ],
+        "resolve": {
+            "nodes": [
+                {"id": worker_id, "dependencies": [{"pkg": contract_id}]},
+                {"id": contract_id, "dependencies": [{"pkg": serde_id}]},
+                {"id": serde_id, "dependencies": []},
+            ]
+        },
+    }
+    monkeypatch.setattr(
+        supply_chain,
+        "_run",
+        lambda *_args, **_kwargs: json.dumps(metadata),
+    )
+
+    supply_chain.refresh_overlay(
+        repo_root=tmp_path,
+        lock_path=lock_path,
+        cargo_workspace=cargo_workspace,
+    )
+
+    actual = supply_chain.overlay_identity(overlay_root)
+    manifest = json.loads((overlay_root / "manifest.json").read_text(encoding="utf-8"))
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    sbom_path = tmp_path / "deploy/agent-runtime-source/capability-worker-sbom.cdx.json"
+    sbom = json.loads(sbom_path.read_text(encoding="utf-8"))
+    overlay_lock_sha = sha256_file(kernel_root / "Cargo.lock")
+    assert manifest["sha256"] == actual["sha256"]
+    assert manifest["file_count"] == actual["file_count"]
+    assert manifest["cargo_lock_sha256"] == overlay_lock_sha
+    assert receipt["capability_worker_schema_sha256"] == sha256_file(
+        tmp_path / "database/migrations/096_agent_capability_executions.sql"
+    )
+    assert {component["name"] for component in sbom["components"]} == {
+        "ai-platform-capability-worker",
+        "ai-platform-capability-contract",
+        "serde",
+    }
+    assert len(sbom["dependencies"]) == 3
+    assert lock["release_state"] == "local_source_locked"
+    assert all(
+        not artifact["candidate_start_allowed"]
+        and artifact["image_digest"] is None
+        and artifact["image_ref"] is None
+        for artifact in lock["oci"]["artifacts"].values()
+    )
+    validate_lock(repo_root=tmp_path, lock_path=lock_path)
+
+    (cargo_workspace / "Cargo.lock").write_text("stale composed lock\n", encoding="utf-8")
+    with pytest.raises(ContractError, match="current overlay Cargo.lock"):
+        supply_chain.refresh_overlay(
+            repo_root=tmp_path,
+            lock_path=lock_path,
+            cargo_workspace=cargo_workspace,
+        )
 
 
 def test_record_local_image_checks_labels_and_locks_only_target(

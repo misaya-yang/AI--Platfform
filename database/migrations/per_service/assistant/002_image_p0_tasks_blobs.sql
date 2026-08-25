@@ -1,6 +1,6 @@
 -- =============================================================================
 -- Migration: assistant/002_image_p0_tasks_blobs
--- Owner    : assistant-service
+-- Owner    : gateway / capability-worker
 -- Purpose  : Gemini image P0 primitives:
 --            * object-store-first image blob references
 --            * durable Postgres task queue/state table
@@ -52,6 +52,9 @@ COMMENT ON TABLE assistant.image_blobs IS
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS assistant.image_tasks (
     task_id             VARCHAR(64) PRIMARY KEY,
+    tenant_id           VARCHAR(64),
+    user_id             VARCHAR(64),
+    runtime_scope_version SMALLINT NOT NULL DEFAULT 0,
     owner_scope         VARCHAR(255) NOT NULL,
     status              VARCHAR(32) NOT NULL DEFAULT 'pending',
     prompt              TEXT NOT NULL,

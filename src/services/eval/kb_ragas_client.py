@@ -33,10 +33,7 @@ def _get_signer() -> GatewaySecret | None:
     with _signer_lock:
         if _gateway_secret_signer is not None:
             return _gateway_secret_signer
-        secret = (
-            os.environ.get("GATEWAY_KNOWLEDGE_SHARED_SECRET", "").strip()
-            or os.environ.get("GATEWAY_ASSISTANT_SHARED_SECRET", "").strip()
-        )
+        secret = os.environ.get("AI_PLATFORM_INTERNAL_TOKEN", "").strip()
         if not secret:
             return None
         _gateway_secret_signer = GatewaySecret(secret=secret)

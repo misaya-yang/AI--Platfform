@@ -6,8 +6,8 @@ This package is the single source of truth for:
 - identity-header strip + inject
 - ``X-Gateway-Secret`` HMAC signing
 
-Both ``_assistant_proxy.py`` and ``_proxy_utils.py`` (KB) import from here,
-so the two have byte-identical semantics (Design doc §3.6 GATE-P1).
+Gateway microservice adapters import this shared implementation so their
+streaming and identity semantics do not drift.
 """
 from .base import (
     CircuitBreaker,

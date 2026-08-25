@@ -60,8 +60,8 @@ DEFAULT_UAT_CAPACITY_BUDGETS: dict[str, CapacityBudget] = {
         enforced=True,
         shared=True,
     ),
-    "upstream.assistant_service": CapacityBudget(
-        key="upstream.assistant_service",
+    "upstream.agent_runtime": CapacityBudget(
+        key="upstream.agent_runtime",
         limit=8,
         queue_max=32,
         queue_timeout_ms=3000,
@@ -137,8 +137,8 @@ SERVICE_UPSTREAM_GROUPS: dict[str, str] = {
     "local-2024-agent": "langgraph_agent",
     "langgraph-agent": "langgraph_agent",
     "agent": "langgraph_agent",
-    "assistant": "assistant_service",
-    "assistant-service": "assistant_service",
+    "assistant": "agent_runtime",
+    "agent-runtime": "agent_runtime",
     "knowledge": "knowledge_service",
     "knowledge-service": "knowledge_service",
     "image-generation": "image_generation",

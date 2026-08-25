@@ -430,7 +430,7 @@ async def update_turn_status(
                 error = $4::text,
                 error_code = $5::varchar,
                 completed_at = CASE
-                    WHEN $2::varchar IN ('completed', 'failed') THEN NOW()
+                    WHEN $2::varchar IN ('completed', 'failed', 'unknown') THEN NOW()
                     ELSE completed_at
                 END
             WHERE turn_id = $1
@@ -566,6 +566,109 @@ async def create_image_task(
         return True
 
 
+async def reserve_scoped_image_task(
+    pool,
+    *,
+    task_id: str,
+    tenant_id: str,
+    user_id: str,
+    owner_scope: str,
+    status: str,
+    prompt: str,
+    model_id: str,
+    request_payload: dict[str, Any],
+    turn_id: str,
+    session_id: str,
+    parent_artifact_id: str | None,
+    client_request_id: str | None,
+    request_hash: str,
+    progress: int = 0,
+) -> dict[str, str]:
+    """Atomically reserve an idempotency key and its durable image task.
+
+    Returning an existing task never creates a second task row.  A failed task
+    insert rolls back the idempotency reservation, preventing a permanent
+    ``duplicate_request_in_flight`` tombstone after a transient database error.
+    """
+
+    if pool is None:
+        return {"state": "unavailable", "task_id": task_id}
+    if (
+        not tenant_id
+        or not user_id
+        or not owner_scope
+        or status not in {"pending", "running"}
+        or not request_hash
+    ):
+        raise ValueError("image task scope is invalid")
+    async with pool.acquire() as conn, conn.transaction():
+        if client_request_id:
+            reservation = await conn.fetchrow(
+                """
+                INSERT INTO assistant.image_idempotency
+                    (owner_scope, client_request_id, request_hash, task_id)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (owner_scope, client_request_id) DO NOTHING
+                RETURNING request_hash, task_id
+                """,
+                owner_scope,
+                client_request_id,
+                request_hash,
+                task_id,
+            )
+            if reservation is None:
+                existing = await conn.fetchrow(
+                    """
+                    SELECT request_hash, task_id
+                      FROM assistant.image_idempotency
+                     WHERE owner_scope=$1 AND client_request_id=$2
+                    """,
+                    owner_scope,
+                    client_request_id,
+                )
+                if existing is None:
+                    raise RuntimeError("image idempotency reservation disappeared")
+                return {
+                    "state": "existing"
+                    if str(existing["request_hash"]) == request_hash
+                    else "conflict",
+                    "task_id": str(existing["task_id"]),
+                }
+
+        inserted = await conn.fetchrow(
+            """
+            INSERT INTO assistant.image_tasks (
+                task_id, tenant_id, user_id, runtime_scope_version,
+                owner_scope, status, prompt, model_id, request_payload,
+                progress, turn_id, session_id, parent_artifact_id,
+                client_request_id, request_hash
+            ) VALUES (
+                $1, $2, $3, 1, $4, $5, $6, $7, $8::jsonb,
+                $9, $10, $11, $12, $13, $14
+            )
+            ON CONFLICT (task_id) DO NOTHING
+            RETURNING task_id
+            """,
+            task_id,
+            tenant_id,
+            user_id,
+            owner_scope,
+            status,
+            prompt,
+            model_id,
+            json.dumps(request_payload, default=str),
+            progress,
+            turn_id,
+            session_id,
+            parent_artifact_id,
+            client_request_id,
+            request_hash,
+        )
+        if inserted is None:
+            raise RuntimeError("image task id collision")
+    return {"state": "reserved", "task_id": task_id}
+
+
 async def update_image_task(
     pool,
     *,
@@ -606,7 +709,7 @@ async def update_image_task(
                         ELSE started_at
                     END,
                     completed_at = CASE
-                        WHEN $2 IN ('completed', 'failed', 'dead_letter') THEN NOW()
+                        WHEN $2 IN ('completed', 'failed', 'dead_letter', 'unknown') THEN NOW()
                         ELSE completed_at
                     END,
                     updated_at = NOW()
@@ -799,6 +902,7 @@ __all__ = [
     "lookup_idempotent",
     "new_turn_id",
     "record_idempotent",
+    "reserve_scoped_image_task",
     "set_locked_style",
     "update_image_blob_status",
     "update_image_task",

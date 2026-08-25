@@ -21,21 +21,30 @@ Endpoints:
 from __future__ import annotations
 
 import contextlib
+import inspect
 import json
 import logging
 import time
 import uuid
-from typing import Annotated, Any
+from typing import Any
 from urllib.parse import urlsplit
 
 from ai_gateway_core.exceptions import SessionAlreadyExistsError
+from ai_gateway_core.knowledge import is_multimodal_embedding_model
+from ai_gateway_core.logging import record_internal_exception
 from ai_gateway_core.storage import get_artifact_storage
 from ai_gateway_core.style_presets import StylePreset  # noqa: F401 — pydantic schema uses it
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
+from pydantic import BaseModel, ValidationError
 
+from ...core.assistant_capability_catalog import (
+    AssistantCapabilityCatalogError,
+    load_assistant_capability_catalog,
+    load_gateway_assistant_policies,
+    project_assistant_tools,
+)
 from ...core.auth.user_resolver import UserContext
 from ...services.agent_runtime.thread_store import AgentThreadStore
 from ..deps import get_user_context
@@ -44,23 +53,14 @@ from ..schemas.assistant import (
     AssistantChatRequest,
     AssistantChatResponse,
     AssistantConfigResponse,
-    AsyncImageGenerationRequest,
-    AsyncImageTaskStatusResponse,
-    AsyncImageTaskSubmitResponse,
     DatasetsListResponse,
-    ImageBlobCompleteRequest,
-    ImageBlobFetchUrlRequest,
-    ImageBlobResponse,
-    ImageBlobUploadUrlRequest,
-    ImageBlobUploadUrlResponse,
-    ImageGenerationRequest,
-    ImageGenerationResponse,
     ModelsListResponse,
 )
 from ._artifact_headers import attachment_content_disposition
 
 router = APIRouter(prefix="/assistant", tags=["assistant"])
 logger = logging.getLogger(__name__)
+
 
 def _browser_artifact_download_url(raw_url: str | None, artifact_id: str) -> str:
     """Return only browser-reachable URLs; local file paths stay server-side."""
@@ -172,15 +172,129 @@ def _raise_artifact_not_found_if_schema_missing(exc: Exception) -> None:
         raise HTTPException(status_code=404, detail="Artifact not found") from None
 
 
+def _assistant_model_service(request: Request) -> Any:
+    """Return the gateway-owned model service for Assistant read routes."""
+
+    model_service = getattr(request.app.state, "model_service", None)
+    if model_service is not None:
+        return model_service
+    # Keep lightweight app fixtures and early-startup callers compatible with
+    # the model facade while the canonical application state remains
+    # ``model_service``.
+    model_meta = getattr(request.app.state, "model_meta", None)
+    return getattr(model_meta, "model_service", None)
+
+
+def _visible_assistant_models(user: UserContext, rows: Any) -> list[dict[str, Any]]:
+    """Project enabled, tenant-scoped model rows into the public Assistant shape."""
+
+    if not isinstance(rows, list):
+        rows = list(rows or [])
+    visible: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict) or not bool(row.get("is_enabled", True)):
+            continue
+        row_tenant_id = row.get("tenant_id")
+        if row_tenant_id is not None and str(row_tenant_id) != (user.tenant_id or "default"):
+            continue
+        access_level = row.get("access_level")
+        # ``_user_can_access_model`` deliberately rejects malformed access
+        # levels, including for administrators.
+        if not isinstance(access_level, str) or not _user_can_access_model(user, access_level):
+            continue
+        model_id = str(row.get("model_id") or "").strip()
+        provider_id = str(row.get("provider_id") or "").strip()
+        effective_capabilities = row.get("effective_capabilities")
+        if effective_capabilities is None:
+            effective_capabilities = {}
+        if not model_id or not provider_id or not isinstance(effective_capabilities, dict):
+            continue
+        try:
+            context_window = int(row.get("context_window") or 0)
+            max_output_tokens = int(row.get("max_output_tokens") or 0)
+            capability_revision = int(row.get("capability_revision") or 0)
+            sort_order = int(row.get("sort_order") or 0)
+            input_price = float(row.get("input_price_per_1k") or 0)
+            output_price = float(row.get("output_price_per_1k") or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if context_window <= 0 or max_output_tokens <= 0 or capability_revision < 1:
+            continue
+        visible.append(
+            {
+                "id": model_id,
+                "name": str(row.get("display_name") or model_id),
+                "provider": provider_id,
+                "context_window": context_window,
+                "max_output_tokens": max_output_tokens,
+                "supports_vision": bool(row.get("supports_vision", False)),
+                "supports_tools": bool(row.get("supports_tools", False)),
+                "access_level": access_level,
+                "input_price_per_1k": input_price,
+                "output_price_per_1k": output_price,
+                "effective_capabilities": dict(effective_capabilities),
+                "capability_revision": capability_revision,
+                "_sort_order": sort_order,
+            }
+        )
+    visible.sort(key=lambda item: (item["provider"], item["_sort_order"], item["name"], item["id"]))
+    for item in visible:
+        item.pop("_sort_order", None)
+    return visible
+
+
+async def _load_visible_assistant_models(
+    request: Request, user: UserContext
+) -> list[dict[str, Any]]:
+    model_service = _assistant_model_service(request)
+    if model_service is None or not callable(getattr(model_service, "list_models", None)):
+        raise HTTPException(status_code=503, detail="Model service is unavailable")
+    try:
+        rows = await model_service.list_models(
+            tenant_id=user.tenant_id or "default",
+            include_disabled=False,
+        )
+    except Exception as exc:
+        record_internal_exception(logger, "assistant.gateway.models.internal_failure", exc)
+        raise HTTPException(status_code=503, detail="Model service is unavailable") from None
+    return _visible_assistant_models(user, rows)
+
+
+async def _load_assistant_tools(request: Request) -> list[str]:
+    """Read an already-installed safe catalog getter without importing the runtime."""
+
+    getter = getattr(request.app.state, "assistant_capability_catalog_getter", None)
+    if getter is None:
+        getter = getattr(request.app.state, "agent_runtime_capability_catalog", None)
+    if getter is None:
+        return []
+    try:
+        value = getter() if callable(getter) else getter
+        if inspect.isawaitable(value):
+            value = await value
+        if isinstance(value, dict):
+            value = value.get("tools", value.get("capabilities", []))
+        if not isinstance(value, (list, tuple)):
+            return []
+        names: list[str] = []
+        for item in value:
+            name = item.get("name") if isinstance(item, dict) else item
+            if isinstance(name, str) and name.strip():
+                names.append(name.strip())
+        return list(dict.fromkeys(names))
+    except Exception as exc:
+        record_internal_exception(logger, "assistant.gateway.config.catalog_failure", exc)
+        return []
+
+
 @router.get("/models", response_model=ModelsListResponse)
 async def list_models(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ) -> ModelsListResponse:
-    """Thin proxy — assistant-service owns the model catalogue."""
-    from ._assistant_proxy import proxy_to_assistant_service
+    """List the tenant-scoped model catalogue owned by Gateway."""
 
-    return await proxy_to_assistant_service(request, user, path="models")
+    return ModelsListResponse(models=await _load_visible_assistant_models(request, user))
 
 
 @router.get("/datasets", response_model=DatasetsListResponse)
@@ -188,10 +302,41 @@ async def list_datasets(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ) -> DatasetsListResponse:
-    """Thin proxy — assistant-service resolves KB datasets via knowledge-service."""
-    from ._assistant_proxy import proxy_to_assistant_service
+    """List datasets through the Gateway-owned Knowledge proxy."""
 
-    return await proxy_to_assistant_service(request, user, path="datasets")
+    kb_proxy = getattr(request.app.state, "kb_proxy", None)
+    if kb_proxy is None or not callable(getattr(kb_proxy, "list_datasets", None)):
+        raise HTTPException(status_code=503, detail="Knowledge service is unavailable")
+    try:
+        raw_datasets = await kb_proxy.list_datasets(user)
+    except Exception as exc:
+        record_internal_exception(logger, "assistant.gateway.datasets.internal_failure", exc)
+        raise HTTPException(status_code=503, detail="Knowledge service is unavailable") from None
+    if not isinstance(raw_datasets, list):
+        raw_datasets = []
+    datasets: list[dict[str, Any]] = []
+    for raw in raw_datasets:
+        if not isinstance(raw, dict):
+            continue
+        stats = raw.get("statistics") if isinstance(raw.get("statistics"), dict) else {}
+        embedding_model = raw.get("embedding_model")
+        datasets.append(
+            {
+                "dataset_id": str(raw.get("dataset_id") or ""),
+                "name": str(raw.get("name") or ""),
+                "description": raw.get("description"),
+                "document_count": int(
+                    stats.get("document_count", raw.get("document_count", 0)) or 0
+                ),
+                "chunk_count": int(
+                    stats.get("segment_count", raw.get("segment_count", raw.get("chunk_count", 0)))
+                    or 0
+                ),
+                "embedding_model": embedding_model,
+                "is_multimodal": is_multimodal_embedding_model(str(embedding_model or "")),
+            }
+        )
+    return DatasetsListResponse(datasets=datasets)
 
 
 @router.get("/config", response_model=AssistantConfigResponse)
@@ -199,10 +344,38 @@ async def get_config(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ) -> AssistantConfigResponse:
-    """Thin proxy — assistant-service owns provider configuration."""
-    from ._assistant_proxy import proxy_to_assistant_service
+    """Return configuration projected from Gateway-owned control-plane state."""
 
-    return await proxy_to_assistant_service(request, user, path="config")
+    visible_models = await _load_visible_assistant_models(request, user)
+    settings = getattr(request.app.state, "settings", None)
+    requested_default = str(getattr(settings, "default_model", "") or "").strip()
+    default_model_id = next(
+        (model["id"] for model in visible_models if model["id"] == requested_default),
+        visible_models[0]["id"] if visible_models else "",
+    )
+
+    model_meta = getattr(request.app.state, "model_meta", None)
+    available_providers: list[str] = []
+    if model_meta is not None and callable(getattr(model_meta, "is_provider_configured", None)):
+        for provider_id in dict.fromkeys(
+            model["provider"] for model in visible_models if model["provider"]
+        ):
+            try:
+                if await model_meta.is_provider_configured(
+                    user.tenant_id or "default", provider_id
+                ):
+                    available_providers.append(provider_id)
+            except Exception as exc:
+                # Configuration must fail closed when provider state is unavailable.
+                record_internal_exception(logger, "assistant.gateway.config.provider_failure", exc)
+
+    return AssistantConfigResponse(
+        default_model_id=default_model_id,
+        available_providers=available_providers,
+        kb_enabled=getattr(request.app.state, "kb_proxy", None) is not None,
+        web_search_enabled=True,
+        tools_available=await _load_assistant_tools(request),
+    )
 
 
 # =========================================================================
@@ -265,172 +438,27 @@ class ResumeResponse(BaseModel):
     resume: dict
 
 
-class LocalNodePairingChallengeRequest(BaseModel):
-    """Browser-safe input for starting (but never completing) pairing."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    display_name_hint: str | None = Field(default=None, min_length=1, max_length=80)
-    ttl_seconds: int = Field(default=180, ge=30, le=600)
-
-
-class LocalNodeRevokeRequest(BaseModel):
-    """Browser-safe reason attached to an owner-initiated device revocation."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    reason: str | None = Field(default=None, max_length=240)
-
-
-LocalNodeOpaqueId = Annotated[
-    str,
-    StringConstraints(
-        strip_whitespace=True,
-        min_length=1,
-        max_length=128,
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
-    ),
-]
-
-
-async def _proxy_local_node_read(
-    request: Request,
-    user: UserContext,
-    *,
-    path: str,
-):
-    """Proxy one explicitly declared Local Node control-plane read.
-
-    This is intentionally not a catch-all route. Host action dispatch,
-    approval receipts, device event append, pairing completion, and grant
-    creation must use trusted internal/device channels instead of Web auth.
-    """
-
-    from ._assistant_proxy import proxy_to_assistant_service
-
-    upstream_path = "local-nodes" if not path else f"local-nodes/{path}"
-    return await proxy_to_assistant_service(request, user, path=upstream_path)
-
-
-@router.post("/local-nodes/pairing/challenges", status_code=201)
-async def create_local_node_pairing_challenge(
-    body: LocalNodePairingChallengeRequest,
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-):
-    """Start owner-bound pairing; device proof must complete it out of band."""
-
-    from ._assistant_proxy import proxy_to_assistant_service
-
-    body_bytes = body.model_dump_json(exclude_none=True).encode("utf-8")
-    return await proxy_to_assistant_service(
-        request,
-        user,
-        path="local-nodes/pairing/challenges",
-        body=body_bytes,
-    )
-
-
-@router.get("/local-nodes")
-async def list_local_nodes(
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-):
-    return await _proxy_local_node_read(request, user, path="")
-
-
-@router.post("/local-nodes/{device_id}/revoke")
-async def revoke_local_node(
-    device_id: LocalNodeOpaqueId,
-    body: LocalNodeRevokeRequest,
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-):
-    """Revoke an owner-bound device without exposing host action execution."""
-
-    from ._assistant_proxy import proxy_to_assistant_service
-
-    body_bytes = body.model_dump_json(exclude_none=True).encode("utf-8")
-    return await proxy_to_assistant_service(
-        request,
-        user,
-        path=f"local-nodes/{device_id}/revoke",
-        body=body_bytes,
-    )
-
-
-@router.get("/local-nodes/{device_id}/status")
-async def get_local_node_status(
-    device_id: LocalNodeOpaqueId,
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-):
-    return await _proxy_local_node_read(request, user, path=f"{device_id}/status")
-
-
-@router.get("/local-nodes/{device_id}/capabilities")
-async def get_local_node_capabilities(
-    device_id: LocalNodeOpaqueId,
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-):
-    return await _proxy_local_node_read(request, user, path=f"{device_id}/capabilities")
-
-
-@router.get("/local-nodes/{device_id}/doctor")
-async def get_local_node_doctor(
-    device_id: LocalNodeOpaqueId,
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-):
-    return await _proxy_local_node_read(request, user, path=f"{device_id}/doctor")
-
-
-@router.get("/local-nodes/{device_id}/grants")
-async def list_local_node_grants(
-    device_id: LocalNodeOpaqueId,
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-):
-    return await _proxy_local_node_read(request, user, path=f"{device_id}/grants")
-
-
-@router.delete("/local-nodes/{device_id}/grants/{grant_id}")
-async def revoke_local_node_grant(
-    device_id: LocalNodeOpaqueId,
-    grant_id: LocalNodeOpaqueId,
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-):
-    """Remove a grant; new grants require the trusted device channel."""
-
-    from ._assistant_proxy import proxy_to_assistant_service
-
-    return await proxy_to_assistant_service(
-        request,
-        user,
-        path=f"local-nodes/{device_id}/grants/{grant_id}",
-    )
-
-
-@router.get("/local-nodes/{device_id}/events")
-async def list_local_node_events(
-    device_id: LocalNodeOpaqueId,
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-):
-    return await _proxy_local_node_read(request, user, path=f"{device_id}/events")
-
-
 @router.get("/tools", response_model=ToolsListResponse)
 async def list_tools(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ) -> ToolsListResponse:
-    """Thin proxy — assistant-service owns the tool registry."""
-    from ._assistant_proxy import proxy_to_assistant_service
+    """List the Gateway-owned, tenant-authorized declarative catalog."""
 
-    return await proxy_to_assistant_service(request, user, path="tools")
+    if not user.is_authenticated:
+        raise HTTPException(status_code=401, detail="authentication required")
+    try:
+        _, records = load_assistant_capability_catalog()
+        policies = await load_gateway_assistant_policies(request, user, records)
+        tools = project_assistant_tools(user, tenant_policy=policies)
+    except HTTPException:
+        raise
+    except AssistantCapabilityCatalogError as exc:
+        record_internal_exception(logger, "assistant.gateway.tools.catalog_failure", exc)
+        raise HTTPException(
+            status_code=503, detail="Assistant tool catalog is unavailable"
+        ) from None
+    return ToolsListResponse(tools=tools)
 
 
 @router.get("/policies", response_model=AssistantPoliciesResponse)
@@ -438,10 +466,19 @@ async def get_policies(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ) -> AssistantPoliciesResponse:
-    """Thin proxy — policy snapshot comes from assistant-service."""
-    from ._assistant_proxy import proxy_to_assistant_service
+    """Return the Gateway-owned, tenant-scoped policy snapshot."""
 
-    return await proxy_to_assistant_service(request, user, path="policies")
+    if not user.is_authenticated:
+        raise HTTPException(status_code=401, detail="authentication required")
+    try:
+        _, records = load_assistant_capability_catalog()
+        policies = await load_gateway_assistant_policies(request, user, records)
+    except HTTPException:
+        raise
+    except AssistantCapabilityCatalogError as exc:
+        record_internal_exception(logger, "assistant.gateway.policies.catalog_failure", exc)
+        raise HTTPException(status_code=503, detail="Assistant policy is unavailable") from None
+    return AssistantPoliciesResponse(policies=policies)
 
 
 @router.post("/approvals/{approval_id}", response_model=ApprovalResponse)
@@ -451,8 +488,7 @@ async def approve_tool_call(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ) -> ApprovalResponse:
-    """Thin proxy — approval state lives in ``assistant_tool_approvals``
-    (ADR-004). Gateway forwards the request body to assistant-service."""
+    """Project approval state through the Gateway Agent Runtime control plane."""
     database = getattr(request.app.state, "database", None)
     if database is not None:
         try:
@@ -518,7 +554,10 @@ async def approve_tool_call(
             )
     raise HTTPException(
         status_code=409,
-        detail={"code": "AGENT_RUNTIME_ONLY", "message": "Approval state is owned by the Agent Runtime."},
+        detail={
+            "code": "AGENT_RUNTIME_ONLY",
+            "message": "Approval state is owned by the Agent Runtime.",
+        },
     )
 
 
@@ -698,7 +737,11 @@ async def _ensure_agent_runtime_session(
             )
         except SessionAlreadyExistsError:
             session = await session_manager.get(session_id)
-            if session is None or session.user_id != user.user_id or session.tenant_id != user.tenant_id:
+            if (
+                session is None
+                or session.user_id != user.user_id
+                or session.tenant_id != user.tenant_id
+            ):
                 raise HTTPException(status_code=404, detail="Session not found") from None
 
     assignment_store = getattr(request.app.state, "assistant_runtime_assignments", None)
@@ -722,7 +765,9 @@ async def _ensure_agent_runtime_session(
                 user_id=user.user_id,
                 session_id=session_id,
                 runtime_owner="agent_runtime",
-                kernel_revision=getattr(request.app.state, "assistant_runtime_kernel_revision", None),
+                kernel_revision=getattr(
+                    request.app.state, "assistant_runtime_kernel_revision", None
+                ),
                 assignment_reason="single_kernel",
             )
     if assignment.runtime_owner != "agent_runtime":
@@ -793,6 +838,7 @@ async def _start_agent_runtime_turn(
             max_tokens=body.max_tokens,
             temperature=body.temperature,
             memory_mode=body.memory_mode,
+            memory_profile=body.memory_profile,
             readonly_capabilities=_agent_runtime_readonly_capabilities(body),
         )
     except Exception as exc:
@@ -813,18 +859,17 @@ async def chat(
     user: UserContext = Depends(get_user_context),
 ) -> AssistantChatResponse:
     """
-    Non-streaming chat completion — thin proxy to assistant-service.
+    Non-streaming chat completion through the Agent Runtime control plane.
 
     Gateway responsibilities (defence-in-depth, mirror of /chat/stream):
       - per-user rate limit
       - model-permission check (users can only call their allowed models)
       - session-ownership check (users can only resume their own sessions)
 
-    Everything else — model routing, tool execution, persistence — runs
-    inside the assistant-service container.
+    Model routing, tool execution and persistence remain Runtime-owned.
     """
     from ..deps import enforce_rate_limit
-    from ._assistant_proxy import reject_client_agent_forgery
+    from ._agent_runtime_headers import reject_client_agent_forgery
 
     try:
         raw_body = await request.json()
@@ -836,8 +881,7 @@ async def chat(
     )
     await enforce_rate_limit(request, user, operation="assistant_chat")
 
-    # Model-permission authz. assistant-service enforces tenant-scoped
-    # model lookups on its side too, but belt-and-braces at the edge
+    # Model-permission authz is enforced at the Gateway edge before Runtime.
     # makes the 403 come back fast without a proxy round-trip.
     model_id = _effective_chat_model_id(request, body.model_id)
     model_meta = getattr(request.app.state, "model_meta", None)
@@ -890,7 +934,7 @@ async def chat_stream(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ):
-    """Streaming chat completion (SSE) — HTTP proxy to assistant-service.
+    """Streaming chat completion (SSE) through the Agent Runtime.
 
     Gateway responsibilities (preserved from the in-process version):
       - JWT auth via ``get_user_context``
@@ -898,12 +942,10 @@ async def chat_stream(
       - Model-permission check (users can only call models they're allowed to)
       - Session-ownership check (users can only resume their own sessions)
 
-    Everything else — model routing, tool execution, SSE event assembly —
-    runs in the assistant-service container. Stopping assistant-service
-    returns a clean 502 for this endpoint; restarting it resumes chat
-    within the next request via the proxy's circuit breaker.
+    Runtime failures remain explicit and the public SSE shape is preserved.
     """
     from ..deps import enforce_rate_limit
+
     await enforce_rate_limit(request, user, operation="assistant_chat")
 
     # Read request body ONCE. We need it for authz parsing and the proxy
@@ -922,7 +964,7 @@ async def chat_stream(
     except ValidationError as exc:
         raise RequestValidationError(exc.errors()) from exc
 
-    from ._assistant_proxy import reject_client_agent_forgery
+    from ._agent_runtime_headers import reject_client_agent_forgery
 
     reject_client_agent_forgery(
         request,
@@ -1159,13 +1201,11 @@ async def delete_session(
     Permanently deletes the session and all its message history.
     User isolation is enforced.
     """
-    from ._route_flags import proxied
-
     session_manager = get_session_manager(request)
 
     try:
-        # Verify ownership against the gateway's canonical session row before
-        # asking assistant-service to clear its runtime/session-schema state.
+        # Verify ownership against the Gateway's canonical session row before
+        # tombstoning the authoritative Agent Runtime thread.
         session = await session_manager.get(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -1173,23 +1213,17 @@ async def delete_session(
         if session.user_id != user.user_id or session.tenant_id != user.tenant_id:
             raise HTTPException(status_code=404, detail="Session not found")
 
-        if proxied("SESSIONS"):
-            from ._assistant_proxy import proxy_to_assistant_service
-
-            upstream_response = await proxy_to_assistant_service(
-                request,
-                user,
-                path=f"sessions/{session_id}",
-            )
-            if getattr(upstream_response, "status_code", 200) >= 400:
-                return upstream_response
+        control = _agent_runtime_control(request)
+        await control.cleanup_session(
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            session_id=session_id,
+        )
 
         await session_manager.delete(session_id)
         if await session_manager.get(session_id) is not None:
             raise HTTPException(status_code=503, detail="Session deletion was not completed")
 
-        if proxied("SESSIONS"):
-            return upstream_response
         return {"session_id": session_id, "status": "deleted"}
     except HTTPException:
         raise
@@ -1293,20 +1327,68 @@ async def cancel_task(
     body: TaskCancelRequest | None = None,
     user: UserContext = Depends(get_user_context),
 ) -> TaskCancelResponse:
-    """Authenticate at the edge and cancel in the owning Assistant process."""
+    """Map the V1 task identifier to the owning Runtime run/turn interrupt."""
 
-    from ._assistant_proxy import proxy_to_assistant_service
+    database = getattr(request.app.state, "database", None)
+    if database is None:
+        raise HTTPException(status_code=503, detail="Agent Runtime is unavailable")
+    try:
+        run_uuid = uuid.UUID(task_id)
+    except ValueError:
+        run_uuid = None
+    row = await database.fetchrow(
+        """
+        SELECT run_id, session_id, harness_thread_id, harness_turn_id, status
+          FROM assistant_runs
+         WHERE tenant_id = $1 AND user_id = $2 AND engine = 'agent_runtime'
+           AND (
+                 ($3::uuid IS NOT NULL AND run_id = $3::uuid)
+                 OR harness_turn_id = $4
+               )
+         ORDER BY started_at DESC
+         LIMIT 1
+        """,
+        user.tenant_id,
+        user.user_id,
+        run_uuid,
+        task_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Task not found")
+    status = str(row.get("status") or "")
+    session_id = str(row.get("session_id") or "")
+    if status not in {"running", "pending"}:
+        return TaskCancelResponse(
+            task_id=task_id,
+            session_id=session_id,
+            cancelled=status == "cancelled",
+            message="Task is already complete",
+        )
+    thread_id = str(row.get("harness_thread_id") or "")
+    turn_id = str(row.get("harness_turn_id") or row.get("run_id") or "")
+    if not thread_id or not turn_id or not session_id:
+        raise HTTPException(status_code=503, detail="Agent Runtime task mapping is unavailable")
+    control = _agent_runtime_control(request)
+    try:
+        await control.interrupt_turn(
+            runtime_thread_id=thread_id,
+            turn_id=turn_id,
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            session_id=session_id,
+            reason=(body.reason if body is not None else "client_interrupt"),
+        )
+    except Exception as exc:
+        from ...services.agent_runtime import AgentRuntimeControlError
 
-    body_bytes = json.dumps(
-        body.model_dump(exclude_none=True) if body is not None else {},
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return await proxy_to_assistant_service(
-        request,
-        user,
-        path=f"tasks/{task_id}/cancel",
-        body=body_bytes,
+        if isinstance(exc, AgentRuntimeControlError):
+            raise HTTPException(status_code=exc.status_code, detail=exc.code) from None
+        raise HTTPException(status_code=503, detail="Agent Runtime interrupt failed") from None
+    return TaskCancelResponse(
+        task_id=task_id,
+        session_id=session_id,
+        cancelled=True,
+        message="Cancellation requested",
     )
 
 
@@ -1485,11 +1567,7 @@ async def create_artifact(
         except Exception as exc:
             logger.error("Failed to verify artifact session ownership: %s", exc)
             raise HTTPException(status_code=500, detail="Failed to verify session") from exc
-        if (
-            not session
-            or session.user_id != user.user_id
-            or session.tenant_id != user.tenant_id
-        ):
+        if not session or session.user_id != user.user_id or session.tenant_id != user.tenant_id:
             raise HTTPException(status_code=404, detail="Session not found")
 
         # Decode base64 content
@@ -1660,178 +1738,6 @@ async def download_artifact(
         _raise_artifact_not_found_if_schema_missing(e)
         logger.error(f"Failed to download artifact: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-# =========================================================================
-# Image Generation Endpoints — Phase 5e thin proxy to assistant-service.
-# Real implementation lives in
-#   apps/assistant-service/src/assistant_service/api/routes/images.py
-# =========================================================================
-
-
-@router.post("/generate-image", response_model=ImageGenerationResponse)
-async def generate_image(
-    body: ImageGenerationRequest,
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-) -> ImageGenerationResponse:
-    """Thin proxy — assistant-service owns image generation routing
-    (Gemini / Doubao / DashScope) and multi-turn session history."""
-    from ..deps import enforce_rate_limit
-
-    await enforce_rate_limit(request, user, operation="image_generate")
-
-    from ._assistant_proxy import proxy_to_assistant_service
-
-    body_bytes = await request.body()
-    return await proxy_to_assistant_service(
-        request,
-        user,
-        path="generate-image",
-        body=body_bytes,
-    )
-
-
-@router.post("/generate-image-async", response_model=AsyncImageTaskSubmitResponse)
-async def submit_image_generation(
-    body: AsyncImageGenerationRequest,
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-) -> AsyncImageTaskSubmitResponse:
-    """Thin proxy — background task lives in assistant-service's in-memory store."""
-    from ..deps import enforce_rate_limit
-
-    await enforce_rate_limit(request, user, operation="image_generate")
-
-    from ._assistant_proxy import proxy_to_assistant_service
-
-    body_bytes = await request.body()
-    return await proxy_to_assistant_service(
-        request,
-        user,
-        path="generate-image-async",
-        body=body_bytes,
-    )
-
-
-@router.get("/image-task/{task_id}", response_model=AsyncImageTaskStatusResponse)
-async def get_image_task_status(
-    task_id: str,
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-) -> AsyncImageTaskStatusResponse:
-    """Thin proxy — polls the task store in assistant-service."""
-    from ._assistant_proxy import proxy_to_assistant_service
-
-    return await proxy_to_assistant_service(
-        request,
-        user,
-        path=f"image-task/{task_id}",
-    )
-
-
-@router.post("/image-blobs/upload-url", response_model=ImageBlobUploadUrlResponse)
-async def create_image_blob_upload_url(
-    body: ImageBlobUploadUrlRequest,
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-) -> ImageBlobUploadUrlResponse:
-    from ..deps import enforce_rate_limit
-
-    await enforce_rate_limit(request, user, operation="image_generate")
-
-    from ._assistant_proxy import proxy_to_assistant_service
-
-    body_bytes = await request.body()
-    return await proxy_to_assistant_service(
-        request,
-        user,
-        path="image-blobs/upload-url",
-        body=body_bytes,
-    )
-
-
-@router.post("/image-blobs/complete", response_model=ImageBlobResponse)
-async def complete_image_blob_upload(
-    body: ImageBlobCompleteRequest,
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-) -> ImageBlobResponse:
-    from ..deps import enforce_rate_limit
-
-    await enforce_rate_limit(request, user, operation="image_generate")
-
-    from ._assistant_proxy import proxy_to_assistant_service
-
-    body_bytes = await request.body()
-    return await proxy_to_assistant_service(
-        request,
-        user,
-        path="image-blobs/complete",
-        body=body_bytes,
-    )
-
-
-@router.post("/image-blobs/fetch-url", response_model=ImageBlobResponse)
-async def fetch_image_blob_from_url(
-    body: ImageBlobFetchUrlRequest,
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-) -> ImageBlobResponse:
-    from ..deps import enforce_rate_limit
-
-    await enforce_rate_limit(request, user, operation="image_generate")
-
-    from ._assistant_proxy import proxy_to_assistant_service
-
-    body_bytes = await request.body()
-    return await proxy_to_assistant_service(
-        request,
-        user,
-        path="image-blobs/fetch-url",
-        body=body_bytes,
-    )
-
-
-@router.get("/artifacts/{artifact_id}/download-url")
-async def get_artifact_download_url(
-    artifact_id: str,
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-):
-    """Thin proxy — re-sign a presigned URL for an artifact variant.
-
-    Query params: ``variant`` (display|raw|thumbnail, default display) and
-    ``expires_in`` (60..3600, default 3600). Owner-scoped — 404 on
-    cross-owner access. See assistant-service for the full contract."""
-    # Query string is auto-appended by ``proxy.forward`` from request.url.query.
-    from ._assistant_proxy import proxy_to_assistant_service
-
-    return await proxy_to_assistant_service(
-        request,
-        user,
-        path=f"artifacts/{artifact_id}/download-url",
-    )
-
-
-@router.get("/image-sessions/{session_id}")
-async def get_image_session_view(
-    session_id: str,
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-):
-    """Thin proxy — paginated turn history for an image session.
-
-    Query params: ``limit`` (1..200, default 50), ``cursor`` (opaque),
-    ``include_urls`` (bool, default false). Owner-scoped."""
-    # Query string is auto-appended by ``proxy.forward`` from request.url.query.
-    from ._assistant_proxy import proxy_to_assistant_service
-
-    return await proxy_to_assistant_service(
-        request,
-        user,
-        path=f"image-sessions/{session_id}",
-    )
 
 
 # =========================================================================

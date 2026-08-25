@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -10,9 +9,12 @@ from pydantic import ValidationError
 
 from src.api import deps
 from src.api.schemas.assistant import AssistantChatRequest
-from src.api.v1 import _assistant_proxy
 from src.api.v1 import assistant as assistant_routes
-from src.api.v1.assistant import _check_model_permission, _user_can_access_model
+from src.api.v1.assistant import (
+    _check_model_permission,
+    _effective_chat_model_id,
+    _user_can_access_model,
+)
 from src.core.auth.user_resolver import UserContext
 
 
@@ -64,15 +66,11 @@ def test_assistant_request_openapi_marks_plan_confirmation_as_false_only() -> No
     assert schema["default"] is False
 
 
-def test_streaming_gateway_rejects_plan_confirmation_before_proxy(
+def test_streaming_gateway_rejects_plan_confirmation_before_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def no_rate_limit(*args, **kwargs) -> None:
         del args, kwargs
-
-    async def forbidden_proxy(*args, **kwargs):
-        del args, kwargs
-        raise AssertionError("unsupported plan confirmation reached the downstream service")
 
     app = FastAPI()
     app.include_router(assistant_routes.router)
@@ -82,7 +80,6 @@ def test_streaming_gateway_rejects_plan_confirmation_before_proxy(
         is_authenticated=True,
     )
     monkeypatch.setattr(deps, "enforce_rate_limit", no_rate_limit)
-    monkeypatch.setattr(_assistant_proxy, "proxy_to_assistant_service", forbidden_proxy)
 
     response = TestClient(app).post(
         "/assistant/chat/stream",
@@ -93,87 +90,56 @@ def test_streaming_gateway_rejects_plan_confirmation_before_proxy(
     assert "confirm_plan" in response.text
 
 
-@pytest.mark.parametrize("path", ["/assistant/chat", "/assistant/chat/stream"])
-def test_gateway_resolves_authorizes_and_proxies_omitted_default_model(
-    path: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+@pytest.mark.asyncio
+async def test_gateway_resolves_and_authorizes_omitted_default_model() -> None:
     permission_lookups: list[tuple[str, str]] = []
-    proxied_bodies: list[dict[str, object]] = []
-
-    async def no_rate_limit(*args, **kwargs) -> None:
-        del args, kwargs
 
     async def get_access_level(tenant_id: str, model_id: str) -> str:
         permission_lookups.append((tenant_id, model_id))
         return "public"
 
-    async def proxy(_request, _user, *, path: str, body: bytes):
-        payload = json.loads(body)
-        proxied_bodies.append(payload)
-        if path == "chat":
-            return {
-                "content": "ok",
-                "usage": {},
-                "contexts": [],
-                "duration_ms": 1,
-                "model_id": payload["model_id"],
-                "session_id": None,
-            }
-        return {"proxied": True}
-
-    app = FastAPI()
-    app.state.settings = SimpleNamespace(default_model="tenant-default-model")
-    app.state.model_meta = SimpleNamespace(get_access_level=get_access_level)
-    app.include_router(assistant_routes.router)
-    app.dependency_overrides[deps.get_user_context] = lambda: UserContext(
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(settings=SimpleNamespace(default_model="tenant-default-model")))
+    )
+    user = UserContext(
         user_id="user-1",
         tenant_id="tenant-1",
         is_authenticated=True,
     )
-    monkeypatch.setattr(deps, "enforce_rate_limit", no_rate_limit)
-    monkeypatch.setattr(_assistant_proxy, "proxy_to_assistant_service", proxy)
+    model_id = _effective_chat_model_id(request, None)
+    await _check_model_permission(
+        user,
+        model_id,
+        SimpleNamespace(get_access_level=get_access_level),
+    )
 
-    response = TestClient(app).post(path, json={"message": "hello"})
-
-    assert response.status_code == 200, response.text
+    assert model_id == "tenant-default-model"
     assert permission_lookups == [("tenant-1", "tenant-default-model")]
-    assert proxied_bodies == [{"message": "hello", "model_id": "tenant-default-model"}]
 
 
-@pytest.mark.parametrize("path", ["/assistant/chat", "/assistant/chat/stream"])
-def test_gateway_denies_omitted_default_model_before_proxy(
-    path: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def no_rate_limit(*args, **kwargs) -> None:
-        del args, kwargs
-
+@pytest.mark.asyncio
+async def test_gateway_denies_omitted_restricted_default_model_before_runtime() -> None:
     async def get_access_level(_tenant_id: str, model_id: str) -> str:
         assert model_id == "restricted-default-model"
         return "premium"
 
-    async def forbidden_proxy(*args, **kwargs):
-        del args, kwargs
-        raise AssertionError("restricted default model reached the downstream service")
-
-    app = FastAPI()
-    app.state.settings = SimpleNamespace(default_model="restricted-default-model")
-    app.state.model_meta = SimpleNamespace(get_access_level=get_access_level)
-    app.include_router(assistant_routes.router)
-    app.dependency_overrides[deps.get_user_context] = lambda: UserContext(
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(settings=SimpleNamespace(default_model="restricted-default-model")))
+    )
+    user = UserContext(
         user_id="user-1",
         tenant_id="tenant-1",
         tier="normal",
         is_authenticated=True,
     )
-    monkeypatch.setattr(deps, "enforce_rate_limit", no_rate_limit)
-    monkeypatch.setattr(_assistant_proxy, "proxy_to_assistant_service", forbidden_proxy)
-
-    response = TestClient(app).post(path, json={"message": "hello"})
-
-    assert response.status_code == 403
-    assert "restricted-default-model" in response.text
+    model_id = _effective_chat_model_id(request, None)
+    with pytest.raises(HTTPException) as exc:
+        await _check_model_permission(
+            user,
+            model_id,
+            SimpleNamespace(get_access_level=get_access_level),
+        )
+    assert exc.value.status_code == 403
 
 
 @pytest.mark.parametrize(

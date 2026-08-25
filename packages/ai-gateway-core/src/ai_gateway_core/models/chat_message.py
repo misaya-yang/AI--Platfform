@@ -1,9 +1,7 @@
 """Shared ``ChatMessage`` dataclass.
 
-Canonical home for the wire-level LLM chat-message shape. Lives here (not
-in ``assistant_service``) so downstream modules — quiz generator, streaming
-writer, skill executor, and any gateway-side code that mirrors the shape —
-can construct instances without importing from the assistant service.
+Canonical home for the wire-level LLM chat-message shape used by service-neutral
+downstream modules.
 """
 
 from __future__ import annotations
@@ -50,8 +48,7 @@ def normalize_chat_message(msg: Any) -> ChatMessage:
     """Coerce a dict or ChatMessage into a ChatMessage.
 
     Used by ``ModelRegistry.chat_completion`` to accept either shape from
-    callers — duck-typed so both gateway and assistant-service code can
-    pass native dicts without materialising the dataclass first."""
+    callers can pass native dicts without materialising the dataclass first."""
     if isinstance(msg, ChatMessage):
         return msg
     if isinstance(msg, dict):

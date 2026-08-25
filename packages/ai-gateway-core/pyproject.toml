@@ -5,18 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "ai-gateway-core"
 version = "0.1.1"
-description = "Shared primitives (logging, exceptions, enums, protocols, proxy framework) consumed by ai-gateway and assistant-service."
+description = "Shared primitives (logging, exceptions, enums, protocols, proxy framework) consumed by the Gateway and Knowledge services."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "AI Gateway Maintainers" }]
-# Runtime deps the package itself imports. After Phase 5f Batch C the
-# package owns concretes (DatabaseStorage, S3 storage, skill parser,
-# usage recorder) that previously lived in the gateway and pulled their
-# deps through the gateway's pyproject. Now ai-gateway-core must declare
-# them directly so a fresh `pip install ./packages/ai-gateway-core` in
-# the assistant-service container is self-sufficient. Trap #3 in
-# reference_server_deployment.md describes this class of regression.
+# Runtime deps the package itself imports. The package owns concretes
+# (DatabaseStorage, S3 storage, skill parser, usage recorder) and declares
+# their dependencies directly so standalone installations remain complete.
 dependencies = [
     "httpx>=0.28.0",
     "fastapi>=0.124.0",

@@ -1,22 +1,26 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 
 from ai_gateway_core.auth import UserContext
 
-if TYPE_CHECKING:
-    # ``FileProcessor`` stays AS-internal (its PDF/VLM pipeline drags
-    # document parsers + VLM services with it). process_file_task only
-    # needs duck-typed ``.preprocess_file(file_path, user, model_supports_vision)``
-    # so the annotation is TYPE_CHECKING-only; the param accepts any
-    # object with that coroutine.
-    from assistant_service.core.files.file_processor import FileProcessor
+
+class FileProcessorProtocol(Protocol):
+    async def preprocess_file(
+        self,
+        *,
+        file_path: str,
+        user: UserContext,
+        model_supports_vision: bool,
+    ) -> Any: ...
 
 logger = logging.getLogger(__name__)
 
 
-async def process_file_task(payload: dict[str, Any], file_processor: "FileProcessor") -> None:
+async def process_file_task(
+    payload: dict[str, Any], file_processor: FileProcessorProtocol
+) -> None:
     """
     Background task to process an uploaded file.
 

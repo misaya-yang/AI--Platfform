@@ -10,7 +10,6 @@ from ...services.llm.provider_setup import configured_providers
 from ...services.registry.health_monitor import HealthMonitor
 from ...services.registry.service_registry import ServiceRegistry
 from ..deps import get_health_monitor, get_registry, get_user_context
-from ._assistant_status import get_assistant_health
 
 logger = get_logger(__name__)
 
@@ -79,9 +78,17 @@ async def all_services_health(
         for service_id, s in monitor.all_status().items()
     }
 
-    # 添加 AI 助手虚拟服务的健康状态。Assistant 已拆为独立容器，
-    # 这里必须检查远端 /health，不能再用旧的 in-process state。
-    health_status["assistant"] = await get_assistant_health()
+    control = getattr(request.app.state, "agent_runtime_control", None)
+    worker = getattr(request.app.state, "image_task_worker", None)
+    health_status["agent_runtime"] = {
+        "status": "healthy" if control is not None else "unavailable",
+    }
+    health_status["image_worker"] = {
+        "status": "healthy"
+        if worker is not None
+        and getattr(getattr(worker, "_loop_task", None), "done", lambda: True)() is False
+        else "unavailable",
+    }
 
     return health_status
 
@@ -98,9 +105,22 @@ async def service_health(
     Requires admin authentication.
     """
     require_admin(user)
-    # 处理 AI 助手虚拟服务
-    if service_id == "assistant":
-        return {"service_id": "assistant", **await get_assistant_health()}
+    if service_id == "agent_runtime":
+        return {
+            "service_id": service_id,
+            "status": "healthy"
+            if getattr(request.app.state, "agent_runtime_control", None) is not None
+            else "unavailable",
+        }
+    if service_id == "image_worker":
+        worker = getattr(request.app.state, "image_task_worker", None)
+        return {
+            "service_id": service_id,
+            "status": "healthy"
+            if worker is not None
+            and getattr(getattr(worker, "_loop_task", None), "done", lambda: True)() is False
+            else "unavailable",
+        }
 
     # 处理数据库中的服务
     status = monitor.get_status(service_id)

@@ -9,7 +9,7 @@ import pytest
 
 def test_storage_signing_key_is_loaded_as_a_redacted_secret(monkeypatch) -> None:
     monkeypatch.setenv(
-        "GATEWAY_ASSISTANT_SHARED_SECRET",
+        "AI_PLATFORM_INTERNAL_TOKEN",
         "unit-test-shared-secret",
     )
     monkeypatch.setenv("KNOWLEDGE_APP__ALLOW_ANONYMOUS", "false")
@@ -35,7 +35,7 @@ def test_required_router_import_failure_aborts_app_creation(
     route_module: str,
 ) -> None:
     """A broken required router must not produce a partially ready app."""
-    monkeypatch.setenv("GATEWAY_ASSISTANT_SHARED_SECRET", "unit-test-shared-secret")
+    monkeypatch.setenv("AI_PLATFORM_INTERNAL_TOKEN", "unit-test-shared-secret")
     monkeypatch.setenv("KNOWLEDGE_APP__ALLOW_ANONYMOUS", "false")
 
     from knowledge_service import main
@@ -59,7 +59,7 @@ async def test_core_worker_startup_failure_never_marks_service_ready(
     monkeypatch,
 ) -> None:
     """A failed core worker must abort lifespan and release opened resources."""
-    monkeypatch.setenv("GATEWAY_ASSISTANT_SHARED_SECRET", "unit-test-shared-secret")
+    monkeypatch.setenv("AI_PLATFORM_INTERNAL_TOKEN", "unit-test-shared-secret")
     monkeypatch.setenv("KNOWLEDGE_APP__ALLOW_ANONYMOUS", "false")
 
     from ai_gateway_core import tracing
@@ -139,7 +139,7 @@ async def test_unreachable_qdrant_probe_aborts_startup_client_initialization(
     monkeypatch,
 ) -> None:
     """A client object is not readiness evidence when its bounded probe fails."""
-    monkeypatch.setenv("GATEWAY_ASSISTANT_SHARED_SECRET", "unit-test-shared-secret")
+    monkeypatch.setenv("AI_PLATFORM_INTERNAL_TOKEN", "unit-test-shared-secret")
     monkeypatch.setenv("KNOWLEDGE_APP__ALLOW_ANONYMOUS", "false")
 
     import qdrant_client

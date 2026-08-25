@@ -67,6 +67,40 @@ from .services.metrics.realtime_metrics import init_realtime_metrics
 
 logger = get_logger(__name__)
 
+
+async def _probe_http_service(
+    name: str,
+    base_url: str | None,
+    checks: dict[str, str],
+    *,
+    path: str = "/health",
+    required: bool = False,
+) -> bool:
+    """Probe a service's explicitly configured health contract.
+
+    The Gateway and Knowledge services expose ``/health`` while the Rust
+    Agent Runtime deliberately exposes only ``/health/live`` and
+    ``/health/ready``.  Keeping the path explicit prevents a healthy Runtime
+    from being classified as unhealthy because of a synthetic 404 probe.
+    """
+    if not base_url:
+        checks[name] = "not_configured"
+        return not required
+
+    url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+    try:
+        timeout = httpx.Timeout(2.0, connect=1.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(url)
+        if 200 <= response.status_code < 300:
+            checks[name] = "healthy"
+            return True
+        checks[name] = f"status_{response.status_code}"
+        return False
+    except Exception as e:
+        checks[name] = f"error: {type(e).__name__}"
+        return False
+
 OPENAPI_TAGS = [
     {
         "name": "Health",
@@ -158,6 +192,11 @@ def create_app() -> FastAPI:
         contact={"name": "AI Gateway Maintainers", "email": "maintainers@example.com"},
         license_info={"name": "MIT"},
     )
+    # The Gateway-owned Confluence broker is opt-in at runtime.  Startup
+    # enables it only after the database and connector authority are ready.
+    # Grant and catalog credential backends still fail independently closed.
+    app.state.confluence_capability_enabled = False
+    app.state.mcp_secret_resolver = None
 
     # ========== 中间件配置 ==========
     # 注意：中间件执行顺序与添加顺序相反（后添加的先执行）
@@ -301,9 +340,7 @@ def create_app() -> FastAPI:
     # container singletons (DB pool, Redis, billing interceptor). Health-probe
     # paths bypass DRAIN entirely so the LB still sees readiness during drain.
     #
-    # Cross-link: same install pattern lives in
-    # ``apps/assistant-service/src/assistant_service/main.py`` and
-    # ``apps/knowledge-service/src/knowledge_service/main.py``.
+    # The Knowledge Service uses the same signal/drain contract.
     from ai_gateway_core.proxy import DrainMiddleware
 
     app.add_middleware(DrainMiddleware)
@@ -312,7 +349,7 @@ def create_app() -> FastAPI:
     # below; remember Starlette executes last-added FIRST, so CORS still
     # wraps OTel). Reads W3C ``traceparent`` from inbound headers, opens
     # a server span, and exposes the active context on ``request.state``
-    # so the proxy layer forwards it intact to assistant-service / KS.
+    # so downstream internal service calls can forward it intact.
     # ``init_tracing`` is called in the startup handler below so the
     # middleware's tracer reference is valid by request time.
     from ai_gateway_core.tracing import OTelInboundMiddleware
@@ -340,14 +377,43 @@ def create_app() -> FastAPI:
     # ========== 路由 ==========
 
     app.include_router(api_router, prefix="/api/v1")
+    from .api.v1.local_nodes import router as local_node_router
+    from .api.v1.agent_local_nodes import router as internal_local_node_router
+
+    # The public Local Node compatibility alias is backed by the same
+    # Gateway-owned control plane; no Assistant implementation is mounted.
+    app.include_router(local_node_router, prefix="/api/v1")
+    app.include_router(local_node_router, prefix="/api/v1/assistant")
+    app.include_router(internal_local_node_router)
+    # Image generation is Gateway-owned.  Mount this router exactly once,
+    # outside the compatibility Assistant router, so every public image path
+    # has one implementation and one OpenAPI operation.
+    from .api.v1.agent_images import router as agent_images_router
+
+    app.include_router(agent_images_router, prefix="/api/v1")
     # Native Agent Thread/Turn/Item API. V1 remains the compatibility surface
     # for one complete release window; V2 is the native Agent Runtime contract.
     from .api.v2.agent import router as agent_v2_router
 
     app.include_router(agent_v2_router, prefix="/api/v2")
     from .api.internal.agent_model_plane import router as agent_model_plane_router
+    from .api.internal.agent_capabilities import router as agent_capabilities_router
+    from .api.internal.confluence_capabilities import router as confluence_capabilities_router
+    from .api.internal.image_capabilities import router as image_capabilities_router
+    from .api.internal.office_artifacts import router as office_artifacts_router
+    from .api.internal_mcp_broker import router as internal_mcp_broker_router
 
     app.include_router(agent_model_plane_router)
+    app.include_router(agent_capabilities_router)
+    from .api.internal.attachment_capabilities import router as attachment_capabilities_router
+    from .api.internal.python_code_capabilities import router as python_code_capabilities_router
+
+    app.include_router(attachment_capabilities_router)
+    app.include_router(python_code_capabilities_router)
+    app.include_router(confluence_capabilities_router)
+    app.include_router(image_capabilities_router)
+    app.include_router(office_artifacts_router)
+    app.include_router(internal_mcp_broker_router)
     from .api.v1.agent_public import document_router as agent_embed_document_router
 
     app.include_router(agent_embed_document_router)
@@ -402,7 +468,8 @@ def create_app() -> FastAPI:
             "database": "unknown",
             "redis": "unknown",
             "knowledge_service": "unknown",
-            "assistant_service": "unknown",
+            "agent_runtime": "unknown",
+            "image_worker": "unknown",
         }
         healthy = True
 
@@ -438,31 +505,32 @@ def create_app() -> FastAPI:
         else:
             checks["redis"] = "disabled"
 
-        async def probe_http_service(name: str, base_url: str | None) -> bool:
-            if not base_url:
-                checks[name] = "not_configured"
-                return True
-
-            url = f"{base_url.rstrip('/')}/health"
-            try:
-                timeout = httpx.Timeout(2.0, connect=1.0)
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    response = await client.get(url)
-                if 200 <= response.status_code < 300:
-                    checks[name] = "healthy"
-                    return True
-                checks[name] = f"status_{response.status_code}"
-                return False
-            except Exception as e:
-                checks[name] = f"error: {type(e).__name__}"
-                return False
-
+        runtime_url = os.environ.get("AI_PLATFORM_AGENT_RUNTIME_URL") or getattr(
+            getattr(app.state, "agent_runtime_control", None), "runtime_url", None
+        )
         service_results = await asyncio.gather(
-            probe_http_service("knowledge_service", os.environ.get("KB_SERVICE_URL")),
-            probe_http_service("assistant_service", os.environ.get("ASSISTANT_SERVICE_URL")),
+            _probe_http_service("knowledge_service", os.environ.get("KB_SERVICE_URL"), checks),
+            _probe_http_service(
+                "agent_runtime",
+                runtime_url,
+                checks,
+                path="/health/ready",
+                required=True,
+            ),
         )
         if not all(service_results):
             healthy = False
+
+        image_worker = getattr(app.state, "image_task_worker", None)
+        worker_task = getattr(image_worker, "_loop_task", None)
+        if image_worker is None or worker_task is None or worker_task.done():
+            checks["image_worker"] = "not_running"
+            healthy = False
+        elif getattr(image_worker, "_drain", False):
+            checks["image_worker"] = "draining"
+            healthy = False
+        else:
+            checks["image_worker"] = "healthy"
 
         status_code = 200 if healthy else 503
         return JSONResponse(
@@ -588,7 +656,9 @@ def create_app() -> FastAPI:
                 key_prefix=getattr(getattr(settings, "storage", None), "key_prefix", None) or "",
             )
             # Get signing key for local file URLs (security)
-            signing_key = getattr(getattr(settings, "image_signing", None), "encryption_key", "") or ""
+            signing_key = (
+                getattr(getattr(settings, "image_signing", None), "encryption_key", "") or ""
+            )
             image_storage_service = ImageStorageService(storage_config, signing_key=signing_key)
             app.state.image_storage_service = image_storage_service
             url_signing = "enabled" if signing_key else "disabled"
@@ -612,10 +682,26 @@ def create_app() -> FastAPI:
         except Exception as e:
             logger.warning(f"存储服务初始化失败: {e}")
 
+        from ai_gateway_core.media import ImageGenerationProvider
+
+        app.state.image_generation_service = ImageGenerationProvider()
+
+        from types import SimpleNamespace
+
+        from .services.images.service import ImageGenerationService
+        from .services.images.worker import ImageTaskWorker, decode_image_task
+
+        image_worker_service = ImageGenerationService(SimpleNamespace(app=app), None)
+        app.state.image_task_worker = ImageTaskWorker(
+            image_worker_service,
+            decode_image_task,
+        )
+        await app.state.image_task_worker.start()
+
         # ========== Knowledge Base ==========
         # KB now runs as an independent microservice on :8092. The gateway
-        # only holds a thin HTTP client (`KBProxyClient`, initialised below
-        # before assistant-service). All chunking / embedding / vector-store
+        # only holds a thin HTTP client (`KBProxyClient`, initialised below).
+        # All chunking / embedding / vector-store
         # / worker / sync logic lives in `apps/knowledge-service/`.
         #
         # The pre-K5b in-process initialisation (KnowledgeService, KnowledgeWorker,
@@ -674,13 +760,13 @@ def create_app() -> FastAPI:
                 app.state.usage_recorder = usage_recorder
                 logger.info("使用量记录器已启动")
 
-        # Initialize KB proxy client BEFORE assistant service (microservice mode)
+        # Initialize the Gateway-owned Knowledge proxy client.
         from ai_gateway_core.knowledge import KBProxyClient
 
         app.state.kb_proxy = KBProxyClient()
 
-        # 初始化 Assistant Service (GPT-like 体验)
-        await _init_assistant_service(app, settings)
+        # Initialize the Gateway control plane used by the Agent Runtime.
+        await _init_agent_control_plane(app, settings)
 
         # Initialize Assistant TaskManager lifecycle explicitly
         from ai_gateway_core.tasks import init_task_manager
@@ -807,14 +893,19 @@ def create_app() -> FastAPI:
         if usage_recorder is not None:
             await usage_recorder.stop()
 
-        # Stop Assistant Service
-        assistant_service = getattr(app.state, "assistant_service", None)
-        if assistant_service is not None:
-            await assistant_service.close()
+        image_task_worker = getattr(app.state, "image_task_worker", None)
+        if image_task_worker is not None:
+            await image_task_worker.shutdown()
 
         agent_model_plane = getattr(app.state, "agent_model_plane", None)
         if agent_model_plane is not None:
             await agent_model_plane.close()
+        mcp_gateway_broker = getattr(app.state, "mcp_gateway_broker", None)
+        if mcp_gateway_broker is not None:
+            await mcp_gateway_broker.close()
+        image_generation_service = getattr(app.state, "image_generation_service", None)
+        if image_generation_service is not None:
+            await image_generation_service.close()
         agent_runtime_control = getattr(app.state, "agent_runtime_control", None)
         if agent_runtime_control is not None:
             await agent_runtime_control.close()
@@ -878,6 +969,27 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     app.state.redis = container.redis
     app.state.memory_service = container.memory_service
 
+    # Gateway-owned Local Node authority.  Public reads remain available when
+    # PostgreSQL is ready; without a real device adapter the internal action
+    # route deliberately returns 503 instead of claiming dispatch success.
+    local_node_pool = getattr(container.database, "_pool", None)
+    if local_node_pool is not None:
+        from .services.local_node import (
+            build_local_node_control_plane,
+            build_local_node_execution_repository,
+        )
+
+        app.state.local_node_control_plane = build_local_node_control_plane(local_node_pool)
+        app.state.local_node_execution_repository = build_local_node_execution_repository(
+            local_node_pool
+        )
+    else:
+        app.state.local_node_control_plane = None
+        app.state.local_node_execution_repository = None
+    app.state.local_node_device_adapter = None
+    app.state.local_node_channel_verifier = None
+    app.state.local_node_device_channel_verifier = None
+
     from .services.assistant_runtime_assignment import (
         AssistantRuntimeAssignmentStore,
         RuntimeAssignmentPolicy,
@@ -894,10 +1006,9 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
         else None
     )
 
-    # AS-03: Gateway owns tenant MCP CRUD and capability resolution while the
-    # protocol client remains in assistant-service. Both processes share the
-    # same repository contract and every runtime resolution is tenant/caller/
-    # connection/channel/schema scoped.
+    # Gateway owns tenant MCP CRUD, discovery, credentials and remote protocol
+    # clients. The Rust Runtime receives only authorized tool descriptors and
+    # invokes this broker; no MCP credential crosses that boundary.
     from ai_gateway_core.persistence.repositories.mcp_repository import (
         DatabaseMCPAgentCapabilityResolver,
         DatabaseMCPRepository,
@@ -906,6 +1017,7 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
         DatabaseAgentKnowledgeResolver,
     )
     from ai_gateway_core.skills import DatabaseSkillArtifactRepository
+    from .api.internal.confluence_capabilities import ConfiguredEnvironmentSecretResolver
 
     mcp_enabled = os.getenv("AGENT_STUDIO_MCP_ENABLED", "true").strip().lower() in {
         "1",
@@ -915,6 +1027,30 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     }
     app.state.agent_studio_mcp_enabled = mcp_enabled
     app.state.mcp_repository = DatabaseMCPRepository(container.database)
+    confluence_secret_resolver = ConfiguredEnvironmentSecretResolver.from_env()
+    app.state.mcp_secret_resolver = (
+        confluence_secret_resolver
+        if (
+            container.settings.database.enabled
+            and mcp_enabled
+            and confluence_secret_resolver.ready
+        )
+        else None
+    )
+    app.state.confluence_capability_enabled = container.settings.database.enabled and mcp_enabled
+    if container.settings.database.enabled and mcp_enabled:
+        from .services.agent_runtime.mcp_gateway_broker import MCPGatewayBroker
+
+        app.state.mcp_gateway_broker = MCPGatewayBroker(
+            repository=app.state.mcp_repository,
+            secret_resolver=confluence_secret_resolver,
+            ttl_seconds=float(os.getenv("ASSISTANT_MCP_CLIENT_CACHE_TTL_SECONDS", "60")),
+            max_entries=int(os.getenv("ASSISTANT_MCP_CLIENT_CACHE_MAX_ENTRIES", "100")),
+        )
+        app.state.mcp_discovery_service = app.state.mcp_gateway_broker
+    else:
+        app.state.mcp_gateway_broker = None
+        app.state.mcp_discovery_service = None
     app.state.skill_artifact_repository = DatabaseSkillArtifactRepository(container.database)
     app.state.agent_runtime_capability_resolver = DatabaseMCPAgentCapabilityResolver(
         app.state.mcp_repository,
@@ -983,8 +1119,10 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
 
     from .services.agent_runtime import AgentModelPlane, AgentRuntimeControlPlane
 
-    model_plane_token = os.environ.get("AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_INTERNAL_TOKEN", "").strip()
-    lease_secret = os.environ.get("AI_PLATFORM_AGENT_RUNTIME_LEASE_SIGNING_SECRET", "").strip()
+    model_plane_token = os.environ.get(
+        "AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_INTERNAL_TOKEN", ""
+    ).strip()
+    lease_secret = os.environ.get("AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET", "").strip()
     app.state.agent_model_plane_internal_token = model_plane_token
     app.state.agent_model_plane = (
         AgentModelPlane(
@@ -995,8 +1133,10 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
         if container.settings.database.enabled and model_plane_token and lease_secret
         else None
     )
-    runtime_internal_token = os.environ.get("AI_PLATFORM_AGENT_RUNTIME_INTERNAL_TOKEN", "").strip()
-    runtime_url = os.environ.get("AI_PLATFORM_AGENT_RUNTIME_URL", "http://agent-runtime:8094").strip()
+    runtime_internal_token = os.environ.get("AI_PLATFORM_INTERNAL_TOKEN", "").strip()
+    runtime_url = os.environ.get(
+        "AI_PLATFORM_AGENT_RUNTIME_URL", "http://agent-runtime:8094"
+    ).strip()
     model_plane_runtime_base_url = os.environ.get(
         "AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_RUNTIME_BASE_URL",
         "http://gateway:8080/internal/v1/agent-model-plane",
@@ -1090,9 +1230,8 @@ async def _load_services_from_database(container: Container, settings: Settings)
         logger.warning(f"从数据库加载服务失败: {e}")
 
 
-async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
-    """
-    初始化 Assistant Service (GPT-like 体验)
+async def _init_agent_control_plane(app: FastAPI, settings: Settings) -> None:
+    """Initialize provider metadata for the Gateway-owned Agent control plane.
 
     从环境变量读取各 LLM 提供商的 API Key：
     - OPENAI_API_KEY
@@ -1153,23 +1292,14 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     # Get Tavily API key for web search
     tavily_api_key = os.environ.get("TAVILY_API_KEY", "")
 
-    # Phase 5d: Tavily + code-executor + VLM tool instances moved to
-    # assistant-service. Gateway no longer builds them.
-
-    # Phase 5d: Gateway no longer constructs an in-process AssistantService,
-    # tool_registry, MCPManager, or tenant isolation services. All of those
-    # live in the assistant-service container and are reached via HTTP proxy.
-    # The gateway keeps ``app.state.model_registry`` because /chat/stream
-    # runs an edge-side model-permission check, /generate-image resolves
-    # providers from the registry, and /api/v1/models CRUD refreshes it
-    # after admin writes. Tool invocation, MCP enumeration, tenant policy
-    # enforcement — all run over the wire against assistant-service.
+    # The Gateway owns model metadata, session state, MCP, image and capability
+    # boundaries. Runtime execution is delegated only to the Rust Agent Runtime.
     _ = session_manager, tavily_api_key, knowledge_vlm_service  # kept for sibling code paths
 
     # Phase 5e: gateway uses a narrow ``GatewayModelMeta`` facade over
     # ModelService + ProviderService for the 3 routes that still need LLM
     # metadata (chat-stream permission check, /health/providers, model
-    # CRUD). The full ModelRegistry lives in assistant-service.
+    # CRUD). The full model authority remains in Gateway/Postgres.
     provider_service = getattr(app.state, "provider_service", None)
     if model_service and provider_service:
         from .services.llm.gateway_model_meta import GatewayModelMeta
@@ -1186,21 +1316,7 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
             "will be bypassed and /health/providers will return {}"
         )
 
-    # ``None`` placeholders so legacy getattr readers in /services and
-    # /health see a consistent shape. Real implementations all live in
-    # assistant-service now (Phase 5d + 5e).
-    app.state.model_registry = None
-    app.state.assistant_service = None
-    app.state.assistant_gateway = None
-    app.state.tool_registry = None
-    app.state.assistant_client = None
-    app.state.mcp_manager = None
-    app.state.tenant_tool_policy = None
-    app.state.tenant_mcp_config = None
-    app.state.tool_audit = None
-
-    # Sync model pricing from DB (no in-memory registry refresh required —
-    # assistant-service refreshes its own registry on demand).
+    # Sync model pricing from DB; no second runtime registry is maintained.
     if model_service:
         try:
             synced = await model_service.sync_pricing_from_llm_models(
@@ -1218,7 +1334,7 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         features.append("session persistence")
     if kb_service:
         features.append("KB tools")
-    features.append("proxy → assistant-service (chat / tools / MCP)")
+    features.append("agent-runtime + capability-worker")
 
     if configured_providers:
         logger.info(f"Gateway启动完成: model_registry ready ({', '.join(features)})")

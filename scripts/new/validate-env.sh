@@ -219,6 +219,10 @@ require_versioned_image() {
         return
     fi
 
+    if [[ "$value" =~ ^ai-gateway-agent-(runtime|capability-worker):local-[0-9a-f]{12}-[0-9a-f]{12}$ ]]; then
+        return
+    fi
+
     fail "$key must use a full semantic release tag (for example 2.0.0) or sha256 digest."
 }
 
@@ -511,10 +515,10 @@ configured_chat_providers() {
     fi
 
     # Mirror ai_gateway_core.config.resolve_google("chat") plus the
-    # assistant-service provider bootstrap:
+    # Gateway provider bootstrap:
     # - AI Studio backend uses GEMINI_API_KEY / GOOGLE_API_KEY for `google`.
     # - Vertex backend uses VERTEX_CHAT_API_KEY -> VERTEX_API_KEY -> studio key
-    #   fallback, and assistant-service configures both `google` with backend
+    #   fallback, and Gateway configures both `google` with backend
     #   vertex and `google-vertex`.
     # - With AI Studio backend, VERTEX_API_KEY alone configures only
     #   `google-vertex`; VERTEX_CHAT_API_KEY alone is ignored by runtime.
@@ -603,19 +607,19 @@ query_enabled_default_qwen_model() {
     fi
 }
 
-validate_assistant_model_alignment() {
+validate_chat_model_alignment() {
     local configured database_configured providers_summary rows available_count enabled_summary provider count
 
     configured="$(configured_chat_providers)"
     database_configured="$(query_database_credential_providers)" || database_configured=""
     configured="$(printf '%s\n%s\n' "$configured" "$database_configured" | xargs)"
     rows="$(query_enabled_model_providers)" || {
-        fail "Unable to query llm_models for assistant model/provider alignment."
+        fail "Unable to query llm_models for chat model/provider alignment."
         return
     }
 
     if [ -z "$rows" ]; then
-        fail "No enabled assistant models found in llm_models for tenant default."
+        fail "No enabled chat models found in llm_models for tenant default."
         return
     fi
 
@@ -632,14 +636,14 @@ validate_assistant_model_alignment() {
     providers_summary="${configured:-none}"
     if [ "$available_count" -le 0 ]; then
         if allows_ui_model_setup; then
-            log_warn "Assistant model provider is not configured yet. Open the frontend provider setup, then rerun make validate. Enabled model providers: ${enabled_summary}."
+            log_warn "Chat model provider is not configured yet. Open the frontend provider setup, then rerun make validate. Enabled model providers: ${enabled_summary}."
         else
-            fail "No enabled assistant models match configured chat providers. Configured providers: ${providers_summary}. Enabled model providers: ${enabled_summary}."
+            fail "No enabled chat models match configured providers. Configured providers: ${providers_summary}. Enabled model providers: ${enabled_summary}."
         fi
         return
     fi
 
-    log_success "Assistant model/provider alignment is valid (${available_count} available model(s))."
+    log_success "Chat model/provider alignment is valid (${available_count} available model(s))."
 }
 
 validate_config() {
@@ -667,8 +671,11 @@ validate_config() {
     fi
 
     require_secret JWT_SECRET 32
-    require_secret GATEWAY_ASSISTANT_SHARED_SECRET 32
     require_secret GATEWAY_ENCRYPTION_KEY 32
+    require_secret AI_PLATFORM_INTERNAL_TOKEN 32
+    require_secret AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET 32
+    require_secret AI_PLATFORM_CAPABILITY_PROOF_SECRET 32
+    require_secret AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_INTERNAL_TOKEN 32
     require_secret_or_local_default DEFAULT_USER_PASSWORD 12 "ChangeMe-Admin-2026!"
     require_domain AUTH_ALLOWED_EMAIL_DOMAIN
     require_frontend_auth_domain_alignment
@@ -713,7 +720,6 @@ validate_config() {
 
     require_versioned_image GATEWAY_IMAGE "ghcr.io/misaya-yang/ai-gateway:2.0.0"
     require_versioned_image FRONTEND_IMAGE "ghcr.io/misaya-yang/ai-gateway-web:2.0.0"
-    require_versioned_image ASSISTANT_IMAGE "ghcr.io/misaya-yang/ai-gateway-assistant-service:2.0.0"
     require_versioned_image KNOWLEDGE_IMAGE "ghcr.io/misaya-yang/ai-gateway-knowledge-service:2.0.0"
     require_versioned_image MIGRATE_IMAGE "ghcr.io/misaya-yang/ai-gateway-migrate:2.0.0"
 
@@ -725,13 +731,11 @@ validate_config() {
         fi
     fi
 
-    require_url ASSISTANT_SERVICE_URL
     require_url KB_SERVICE_URL
     require_frontend_runtime_url VITE_API_URL
     require_frontend_runtime_url VITE_API_BASE_URL
     require_frontend_runtime_url VITE_TELEMETRY_ENDPOINT
     require_cors_origins KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON
-    require_cors_origins ASSISTANT_CORS_ALLOW_ORIGINS_JSON
 
     validate_compose_config
 
@@ -752,27 +756,24 @@ validate_example_config() {
         POSTGRES_PASSWORD
         REDIS_PASSWORD
         JWT_SECRET
-        GATEWAY_ASSISTANT_SHARED_SECRET
         GATEWAY_ENCRYPTION_KEY
+        AI_PLATFORM_INTERNAL_TOKEN
+        AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET
+        AI_PLATFORM_CAPABILITY_PROOF_SECRET
+        AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_INTERNAL_TOKEN
         MODEL_SETUP_MODE
         INTERNAL_COMM_REDIS_URL
         AUTH_ALLOWED_EMAIL_DOMAIN
         DEFAULT_USER_PASSWORD
-        ASSISTANT_SERVICE_URL
-        ASSISTANT_AGENT_PLUGIN_PATHS
-        ASSISTANT_AGENT_PLUGIN_DATA_ROOT
-        ASSISTANT_TRUSTED_AGENT_PLUGIN_ROOTS
         KB_SERVICE_URL
         GATEWAY_IMAGE
         FRONTEND_IMAGE
-        ASSISTANT_IMAGE
         KNOWLEDGE_IMAGE
         MIGRATE_IMAGE
         KB_EMBEDDING_PROVIDER
         KB_EMBEDDING_MODEL
         KB_EMBEDDING_DIMENSION
         KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON
-        ASSISTANT_CORS_ALLOW_ORIGINS_JSON
     )
     local provider_keys=(
         DASHSCOPE_CHAT_API_KEY
@@ -807,13 +808,11 @@ validate_example_config() {
     require_domain AUTH_ALLOWED_EMAIL_DOMAIN
     require_frontend_auth_domain_alignment
     require_support_email_release_ready
-    require_url ASSISTANT_SERVICE_URL
     require_url KB_SERVICE_URL
     require_frontend_runtime_url VITE_API_URL
     require_frontend_runtime_url VITE_API_BASE_URL
     require_frontend_runtime_url VITE_TELEMETRY_ENDPOINT
     require_cors_origins KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON
-    require_cors_origins ASSISTANT_CORS_ALLOW_ORIGINS_JSON
 
     local embedding_provider="${KB_EMBEDDING_PROVIDER:-dashscope}"
     case "$embedding_provider" in
@@ -824,7 +823,7 @@ validate_example_config() {
             ;;
     esac
 
-    for key in GATEWAY_IMAGE FRONTEND_IMAGE ASSISTANT_IMAGE KNOWLEDGE_IMAGE MIGRATE_IMAGE; do
+    for key in GATEWAY_IMAGE FRONTEND_IMAGE KNOWLEDGE_IMAGE MIGRATE_IMAGE AGENT_CAPABILITY_WORKER_IMAGE; do
         require_versioned_image "$key"
     done
 
@@ -853,13 +852,11 @@ validate_runtime() {
 
     wait_for_healthy "Knowledge service" "check_knowledge_health" 60 || fail "Knowledge service runtime check failed."
     wait_for_healthy "Knowledge worker" "check_knowledge_worker_health" 60 || fail "Knowledge worker runtime check failed."
-    wait_for_healthy "Assistant service" "check_assistant_health" 60 || fail "Assistant service runtime check failed."
     wait_for_healthy "Agent Runtime" "check_agent_runtime_health" 60 || fail "Agent Runtime runtime check failed."
-    wait_for_healthy "Bundled docgen plugin" "check_docgen_health" 60 || fail "Bundled docgen runtime check failed."
     wait_for_healthy "Gateway readiness" "check_gateway_health" 60 || fail "Gateway runtime check failed."
     wait_for_healthy "Gateway metrics endpoint" "check_gateway_metrics" 60 || fail "Gateway metrics check failed."
     wait_for_healthy "Frontend health endpoint" "check_frontend_health" 60 || fail "Frontend runtime check failed."
-    validate_assistant_model_alignment
+    validate_chat_model_alignment
 
     if [ "$ERRORS" -eq 0 ]; then
         log_success "Runtime validation passed"

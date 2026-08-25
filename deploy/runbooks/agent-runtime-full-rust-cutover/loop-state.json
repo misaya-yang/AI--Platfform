@@ -1,0 +1,160 @@
+{
+  "schema_version": "prd-phase-harness/loop-state/v4",
+  "goal": "Migrate the complete Assistant execution surface to one Rust Agent Runtime plus a Rust capability worker, preserve every public product contract, and delete the Python AgentLoop only after parity evidence passes.",
+  "cycle": [
+    "observe",
+    "act",
+    "verify",
+    "decide"
+  ],
+  "active_phase": "FRC-00",
+  "active_feature": "FRC-F001",
+  "iteration": 0,
+  "max_iterations": 5,
+  "last_result": "Harness grounded on clean main commit 4968068; no migration phase has passed yet.",
+  "next_action": "Run init.sh, start the repository-owned Docker stack, and capture the FRC-00 compatibility and rollback baseline without skipped live gates.",
+  "blockers": [],
+  "confirmation": null,
+  "phases": [
+    {
+      "id": "FRC-00",
+      "file": "phase-00-freeze-full-product-compatibility-baseline-and-rollback-bundle.md",
+      "depends_on": [],
+      "status": "ready",
+      "evidence": [],
+      "review": "not_required"
+    },
+    {
+      "id": "FRC-01",
+      "file": "phase-01-implement-the-rust-capability-execution-contract-and-worker.md",
+      "depends_on": [
+        "FRC-00"
+      ],
+      "status": "pending",
+      "evidence": [],
+      "review": "not_required"
+    },
+    {
+      "id": "FRC-02",
+      "file": "phase-02-migrate-read-only-capabilities-and-gateway-control-ownership.md",
+      "depends_on": [
+        "FRC-01"
+      ],
+      "status": "pending",
+      "evidence": [],
+      "review": "not_required"
+    },
+    {
+      "id": "FRC-03",
+      "file": "phase-03-migrate-write-approval-office-connector-local-node-and-long-task-capabilities.md",
+      "depends_on": [
+        "FRC-02"
+      ],
+      "status": "pending",
+      "evidence": [],
+      "review": "required"
+    },
+    {
+      "id": "FRC-04",
+      "file": "phase-04-switch-every-assistant-and-agent-product-entrypoint-to-the-rust-execution-plane.md",
+      "depends_on": [
+        "FRC-03"
+      ],
+      "status": "pending",
+      "evidence": [],
+      "review": "not_required"
+    },
+    {
+      "id": "FRC-05",
+      "file": "phase-05-physically-delete-the-python-assistant-execution-plane-and-docgen-implementation.md",
+      "depends_on": [
+        "FRC-04"
+      ],
+      "status": "pending",
+      "evidence": [],
+      "review": "required"
+    },
+    {
+      "id": "FRC-06",
+      "file": "phase-06-complete-automated-docker-browser-agent-eval-performance-and-rollback-acceptance.md",
+      "depends_on": [
+        "FRC-05"
+      ],
+      "status": "pending",
+      "evidence": [],
+      "review": "required"
+    }
+  ],
+  "features": [
+    {
+      "id": "FRC-F001",
+      "phase_id": "FRC-00",
+      "description": "A reproducible baseline proves every existing Agent product surface and capability before any Python implementation is deleted, and records an immutable rollback bundle.",
+      "steps": [
+        "Exercise the authenticated Docker Assistant, Studio, public Agent, Knowledge, Office, approval, Local Node, and Eval baseline on commit 4968068.",
+        "Record contract fixtures and the exact Git, schema, Compose, image, catalog, and browser evidence needed to compare Rust replacements and roll back safely."
+      ],
+      "passes": false
+    },
+    {
+      "id": "FRC-F002",
+      "phase_id": "FRC-01",
+      "description": "Runtime can discover and execute a tenant-bound read-only Rust capability through a durable Rust worker with idempotent events and no Python Assistant dependency.",
+      "steps": [
+        "Create a Runtime turn whose tool call is dispatched through Capability Contract V2 to the Rust worker.",
+        "Reconnect by event cursor and observe one durable execution and one terminal result under duplicate, cancellation, scope-forgery, and worker-restart probes."
+      ],
+      "passes": false
+    },
+    {
+      "id": "FRC-F003",
+      "phase_id": "FRC-02",
+      "description": "Every original read-only Assistant capability and control-plane API behaves equivalently through Gateway, Rust Runtime, and Rust worker.",
+      "steps": [
+        "Use Knowledge, web, file, Artifact, memory, attachment, MCP/Connector discovery, session history, and tool catalog from real product entrypoints.",
+        "Compare schemas, permissions, citations, evidence, tenant isolation, and visible results against the frozen FRC-00 baseline with zero Python read-path calls."
+      ],
+      "passes": false
+    },
+    {
+      "id": "FRC-F004",
+      "phase_id": "FRC-03",
+      "description": "Every original write, Office, connector, Local Node, image, quiz, code, and long-task capability executes in Rust with exact approval and unknown-effect safety.",
+      "steps": [
+        "Create and modify all Office formats and exercise approved, denied, expired, cancelled, timed-out, and restarted write operations.",
+        "Observe durable Artifacts and one terminal tool result per call, with no duplicate side effect and side_effect_unknown whenever a dispatched write cannot be proven."
+      ],
+      "passes": false
+    },
+    {
+      "id": "FRC-F005",
+      "phase_id": "FRC-04",
+      "description": "Assistant, Responses, Studio, Hosted, Embed, Public Agent, SDK, and CLI all use the Rust execution plane without public contract or UI regression.",
+      "steps": [
+        "Run simple, complex, multi-Agent, tool, stop/resume, Office, Knowledge, approval, and download journeys from every public product entrypoint.",
+        "Verify unchanged HTTP/SSE/OpenAPI contracts, real provider output, thinking and Activity UI, responsive themes, and zero Assistant Service model traffic."
+      ],
+      "passes": false
+    },
+    {
+      "id": "FRC-F006",
+      "phase_id": "FRC-05",
+      "description": "The repository and Compose distribution contain no Python Assistant execution package, Python docgen implementation, Assistant Service container, or reachable legacy loop.",
+      "steps": [
+        "Delete the fully replaced Python packages, proxies, dependencies, tests, scripts, images, environment variables, and unreachable route bodies.",
+        "Run AST, import, Compose, OpenAPI, SDK, and source-distribution gates proving the Rust Runtime is the only Agent loop and every removed test has equivalent evidence."
+      ],
+      "passes": false
+    },
+    {
+      "id": "FRC-F007",
+      "phase_id": "FRC-06",
+      "description": "The full Rust release passes automated, Docker, browser, Agent Eval, performance, resource, security, and old-new-old rollback acceptance and is safe to merge.",
+      "steps": [
+        "Build both locked Rust images serially, run fresh/upgrade/idempotent migrations, all test gates, three live Agent Eval cohorts, and the complete browser/fault matrix.",
+        "Deploy new, roll back to the frozen pre-delete bundle without schema downgrade, redeploy new, then verify exact remote SHA and one clean main worktree after merge."
+      ],
+      "passes": false
+    }
+  ]
+}

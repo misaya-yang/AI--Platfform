@@ -137,6 +137,19 @@ def _request(
     return request
 
 
+def test_knowledge_proxy_signer_uses_the_platform_internal_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AI_PLATFORM_INTERNAL_TOKEN", "i" * 32)
+    monkeypatch.setenv("GATEWAY_ENCRYPTION_KEY", "e" * 32)
+    monkeypatch.setenv("GATEWAY_KNOWLEDGE_SHARED_SECRET", "k" * 32)
+
+    signer = proxy_utils._build_signer()
+
+    assert signer is not None
+    assert signer.secret == "i" * 32
+
+
 def test_path_specific_defaults_are_narrow_and_exact(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("KB_MAX_JSON_BODY_MB", "KB_MAX_FILE_SIZE_MB", "KB_MAX_BATCH_SIZE_MB"):
         monkeypatch.delenv(name, raising=False)

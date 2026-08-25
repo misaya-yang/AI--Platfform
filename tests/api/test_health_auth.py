@@ -118,27 +118,21 @@ class TestHealthEndpointAuth:
         assert exc_info.value.status_code == 403
 
     @pytest.mark.asyncio
-    async def test_services_health_uses_remote_assistant_health(self, monkeypatch):
-        """Extracted assistant-service should report healthy via its HTTP health endpoint."""
+    async def test_services_health_reports_initialized_agent_runtime(self):
+        """The service view reports the configured Runtime control plane."""
         from src.api.v1 import health
 
-        async def fake_assistant_health():
-            return {
-                "status": "healthy",
-                "latency": 0.01,
-                "last_check": "2026-05-26T00:00:00",
-                "error": None,
-            }
-
-        monkeypatch.setattr(health, "get_assistant_health", fake_assistant_health)
         monitor = SimpleNamespace(all_status=lambda: {})
-        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(assistant_service=None)))
+        request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(agent_runtime_control=object(), image_task_worker=None)
+            )
+        )
         user = MockUserContext(user_id="admin123", is_authenticated=True, roles=["admin"])
 
         result = await health.all_services_health(request=request, monitor=monitor, user=user)
 
-        assert result["assistant"]["status"] == "healthy"
-        assert result["assistant"]["error"] is None
+        assert result["agent_runtime"]["status"] == "healthy"
 
 
 class TestHealthEndpointInfoProtection:

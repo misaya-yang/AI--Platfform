@@ -58,11 +58,14 @@ def test_manifest_keeps_named_critical_and_assistant_gates() -> None:
     entries = {
         f"{entry['phase']}:{entry['id']}": entry["command"] for entry in _manifest()["gates"]
     }
-    assert "test_agent_capability_allowlist.py" in entries["AS-00:capability-tests"]
+    assert "test_internal_agent_capabilities.py" in entries["AS-00:capability-tests"]
+    assert "test_control_plane.py" in entries["AS-00:capability-tests"]
     assert "test_agent_runtime_envelope.py" in entries["AS-02:gateway-envelope"]
-    assert "test_connector_credential_principal.py" in entries["AS-03:mcp-api-runtime"]
+    assert "test_internal_mcp_broker.py" in entries["AS-03:mcp-api-runtime"]
+    assert "test_mcp_gateway_broker.py" in entries["AS-03:mcp-api-runtime"]
     assert "test_skill_entrypoint_policy.py" in entries["AS-04:skill-api-isolation"]
-    assert "test_agent_knowledge_binding.py" in entries["AS-04:knowledge-binding"]
+    assert "test_capability_plane.py" in entries["AS-04:knowledge-binding"]
+    assert "test_internal_agent_capabilities.py" in entries["AS-04:knowledge-binding"]
     assert "test_agent_publication_atomicity.py" in entries["AS-06:publish-api-atomicity"]
     assert "make verify-eval-dev" in entries["AS-06:agent-eval"]
     assert "--built-image" in entries["AS-07:built-nginx-header-smoke"]

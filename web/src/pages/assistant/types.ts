@@ -67,6 +67,7 @@ export interface ToolTimelineItem {
 export interface ProcessSummaryState {
   collapsed: boolean;
   runId?: string;
+  runtimeThreadId?: string;
   status: "running" | "succeeded" | "failed" | "cancelled" | "blocked";
   startedAt?: number;
   totalDurationMs?: number;

@@ -22,6 +22,7 @@ def _app(
     *,
     allow_anonymous: bool = False,
     separately_authenticated_paths: frozenset[str] = frozenset(),
+    separately_authenticated_prefixes: frozenset[str] = frozenset(),
 ) -> tuple[FastAPI, GatewaySecret]:
     secret = GatewaySecret(secret="shared-secret-for-tests")
     app = FastAPI()
@@ -30,6 +31,7 @@ def _app(
         gateway_secret=secret,
         allow_anonymous=allow_anonymous,
         separately_authenticated_paths=separately_authenticated_paths,
+        separately_authenticated_prefixes=separately_authenticated_prefixes,
     )
 
     @app.get("/health")
@@ -43,6 +45,14 @@ def _app(
     @app.get("/private-runtime")
     async def private_runtime():
         return {"status": "separately-authenticated"}
+
+    @app.get("/internal/v2/capabilities/item")
+    async def private_capability():
+        return {"status": "separately-authenticated"}
+
+    @app.get("/internal/v2/capabilities-evil/item")
+    async def prefix_confusion():
+        return {"status": "must-stay-protected"}
 
     return app, secret
 
@@ -103,15 +113,23 @@ def test_gateway_secret_middleware_rejects_missing_signature() -> None:
 
 
 def test_gateway_secret_middleware_bypasses_only_explicit_separate_auth_path() -> None:
-    app, _secret = _app(
-        separately_authenticated_paths=frozenset({"/private-runtime"})
-    )
+    app, _secret = _app(separately_authenticated_paths=frozenset({"/private-runtime"}))
 
     accepted = TestClient(app).get("/private-runtime")
     rejected = TestClient(app).get("/protected")
 
     assert accepted.status_code == 200
     assert accepted.json() == {"status": "separately-authenticated"}
+    assert rejected.status_code == 401
+
+
+def test_gateway_secret_middleware_bypasses_only_segment_scoped_prefix() -> None:
+    app, _secret = _app(separately_authenticated_prefixes=frozenset({"/internal/v2/capabilities/"}))
+
+    accepted = TestClient(app).get("/internal/v2/capabilities/item")
+    rejected = TestClient(app).get("/internal/v2/capabilities-evil/item")
+
+    assert accepted.status_code == 200
     assert rejected.status_code == 401
 
 

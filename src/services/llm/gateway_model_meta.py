@@ -1,7 +1,7 @@
 """Gateway-side model-metadata facade.
 
 Gateway no longer runs an in-process ``ModelRegistry`` (those live only
-in assistant-service after Phase 5e). For the 3 remaining gateway-side
+in a second execution service). For the remaining Gateway-side
 uses — chat-stream permission check, health-provider enumeration,
 and admin CRUD cache-refresh triggers — gateway queries the DB
 directly via the existing ``ModelService`` / ``ProviderService``.
@@ -52,7 +52,7 @@ class GatewayModelMeta:
         """Return the model's access_level (public / premium / admin)
         or ``None`` if the model isn't in the DB. Used by
         ``_check_model_permission`` to authorize chat requests at the
-        edge before proxying to assistant-service."""
+        edge before starting a Runtime turn."""
         row = await self.model_service.get_model(tenant_id, model_id)
         if not row:
             return None
@@ -90,7 +90,7 @@ class GatewayModelMeta:
     ) -> dict[str, int]:
         """Return ``{provider_id: enabled_model_count}`` for health
         dashboards. Uses the models table directly — cheaper than
-        round-tripping through assistant-service."""
+        round-tripping through another execution service."""
         rows = await self.model_service.list_models(
             tenant_id, include_disabled=False
         )

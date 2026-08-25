@@ -106,9 +106,13 @@ impl PostgresThreadStore {
     ) -> ThreadStoreResult<MemberScope> {
         let row = sqlx::query(
             r#"
-            SELECT runtime_thread_id, tenant_id, user_id, session_id
-            FROM assistant_runtime_thread_members
-            WHERE kernel_thread_id = $1
+            SELECT member.runtime_thread_id, member.tenant_id, member.user_id,
+                   member.session_id
+            FROM assistant_runtime_thread_members AS member
+            JOIN assistant_runtime_threads AS root
+              ON root.runtime_thread_id = member.runtime_thread_id
+             AND root.deleted_at IS NULL
+            WHERE member.kernel_thread_id = $1
             "#,
         )
         .bind(kernel_thread_id)

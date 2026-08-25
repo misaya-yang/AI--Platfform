@@ -12,12 +12,9 @@ unit-test pass rate. Treat it as production-critical.
 
 from __future__ import annotations
 
-import subprocess
-import sys
-import textwrap
-from pathlib import Path
+from types import SimpleNamespace
 
-ROOT = Path(__file__).resolve().parents[2]
+import pytest
 
 
 def test_gateway_boot_imports_resolve() -> None:
@@ -37,32 +34,41 @@ def test_gateway_boot_imports_resolve() -> None:
     assert len(app.routes) > 0, "create_app() produced a FastAPI app with zero routes"
 
 
-def test_gateway_boot_does_not_require_assistant_service() -> None:
-    """Model the production image, where assistant_service is not installed."""
-    script = textwrap.dedent(
-        """
-        import builtins
+@pytest.mark.asyncio
+async def test_readiness_probes_runtime_ready_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Rust Runtime has no /health endpoint; probe its readiness contract."""
+    from src import main
 
-        real_import = builtins.__import__
+    requested: list[str] = []
 
-        def without_assistant(name, *args, **kwargs):
-            if name == "assistant_service" or name.startswith("assistant_service."):
-                raise ModuleNotFoundError("assistant_service is excluded from gateway image")
-            return real_import(name, *args, **kwargs)
+    class _Client:
+        async def __aenter__(self):
+            return self
 
-        builtins.__import__ = without_assistant
+        async def __aexit__(self, *_args):
+            return None
 
-        from src.main import create_app
+        async def get(self, url: str):
+            requested.append(url)
+            return SimpleNamespace(status_code=200)
 
-        app = create_app()
-        assert app.routes
-        """
+    monkeypatch.setattr(main.httpx, "AsyncClient", lambda **_kwargs: _Client())
+    checks: dict[str, str] = {}
+
+    assert await main._probe_http_service(
+        "agent_runtime",
+        "http://agent-runtime:8094",
+        checks,
+        path="/health/ready",
+        required=True,
     )
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
+    assert await main._probe_http_service(
+        "knowledge_service",
+        "http://knowledge-service:8092",
+        checks,
     )
-    assert result.returncode == 0, result.stderr
+    assert requested == [
+        "http://agent-runtime:8094/health/ready",
+        "http://knowledge-service:8092/health",
+    ]
+    assert checks == {"agent_runtime": "healthy", "knowledge_service": "healthy"}

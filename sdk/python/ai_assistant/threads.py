@@ -11,6 +11,86 @@ if TYPE_CHECKING:
     from ai_assistant.transport.http import HTTPTransport
 
 
+def _record(value: Any) -> dict[str, Any] | None:
+    return value if isinstance(value, dict) else None
+
+
+def _item_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        return ""
+    return "".join(
+        part.get("text", part.get("content", ""))
+        for part in value
+        if isinstance(part, dict) and isinstance(part.get("text", part.get("content", "")), str)
+    )
+
+
+def project_v2_event(event: StreamEvent) -> StreamEvent | None:
+    """Unwrap a V2 item envelope into the stable stream event contract."""
+    from ai_assistant.models.events import StreamEvent
+
+    if event.event_type != "item" or not isinstance(event.data, dict):
+        return event
+    envelope = _record(event.data.get("event")) or event.data
+    raw = _record(envelope.get("payload")) or {}
+    event_type = raw.get("event_type")
+    data = raw.get("data")
+    if isinstance(event_type, str) and event_type not in {"item", "rollout/item"}:
+        return StreamEvent(
+            event_type=event_type,
+            data=data if isinstance(data, dict) else {"value": data},
+            timestamp=event.timestamp,
+        )
+
+    item = _record(data) or raw
+    payload = _record(item.get("payload")) or item
+    item_type = str(item.get("type") or payload.get("type") or "")
+    text = _item_text(payload.get("content")) or str(
+        payload.get("message") or payload.get("text") or ""
+    )
+    if text and (payload.get("role") == "assistant" or payload.get("type") == "agent_message"):
+        return StreamEvent(
+            event_type="text_delta", data={"content": text}, timestamp=event.timestamp
+        )
+    if text and (payload.get("role") == "reasoning" or payload.get("type") == "reasoning"):
+        return StreamEvent(
+            event_type="thinking_delta", data={"content": text}, timestamp=event.timestamp
+        )
+    if payload.get("approval_id") or item_type == "approval_request":
+        return StreamEvent(event_type="approval_required", data=payload, timestamp=event.timestamp)
+    if payload.get("artifact_id") or item_type == "artifact":
+        return StreamEvent(event_type="artifact_created", data=payload, timestamp=event.timestamp)
+    tool_name = payload.get("name") or payload.get("tool")
+    if tool_name or item_type in {
+        "function_call",
+        "tool_use",
+        "command_execution",
+        "mcp_tool_call",
+    }:
+        status = str(item.get("status") or payload.get("status") or "").lower()
+        event_type = (
+            "tool_call_result"
+            if status in {"completed", "succeeded", "failed", "error", "cancelled"}
+            else "tool_call_start"
+        )
+        return StreamEvent(
+            event_type=event_type,
+            data={
+                "tool_call_id": item.get("id") or payload.get("id"),
+                "tool_name": tool_name or item_type,
+                "arguments": payload.get("arguments", payload.get("input")),
+                "result": payload.get("result", payload.get("output")),
+                "status": item.get("status", payload.get("status")),
+            },
+            timestamp=event.timestamp,
+        )
+    if item_type in {"activity", "event_msg"}:
+        return StreamEvent(event_type="activity", data=payload, timestamp=event.timestamp)
+    return None
+
+
 class ThreadModule:
     _BASE = "/api/v2/agent/threads"
 
@@ -73,6 +153,23 @@ class ThreadModule:
         )
         return response.json()
 
+    async def get_approval(self, thread_id: str, approval_id: str) -> dict[str, Any]:
+        response = await self._transport.request(
+            "GET", f"{self._BASE}/{thread_id}/approvals/{approval_id}"
+        )
+        return response.json()
+
+    async def decide_approval(
+        self, thread_id: str, approval_id: str, *, approved: bool, reason: str | None = None
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"approved": approved}
+        if reason is not None:
+            body["reason"] = reason
+        response = await self._transport.request(
+            "POST", f"{self._BASE}/{thread_id}/approvals/{approval_id}/decision", json=body
+        )
+        return response.json()
+
     async def events(
         self,
         thread_id: str,
@@ -85,13 +182,19 @@ class ThreadModule:
         cursor = turn.get("turn", turn) if isinstance(turn, dict) else {}
         events_url = cursor.get("events_url") if isinstance(cursor, dict) else None
         path = str(events_url or f"{self._BASE}/{thread_id}/events")
-        params = None if events_url else {
-            "after_sequence": after_sequence,
-            "limit": limit,
-            **({"turn_id": turn_id} if turn_id else {}),
-        }
+        params = (
+            None
+            if events_url
+            else {
+                "after_sequence": after_sequence,
+                "limit": limit,
+                **({"turn_id": turn_id} if turn_id else {}),
+            }
+        )
         async for event in self._transport.stream_sse_get(
             path,
             params=params,
         ):
-            yield event
+            projected = project_v2_event(event)
+            if projected is not None:
+                yield projected

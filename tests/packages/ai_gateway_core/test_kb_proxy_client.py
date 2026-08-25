@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from ai_gateway_core.comm.client import InternalServiceHTTPError
 from ai_gateway_core.knowledge import KnowledgeClientLike
 from ai_gateway_core.knowledge.proxy_client import KBProxyClient
 from ai_gateway_core.proxy.request_id_middleware import REQUEST_ID_CTX
@@ -64,6 +65,21 @@ def test_kb_proxy_client_reads_timeout_and_pool_limits_from_env(monkeypatch) -> 
     assert client.timeout.write == 6.0
     assert client.timeout.pool == 8.0
     assert client.limits == httpx.Limits(max_connections=25, max_keepalive_connections=9)
+
+
+@pytest.mark.asyncio
+async def test_kb_proxy_client_does_not_disguise_dataset_outage_as_empty() -> None:
+    client = KBProxyClient(
+        base_url="http://knowledge-service.test",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(503, json={"detail": "unavailable"})
+        ),
+    )
+    try:
+        with pytest.raises(InternalServiceHTTPError):
+            await client.list_datasets(SimpleNamespace(user_id="u1", tenant_id="t1", tier="normal"))
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio

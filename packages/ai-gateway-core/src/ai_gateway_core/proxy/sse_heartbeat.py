@@ -12,9 +12,7 @@ seconds of producer silence — invisible to spec-compliant EventSource
 consumers (lines starting with ``:`` are dropped per the SSE spec) but
 keeps every TCP/HTTP intermediary's keepalive timer alive.
 
-The same pattern lives directly inside
-``apps/assistant-service/.../routes/chat.py`` for the AS-owned event
-generator. This module is the **proxy-layer** version: it wraps an
+This proxy-layer implementation wraps an
 ``async generator`` of bytes (or strings) coming back from a pass-
 through ``client.stream(...)`` so the gateway's SSE proxies for agent-
 agent and other LangGraph upstreams get the same protection without

@@ -113,7 +113,7 @@ def resolve_image_routing(
 #   2. Vendor-locks our scale to Google's storage product, with a 48 h URI
 #      expiry that breaks "user comes back tomorrow to keep editing".
 #
-# Instead the assistant-service stores generated images in our own S3/MinIO
+# Instead Gateway stores generated images in our own S3/MinIO
 # (via ``ArtifactStorage``). Session metadata holds a tiny pointer per turn:
 # ``artifact_id`` (~36 bytes) + ``thought_signature`` (~few KB). On the next
 # turn the route fetches the bytes from S3, base64-encodes them, and passes

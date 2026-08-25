@@ -16,7 +16,52 @@ from src.services.agent_runtime.control_plane import (
     AgentRuntimeControlError,
     AgentRuntimeControlPlane,
     AgentTurn,
+    _project_child_runtime_event,
 )
+
+
+def test_child_runtime_events_project_to_subagent_lifecycle() -> None:
+    parent_turn_id = "parent-turn"
+    started = _project_child_runtime_event(
+        {
+            "event_type": "run_started",
+            "data": {
+                "run_id": "child-turn",
+                "thread_id": "child-thread",
+                "session_id": "session-a",
+                "status": "running",
+            },
+        },
+        parent_turn_id,
+    )
+    assert started is not None
+    assert started["event_type"] == "subagent_started"
+    assert started["data"]["agent_id"] == "child-thread"
+    assert started["data"]["parent_task_id"] == parent_turn_id
+
+    finished = _project_child_runtime_event(
+        {
+            "event_type": "run_finished",
+            "data": {
+                "run_id": "child-turn",
+                "thread_id": "child-thread",
+                "session_id": "session-a",
+                "status": "succeeded",
+                "exit": "succeeded",
+            },
+        },
+        parent_turn_id,
+    )
+    assert finished is not None
+    assert finished["event_type"] == "subagent_finished"
+    assert finished["data"]["status"] == "completed"
+
+    parent = {"event_type": "run_finished", "data": {"run_id": parent_turn_id}}
+    assert _project_child_runtime_event(parent, parent_turn_id) is parent
+    assert _project_child_runtime_event(
+        {"event_type": "thinking_delta", "data": {"run_id": "child-turn"}},
+        parent_turn_id,
+    ) is None
 
 
 class _Database:
@@ -87,6 +132,78 @@ class _ProviderService:
             "metadata": {"wire_protocol": "chat_completions"},
             "updated_at": "provider-revision-1",
         }
+
+
+def _connector_snapshot(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "agent_spec": {"channel": "api"},
+        "capabilities": [
+            {
+                "type": "connector",
+                "id": "confluence_read",
+                "version": "v1",
+                "schema_hash": "sha256:" + "a" * 64,
+                "config": config,
+            }
+        ],
+    }
+
+
+def test_connector_allowlist_keeps_only_signed_non_secret_binding() -> None:
+    with pytest.raises(AgentRuntimeControlError):
+        AgentRuntimeControlPlane._snapshot_capability_allowlist(
+            _connector_snapshot(
+                {
+                    "provider": "confluence",
+                    "tool_name": "confluence_read",
+                    "principal_type": "service_account",
+                    "grant_id": "00000000-0000-0000-0000-000000000001",
+                    "api_token": "must-not-cross-boundary",
+                }
+            )
+        )
+
+
+def test_responses_tool_controls_are_preserved_in_runtime_readonly_snapshot() -> None:
+    payload = AgentRuntimeControlPlane._readonly_capability_payload(
+        {
+            "responses_tool_names": ["search_knowledge_base"],
+            "responses_tool_choice": {"type": "function", "name": "search_knowledge_base"},
+            "responses_parallel_tool_calls": False,
+        },
+        tenant_id="tenant-a",
+        capability_revision=3,
+    )
+
+    assert payload["responses_tool_names"] == ["search_knowledge_base"]
+    assert payload["responses_tool_choice"] == {
+        "type": "function",
+        "name": "search_knowledge_base",
+    }
+    assert payload["responses_parallel_tool_calls"] is False
+
+
+def test_connector_allowlist_catalog_binding_uses_signed_channel() -> None:
+    allowlist = AgentRuntimeControlPlane._snapshot_capability_allowlist(
+        _connector_snapshot({"provider": "confluence"})
+    )
+    assert allowlist == [
+        {
+            "type": "connector",
+            "name": "confluence_read",
+            "id": "confluence_read",
+            "version": "v1",
+            "schema_hash": "sha256:" + "a" * 64,
+            "connector_binding": {
+                "binding_type": "catalog",
+                "provider": "confluence",
+                "tool_name": "confluence_read",
+                "principal_type": None,
+                "grant_id": None,
+                "channel": "api",
+            },
+        }
+    ]
 
 
 class _AssignmentStore:
@@ -172,6 +289,42 @@ def test_signed_capability_catalog_allowlist_rejects_unbound_or_unsealed_tools()
         )
 
 
+def test_mcp_snapshot_preserves_exact_runtime_principal_binding() -> None:
+    connection_id = str(uuid.uuid4())
+    schema_hash = "sha256:" + "a" * 64
+    snapshot = {
+        "agent_spec": {"channel": "api"},
+        "capabilities": [
+            {
+                "type": "mcp",
+                "id": "tenant_search",
+                "version": "v1",
+                "schema_hash": schema_hash,
+                "risk": "low",
+                "config": {
+                    "connection_id": connection_id,
+                    "principal_type": "user_delegated",
+                    "risk": "low",
+                },
+            }
+        ],
+    }
+
+    allowlist = AgentRuntimeControlPlane._snapshot_capability_allowlist(snapshot)
+
+    assert allowlist is not None
+    assert allowlist[0]["connector_binding"] == {
+        "binding_type": "grant",
+        "provider": "mcp",
+        "tool_name": "tenant_search",
+        "principal_type": "user_delegated",
+        "grant_id": None,
+        "connection_id": connection_id,
+        "schema_hash": schema_hash,
+        "risk_level": "low",
+        "channel": "api",
+    }
+
 def test_runtime_uses_native_multi_agent_and_hides_legacy_loop_alias() -> None:
     config = AgentRuntimeControlPlane._runtime_model_config(
         SimpleNamespace(model_plane_base_url="http://gateway.test/model-plane"),
@@ -181,6 +334,14 @@ def test_runtime_uses_native_multi_agent_and_hides_legacy_loop_alias() -> None:
         "enabled": True,
         "max_concurrent_threads_per_session": 6,
     }
+    assert config["features"]["standalone_web_search"] is False
+    assert config["web_search"] == "disabled"
+    native_config = AgentRuntimeControlPlane._runtime_model_config(
+        SimpleNamespace(model_plane_base_url="http://gateway.test/model-plane"),
+        "qwen3.7-plus",
+        native_web_search_enabled=True,
+    )
+    assert native_config["web_search"] == "live"
     dynamic = AgentRuntimeControlPlane._dynamic_tools(
         {
             "tools": [
@@ -189,6 +350,18 @@ def test_runtime_uses_native_multi_agent_and_hides_legacy_loop_alias() -> None:
                     "description": "Legacy Python subagent loop",
                     "schema": {"type": "object"},
                     "read_only": True,
+                },
+                {
+                    "name": "tool_search",
+                    "description": "Compatibility tool search",
+                    "schema": {"type": "object"},
+                    "read_only": True,
+                },
+                {
+                    "name": "context_compact",
+                    "description": "Compatibility compaction control",
+                    "schema": {"type": "object"},
+                    "read_only": False,
                 },
                 {
                     "name": "search_knowledge_base",
@@ -200,6 +373,85 @@ def test_runtime_uses_native_multi_agent_and_hides_legacy_loop_alias() -> None:
         }
     )
     assert [tool["name"] for tool in dynamic] == ["search_knowledge_base"]
+
+
+def test_dynamic_tools_exposes_deferred_only_for_exact_snapshot_allowlist() -> None:
+    deferred = {
+        "name": "document_write",
+        "description": "Write a document",
+        "schema": {"type": "object"},
+        "read_only": False,
+        "id": "docs:document_write",
+        "version": "v1",
+        "schema_hash": "sha256:" + "a" * 64,
+    }
+    readonly = {
+        "tools": [],
+        "mcp": [],
+        "deferred": [deferred],
+        "capability_allowlist": [
+            {
+                "type": "tool",
+                "name": deferred["name"],
+                "id": deferred["id"],
+                "version": deferred["version"],
+                "schema_hash": deferred["schema_hash"],
+            }
+        ],
+    }
+    assert [tool["name"] for tool in AgentRuntimeControlPlane._dynamic_tools(readonly)] == [
+        "document_write"
+    ]
+    readonly["capability_allowlist"][0]["schema_hash"] = "sha256:" + "b" * 64
+    assert AgentRuntimeControlPlane._dynamic_tools(readonly) == []
+
+
+def test_attachment_refs_become_one_bound_read_attachment_descriptor() -> None:
+    readonly = AgentRuntimeControlPlane._readonly_capability_payload(
+        {
+            "attachments": {"refs": ["blob-a", "blob-b"]},
+        },
+        tenant_id="tenant-a",
+        capability_revision=7,
+    )
+    AgentRuntimeControlPlane._attach_read_attachment_descriptors(
+        readonly,
+        tenant_id="tenant-a",
+        capability_revision=7,
+    )
+    descriptor = readonly["attachment_tools"][0]
+    assert descriptor["name"] == "read_attachment"
+    assert descriptor["read_only"] is True
+    assert descriptor["schema"]["properties"]["ref"]["enum"] == ["blob-a", "blob-b"]
+    assert [item["name"] for item in AgentRuntimeControlPlane._dynamic_tools(readonly)] == [
+        "read_attachment"
+    ]
+
+
+def test_attachment_descriptor_is_turn_scoped_not_thread_fingerprint_state() -> None:
+    descriptor = AgentRuntimeControlPlane._attachment_tool_descriptor(
+        tenant_id="tenant-a",
+        capability_revision=7,
+        references=["blob-a"],
+    )
+    assert AgentRuntimeControlPlane._dynamic_tool_fingerprint({}) == (
+        AgentRuntimeControlPlane._dynamic_tool_fingerprint(
+            {"attachment_tools": [descriptor]}
+        )
+    )
+
+
+def test_deferred_worker_gate_requires_explicit_runtime_configuration(monkeypatch) -> None:
+    monkeypatch.setenv("AI_PLATFORM_CAPABILITY_WORKER_ENABLED", "true")
+    monkeypatch.setenv("AI_PLATFORM_CAPABILITY_WORKER_WRITES_ENABLED", "true")
+    monkeypatch.setenv("AI_PLATFORM_CAPABILITY_WORKER_URL", "http://worker")
+    monkeypatch.setenv("AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET", "configured")
+    assert AgentRuntimeControlPlane._worker_ready_for_writes()
+    monkeypatch.setenv("AI_PLATFORM_CAPABILITY_WORKER_WRITES_ENABLED", "false")
+    assert not AgentRuntimeControlPlane._worker_ready_for_writes()
+    monkeypatch.setenv("AI_PLATFORM_CAPABILITY_WORKER_WRITES_ENABLED", "true")
+    monkeypatch.setenv("AI_PLATFORM_CAPABILITY_WORKER_ENABLED", "false")
+    assert not AgentRuntimeControlPlane._worker_ready_for_writes()
 
 
 @pytest.mark.asyncio
@@ -218,15 +470,14 @@ async def test_memory_context_is_tenant_scoped_and_mode_gated() -> None:
     memory = Memory()
     plane = object.__new__(AgentRuntimeControlPlane)
     plane.memory_service = memory
-    assert await plane._load_memory_context(
-        tenant_id="tenant-a", user_id="user-a", mode="off"
-    ) is None
-    assert await plane._load_memory_context(
-        tenant_id="tenant-a", user_id="user-a", mode="session"
-    ) is None
-    loaded = await plane._load_memory_context(
-        tenant_id="tenant-a", user_id="user-a", mode="user"
+    assert (
+        await plane._load_memory_context(tenant_id="tenant-a", user_id="user-a", mode="off") is None
     )
+    assert (
+        await plane._load_memory_context(tenant_id="tenant-a", user_id="user-a", mode="session")
+        is None
+    )
+    loaded = await plane._load_memory_context(tenant_id="tenant-a", user_id="user-a", mode="user")
     assert loaded == {
         "status": "available",
         "context": {
@@ -243,9 +494,7 @@ async def test_memory_context_is_tenant_scoped_and_mode_gated() -> None:
     plane.memory_service = Broken()
     with pytest.raises(AgentRuntimeControlError, match="MEMORY_UNAVAILABLE"):
         await plane._load_memory_context(tenant_id="tenant-a", user_id="user-a", mode="strict")
-    degraded = await plane._load_memory_context(
-        tenant_id="tenant-a", user_id="user-a", mode="auto"
-    )
+    degraded = await plane._load_memory_context(tenant_id="tenant-a", user_id="user-a", mode="auto")
     assert degraded == {"status": "unavailable", "reason": "memory_lookup_failed"}
 
 
@@ -282,6 +531,8 @@ async def test_empty_developer_instructions_use_stable_generic_default() -> None
     finally:
         await client.aclose()
     assert captured["developerInstructions"] == GENERIC_AGENT_INSTRUCTIONS_V1
+
+
 @pytest.mark.asyncio
 async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() -> None:
     runtime_thread_id = uuid.uuid4()
@@ -370,6 +621,11 @@ async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() ->
     assert database.issued_snapshot["model"]["wire_protocol"] == "responses_v1"
     assert database.issued_snapshot["parameters"] == {"temperature": 0.2}
     assert database.issued_snapshot["input"] == {"message": "你好"}
+    assert database.issued_snapshot["memory"]["policy"] == {
+        "authoritative_profile": "basic",
+        "agent_memory_mode": "user",
+        "memory_principal": "user-a",
+    }
     assert database.issued_snapshot["reasoning"] == {
         "requested_option": "auto",
         "effective_option": "minimal",
@@ -436,7 +692,7 @@ async def test_catalog_is_fetched_before_first_thread_and_dynamic_tools_are_pinn
                             "read_only": True,
                             "tenant_id": "tenant-a",
                             "capability_revision": 7,
-                        }
+                        },
                     ]
                 },
             )
@@ -488,7 +744,11 @@ async def test_catalog_is_fetched_before_first_thread_and_dynamic_tools_are_pinn
     thread_request = next(body for path, body in requests if path.endswith("/threads"))
     assert thread_request["start"]["approvalPolicy"] == "on-request"
     assert thread_request["start"]["dynamicTools"][0]["name"] == "search_knowledge_base"
-    assert thread_request["start"]["dynamicTools"][1]["name"] == "tool_search"
+    assert len(thread_request["start"]["dynamicTools"]) == 1
+    assert all(
+        tool["name"] != "tool_search"
+        for tool in thread_request["start"]["dynamicTools"]
+    )
     assert thread_request["start"]["dynamicTools"][0]["inputSchema"] == {
         "type": "object",
         "properties": {},
@@ -511,6 +771,162 @@ async def test_catalog_is_fetched_before_first_thread_and_dynamic_tools_are_pinn
         },
     ]
     assert len(plane.database.fingerprint or "") == 64
+
+
+@pytest.mark.asyncio
+async def test_generic_assistant_exposes_worker_writes_only_when_worker_is_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descriptor = {
+        "name": "generate_document",
+        "id": "generate_document",
+        "version": "1",
+        "schema_hash": "sha256:" + "c" * 64,
+        "description": "Generate an Office document.",
+        "schema": {"type": "object", "properties": {}},
+        "source": "capability_worker",
+        "kind": "tool",
+        "read_only": False,
+        "tenant_id": "tenant-a",
+        "capability_revision": 7,
+    }
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={"tools": [], "mcp": [], "deferred": [descriptor]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    plane = AgentRuntimeControlPlane(
+        database=_Database(uuid.uuid4()),
+        model_service=_ModelService(),
+        provider_service=_ProviderService(),
+        assignment_store=_AssignmentStore(),
+        lease_signer=RuntimeModelLeaseSigner("x" * 32),
+        runtime_url="http://runtime.test",
+        runtime_internal_token="runtime-token",
+        model_plane_base_url="http://gateway.test/internal/v1/agent-model-plane",
+        kernel_revision="kernel-1",
+        http_client=client,
+    )
+    plane.capability_plane_url = "http://capability.test/internal/v1/capabilities"
+    monkeypatch.setenv("AI_PLATFORM_CAPABILITY_WORKER_ENABLED", "true")
+    monkeypatch.setenv("AI_PLATFORM_CAPABILITY_WORKER_WRITES_ENABLED", "true")
+    monkeypatch.setenv("AI_PLATFORM_CAPABILITY_WORKER_URL", "http://worker")
+    monkeypatch.setenv("AI_PLATFORM_CAPABILITY_LEASE_SIGNING_SECRET", "configured")
+    readonly = plane._readonly_capability_payload(
+        None,
+        tenant_id="tenant-a",
+        capability_revision=7,
+    )
+    try:
+        await plane._fetch_capability_catalog(
+            readonly,
+            tenant_id="tenant-a",
+            user_id="user-a",
+            session_id="session-a",
+            model_id="qwen3.7-plus",
+            capability_revision=7,
+        )
+    finally:
+        await client.aclose()
+
+    assert readonly["deferred"] == [descriptor]
+    assert readonly["capability_allowlist"] == [
+        {
+            "type": "tool",
+            "name": "generate_document",
+            "id": "generate_document",
+            "version": "1",
+            "schema_hash": "sha256:" + "c" * 64,
+        }
+    ]
+    assert [tool["name"] for tool in plane._dynamic_tools(readonly)] == [
+        "generate_document"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_catalog_refresh_preserves_connector_binding_and_fills_live_schema() -> None:
+    runtime_thread_id = uuid.uuid4()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/catalog")
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "tools": [
+                    {
+                        "name": "confluence_read",
+                        "id": "confluence_read",
+                        "version": None,
+                        "schema_hash": "sha256:" + "b" * 64,
+                        "description": "Read Confluence.",
+                        "schema": {"type": "object", "properties": {}},
+                        "kind": "tool",
+                        "read_only": True,
+                        "tenant_id": "tenant-a",
+                        "capability_revision": 7,
+                    }
+                ],
+                "mcp": [],
+                "deferred": [],
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    plane = AgentRuntimeControlPlane(
+        database=_Database(runtime_thread_id),
+        model_service=_ModelService(),
+        provider_service=_ProviderService(),
+        assignment_store=_AssignmentStore(),
+        lease_signer=RuntimeModelLeaseSigner("x" * 32),
+        runtime_url="http://runtime.test",
+        runtime_internal_token="runtime-token",
+        model_plane_base_url="http://gateway.test/internal/v1/agent-model-plane",
+        kernel_revision="kernel-1",
+        http_client=client,
+    )
+    plane.capability_plane_url = "http://capability.test/internal/v1/capabilities"
+    readonly = {
+        "tools": [],
+        "mcp": [],
+        "capability_allowlist": [],
+    }
+    binding = {
+        "type": "connector",
+        "name": "confluence_read",
+        "id": "confluence_read",
+        "version": None,
+        "schema_hash": None,
+        "connector_binding": {
+            "binding_type": "catalog",
+            "provider": "confluence",
+            "tool_name": "confluence_read",
+            "principal_type": None,
+            "grant_id": None,
+            "channel": "api",
+        },
+    }
+    try:
+        await plane._fetch_capability_catalog(
+            readonly,
+            tenant_id="tenant-a",
+            user_id="user-a",
+            session_id="session-a",
+            model_id="qwen3.7-plus",
+            capability_revision=7,
+            capability_allowlist=[binding],
+        )
+    finally:
+        await client.aclose()
+    result = readonly["capability_allowlist"][0]
+    assert result["schema_hash"] == "sha256:" + "b" * 64
+    assert result["connector_binding"] == binding["connector_binding"]
+    assert "secret_ref" not in result and "api_token" not in result
 
 
 @pytest.mark.asyncio

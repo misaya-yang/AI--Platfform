@@ -81,6 +81,8 @@ class EventType:
     RUN_FINISHED: str = "run_finished"
     RUN_ERROR: str = "run_error"
     CANCELLED: str = "cancelled"
+    ITEM: str = "item"
+    ACTIVITY: str = "activity"
 
     # -- Step lifecycle ------------------------------------------------------
     STEP_STARTED: str = "step_started"

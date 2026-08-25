@@ -10005,7 +10005,7 @@
           "Debug"
         ],
         "summary": "List Registered Tools",
-        "description": "Return the live in-process tool registry contents.\n\nOperator sanity check: if `confluence_read` / `confluence_write` are\nmissing here but the frontend shows Confluence 'connected', the\nstartup auto-rehydration (apps/assistant-service/main.py lifespan)\nfailed — check logs for 'Confluence tools registered'.\n\nRequires a real user (not anonymous). `get_user_context` returns\nanonymous users for public endpoints; we reject those explicitly\nhere because tool names are tenant-level reconnaissance info.",
+        "description": "Return the live Gateway-owned tool registry contents.\n\nOperator sanity check: if `confluence_read` / `confluence_write` are\nmissing here but the frontend shows Confluence 'connected', inspect\nthe Gateway capability registration logs.\n\nRequires a real user (not anonymous). `get_user_context` returns\nanonymous users for public endpoints; we reject those explicitly\nhere because tool names are tenant-level reconnaissance info.",
         "operationId": "list_registered_tools_api_v1_debug_tools_get",
         "responses": {
           "200": {
@@ -15237,7 +15237,7 @@
           "assistant"
         ],
         "summary": "List Models",
-        "description": "Thin proxy — assistant-service owns the model catalogue.",
+        "description": "Gateway-owned model catalogue used by the Agent Runtime.",
         "operationId": "list_models_api_v1_assistant_models_get",
         "responses": {
           "200": {
@@ -15259,7 +15259,7 @@
           "assistant"
         ],
         "summary": "List Datasets",
-        "description": "Thin proxy — assistant-service resolves KB datasets via knowledge-service.",
+        "description": "Gateway knowledge catalogue resolved for Agent Runtime turns.",
         "operationId": "list_datasets_api_v1_assistant_datasets_get",
         "responses": {
           "200": {
@@ -15281,7 +15281,7 @@
           "assistant"
         ],
         "summary": "Get Config",
-        "description": "Thin proxy — assistant-service owns provider configuration.",
+        "description": "Gateway-owned provider configuration.",
         "operationId": "get_config_api_v1_assistant_config_get",
         "responses": {
           "200": {
@@ -15297,14 +15297,14 @@
         }
       }
     },
-    "/api/v1/assistant/local-nodes/pairing/challenges": {
+    "/api/v1/local-nodes/pairing/challenges": {
       "post": {
         "tags": [
           "assistant"
         ],
         "summary": "Create Local Node Pairing Challenge",
         "description": "Start owner-bound pairing; device proof must complete it out of band.",
-        "operationId": "create_local_node_pairing_challenge_api_v1_assistant_local_nodes_pairing_challenges_post",
+        "operationId": "create_pairing_challenge_api_v1_local_nodes_pairing_challenges_post",
         "requestBody": {
           "content": {
             "application/json": {
@@ -15337,13 +15337,13 @@
         }
       }
     },
-    "/api/v1/assistant/local-nodes": {
+    "/api/v1/local-nodes": {
       "get": {
         "tags": [
           "assistant"
         ],
         "summary": "List Local Nodes",
-        "operationId": "list_local_nodes_api_v1_assistant_local_nodes_get",
+        "operationId": "list_devices_api_v1_local_nodes_get",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -15356,67 +15356,13 @@
         }
       }
     },
-    "/api/v1/assistant/local-nodes/{device_id}/revoke": {
-      "post": {
-        "tags": [
-          "assistant"
-        ],
-        "summary": "Revoke Local Node",
-        "description": "Revoke an owner-bound device without exposing host action execution.",
-        "operationId": "revoke_local_node_api_v1_assistant_local_nodes__device_id__revoke_post",
-        "parameters": [
-          {
-            "name": "device_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128,
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
-              "title": "Device Id"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/LocalNodeRevokeRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/assistant/local-nodes/{device_id}/status": {
+    "/api/v1/local-nodes/{device_id}/status": {
       "get": {
         "tags": [
           "assistant"
         ],
         "summary": "Get Local Node Status",
-        "operationId": "get_local_node_status_api_v1_assistant_local_nodes__device_id__status_get",
+        "operationId": "device_status_api_v1_local_nodes__device_id__status_get",
         "parameters": [
           {
             "name": "device_id",
@@ -15453,13 +15399,13 @@
         }
       }
     },
-    "/api/v1/assistant/local-nodes/{device_id}/capabilities": {
+    "/api/v1/local-nodes/{device_id}/capabilities": {
       "get": {
         "tags": [
           "assistant"
         ],
         "summary": "Get Local Node Capabilities",
-        "operationId": "get_local_node_capabilities_api_v1_assistant_local_nodes__device_id__capabilities_get",
+        "operationId": "device_capabilities_api_v1_local_nodes__device_id__capabilities_get",
         "parameters": [
           {
             "name": "device_id",
@@ -15496,13 +15442,13 @@
         }
       }
     },
-    "/api/v1/assistant/local-nodes/{device_id}/doctor": {
+    "/api/v1/local-nodes/{device_id}/doctor": {
       "get": {
         "tags": [
           "assistant"
         ],
         "summary": "Get Local Node Doctor",
-        "operationId": "get_local_node_doctor_api_v1_assistant_local_nodes__device_id__doctor_get",
+        "operationId": "device_doctor_api_v1_local_nodes__device_id__doctor_get",
         "parameters": [
           {
             "name": "device_id",
@@ -15539,13 +15485,13 @@
         }
       }
     },
-    "/api/v1/assistant/local-nodes/{device_id}/grants": {
+    "/api/v1/local-nodes/{device_id}/grants": {
       "get": {
         "tags": [
           "assistant"
         ],
         "summary": "List Local Node Grants",
-        "operationId": "list_local_node_grants_api_v1_assistant_local_nodes__device_id__grants_get",
+        "operationId": "list_grants_api_v1_local_nodes__device_id__grants_get",
         "parameters": [
           {
             "name": "device_id",
@@ -15582,14 +15528,14 @@
         }
       }
     },
-    "/api/v1/assistant/local-nodes/{device_id}/grants/{grant_id}": {
+    "/api/v1/local-nodes/{device_id}/grants/{grant_id}": {
       "delete": {
         "tags": [
           "assistant"
         ],
         "summary": "Revoke Local Node Grant",
         "description": "Remove a grant; new grants require the trusted device channel.",
-        "operationId": "revoke_local_node_grant_api_v1_assistant_local_nodes__device_id__grants__grant_id__delete",
+        "operationId": "revoke_grant_api_v1_local_nodes__device_id__grants__grant_id__delete",
         "parameters": [
           {
             "name": "device_id",
@@ -15638,13 +15584,13 @@
         }
       }
     },
-    "/api/v1/assistant/local-nodes/{device_id}/events": {
+    "/api/v1/local-nodes/{device_id}/events": {
       "get": {
         "tags": [
           "assistant"
         ],
         "summary": "List Local Node Events",
-        "operationId": "list_local_node_events_api_v1_assistant_local_nodes__device_id__events_get",
+        "operationId": "list_events_api_v1_local_nodes__device_id__events_get",
         "parameters": [
           {
             "name": "device_id",
@@ -15687,7 +15633,7 @@
           "assistant"
         ],
         "summary": "List Tools",
-        "description": "Thin proxy — assistant-service owns the tool registry.",
+        "description": "Gateway-owned tool registry exposed to the Agent Runtime.",
         "operationId": "list_tools_api_v1_assistant_tools_get",
         "responses": {
           "200": {
@@ -15709,7 +15655,7 @@
           "assistant"
         ],
         "summary": "Get Policies",
-        "description": "Thin proxy — policy snapshot comes from assistant-service.",
+        "description": "Gateway policy snapshot used by the Agent Runtime.",
         "operationId": "get_policies_api_v1_assistant_policies_get",
         "responses": {
           "200": {
@@ -15731,7 +15677,7 @@
           "assistant"
         ],
         "summary": "Approve Tool Call",
-        "description": "Thin proxy — approval state lives in ``assistant_tool_approvals``\n(ADR-004). Gateway forwards the request body to assistant-service.",
+        "description": "Gateway-owned approval decision for a Runtime tool call. Approval state is tenant- and session-scoped.",
         "operationId": "approve_tool_call_api_v1_assistant_approvals__approval_id__post",
         "parameters": [
           {
@@ -15887,7 +15833,7 @@
           "assistant"
         ],
         "summary": "Chat",
-        "description": "Non-streaming chat completion — thin proxy to assistant-service.\n\nGateway responsibilities (defence-in-depth, mirror of /chat/stream):\n  - per-user rate limit\n  - model-permission check (users can only call their allowed models)\n  - session-ownership check (users can only resume their own sessions)\n\nEverything else — model routing, tool execution, persistence — runs\ninside the assistant-service container.",
+        "description": "Non-streaming chat completion through the Gateway-owned Agent Runtime.\n\nGateway responsibilities:\n  - per-user rate limit\n  - model-permission check\n  - session-ownership check\n\nModel routing, tool execution, and persistence remain Runtime-owned.",
         "operationId": "chat_api_v1_assistant_chat_post",
         "requestBody": {
           "content": {
@@ -15929,7 +15875,7 @@
           "assistant"
         ],
         "summary": "Chat Stream",
-        "description": "Streaming chat completion (SSE) — HTTP proxy to assistant-service.\n\nGateway responsibilities (preserved from the in-process version):\n  - JWT auth via ``get_user_context``\n  - Per-user rate limiting (``operation=\"assistant_chat\"``)\n  - Model-permission check (users can only call models they're allowed to)\n  - Session-ownership check (users can only resume their own sessions)\n\nEverything else — model routing, tool execution, SSE event assembly —\nruns in the assistant-service container. Stopping assistant-service\nreturns a clean 502 for this endpoint; restarting it resumes chat\nwithin the next request via the proxy's circuit breaker.",
+        "description": "Streaming chat completion (SSE) through the Gateway-owned Agent Runtime.\n\nGateway responsibilities:\n  - JWT authentication\n  - per-user rate limiting\n  - model-permission and session-ownership checks\n\nModel routing, tool execution, persistence, and SSE event projection remain Runtime-owned.",
         "operationId": "chat_stream_api_v1_assistant_chat_stream_post",
         "responses": {
           "200": {
@@ -16439,7 +16385,7 @@
           "assistant"
         ],
         "summary": "Generate Image",
-        "description": "Thin proxy — assistant-service owns image generation routing\n(Gemini / Doubao / DashScope) and multi-turn session history.",
+        "description": "Gateway-owned image capability entry point with provider routing and artifact persistence.",
         "operationId": "generate_image_api_v1_assistant_generate_image_post",
         "requestBody": {
           "content": {
@@ -16481,7 +16427,7 @@
           "assistant"
         ],
         "summary": "Submit Image Generation",
-        "description": "Thin proxy — background task lives in assistant-service's in-memory store.",
+        "description": "Submit an image capability task to the Gateway-owned task store.",
         "operationId": "submit_image_generation_api_v1_assistant_generate_image_async_post",
         "requestBody": {
           "content": {
@@ -16523,7 +16469,7 @@
           "assistant"
         ],
         "summary": "Get Image Task Status",
-        "description": "Thin proxy — polls the task store in assistant-service.",
+        "description": "Poll the Gateway-owned image capability task store.",
         "operationId": "get_image_task_status_api_v1_assistant_image_task__task_id__get",
         "parameters": [
           {
@@ -16689,7 +16635,7 @@
           "assistant"
         ],
         "summary": "Get Artifact Download Url",
-        "description": "Thin proxy — re-sign a presigned URL for an artifact variant.\n\nQuery params: ``variant`` (display|raw|thumbnail, default display) and\n``expires_in`` (60..3600, default 3600). Owner-scoped — 404 on\ncross-owner access. See assistant-service for the full contract.",
+        "description": "Re-sign a presigned URL for an artifact variant.\n\nQuery params: ``variant`` (display|raw|thumbnail, default display) and\n``expires_in`` (60..3600, default 3600). Owner-scoped — 404 on\ncross-owner access.",
         "operationId": "get_artifact_download_url_api_v1_assistant_artifacts__artifact_id__download_url_get",
         "parameters": [
           {

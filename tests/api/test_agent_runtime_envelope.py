@@ -22,7 +22,7 @@ from src.api.schemas.agent_runtime import (
     AgentVersionPreviewChatRequest,
     InternalAgentRuntimeChatRequest,
 )
-from src.api.v1._assistant_proxy import reject_client_agent_forgery
+from src.api.v1._agent_runtime_headers import reject_client_agent_forgery
 from src.api.v1.agent_runtime import (
     _assert_attachments_allowed,
     _assert_existing_pin,

@@ -1,7 +1,6 @@
 """
-Quiz API — DEPRECATED shim. The supported path is the in-chat ``generate_quiz``
-assistant tool (apps/assistant-service/core/tools/quiz_tool.py), documented by
-the ai-quiz agent plugin (agent-plugins/ai-quiz).
+Quiz API — compatibility routes for quizzes created by the Agent Runtime's
+``generate_quiz`` capability, documented by the ai-quiz plugin manifest.
 
 Endpoints (load-bearing only):
 - GET  /assistant/quiz/{quiz_id}         — Get quiz details (no answers)
