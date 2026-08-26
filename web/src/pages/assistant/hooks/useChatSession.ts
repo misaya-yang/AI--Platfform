@@ -268,6 +268,13 @@ async function restoreLatestRun(
           ...base,
           collapsed: false,
           status: "blocked",
+          // The restored card must take the V2 decision branch, which keys off
+          // ``runtimeThreadId``. The run-status response already carries the
+          // authoritative ``harness_thread_id`` (== the runtime thread id the
+          // live ``approval_required`` event reports as ``thread_id``), so
+          // recover it here instead of falling through to the legacy
+          // ``approveToolCall`` + resume path that cannot drive a V2 thread.
+          runtimeThreadId: nonEmptyString(run.harness_thread_id) ?? base.runtimeThreadId,
           tools: [{
             id: nonEmptyString(pendingTool?.tool_id) ?? `approval-${approvalId}`,
             name: nonEmptyString(pendingTool?.tool_name) ?? "Pending tool",
@@ -827,6 +834,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [messages, setMessages] = useState<ChatMessageType[]>([]);
   const messagesRef = useRef<ChatMessageType[]>([]);
+  const activeSessionIdRef = useRef<string | null | undefined>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [sessionsLoading, setSessionsLoading] = useState(true);
   const [historyRestoreState, setHistoryRestoreState] = useState<
@@ -861,6 +869,13 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
   // exists, and stale finally blocks must never clear a newer stream's refs.
   const streamEpochRef = useRef(0);
   const restoreEpochRef = useRef(0);
+  // Assistant-message ids whose SSE consumer exited while an approval hold was
+  // still active (server EOF / proxy timeout / network drop mid-park). For
+  // these the stream is dead, so a decision made later can never arrive as an
+  // in-band APPROVAL_RESULT; ``handleToolApproval`` reconciles them from
+  // authoritative history instead of relying on the abandoned stream. A live
+  // stream clears the hold before its ``finally`` runs, so it is never added.
+  const deadApprovalMessageIdsRef = useRef<Set<string>>(new Set());
   const pendingSessionIdRef = useRef<string | undefined>(undefined);
   const lastStreamConfigRef = useRef<{
     config: SessionConfig;
@@ -920,6 +935,10 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
 
   useEffect(() => {
     return () => {
@@ -3465,7 +3484,20 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       if (!streamTraceClosed) {
         closeStreamTrace("cancelled", { reason: "finalized_without_outcome" });
       }
-      if (isCurrentStream() && !approvalHoldActive()) {
+      // The consumer is gone by the time ``finally`` runs, so the send locks
+      // must be released even when an approval hold is still active. A live
+      // stream clears ``approvalHoldOpen`` on APPROVAL_RESULT before reaching
+      // here, so ``approvalHoldActive()`` at this point means the stream died
+      // mid-park — the exact case the old guard turned into a permanent
+      // composer lock (Approve POSTed server-side while the UI stayed stuck on
+      // "Stop generating", recoverable only by session switch). Release the
+      // locks; the pending card and its runtimeThreadId/approvalId persist in
+      // message state so the decision stays actionable, and flag the id so the
+      // decision handler reconciles from history rather than a dead stream.
+      if (isCurrentStream()) {
+        if (approvalHoldActive()) {
+          deadApprovalMessageIdsRef.current.add(assistantMessage.id);
+        }
         setIsStreaming(false);
         clearCancelFallback();
         if (abortControllerRef.current === streamAbortController) {
@@ -3478,6 +3510,43 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       }
     }
   }, [activeSessionId, clearCancelFallback, messages, requestTaskCancellation, setActiveSessionId, setAssistantLocalTitles, t, workingMemory]);
+
+  // Reconcile a run whose approval was decided AFTER its SSE consumer had
+  // already exited mid-park (see the ``finally`` that records
+  // ``deadApprovalMessageIdsRef``). The decision wakes the turn server-side but
+  // no client is streaming it, so poll the run to a terminal state and reload
+  // the authoritative append-only history — the same source the session loader
+  // uses — so the continued answer surfaces without a manual reload. Guarded on
+  // the session still being active so a session switch during the poll cannot
+  // clobber the conversation the user has since opened.
+  const reconcileDeadApprovalRun = useCallback(
+    async (runId?: string, sessionIdHint?: string | null) => {
+      const terminal = new Set(["succeeded", "failed", "cancelled"]);
+      let sessionId = sessionIdHint || undefined;
+      try {
+        if (runId) {
+          for (let attempt = 0; attempt < 40; attempt += 1) {
+            const { run } = await getAssistantRunStatus(runId);
+            sessionId = nonEmptyString(run.session_id) || sessionId;
+            if (terminal.has(run.status || "")) break;
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+          }
+        }
+        if (!sessionId) return;
+        const history = await getAssistantSessionHistory(sessionId, 200);
+        if (activeSessionIdRef.current !== sessionId) return;
+        const targetSession = sessionId;
+        const restored = history.messages.map((message, index) =>
+          restoreMessageMetadata(message, index, targetSession),
+        );
+        setMessages(restored);
+        void hydrateQuizData(restored, setMessages);
+      } catch {
+        console.warn("Reconcile after dead-stream approval decision failed");
+      }
+    },
+    [],
+  );
 
   const handleToolApproval = useCallback(
     async (
@@ -3548,9 +3617,24 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         });
       });
 
-      if (!approved) return;
+      if (!approved) {
+        // A rejected approval ends the turn; reconcile the dead-stream case so
+        // the rejection is reflected instead of leaving a parked "blocked" card.
+        if (runtimeThreadId && deadApprovalMessageIdsRef.current.delete(messageId)) {
+          void reconcileDeadApprovalRun(runId, activeSessionIdRef.current);
+        }
+        return;
+      }
 
-      if (runtimeThreadId) return;
+      if (runtimeThreadId) {
+        // A live V2 stream keeps consuming after the decision and renders the
+        // continued turn itself. Only the dead-stream case — flagged by the
+        // consumer's ``finally`` — needs a client-side reconcile.
+        if (deadApprovalMessageIdsRef.current.delete(messageId)) {
+          void reconcileDeadApprovalRun(runId, activeSessionIdRef.current);
+        }
+        return;
+      }
 
       try {
         const resumePlan = await prepareAssistantRunResume(runId, {
@@ -3647,7 +3731,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         targetAssistantMessageId: messageId,
       });
     },
-    [sendMessage],
+    [sendMessage, reconcileDeadApprovalRun],
   );
 
   return {

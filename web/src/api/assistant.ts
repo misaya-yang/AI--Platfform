@@ -926,6 +926,8 @@ export interface AssistantRunStatus {
   run_id?: string;
   session_id?: string;
   status?: string;
+  harness_thread_id?: string | null;
+  harness_turn_id?: string | null;
   checkpoint?: AssistantRunCheckpoint | null;
 }
 
