@@ -13,11 +13,8 @@ from __future__ import annotations
 import hashlib
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
 
 from ai_gateway_core.logging import get_logger
-
-from ..core.client_ip import get_client_ip, get_client_ip_from_request
 
 logger = get_logger(__name__)
 
@@ -368,94 +365,4 @@ class ContextInjector:
 
         return headers
 
-    @staticmethod
-    def extract_context_from_scope(scope: dict[str, Any]) -> RequestContext:
-        """
-        从 ASGI scope 提取请求上下文
 
-        Args:
-            scope: ASGI scope 字典
-
-        Returns:
-            RequestContext 对象
-        """
-        # 从 scope["state"] 获取中间件注入的信息
-        state = scope.get("state", {})
-
-        # 用户信息
-        user_info = state.get("user_info", {})
-
-        # 原始请求头
-        raw_headers = scope.get("headers", [])
-        original_headers = {
-            name.decode("utf-8"): value.decode("utf-8") for name, value in raw_headers
-        }
-
-        # 客户端 IP
-        client_host = scope.get("client", (None,))[0] if scope.get("client") else None
-        client_ip = get_client_ip(original_headers, client_host)
-
-        return RequestContext(
-            user_id=user_info.get("user_id", ""),
-            tenant_id=user_info.get("tenant_id", ""),
-            user_tier=user_info.get("tier", "anonymous"),
-            is_authenticated=user_info.get("is_authenticated", False),
-            roles=user_info.get("roles", []),
-            request_id=state.get("request_id", str(uuid.uuid4())),
-            trace_id=state.get("trace_id", ""),
-            span_id=state.get("span_id", ""),
-            traceparent=state.get("traceparent", ""),
-            client_ip=client_ip,
-            user_agent=original_headers.get("user-agent", ""),
-            original_headers=original_headers,
-        )
-
-    @staticmethod
-    def extract_context_from_request(request) -> RequestContext:
-        """
-        从 FastAPI Request 对象提取请求上下文
-
-        Args:
-            request: FastAPI Request 对象
-
-        Returns:
-            RequestContext 对象
-        """
-        # 从 request.state 获取信息
-        state = request.state._state if hasattr(request.state, "_state") else {}
-
-        # 用户信息（可能来自 get_user_context 依赖）
-        user_info = getattr(request.state, "user_info", {})
-        if not user_info:
-            user_info = state.get("user_info", {})
-
-        # 原始请求头
-        original_headers = dict(request.headers)
-
-        # 客户端 IP
-        client_ip = get_client_ip_from_request(request)
-
-        return RequestContext(
-            user_id=user_info.get("user_id", "")
-            if isinstance(user_info, dict)
-            else getattr(user_info, "user_id", ""),
-            tenant_id=user_info.get("tenant_id", "")
-            if isinstance(user_info, dict)
-            else getattr(user_info, "tenant_id", ""),
-            user_tier=user_info.get("tier", "anonymous")
-            if isinstance(user_info, dict)
-            else getattr(user_info, "tier", "anonymous"),
-            is_authenticated=user_info.get("is_authenticated", False)
-            if isinstance(user_info, dict)
-            else getattr(user_info, "is_authenticated", False),
-            roles=user_info.get("roles", [])
-            if isinstance(user_info, dict)
-            else getattr(user_info, "roles", []),
-            request_id=getattr(request.state, "request_id", str(uuid.uuid4())),
-            trace_id=getattr(request.state, "trace_id", ""),
-            span_id=getattr(request.state, "span_id", ""),
-            traceparent=getattr(request.state, "traceparent", ""),
-            client_ip=client_ip,
-            user_agent=request.headers.get("user-agent", ""),
-            original_headers=original_headers,
-        )

@@ -4,7 +4,7 @@ Sub-modules:
 
 - ``envelope`` — ``EventEnvelope[T]`` + concrete payloads
   (``UsageRecordedV1``).
-- ``registry`` — static ``STREAM_NAMES`` / ``GROUP_NAMES`` map +
+- ``registry`` — static ``STREAM_NAMES`` map +
   ``get_stream(event_type)`` helper.
 - ``bus`` — ``EventBus.publish(envelope)`` writes to a stream.
 - ``consumer`` — ``EventConsumer`` runs the XREADGROUP loop with
@@ -40,15 +40,6 @@ from .errors import EventBusError, EventDeserializationError, EventHandlerError
 from .idempotency import IdempotencyStore
 from .registry import DLQ_SUFFIX, STREAM_NAMES, dlq_for, get_stream
 
-# Default group names per event type. Co-located with STREAM_NAMES so a
-# new event ships with both wires defined. Multiple consumer apps may
-# reuse the same group string when they want shared at-least-once
-# delivery, or define their own group ad-hoc.
-GROUP_NAMES: dict[str, str] = {
-    "usage.recorded.v1": "usage-aggregator",
-}
-
-
 __all__ = [
     "DLQ_SUFFIX",
     "EventBus",
@@ -57,7 +48,6 @@ __all__ = [
     "EventDeserializationError",
     "EventEnvelope",
     "EventHandlerError",
-    "GROUP_NAMES",
     "IdempotencyStore",
     "STREAM_NAMES",
     "UsageRecordedV1",

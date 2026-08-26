@@ -770,46 +770,6 @@ async def count_active_image_tasks(
     return int(value or 0)
 
 
-async def claim_next_image_tasks(
-    pool,
-    *,
-    limit: int,
-    visibility_seconds: int,
-) -> list[dict]:
-    """Claim queued tasks using Postgres ``FOR UPDATE SKIP LOCKED``."""
-    if pool is None:
-        return []
-    try:
-        async with pool.acquire() as conn, conn.transaction():
-            rows = await conn.fetch(
-                """
-                    WITH picked AS (
-                        SELECT task_id
-                        FROM assistant.image_tasks
-                        WHERE status = 'pending'
-                          AND (locked_until IS NULL OR locked_until < NOW())
-                        ORDER BY created_at ASC
-                        LIMIT $1
-                        FOR UPDATE SKIP LOCKED
-                    )
-                    UPDATE assistant.image_tasks t SET
-                        status = 'running',
-                        locked_until = NOW() + ($2::int * INTERVAL '1 second'),
-                        attempt_count = attempt_count + 1,
-                        started_at = COALESCE(started_at, NOW()),
-                        updated_at = NOW()
-                    FROM picked
-                    WHERE t.task_id = picked.task_id
-                    RETURNING t.*
-                    """,
-                limit, visibility_seconds,
-            )
-    except (TypeError, AttributeError) as exc:
-        logger.debug("claim_next_image_tasks: non-real pool (%s) — []", exc)
-        return []
-    return [dict(r) for r in rows]
-
-
 # ----- Idempotency --------------------------------------------------------
 
 async def lookup_idempotent(
@@ -886,7 +846,6 @@ async def record_idempotent(
 
 __all__ = [
     "advance_latest_artifact_cas",
-    "claim_next_image_tasks",
     "count_active_image_tasks",
     "compute_owner_scope",
     "compute_request_hash",

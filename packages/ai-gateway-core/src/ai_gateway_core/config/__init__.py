@@ -19,11 +19,9 @@ from .endpoints import (
 # bare host without ``/api/v1``. Removed because the dashscope SDK 404s
 # on it; kept here as an alias to the new value so old import sites
 # don't break during the upgrade window.
-DASHSCOPE_DEFAULT_LEGACY_BASE_URL = DASHSCOPE_DEFAULT_NATIVE_BASE_URL
 
 __all__ = [
     "DASHSCOPE_DEFAULT_CHAT_BASE_URL",
-    "DASHSCOPE_DEFAULT_LEGACY_BASE_URL",
     "DASHSCOPE_DEFAULT_NATIVE_BASE_URL",
     "GOOGLE_AI_STUDIO_BASE_URL",
     "GOOGLE_VERTEX_BASE_URL",

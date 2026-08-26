@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """AST/text gate for the Gateway/Rust Runtime ownership boundary.
 
-The retired source trees are deliberately excluded while they remain in the
-checkout. Everything else must not reintroduce the retired Python loop,
-Assistant Service process dependencies, or the old Python docgen/OpenAPI
-snapshot entrypoints. The report is intentionally path-specific so cleanup
-can proceed without hiding residual consumers.
+The retired source trees were removed from the checkout; the exclusion
+patterns remain so a partial re-add during recovery can never mask the
+rest of the tree. Everything else must not reintroduce the retired Python
+loop, Assistant Service process dependencies, or the old Python
+docgen/OpenAPI snapshot entrypoints. The report is intentionally
+path-specific so cleanup can proceed without hiding residual consumers.
 """
 
 from __future__ import annotations
