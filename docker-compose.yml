@@ -419,6 +419,10 @@ services:
       KNOWLEDGE_CORS__ALLOW_ORIGINS: '${KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON:-["http://localhost:80","http://localhost:3000","http://localhost:8081"]}'
       KNOWLEDGE_APP__HOST: "0.0.0.0"
       KNOWLEDGE_APP__PORT: "8092"
+      # Guard-documented dev escape valve: the startup check refuses to boot
+      # with neither the internal token nor anonymity. Default false keeps it
+      # fail-closed; see apps/knowledge-service main.py Phase K5c.
+      KNOWLEDGE_APP__ALLOW_ANONYMOUS: "${KNOWLEDGE_APP__ALLOW_ANONYMOUS:-false}"
       KNOWLEDGE_DATABASE__DSN: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-gateway}?options=-csearch_path%3Dknowledge%2Cgateway%2Cassistant%2Cpublic"
       KNOWLEDGE_REDIS__ENABLED: "true"
       KNOWLEDGE_REDIS__URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/2"
@@ -541,7 +545,7 @@ services:
   # Rust capability worker. It owns durable tool execution but never a model loop.
   agent-capability-worker:
     container_name: ai-gateway-agent-capability-worker
-    image: "${AGENT_CAPABILITY_WORKER_IMAGE:-ai-gateway-agent-capability-worker:local-93c54bca3899-5f925d16fe3a}"
+    image: "${AGENT_CAPABILITY_WORKER_IMAGE:-ai-gateway-agent-capability-worker:local-93c54bca3899-c2f4e4c2ef8e}"
     expose:
       - "8095"
     environment:
@@ -587,7 +591,7 @@ services:
   # Rust Agent Runtime. It is the sole Agent kernel for new and resumed turns.
   agent-runtime:
     container_name: ai-gateway-agent-runtime
-    image: "${AI_PLATFORM_AGENT_RUNTIME_IMAGE:-ai-gateway-agent-runtime:local-93c54bca3899-5f925d16fe3a}"
+    image: "${AI_PLATFORM_AGENT_RUNTIME_IMAGE:-ai-gateway-agent-runtime:local-93c54bca3899-c2f4e4c2ef8e}"
     expose:
       - "8094"
     environment:

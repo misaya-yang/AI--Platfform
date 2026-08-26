@@ -1291,12 +1291,19 @@ async fn validated_public_url(value: &str) -> Result<Url, ReadCapabilityError> {
 }
 
 fn resolved_peer_ip(remote: Option<IpAddr>, pinned: &[std::net::SocketAddr]) -> Option<IpAddr> {
-    // `resolve_to_addrs` pins the TCP peer. Some HTTP stacks then leave
-    // `remote_addr()` empty; falling back to the already-validated pin keeps
-    // SSRF closed without rejecting a successful public fetch.
-    remote
-        .filter(|ip| is_public_ip(*ip))
-        .or_else(|| pinned.iter().map(std::net::SocketAddr::ip).find(|ip| is_public_ip(*ip)))
+    // `resolve_to_addrs` pins the TCP peer. Only when the HTTP stack leaves
+    // `remote_addr()` empty do we fall back to the already-validated pin. An
+    // *observed* peer is never overridden: if the connection actually landed on
+    // a private address, that observation must reach the caller's `SsrfBlocked`
+    // branch so a future pinning/proxy regression stays a hard block rather
+    // than being masked into a silent public pass.
+    match remote {
+        Some(ip) => Some(ip),
+        None => pinned
+            .iter()
+            .map(std::net::SocketAddr::ip)
+            .find(|ip| is_public_ip(*ip)),
+    }
 }
 
 fn is_public_ip(ip: IpAddr) -> bool {
@@ -1323,13 +1330,31 @@ fn is_public_ipv4(ip: Ipv4Addr) -> bool {
 }
 
 fn is_public_ipv6(ip: Ipv6Addr) -> bool {
-    let first = ip.segments()[0];
+    // A v4-mapped (`::ffff:a.b.c.d`), IPv4-compatible (`::a.b.c.d`), or 6to4
+    // (`2002:a.b.c.d::`) address can carry a private IPv4 inside a nominally
+    // public IPv6 shape, and Linux `connect()` on such a sockaddr reaches the
+    // embedded IPv4 host. Classify the mapped form by its embedded v4 and block
+    // the compat/6to4 transition ranges outright, or a public domain serving an
+    // attacker-chosen AAAA record bypasses every SSRF check (metadata/localhost).
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return is_public_ipv4(v4);
+    }
+    let seg = ip.segments();
+    if seg[0] == 0x2002 {
+        // 6to4 (2002::/16) — embeds an IPv4 destination; web_fetch never needs it.
+        return false;
+    }
+    if seg[0] == 0 && seg[1] == 0 && seg[2] == 0 && seg[3] == 0 && seg[4] == 0 {
+        // ::/96 — the deprecated IPv4-compatible form (and `::`, already covered).
+        return false;
+    }
+    let first = seg[0];
     !(ip.is_loopback()
         || ip.is_unspecified()
         || ip.is_multicast()
         || (first & 0xfe00) == 0xfc00
         || (first & 0xffc0) == 0xfe80
-        || (ip.segments()[0] == 0x2001 && ip.segments()[1] == 0x0db8))
+        || (seg[0] == 0x2001 && seg[1] == 0x0db8))
 }
 
 #[cfg(test)]
@@ -1346,10 +1371,41 @@ mod capability_proof_tests {
             super::resolved_peer_ip(None, &[pinned]),
             Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)))
         );
+    }
+
+    #[test]
+    fn observed_private_peer_is_never_masked_by_a_public_pin() {
+        // The connection actually landed on loopback while the pin list is
+        // public: the observation must pass through so the caller's
+        // `SsrfBlocked` branch fires, instead of being overwritten by the pin.
+        let pinned = "1.1.1.1:443".parse::<std::net::SocketAddr>().unwrap();
         assert_eq!(
-            super::resolved_peer_ip(Some(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)), &[pinned]),
-            Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)))
+            super::resolved_peer_ip(
+                Some(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+                &[pinned],
+            ),
+            Some(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
         );
+    }
+
+    #[test]
+    fn ipv4_mapped_and_transition_v6_are_not_public() {
+        // Attacker-controlled AAAA records that embed a private IPv4 must not
+        // read as public (web_fetch URLs are model-influenced).
+        use std::net::IpAddr;
+        use std::net::Ipv6Addr;
+        let mapped_loopback = Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x7f00, 0x0001); // ::ffff:127.0.0.1
+        let mapped_metadata = Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0xa9fe, 0xa9fe); // ::ffff:169.254.169.254
+        let compat_loopback = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0x7f00, 0x0001); // ::127.0.0.1
+        let sixto4 = Ipv6Addr::new(0x2002, 0x7f00, 0x0001, 0, 0, 0, 0, 0); // 2002:7f00:1::
+        assert!(!super::is_public_ip(IpAddr::V6(mapped_loopback)));
+        assert!(!super::is_public_ip(IpAddr::V6(mapped_metadata)));
+        assert!(!super::is_public_ip(IpAddr::V6(compat_loopback)));
+        assert!(!super::is_public_ip(IpAddr::V6(sixto4)));
+        // A genuine global IPv6 address stays public.
+        assert!(super::is_public_ip(IpAddr::V6(Ipv6Addr::new(
+            0x2606, 0x4700, 0, 0, 0, 0, 0, 0x6806
+        ))));
     }
 
     #[test]
