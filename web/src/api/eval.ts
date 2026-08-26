@@ -590,10 +590,6 @@ export async function listEvalDatasets(params: { limit?: number; offset?: number
   return response.data;
 }
 
-export async function getEvalDataset(datasetId: string): Promise<EvalDataset> {
-  const response = await api.get<EvalDataset>(`/api/v1/eval/datasets/${encodeURIComponent(datasetId)}`);
-  return response.data;
-}
 
 export async function listEvalExamples(
   datasetId: string,
@@ -671,10 +667,6 @@ export async function listEvalEvaluators(params: { limit?: number; offset?: numb
   return response.data;
 }
 
-export async function getEvalEvaluator(evaluatorId: string): Promise<EvalEvaluator> {
-  const response = await api.get<EvalEvaluator>(`/api/v1/eval/evaluators/${encodeURIComponent(evaluatorId)}`);
-  return response.data;
-}
 
 export async function createEvalEvaluator(payload: {
   name: string;

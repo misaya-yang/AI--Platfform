@@ -94,10 +94,6 @@ export async function invokeService(req: UnifiedRequest) {
   return data;
 }
 
-export async function submitService(req: UnifiedRequest) {
-  const { data } = await api.post<UnifiedResponse>("/api/v1/submit", req);
-  return data;
-}
 
 export async function getTask(taskId: string) {
   const { data } = await api.get<Task>(`/api/v1/tasks/${taskId}`);

@@ -9,7 +9,7 @@ export interface SetupState {
   default_model: string;
 }
 
-export async function fetchSetupState(): Promise<SetupState> {
+async function fetchSetupState(): Promise<SetupState> {
   const { data } = await api.get<SetupState>("/api/v1/setup/state");
   return data;
 }

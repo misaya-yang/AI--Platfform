@@ -162,13 +162,6 @@ export async function listRoles(): Promise<RoleListResponse> {
   return response.data;
 }
 
-/**
- * Get role by name
- */
-export async function getRole(roleName: string): Promise<RoleResponse> {
-  const response = await api.get<RoleResponse>(`/api/v1/roles/${roleName}`);
-  return response.data;
-}
 
 /**
  * List all permissions

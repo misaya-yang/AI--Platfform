@@ -140,7 +140,7 @@ function projectRuntimeItem(
   return null;
 }
 
-export function projectAgentV2Event(
+function projectAgentV2Event(
   event: AgentV2Event,
   runtimeSessionId?: string,
 ): StreamEvent | null {
@@ -191,7 +191,7 @@ export function projectAgentV2Event(
   return null;
 }
 
-export async function createAgentThread(
+async function createAgentThread(
   sessionId?: string,
   modelId?: string,
 ): Promise<AgentV2Thread> {
@@ -202,12 +202,8 @@ export async function createAgentThread(
   return data.thread;
 }
 
-export async function getAgentThread(threadId: string): Promise<AgentV2Thread> {
-  const { data } = await api.get<{ thread: AgentV2Thread }>(`/api/v2/agent/threads/${encodeURIComponent(threadId)}`);
-  return data.thread;
-}
 
-export async function startAgentTurn(
+async function startAgentTurn(
   threadId: string,
   message: string,
   modelId?: string,
@@ -221,7 +217,7 @@ export async function startAgentTurn(
   return data;
 }
 
-export async function interruptAgentTurn(threadId: string, turnId: string, reason = "client_interrupt") {
+async function interruptAgentTurn(threadId: string, turnId: string, reason = "client_interrupt") {
   const { data } = await api.post(
     `/api/v2/agent/threads/${encodeURIComponent(threadId)}/turns/${encodeURIComponent(turnId)}:interrupt`,
     { reason },

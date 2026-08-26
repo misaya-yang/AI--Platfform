@@ -39,88 +39,10 @@ export interface FilesListResponse {
 // File Upload APIs
 // ============================================================
 
-/**
- * Upload a single file for analysis.
- *
- * @param file - The file to upload
- * @returns Upload response with file path for agent use
- */
-export async function uploadFile(file: File): Promise<FileUploadResponse> {
-  const formData = new FormData();
-  formData.append("file", file);
 
-  const { data } = await api.post<FileUploadResponse>(
-    "/api/v1/files/upload",
-    formData,
-    {
-      headers: {
-        "Content-Type": "multipart/form-data",
-      },
-    }
-  );
-  return data;
-}
 
-/**
- * Upload multiple files (max 5).
- *
- * @param files - Array of files to upload
- * @returns Array of upload responses
- */
-export async function uploadMultipleFiles(
-  files: File[]
-): Promise<FileUploadResponse[]> {
-  const formData = new FormData();
-  files.forEach((file) => {
-    formData.append("files", file);
-  });
 
-  const { data } = await api.post<FileUploadResponse[]>(
-    "/api/v1/files/upload/multiple",
-    formData,
-    {
-      headers: {
-        "Content-Type": "multipart/form-data",
-      },
-    }
-  );
-  return data;
-}
 
-/**
- * List files uploaded by the current user.
- *
- * @returns List of uploaded files
- */
-export async function listFiles(): Promise<FilesListResponse> {
-  const { data } = await api.get<FilesListResponse>("/api/v1/files");
-  return data;
-}
-
-/**
- * Get information about a specific file.
- *
- * @param fileId - The file ID
- * @returns File information
- */
-export async function getFileInfo(fileId: string): Promise<FileInfo> {
-  const { data } = await api.get<FileInfo>(`/api/v1/files/${fileId}`);
-  return data;
-}
-
-/**
- * Delete an uploaded file.
- *
- * @param fileId - The file ID to delete
- */
-export async function deleteFile(
-  fileId: string
-): Promise<{ status: string; file_id: string }> {
-  const { data } = await api.delete<{ status: string; file_id: string }>(
-    `/api/v1/files/${fileId}`
-  );
-  return data;
-}
 
 // ============================================================
 // Image Compression
@@ -156,7 +78,7 @@ const DEFAULT_COMPRESSION_OPTIONS: Required<ImageCompressionOptions> = {
  * @param options - Compression options
  * @returns Compressed file (or original if no compression needed)
  */
-export async function compressImage(
+async function compressImage(
   file: File,
   options?: ImageCompressionOptions
 ): Promise<File> {
@@ -275,21 +197,6 @@ export function isImageFile(file: File): boolean {
   return file.type.startsWith("image/");
 }
 
-/**
- * Check if a file is a document.
- */
-export function isDocumentFile(file: File): boolean {
-  const documentTypes = [
-    "application/pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "application/msword",
-    "text/markdown",
-    "text/plain",
-    "text/csv",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  ];
-  return documentTypes.includes(file.type);
-}
 
 // Re-export from shared format utilities for backward compatibility.
 export { formatFileSize } from "@/lib/format";

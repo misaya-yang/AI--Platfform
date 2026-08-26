@@ -147,16 +147,6 @@ export async function createAgent(payload: {
   return data.agent;
 }
 
-export async function updateAgent(
-  agentId: string,
-  patch: { name?: string; slug?: string; description?: string },
-): Promise<AgentSummary> {
-  const { data } = await api.patch<{ agent: AgentSummary }>(
-    `/api/v1/agents/${agentId}`,
-    patch,
-  );
-  return data.agent;
-}
 
 export async function copyAgent(agentId: string): Promise<AgentSummary> {
   const { data } = await api.post<{ agent: AgentSummary }>(

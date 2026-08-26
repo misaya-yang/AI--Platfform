@@ -16,7 +16,6 @@ import type {
   QARequest,
   QAResponse,
   QAStreamEvent,
-  QABatchTestResult,
   DatasetConfig,
   DatasetDebugInfo,
   ChunkingConfig,
@@ -71,10 +70,6 @@ export async function listDocuments(datasetId: string) {
   return data;
 }
 
-export async function getDocument(datasetId: string, documentId: string) {
-  const { data } = await api.get<Document>(`/api/v1/knowledge/${datasetId}/documents/${documentId}`);
-  return data;
-}
 
 export async function createDocumentFromText(datasetId: string, payload: DocumentCreateTextRequest) {
   const { data } = await api.post<Document>(`/api/v1/knowledge/${datasetId}/documents/text`, payload);
@@ -90,11 +85,7 @@ export async function createDocumentFromUrl(datasetId: string, payload: { url: s
  * Public document upload is intentionally text-only until the multimodal
  * create/ingest/retrieve/delete contract is released end to end.
  */
-export const ProcessingModes = {
-  TEXT_ONLY: "text_only",
-} as const;
-
-export type ProcessingMode = typeof ProcessingModes[keyof typeof ProcessingModes];
+export type ProcessingMode = "text_only";
 
 export async function uploadDocument(
   datasetId: string,
@@ -166,27 +157,7 @@ export interface ImageUploadResult {
   }>;
 }
 
-/**
- * 批量上传图片到知识库
- * 支持格式: JPEG, PNG, GIF, WebP, BMP
- * 最大大小: 3MB per image
- */
-export async function uploadImages(datasetId: string, files: File[]): Promise<ImageUploadResult> {
-  const form = new FormData();
-  files.forEach((file) => {
-    form.append("files", file);
-  });
-  const { data } = await api.post<ImageUploadResult>(
-    `/api/v1/knowledge/${datasetId}/documents/images`,
-    form
-  );
-  return data;
-}
 
-export async function updateDocument(datasetId: string, documentId: string, patch: Partial<Document>) {
-  const { data } = await api.put<Document>(`/api/v1/knowledge/${datasetId}/documents/${documentId}`, patch);
-  return data;
-}
 
 export async function deleteDocument(datasetId: string, documentId: string) {
   const { data } = await api.delete(`/api/v1/knowledge/${datasetId}/documents/${documentId}`);
@@ -198,10 +169,6 @@ export async function reindexDocument(datasetId: string, documentId: string) {
   return data;
 }
 
-export async function setDocumentEnabled(datasetId: string, documentId: string, enabled: boolean) {
-  const { data } = await api.post(`/api/v1/knowledge/${datasetId}/documents/${documentId}/enable`, { enabled });
-  return data;
-}
 
 // ============================================================
 // Segment APIs
@@ -217,10 +184,6 @@ export async function listSegments(datasetId: string, params?: { documentId?: st
   return data;
 }
 
-export async function getSegment(datasetId: string, segmentId: string) {
-  const { data } = await api.get<Segment>(`/api/v1/knowledge/${datasetId}/segments/${segmentId}`);
-  return data;
-}
 
 export async function updateSegment(datasetId: string, segmentId: string, text: string) {
   const { data } = await api.put<Segment>(`/api/v1/knowledge/${datasetId}/segments/${segmentId}`, { text });
@@ -232,10 +195,6 @@ export async function deleteSegment(datasetId: string, segmentId: string) {
   return data;
 }
 
-export async function setSegmentEnabled(datasetId: string, segmentId: string, enabled: boolean) {
-  const { data } = await api.post(`/api/v1/knowledge/${datasetId}/segments/${segmentId}/enable`, { enabled });
-  return data;
-}
 
 // ============================================================
 // Retrieval APIs
@@ -646,23 +605,6 @@ export async function* qaQueryStream(
   }
 }
 
-export async function qaBatchTest(
-  datasetId: string,
-  testCases: Array<{ query: string; expected_answer?: string; expected_segments?: string[] }>,
-  options?: {
-    top_k?: number;
-    mode?: string;
-    rerank?: boolean;
-    mmr?: boolean;
-    llm_config?: QARequest["llm_config"]
-  }
-) {
-  const { data } = await api.post<QABatchTestResult>(`/api/v1/knowledge/${datasetId}/qa/batch`, {
-    test_cases: testCases,
-    ...options,
-  });
-  return data;
-}
 
 // ============================================================
 // Configuration APIs
@@ -692,10 +634,6 @@ export async function debugDataset(datasetId: string) {
   return data;
 }
 
-export async function getDatasetStatistics(datasetId: string) {
-  const { data } = await api.get(`/api/v1/knowledge/${datasetId}/statistics`);
-  return data;
-}
 
 // ============================================================
 // Sources APIs
@@ -713,10 +651,6 @@ export interface DatasetSources {
   total_documents: number;
 }
 
-export async function getDatasetSources(datasetId: string): Promise<DatasetSources> {
-  const { data } = await api.get<DatasetSources>(`/api/v1/knowledge/${datasetId}/sources`);
-  return data;
-}
 
 // ============================================================
 // Batch Operations APIs
@@ -736,13 +670,6 @@ export async function batchDeleteDocuments(datasetId: string, documentIds: strin
   return data;
 }
 
-export async function batchEnableSegments(datasetId: string, segmentIds: string[], enabled: boolean) {
-  const { data } = await api.post<BatchOperationResult>(`/api/v1/knowledge/${datasetId}/segments/batch/enable`, {
-    segment_ids: segmentIds,
-    enabled,
-  });
-  return data;
-}
 
 
 // ============================================================
@@ -848,19 +775,6 @@ export async function listDocumentVersions(
   return data;
 }
 
-/**
- * Get specific version
- */
-export async function getDocumentVersion(
-  datasetId: string,
-  documentId: string,
-  versionNumber: number
-): Promise<DocumentVersion> {
-  const { data } = await api.get<DocumentVersion>(
-    `/api/v1/knowledge/${datasetId}/documents/${documentId}/versions/${versionNumber}`
-  );
-  return data;
-}
 
 /**
  * Compare two versions

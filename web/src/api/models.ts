@@ -152,13 +152,6 @@ export async function listModels(
   return data;
 }
 
-/**
- * Get a specific model.
- */
-export async function getModel(modelId: string): Promise<LLMModel> {
-  const { data } = await api.get<LLMModel>(`/api/v1/models/${modelId}`);
-  return data;
-}
 
 /**
  * Create a new model.
@@ -259,17 +252,6 @@ export function getAccessLevelDisplayName(level: ModelAccessLevel): string {
   return names[level] || level;
 }
 
-/**
- * Get access level badge color.
- */
-export function getAccessLevelColor(level: ModelAccessLevel): string {
-  const colors: Record<ModelAccessLevel, string> = {
-    public: "green",
-    premium: "blue",
-    admin: "orange",
-  };
-  return colors[level] || "default";
-}
 
 /**
  * Format price for display.
@@ -310,16 +292,3 @@ export function formatContextWindow(tokens: number | string | null | undefined):
   return numTokens.toString();
 }
 
-/**
- * Group models by provider.
- */
-export function groupModelsByProvider(models: LLMModel[]): Record<string, LLMModel[]> {
-  const grouped: Record<string, LLMModel[]> = {};
-  for (const model of models) {
-    if (!grouped[model.provider_id]) {
-      grouped[model.provider_id] = [];
-    }
-    grouped[model.provider_id].push(model);
-  }
-  return grouped;
-}
