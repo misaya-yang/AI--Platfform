@@ -12,7 +12,7 @@
   "iteration": 0,
   "max_iterations": 12,
   "last_result": "Program scaffolded from the platform architecture review on 2026-08-14. No implementation has started; every feature is still failing by definition.",
-  "next_action": "Run ./init.sh to capture the ACU-00 baseline, then add mode, permissions, and budget to AgentSpec in src/api/schemas/agents.py without touching existing capabilities bindings.",
+  "next_action": "None \u2014 program superseded by the Rust kernel migration (agent-runtime-full-rust-cutover); see the note in superseded_by. Do not resume this loop without a new PRD.",
   "blockers": [],
   "confirmation": null,
   "features": [
@@ -168,5 +168,6 @@
       "evidence": [],
       "review": "not_required"
     }
-  ]
+  ],
+  "superseded_by": "agent-runtime-full-rust-cutover (Rust single kernel owns the assistant loop); ACU-00 never started; its AgentSpec contract direction was overtaken by the single-kernel migration."
 }

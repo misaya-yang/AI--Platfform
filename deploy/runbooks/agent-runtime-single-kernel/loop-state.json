@@ -12,7 +12,7 @@
   "iteration": 1,
   "max_iterations": 8,
   "last_result": "CHR-05 lazy import now resolves authoritative assistant.* sources independently of caller search_path, rejects source drift and unpaired legacy tools atomically, blocks resumable Run/approval states, emits paired Agent response Items, and hashes approval arguments. PostgreSQL migration contracts returned 13/13; a real split-schema transaction with caller search_path=public produced message,function_call,function_call_output,message plus one approval receipt and rolled back cleanly. A final authenticated Qwen UI probe answered 9x9 correctly, retained think:minimal with one Activity step, reached first token in 4.30s, and produced no new browser warnings/errors. Production canary, rollback rehearsal, and legacy-loop deletion remain intentionally unverified.",
-  "next_action": "Run the time-bound production canary and rollback rehearsal before full cutover or Python loop deletion.",
+  "next_action": "None \u2014 program superseded by the Rust kernel migration (agent-runtime-full-rust-cutover); see the note in superseded_by. Do not resume this loop without a new PRD.",
   "blockers": [],
   "confirmation": null,
   "phases": [
@@ -208,5 +208,6 @@
       ],
       "passes": false
     }
-  ]
+  ],
+  "superseded_by": "agent-runtime-full-rust-cutover (Rust single kernel owns the assistant loop); CHR-05 canary/rollback evidence was recorded by the full-rust-cutover program (FRC-06); the Python loop was deleted."
 }

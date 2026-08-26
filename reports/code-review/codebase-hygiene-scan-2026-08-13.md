@@ -1238,3 +1238,31 @@ knowledge 代理判定 'gateway 副本活,service 副本死' 不精确。实际:
 ## 附录 B:清理跟踪建议
 
 建议把本报告转为逐条可勾选的清理看板(每类一条 issue/卡片),清理时在报告中标注结果(已删/保留及原因/已重构),使本报告成为清理工作的单一日程。后续轮次扫描可用同一套 14 模块工作流增量重跑(脚本保存在会话目录,可复用)。
+
+## 附录 C:2026-08-26 清理轮次记录(codex-harness 迁移后残余)
+
+分支 `audit/codex-harness-parity-cleanup`(PR base: `fix/agent-runtime-image-and-v1-chat-auth`)。按最小粒度原则执行的已删/保留结论:
+
+**已删除(Python / scripts)**
+
+- `scripts/test_style_presets_e2e.py`、`scripts/smoke_native_search.py`(import 已不存在的 `src.services.assistant.*`,本身已损坏)、`scripts/new/prepare-agent-studio-e2e-account.py`、`scripts/goal/exercise-shipped-paths.py`
+- `src/proxy/context_injector.py`:`extract_context_from_scope`、`extract_context_from_request`
+- `src/adapters/langgraph_proxy.py`:`_make_request` + `LangGraphLoadBalancer.add_instance/remove_instance/mark_unhealthy/mark_healthy`
+- `src/core/gateway/capacity.py`:`inventory_rows`;`src/core/middleware/rate_limit_http.py`:`RateLimitMiddleware`、`RateLimitConfig`
+- `ai_gateway_core`:`events.GROUP_NAMES`、`config.DASHSCOPE_DEFAULT_LEGACY_BASE_URL`、`image.claim_next_image_tasks`(含 `__all__`/re-export)
+
+**已删除(Web)**
+
+- `web/src/api/*` 中 43 个零调用导出(经 named/namespace/dynamic-import/barrel 四类解析复核;`chat`、`createAgentThread`、`interruptAgentTurn`、`startAgentTurn`、`projectAgentV2Event`、`compressImage`、`fetchSetupState`、`ProcessingModes` 因仅本文件自引用改为取消 export)
+- 8 个零引用组件文件:`components/{HealthBadge,TaskTable}.tsx`、`components/ui/slider.tsx`、`pages/dashboard/components/{SummaryCharts,KPICards,DashboardSkeleton,DashboardHeader}.tsx`、`pages/knowledge/detail/HierarchicalSegmentCard.tsx`
+
+**明确保留(报告候选但不属重构残余)**
+
+- `scripts/gateway_capacity_inventory.py`、`scripts/uat_gateway_capacity_probe.py`、`scripts/uat_gateway_capacity_smoke.py`、`scripts/metrics/repair_usage_metrics.py` — 运维探针/修复工具,非老代码残余
+- `prepareAssistantRunResume`(`useChatSession.ts:3640` 有活引用);`models/providers` CRUD(`Services.tsx` 经 `import * as modelsApi` 命名空间导入使用,初版静态解析误报为死)
+
+**其他**
+
+- `src/main.py:1340` 启动日志去掉过时的 `model_registry ready` 措辞;`scripts/harness/runtime_dependency_gate.py` docstring 更新(退役树已不在 checkout)
+- 5 个 `deploy/runbooks/*/loop-state.json` 追加 `superseded_by` 并终止 `next_action`:AGA-06、AHR-05、ARO-05、ACU-00、CHR-05
+- ruff 基线:`src` + `packages/ai-gateway-core/src` 存量 49 错为分支既有债务,本轮零新增(本轮引入的孤儿 import/换行已全部修复,改动文件 ruff 清零)

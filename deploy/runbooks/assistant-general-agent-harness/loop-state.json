@@ -7,7 +7,7 @@
   "iteration": 1,
   "max_iterations": 8,
   "last_result": "Backend and API/UI thinking controls landed. tests/services/assistant: 2439 passed, 1 skipped.",
-  "next_action": "Hot-update the running assistant-service and take a live 你好 receipt if production latency must be re-verified.",
+  "next_action": "None \u2014 program superseded by the Rust kernel migration (agent-runtime-full-rust-cutover); see the note in superseded_by. Do not resume this loop without a new PRD.",
   "blockers": [],
   "confirmation": null,
   "phases": [
@@ -139,5 +139,6 @@
       ],
       "passes": true
     }
-  ]
+  ],
+  "superseded_by": "agent-runtime-full-rust-cutover (Rust single kernel owns the assistant loop); AGA-06 predates the Rust cutover; its next_action targets the retired assistant-service hot-update."
 }
