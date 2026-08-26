@@ -59,6 +59,7 @@
   "assistant": {
     "activity": {
       "approvalRequired": "需要审批",
+      "approvalPrompt": "助手请求运行 {{tool}}，通过后将继续执行。",
       "approve": "通过",
       "contextCompacted": "上下文已压缩",
       "contextCompactedDropped": "上下文已压缩，丢弃 {{count}} 条历史消息",
@@ -369,6 +370,7 @@
     "add": "添加",
     "addAttachment": "添加附件",
     "approve": "通过",
+    "reject": "拒绝",
     "back": "返回",
     "cancel": "取消",
     "chart": "图表",

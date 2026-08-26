@@ -13,6 +13,8 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+import asyncpg
+
 from .base import BaseRepository
 
 if TYPE_CHECKING:
@@ -164,7 +166,8 @@ class DatabaseSessionRepository(SessionRepository, BaseRepository):
 
         # 从数据库获取
         row = await self.fetchrow(
-            "SELECT * FROM assistant.sessions WHERE session_id = $1",
+            "SELECT * FROM assistant.sessions "
+            "WHERE session_id = $1 AND status <> 'deleted'",
             session_id,
         )
         session = self._row_to_dict(row) if row else None
@@ -326,11 +329,27 @@ class DatabaseSessionRepository(SessionRepository, BaseRepository):
         return result == "UPDATE 1"
 
     async def delete(self, session_id: str) -> bool:
-        """删除会话"""
-        result = await self.execute(
-            "DELETE FROM assistant.sessions WHERE session_id = $1",
-            session_id,
-        )
+        """删除会话。
+
+        与 ``DatabaseStorage.delete_session`` 同源：Agent Runtime 的审计链以
+        RESTRICT 外键指向会话行，跑过对话的会话只能打墓碑标记，否则硬删除会以
+        外键冲突失败。
+        """
+        try:
+            result = await self.execute(
+                "DELETE FROM assistant.sessions WHERE session_id = $1",
+                session_id,
+            )
+        except asyncpg.exceptions.ForeignKeyViolationError:
+            result = await self.execute(
+                "UPDATE assistant.sessions "
+                "SET status = 'deleted', updated_at = NOW() "
+                "WHERE session_id = $1 AND status <> 'deleted'",
+                session_id,
+            )
+            if self.redis and self.redis.enabled:
+                await self.redis.delete_session(session_id)
+            return result == "UPDATE 1"
         # 清除缓存
         if self.redis and self.redis.enabled:
             await self.redis.delete_session(session_id)

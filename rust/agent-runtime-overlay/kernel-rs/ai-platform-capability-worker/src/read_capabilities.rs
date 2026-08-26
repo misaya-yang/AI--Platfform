@@ -275,6 +275,14 @@ impl ReadHttpAdapter for ReqwestReadHttpAdapter {
             .map_err(|_| ReadCapabilityError::Configuration)?;
         let response = client
             .get(url)
+            .header(
+                reqwest::header::USER_AGENT,
+                "Mozilla/5.0 (compatible; AI-Gateway-web_fetch/2.0)",
+            )
+            .header(
+                reqwest::header::ACCEPT,
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
             .send()
             .await
             .map_err(|_| ReadCapabilityError::DownstreamUnavailable)?;
@@ -292,7 +300,10 @@ impl ReadHttpAdapter for ReqwestReadHttpAdapter {
             .get(reqwest::header::LOCATION)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        let remote_ip = response.remote_addr().map(|address| address.ip());
+        let remote_ip = resolved_peer_ip(
+            response.remote_addr().map(|address| address.ip()),
+            &addresses,
+        );
         let bytes = bounded_response(response, MAX_WEB_RESPONSE_BYTES).await?;
         Ok(PublicHttpResponse {
             status,
@@ -1279,6 +1290,15 @@ async fn validated_public_url(value: &str) -> Result<Url, ReadCapabilityError> {
     Ok(url)
 }
 
+fn resolved_peer_ip(remote: Option<IpAddr>, pinned: &[std::net::SocketAddr]) -> Option<IpAddr> {
+    // `resolve_to_addrs` pins the TCP peer. Some HTTP stacks then leave
+    // `remote_addr()` empty; falling back to the already-validated pin keeps
+    // SSRF closed without rejecting a successful public fetch.
+    remote
+        .filter(|ip| is_public_ip(*ip))
+        .or_else(|| pinned.iter().map(std::net::SocketAddr::ip).find(|ip| is_public_ip(*ip)))
+}
+
 fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => is_public_ipv4(ip),
@@ -1318,6 +1338,19 @@ mod capability_proof_tests {
 
     use super::{CapabilityProofInput, ReadCapabilityContext, sign_capability_proof};
     use serde_json::json;
+
+    #[test]
+    fn pinned_public_peer_survives_missing_remote_addr() {
+        let pinned = "1.1.1.1:443".parse::<std::net::SocketAddr>().unwrap();
+        assert_eq!(
+            super::resolved_peer_ip(None, &[pinned]),
+            Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)))
+        );
+        assert_eq!(
+            super::resolved_peer_ip(Some(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)), &[pinned]),
+            Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)))
+        );
+    }
 
     #[test]
     fn matches_python_capability_proof_fixture() {

@@ -129,6 +129,33 @@ function parseToolArguments(value: string): Record<string, unknown> {
   return { raw: value };
 }
 
+function eventToolId(data: Record<string, unknown> | undefined): string {
+  if (!data) return "";
+  for (const key of ["tool_id", "tool_call_id", "call_id", "id"]) {
+    const value = data[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function summarizeToolArguments(value: unknown): string | undefined {
+  const args =
+    typeof value === "string"
+      ? parseToolArguments(value)
+      : value && typeof value === "object" && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : undefined;
+  if (!args) return undefined;
+  for (const key of ["prompt", "title", "goal", "url", "path", "query", "command"]) {
+    const item = args[key];
+    if (typeof item === "string" && item.trim()) {
+      const text = item.trim();
+      return text.length > 160 ? `${text.slice(0, 157)}...` : text;
+    }
+  }
+  return undefined;
+}
+
 function mapStreamToolCallsToAssistant(turnState: StreamTurnState) {
   return turnState.toolCalls.map((toolCall) => ({
     id: toolCall.id,
@@ -742,6 +769,15 @@ function finalizeProcessSummary(
     summary.totalDurationMs ??
     (summary.startedAt ? finishedAtMs - summary.startedAt : undefined);
 
+  if (summary.tools.some((tool) => tool.status === "approval_required")) {
+    return {
+      ...summary,
+      status: "blocked",
+      collapsed: false,
+      totalDurationMs,
+    };
+  }
+
   if (finalStatus === "failed") {
     return {
       ...summary,
@@ -756,15 +792,6 @@ function finalizeProcessSummary(
     return {
       ...summary,
       status: "cancelled",
-      totalDurationMs,
-    };
-  }
-
-  if (summary.tools.some((tool) => tool.status === "approval_required")) {
-    return {
-      ...summary,
-      status: "blocked",
-      collapsed: false,
       totalDurationMs,
     };
   }
@@ -1399,6 +1426,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         });
     };
     let streamTurnState = createStreamTurnState(startTime);
+    let approvalHoldOpen = false;
     const streamReducerContext = createStreamReducerContext();
     let firstTokenMs: number | undefined;
     let firstTextTokenMs: number | undefined;
@@ -1499,6 +1527,11 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     };
 
     const terminalLatch = createStreamTerminalLatch();
+    // The turn parks on an approval only until the operator decides. Once the
+    // run reaches a terminal outcome the hold is over, whether or not the
+    // runtime echoed an approval_result — otherwise a granted approval would
+    // leave the composer locked and "Stop generating" showing forever.
+    const approvalHoldActive = () => approvalHoldOpen && !terminalLatch.current();
     const settleRunTerminal = (
       outcome: StreamTerminalOutcome,
       timestampMs: number,
@@ -2022,16 +2055,12 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
 
           case SSEEventType.APPROVAL_REQUIRED:
             const approvalData = (event.data || {}) as Record<string, unknown>;
-            const approvalToolId =
-              typeof approvalData.tool_id === "string"
-                ? approvalData.tool_id
-                : typeof approvalData.tool_call_id === "string"
-                  ? approvalData.tool_call_id
-                  : "";
+            const approvalToolId = eventToolId(approvalData);
             const approvalToolName =
               typeof approvalData.tool_name === "string"
                 ? approvalData.tool_name
                 : approvalToolId;
+            approvalHoldOpen = true;
             updateAssistantMessage((m) => {
               const prev = m.processSummary ?? initProcessSummary(undefined, now);
               if (!approvalToolId) return m;
@@ -2045,9 +2074,12 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                   : prev.runId;
               return {
                 ...m,
+                isStreaming: true,
+                status: "streaming",
                 processSummary: {
                   ...prev,
                   collapsed: false,
+                  status: "blocked",
                   runId,
                   runtimeThreadId:
                     typeof approvalData.thread_id === "string"
@@ -2062,13 +2094,14 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                         ? approvalData.approval_id
                         : existing?.approvalId,
                     summary:
-                      typeof approvalData.reason === "string" ? approvalData.reason : existing?.summary,
+                      typeof approvalData.reason === "string"
+                        ? approvalData.reason
+                        : existing?.summary ||
+                          summarizeToolArguments(approvalData.arguments),
                   }),
                 },
               };
             });
-            streamTurnState = completeStreamTurn(streamTurnState, now);
-            syncTurnStateToMessage();
             await persistAssistantRunId(approvalData.run_id);
             if (!isCurrentStream()) return;
             break;
@@ -2122,10 +2155,11 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
             break;
 
           case SSEEventType.APPROVAL_RESULT:
+            approvalHoldOpen = false;
             updateAssistantMessage((m) => {
               const prev = m.processSummary ?? initProcessSummary(undefined, now);
               const approvalResultData = (event.data || {}) as Record<string, unknown>;
-              const toolId = typeof approvalResultData.tool_id === "string" ? approvalResultData.tool_id : "";
+              const toolId = eventToolId(approvalResultData);
               if (!toolId) return m;
               const existing = prev.tools.find((tool) => tool.id === toolId);
               const approved = approvalResultData.approved === true;
@@ -2445,15 +2479,21 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
             }
             updateAssistantMessage((m) => {
               const prev = m.processSummary ?? initProcessSummary(undefined, now);
+              const existing = prev.tools.find((tool) => tool.id === toolStartData.tool_call_id);
+              const awaitingApproval = existing?.status === "approval_required";
               return {
                 ...m,
                 processSummary: {
                   ...prev,
                   tools: upsertTool(prev.tools, {
                     id: toolStartData.tool_call_id,
-                    name: toolStartData.tool_name,
-                    status: "running",
-                    startedAt: toolStartData.timestamp ?? now,
+                    name: existing?.name || toolStartData.tool_name,
+                    status: awaitingApproval ? "approval_required" : "running",
+                    startedAt: existing?.startedAt ?? toolStartData.timestamp ?? now,
+                    approvalId: existing?.approvalId,
+                    summary:
+                      existing?.summary ||
+                      summarizeToolArguments(toolStartData.arguments),
                   }),
                 },
               };
@@ -2492,6 +2532,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
               const prev = m.processSummary ?? initProcessSummary(undefined, now);
               const existing = prev.tools.find((tool) => tool.id === toolEndData.tool_call_id);
               if (!existing) return m;
+              if (existing.status === "approval_required" && !toolEndFailed) return m;
               return {
                 ...m,
                 processSummary: {
@@ -3170,7 +3211,21 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         return;
       }
       const streamFinishedAtMs = Date.now();
-      if (cancelRequestedRef.current || streamAbortController.signal.aborted) {
+      if (approvalHoldActive() && !cancelRequestedRef.current && !streamAbortController.signal.aborted) {
+        updateAssistantMessage((message) => ({
+          ...message,
+          isStreaming: true,
+          status: "streaming",
+          processSummary: message.processSummary
+            ? {
+                ...message.processSummary,
+                status: "blocked",
+                collapsed: false,
+              }
+            : message.processSummary,
+        }));
+        closeStreamTrace("completed", { reason: "awaiting_approval" });
+      } else if (cancelRequestedRef.current || streamAbortController.signal.aborted) {
         settleRunTerminal("cancelled", streamFinishedAtMs, { error: "cancelled" });
       } else if (
         streamTurnState.status === "idle" ||
@@ -3192,10 +3247,17 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       // link missing until the user manually reloads the conversation.
       if (terminalLatch.current() === "succeeded" && isCurrentStream()) {
         try {
-          const [historyResponse, sessionArtifacts] = await Promise.all([
+          // Distinguish "no artifacts" from "the artifact fetch failed".
+          // Collapsing both to [] let a transient failure clear a panel that
+          // the stream had just correctly populated.
+          const [historyResponse, artifactFetch] = await Promise.all([
             getAssistantSessionHistory(sessionId, 200),
-            getSessionArtifacts(sessionId).catch(() => []),
+            getSessionArtifacts(sessionId).then(
+              (items) => ({ ok: true, items }),
+              () => ({ ok: false, items: [] as ArtifactInfo[] }),
+            ),
           ]);
+          const sessionArtifacts = artifactFetch.items;
           if (!isCurrentStream()) return;
           const restoredMessages = historyResponse.messages.map((message, index) =>
             restoreMessageMetadata(message, index, sessionId)
@@ -3218,11 +3280,31 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                 hydrated?.generatedArtifacts ?? message.generatedArtifacts,
               _artifactIds: hydrated?._artifactIds ?? message._artifactIds,
             }));
+            // The quiz capability moved into the Rust worker, whose compat
+            // `tool_call_result` carries only the arguments and which emits no
+            // `quiz:ready` event, so the card has no live source. The
+            // reconciled history does carry `quiz_id` (recovered from the
+            // capability ledger) — hydrate the card from it.
+            const restoredQuizId = (restoredAssistant as { _quizId?: string })._quizId;
+            if (restoredQuizId) {
+              void getQuiz(restoredQuizId)
+                .then((quiz) => {
+                  if (!isCurrentStream()) return;
+                  updateAssistantMessage((message) => ({ ...message, quizData: quiz }));
+                })
+                .catch(() => undefined);
+            }
           }
-          setArtifacts(sessionArtifacts.map(toArtifact));
+          if (artifactFetch.ok) {
+            setArtifacts(sessionArtifacts.map(toArtifact));
+          }
         } catch {
           console.warn("Assistant terminal history reconciliation failed");
         }
+      }
+
+      if (approvalHoldActive() && !cancelRequestedRef.current && !streamAbortController.signal.aborted) {
+        return;
       }
 
       // Final update
@@ -3292,7 +3374,21 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       const userCancelled =
         cancelRequestedRef.current ||
         (error.name === "AbortError" && streamAbortController.signal.aborted === true);
-      if (!userCancelled) {
+      if (approvalHoldActive() && !userCancelled) {
+        updateAssistantMessage((message) => ({
+          ...message,
+          isStreaming: true,
+          status: "streaming",
+          processSummary: message.processSummary
+            ? {
+                ...message.processSummary,
+                status: "blocked",
+                collapsed: false,
+              }
+            : message.processSummary,
+        }));
+        closeStreamTrace("completed", { reason: "awaiting_approval" });
+      } else if (!userCancelled) {
         const finishedAtMs = Date.now();
         const accepted = settleRunTerminal("failed", finishedAtMs, {
           error: error.message || "Unknown error",
@@ -3369,7 +3465,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       if (!streamTraceClosed) {
         closeStreamTrace("cancelled", { reason: "finalized_without_outcome" });
       }
-      if (isCurrentStream()) {
+      if (isCurrentStream() && !approvalHoldActive()) {
         setIsStreaming(false);
         clearCancelFallback();
         if (abortControllerRef.current === streamAbortController) {

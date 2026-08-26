@@ -9,6 +9,7 @@ import {
   readTelemetryEvents,
   seedClientPrefs,
   toSseBody,
+  wrapAssistantSseAsAgentV2,
 } from "./support/helpers";
 import { buildTimeline } from "../src/pages/assistant/components/buildTimeline";
 import type { ChatMessage as AssistantChatMessage } from "../src/pages/assistant/types";
@@ -293,7 +294,14 @@ export async function installAssistantHarness(
     );
   });
 
+  // The Local Node control plane moved off the /assistant prefix during the
+  // Runtime cutover. Mock both paths: an unmocked 401 here trips the global
+  // auth interceptor and redirects the page to /login mid-assertion.
   await page.route("**/api/v1/assistant/local-nodes*", async (route) => {
+    await route.fulfill(jsonResponse({ devices: [] }));
+  });
+
+  await page.route("**/api/v1/local-nodes*", async (route) => {
     await route.fulfill(jsonResponse({ devices: [] }));
   });
 
@@ -372,6 +380,17 @@ export async function installAssistantHarness(
     await route.fulfill(jsonResponse(historyBySessionId[sessionId] || []));
   });
 
+  // The Assistant reads history from its own prefix and reconciles once at
+  // turn terminal. Leaving this unmocked returns 401, and the global auth
+  // interceptor then redirects the page to /login after every mocked stream.
+  await page.route("**/api/v1/assistant/sessions/*/history*", async (route) => {
+    const sessionId = pathSegmentAfter(route.request().url(), "sessions");
+    const messages = historyBySessionId[sessionId] || [];
+    await route.fulfill(
+      jsonResponse({ session_id: sessionId, messages, total: messages.length }),
+    );
+  });
+
   await page.route("**/api/v1/sessions/*", async (route) => {
     const request = route.request();
     const sessionId = request.url().split("/").pop() || "";
@@ -410,6 +429,88 @@ export async function installAssistantHarness(
   });
 
   await page.route("**/api/v1/assistant/chat/stream", fulfillStream);
+
+  const fulfillV2Events = async (route: Route) => {
+    let captured:
+      | {
+          status?: number;
+          headers?: Record<string, string>;
+          body?: string;
+        }
+      | undefined;
+    const capturingRoute = {
+      request: () => route.request(),
+      fulfill: async (response: Parameters<Route["fulfill"]>[0]) => {
+        captured = {
+          status: response.status,
+          headers: (response.headers as Record<string, string> | undefined) || {},
+          body: typeof response.body === "string" ? response.body : undefined,
+        };
+      },
+    } as Route;
+    await fulfillStream(capturingRoute);
+    await route.fulfill({
+      status: captured?.status ?? 200,
+      headers: {
+        ...(captured?.headers || {}),
+        "content-type": "text/event-stream",
+      },
+      body: wrapAssistantSseAsAgentV2(captured?.body || toSseBody([])),
+    });
+  };
+
+  await page.route("**/api/v2/agent/threads/*/events**", fulfillV2Events);
+  await page.route("**/api/v2/agent/threads/*/turns", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill(
+      jsonResponse({
+        turn: {
+          id: "e2e-turn",
+          events_url: "/api/v2/agent/threads/e2e-runtime-thread/events?turn_id=e2e-turn",
+        },
+      }),
+    );
+  });
+  // Fired from the stream generator's `finally` on a non-terminal EOF. It is
+  // best-effort in the client, but an unmocked 401 still trips the global auth
+  // interceptor and redirects the page to /login.
+  await page.route("**/api/v2/agent/threads/*/turns/*", async (route) => {
+    await route.fulfill(jsonResponse({ status: "accepted" }));
+  });
+
+  await page.route("**/api/v2/agent/threads/*/approvals/*/decision", async (route) => {
+    await route.fulfill(
+      jsonResponse({
+        schema_version: "agent-approval/v2",
+        approval: { status: "approved", approved: true },
+      }),
+    );
+  });
+  await page.route("**/api/v2/agent/threads", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    const sessionId =
+      (route.request().postDataJSON() as { session_id?: string } | null)?.session_id ||
+      "e2e-session";
+    await route.fulfill(
+      jsonResponse({
+        thread: {
+          schema_version: "agent-thread/v2",
+          id: "e2e-runtime-thread",
+          thread_id: "e2e-runtime-thread",
+          session_id: sessionId,
+          import_status: "not_required",
+          last_sequence: 0,
+          runtime: { owner: "agent_runtime", source: "native" },
+        },
+      }),
+    );
+  });
 }
 
 test("composer sends with the cached last model before the catalog resolves", async ({
@@ -685,16 +786,25 @@ test("assistant stream path keeps a11y and performance budget", async ({ page })
     '[role="log"]',
   ]);
 
-  const prompt = `e2e-assistant-${Date.now()}`;
+  // Say what the turn should do. Handed a bare token the model reaches for a
+  // tool to make sense of it — observed: `execute_python_code` — and the turn
+  // then parks on an approval instead of completing.
+  const prompt = `e2e-assistant-${Date.now()}: reply with exactly "ok" and use no tools`;
   await composer.fill(prompt);
   await composer.press("Enter");
   await expect(page.getByText(prompt)).toBeVisible();
 
   const log = page.locator('[role="log"]');
   await expect(log).toBeVisible();
+  const approve = page.getByRole("button", { name: /^(Approve|通过)$/ });
   await expect
     .poll(
       async () => {
+        // A live model may still request a write capability; grant it rather
+        // than time out on a run that is deliberately waiting for an operator.
+        if ((await approve.count()) > 0) {
+          await approve.first().click();
+        }
         const events = await readTelemetryEvents(page);
         return events.find((event) => event.event === "chat.stream.finished")?.payload?.outcome;
       },
@@ -1009,6 +1119,9 @@ test("assistant emits stream telemetry lifecycle on mocked stream", async ({ pag
 
 test("assistant preserves reasoning when provider omits thinking start and end", async ({ page }) => {
   const reasoningSummary = "Provider reasoning summary without lifecycle markers.";
+  // The shared storage state pins i18nextLng=zh-CN, so English locators below
+  // need an explicit locale like every other test in this file.
+  await seedClientPrefs(page, { locale: "en-US" });
   await installAssistantHarness(page, async (route) => {
     await route.fulfill({
       status: 200,
@@ -1053,7 +1166,12 @@ test("assistant new-session stream is not blocked by delayed sidebar refresh", a
       sessionCreateRequested
     ) {
       postCreateListStartedAt ??= Date.now();
-    } else if (path === "/api/v1/assistant/chat/stream") {
+    } else if (
+      path === "/api/v1/assistant/chat/stream" ||
+      (path.startsWith("/api/v2/agent/threads/") && path.endsWith("/events"))
+    ) {
+      // The turn streams through the V2 events cursor now; keying this probe
+      // on the retired V1 path left `chatRequestedAt` null forever.
       chatRequestedAt ??= Date.now();
     }
   });
@@ -1369,7 +1487,10 @@ test("assistant renders the complete sub-agent status contract", async ({ page }
   const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
   await composer.fill(`subagent-status-${Date.now()}`);
   await composer.press("Enter");
-  const agentsLauncher = page.getByRole("button", { name: /^Agents 7$/ });
+  // `RightPanelChip` sets an explicit `aria-label` of "<label> (<count>)",
+  // which wins over the visible "Agents 7" content when the accessible
+  // name is computed.
+  const agentsLauncher = page.getByRole("button", { name: /^Agents \(7\)$/ });
   await agentsLauncher.click();
   await expect(page.getByRole("dialog", { name: "Sub-agent workbench" })).toBeVisible();
   await expect(page.getByTestId("subagent-workbench")).toBeVisible();
@@ -1544,13 +1665,39 @@ test("desktop sub-agent workbench follows three parallel children through out-of
 
   await page.addInitScript(({ streamFrames }) => {
     const nativeFetch = window.fetch.bind(window);
+    // The Assistant streams through the V2 events cursor; the legacy
+    // /api/v1/assistant/chat/stream path is never requested any more. Accept
+    // both and re-envelope legacy frames so these overrides keep working.
+    const isAgentStreamUrl = (value: string) =>
+      value.includes("/api/v1/assistant/chat/stream") ||
+      (value.includes("/api/v2/agent/threads/") && value.includes("/events"));
+    let envelopeSequence = 0;
+    const asAgentV2Frame = (event: unknown) => {
+      envelopeSequence += 1;
+      const record = (event || {}) as Record<string, unknown>;
+      return {
+        schema_version: "agent-event/v2",
+        thread_id: "e2e-runtime-thread",
+        sequence: envelopeSequence,
+        event: {
+          id: `evt-${envelopeSequence}`,
+          key: `evt-${envelopeSequence}`,
+          type: typeof record.event_type === "string" ? record.event_type : "item",
+          item_id: null,
+          turn_id: null,
+          status: null,
+          payload: record,
+        },
+        timestamp: new Date().toISOString(),
+      };
+    };
     window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string"
         ? input
         : input instanceof Request
           ? input.url
           : String(input);
-      if (!url.includes("/api/v1/assistant/chat/stream")) return nativeFetch(input, init);
+      if (!isAgentStreamUrl(url)) return nativeFetch(input, init);
       const encoder = new TextEncoder();
       return new Response(new ReadableStream({
         start(controller) {
@@ -1563,7 +1710,7 @@ test("desktop sub-agent workbench follows three parallel children through out-of
           };
           for (const frame of streamFrames) {
             window.setTimeout(() => {
-              if (!closed) controller.enqueue(encoder.encode(`data: ${JSON.stringify(frame.event)}\n\n`));
+              if (!closed) controller.enqueue(encoder.encode(`data: ${JSON.stringify(asAgentV2Frame(frame.event))}\n\n`));
             }, frame.delayMs);
           }
           window.setTimeout(close, Math.max(...streamFrames.map((frame) => frame.delayMs)) + 80);
@@ -1973,11 +2120,13 @@ test("assistant activity surfaces agent run state approvals context and artifact
 
   await expect(page.getByText("Run state ready.")).toBeVisible();
   await expect(page.getByText("Run report").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Approve$/i })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Reject$/i })).toBeVisible();
+  await expect(page.getByText("Needs operator approval before running command")).toBeVisible();
 
   await page.getByRole("button", { name: /Activity/ }).last().click();
   await expect(page.getByText("Review requested change")).toBeVisible();
   await expect(page.getByText("Draft final answer")).toBeVisible();
-  await expect(page.getByText("Needs operator approval before running command")).toBeVisible();
   await expect(page.getByText("Context used")).toBeVisible();
   await expect(page.getByText("Context compacted")).toBeVisible();
 });
@@ -2064,7 +2213,7 @@ test("assistant restores session artifacts into unique artifact and share counts
   await expect(page.getByText("Here is the recovered plan.")).toBeVisible();
   await expect(page.getByText("Recovered plan").first()).toBeVisible();
 
-  const artifactsChip = page.getByRole("button", { name: /^Artifacts\s+1$/ });
+  const artifactsChip = page.getByRole("button", { name: /^Artifacts \(1\)$/ });
   await expect(artifactsChip).toBeVisible();
   await artifactsChip.click();
   await expect(page.getByText("recovered-plan.md").first()).toBeVisible();
@@ -2170,8 +2319,12 @@ test("assistant restores a pending approval after refresh", async ({ page }) => 
   await expect.poll(() => runStatusHits).toBeGreaterThan(hitsBeforeRefresh);
   await page.getByRole("button", { name: /Activity/ }).last().click();
   await expect(page.getByText("Approval required: shell")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Approve" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Reject" })).toBeVisible();
+  // The decision is offered on two surfaces now: the inline approval card in
+  // the message and the Activity panel row. Assert presence without pinning
+  // the test to one of them; the terminal assertion below still requires both
+  // to clear.
+  await expect(page.getByRole("button", { name: "Approve" }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reject" }).first()).toBeVisible();
 
   runSucceeded = true;
   const hitsBeforeTerminalRefresh = runStatusHits;
@@ -2252,7 +2405,7 @@ test("assistant escape cancels delayed stream", async ({ page }) => {
   ).toBeTruthy();
 });
 
-test("assistant stop closes tool exchange through task cancel and allows follow-up", async ({ page }) => {
+test("assistant stop closes tool exchange through the turn interrupt and allows follow-up", async ({ page }) => {
   await seedClientPrefs(page, { locale: "en-US" });
   await installClientAuth(page, {
     user_id: "e2e-assistant-tool-cancel-user",
@@ -2260,16 +2413,11 @@ test("assistant stop closes tool exchange through task cancel and allows follow-
     display_name: "Assistant Tool Cancel",
   });
 
-  let cancelHits = 0;
-  await page.route("**/api/v1/assistant/tasks/task-stop-paired/cancel", async (route) => {
-    cancelHits += 1;
-    await route.fulfill(jsonResponse({
-      task_id: "task-stop-paired",
-      session_id: "session-stop-paired",
-      cancelled: true,
-      message: "Cancellation requested",
-    }));
-  });
+  // Stop is a V2 contract now: `projectAgentV2Event` deliberately nulls the
+  // legacy `task_id`, so the client no longer calls
+  // /api/v1/assistant/tasks/<id>/cancel. It closes the events cursor and the
+  // stream generator's `finally` interrupts the turn instead. Count that.
+  let interruptHits = 0;
   await installAssistantHarness(page, async (route) => {
     await route.fulfill({
       status: 500,
@@ -2279,6 +2427,33 @@ test("assistant stop closes tool exchange through task cancel and allows follow-
   });
   await page.addInitScript(() => {
     const nativeFetch = window.fetch.bind(window);
+    type MockFrame = { delayMs: number; event: unknown };
+    // The Assistant streams through the V2 events cursor; the legacy
+    // /api/v1/assistant/chat/stream path is never requested any more. Accept
+    // both and re-envelope legacy frames so these overrides keep working.
+    const isAgentStreamUrl = (value: string) =>
+      value.includes("/api/v1/assistant/chat/stream") ||
+      (value.includes("/api/v2/agent/threads/") && value.includes("/events"));
+    let envelopeSequence = 0;
+    const asAgentV2Frame = (event: unknown) => {
+      envelopeSequence += 1;
+      const record = (event || {}) as Record<string, unknown>;
+      return {
+        schema_version: "agent-event/v2",
+        thread_id: "e2e-runtime-thread",
+        sequence: envelopeSequence,
+        event: {
+          id: `evt-${envelopeSequence}`,
+          key: `evt-${envelopeSequence}`,
+          type: typeof record.event_type === "string" ? record.event_type : "item",
+          item_id: null,
+          turn_id: null,
+          status: null,
+          payload: record,
+        },
+        timestamp: new Date().toISOString(),
+      };
+    };
     let streamNumber = 0;
     window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string"
@@ -2286,12 +2461,12 @@ test("assistant stop closes tool exchange through task cancel and allows follow-
         : input instanceof Request
           ? input.url
           : String(input);
-      if (!url.includes("/api/v1/assistant/chat/stream")) {
+      if (!isAgentStreamUrl(url)) {
         return nativeFetch(input, init);
       }
       streamNumber += 1;
       const encoder = new TextEncoder();
-      const frames = streamNumber === 1
+      const frames: MockFrame[] = streamNumber === 1
         ? [
             {
               delayMs: 0,
@@ -2300,7 +2475,6 @@ test("assistant stop closes tool exchange through task cancel and allows follow-
                 data: {
                   run_id: "run-stop-paired",
                   session_id: "session-stop-paired",
-                  task_id: "task-stop-paired",
                   timestamp: Date.now(),
                 },
               },
@@ -2317,48 +2491,9 @@ test("assistant stop closes tool exchange through task cancel and allows follow-
                 },
               },
             },
-            {
-              delayMs: 900,
-              event: {
-                event_type: "tool_call_result",
-                data: {
-                  tool_call_id: "tool-stop-paired",
-                  tool_name: "web_fetch",
-                  status: "cancelled",
-                  success: false,
-                  error: "cancelled",
-                  synthetic: true,
-                },
-              },
-            },
-            {
-              delayMs: 920,
-              event: {
-                event_type: "tool_call_end",
-                data: {
-                  tool_call_id: "tool-stop-paired",
-                  tool_name: "web_fetch",
-                  status: "cancelled",
-                  error: "cancelled",
-                  synthetic: true,
-                },
-              },
-            },
-            {
-              delayMs: 950,
-              event: {
-                event_type: "run_error",
-                data: {
-                  run_id: "run-stop-paired",
-                  status: "cancelled",
-                  error: "Cancelled by user",
-                  terminal_envelope: {
-                    status: "cancelled",
-                    exit_reason: "cancelled",
-                  },
-                },
-              },
-            },
+            // No terminal frame: a slow tool call keeps the cursor open until
+            // the operator stops it, which is exactly the state Stop has to
+            // resolve.
           ]
         : [
             {
@@ -2383,6 +2518,7 @@ test("assistant stop closes tool exchange through task cancel and allows follow-
             },
           ];
 
+      const hasTerminalFrame = streamNumber !== 1;
       return new Response(new ReadableStream({
         start(controller) {
           let closed = false;
@@ -2392,20 +2528,30 @@ test("assistant stop closes tool exchange through task cancel and allows follow-
             controller.enqueue(encoder.encode("data: [DONE]\n\n"));
             controller.close();
           };
+          const emit = (frame: MockFrame) => {
+            if (closed) return;
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(asAgentV2Frame(frame.event))}\n\n`)
+            );
+          };
           for (const frame of frames) {
-            window.setTimeout(() => {
-              if (!closed) {
-                controller.enqueue(
-                  encoder.encode(`data: ${JSON.stringify(frame.event)}\n\n`)
-                );
-              }
-            }, frame.delayMs);
+            window.setTimeout(() => emit(frame), frame.delayMs);
           }
-          window.setTimeout(close, Math.max(...frames.map((frame) => frame.delayMs)) + 30);
+          if (hasTerminalFrame) {
+            window.setTimeout(close, Math.max(...frames.map((frame) => frame.delayMs)) + 30);
+          }
+          // Without a terminal frame the cursor stays open until the client
+          // aborts it, which is what Stop does.
           init?.signal?.addEventListener("abort", close, { once: true });
         },
       }), { headers: { "content-type": "text/event-stream" } });
     };
+  });
+
+  // Registered after the harness so it wins the same `turns/*` pattern.
+  await page.route("**/api/v2/agent/threads/*/turns/*", async (route) => {
+    if (route.request().url().includes(":interrupt")) interruptHits += 1;
+    await route.fulfill(jsonResponse({ status: "accepted" }));
   });
 
   await ensureAuthenticatedPage(page, "/assistant");
@@ -2418,7 +2564,9 @@ test("assistant stop closes tool exchange through task cancel and allows follow-
   await expect(page.getByText("web_fetch")).toBeVisible();
   await page.getByRole("button", { name: "Stop generating" }).click();
 
-  await expect.poll(() => cancelHits).toBe(1);
+  // `stopStreaming` holds the cursor open for a grace window before aborting,
+  // so the interrupt lands a couple of seconds after the click.
+  await expect.poll(() => interruptHits, { timeout: 15_000 }).toBe(1);
   await expect(page.getByRole("button", { name: "Stop generating" })).toBeHidden();
   await expect(page.getByText(/^cancelled ·/)).toBeVisible();
   await expect(page.getByText(/^completed ·/)).toHaveCount(0);
@@ -2426,7 +2574,10 @@ test("assistant stop closes tool exchange through task cancel and allows follow-
   await composer.fill("continue after stop");
   await composer.press("Enter");
   await expect(page.getByText("FOLLOWUP_OK")).toBeVisible();
-  await expect(page.getByText(/^completed ·/)).toBeVisible();
+  // Sending closes the drawer, and the run state lives in its header — reopen
+  // it on the follow-up turn before asserting that run settled as completed.
+  await page.getByRole("button", { name: /Activity/ }).last().click();
+  await expect(page.getByText(/^completed ·/)).toBeVisible({ timeout: 30_000 });
 });
 
 test("assistant new chat invalidates late events from the previous stream", async ({ page }) => {
@@ -2445,6 +2596,32 @@ test("assistant new chat invalidates late events from the previous stream", asyn
   });
   await page.addInitScript(() => {
     const nativeFetch = window.fetch.bind(window);
+    // The Assistant streams through the V2 events cursor; the legacy
+    // /api/v1/assistant/chat/stream path is never requested any more. Accept
+    // both and re-envelope legacy frames so these overrides keep working.
+    const isAgentStreamUrl = (value: string) =>
+      value.includes("/api/v1/assistant/chat/stream") ||
+      (value.includes("/api/v2/agent/threads/") && value.includes("/events"));
+    let envelopeSequence = 0;
+    const asAgentV2Frame = (event: unknown) => {
+      envelopeSequence += 1;
+      const record = (event || {}) as Record<string, unknown>;
+      return {
+        schema_version: "agent-event/v2",
+        thread_id: "e2e-runtime-thread",
+        sequence: envelopeSequence,
+        event: {
+          id: `evt-${envelopeSequence}`,
+          key: `evt-${envelopeSequence}`,
+          type: typeof record.event_type === "string" ? record.event_type : "item",
+          item_id: null,
+          turn_id: null,
+          status: null,
+          payload: record,
+        },
+        timestamp: new Date().toISOString(),
+      };
+    };
     let streamNumber = 0;
     window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       const url =
@@ -2453,7 +2630,7 @@ test("assistant new chat invalidates late events from the previous stream", asyn
           : input instanceof Request
             ? input.url
             : String(input);
-      if (!url.includes("/api/v1/assistant/chat/stream")) {
+      if (!isAgentStreamUrl(url)) {
         return nativeFetch(input, init);
       }
       streamNumber += 1;
@@ -2466,7 +2643,7 @@ test("assistant new chat invalidates late events from the previous stream", asyn
           start(controller) {
             const emit = (event: unknown) =>
               controller.enqueue(
-                encoder.encode(`data: ${JSON.stringify(event)}\n\n`)
+                encoder.encode(`data: ${JSON.stringify(asAgentV2Frame(event))}\n\n`)
               );
             emit({ event_type: "started", data: { stream: current } });
             if (current === 1) {

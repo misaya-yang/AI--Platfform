@@ -9,10 +9,28 @@ in-flight guard, item append, and ready marker share one transaction.
 from __future__ import annotations
 
 import json
+import logging
+import re
 import uuid
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
+
+_READONLY_CONTEXT_DUMP = re.compile(
+    r"\[AI_PLATFORM_READONLY_CONTEXT_V1\].*?\[/AI_PLATFORM_READONLY_CONTEXT_V1\]",
+    re.DOTALL,
+)
+
+
+_QUIZ_ID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _visible_message_text(text: str) -> str:
+    """Drop overlay catalog dumps that were mistakenly stored as user/assistant text."""
+
+    return _READONLY_CONTEXT_DUMP.sub("", text).strip()
 
 
 class ThreadStoreDatabase(Protocol):
@@ -372,6 +390,9 @@ class AgentThreadStore:
             text = row.get("content")
             if role is None or not isinstance(text, str) or not text:
                 continue
+            text = _visible_message_text(text)
+            if not text:
+                continue
             created_at = row.get("created_at")
             metadata = {"runtime_run_id": row.get("run_id")}
             if row.get("sequence") is not None:
@@ -448,8 +469,60 @@ class AgentThreadStore:
                     "metadata": metadata,
                 }
             )
+        await self._attach_quiz_ids(messages, tenant_id=tenant_id, user_id=user_id)
         total = int(rows[0].get("total") or 0) if rows else 0
         return messages, total
+
+    async def _attach_quiz_ids(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tenant_id: str,
+        user_id: str,
+    ) -> None:
+        """Key assistant messages that generated a quiz by its quiz id.
+
+        The Rust worker persists the quiz and reports it on the capability
+        ledger's ``result_summary``; its compat ``tool_call_result`` event
+        carries only the arguments. Everything that renders a quiz — the chat
+        card restore and conversation-share freezing — keys off
+        ``metadata.quiz_id``, so recover it from the ledger.
+        """
+
+        pending = {
+            str(message["metadata"]["runtime_run_id"]): message
+            for message in messages
+            if message.get("role") == "assistant"
+            and isinstance(message.get("metadata"), dict)
+            and not message["metadata"].get("quiz_id")
+            and message["metadata"].get("runtime_run_id")
+        }
+        if not pending:
+            return
+        try:
+            rows = await self.database.fetch(
+                """
+                SELECT run_id::text AS run_id,
+                       result_summary ->> 'quiz_id' AS quiz_id
+                  FROM assistant_capability_executions
+                 WHERE tenant_id = $1 AND user_id = $2
+                   AND capability_id = 'generate_quiz'
+                   AND status = 'succeeded'
+                   AND run_id::text = ANY($3::text[])
+                 ORDER BY created_at
+                """,
+                tenant_id,
+                user_id,
+                list(pending),
+            )
+        except Exception:  # pragma: no cover - ledger is advisory for rendering
+            logger.warning("Failed to resolve quiz ids for assistant history", exc_info=True)
+            return
+        for row in rows or []:
+            quiz_id = str(row.get("quiz_id") or "").strip()
+            message = pending.get(str(row.get("run_id") or ""))
+            if message is not None and _QUIZ_ID_PATTERN.match(quiz_id.lower()):
+                message["metadata"]["quiz_id"] = quiz_id
 
     async def turn_metadata(
         self,

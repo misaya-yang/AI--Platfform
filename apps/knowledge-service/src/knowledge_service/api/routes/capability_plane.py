@@ -7,6 +7,7 @@ owned by ``KnowledgeService`` and its existing retrieval pipeline.
 from __future__ import annotations
 
 import hmac
+import logging
 import os
 from typing import Any
 
@@ -19,6 +20,7 @@ from ...core.exceptions import PermissionDeniedError, ValidationFailedError
 from ...services.knowledge.knowledge_service import KnowledgeService
 from ..deps import get_knowledge_service
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 MAX_CAPABILITY_BODY_BYTES = 256 * 1024
 
@@ -115,13 +117,24 @@ async def retrieve_capability(
 ) -> dict[str, Any]:
     """Retrieve bounded text chunks for an authenticated Rust worker lease."""
 
+    # The Rust worker collapses every non-2xx into
+    # ``read_capability_downstream_rejected``, so without a line here a
+    # rejected retrieval is invisible on both sides. Log the reason (never the
+    # token, proof, or query).
     if not _internal_authorized(request):
+        logger.warning(
+            "Capability retrieve rejected: internal token mismatch (dataset=%s)",
+            dataset_id,
+        )
         raise HTTPException(status_code=401, detail="capability authentication failed")
     if not _proof_authorized(
         request,
         path=f"/internal/v2/capabilities/knowledge/{dataset_id}/retrieve",
         body=payload.model_dump(mode="json"),
     ):
+        logger.warning(
+            "Capability retrieve rejected: proof invalid (dataset=%s)", dataset_id
+        )
         raise HTTPException(status_code=401, detail="capability proof invalid")
     if len(await request.body()) > MAX_CAPABILITY_BODY_BYTES:
         raise HTTPException(status_code=413, detail="capability request too large")
@@ -130,8 +143,14 @@ async def retrieve_capability(
         # This is the same authoritative tenant/ACL check used by public KB
         # retrieval; do not infer ownership from the URL or worker payload.
         await svc.require_dataset_access(user, dataset_id, required="viewer")
-    except (PermissionDeniedError, ValidationFailedError, LookupError, ValueError):
-        # Deliberately collapse forbidden, missing, and deleted datasets.
+    except (PermissionDeniedError, ValidationFailedError, LookupError, ValueError) as exc:
+        # Deliberately collapse forbidden, missing, and deleted datasets in the
+        # response; keep the distinction in the log.
+        logger.warning(
+            "Capability retrieve rejected: dataset access denied (dataset=%s, reason=%s)",
+            dataset_id,
+            type(exc).__name__,
+        )
         raise HTTPException(status_code=404, detail="Dataset not found") from None
     try:
         results, metadata = await svc.retrieve(

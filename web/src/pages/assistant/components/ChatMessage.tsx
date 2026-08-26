@@ -39,9 +39,16 @@ import { messageContainmentStyle } from "@/features/chat/messageRenderPerformanc
 
 interface ChatMessageProps {
   message: ChatMessageType;
+  onToolApproval?: (
+    messageId: string,
+    toolId: string,
+    approvalId: string,
+    approved: boolean,
+  ) => void;
 }
 
 const ASSISTANT_UI_V2 = import.meta.env.VITE_ASSISTANT_UI_V2 !== "false";
+const ToolApprovalCard = lazy(() => import("./ToolApprovalCard"));
 const StreamOutput = lazy(async () => {
   const module = await import("@/components/StreamOutput");
   return { default: module.StreamOutput };
@@ -344,7 +351,10 @@ function formatDurationLabel(ms: number): string {
   return `${m}m ${s}s`;
 }
 
-export const ChatMessage = memo(function ChatMessage({ message }: ChatMessageProps) {
+export const ChatMessage = memo(function ChatMessage({
+  message,
+  onToolApproval,
+}: ChatMessageProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
   const { openActivity, openSubagents } = useRightPanel();
@@ -368,6 +378,13 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
     const url = artifact.url?.trim();
     return !url || !message.content.includes(url);
   });
+
+  // A turn paused on a tool approval deliberately keeps `isStreaming` true so
+  // the SSE turn stays open, but everything it produced before the pause is
+  // already final. Gating that output on `!isStreaming` alone hid artifacts
+  // and citations for the whole time the operator was deciding.
+  const awaitingApproval = message.processSummary?.status === "blocked";
+  const outputSettled = !message.isStreaming || awaitingApproval;
 
   // Always surface the activity entry point on assistant turns. Earlier we
   // gated on `timelineSteps.length > 0 || isStreaming`, but messages reloaded
@@ -444,6 +461,25 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
             );
           })()}
 
+          {!isUser && onToolApproval && (
+            <Suspense fallback={null}>
+              {(message.processSummary?.tools ?? [])
+                .filter((tool) => tool.status === "approval_required" && tool.approvalId)
+                .map((tool) => (
+                  <ToolApprovalCard
+                    key={tool.id}
+                    tool={tool}
+                    onApprove={() =>
+                      onToolApproval(message.id, tool.id, tool.approvalId as string, true)
+                    }
+                    onReject={() =>
+                      onToolApproval(message.id, tool.id, tool.approvalId as string, false)
+                    }
+                  />
+                ))}
+            </Suspense>
+          )}
+
           {/* Typing dots: only if we have no signal at all yet */}
           {showTypingDots && (
             <motion.div
@@ -517,7 +553,7 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
           )}
 
           {/* Citation display */}
-          {!message.isStreaming && message.ragCitations && message.ragCitations.length > 0 && (
+          {outputSettled && message.ragCitations && message.ragCitations.length > 0 && (
             <CitationDisplay
               citations={message.ragCitations}
               evaluation={message.ragEvaluation}
@@ -525,7 +561,7 @@ export const ChatMessage = memo(function ChatMessage({ message }: ChatMessagePro
           )}
 
           {/* Generated artifacts */}
-          {!message.isStreaming &&
+          {outputSettled &&
             standaloneArtifacts.length > 0 &&
             (ASSISTANT_UI_V2 ? (
               <div className="mt-4 space-y-2">

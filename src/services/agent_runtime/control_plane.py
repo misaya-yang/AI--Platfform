@@ -9,7 +9,7 @@ import logging
 import os
 import secrets
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -514,10 +514,19 @@ class AgentRuntimeControlPlane:
                 if str(entry.get("id") or "") == str(descriptor.get("id") or "")
             ]
             if len(matches) != 1:
-                raise AgentRuntimeControlError(
-                    "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_CATALOG_SCOPE_MISMATCH",
-                    status_code=409,
+                # The worker publishes its whole registry and does not apply the
+                # requested allowlist, so a descriptor the Agent never configured
+                # is expected here. Withhold it instead of failing the turn:
+                # dropping is at least as closed as rejecting for capability
+                # exposure, and rejecting made every Agent preview whose
+                # allowlist did not happen to name each worker builtin 409.
+                logger.debug(
+                    "Withholding capability %r: not named exactly once by the "
+                    "agent allowlist (%d entries)",
+                    str(descriptor.get("id") or ""),
+                    len(allowlist),
                 )
+                continue
             expected = matches[0]
             for field in ("version", "schema_hash"):
                 expected_value = expected.get(field)
@@ -528,6 +537,9 @@ class AgentRuntimeControlPlane:
                     and expected_value is None
                 )
                 if actual_value != expected_value and not allow_platform_schema_resolution:
+                    # An allowlisted capability whose pinned version/schema does
+                    # not match is tampering or drift, not scoping. Keep failing
+                    # closed for that.
                     raise AgentRuntimeControlError(
                         "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_CATALOG_SCOPE_MISMATCH",
                         status_code=409,
@@ -1219,6 +1231,29 @@ class AgentRuntimeControlPlane:
             normalized["capability_allowlist"] = capability_allowlist
         return normalized
 
+    @staticmethod
+    def _turn_prompt_readonly(readonly: Mapping[str, Any]) -> dict[str, Any]:
+        """Turn HTTP payload is Codex additional_context material.
+
+        Knowledge, memory, attachments, and web-search items belong here.
+        Tool catalogs stay on the snapshot and on thread ``dynamicTools``;
+        they are never turn input.
+        """
+        payload = {
+            "schema_version": readonly["schema_version"],
+            "tenant_id": readonly["tenant_id"],
+            "capability_revision": readonly["capability_revision"],
+            "items": list(readonly.get("items") or []),
+            "tools": [],
+            "mcp": [],
+            "deferred": [],
+            "attachment_tools": [],
+        }
+        platform_config = readonly.get("platform_config")
+        if platform_config is not None:
+            payload["platform_config"] = platform_config
+        return payload
+
     async def _fetch_capability_catalog(
         self,
         readonly: dict[str, Any],
@@ -1484,6 +1519,7 @@ class AgentRuntimeControlPlane:
         readonly_capabilities: dict[str, Any] | None = None,
         resolved_agent_snapshot: dict[str, Any] | None = None,
         developer_instructions: str | None = None,
+        style_guidance: str | None = None,
         memory_mode: str = "auto",
         memory_profile: str | None = None,
         enable_dynamic_tools: bool = True,
@@ -1608,6 +1644,19 @@ class AgentRuntimeControlPlane:
         }
         if developer_instructions is not None:
             agent_spec = {**agent_spec, "developerInstructions": developer_instructions}
+        if (
+            signed_agent_spec is None
+            and isinstance(style_guidance, str)
+            and style_guidance.strip()
+        ):
+            combined = (
+                f"{str(agent_spec['developerInstructions']).rstrip()}\n\n{style_guidance.strip()}"
+            )
+            if len(combined) > 256 * 1024:
+                raise AgentRuntimeControlError(
+                    "AI_PLATFORM_AGENT_RUNTIME_AGENT_INSTRUCTIONS_INVALID", status_code=400
+                )
+            agent_spec = {**agent_spec, "developerInstructions": combined}
         signed_memory = agent_spec.get("memory")
         signed_memory_mode = (
             str(signed_memory.get("mode") or "session")
@@ -1937,7 +1986,7 @@ class AgentRuntimeControlPlane:
                 "model": model_id,
                 "effort": effort,
                 "capabilityRevision": capability_revision,
-                "readonly": readonly,
+                "readonly": self._turn_prompt_readonly(readonly),
                 "platformConfig": platform_config,
             },
         )
@@ -2059,6 +2108,16 @@ class AgentRuntimeControlPlane:
                                 ).encode()
                             if event_type in {"run_finished", "run_error"}:
                                 terminal_status = str(event_data.get("status") or "failed")
+                        elif event_type in {"run_finished", "run_error"}:
+                            logger.warning(
+                                "Terminal %s not matched to turn run_id=%s (event run_id=%r); "
+                                "V1 stream will not close on it",
+                                event_type,
+                                turn.run_id,
+                                (event_data or {}).get("run_id")
+                                if isinstance(event_data, dict)
+                                else None,
+                            )
                 yield encoded
                 if terminal_status:
                     break

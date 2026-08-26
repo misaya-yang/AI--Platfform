@@ -1498,12 +1498,13 @@ class DatabaseStorage:
             return row is not None
 
     async def get_session(self, session_id: str) -> dict[str, Any] | None:
-        """获取会话"""
+        """获取会话（已删除的会话视为不存在）"""
         if not self._pool:
             return None
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT * FROM assistant.sessions WHERE session_id = $1",
+                "SELECT * FROM assistant.sessions "
+                "WHERE session_id = $1 AND status <> 'deleted'",
                 session_id,
             )
             return self._row_to_dict(row) if row else None
@@ -1791,14 +1792,30 @@ class DatabaseStorage:
             return result == "UPDATE 1"
 
     async def delete_session(self, session_id: str) -> bool:
-        """删除会话"""
+        """删除会话。
+
+        Agent Runtime 的线程 / 条目 / 运行 / 能力执行审计链全部以 RESTRICT 外键
+        指向 ``assistant.sessions``：清理会话时 Runtime 只会给线程打删除标记而不
+        删行，所以对跑过任何一轮对话的会话执行硬删除必然违反外键并向用户抛 500。
+        这类会话改为墓碑标记——它在所有列表（均按 ``status='active'`` 过滤）和
+        ``get_session`` 中消失，而审计链保持完整。
+        """
         if not self._pool:
             return False
         async with self._pool.acquire() as conn:
-            result = await conn.execute(
-                "DELETE FROM assistant.sessions WHERE session_id = $1",
-                session_id,
-            )
+            try:
+                result = await conn.execute(
+                    "DELETE FROM assistant.sessions WHERE session_id = $1",
+                    session_id,
+                )
+            except asyncpg.exceptions.ForeignKeyViolationError:
+                result = await conn.execute(
+                    "UPDATE assistant.sessions "
+                    "SET status = 'deleted', updated_at = NOW() "
+                    "WHERE session_id = $1 AND status <> 'deleted'",
+                    session_id,
+                )
+                return result == "UPDATE 1"
             return result == "DELETE 1"
 
     async def cleanup_expired_sessions(self) -> int:

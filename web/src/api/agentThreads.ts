@@ -254,6 +254,7 @@ export async function* streamAgentRuntimeV2(
   const turn = started?.turn as { id?: string; events_url?: string } | undefined;
   if (!turn?.events_url) throw new Error("V2 Agent Runtime did not return an events cursor");
   let terminal = false;
+  let awaitingApproval = false;
   try {
     const stream = sseFetch<AgentV2Event>(turn.events_url, {
       method: "GET", headers: { Accept: "text/event-stream" }, signal,
@@ -261,10 +262,16 @@ export async function* streamAgentRuntimeV2(
     for await (const item of stream) {
       const projected = projectAgentV2Event(item, thread.session_id);
       if (!projected) continue;
-      if (["run_finished", "run_error", "cancelled"].includes(projected.event_type)) terminal = true;
+      if (projected.event_type === "approval_required") awaitingApproval = true;
+      if (["run_finished", "run_error", "cancelled"].includes(projected.event_type)) {
+        terminal = true;
+        awaitingApproval = false;
+      }
       yield projected;
     }
   } finally {
-    if (!terminal && turn.id) await interruptAgentTurn(thread.thread_id, turn.id, "client_disconnect").catch(() => undefined);
+    if (!terminal && !awaitingApproval && turn.id) {
+      await interruptAgentTurn(thread.thread_id, turn.id, "client_disconnect").catch(() => undefined);
+    }
   }
 }

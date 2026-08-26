@@ -77,6 +77,18 @@ function traceSummary(overrides: Record<string, unknown> = {}) {
 }
 
 async function installEvalHarness(page: Page) {
+  // Every locator below is an English string, so pin the locale instead of
+  // inheriting the shared storage state, which `global.setup.ts` always writes
+  // as zh-CN — otherwise the console renders in Chinese and none of them match.
+  // Init scripts re-run on every navigation, so the pin cannot key off
+  // `i18nextLng` being unset (it never is) nor be unconditional (it would undo
+  // the locale-switch assertion at the end of this file, which writes `zh-CN`
+  // and reloads). Key it off an explicit release flag that assertion sets.
+  await page.addInitScript(() => {
+    if (!localStorage.getItem("e2e-eval-locale-released")) {
+      localStorage.setItem("i18nextLng", "en-US");
+    }
+  });
   await installClientAuth(page, {
     user_id: "eval-user",
     email: "eval@example.com",
@@ -1107,6 +1119,9 @@ test.describe("Eval trace console", () => {
           version: 3,
         })
       );
+      // Release the en-US pin installed by `installEvalHarness` so it does not
+      // re-apply when the reload below re-runs the init script.
+      localStorage.setItem("e2e-eval-locale-released", "1");
       localStorage.setItem("i18nextLng", "zh-CN");
     });
     await page.reload({ waitUntil: "domcontentloaded" });

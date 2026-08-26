@@ -311,6 +311,11 @@ async function installHarness(page: Page, options: HarnessOptions = {}): Promise
     if (path === "/api/v1/knowledge/datasets") return route.fulfill(json([{ dataset_id: DATASET_ID, name: "Refund policy", description: "Approved refund and billing policy.", visibility: "tenant", embedding_provider: "dashscope", embedding_model: "text-embedding-v4" }]));
     if (path === "/api/v1/eval/datasets") return route.fulfill(json({ datasets: [], total: 0, limit: 200, offset: 0 }));
     if (path === "/api/v1/setup/state") return route.fulfill(json({ configured: true, missing: [], mode: "environment", default_model: null }));
+    // The Local Node control plane moved off the /assistant prefix during the
+    // Runtime cutover and is polled on console pages.
+    if (path === "/api/v1/local-nodes" || path === "/api/v1/assistant/local-nodes") {
+      return route.fulfill(json({ devices: [] }));
+    }
     throw new Error(`Unhandled API request: ${request.method()} ${path}`);
   });
   return state;

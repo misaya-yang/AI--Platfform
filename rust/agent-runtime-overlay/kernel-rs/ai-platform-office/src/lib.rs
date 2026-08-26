@@ -591,6 +591,13 @@ fn parse_markdown(markdown: &str) -> Result<Vec<Block>, DocumentError> {
             let (headers, rows, consumed) = parse_table(&lines, index)?;
             blocks.push(Block::Table { headers, rows });
             index = consumed;
+        } else if let Some((expression, consumed)) = take_display_math(&lines, index) {
+            if !expression.is_empty() {
+                blocks.push(Block::Paragraph {
+                    inlines: vec![Inline::Formula { expression }],
+                });
+            }
+            index = consumed;
         } else if line.starts_with('<') || line.contains("![") || line.contains("](") {
             return Err(DocumentError::UnsupportedMarkdown(line.to_owned()));
         } else {
@@ -639,6 +646,49 @@ fn heading(line: &str) -> Option<(u8, &str)> {
 fn is_bullet(line: &str) -> bool {
     let value = line.trim_start();
     value.starts_with("- ") || value.starts_with("* ")
+}
+
+fn looks_like_html(value: &str) -> bool {
+    value.as_bytes().windows(2).any(|pair| {
+        pair[0] == b'<'
+            && (pair[1].is_ascii_alphabetic() || pair[1] == b'/' || pair[1] == b'!')
+    })
+}
+
+fn take_display_math(lines: &[&str], start: usize) -> Option<(String, usize)> {
+    let first = lines.get(start)?.trim();
+    if !first.starts_with("$$") {
+        return None;
+    }
+    if first.len() > 4 && first.ends_with("$$") {
+        return Some((first[2..first.len() - 2].trim().to_owned(), start + 1));
+    }
+    let mut math = if first == "$$" {
+        String::new()
+    } else {
+        first[2..].to_owned()
+    };
+    let mut index = start + 1;
+    while index < lines.len() {
+        let next = lines[index].trim_end();
+        let trimmed = next.trim();
+        if trimmed == "$$" {
+            return Some((math.trim().to_owned(), index + 1));
+        }
+        if let Some(stripped) = trimmed.strip_suffix("$$") {
+            if !math.is_empty() {
+                math.push('\n');
+            }
+            math.push_str(stripped.trim());
+            return Some((math.trim().to_owned(), index + 1));
+        }
+        if !math.is_empty() {
+            math.push('\n');
+        }
+        math.push_str(next);
+        index += 1;
+    }
+    Some((math.trim().to_owned(), index))
 }
 
 fn parse_table(
@@ -737,15 +787,34 @@ fn parse_inlines(value: &str) -> Result<Vec<Inline>, DocumentError> {
                 text: text.to_owned(),
             });
             rest = &rest[2 + end..];
+        } else if rest.starts_with("$$") {
+            if let Some(end) = rest[2..].find("$$") {
+                let expression = rest[2..2 + end].trim();
+                if !expression.is_empty() {
+                    output.push(Inline::Formula {
+                        expression: expression.to_owned(),
+                    });
+                }
+                rest = &rest[4 + end..];
+            } else {
+                output.push(Inline::Text {
+                    text: rest.to_owned(),
+                });
+                rest = "";
+            }
         } else if let Some(end) = rest.strip_prefix('$').and_then(|tail| tail.find('$')) {
             let expression = &rest[1..1 + end];
             if expression.is_empty() {
-                return Err(DocumentError::UnsupportedMarkdown(value.to_owned()));
+                output.push(Inline::Text {
+                    text: "$".to_owned(),
+                });
+                rest = &rest[1..];
+            } else {
+                output.push(Inline::Formula {
+                    expression: expression.to_owned(),
+                });
+                rest = &rest[2 + end..];
             }
-            output.push(Inline::Formula {
-                expression: expression.to_owned(),
-            });
-            rest = &rest[2 + end..];
         } else if let Some(end) = rest.strip_prefix('*').and_then(|tail| tail.find('*')) {
             let text = &rest[1..1 + end];
             if text.is_empty() {
@@ -772,9 +841,13 @@ fn parse_inlines(value: &str) -> Result<Vec<Inline>, DocumentError> {
             };
             let text = &rest[..next];
             if text.is_empty() {
-                return Err(DocumentError::UnsupportedMarkdown(value.to_owned()));
+                output.push(Inline::Text {
+                    text: rest[..1].to_owned(),
+                });
+                rest = &rest[1..];
+                continue;
             }
-            if text.contains('<') || text.contains('>') {
+            if looks_like_html(text) {
                 return Err(DocumentError::UnsupportedMarkdown(value.to_owned()));
             }
             output.push(Inline::Text {
@@ -1866,6 +1939,44 @@ mod tests {
         let mut output = String::new();
         entry.read_to_string(&mut output).expect("UTF-8 XML");
         output
+    }
+
+    #[test]
+    fn display_math_is_kept_as_formula_instead_of_failing_generation() {
+        let generator = DocumentGenerator::new();
+        let result = generator
+            .generate(&GenerateDocumentRequest {
+                format: DocumentFormat::Docx,
+                title: "Flow Matching".to_owned(),
+                goal: "Keep LaTeX formulas in generated Word documents".to_owned(),
+                body_markdown: Some(
+                    "The ODE is\n\n$$\\frac{dx_t}{dt} = v_t(x_t)$$\n\nwith inline $x_t$."
+                        .to_owned(),
+                ),
+                locale: "en-US".to_owned(),
+                design_system: Some(DesignSystem::Enterprise),
+                template_name: None,
+            })
+            .expect("display math must not fail document generation");
+        let document = archive_entry(&result.bytes, "word/document.xml");
+        assert!(document.contains("dx_t"));
+        assert!(document.contains("x_t"));
+    }
+
+    #[test]
+    fn unterminated_display_math_is_kept_as_text() {
+        let generator = DocumentGenerator::new();
+        generator
+            .generate(&GenerateDocumentRequest {
+                format: DocumentFormat::Docx,
+                title: "Partial formula".to_owned(),
+                goal: "Do not fail the whole document on an unclosed formula".to_owned(),
+                body_markdown: Some("$$\\frac{dx_t}{dt} = v_t(x".to_owned()),
+                locale: "en-US".to_owned(),
+                design_system: Some(DesignSystem::Enterprise),
+                template_name: None,
+            })
+            .expect("unterminated display math must not fail generation");
     }
 
     #[test]

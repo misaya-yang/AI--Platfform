@@ -59,6 +59,7 @@
   "assistant": {
     "activity": {
       "approvalRequired": "Approval required",
+      "approvalPrompt": "The assistant wants to run {{tool}}. Approve to continue.",
       "approve": "Approve",
       "contextCompacted": "Context compacted",
       "contextCompactedDropped": "Context compacted · dropped {{count}} history messages",
@@ -369,6 +370,7 @@
     "add": "Add",
     "addAttachment": "Add attachment",
     "approve": "Approve",
+    "reject": "Reject",
     "back": "Back",
     "cancel": "Cancel",
     "chart": "Chart",
@@ -1821,7 +1823,7 @@
       "errorFallback": "Step failed",
       "foundResults": "{{count}} results",
       "running": "Running…",
-      "statusCancelled": "Canceled",
+      "statusCancelled": "cancelled",
       "statusCompleted": "completed",
       "step": {
         "searchWeb": "Searching the web for \"{{query}}\"",

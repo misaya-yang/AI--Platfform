@@ -776,15 +776,17 @@ async def _ensure_agent_runtime_session(
 
 
 def _require_agent_runtime_request(body: AssistantChatRequest) -> None:
-    """Fail closed instead of silently dropping unmigrated capabilities."""
+    """Fail closed on controls the Runtime has no contract for.
+
+    ``system_prompt`` is forwarded as style guidance. ``os_agent_enabled`` and
+    the ``local_node_*`` fields are accepted but carry no turn-level binding:
+    the worker resolves the device from the tenant grant or the tool arguments,
+    so a Local Node request is answered by the capability, not by this edge.
+    """
 
     unsupported = bool(
-        body.system_prompt
-        or body.enable_task_planning
+        body.enable_task_planning
         or body.confirm_plan
-        or body.os_agent_enabled
-        or body.local_node_device_id
-        or body.local_node_grant_ids
         or body.resume_run_id
         or body.resume_approval_id
     )
@@ -827,6 +829,7 @@ async def _start_agent_runtime_turn(
     _require_agent_runtime_request(body)
     control = _agent_runtime_control(request)
     try:
+        style_guidance = str(body.system_prompt or "").strip() or None
         return await control.start_turn(
             tenant_id=user.tenant_id,
             user_id=user.user_id,
@@ -840,6 +843,7 @@ async def _start_agent_runtime_turn(
             memory_mode=body.memory_mode,
             memory_profile=body.memory_profile,
             readonly_capabilities=_agent_runtime_readonly_capabilities(body),
+            style_guidance=style_guidance,
         )
     except Exception as exc:
         from ...services.agent_runtime import AgentRuntimeControlError
@@ -868,6 +872,18 @@ async def chat(
 
     Model routing, tool execution and persistence remain Runtime-owned.
     """
+    # ``get_user_context`` is a *scoping* dependency: with no credentials it
+    # mints an anonymous guest on tenant ``public`` rather than rejecting the
+    # call.  Every route below assumes a real actor, so the V1 chat edge has to
+    # say so itself — exactly like ``/tools`` and ``/policies`` and V2's
+    # ``_require_actor``.  Without it an anonymous caller reaches model
+    # resolution and is turned away only because tenant ``public`` happens to
+    # own no ``llm_models`` row, which leaks the configured default model name
+    # as ``400 Unknown model`` and would start a real turn the moment that
+    # tenant ever gained one.
+    if not user.is_authenticated:
+        raise HTTPException(status_code=401, detail="authentication required")
+
     from ..deps import enforce_rate_limit
     from ._agent_runtime_headers import reject_client_agent_forgery
 
@@ -882,7 +898,6 @@ async def chat(
     await enforce_rate_limit(request, user, operation="assistant_chat")
 
     # Model-permission authz is enforced at the Gateway edge before Runtime.
-    # makes the 403 come back fast without a proxy round-trip.
     model_id = _effective_chat_model_id(request, body.model_id)
     model_meta = getattr(request.app.state, "model_meta", None)
     if model_meta:
@@ -936,7 +951,7 @@ async def chat_stream(
 ):
     """Streaming chat completion (SSE) through the Agent Runtime.
 
-    Gateway responsibilities (preserved from the in-process version):
+    Gateway responsibilities:
       - JWT auth via ``get_user_context``
       - Per-user rate limiting (``operation="assistant_chat"``)
       - Model-permission check (users can only call models they're allowed to)
@@ -944,12 +959,23 @@ async def chat_stream(
 
     Runtime failures remain explicit and the public SSE shape is preserved.
     """
+    # ``get_user_context`` is a *scoping* dependency: with no credentials it
+    # mints an anonymous guest on tenant ``public`` rather than rejecting the
+    # call.  Every route below assumes a real actor, so the V1 chat edge has to
+    # say so itself — exactly like ``/tools`` and ``/policies`` and V2's
+    # ``_require_actor``.  Without it an anonymous caller reaches model
+    # resolution and is turned away only because tenant ``public`` happens to
+    # own no ``llm_models`` row, which leaks the configured default model name
+    # as ``400 Unknown model`` and would start a real turn the moment that
+    # tenant ever gained one.
+    if not user.is_authenticated:
+        raise HTTPException(status_code=401, detail="authentication required")
+
     from ..deps import enforce_rate_limit
 
     await enforce_rate_limit(request, user, operation="assistant_chat")
 
-    # Read request body ONCE. We need it for authz parsing and the proxy
-    # needs the same bytes — starlette's Request.stream() is single-use.
+    # Read the body once; Starlette's Request.stream() is single-use.
     body_bytes = await request.body()
     try:
         body_json = json.loads(body_bytes) if body_bytes else {}
@@ -957,8 +983,7 @@ async def chat_stream(
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
     # Keep the streaming edge contract identical to the typed non-streaming
-    # route. In particular, fail before proxying fields that the downstream
-    # service deliberately reserves for a future durable implementation.
+    # route. Reject unmigrated fields before the Runtime control plane starts.
     try:
         validated_body = AssistantChatRequest.model_validate(body_json)
     except ValidationError as exc:
@@ -971,10 +996,6 @@ async def chat_stream(
         body_json if isinstance(body_json, dict) else {},
     )
 
-    # Authz 1: model must be allowed for this user. Done at the edge so
-    # 403 comes back without a proxy round-trip. DB-backed
-    # ``GatewayModelMeta`` query (<1 ms) — the old in-memory
-    # ModelRegistry lookup went away with Phase 5e's split.
     model_id = _effective_chat_model_id(request, validated_body.model_id)
     model_meta = getattr(request.app.state, "model_meta", None)
     if model_meta:

@@ -28,6 +28,8 @@ Never mix package managers: **pnpm for `web/`, uv for Python.** No `npm install`
 | Verify the pinned Agent Runtime source release unit | `make agent-runtime-source-contract` |
 | Verify the pinned Rust Agent Runtime image | `make agent-runtime-contract` |
 | Verify the Agent PostgreSQL ThreadStore | `AI_PLATFORM_AGENT_RUNTIME_SOURCE=/path/to/fork make agent-thread-store-contract` |
+| Serial single-kernel release contract | `make agent-runtime-release-gate` |
+| Digest-pinned current→frozen→current rollback rehearsal | `make agent-runtime-rollback-rehearsal` |
 | Build the pinned local Agent image and probe initialize | `AI_PLATFORM_AGENT_RUNTIME_SOURCE=/absolute/fork make agent-runtime-source-build-local` |
 | Build the pinned Rust Agent Runtime image | `AI_PLATFORM_AGENT_RUNTIME_SOURCE=/absolute/fork make agent-runtime-build-local` |
 | Smoke-test the Rust Runtime in an isolated Docker network | `AI_PLATFORM_AGENT_RUNTIME_IMAGE=... make agent-runtime-smoke` |
@@ -133,6 +135,8 @@ Run the gate that matches what you touched. These are the same commands CI runs.
 | Agent Runtime real Qwen text path | `ENV_FILE=/path/to/.env AI_PLATFORM_AGENT_RUNTIME_IMAGE=... make agent-runtime-text-gate` |
 | Agent Runtime read-only capability bridge | `make agent-runtime-readonly-gate` |
 | Agent Runtime tool side-effect safety | `AI_PLATFORM_AGENT_RUNTIME_SOURCE=/absolute/fork make agent-runtime-write-gate` |
+| Serial Rust cutover release contract | `make agent-runtime-release-gate` |
+| Digest-pinned current→frozen→current rollback | `make agent-runtime-rollback-rehearsal` |
 | Agent ThreadStore fresh/idempotent/live contract | `AI_PLATFORM_AGENT_RUNTIME_SOURCE=/path/to/fork make agent-thread-store-contract` |
 | Agent runtime compatibility surface | `make verify-assistant-runtime-dev` |
 | Eval / trace pipeline | `make eval-e1-gate`, then `make verify-eval-dev` for the wider branch gate |

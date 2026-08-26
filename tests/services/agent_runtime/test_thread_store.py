@@ -189,3 +189,85 @@ async def test_history_messages_projects_runtime_rollout_in_chronological_order(
     assert messages[1]["metadata"]["tool_results"][0]["result"] == "ok"
     assert messages[1]["metadata"]["runtime_events"][0]["event_type"] == "subagent_started"
     assert messages[1]["metadata"]["process_summary"]["steps"][0]["id"] == "context-compaction"
+
+
+@pytest.mark.asyncio
+async def test_history_messages_strip_readonly_catalog_dumps() -> None:
+    now = datetime.now(timezone.utc)
+
+    class _HistoryDatabase(_Database):
+        async def fetch(self, query: str, *args):
+            del query, args
+            return [
+                {
+                    "role": "assistant",
+                    "content": (
+                        "runtime-ok[AI_PLATFORM_READONLY_CONTEXT_V1]\n"
+                        '{"capability_allowlist":[{"id":"generate_quiz"}]}\n'
+                        "[/AI_PLATFORM_READONLY_CONTEXT_V1]"
+                    ),
+                    "sequence": 2,
+                    "run_id": "run-1",
+                    "created_at": now,
+                    "thinking_content": None,
+                    "tool_calls": None,
+                    "tool_results": None,
+                    "runtime_events": None,
+                    "total": 1,
+                }
+            ]
+
+    messages, total = await AgentThreadStore(_HistoryDatabase()).history_messages(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        runtime_thread_id="00000000-0000-0000-0000-000000000001",
+        limit=10,
+    )
+
+    assert total == 1
+    assert len(messages) == 1
+    assert messages[0]["role"] == "assistant"
+    assert messages[0]["content"] == "runtime-ok"
+    assert "generate_quiz" not in messages[0]["content"]
+    assert "AI_PLATFORM_READONLY_CONTEXT_V1" not in messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_attach_quiz_ids_keys_assistant_messages_from_the_capability_ledger() -> None:
+    quiz_id = "01a03bee-e650-7f01-9e96-8b71052a5282"
+    captured: dict[str, object] = {}
+
+    class _Ledger:
+        async def fetch(self, query: str, *args):
+            captured["query"] = query
+            captured["args"] = args
+            return [{"run_id": "run-1", "quiz_id": quiz_id}]
+
+    store = AgentThreadStore(_Ledger())
+    messages = [
+        {"role": "user", "content": "出题", "metadata": {"runtime_run_id": "run-1"}},
+        {"role": "assistant", "content": "好的", "metadata": {"runtime_run_id": "run-1"}},
+        {"role": "assistant", "content": "无关", "metadata": {"runtime_run_id": "run-2"}},
+    ]
+
+    await store._attach_quiz_ids(messages, tenant_id="tenant-a", user_id="user-a")
+
+    assert messages[1]["metadata"]["quiz_id"] == quiz_id
+    # A user turn is never a quiz carrier, and an unrelated run stays untouched.
+    assert "quiz_id" not in messages[0]["metadata"]
+    assert "quiz_id" not in messages[2]["metadata"]
+    assert captured["args"] == ("tenant-a", "user-a", ["run-1", "run-2"])
+
+
+@pytest.mark.asyncio
+async def test_attach_quiz_ids_is_advisory_when_the_ledger_is_unavailable() -> None:
+    class _BrokenLedger:
+        async def fetch(self, *_args):
+            raise RuntimeError("ledger unavailable")
+
+    store = AgentThreadStore(_BrokenLedger())
+    messages = [{"role": "assistant", "content": "好的", "metadata": {"runtime_run_id": "run-1"}}]
+
+    await store._attach_quiz_ids(messages, tenant_id="tenant-a", user_id="user-a")
+
+    assert "quiz_id" not in messages[0]["metadata"]

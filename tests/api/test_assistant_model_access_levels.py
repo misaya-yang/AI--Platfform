@@ -201,3 +201,42 @@ async def test_model_permission_rejects_dirty_database_access_level() -> None:
         await _check_model_permission(user, "model-1", model_meta)
 
     assert exc_info.value.status_code == 403
+
+
+@pytest.mark.parametrize("path", ["/assistant/chat", "/assistant/chat/stream"])
+def test_v1_chat_edge_rejects_anonymous_callers_before_model_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    """An unauthenticated caller must get 401, not a model-catalog answer.
+
+    ``get_user_context`` mints an anonymous guest on tenant ``public`` instead
+    of rejecting; before the edge guard the request reached
+    ``_check_model_permission`` and came back ``400 Unknown model: <default>``,
+    disclosing the configured default model and leaving anonymous turns one
+    ``llm_models`` row away from actually running.
+    """
+
+    async def no_rate_limit(*args, **kwargs) -> None:  # pragma: no cover - guard fires first
+        del args, kwargs
+
+    def unexpected_model_meta(*args, **kwargs):  # pragma: no cover - guard fires first
+        raise AssertionError("anonymous request reached model resolution")
+
+    app = FastAPI()
+    app.include_router(assistant_routes.router)
+    app.state.settings = SimpleNamespace(default_model="tenant-default-model")
+    app.state.model_meta = SimpleNamespace(get_access_level=unexpected_model_meta)
+    app.dependency_overrides[deps.get_user_context] = lambda: UserContext(
+        user_id="anon:203.0.113.7",
+        tenant_id="public",
+        tier="anonymous",
+        is_authenticated=False,
+        roles=["guest"],
+    )
+    monkeypatch.setattr(deps, "enforce_rate_limit", no_rate_limit)
+
+    response = TestClient(app).post(path, json={"message": "hello"})
+
+    assert response.status_code == 401
+    assert "tenant-default-model" not in response.text

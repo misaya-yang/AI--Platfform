@@ -23,9 +23,22 @@ async function login(page, email: string, password: string) {
   const username = email.replace(`@${AUTH_EMAIL_DOMAIN}`, "");
   await page.fill('input#email', username);
   await page.fill('input#password', password);
-  await page.click('button[type="submit"]');
-  // Wait for login API response and any redirect
-  await page.waitForLoadState("networkidle");
+  // `networkidle` can settle before the SPA has stored the token, so the next
+  // navigation raced back to /login. Wait for the auth response and for the
+  // route guard to actually let go of the login page instead.
+  const [response] = await Promise.all([
+    page.waitForResponse(
+      (candidate) =>
+        candidate.url().includes("/api/v1/auth/login") &&
+        candidate.request().method() === "POST",
+      { timeout: 30_000 }
+    ),
+    page.click('button[type="submit"]'),
+  ]);
+  if (!response.ok()) {
+    throw new Error(`model_tester login failed for ${email}: ${response.status()}`);
+  }
+  await page.waitForURL((url) => !url.pathname.startsWith("/login"), { timeout: 30_000 });
 }
 
 for (const user of TEST_USERS) {
@@ -36,7 +49,9 @@ for (const user of TEST_USERS) {
       await page.waitForLoadState("networkidle");
       // Verify playground content is visible
       const bodyText = await page.locator("body").textContent();
-      expect(bodyText).toMatch(/New chat|Playground|模型体验|聊天|assistant/i);
+      expect(bodyText).toMatch(
+        /Model Debug|模型调试|New chat|Playground|模型体验|聊天|assistant/i
+      );
     });
 
     test("sees only playground in sidebar", async ({ page }) => {
@@ -47,8 +62,13 @@ for (const user of TEST_USERS) {
       // Wait for sidebar to render
       await page.waitForSelector("nav, [class*='sidebar'], aside", { timeout: 10000 });
 
-      // Playground/模型体验 should be visible
-      const playgroundVisible = await page.locator("text=/模型体验|Playground|New chat/i").first().isVisible().catch(() => false);
+      // The playground surface is named "Model Debug" / "模型调试" in the
+      // console navigation; older builds called it Playground / 模型体验.
+      const playgroundVisible = await page
+        .locator("text=/Model Debug|模型调试|模型体验|Playground|New chat/i")
+        .first()
+        .isVisible()
+        .catch(() => false);
       expect(playgroundVisible).toBe(true);
 
       // Dashboard should NOT be visible in nav

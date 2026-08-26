@@ -680,6 +680,16 @@ def _validate_tool_transcript(
                 or call_id in completed_calls
                 or not allowed_identity
             ):
+                # Names and identities only — arguments can carry user content.
+                logger.warning(
+                    "Tool transcript rejected: function_call name=%s namespace=%s "
+                    "identity_allowed=%s duplicate=%s arguments_str=%s",
+                    str(name)[:64],
+                    str(namespace)[:64],
+                    allowed_identity,
+                    call_id in pending_calls or call_id in completed_calls,
+                    isinstance(arguments, str),
+                )
                 raise AgentModelPlaneError("RUNTIME_TOOL_TRANSCRIPT_INVALID", status_code=422)
             pending_calls[call_id] = name
         elif item_type == "function_call_output":
@@ -689,10 +699,20 @@ def _validate_tool_transcript(
                 or call_id not in pending_calls
                 or not isinstance(item.get("output"), str)
             ):
+                logger.warning(
+                    "Tool transcript rejected: function_call_output has_call=%s output_str=%s",
+                    isinstance(call_id, str) and call_id in pending_calls,
+                    isinstance(item.get("output"), str),
+                )
                 raise AgentModelPlaneError("RUNTIME_TOOL_TRANSCRIPT_INVALID", status_code=422)
             pending_calls.pop(call_id)
             completed_calls.add(call_id)
     if pending_calls:
+        logger.warning(
+            "Tool transcript rejected: %d function_call item(s) without output (%s)",
+            len(pending_calls),
+            ",".join(sorted(pending_calls.values()))[:200],
+        )
         raise AgentModelPlaneError("RUNTIME_TOOL_TRANSCRIPT_INVALID", status_code=422)
 
 
@@ -1758,6 +1778,11 @@ class AgentModelPlane:
             ),
         )
         header_request_id: str | None = None
+        # TTFT breakdown: provider connect/headers vs. first usable event. The
+        # request-level middleware timing only reports total generation, which
+        # hid where first-token latency actually goes.
+        dispatch_started = time.perf_counter()
+        first_event_logged = False
         async with self.http_client.stream(
             "POST",
             _responses_url(base_url),
@@ -1765,6 +1790,7 @@ class AgentModelPlane:
             json=provider_body,
         ) as response:
             header_request_id = response.headers.get("x-request-id")
+            headers_ms = (time.perf_counter() - dispatch_started) * 1000
             if response.status_code >= 400:
                 await response.aread()
                 await self._fail_call(
@@ -1781,6 +1807,17 @@ class AgentModelPlane:
                     continue
                 event = validator.consume(payload)
                 if event is not None:
+                    if not first_event_logged:
+                        first_event_logged = True
+                        logger.info(
+                            "Agent provider TTFT model=%s headers_ms=%.0f "
+                            "first_event_ms=%.0f tools=%d payload_chars=%d",
+                            call.model_id,
+                            headers_ms,
+                            (time.perf_counter() - dispatch_started) * 1000,
+                            len(provider_body.get("tools") or []),
+                            len(json.dumps(provider_body, ensure_ascii=False)),
+                        )
                     yield event
         terminal = validator.finish()
         await self._complete_call(

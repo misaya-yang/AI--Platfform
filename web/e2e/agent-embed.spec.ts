@@ -6,7 +6,10 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 import { assertNoBlockingA11yIssues } from "./support/helpers";
 
 const PUBLIC_ID = "44444444-4444-4444-8444-444444444444";
-const BASE = "http://127.0.0.1:4181";
+// The embed frame is CSP-pinned to its parent origin, and the widget
+// postMessage handshake compares origins too. Both must follow the config's
+// baseURL, or the iframe is blocked whenever the console is not on :4181.
+const BASE = (process.env.E2E_BASE_URL || "http://127.0.0.1:4181").replace(/\/$/, "");
 const EMBED_TOKEN = "e1.fixture.signature";
 const SCREENSHOTS = path.resolve("../reports/agent-studio/as-07-screenshots");
 

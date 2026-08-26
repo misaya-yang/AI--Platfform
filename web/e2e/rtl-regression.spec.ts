@@ -5,8 +5,8 @@
  *
  * Uses mock API routes to verify UI behavior without a live backend.
  */
-import { expect, test, type Page } from "@playwright/test";
-import { seedClientPrefs } from "./support/helpers";
+import { expect, test, type Page, type Route } from "@playwright/test";
+import { installAgentV2StreamRoutes, seedClientPrefs } from "./support/helpers";
 
 const MOCK_SERVICE_ID = "__builtin_assistant__";
 const MOCK_SESSION_ID = "rtl-test-session-001";
@@ -80,8 +80,9 @@ async function installMockRoutes(page: Page, responseText: string) {
     }
   });
 
-  // Mock stream response
-  await page.route("**/api/v1/assistant/chat/stream", async (route) => {
+  // Mock stream response. The Assistant streams through the V2 events cursor,
+  // so the same payload is served on both the legacy and current routes.
+  const fulfillStream = async (route: Route) => {
     const sseChunks = [
       `data: ${JSON.stringify({ event_type: "text_delta", data: responseText, timestamp: Date.now() / 1000 })}\n\n`,
       `data: ${JSON.stringify({ event_type: "done", data: { usage: { prompt_tokens: 100, completion_tokens: 200 } }, timestamp: Date.now() / 1000 })}\n\n`,
@@ -91,7 +92,9 @@ async function installMockRoutes(page: Page, responseText: string) {
       contentType: "text/event-stream",
       body: sseChunks.join(""),
     });
-  });
+  };
+  await page.route("**/api/v1/assistant/chat/stream", fulfillStream);
+  await installAgentV2StreamRoutes(page, fulfillStream);
 
   // Mock services
   await page.route("**/api/v1/services*", async (route) => {

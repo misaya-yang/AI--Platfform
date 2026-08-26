@@ -80,14 +80,23 @@ async def all_services_health(
 
     control = getattr(request.app.state, "agent_runtime_control", None)
     worker = getattr(request.app.state, "image_task_worker", None)
+    runtime_ready = control is not None
+    worker_ready = (
+        worker is not None
+        and getattr(getattr(worker, "_loop_task", None), "done", lambda: True)() is False
+    )
     health_status["agent_runtime"] = {
-        "status": "healthy" if control is not None else "unavailable",
+        "status": "healthy" if runtime_ready else "unavailable",
     }
     health_status["image_worker"] = {
-        "status": "healthy"
-        if worker is not None
-        and getattr(getattr(worker, "_loop_task", None), "done", lambda: True)() is False
-        else "unavailable",
+        "status": "healthy" if worker_ready else "unavailable",
+    }
+    # The built-in Assistant is published by ``/api/v1/services`` under the
+    # ``assistant`` service_id. Key its health the same way, or every consumer
+    # of this map (the Services console among them) reports it as unhealthy
+    # because the lookup misses. Same readiness signal as the catalog uses.
+    health_status["assistant"] = {
+        "status": "healthy" if runtime_ready and worker_ready else "unavailable",
     }
 
     return health_status

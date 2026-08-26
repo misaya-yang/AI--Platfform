@@ -10,7 +10,12 @@
  */
 
 import { expect, test } from "@playwright/test";
-import { buildAuthHeaders, getApiUrl } from "./support/helpers";
+import {
+  buildAuthHeaders,
+  createOwnedKnowledgeDataset,
+  deleteKnowledgeDataset,
+  getApiUrl,
+} from "./support/helpers";
 
 test.describe("Quiz workflow", () => {
   test.setTimeout(3 * 60_000);
@@ -18,6 +23,7 @@ test.describe("Quiz workflow", () => {
   let headers: Record<string, string>;
   let quizId: string | undefined;
   let sessionId: string | undefined;
+  let datasetId: string | undefined;
 
   test.beforeAll(async ({ request }) => {
     headers = await buildAuthHeaders(request);
@@ -37,28 +43,18 @@ test.describe("Quiz workflow", () => {
         .delete(`${apiUrl}/api/v1/sessions/${sessionId}`, { headers })
         .catch(() => {});
     }
+    if (datasetId) {
+      await deleteKnowledgeDataset(request, datasetId).catch(() => {});
+    }
   });
 
   test("generate, submit, share, public access, delete quiz", async ({ page, request }) => {
     const apiUrl = getApiUrl();
 
-    // --- Step 1: List KB datasets to find one with content ---
-    const dsRes = await request.get(`${apiUrl}/api/v1/assistant/datasets`, {
-      headers,
-    });
-    expect(dsRes.ok(), `List datasets failed: ${dsRes.status()}`).toBeTruthy();
-    const dsData = await dsRes.json();
-    const datasets = dsData.datasets ?? dsData.data ?? dsData;
-    expect(Array.isArray(datasets)).toBeTruthy();
-
-    // Skip test if no datasets available
-    if (datasets.length === 0) {
-      test.skip(true, "No KB datasets available for quiz generation");
-      return;
-    }
-
-    const datasetId = datasets[0].id ?? datasets[0].dataset_id;
-    expect(datasetId).toBeTruthy();
+    // --- Step 1: Seed a KB dataset this user owns ---
+    const owned = await createOwnedKnowledgeDataset(request);
+    datasetId = owned.datasetId;
+    const datasetName = owned.name;
 
     // --- Step 2: Generate a quiz through the assistant (in-chat generate_quiz tool) ---
     // The gateway quiz-generation API was removed (PC-03); the supported path is
@@ -77,39 +73,60 @@ test.describe("Quiz workflow", () => {
     await page
       .getByRole("button", { name: /Company Knowledge Base|公司知识库/ })
       .click();
-    const datasetName = String(datasets[0].name ?? "");
-    expect(datasetName).toBeTruthy();
     await page.getByText(datasetName, { exact: true }).click();
     await composer.click();
 
-    const chatRequest = page.waitForRequest(
+    // The console drives Agent Runtime V2: it creates a thread, then posts the
+    // turn. The legacy /api/v1/assistant/chat/stream request this used to wait
+    // for is never issued any more. The dataset binding rides on the turn body
+    // and the session id comes back on the thread.
+    const threadResponse = page.waitForResponse(
+      (res) =>
+        res.request().method() === "POST" &&
+        new URL(res.url()).pathname.endsWith("/api/v2/agent/threads"),
+    );
+    const turnRequest = page.waitForRequest(
       (req) =>
         req.method() === "POST" &&
-        new URL(req.url()).pathname.endsWith("/api/v1/assistant/chat/stream"),
+        /\/api\/v2\/agent\/threads\/[^/]+\/turns$/.test(new URL(req.url()).pathname),
     );
     await composer.fill("请根据知识库出 4 道单选题，覆盖核心概念");
     await composer.press("Enter");
 
-    const chatPayload = (await chatRequest).postDataJSON();
-    expect(chatPayload.kb_dataset_ids).toContain(datasetId);
-    sessionId = String(chatPayload.session_id ?? "");
+    const turnPayload = (await turnRequest).postDataJSON();
+    expect(turnPayload.kb_dataset_ids).toContain(datasetId);
+    const threadBody = await (await threadResponse).json();
+    sessionId = String(threadBody?.thread?.session_id ?? "");
     expect(sessionId).toBeTruthy();
 
     // A freshly streamed quiz is already hydrated from the canonical
     // ``quiz:ready`` SSE payload, so no GET is expected at render time.
     // Verify the card and resolve its id from persisted session metadata.
-    await expect(
-      page.getByRole("button", { name: /Start quiz|开始作答/ }),
-    ).toBeVisible({ timeout: 180_000 });
+    // `generate_quiz` is a write capability, and the runtime runs with
+    // `approvalPolicy: on-request` + a read-only sandbox, so the turn parks on
+    // an approval the operator has to grant before the card can render.
+    const approveButton = page.getByRole("button", { name: /^(Approve|通过)$/ });
+    const startQuizButton = page.getByRole("button", { name: /^(Start Quiz|开始作答)$/i });
+    await expect(approveButton.or(startQuizButton).first()).toBeVisible({
+      timeout: 180_000,
+    });
+    if ((await approveButton.count()) > 0) {
+      await approveButton.first().click();
+    }
+    await expect(startQuizButton).toBeVisible({ timeout: 180_000 });
     await expect
       .poll(
         async () => {
+          // The Runtime owns conversation history now; the generic
+          // /api/v1/sessions history reads the Gateway session store and
+          // carries none of the runtime-projected metadata.
           const historyRes = await request.get(
-            `${apiUrl}/api/v1/sessions/${sessionId}/history`,
+            `${apiUrl}/api/v1/assistant/sessions/${sessionId}/history?limit=200`,
             { headers },
           );
           if (!historyRes.ok()) return undefined;
-          const messages = await historyRes.json();
+          const historyBody = await historyRes.json();
+          const messages = historyBody.messages ?? historyBody;
           const quizMessage = [...messages]
             .reverse()
             .find(

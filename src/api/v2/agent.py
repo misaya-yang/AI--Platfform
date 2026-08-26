@@ -104,15 +104,16 @@ def _require_actor(user: UserContext) -> None:
 
 
 def _reject_unmigrated_turn_capabilities(body: TurnCreateRequest) -> None:
-    """Keep V2 fail-closed until these controls have a runtime contract."""
+    """Keep V2 fail-closed until these controls have a runtime contract.
+
+    Mirrors ``_require_agent_runtime_request``: ``system_prompt`` becomes style
+    guidance, while ``os_agent_enabled`` and the ``local_node_*`` fields are
+    accepted without a turn-level binding and resolved by the capability worker.
+    """
 
     unsupported = (
         body.execution_profile != "safe"
         or body.memory_mode not in {"auto", "strict", "off"}
-        or body.system_prompt is not None
-        or body.os_agent_enabled
-        or body.local_node_device_id is not None
-        or bool(body.local_node_grant_ids)
         or body.resume_run_id is not None
         or body.resume_approval_id is not None
     )
@@ -323,6 +324,7 @@ async def create_turn(
     if not model_id:
         raise HTTPException(status_code=503, detail={"code": "AGENT_RUNTIME_MODEL_UNAVAILABLE"})
     try:
+        style_guidance = str(body.system_prompt or "").strip() or None
         turn = await control.start_turn(
             tenant_id=user.tenant_id, user_id=user.user_id, session_id=thread.session_id,
             message=body.message, model_id=model_id,
@@ -331,6 +333,7 @@ async def create_turn(
             max_tokens=body.max_tokens,
             temperature=body.temperature,
             memory_mode=body.memory_mode,
+            style_guidance=style_guidance,
             readonly_capabilities={
                 "knowledge": {
                     "dataset_ids": body.kb_dataset_ids,

@@ -29,6 +29,8 @@ use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadMemoryMode;
 use codex_app_server_protocol::ThreadMemoryModeSetParams;
+use codex_app_server_protocol::AdditionalContextEntry;
+use codex_app_server_protocol::AdditionalContextKind;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
@@ -722,23 +724,23 @@ async fn start_turn(
         "ai_platform_scope_sha256".to_string(),
         runtime_scope_sha256(&tenant_id, &user_id, &session_id),
     );
-    let mut input = Vec::with_capacity(2);
-    // Keep the stable user/developer prompt first.  Gateway-selected
-    // capabilities, skills, grants and attachments are dynamic lower-trust
-    // context and must remain after the user turn.
-    input.push(UserInput::Text {
+    let input = vec![UserInput::Text {
         text: body.message,
         text_elements: Vec::new(),
+    }];
+    let additional_context = readonly_input.flatten().map(|value| {
+        HashMap::from([(
+            "ai_platform_readonly".to_string(),
+            AdditionalContextEntry {
+                value,
+                kind: AdditionalContextKind::Untrusted,
+            },
+        )])
     });
-    if let Some(readonly_input) = readonly_input.flatten() {
-        input.push(UserInput::Text {
-            text: readonly_input,
-            text_elements: Vec::new(),
-        });
-    }
     let params = TurnStartParams {
         thread_id: thread_id.to_string(),
         input,
+        additional_context,
         responsesapi_client_metadata: Some(metadata),
         model: Some(body.model),
         effort: body
@@ -1619,6 +1621,7 @@ async fn persist_dynamic_approval_required(
             "session_id": identity.session_id,
             "thread_id": identity.runtime_thread_id.to_string(),
             "approval_id": approval_id,
+            "tool_id": params.call_id,
             "tool_call_id": params.call_id,
             "tool_name": params.tool,
             "arguments_hash": arguments_hash,

@@ -549,6 +549,28 @@ def validate_lock(
         or capability_sbom_rel != receipt_capability_sbom.get("path")
     ):
         raise ContractError("capability worker SBOM does not match the source receipt")
+    # The digest check above only proves the committed SBOM is the one the lock
+    # names.  It cannot see that the SBOM still *describes* the locked overlay:
+    # regenerating the lock without regenerating the SBOM leaves a document that
+    # claims a different build than the image we ship.  Pin the identity too.
+    capability_sbom = _load_object(capability_sbom_path, label="capability worker SBOM")
+    sbom_component = (capability_sbom.get("metadata") or {}).get("component") or {}
+    sbom_overlay_sha = next(
+        (
+            property_.get("value")
+            for property_ in sbom_component.get("properties") or []
+            if isinstance(property_, dict)
+            and property_.get("name") == "ai-platform:overlay.sha256"
+        ),
+        None,
+    )
+    expected_overlay_sha = build.get("overlay_sha256")
+    if expected_overlay_sha and (
+        sbom_overlay_sha != expected_overlay_sha
+        or sbom_component.get("version")
+        != f"{source['upstream_sha']}+{expected_overlay_sha[:12]}"
+    ):
+        raise ContractError("capability worker SBOM does not describe the locked overlay")
 
     schema = receipt.get("schema_bundle") or {}
     _require_hex(schema.get("sha256"), length=64, label="schema bundle SHA")

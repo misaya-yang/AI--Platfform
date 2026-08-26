@@ -1,10 +1,39 @@
 import { expect, test } from "@playwright/test";
+import type { APIRequestContext, APIResponse } from "@playwright/test";
 import { buildAuthHeaders, ensureAuthenticatedPage, getApiUrl, readE2ETestUser } from "./support/helpers";
 
 const DATASET_PREFIX = "e2e-kb-test";
 
 function uniqueName(): string {
   return `${DATASET_PREFIX}-${Date.now()}`;
+}
+
+/**
+ * Delete a dataset, absorbing the retryable index-lease conflict.
+ *
+ * Deletion takes the same index lifecycle lease as ingestion, so a delete
+ * issued while the freshly uploaded document is still being indexed loses the
+ * race and comes back 409. That is expected contention, not a failure — retry
+ * until the indexer releases the lease.
+ */
+async function deleteDatasetWithRetry(
+  request: APIRequestContext,
+  apiUrl: string,
+  datasetId: string,
+  headers: Record<string, string>,
+  password: string,
+  reason: string,
+): Promise<APIResponse> {
+  let response!: APIResponse;
+  for (let attempt = 0; attempt < 15; attempt += 1) {
+    response = await request.delete(`${apiUrl}/api/v1/knowledge/datasets/${datasetId}`, {
+      headers,
+      data: { password, reason },
+    });
+    if (response.status() !== 409) return response;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  return response;
 }
 
 test.describe("Knowledge Base workflow", () => {
@@ -24,10 +53,14 @@ test.describe("Knowledge Base workflow", () => {
     // Clean up: delete dataset if it was created
     if (datasetId) {
       const apiUrl = getApiUrl();
-      await request.delete(`${apiUrl}/api/v1/knowledge/datasets/${datasetId}`, {
+      await deleteDatasetWithRetry(
+        request,
+        apiUrl,
+        datasetId,
         headers,
-        data: { password: testPassword, reason: "E2E cleanup" },
-      }).catch(() => {});
+        testPassword,
+        "E2E cleanup",
+      ).catch(() => {});
     }
   });
 
@@ -95,10 +128,14 @@ test.describe("Knowledge Base workflow", () => {
     expect(updatedData.description).toBe(updatedDescription);
 
     // --- Step 8: Delete dataset via API ---
-    const deleteRes = await request.delete(`${apiUrl}/api/v1/knowledge/datasets/${datasetId}`, {
+    const deleteRes = await deleteDatasetWithRetry(
+      request,
+      apiUrl,
+      datasetId,
       headers,
-      data: { password: testPassword, reason: "E2E lifecycle complete" },
-    });
+      testPassword,
+      "E2E lifecycle complete",
+    );
     expect(deleteRes.ok(), `Delete dataset failed: ${deleteRes.status()}`).toBeTruthy();
     datasetId = undefined; // prevent afterAll cleanup
 

@@ -42,12 +42,8 @@ import { useToast } from "@/hooks/use-toast";
 import { useAuthStore } from "@/store/useAuthStore";
 
 // Local Components & Hooks
-import {
-  ChatMessage,
-  CompactModelSelector,
-  AgentTaskTimeline,
-  type AgentTask,
-} from "./components";
+import { CompactModelSelector } from "./components/CompactModelSelector";
+import { AgentTaskTimeline, type AgentTask } from "./components/AgentTaskTimeline";
 import { ChatInputArea } from "./components/ChatInputArea";
 import {
   readHydratedLastModelId,
@@ -77,6 +73,10 @@ import {
 
 const ASSISTANT_UI_V2 = import.meta.env.VITE_ASSISTANT_UI_V2 !== "false";
 const ASSISTANT_COMPOSER_ID = "assistant-chat-composer";
+const ChatMessage = lazy(async () => {
+  const module = await import("./components/ChatMessage");
+  return { default: module.ChatMessage };
+});
 const ActivityPanel = lazy(async () => {
   const module = await import("./components/ActivityPanel");
   return { default: module.ActivityPanel };
@@ -1158,11 +1158,13 @@ export function AssistantPage() {
                         className="mb-4"
                       />
                     )}
-                    {messages.map((message) => (
-                      <MessageErrorBoundary key={message.id}>
-                        <ChatMessage message={message} />
-                      </MessageErrorBoundary>
-                    ))}
+                    <Suspense fallback={null}>
+                      {messages.map((message) => (
+                        <MessageErrorBoundary key={message.id}>
+                          <ChatMessage message={message} onToolApproval={handleToolApproval} />
+                        </MessageErrorBoundary>
+                      ))}
+                    </Suspense>
                   </div>
                 )}
               </div>
@@ -1189,8 +1191,13 @@ export function AssistantPage() {
               isStreaming={isStreaming}
               isGeneratingImage={isGeneratingImage}
               isImageMode={isImageMode}
+              // Mirror of the `handleSend` guard: block only when nothing is
+              // selected, or when the catalog has resolved and is genuinely
+              // empty. Requiring `modelsLoaded` here disabled the composer
+              // while the catalog loaded, so the cached last model could never
+              // actually send the first message (W3).
               hasAvailableModel={
-                modelsLoaded && models.length > 0 && models.some((model) => model.id === selectedModel)
+                Boolean(selectedModel) && !(modelsLoaded && models.length === 0)
               }
               handleFileSelect={handleFileSelect}
               removeFile={removeFile}

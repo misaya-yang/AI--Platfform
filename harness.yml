@@ -127,6 +127,12 @@ commands:
   agent_runtime_source_build_local:
     make: agent-runtime-source-build-local
     purpose: Build the pinned App Server locally and verify source/schema labels plus initialize.
+  agent_runtime_release_gate:
+    make: agent-runtime-release-gate
+    purpose: Serial single-kernel release contract without image builds or provider calls.
+  agent_runtime_rollback_rehearsal:
+    make: agent-runtime-rollback-rehearsal
+    purpose: Digest-pinned current-to-frozen-to-current rollback with session and execution fingerprints.
   sdk_sse_contract:
     make: sdk-sse-contract
     purpose: Verify the shared Python, CLI, Java, and Dart SSE envelope contract.

@@ -18,6 +18,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Map;
 use serde_json::Value;
+use serde_json::json;
 
 pub const READONLY_CAPABILITY_SCHEMA_VERSION: &str = "agent-readonly-capability/v1";
 pub const PLATFORM_CONFIG_SCHEMA_VERSION: &str = "agent-runtime-platform-config/v1";
@@ -861,9 +862,9 @@ pub fn discover_readonly(
     Ok(selected.into_values().collect())
 }
 
-/// Validate a gateway payload and render it as one clearly marked, untrusted
-/// Agent input item. The Runtime never turns this payload into executable
-/// tools; write-capable descriptors are rejected before the kernel sees them.
+/// Validate a gateway payload and render turn **items** for Codex
+/// `additional_context`. Tool catalogs authorize execution on the snapshot and
+/// are registered as `dynamicTools`; they must not become model-visible text.
 pub fn render_turn_input(
     scope: &RuntimeCapabilityScope,
     payload: &Value,
@@ -939,34 +940,22 @@ pub fn render_turn_input(
             }
         }
     }
-    if object
+    let items = object
         .get("items")
         .and_then(Value::as_array)
-        .is_none_or(Vec::is_empty)
-        && object
-            .get("tools")
-            .and_then(Value::as_array)
-            .is_none_or(Vec::is_empty)
-        && object
-            .get("mcp")
-            .and_then(Value::as_array)
-            .is_none_or(Vec::is_empty)
-        && object
-            .get("deferred")
-            .and_then(Value::as_array)
-            .is_none_or(Vec::is_empty)
-        && object
-            .get("attachment_tools")
-            .and_then(Value::as_array)
-            .is_none_or(Vec::is_empty)
-    {
+        .cloned()
+        .unwrap_or_default();
+    if items.is_empty() {
         return Ok(None);
     }
-    let encoded = serde_json::to_string(payload)
-        .map_err(|_| ReadonlyCapabilityError::new("runtime_readonly_payload_invalid"))?;
-    Ok(Some(format!(
-        "[AI_PLATFORM_READONLY_CONTEXT_V1]\n{encoded}\n[/AI_PLATFORM_READONLY_CONTEXT_V1]"
-    )))
+    let encoded = serde_json::to_string(&json!({
+        "schema_version": object.get("schema_version"),
+        "tenant_id": object.get("tenant_id"),
+        "capability_revision": object.get("capability_revision"),
+        "items": items,
+    }))
+    .map_err(|_| ReadonlyCapabilityError::new("runtime_readonly_payload_invalid"))?;
+    Ok(Some(encoded))
 }
 
 /// Returns whether a dynamic tool name is explicitly present in the
@@ -1247,12 +1236,31 @@ mod tests {
         let rendered = render_turn_input(&scope(), &payload)
             .expect("readonly input should validate")
             .expect("non-empty readonly input should render");
-        assert!(rendered.starts_with("[AI_PLATFORM_READONLY_CONTEXT_V1]"));
+        assert!(rendered.contains("knowledge:source-a"));
+        assert!(!rendered.contains("capability_allowlist"));
+        assert!(!rendered.contains("[AI_PLATFORM_READONLY_CONTEXT_V1]"));
 
         let mut foreign = payload;
         foreign["tenant_id"] = Value::String("tenant-b".to_string());
         let error = render_turn_input(&scope(), &foreign).expect_err("foreign input must fail");
         assert_eq!(error.to_string(), "runtime_capability_revision_mismatch");
+    }
+
+    #[test]
+    fn render_turn_input_does_not_dump_tool_catalogs() {
+        let payload = serde_json::json!({
+            "schema_version": READONLY_CAPABILITY_SCHEMA_VERSION,
+            "tenant_id": "tenant-a",
+            "capability_revision": 7,
+            "items": [],
+            "tools": [serde_json::to_value(descriptor("search", "knowledge")).unwrap()],
+            "mcp": [],
+            "deferred": [],
+            "attachment_tools": []
+        });
+        let rendered = render_turn_input(&scope(), &payload)
+            .expect("catalog-only payload should validate");
+        assert_eq!(rendered, None);
     }
 
     #[test]

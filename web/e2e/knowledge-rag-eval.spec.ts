@@ -391,6 +391,14 @@ test.describe("@mock KB RAG evaluation UI contract", () => {
 test.describe("KB RAG config & evaluation workbench", () => {
   test.setTimeout(5 * 60_000);
 
+  // These assertions are written against the Chinese console. Pin the locale
+  // instead of inheriting whatever the shared storage state happens to carry:
+  // when `ensureAuthenticatedPage` has to log in through the form, the app
+  // starts from the default locale and every Chinese locator misses.
+  test.beforeEach(async ({ page }) => {
+    await seedClientPrefs(page, { locale: "zh-CN" });
+  });
+
   let datasetId: string | undefined;
   let headers: Record<string, string>;
   let testPassword: string;

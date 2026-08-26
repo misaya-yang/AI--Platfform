@@ -410,6 +410,15 @@ async def delete_dataset(
         return {"status": "success" if ok else "not_found", "dataset_id": dataset_id}
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    except IndexLeaseUnavailableError as exc:
+        # Deletion takes the same index lifecycle lease as ingestion/reindex.
+        # Losing that race is transient contention, not a server fault: report
+        # it as a retryable conflict like every other lease-guarded route.
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+            headers={"Retry-After": "1"},
+        ) from exc
     except ValidationFailedError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

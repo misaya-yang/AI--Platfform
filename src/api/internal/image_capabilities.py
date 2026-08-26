@@ -16,6 +16,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import uuid
 from typing import Any
@@ -31,6 +32,8 @@ from fastapi import APIRouter, Body, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 router = APIRouter(prefix="/internal/v2/agent-capabilities", tags=["internal-agent-capabilities"])
+
+logger = logging.getLogger(__name__)
 
 _PATH = "/internal/v2/agent-capabilities/image/generate"
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
@@ -416,9 +419,22 @@ async def generate_image_capability(
     }
     try:
         result = await generate(**generate_kwargs)
-    except Exception:
+    except Exception as exc:
+        # The message can carry provider URLs or request bodies, so log the
+        # exception type only. Without this the 502 is undiagnosable.
+        logger.warning(
+            "Image capability provider call raised %s (execution=%s)",
+            type(exc).__name__,
+            execution_id,
+        )
         raise HTTPException(status_code=502, detail="image provider unavailable") from None
     if not getattr(result, "success", False):
+        logger.warning(
+            "Image capability generation failed code=%s unknown=%s (execution=%s)",
+            str(getattr(result, "error_code", "unknown"))[:64],
+            bool(getattr(result, "outcome_unknown", False)),
+            execution_id,
+        )
         if getattr(result, "outcome_unknown", False):
             raise HTTPException(status_code=502, detail="image generation outcome unknown")
         await _clear_execution_claim(request, execution_id)

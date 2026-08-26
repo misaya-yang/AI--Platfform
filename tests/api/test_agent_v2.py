@@ -251,10 +251,6 @@ async def test_v2_turn_uses_gateway_default_when_model_is_omitted() -> None:
     [
         ("execution_profile", "balanced"),
         ("memory_mode", "user"),
-        ("system_prompt", "custom instructions"),
-        ("os_agent_enabled", True),
-        ("local_node_device_id", "node-a"),
-        ("local_node_grant_ids", ["grant-a"]),
         ("resume_run_id", "run-a"),
         ("resume_approval_id", "approval-a"),
     ],
@@ -266,6 +262,19 @@ async def test_v2_turn_rejects_unmigrated_capabilities(
     with pytest.raises(Exception) as exc_info:
         _reject_unmigrated_turn_capabilities(body)
     assert getattr(exc_info.value, "status_code", None) == 409
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("system_prompt", "Be concise."),
+        ("os_agent_enabled", True),
+        ("local_node_device_id", "node-a"),
+        ("local_node_grant_ids", ["grant-a"]),
+    ],
+)
+def test_v2_turn_accepts_style_and_local_node_fields(field: str, value: object) -> None:
+    _reject_unmigrated_turn_capabilities(TurnCreateRequest(message="hello", **{field: value}))
 
 
 @pytest.mark.parametrize("memory_mode", ["auto", "strict", "off"])

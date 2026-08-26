@@ -53,7 +53,7 @@ export COMPOSE_PARALLEL_LIMIT
 
 # -- Quick Start --------------------------------------------------------------
 
-.PHONY: doctor harness-check runtime-dependency-gate agent-runtime-source-build-local agent-runtime-source-contract agent-runtime-build-local agent-runtime-contract agent-runtime-smoke agent-runtime-text-gate agent-runtime-single-kernel-gate agent-runtime-readonly-gate agent-runtime-write-gate agent-thread-store-contract agent-capability-worker-build-local agent-capability-worker-smoke sdk-sse-contract snapshot-gateway-openapi quickstart quickstart-build validate-config validate-example-config validate seed-demo seed-demo-apply
+.PHONY: doctor harness-check runtime-dependency-gate agent-runtime-source-build-local agent-runtime-source-contract agent-runtime-build-local agent-runtime-contract agent-runtime-smoke agent-runtime-text-gate agent-runtime-single-kernel-gate agent-runtime-readonly-gate agent-runtime-write-gate agent-thread-store-contract agent-capability-worker-build-local agent-capability-worker-smoke agent-runtime-release-gate agent-runtime-rollback-rehearsal sdk-sse-contract snapshot-gateway-openapi quickstart quickstart-build validate-config validate-example-config validate seed-demo seed-demo-apply
 
 doctor:                     ## 环境体检: 工具/Docker/内存/端口/compose 归属 (只读)
 	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/doctor.sh --env "$(ENV_FILE)"
@@ -120,6 +120,21 @@ agent-capability-worker-build-local: ## 单 job 构建固定源码的 Rust capab
 
 agent-capability-worker-smoke: ## 隔离 PostgreSQL 验证 capability worker 的租约、幂等、事件、取消和恢复
 	@bash scripts/harness/smoke_agent_capability_worker_image.sh
+
+agent-runtime-release-gate:   ## 串行运行单内核发布合同（不构建镜像、不调用 provider）
+	@$(MAKE) agent-runtime-source-contract
+	@$(MAKE) runtime-dependency-gate
+	@$(MAKE) agent-runtime-single-kernel-gate
+	@$(MAKE) agent-runtime-readonly-gate
+	@$(MAKE) verify-assistant-runtime-dev
+	@$(MAKE) agent-eval-core-gate
+	@$(MAKE) test-isolation
+	@$(MAKE) rag-eval-regression-gate
+	@$(MAKE) sdk-sse-contract
+	@$(MAKE) harness-check
+
+agent-runtime-rollback-rehearsal: ## 用冻结 release 执行 new→old→new 回滚并验证会话/执行账本
+	@ENV_FILE="$(ENV_FILE)" bash scripts/harness/agent_runtime_rollback_rehearsal.sh
 
 agent-runtime-source-build-local: ## 低内存构建本地 Agent Runtime 源码镜像并验证源码/Schema 标签与 initialize
 	@bash scripts/harness/build_agent_runtime_source_image.sh

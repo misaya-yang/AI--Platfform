@@ -4,7 +4,7 @@ from typing import Any
 from uuid import UUID
 
 from ai_gateway_core.exceptions import SessionAlreadyExistsError
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, field_validator
 
 from ...core.auth.user_resolver import UserContext
@@ -195,12 +195,29 @@ async def update_session(
 @router.delete("/sessions/{session_id}")
 async def delete_session(
     session_id: str,
+    request: Request,
     session_manager: SessionManager = Depends(get_session_manager),
     user: UserContext = Depends(get_user_context),
 ):
     session = await session_manager.get(session_id)
     if not session or (session.user_id != user.user_id or session.tenant_id != user.tenant_id):
         raise HTTPException(status_code=404, detail="session not found")
+    # ``assistant_runtime_threads`` references ``sessions`` ON DELETE RESTRICT,
+    # so the Runtime thread has to be tombstoned first. /api/v1/assistant/
+    # sessions/{id} already does this; without the same step here a session
+    # that ever ran a turn fails the delete with a raw ForeignKeyViolation 500.
+    control = getattr(request.app.state, "agent_runtime_control", None)
+    if control is not None:
+        from ...services.agent_runtime import AgentRuntimeControlError
+
+        try:
+            await control.cleanup_session(
+                tenant_id=user.tenant_id,
+                user_id=user.user_id,
+                session_id=session_id,
+            )
+        except AgentRuntimeControlError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.code) from exc
     await session_manager.delete(session_id)
     return {"session_id": session_id, "status": "deleted"}
 

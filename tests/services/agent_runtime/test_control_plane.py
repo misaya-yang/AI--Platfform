@@ -219,7 +219,15 @@ class _AssignmentStore:
         )
 
 
-def test_signed_capability_catalog_allowlist_rejects_unbound_or_unsealed_tools() -> None:
+def test_signed_capability_catalog_allowlist_withholds_unbound_and_rejects_unsealed() -> None:
+    """The allowlist scopes the catalog; a version/hash mismatch still fails closed.
+
+    The worker publishes its whole registry and does not apply the requested
+    allowlist, so descriptors the Agent never configured are expected in the
+    response and are withheld. A descriptor that *is* allowlisted but whose
+    pinned version or schema hash differs is tampering and must still raise.
+    """
+
     allowlist = [
         {
             "type": "mcp",
@@ -241,7 +249,8 @@ def test_signed_capability_catalog_allowlist_rejects_unbound_or_unsealed_tools()
         allowlist,
     )
     assert [item["name"] for item in selected] == ["tool-a"]
-    with pytest.raises(AgentRuntimeControlError, match="SCOPE_MISMATCH"):
+    # Not named by the allowlist: withheld from the Agent, not fatal to the turn.
+    assert (
         AgentRuntimeControlPlane._allowlisted_catalog_descriptors(
             [
                 {
@@ -253,6 +262,8 @@ def test_signed_capability_catalog_allowlist_rejects_unbound_or_unsealed_tools()
             ],
             allowlist,
         )
+        == []
+    )
 
     platform_without_legacy_hash = [
         {
@@ -609,6 +620,11 @@ async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() ->
         "attachment",
         "context",
     ]
+    assert readonly["tools"] == []
+    assert readonly["mcp"] == []
+    assert readonly["deferred"] == []
+    assert readonly["attachment_tools"] == []
+    assert "capability_allowlist" not in readonly
     assert captured["headers"]["x-ai-tenant-id"] == "tenant-a"
     assert captured["requests"][0][0] == f"/internal/v1/threads/{runtime_thread_id}/resume"
     assert captured["requests"][0][1]["model"] == "qwen3.7-plus"
@@ -618,6 +634,11 @@ async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() ->
     assert captured["requests"][0][1]["baseInstructions"]
     assert captured["requests"][0][1]["developerInstructions"]
     assert database.issued_snapshot is not None
+    assert [item["kind"] for item in database.issued_snapshot["readonly_capabilities"]["items"]] == [
+        "knowledge",
+        "attachment",
+        "context",
+    ]
     assert database.issued_snapshot["model"]["wire_protocol"] == "responses_v1"
     assert database.issued_snapshot["parameters"] == {"temperature": 0.2}
     assert database.issued_snapshot["input"] == {"message": "你好"}
@@ -1218,3 +1239,74 @@ async def test_interrupt_uses_strict_empty_runtime_body_and_closes_run() -> None
 
     assert captured["body"] == {}
     assert completed == [(uuid.UUID(run_id), "cancelled")]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_tool_catalog_does_not_depend_on_turn_scoped_bindings() -> None:
+    """The thread's tool catalog must be identical with and without a dataset.
+
+    ``ensure_thread`` pins ``dynamic_tool_fingerprint`` from a catalog fetched
+    with no readonly input, while ``start_turn`` recomputes it from the turn's
+    bindings. If the catalog varies with a turn-scoped binding the two
+    fingerprints diverge and every KB-bound turn is rejected with
+    ``CAPABILITY_THREAD_RECREATE_REQUIRED`` — which is what happened when
+    ``search_knowledge_base`` was withheld for turns with no dataset selected.
+    """
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/catalog")
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "tools": [
+                    {
+                        "name": "search_knowledge_base",
+                        "id": "search_knowledge_base",
+                        "version": None,
+                        "schema_hash": "sha256:" + "a" * 64,
+                        "description": "Read Knowledge.",
+                        "schema": {"type": "object", "properties": {}},
+                        "source": "knowledge",
+                        "kind": "knowledge",
+                        "read_only": True,
+                        "tenant_id": "tenant-a",
+                        "capability_revision": 7,
+                    }
+                ]
+            },
+        )
+
+    async def fingerprint_for(readonly_input: dict[str, Any] | None) -> str:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        plane = AgentRuntimeControlPlane(
+            database=SimpleNamespace(),
+            model_service=SimpleNamespace(),
+            provider_service=SimpleNamespace(),
+            assignment_store=SimpleNamespace(),
+            lease_signer=RuntimeModelLeaseSigner("x" * 32),
+            runtime_url="http://runtime.test",
+            runtime_internal_token="runtime-token",
+            model_plane_base_url="http://gateway.test/internal/v1/agent-model-plane",
+            kernel_revision="kernel-1",
+            http_client=client,
+        )
+        try:
+            readonly = plane._readonly_capability_payload(
+                readonly_input, tenant_id="tenant-a", capability_revision=7
+            )
+            await plane._fetch_capability_catalog(
+                readonly,
+                tenant_id="tenant-a",
+                user_id="user-a",
+                session_id="session-a",
+                model_id="qwen3.7-plus",
+                capability_revision=7,
+            )
+        finally:
+            await client.aclose()
+        return plane._dynamic_tool_fingerprint(readonly)
+
+    unbound = await fingerprint_for(None)
+    bound = await fingerprint_for({"knowledge": {"dataset_ids": ["dataset-a"]}})
+    assert unbound == bound
