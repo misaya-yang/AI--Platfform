@@ -15,11 +15,6 @@ from .endpoints import (
     resolve_google,
 )
 
-# Back-compat alias — pre-2026-04-28 default for image/embedding was the
-# bare host without ``/api/v1``. Removed because the dashscope SDK 404s
-# on it; kept here as an alias to the new value so old import sites
-# don't break during the upgrade window.
-
 __all__ = [
     "DASHSCOPE_DEFAULT_CHAT_BASE_URL",
     "DASHSCOPE_DEFAULT_NATIVE_BASE_URL",

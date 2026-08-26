@@ -24,8 +24,6 @@ from ..hot_path_metrics import gateway_hot_path_metrics
 logger = get_logger(__name__)
 
 
-
-
 @dataclass
 class RateLimitInfo:
     """限流信息"""
@@ -191,5 +189,3 @@ class SlidingWindowRateLimiter:
             remaining=remaining,
             reset_at=reset_at,
         )
-
-

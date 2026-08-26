@@ -364,5 +364,3 @@ class ContextInjector:
             logger.info(f"[ContextInjector] Forwarding auth headers: {auth_headers}")
 
         return headers
-
-
