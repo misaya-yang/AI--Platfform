@@ -599,14 +599,6 @@ export async function getConfig(): Promise<AssistantConfig> {
 }
 
 /**
- * Non-streaming chat completion.
- */
-export async function chat(request: ChatRequest): Promise<ChatResponse> {
-  const { data } = await api.post<ChatResponse>("/api/v1/assistant/chat", request);
-  return data;
-}
-
-/**
  * Streaming chat completion (SSE).
  *
  * Returns an async generator that yields StreamEvent objects.
@@ -663,33 +655,8 @@ export function getProviderDisplayName(provider: string): string {
 // Session Management APIs
 // =========================================================================
 
-/**
- * Create a new assistant session.
- */
-export async function createSession(metadata?: { title?: string }): Promise<AssistantSession> {
-  const { data } = await api.post<AssistantSession>("/api/v1/assistant/sessions", {
-    metadata,
-  });
-  return data;
-}
 
-/**
- * List user's assistant sessions.
- */
-export async function listSessions(limit = 50): Promise<AssistantSession[]> {
-  const { data } = await api.get<{ sessions: AssistantSession[]; total: number }>(
-    `/api/v1/assistant/sessions?limit=${limit}`
-  );
-  return data.sessions;
-}
 
-/**
- * Get session details.
- */
-export async function getSession(sessionId: string): Promise<AssistantSession> {
-  const { data } = await api.get<AssistantSession>(`/api/v1/assistant/sessions/${sessionId}`);
-  return data;
-}
 
 /**
  * Delete a session.
@@ -711,38 +678,6 @@ export async function getSessionHistory(
   return data;
 }
 
-/**
- * Group sessions by date for display.
- */
-export function groupSessionsByDate(sessions: AssistantSession[]): Record<string, AssistantSession[]> {
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
-  const lastWeek = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
-
-  const groups: Record<string, AssistantSession[]> = {
-    today: [],
-    yesterday: [],
-    lastWeek: [],
-    older: [],
-  };
-
-  for (const session of sessions) {
-    const date = session.created_at ? new Date(session.created_at) : new Date(session.updated_at || 0);
-
-    if (date >= today) {
-      groups.today.push(session);
-    } else if (date >= yesterday) {
-      groups.yesterday.push(session);
-    } else if (date >= lastWeek) {
-      groups.lastWeek.push(session);
-    } else {
-      groups.older.push(session);
-    }
-  }
-
-  return groups;
-}
 
 
 // =========================================================================
@@ -779,22 +714,7 @@ export async function getSessionArtifacts(sessionId: string): Promise<ArtifactIn
   return data.artifacts;
 }
 
-/**
- * Get a single artifact with fresh download URL.
- */
-export async function getArtifact(artifactId: string): Promise<ArtifactInfo> {
-  const { data } = await api.get<ArtifactInfo>(
-    `/api/v1/assistant/artifacts/${artifactId}`
-  );
-  return data;
-}
 
-/**
- * Delete an artifact.
- */
-export async function deleteArtifact(artifactId: string): Promise<void> {
-  await api.delete(`/api/v1/assistant/artifacts/${artifactId}`);
-}
 
 /**
  * Create an artifact from base64 content.
@@ -851,37 +771,9 @@ export async function createConversationShare(
   return data;
 }
 
-export async function getConversationShare(shareCode: string): Promise<{
-  share_code: string;
-  title: string;
-  snapshot: {
-    messages: Array<{ role: string; content: string; timestamp?: string; metadata?: Record<string, unknown> }>;
-    artifacts: Array<{ artifact_id: string; type: string; format: string; title: string; filename: string; size_bytes: number; mime_type?: string }>;
-    model_id?: string;
-    shared_at?: string;
-  };
-  message_count: number;
-  artifact_count: number;
-  view_count: number;
-  created_at: string;
-  expires_at: string | null;
-}> {
-  const { data } = await api.get(`/api/v1/assistant/shares/${shareCode}`);
-  return data;
-}
 
-export function getSharedArtifactUrl(shareCode: string, artifactId: string): string {
-  return `/api/v1/assistant/shares/${shareCode}/artifact/${artifactId}`;
-}
 
-export async function listMyShares(limit = 50): Promise<{ shares: Array<Record<string, unknown>> }> {
-  const { data } = await api.get(`/api/v1/assistant/shares?limit=${limit}`);
-  return data;
-}
 
-export async function revokeShare(shareCode: string): Promise<void> {
-  await api.delete(`/api/v1/assistant/shares/${shareCode}`);
-}
 
 // =============================================================================
 // Run lifecycle + tool approval

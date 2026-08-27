@@ -13,52 +13,15 @@ from __future__ import annotations
 import time
 import uuid
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from ai_gateway_core.logging import get_logger
-from fastapi import Request
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.responses import JSONResponse, Response
 
-from ..client_ip import get_client_ip_from_request
 from ..gateway.lua_scripts import SLIDING_WINDOW_CHECK_LUA, eval_script
 from ..hot_path_metrics import gateway_hot_path_metrics
 
 logger = get_logger(__name__)
-
-
-@dataclass
-class RateLimitConfig:
-    """限流配置"""
-
-    enabled: bool = True
-
-    # 全局限流
-    global_limit: int = 1000  # 1000 req/min
-    global_window: int = 60
-
-    # 用户级限流
-    user_limit: int = 30  # 30 req/min
-    user_window: int = 60
-
-    # 游客限流（更严格）
-    guest_limit: int = 10  # 10 req/min
-    guest_window: int = 60
-
-    # IP 级限流
-    ip_limit: int = 60  # 60 req/min
-    ip_window: int = 60
-
-    # 白名单路径
-    whitelist_paths: list = field(
-        default_factory=lambda: [
-            "/health",
-            "/health/live",
-            "/health/ready",
-
-        ]
-    )
 
 
 @dataclass
@@ -225,130 +188,4 @@ class SlidingWindowRateLimiter:
             limit=limit,
             remaining=remaining,
             reset_at=reset_at,
-        )
-
-
-class RateLimitMiddleware(BaseHTTPMiddleware):
-    """
-    HTTP 限流中间件
-
-    多维度限流策略：
-    1. 全局限流 - 保护后端服务
-    2. 用户级限流 - 防止单用户滥用
-    3. IP 级限流 - 防止未登录滥用
-    """
-
-    def __init__(
-        self,
-        app,
-        config: RateLimitConfig,
-        redis_client: Any | None = None,
-    ):
-        super().__init__(app)
-        self.config = config
-        self.limiter = SlidingWindowRateLimiter(redis_client)
-
-    async def dispatch(
-        self,
-        request: Request,
-        call_next: RequestResponseEndpoint,
-    ) -> Response:
-        """处理限流检查"""
-        if not self.config.enabled:
-            return await call_next(request)
-
-        # 检查白名单
-        if self._is_whitelisted(request.url.path):
-            return await call_next(request)
-
-        # 获取用户信息
-        user_info = getattr(getattr(request, "state", None), "user_info", None)
-        client_ip = self._get_client_ip(request)
-
-        # 多维度限流检查
-        checks = [
-            ("global", "ratelimit:global", self.config.global_limit, self.config.global_window),
-        ]
-
-        if user_info:
-            if user_info.user_type == "user":
-                # 登录用户限流
-                checks.append(
-                    (
-                        "user",
-                        f"ratelimit:user:{user_info.user_id}",
-                        self.config.user_limit,
-                        self.config.user_window,
-                    )
-                )
-            elif user_info.user_type in ("guest", "anonymous"):
-                # 游客/匿名用户限流（更严格）
-                checks.append(
-                    (
-                        "guest",
-                        f"ratelimit:guest:{user_info.user_id}",
-                        self.config.guest_limit,
-                        self.config.guest_window,
-                    )
-                )
-
-        # IP 限流
-        checks.append(
-            (
-                "ip",
-                f"ratelimit:ip:{client_ip}",
-                self.config.ip_limit,
-                self.config.ip_window,
-            )
-        )
-
-        # 执行所有检查
-        for dimension, key, limit, window in checks:
-            result = await self.limiter.check(key, limit, window)
-            if not result.allowed:
-                result.dimension = dimension
-                return self._build_rate_limit_response(result)
-
-        # 限流通过，继续处理请求
-        response = await call_next(request)
-
-        # 添加限流响应头
-        response.headers["X-RateLimit-Limit"] = str(self.config.user_limit)
-        response.headers["X-RateLimit-Window"] = str(self.config.user_window)
-
-        return response
-
-    def _is_whitelisted(self, path: str) -> bool:
-        """检查是否在白名单"""
-        for whitelist_path in self.config.whitelist_paths:
-            if path == whitelist_path or path.startswith(whitelist_path + "/"):
-                return True
-        return False
-
-    def _get_client_ip(self, request: Request) -> str:
-        """获取客户端 IP"""
-        return get_client_ip_from_request(request)
-
-    def _build_rate_limit_response(self, info: RateLimitInfo) -> Response:
-        """构建限流响应"""
-        return JSONResponse(
-            status_code=429,
-            content={
-                "error": {
-                    "code": "RATE_LIMIT_EXCEEDED",
-                    "message": "Too many requests",
-                    "dimension": info.dimension,
-                    "limit": info.limit,
-                    "remaining": 0,
-                    "reset_at": info.reset_at,
-                    "retry_after": info.retry_after,
-                },
-            },
-            headers={
-                "X-RateLimit-Limit": str(info.limit),
-                "X-RateLimit-Remaining": "0",
-                "X-RateLimit-Reset": str(info.reset_at),
-                "X-RateLimit-Dimension": info.dimension,
-                "Retry-After": str(info.retry_after),
-            },
         )

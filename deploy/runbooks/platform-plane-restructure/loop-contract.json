@@ -1,0 +1,31 @@
+{
+  "schema_version": "prd-phase-harness/loop-contract/v2",
+  "type": "goal",
+  "trigger": "manual",
+  "goal": "Implement and prove one bounded platform-plane phase without crossing a plane boundary, a contract, or an approval gate.",
+  "cycle": [
+    "observe",
+    "select",
+    "execute",
+    "verify",
+    "record",
+    "decide"
+  ],
+  "max_iterations": 3,
+  "state_file": "deploy/runbooks/platform-plane-restructure/loop-state.json",
+  "oracle_file": "deploy/runbooks/platform-plane-restructure/feature-oracle.json",
+  "done_when": [
+    "The selected phase file's Done-when list is fully checked with durable evidence.",
+    "Every gate in architecture-contract.md section 4 passed on the current tree.",
+    "The phase report exists under reports/platform-plane-restructure/ and includes the pre-work baseline, the gate targets fixed before work started, measured results, and every cancelled sub-item with its reason.",
+    "loop-state.json, the progress log, and any required ADR are current."
+  ],
+  "stop_when": [
+    "A direct dependency phase is not done and has no explicit user waiver.",
+    "The work requires a public contract change (OpenAPI, agent-event/v2, capability-contract/v2, SDK behaviour).",
+    "A migration against real data, a destructive action, a deploy, an image rebuild of a base family, or a default model change needs approval that has not been given.",
+    "The change would violate a hard rule H1-H8 in architecture-contract.md.",
+    "The fix requires re-implementing something PRD section 2.5 lists as already fixed, without new line-numbered evidence from the current tree.",
+    "The same blocker repeats without new evidence, or max_iterations is reached."
+  ]
+}

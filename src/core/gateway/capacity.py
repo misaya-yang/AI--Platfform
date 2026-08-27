@@ -296,47 +296,6 @@ class CapacityResolver:
             )
         return rows
 
-    def inventory_rows(self, services: list[Any] | None = None) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for service_id, group in SERVICE_UPSTREAM_GROUPS.items():
-            if service_id in seen:
-                continue
-            seen.add(service_id)
-            key = f"upstream.{group}"
-            budget = DEFAULT_UAT_CAPACITY_BUDGETS.get(key)
-            rows.append(
-                {
-                    "service_id": service_id,
-                    "upstream_group": group,
-                    "budget_key": key,
-                    "capacity_budget_source": budget.source if budget else "missing",
-                    "source_status": budget.source_status if budget else "missing",
-                    "enforced": bool(budget and budget.enforced),
-                }
-            )
-
-        for service in services or []:
-            service_id = str(getattr(service, "service_id", "") or "").strip()
-            if not service_id or service_id in seen:
-                continue
-            group = service_upstream_group(
-                service_id,
-                capacity_config_from_service(service).get("upstream_group"),
-            )
-            key = f"upstream.{group}" if group else f"service.{service_id}"
-            budget = DEFAULT_UAT_CAPACITY_BUDGETS.get(key)
-            rows.append(
-                {
-                    "service_id": service_id,
-                    "upstream_group": group,
-                    "budget_key": key,
-                    "capacity_budget_source": budget.source if budget else "missing",
-                    "source_status": budget.source_status if budget else "missing",
-                    "enforced": bool(budget and budget.enforced),
-                }
-            )
-        return rows
 
     @staticmethod
     def _missing_budget(key: str) -> CapacityBudget:

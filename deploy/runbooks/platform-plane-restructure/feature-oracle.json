@@ -1,0 +1,97 @@
+{
+  "schema_version": "prd-phase-harness/feature-oracle/v1",
+  "program": "platform-plane-restructure",
+  "note": "Each item is a falsifiable acceptance oracle. 'measured_not_adopted' is a passing outcome where marked.",
+  "items": [
+    {
+      "id": "O-01",
+      "phase": "PPR-00",
+      "assert": "A 50ms injected local delay moves local_overhead_seconds by ~50ms and leaves ttft_seconds statistically unchanged.",
+      "allows_negative_outcome": false
+    },
+    {
+      "id": "O-02",
+      "phase": "PPR-00",
+      "assert": "Provider IQR is reported at N>=30 so any later delta can be compared against noise.",
+      "allows_negative_outcome": false
+    },
+    {
+      "id": "O-03",
+      "phase": "PPR-01",
+      "assert": "ai-gateway-agent-runtime image is <=150MB and passes its healthcheck and the live suite.",
+      "allows_negative_outcome": false
+    },
+    {
+      "id": "O-04",
+      "phase": "PPR-01",
+      "assert": "No image tag literal exists outside lock.json; editing a capability-worker file leaves the agent-runtime tag unchanged.",
+      "allows_negative_outcome": false
+    },
+    {
+      "id": "O-05",
+      "phase": "PPR-02",
+      "assert": "An injected control-plane import inside a data-plane turn path makes make plane-boundary-gate fail.",
+      "allows_negative_outcome": false
+    },
+    {
+      "id": "O-06",
+      "phase": "PPR-03",
+      "assert": "Under an N-worker admission fuzz the capacity budget is never oversold, and each rate-limit dimension is counted exactly once.",
+      "allows_negative_outcome": false
+    },
+    {
+      "id": "O-07",
+      "phase": "PPR-04",
+      "assert": "SSE fixture replay is byte-identical between Python and Rust model planes, including error and cancellation frames.",
+      "allows_negative_outcome": false
+    },
+    {
+      "id": "O-08",
+      "phase": "PPR-04",
+      "assert": "Rust RSS at 50 concurrent streams is >=60% below Python, OR the phase closes as measured_not_adopted with the numbers recorded.",
+      "allows_negative_outcome": true
+    },
+    {
+      "id": "O-09",
+      "phase": "PPR-05",
+      "assert": "A heavy eval batch moves neither streaming p99 nor local_overhead_seconds.",
+      "allows_negative_outcome": false
+    },
+    {
+      "id": "O-10",
+      "phase": "PPR-06",
+      "assert": "A 200-page PDF ingest raises interactive retrieval p99 by <=10% while N>1 workers run without double-claiming.",
+      "allows_negative_outcome": false
+    },
+    {
+      "id": "O-11",
+      "phase": "PPR-06",
+      "assert": "Native chunk kernels reproduce Python chunk boundaries byte-for-byte over the corpus, OR the kernel work is cancelled and recorded.",
+      "allows_negative_outcome": true
+    },
+    {
+      "id": "O-12",
+      "phase": "PPR-07",
+      "assert": "Legacy sessions render identical history through the public API after the store is unified, and session delete still tombstones without violating the runtime FK.",
+      "allows_negative_outcome": false
+    },
+    {
+      "id": "O-13",
+      "phase": "PPR-08",
+      "assert": "At least one configuration reaches TTFT p50 <=3.41s at N>=30 without losing the eight-scenario cohort, OR the ceiling is declared unreachable with an evidenced replacement.",
+      "allows_negative_outcome": true
+    },
+    {
+      "id": "O-14",
+      "phase": "PPR-09",
+      "assert": "current-to-frozen-to-current rollback preserves session and execution-ledger fingerprints exactly, and the recorded evidence names the shipped images.",
+      "allows_negative_outcome": false
+    },
+    {
+      "id": "O-15",
+      "phase": "*",
+      "assert": "Every phase ends with the live suite at >=141 passed / 0 failed and the Python suite at 0 failed.",
+      "allows_negative_outcome": false
+    }
+  ]
+}

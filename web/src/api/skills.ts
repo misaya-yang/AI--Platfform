@@ -24,10 +24,6 @@ export async function listSkills(params?: { enabled_only?: boolean }) {
   return data;
 }
 
-export async function getSkill(name: string) {
-  const { data } = await api.get<Skill>(`/api/v1/skills/${name}`);
-  return data;
-}
 
 export async function uploadSkill(file: File) {
   const formData = new FormData();
@@ -48,10 +44,3 @@ export async function deleteSkill(name: string) {
   return api.delete(`/api/v1/skills/${name}`);
 }
 
-export async function testSkill(name: string, input: string) {
-  const { data } = await api.post<{ success: boolean; result?: string; error?: string }>(
-    `/api/v1/skills/${name}/test`,
-    { input },
-  );
-  return data;
-}

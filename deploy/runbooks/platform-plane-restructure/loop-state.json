@@ -1,0 +1,247 @@
+{
+  "schema_version": "prd-phase-harness/loop-state/v4",
+  "goal": "Restructure the platform into five load-classed planes, move implementations to Rust only where measurement and a parity oracle justify it, and make performance governable by separating local from provider SLIs, with zero public contract change.",
+  "cycle": [
+    "observe",
+    "act",
+    "verify",
+    "decide"
+  ],
+  "active_phase": "PPR-00",
+  "active_feature": "PPR-F001",
+  "iteration": 0,
+  "max_iterations": 3,
+  "last_result": "Program authored 2026-08-26 from a verified survey of the current tree. Six items on the 2026-08-17 SPO list were confirmed already fixed and four more obsolete after the Python AgentLoop deletion; they are excluded in PRD section 2.5.",
+  "next_action": "Start PPR-00: split local_overhead_seconds from ttft_seconds in the probe, characterise provider variance at >=30 trials, and gate only the local SLI.",
+  "blockers": [],
+  "confirmation": null,
+  "phases": [
+    {
+      "id": "PPR-00",
+      "file": "phase-00-separate-local-and-provider-slis-and-freeze-baseline.md",
+      "depends_on": [],
+      "status": "ready",
+      "evidence": [
+        "reports/platform-plane-restructure/ppr-00-baseline.json"
+      ],
+      "review": "not_required"
+    },
+    {
+      "id": "PPR-01",
+      "file": "phase-01-make-rust-build-and-distribution-cheap.md",
+      "depends_on": [
+        "PPR-00"
+      ],
+      "status": "pending",
+      "evidence": [
+        "deploy/agent-runtime-source/lock.json"
+      ],
+      "review": "not_required"
+    },
+    {
+      "id": "PPR-02",
+      "file": "phase-02-freeze-the-plane-contract-as-an-executable-gate.md",
+      "depends_on": [
+        "PPR-01"
+      ],
+      "status": "pending",
+      "evidence": [
+        "docs/architecture/ADR-008-plane-topology.md"
+      ],
+      "review": "not_required"
+    },
+    {
+      "id": "PPR-03",
+      "file": "phase-03-extract-the-edge-plane.md",
+      "depends_on": [
+        "PPR-02"
+      ],
+      "status": "pending",
+      "evidence": [],
+      "review": "not_required"
+    },
+    {
+      "id": "PPR-04",
+      "file": "phase-04-shadow-and-conditionally-cut-over-the-rust-model-plane.md",
+      "depends_on": [
+        "PPR-03"
+      ],
+      "status": "pending",
+      "evidence": [],
+      "review": "not_required"
+    },
+    {
+      "id": "PPR-05",
+      "file": "phase-05-slim-the-control-plane-and-split-governance.md",
+      "depends_on": [
+        "PPR-04"
+      ],
+      "status": "pending",
+      "evidence": [],
+      "review": "not_required"
+    },
+    {
+      "id": "PPR-06",
+      "file": "phase-06-give-the-index-plane-capacity.md",
+      "depends_on": [
+        "PPR-05"
+      ],
+      "status": "pending",
+      "evidence": [],
+      "review": "not_required"
+    },
+    {
+      "id": "PPR-07",
+      "file": "phase-07-unify-session-storage.md",
+      "depends_on": [
+        "PPR-06"
+      ],
+      "status": "pending",
+      "evidence": [],
+      "review": "not_required"
+    },
+    {
+      "id": "PPR-08",
+      "file": "phase-08-attack-provider-side-latency.md",
+      "depends_on": [
+        "PPR-00"
+      ],
+      "status": "pending",
+      "evidence": [],
+      "review": "not_required"
+    },
+    {
+      "id": "PPR-09",
+      "file": "phase-09-release-gate-and-rollback-on-the-new-topology.md",
+      "depends_on": [
+        "PPR-07",
+        "PPR-08"
+      ],
+      "status": "pending",
+      "evidence": [],
+      "review": "not_required"
+    }
+  ],
+  "features": [
+    {
+      "id": "PPR-F001",
+      "phase_id": "PPR-00",
+      "description": "Local overhead and provider latency are two independently reported and independently gated SLIs, and provider variance is characterised at N>=30.",
+      "steps": [
+        "Derive local_overhead_seconds from gateway-owned timestamps only.",
+        "Report p50/p95/IQR for both SLIs at >=30 trials.",
+        "Gate the local SLI; report the provider SLI without gating it.",
+        "Freeze a digest-pinned rollback bundle at the program start commit."
+      ],
+      "passes": false
+    },
+    {
+      "id": "PPR-F002",
+      "phase_id": "PPR-01",
+      "description": "One command takes a one-line Rust edit to a healthy container in under 15 minutes, on a service-sized image, without rebuilding unrelated crates.",
+      "steps": [
+        "Move the runtime stage off the toolchain base image.",
+        "Derive every downstream image pin from lock.json instead of duplicating it.",
+        "Compute overlay identity per crate.",
+        "Record the measured edit-to-container wall time."
+      ],
+      "passes": false
+    },
+    {
+      "id": "PPR-F003",
+      "phase_id": "PPR-02",
+      "description": "The plane topology exists as an accepted ADR and as a gate that fails on a boundary violation, before any code moves.",
+      "steps": [
+        "Write ADR-008 with the five planes, their SLO classes, and hard rules H1-H8.",
+        "Record plane ownership as data so docs and gate cannot disagree.",
+        "Add make plane-boundary-gate and register it in harness.yml and docs/harness/commands.md.",
+        "Prove the gate fails on an injected violation."
+      ],
+      "passes": false
+    },
+    {
+      "id": "PPR-F004",
+      "phase_id": "PPR-03",
+      "description": "Edge responsibilities run as their own multi-worker unit with their own budget, preserving the already-correct admission and rate-limit behaviour.",
+      "steps": [
+        "Split the edge out of the gateway process boundary without rewriting it.",
+        "Keep single-EVAL admission and dimension-skip rate limiting exactly as they are.",
+        "Prove zero oversell under a multi-worker fuzz.",
+        "Measure edge p99 added latency and gateway RSS delta."
+      ],
+      "passes": false
+    },
+    {
+      "id": "PPR-F005",
+      "phase_id": "PPR-04",
+      "description": "A Rust model plane proves byte-identical SSE projection in shadow and is adopted only if it clears its memory gate.",
+      "steps": [
+        "Preserve ADR-007 lease, snapshot, and single-provider-call semantics.",
+        "Run both implementations in shadow and diff outputs.",
+        "Prove byte-identical fixture replay including error and cancellation frames.",
+        "Adopt only on >=60% RSS reduction at 50 concurrent streams; otherwise close as measured-not-adopted."
+      ],
+      "passes": false
+    },
+    {
+      "id": "PPR-F006",
+      "phase_id": "PPR-05",
+      "description": "Governance runs apart from execution and the edge, and can no longer squeeze the request path.",
+      "steps": [
+        "Move Eval, trace consumption, and audit surfaces to their own unit.",
+        "Keep lifecycle, capability catalog, policy, Studio, and billing on the control plane.",
+        "Prove a heavy eval batch does not move streaming p99 or the local SLI.",
+        "Show a >=30% gateway RSS reduction against the PPR-00 baseline."
+      ],
+      "passes": false
+    },
+    {
+      "id": "PPR-F007",
+      "phase_id": "PPR-06",
+      "description": "Ingestion scales horizontally without touching interactive retrieval latency, and any native kernel proves byte-identical output first.",
+      "steps": [
+        "Scale knowledge-worker beyond one worker with safe claim semantics.",
+        "Add an interactive retrieval profile distinct from the eval profile.",
+        "Prove a 200-page ingest raises retrieval p99 by at most 10%.",
+        "Ship native chunk kernels only on byte-identical boundaries; otherwise cancel and record."
+      ],
+      "passes": false
+    },
+    {
+      "id": "PPR-F008",
+      "phase_id": "PPR-07",
+      "description": "Conversation history has one normalized home and the gateway path stops writing the unbounded JSONB column.",
+      "steps": [
+        "Project gateway session reads and writes from assistant_runtime_items.",
+        "Migrate or freeze legacy history payloads reversibly.",
+        "Preserve the audit chain and the tombstone-on-delete behaviour.",
+        "Prove render parity for legacy sessions through the public API."
+      ],
+      "passes": false
+    },
+    {
+      "id": "PPR-F009",
+      "phase_id": "PPR-08",
+      "description": "Provider-side configuration is A/B tested with real evidence, and the product ceiling is either met or replaced with an evidenced number.",
+      "steps": [
+        "Measure at least three model/variant/cache configurations at >=30 trials each.",
+        "Report prompt-cache hit rate per configuration.",
+        "Reject any configuration that wins latency and loses the eight-scenario cohort.",
+        "Conclude with a met ceiling or an evidenced replacement ceiling."
+      ],
+      "passes": false
+    },
+    {
+      "id": "PPR-F010",
+      "phase_id": "PPR-09",
+      "description": "The restructured platform has a serial release contract and a rehearsed, digest-pinned rollback that preserves sessions and the execution ledger.",
+      "steps": [
+        "Extend the release gate across every plane.",
+        "Rehearse current-to-frozen-to-current with fingerprint equality.",
+        "Refresh the rollback evidence so it names the images actually shipped.",
+        "Publish a program report covering every gate number and every cancelled sub-item."
+      ],
+      "passes": false
+    }
+  ]
+}

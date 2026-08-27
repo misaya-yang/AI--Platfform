@@ -143,13 +143,6 @@ export async function listProviderTemplates(): Promise<ProviderTemplate[]> {
   return data;
 }
 
-/**
- * Get a specific provider.
- */
-export async function getProvider(providerId: string): Promise<Provider> {
-  const { data } = await api.get<Provider>(`/api/v1/providers/${providerId}`);
-  return data;
-}
 
 /**
  * Create a new provider.

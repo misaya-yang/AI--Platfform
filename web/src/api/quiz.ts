@@ -48,9 +48,6 @@ export async function submitSharedQuiz(
   return resp.json();
 }
 
-export async function deleteQuiz(quizId: string): Promise<void> {
-  await api.delete(`/api/v1/assistant/quiz/${quizId}`);
-}
 
 // --- Share ---
 
@@ -104,9 +101,3 @@ export async function listAttempts(
   return data;
 }
 
-export async function revokeQuizShare(
-  quizId: string,
-  shareId: string,
-): Promise<void> {
-  await api.delete(`/api/v1/artifact-shares/${shareId}`);
-}

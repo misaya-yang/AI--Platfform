@@ -3,7 +3,7 @@
 Everything an agent or a new engineer needs is reachable from this page. If knowledge is not in
 this repository, it does not exist — see [`harness/README.md`](harness/README.md) §1.
 
-**Updated:** 2026-08-17
+**Updated:** 2026-08-26
 
 ---
 
@@ -76,6 +76,7 @@ listed in [`harness/architecture.md`](harness/architecture.md) §4.
 | [`plans/assistant-upgrade-plan-2026-08.md`](plans/assistant-upgrade-plan-2026-08.md) | Assistant runtime upgrade |
 | [`plans/assistant-harness-lighten-plan-2026-08.md`](plans/assistant-harness-lighten-plan-2026-08.md) | Reducing assistant harness weight |
 | [`plans/kb-rag-optimization-plan.md`](plans/kb-rag-optimization-plan.md) | KB retrieval quality / UX（不要与运行时性能计划混淆） |
+| [`plans/rust-expansion-and-service-topology-2026-08.md`](plans/rust-expansion-and-service-topology-2026-08.md) | **plan** — 执行面 Rust 化之后：迁移判据、平面拓扑、业界 SOTA 对照。实施拆解见 `deploy/runbooks/platform-plane-restructure/` |
 | [`plans/knowledge-bm25-v2-shadow-rollout.md`](plans/knowledge-bm25-v2-shadow-rollout.md) | BM25 v2 shadow rollout |
 
 ## Research
@@ -85,10 +86,12 @@ listed in [`harness/architecture.md`](harness/architecture.md) §4.
 ## Programs
 
 All multi-session programs live in [`../deploy/runbooks/`](../deploy/runbooks/). Status comes from
-each program's `loop-state.json`, never from prose. Verified 2026-08-17:
+each program's `loop-state.json`, never from prose. Verified 2026-08-26:
 
 | Program | Terminal phase | Status |
 | --- | --- | --- |
+| **`platform-plane-restructure`** | PPR-00 → PPR-09 | **authored, not started** — 按负载类型重构为五个 plane，条件性 Rust 迁移，本地/供应商 SLI 分离。PRD: [`product-requirements.md`](../deploy/runbooks/platform-plane-restructure/product-requirements.md) |
+| **`agent-runtime-full-rust-cutover`** | FRC-00 → FRC-06 | **FRC-06** — Agent 执行面 Rust 化收尾；Python AgentLoop 已删除 |
 | **`agent-runtime-single-kernel`** | CHR-00 → CHR-06 | **active** — source lock and single-kernel architecture checkpoint in progress; no runtime traffic has moved. |
 | **`performance-correctness-hardening`** | PCH-00 → PCH-07 | **active** — PCH-07 is the stop-safe tool-exchange gate. Successor performance work is planned in [`plans/sota-performance-optimization-2026-08.md`](plans/sota-performance-optimization-2026-08.md), not started as a runbook. |
 | **`agent-contract-unification`** | ACU-00 → ACU-06 | **active** — makes the assistant an `AgentSpec` instance and the public runtime API the only surface contract. Target law: [`harness/platform-architecture.md`](harness/platform-architecture.md) |

@@ -79,14 +79,3 @@ export async function getCurrentUser(): Promise<CurrentUserResponse> {
   return response.data;
 }
 
-/**
- * Validate current token
- */
-export async function validateToken(): Promise<boolean> {
-  try {
-    await api.post("/api/v1/auth/validate-token");
-    return true;
-  } catch {
-    return false;
-  }
-}

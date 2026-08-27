@@ -141,29 +141,6 @@ class LangGraphLoadBalancer:
         self.instances: list[LangGraphInstance] = config.instances
         self._rr_index = -1
 
-    def add_instance(self, instance: LangGraphInstance) -> None:
-        """添加实例"""
-        self.instances.append(instance)
-
-    def remove_instance(self, instance_id: str) -> None:
-        """移除实例"""
-        self.instances = [i for i in self.instances if i.instance_id != instance_id]
-
-    def mark_unhealthy(self, instance_id: str) -> None:
-        """标记实例不健康"""
-        for inst in self.instances:
-            if inst.instance_id == instance_id:
-                inst.is_healthy = False
-                break
-
-    def mark_healthy(self, instance_id: str) -> None:
-        """标记实例健康"""
-        for inst in self.instances:
-            if inst.instance_id == instance_id:
-                inst.is_healthy = True
-                inst.last_health_check = datetime.utcnow()
-                break
-
     async def select_instance(self, request_type: str = None) -> LangGraphInstance:
         """选择目标实例"""
         del request_type
@@ -309,37 +286,6 @@ class LangGraphProxy:
                 headers["X-Request-Id"] = request_id
 
         return headers
-
-    async def _make_request(
-        self,
-        method: str,
-        path: str,
-        user: UserContext,
-        json_data: dict[str, Any] | None = None,
-        params: dict[str, Any] | None = None,
-        original_headers: dict[str, str] | None = None,
-    ) -> httpx.Response:
-        """
-        统一的请求转发方法
-
-        1. 选择健康实例
-        2. 构建 headers（包含用户信息）
-        3. 发送请求
-        4. 处理响应
-        """
-        instance = await self.lb.select_instance()
-        client = await self._get_client(instance)
-        headers = self._build_langgraph_headers(user, original_headers)
-
-        response = await client.request(
-            method=method,
-            url=path,
-            headers=headers,
-            json=json_data,
-            params=params,
-        )
-
-        return response
 
     # ============ Assistants API ============
 

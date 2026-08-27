@@ -224,6 +224,27 @@ class VectorStore:
             for marker in ("timeout", "transport", "connection", "network")
         )
 
+    @staticmethod
+    def _is_collection_missing_error(exc: BaseException) -> bool:
+        """True when the underlying Qdrant failure is a 404 (collection gone).
+
+        A 404 during dataset cleanup means a concurrent worker already deleted
+        the collection — an idempotent success for removal paths, not a fault.
+        """
+        seen = 0
+        while exc is not None and seen < 6:
+            status_code = getattr(exc, "status_code", None)
+            if status_code is None:
+                status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            try:
+                if int(status_code) == 404:
+                    return True
+            except (TypeError, ValueError):
+                pass
+            exc = exc.__cause__ if exc.__cause__ is not None else exc.__context__
+            seen += 1
+        return False
+
     def _record_interactive_health(self, *, success: bool) -> None:
         now = time.monotonic()
         if success:
@@ -2859,9 +2880,15 @@ class VectorStore:
             collection_name = str(getattr(item, "name", "") or "").strip()
             if not collection_name:
                 continue
-            info = await self._call(
-                lambda name=collection_name: self._client.get_collection(name)
-            )
+            try:
+                info = await self._call(
+                    lambda name=collection_name: self._client.get_collection(name)
+                )
+            except VectorStoreError as exc:
+                # Listed but vanished: a concurrent cleanup already removed it.
+                if self._is_collection_missing_error(exc):
+                    continue
+                raise
             metadata = self._collection_metadata(info)
             scope = self._scope_from_metadata(metadata)
             is_authoritative = collection_name in authoritative
@@ -2878,11 +2905,16 @@ class VectorStore:
                     f"collection '{collection_name}' has malformed immutable scope metadata"
                 )
 
-            total = await self._count_collection_points(collection_name)
-            matching = await self._count_collection_points(
-                collection_name,
-                count_filter=dataset_filter,
-            )
+            try:
+                total = await self._count_collection_points(collection_name)
+                matching = await self._count_collection_points(
+                    collection_name,
+                    count_filter=dataset_filter,
+                )
+            except VectorStoreError as exc:
+                if self._is_collection_missing_error(exc):
+                    continue
+                raise
             if total == 0:
                 if is_authoritative:
                     actions.append((collection_name, True, metadata))
@@ -2902,22 +2934,33 @@ class VectorStore:
         touched: list[str] = []
         for collection_name, delete_whole, metadata in actions:
             if delete_whole:
-                await self.delete_collection(collection_name)
+                try:
+                    await self.delete_collection(collection_name)
+                except VectorStoreError as exc:
+                    # A concurrent cleanup removed it first — removal intent holds.
+                    if not self._is_collection_missing_error(exc):
+                        raise
             else:
                 await self._invalidate_remote_bm25_v2_receipt(
                     collection_name,
                     metadata,
                     reason="runtime_dataset_delete",
                 )
-                result = await self._call(
-                    lambda name=collection_name: self._client.delete(
-                        collection_name=name,
-                        points_selector=qmodels.FilterSelector(
-                            filter=dataset_filter
-                        ),
-                        wait=True,
+                try:
+                    result = await self._call(
+                        lambda name=collection_name: self._client.delete(
+                            collection_name=name,
+                            points_selector=qmodels.FilterSelector(
+                                filter=dataset_filter
+                            ),
+                            wait=True,
+                        )
                     )
-                )
+                except VectorStoreError as exc:
+                    if self._is_collection_missing_error(exc):
+                        touched.append(collection_name)
+                        continue
+                    raise
                 self._require_completed_write(
                     result,
                     operation=f"dataset point delete from {collection_name}",

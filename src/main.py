@@ -1337,7 +1337,7 @@ async def _init_agent_control_plane(app: FastAPI, settings: Settings) -> None:
     features.append("agent-runtime + capability-worker")
 
     if configured_providers:
-        logger.info(f"Gateway启动完成: model_registry ready ({', '.join(features)})")
+        logger.info(f"Gateway启动完成: ({', '.join(features)})")
     else:
         logger.warning("Gateway 启动，但没有配置任何 LLM 提供商 API Key")
 

@@ -16,7 +16,6 @@ from .helpers import (
 )
 from .image_state import (
     advance_latest_artifact_cas,
-    claim_next_image_tasks,
     compute_owner_scope,
     compute_request_hash,
     count_active_image_tasks,
@@ -60,7 +59,6 @@ __all__ = [
     "append_image_turns",
     "apply_watermark_b64",
     "build_gemini_contents_from_history",
-    "claim_next_image_tasks",
     "count_active_image_tasks",
     "compute_owner_scope",
     "compute_request_hash",
