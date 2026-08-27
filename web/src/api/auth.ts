@@ -78,4 +78,3 @@ export async function getCurrentUser(): Promise<CurrentUserResponse> {
   const response = await api.get<CurrentUserResponse>("/api/v1/auth/me");
   return response.data;
 }
-

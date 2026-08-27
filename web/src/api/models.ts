@@ -291,4 +291,3 @@ export function formatContextWindow(tokens: number | string | null | undefined):
   if (numTokens >= 1000) return `${(numTokens / 1000).toFixed(0)}K`;
   return numTokens.toString();
 }
-

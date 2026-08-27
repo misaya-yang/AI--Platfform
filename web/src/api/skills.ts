@@ -43,4 +43,3 @@ export async function disableSkill(name: string) {
 export async function deleteSkill(name: string) {
   return api.delete(`/api/v1/skills/${name}`);
 }
-
