@@ -32,8 +32,8 @@ Out:
 - [x] The benchmark report contains the three components, derived `local_overhead_seconds`, end-to-end TTFT, raw trials, configuration fingerprint, and statistical policy. (run4 report `reports/performance/assistant-ttft-baseline-2026-08-28-run4.json`: all present, 107 raw receipts, `recordable: true`. Known gap: per-trial token `usage` is null on the current stack — the shared adapter harvests usage from the `context_snapshot` streams the Rust cutover removed; blocks cost evidence for PPR-F009, not this baseline.)
 - [x] The local p95 gate is fixed from the high-sample replay before later implementation begins; the old 25 ms proposal is accepted only if the new evidence supports it. (2026-08-28, frozen from run4 — see "Frozen baseline" below. The 25 ms local-pre proposal is SUPPORTED with large headroom: observed `local_pre_provider_seconds` p95 = 1.765 ms.)
 - [x] Provider variance is reported without claiming that 30 trials establish a stable p95. (run4: 105 successful gate trials — p95 reported as nearest-rank 2.800 s with seeded bootstrap CI [2.643, 3.533], explicitly not a certified stable p95 per G5; run3 documents provider tail risk: congestion burst 5.4–45.7 s `provider_wait` across the first 8 trials of one run.)
-- [ ] The named load profile and resource curves are reproducible from one documented command.
-- [x] Rollback bundle, independent performance-method review, targeted tests, and shared regression gates pass. (Rollback bundle recorded 2026-08-28: `rollback-bundle.json` pinned to `f884d1e`. Independent reviews 2026-08-28: contract/correctness review — all six findings fixed, re-verified "safe to record"; methodology review — accept-with-conditions, minimal conditions 1–5 met in code/tests and the methodology notes above; the audit-stability condition is RESOLVED: the gate text + notes were committed standalone as `ad7777a` on `rust-0828` (2026-08-28, no implementation in that commit). Baseline collected and certified 2026-08-28 (run4, G3/v2 — user-authorized amendment; see "Frozen baseline"). Post-run reviews 2026-08-28: delta review (3 fail-open corners, all fixed with regression tests: `recordable` single certification bit, all-trial reconciliation accounting, refuse-existing-output guard), security review (no blockers; A2/A5 fixes + sentinel-credential test landed), server instrumentation review (F2 cancellation zero-lines test landed; G4 `make sdk-sse-contract` re-passed before freeze).)
+- [x] The named load profile and resource curves are reproducible from one documented command. (2026-08-28: `ppr00-stream-load-v1` executed once with the single command in the record below — exit 0, 82/82 paid streams — and frozen there; independent profile-leg review applied its three MAJOR narrative corrections (Δ_K = load-signal floor with K≥5 robust fits and level-end increments; K=20 tail framed against replacement-wave base rates; retention framed from recomputed settle-window values) before this box was ticked. Reproduction re-execution is NOT required by the gate text ("reproducible from one documented command" — the command exists, is deterministic in schedule, and raw samples permit audit; a second paid run would cost ~82 further calls and was not authorized for repetition alone).)
+- [x] Rollback bundle, independent performance-method review, targeted tests, and shared regression gates pass. (Rollback bundle recorded 2026-08-28: `rollback-bundle.json` pinned to `f884d1e`. Independent reviews 2026-08-28: contract/correctness review — all six findings fixed, re-verified "safe to record"; methodology review — accept-with-conditions, minimal conditions 1–5 met in code/tests and the methodology notes above; the audit-stability condition is RESOLVED: the gate text + notes were committed standalone as `ad7777a` on `rust-0828` (2026-08-28, no implementation in that commit). Baseline collected and certified 2026-08-28 (run4, G3/v2 — user-authorized amendment; see "Frozen baseline"). Post-run reviews 2026-08-28: delta review (3 fail-open corners, all fixed with regression tests: `recordable` single certification bit, all-trial reconciliation accounting, refuse-existing-output guard), security review (no blockers; A2/A5 fixes + sentinel-credential test landed), server instrumentation review (F2 cancellation zero-lines test landed; G4 `make sdk-sse-contract` re-passed before freeze). Comprehensive whole-delta final review 2026-08-28 (parallel reviewers): evidence-chain audit VERDICT COHERENT; profile-leg second pass TRUST (all frozen numbers hand-verified against raw receipts); adversarial whole-delta probe pass 7/7 with WHOLE-DELTA-OK (103 tests, ruff check, harness-check, test-isolation at review time) — its three accepted driver findings were fixed post-run with the disclosure in the resource-profile section.)
 
 ## Pre-declared timing gates (fixed 2026-08-28, before any implementation)
 
@@ -188,6 +188,156 @@ token `usage` per trial is null on the current stack (adapter harvests it
 from the `context_snapshot` streams the Rust cutover removed at
 `scripts/native_agent_parity_benchmark.py:942`), so cost evidence for
 PPR-F009 needs a usage-path fix or provider-console data first.
+
+## Named concurrency/resource profile (2026-08-28, `ppr00-stream-load-v1`)
+
+Spec `tmp/ppr00-resource-profile-draft.md` frozen before implementation;
+driver `scripts/ppr00_resource_profile.py` (23 tests after post-run
+hardening — see disclosure below). One documented
+command reproduces the run (single progressive staircase, 82 paid calls —
+user-authorized 2026-08-28; no Makefile alias, matching the TTFT leg):
+
+```
+uv run python scripts/ppr00_resource_profile.py --env-file .env \
+  --levels 1,5,10,20 --output reports/performance/ppr00-resource-<date>.json
+```
+
+Run: exit 0, all levels completed, **82/82 streams succeeded (2 warm-up +
+80 level streams — the warm-up calls are also paid) — zero admission
+rejects, 5xx, stream errors, timeouts; zero container restarts;
+90 %-mem-guard never tripped**; 400.6 s wall; observed max in-flight
+equalled K at every level — the pool bound (informational at K=1, where
+10 sequential streams make it trivially true; meaningful at K=5/10/20).
+Stream percentiles use the shared inclusive nearest-rank `_percentile`
+imported from the TTFT script (rank = ceil(q·n)) — the same convention
+that produced run4's p95 2.800; at the n=10 levels p95 therefore equals
+the max (K=5 totals 5.460 s is the 10th of 10, the 24.2 s-class provider
+tail's milder cousin), which is convention, not data anomaly. Report + raw samples
+(`…-2026-08-28.json` / `…-2026-08-28.samples.jsonl`, both mode 0600;
+**achieved sampling cadence ≈ 2.03 s — 197 samples, not the requested
+1 Hz**: `docker stats --no-stream` itself costs ~1 s per cycle so the loop
+cannot recover the interval; per-sample `elapsed_seconds` in the JSONL
+makes the true cadence re-derivable, and the report's
+`sample_interval_seconds: 1.0` is the requested, not achieved, value).
+Request mix byte-identical to the TTFT baseline (qwen3.7-plus, thinking
+low, temp 0, max_tokens 256, profile safe, memory off, skills off);
+fingerprint commit `a082b4a` — same working-tree caveat as methodology
+note 8 (instrumentation/benchmark uncommitted at collection). Stack
+identity stated precisely: the profile ran against the **post-server-review
+hardened tree** (`model_plane.py` 75/4 diff, re-hot-updated with
+`make sdk-sse-contract` re-passed); run4's trials were collected on the
+pre-hardening 66/4 tree per note 8 — the profile is closer to the hardened
+stack than to run4's collection-time stack, not the identical one. The profile driver itself
+(`scripts/ppr00_resource_profile.py` + its tests) is likewise untracked at
+record time: **whenever the user authorizes committing the freeze record,
+that commit must include the driver**, or "reproducible from one
+documented command" would point at code that exists nowhere in history
+(program rule: no commits unless asked).
+
+Warmed-idle RSS (MiB): agent-runtime 38.8, backend 110.9, pg 176.0,
+redis 21.1, qdrant 244.1. The **steady-window Δ_K is a load-signal FLOOR,
+not a full level-end increment**: steady windows are only 3–5 samples
+at K≥5 (the
+`steady:K` phase tag is set at ramp end — last launch — not first
+completion, and runs to the level's drain; the separately recorded
+`steady_started_after_seconds` is first-completion and diverges from the
+phase tag by ~3 s at K=5; windows are 25/4/3/5 samples at K=1/5/10/20, so
+they capture the drain climb — at K=20 agent-runtime rose 87.8→112.7 MiB
+inside its window — but not the last streams' completions). Level-end increments
+(final sample minus warmed idle): agent-runtime **+73.6**, backend
+**+22.8**, pg **+73.1** MiB at K=20. Slope fits (MiB/stream): four-point
+least-squares as reported in `derivations` = 3.33 / 1.06 / 3.34; the
+K≥5-only robust fit (drops the warm-up-trend-contaminated K=1 point) =
+3.43 / 1.14 / 3.80 — pg's growth is superlinear (per-stream 1.95→3.26
+across K=10→20). redis (0.014) and qdrant (0.001) are flat — memory off ⇒
+no stream path, as designed. All raw windows are in the report for
+post-hoc re-derivation. Peaks vs frozen limits at K=20: agent-runtime
+112.7/192 (59 %), pg 249.1/320 (78 %) — both inside the guard with margin;
+pg's superlinear trend makes it the first container projected to reach
+90 % (≈K≈29–34 depending on fit — the robust fit lands low at ≈29; pg's superlinearity limits projection confidence either way).
+
+Caveats carried by the measurement policy itself (all in the report):
+docker stats reports cgroup working-set at container granularity; Δ_K mixes
+per-stream state with shared warm-up growth — in fact Δ_K is positive even
+where the stream path is provably zero (the 56 streams never touch
+qdrant/redis/knowledge/capability paths, yet capability-worker steady Δ at
+K=20 is +0.04; redis slope 0.014, qdrant 0.001), so per-stream
+attribution is a floor estimate, not a decomposition. Post-level cooldown
+windows exist only for K=1/5/10 (the between-levels settle gap; after the
+final level the sampler stops immediately — `settle:20` has 0 samples) and
+show a genuine monotone RETAINED trend: agent-runtime settles at
++9.2/+19.6/+38.6 MiB above warmed-idle after levels 1/5/10, backend
++0.8/+3.6/+9.6, pg +4.6/+15.6/+20.0 — the growth is not merely in-flight
+buffers. (Note: a review pass mis-cited these retention numbers against a
+non-existent post-K=20 window; the figures above are recomputed directly
+from the samples JSONL and are the record's authority.)
+
+Latency signals (informational — this profile declares no ceilings):
+time-to-first-event p50 0.109–0.129 s across all levels; K=10 shows zero
+first-event exceedances of 0.2 s; K=20 shows **16 exceedances (0.46–0.98 s)
+confined to ordinals 20–35** — none among ordinals 1–19 or 36–40, so the
+tail straddles the last initial launch and 15 of the 20 replacement-wave
+streams, i.e. it appears during the drain/replacement burst at 20×, not at
+10× (first-event p95 0.126 → 0.983 s across 10×→20×; the control at
+K≤10 shows zero exceedances across its 40 streams). One K=1 outlier (ordinal 5, 24.2 s total at 0.115 s
+first-event) is provider generation variance on a single stream, not local
+resource — the level's headline p95 = max(near-max) = that one sample, a
+single-point quantile artifact at n=10. Both warm-up streams succeeded
+(first events 0.1997/0.1242 s — no first-event anomaly; totals 7.01/4.23 s
+— provider generation variance within the same config), recorded and
+excluded from level stats by design. *(Disclosure: this sentence originally
+carried a "~2.0–2.1 s cold-start blip, the run's two worst first events"
+claim copied from an intermediate review pass; two later independent
+audits found the receipts say otherwise, and it was corrected from
+`warmup.streams` — exactly why frozen numbers are re-derived, never
+copied.)*
+
+**Topology inputs frozen by this record:** stream-path memory grows at
+≈3.3–3.4 MiB/stream (agent-runtime) + ≈1.1 (backend) + ≈3.3–3.8,
+superlinear (pg, largely session/copy overhead that PPR-07 session
+unification could reduce); level-end increments at K=20 (agent-runtime
++73.6, pg +73.1, backend +22.8 MiB) exceed the steady-window floors;
+the agent-runtime hop retains
+memory under sustained load; first-event queueing at 20× concurrency on a
+single gateway/runtime pair. None of this prescribes splitting services —
+measured-not-adopted remains legal; it fixes the before-state that any
+later topology comparison must not regress.
+
+**Post-run driver hardening (disclosed; does not touch the executed
+artifact):** the whole-delta final review (2026-08-28) found three
+fail-closed corners in the driver after the run was frozen, all fixed
+post-run with regression tests (profile suite 21 → 23): (a) the level
+drain-loop only re-checked the wall-clock cap at `can_issue()` on spawn —
+a deadline expiring mid-drain let the level keep issuing; the `while
+pending:` loop now re-checks it directly and marks
+`wall_clock_cap_exceeded` (already-issued streams still drain); (b) the
+exit-code computation accepted zero-sample reports — `finalize` now marks
+`no_samples` incomplete so an empty-sampler run can never exit 0; (c) the
+admission classification token `"rate"` matched benign substrings
+("generated", "separate"), misclassifying stream defects as
+`http_429_or_admission_reject` — the token is now `"rate_limit"`/`"rate
+limit"`. None of the three could have altered the frozen run: the wall
+clock used 400.6 s of the 90-min cap, the sampler produced 197 samples,
+and 82/82 clean streams meant the classification path never fired. The
+same review's server-side findings were deliberately NOT applied
+post-freeze to keep the verified 75/4 tree byte-stable; they are recorded
+as PPR-F001 follow-ups: dead `IDENTITY_TOLERANCE_SECONDS` constant,
+duplicated health-URL literals, configuration fingerprint blind to a
+dirty working tree, and `ruff format --check` not in the gate (4 files
+incl. `model_plane.py` differ under format-check while `ruff check` is
+clean).
+
+**Merge-acceptance driver hardening (disclosed; also does not touch the
+executed artifact):** the final local merge review found three additional
+future-run fail-open gaps and closed them with four regressions (profile suite
+23 → 27): Compose ownership is now required for all nine measured containers,
+a missing memory limit aborts instead of disabling the 90% guard, and a changed
+container ID aborts even when recreation resets `RestartCount` to zero. Docker
+inspection/stat/health commands also have a bounded CLI timeout so the global
+wall-clock cap cannot be bypassed by a hung Docker client. The frozen run's
+record remains valid: acceptance independently observed matching ownership,
+non-null limits, stable IDs/restart counts, and healthy state for all nine
+containers; these branches did not fire while the artifact was collected.
 
 ## Verify
 

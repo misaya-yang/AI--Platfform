@@ -1,44 +1,46 @@
-# Phase 09 - Release gate and rollback on the new topology
+# Phase 09 - Release and roll back the adopted topology
 
 - PHASE_ID: PPR-09
 - FEATURE_ID: PPR-F010
-- DEPENDS_ON: PPR-07, PPR-08
+- DEPENDS_ON: PPR-03, PPR-04, PPR-05, PPR-06, PPR-07, PPR-08
 
 ## Outcome
 
-The restructured platform has a serial release contract and a digest-pinned rollback rehearsal that covers the new plane boundaries, so a bad release can be reverted without losing sessions or the execution ledger.
+The release matrix is generated from what prior phases actually adopted—not the aspirational diagram—and a reviewed serial gate plus digest-pinned rollback preserves product behavior, sessions and the execution ledger.
 
 ## Scope
 
 In:
 
-- Extend `make agent-runtime-release-gate` to cover every plane, not just the agent runtime.
-- A current→frozen→current rollback rehearsal against the new topology, with session and execution-ledger fingerprints preserved across both directions.
-- A fresh rollback bundle whose recorded images match the shipped ones.
+- Classify every prior phase as adopted, measured-not-adopted, deferred or waived with evidence.
+- Extend the release gate only for adopted deployment units and data owners across Edge, Control, Data, Index and Governance; include storage substrate health and fingerprints without calling it an application plane.
+- Current-to-frozen-to-current rehearsal using the exact shipped images, config fingerprints and schema state.
+- Product, failure, security, resource and rollback receipts.
 
 Out:
 
-- Any new functionality.
+- New functionality, late topology changes or using stale image receipts.
 
 ## Done when
 
-- [ ] The serial release gate covers edge, control, data, index and governance units.
-- [ ] Rollback rehearsal passes current→frozen→current with identical session and ledger fingerprints.
-- [ ] `reports/agent-runtime/rollback-rehearsal-latest.json` records the images actually shipped (the 2026-08-26 evidence predates the runtime rebuild and must be refreshed).
-- [ ] `make agent-runtime-source-contract` and the plane boundary gate pass on the released tree.
-- [ ] The live suite passes at or above 141 passed / 0 failed.
-- [ ] A program report summarises every phase's gate numbers **and every cancelled sub-item**.
+- [ ] Every selected unit and cross-plane contract has a serial gate; non-adopted experiments are absent from the default path.
+- [ ] Shipped image, config and schema digests match the rollback bundle.
+- [ ] Approved current-to-frozen-to-current rehearsal preserves session, audit and execution-ledger fingerprints exactly.
+- [ ] Live product checks have at least the baseline pass count, zero failures and no skip beyond the named allowlist.
+- [ ] Independent release/security review approves the evidence and the closeout distinguishes all four outcome classes.
 
 ## Verify
 
 | Check | Command or observation | Proves |
 | --- | --- | --- |
-| Release contract | `make agent-runtime-release-gate` | Every plane is gated |
-| Rollback | `make agent-runtime-rollback-rehearsal` | Reversible with data intact |
-| Evidence freshness | Compare report images against `lock.json` | Evidence matches what ships |
-| Product | Full live suite | No user-visible regression |
+| Generated matrix | Compare adopted decisions to release targets | No aspirational/stale service is gated |
+| Serial contract | Extended canonical release target | Ordered health and contract coverage |
+| Evidence freshness | Image/config/schema digests versus bundle | What was tested is what ships |
+| Rollback | Approved round trip with before/after fingerprints | Operational reversibility |
+| Product | Full live suite and failure matrix | User-visible behavior survives |
 
 ## Stop or confirm
 
-- **Confirm before the rollback rehearsal**: it swaps running images.
-- Stop if any fingerprint differs across the round trip; investigate rather than re-running until it passes.
+- Set `waiting_confirmation` before deploy, image swap, rollback rehearsal or shared-state mutation.
+- Stop on any fingerprint mismatch; do not rerun unchanged until it passes.
+- Required review: independent release and security approval.

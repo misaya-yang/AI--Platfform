@@ -1,49 +1,47 @@
-# Phase 07 - Unify session storage
+# Phase 07 - Decide and rehearse session-storage unification
 
 - PHASE_ID: PPR-07
 - FEATURE_ID: PPR-F008
-- DEPENDS_ON: PPR-06
+- DEPENDS_ON: PPR-02
 
 ## Outcome
 
-Conversation history has one normalized home. The gateway path stops writing the unbounded `sessions.history` JSONB column, and reads project from the same item store the runtime already owns.
-
-## Starting position (verified 2026-08-26)
-
-The runtime path is already normalized: `assistant_runtime_items` holds 33,472 rows against 941 sessions. `sessions.history JSONB` (schema.sql:236) survives only for the V1/gateway compatibility surface — an unbounded column that grows without a tail bound.
+ADR-010 independently decides whether to migrate legacy `sessions.history` into normalized runtime items. Adoption requires isolated-copy parity and reversibility; otherwise the legacy read path remains with bounded-growth evidence and no data deletion.
 
 ## Scope
 
 In:
 
-- Gateway session reads/writes project from `assistant_runtime_items`.
-- A migration that backfills or explicitly tombstones legacy `history` payloads, with a reversible plan.
-- Retain the audit chain semantics: `ON DELETE RESTRICT` and the tombstone-on-delete behaviour must not change.
+- Inventory every legacy reader/writer and quantify row, byte and growth distributions.
+- ADR-010 covering owner, dual-read/write avoidance, backfill/tombstone policy, cutover, rollback and retention.
+- Rehearsal on an isolated data copy with public API payload and database fingerprints before and after.
+- If adopted, stop new legacy writes while preserving historical reads until parity and rollback are proven.
 
 Out:
 
-- Changing the public session API shape.
-- Deleting historical data. Legacy rows are migrated or frozen, never dropped.
+- Deleting historical data, changing public session payloads or migrating shared/real data without approval.
+- Depending on PPR-06 Index work.
 
 ## Done when
 
-- [ ] No gateway write path targets `sessions.history`.
-- [ ] Legacy sessions still render their history identically through the public API.
-- [ ] The migration is reversible and rehearsed on a copy before it touches the live database.
-- [ ] Session delete still tombstones (never violates the runtime FK) — the 2026-08-26 regression tests still pass.
-- [ ] `make migrate-status` is clean; `database/schema.sql` matches the migrations.
-- [ ] Full regression passes.
+- [ ] ADR-010 and database review approve either migration or explicit retention.
+- [ ] Adopted migration shows byte/semantic render parity, schema consistency, tombstone behavior and exact rollback on an isolated copy.
+- [ ] No write path silently targets both owners after cutover.
+- [ ] If parity or reversibility misses, migration is deferred and legacy growth/retention is bounded and monitored.
+- [ ] User approval exists before real-data mutation; shared regression gates pass.
 
 ## Verify
 
 | Check | Command or observation | Proves |
 | --- | --- | --- |
-| No legacy writes | Grep + query audit during the live suite | Column is read-only, then unused |
-| Render parity | Public history API before/after on legacy sessions | Identical payloads |
-| Delete safety | `tests/persistence/test_session_delete_tombstone.py`, `tests/api/test_sessions_runtime_cleanup.py` | FK and tombstone intact |
-| Migration | `make migrate-status`, rehearsal on a copy | Reversible and consistent |
+| Ownership inventory | Static call map plus query audit | No hidden writer/reader |
+| Render parity | Public API before/after corpus diff | User-visible history unchanged |
+| Database safety | Isolated-copy migration and reverse migration fingerprints | Reversible with no loss |
+| Tombstones | Session cleanup persistence tests | Audit FKs remain intact |
+| Schema | `make migrate-status` | Migrations and schema agree |
 
 ## Stop or confirm
 
-- **Confirm with the user before running any migration against real data.**
-- Stop if render parity cannot be shown for legacy sessions; leave the column in place and record why.
+- Set `waiting_confirmation` before any migration against real or shared data.
+- Stop and retain the legacy path if render parity, rollback or retention semantics are unclear.
+- Required review: independent database/migration review and explicit user approval for adoption on real data.

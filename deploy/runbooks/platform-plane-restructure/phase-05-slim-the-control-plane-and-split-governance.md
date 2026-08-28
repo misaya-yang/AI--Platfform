@@ -1,48 +1,46 @@
-# Phase 05 - Slim the control plane and split governance
+# Phase 05 - Conditionally isolate Governance
 
 - PHASE_ID: PPR-05
 - FEATURE_ID: PPR-F006
-- DEPENDS_ON: PPR-04
+- DEPENDS_ON: PPR-02
 
 ## Outcome
 
-The gateway process holds control-plane work only. Eval and the rest of the governance surface run apart from the execution and edge paths, so their memory and CPU can no longer squeeze the request path.
-
-## Why it matters
-
-`src/services/eval/` is 6,768 lines — the single largest service module — sharing a 384 MB container and one event loop with the public edge. Hard rule H3 says governance must not share a process with execution: a control plane cannot objectively govern the surface it runs on.
+Eval, audit and trace consumption become a separate deployment unit only if reproducible Governance load harms Edge/Data and bounded asynchronous execution in the existing unit cannot meet the precommitted gate.
 
 ## Scope
 
 In:
 
-- Eval, trace consumption, and audit surfaces move to their own unit with their own budget.
-- The gateway keeps: agent/thread lifecycle, capability catalog and fingerprint, policy, Studio, billing.
-- Trace/eval ingestion stays asynchronous and must never block a user path (existing `trace_writer` contract).
+- Measure heavy Eval/trace/audit load against local timing components, streaming p99, CPU, RSS and failures.
+- Compare bounded queues, worker/process isolation and a separate Governance service.
+- If adopted, preserve asynchronous ingestion, fixtures, retention, audit and failure semantics.
+- Keep lifecycle, catalog, policy, Studio and billing in Control unless separately approved.
 
 Out:
 
-- Rewriting Eval scoring logic or the Studio domain model.
-- Changing the eval golden fixtures or the RAG fixtures.
+- Rewriting Eval scoring, changing golden/RAG fixtures or moving billing.
+- Declaring process separation a hard requirement without noisy-neighbor evidence.
 
 ## Done when
 
-- [ ] Eval and trace consumption run outside the gateway process; `make plane-boundary-gate` shows them on the governance side.
-- [ ] Gateway container RSS **under the PPR-00 load profile** is ≥ 30% below that same baseline (combined effect of PPR-03 and this phase). Idle numbers do not count: at idle the gateway uses 129.5 MiB of 384 MiB and is under no pressure.
-- [ ] Driving a heavy eval batch does not move streaming p99 or the local overhead SLI.
-- [ ] `make eval-e1-gate` and the RAG regression gate still pass unchanged.
-- [ ] Full regression passes.
+- [ ] The same PPR-00 profile proves interference and the simpler bounded in-place option cannot satisfy the adoption gate, or physical separation is measured-not-adopted.
+- [ ] If adopted, Governance load no longer moves Edge/Data local SLI or streaming p99 beyond the predeclared noise tolerance.
+- [ ] Eval, trace, audit and retention outputs remain identical.
+- [ ] The actual CPU/RSS and operational delta is recorded; idle RSS is not used as proof.
+- [ ] Rollback, independent Eval/architecture review and shared regression gates pass.
 
 ## Verify
 
 | Check | Command or observation | Proves |
 | --- | --- | --- |
-| Placement | `make plane-boundary-gate` | Governance is off the execution plane |
-| Interference | Heavy eval batch during a live stream | Streaming p99 and local SLI unaffected |
-| Memory | `docker stats` during the PPR-00 load profile | ≥ 30% reduction under load, not at idle |
-| Eval intact | `make eval-e1-gate` | Scoring behaviour unchanged |
+| Interference baseline | Heavy Governance load during named stream profile | Problem is reproducible |
+| Alternative comparison | Bounded in-place worker versus separate unit | Least complex fix wins |
+| Eval contract | Existing Eval and RAG gates | Quality semantics unchanged |
+| Failure isolation | Queue saturation and Governance outage | User path remains bounded |
 
 ## Stop or confirm
 
-- Stop if splitting Eval requires changing its scoring semantics or its fixtures.
-- Confirm before moving billing: it touches money and belongs to control, not governance — moving it is a separate decision.
+- Ask before changing Compose topology, deployed budgets or billing ownership.
+- Stop if separation requires scoring, retention, audit or public-contract changes.
+- Required review: independent architecture and Eval review; add security review for new trust boundaries.

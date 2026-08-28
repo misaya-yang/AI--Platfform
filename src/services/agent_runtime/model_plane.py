@@ -17,7 +17,7 @@ import math
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
@@ -34,6 +34,7 @@ from ai_gateway_core.agents import (
 from ai_gateway_core.models import ReasoningWireError, apply_reasoning_wire
 
 from ..metrics.redaction import redact_sensitive_text
+from .timing import TIMING_SCHEMA_VERSION, ModelPlaneTiming
 
 logger = logging.getLogger(__name__)
 
@@ -1294,6 +1295,7 @@ class AgentModelPlane:
         provider_service: Any,
         lease_signer: RuntimeModelLeaseSigner,
         http_client: httpx.AsyncClient | None = None,
+        clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self.database = database
         self.provider_service = provider_service
@@ -1303,6 +1305,10 @@ class AgentModelPlane:
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
         )
         self._owns_http_client = http_client is None
+        # Injectable monotonic clock so the additive timing identity and the
+        # controlled-delay attribution tests can advance time deterministically
+        # without sleeping. Production keeps ``time.perf_counter``.
+        self._clock = clock
 
     async def close(self) -> None:
         if self._owns_http_client:
@@ -1530,6 +1536,11 @@ class AgentModelPlane:
             body=body,
             turn_metadata=turn_metadata,
         )
+        # Gateway-owned additive timing (PPR-00): one monotonic clock domain,
+        # internal observability only — nothing here enters the public SSE
+        # envelope or any API contract. Surface: one structured log line per
+        # completed call, keyed by call_id.
+        timing = ModelPlaneTiming.start(self._clock)
         provider = await self.provider_service.get_runtime_provider_config(
             call.tenant_id,
             call.provider_id,
@@ -1561,6 +1572,7 @@ class AgentModelPlane:
             try:
                 async for chunk in self._stream_native_responses(
                     call=call,
+                    timing=timing,
                     body={**body, **snapshot_parameters},
                     profile=profile,
                     reasoning=reasoning,
@@ -1639,6 +1651,7 @@ class AgentModelPlane:
             estimated_input_tokens=call.estimated_input_tokens,
         )
         provider_request_id: str | None = None
+        timing.note_dispatch()
         try:
             async with self.http_client.stream(
                 "POST",
@@ -1672,6 +1685,7 @@ class AgentModelPlane:
                         raise AgentModelPlaneError(
                             "RUNTIME_PROVIDER_STREAM_INVALID", status_code=502
                         )
+                    timing.note_first_frame()
                     projector.set_usage(event.get("usage"))
                     choices = event.get("choices")
                     if not isinstance(choices, list):
@@ -1688,10 +1702,12 @@ class AgentModelPlane:
                         reasoning_delta = delta.get("reasoning_content")
                         if isinstance(reasoning_delta, str) and reasoning_delta:
                             for chunk in projector.reasoning_delta(reasoning_delta):
+                                timing.note_first_visible()
                                 yield chunk
                         text_delta = delta.get("content")
                         if isinstance(text_delta, str) and text_delta:
                             for chunk in projector.text_delta(text_delta):
+                                timing.note_first_visible()
                                 yield chunk
             terminal_chunks = projector.complete()
             assert projector.usage is not None
@@ -1704,6 +1720,7 @@ class AgentModelPlane:
                 output_tokens=output_tokens,
                 provider_request_id=provider_request_id,
             )
+            self._log_model_plane_timing("chat_completions", call, timing)
             for chunk in terminal_chunks:
                 yield chunk
         finally:
@@ -1716,6 +1733,7 @@ class AgentModelPlane:
         self,
         *,
         call: _AuthorizedCall,
+        timing: ModelPlaneTiming,
         body: dict[str, Any],
         profile: Mapping[str, Any],
         reasoning: Mapping[str, Any],
@@ -1781,7 +1799,8 @@ class AgentModelPlane:
         # TTFT breakdown: provider connect/headers vs. first usable event. The
         # request-level middleware timing only reports total generation, which
         # hid where first-token latency actually goes.
-        dispatch_started = time.perf_counter()
+        timing.note_dispatch()
+        dispatch_started = self._clock()
         first_event_logged = False
         async with self.http_client.stream(
             "POST",
@@ -1790,7 +1809,7 @@ class AgentModelPlane:
             json=provider_body,
         ) as response:
             header_request_id = response.headers.get("x-request-id")
-            headers_ms = (time.perf_counter() - dispatch_started) * 1000
+            headers_ms = (self._clock() - dispatch_started) * 1000
             if response.status_code >= 400:
                 await response.aread()
                 await self._fail_call(
@@ -1807,6 +1826,27 @@ class AgentModelPlane:
                     continue
                 event = validator.consume(payload)
                 if event is not None:
+                    timing.note_first_frame()
+                    # Match the re-encoded SSE event type line, not payload
+                    # substrings: a function_call_arguments.delta whose model-
+                    # generated arguments contain "reasoning" must not stamp
+                    # first-visible.
+                    event_type = event.split(b"\n", 1)[0]
+                    if (
+                        timing.first_visible is None
+                        and event_type
+                        in (
+                            b"event: response.output_text.delta",
+                            b"event: response.reasoning_text.delta",
+                            b"event: response.reasoning_summary_text.delta",
+                            # A refusal delta is client-visible text on this
+                            # wire (chat delivers refusals via delta.content);
+                            # omitting it under-measures TTFT for refusal-only
+                            # completions.
+                            b"event: response.refusal.delta",
+                        )
+                    ):
+                        timing.note_first_visible()
                     if not first_event_logged:
                         first_event_logged = True
                         logger.info(
@@ -1814,7 +1854,7 @@ class AgentModelPlane:
                             "first_event_ms=%.0f tools=%d payload_chars=%d",
                             call.model_id,
                             headers_ms,
-                            (time.perf_counter() - dispatch_started) * 1000,
+                            (self._clock() - dispatch_started) * 1000,
                             len(provider_body.get("tools") or []),
                             len(json.dumps(provider_body, ensure_ascii=False)),
                         )
@@ -1826,8 +1866,39 @@ class AgentModelPlane:
             output_tokens=terminal.output_tokens,
             provider_request_id=terminal.provider_request_id or header_request_id,
         )
+        self._log_model_plane_timing("responses_v1", call, timing)
         yield terminal.event
         yield b"data: [DONE]\n\n"
+
+    def _log_model_plane_timing(
+        self, wire: str, call: _AuthorizedCall, timing: ModelPlaneTiming
+    ) -> None:
+        """Server-side evidence for PPR-00: one parseable line per completed call.
+
+        Internal observability only — no public API, SSE envelope, or schema
+        surface carries these values.
+        """
+        components = timing.components()
+        # Fixed-point 6-decimal rendering: str(float) can emit scientific
+        # notation (e.g. 9.7e-05), which downstream log parsers must not have
+        # to special-case. "None" stays literal for unset stamps.
+        rendered = " ".join(
+            f"{key}={'None' if value is None else format(value, '.6f')}"
+            for key, value in components.items()
+        )
+        logger.info(
+            "Agent model-plane timing schema=%s wire=%s run_id=%s call_id=%s model=%s %s",
+            TIMING_SCHEMA_VERSION,
+            wire,
+            call.run_id,
+            call.call_id,
+            # model_id is tenant-editable (schemas/providers.py has no character
+            # pattern): whitespace folding prevents forged key=value pairs or
+            # extra lines in this parsed-evidence channel. run_id/call_id are
+            # UUID-typed and cannot carry separators.
+            re.sub(r"\s+", "_", call.model_id),
+            rendered,
+        )
 
     async def _complete_call(
         self,

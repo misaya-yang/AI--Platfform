@@ -132,7 +132,7 @@ input/output tokens、cost、child count、fan-out、tree budget、context/tool-
 | Provider outbound | OpenAI/DashScope；严格 sequence/terminal/usage；streaming function call；DashScope native web search | 其他 provider；non-stream function-call 返回；隐式改写默认协议 |
 | Public ingress | JWT/API key；model permission/rate limit；文本与有序历史；instructions、temperature、max tokens；`store:false`；non-stream/SSE；stateless completed function-result replay；non-stream idempotency | `store:true`、`previous_response_id`、client tools、built-in tools、媒体输入、后台任务、持久会话、Memory/KB、任意未知字段 |
 
-`store:false` 不是 zero-data-retention 承诺：平台仍可按租户策略保留运行/trace receipt。详细支持矩阵见 [`openai-responses-ingress.md`](../../../apps/assistant-service/docs/api/openai-responses-ingress.md)。
+`store:false` 不是 zero-data-retention 承诺：平台仍可按租户策略保留运行/trace receipt。详细支持矩阵见上表；入口实现见 [`src/api/v1/responses.py`](../../../src/api/v1/responses.py)。
 
 Assistant 的 KB tool contract 同时收口为当前可发布的 text-only 子集：查询最多 4,096 字、一次最多 8 个唯一 dataset、`top_k` 为 1–20、阈值为 0–1。JSON schema、公共 Gateway schema、已签名 Agent snapshot、自动 RAG 和 executor 都执行相同边界；非法值在任何检索调用前失败。尚未达到统一索引与删除合同的 `find_image` / `include_images` 不再向模型广告，也不能由旧签名 snapshot 绕开。
 

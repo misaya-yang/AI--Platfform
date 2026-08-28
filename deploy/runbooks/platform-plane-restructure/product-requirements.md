@@ -1,6 +1,6 @@
 # 平台平面化重构 产品需求文档
 
-**文档状态：** Ready for implementation
+**文档状态：** Ready for PPR-00 only；后续实现由 PPR-02 的已批准 ADR 解锁
 **规划版本：** V1
 **基线日期：** 2026-08-26
 **目标仓库：** `/Users/yang/projects/AI--Platfform`
@@ -11,7 +11,7 @@
 
 ## 1. 产品定义
 
-本程序把平台从「按语言和历史切分的 9 个容器」重构为「按负载类型分层的五个 plane」，在有实测收益且有平价预言机的位置把 Python 实现替换为 Rust，并把性能治理从「一个混合数字」改为「本地与供应商分开度量、分开设门禁」。
+本程序先把平台职责归入 Edge、Control、Data、Index、Governance 五个**逻辑应用 plane**，再用负载证据决定是否改变物理部署。PostgreSQL、Redis、Qdrant 与对象存储是共享基础设施底座，不计作应用 plane。只有在平价预言机、资源收益、运维收益和回滚门同时成立时，才把 Python 实现替换为 Rust 或拆出新服务。
 
 **全过程零公共契约变更**：OpenAPI、`agent-event/v2` 信封、Capability Contract V2、四端 SDK 行为不变。任何用户可见的变化都是缺陷。
 
@@ -74,9 +74,9 @@
 
 在这个成本下每加一个 Rust 服务都乘以同一份摩擦。**扩面之前必须先把它压下来。**
 
-### 2.4 P4 — 容量不可水平扩展
+### 2.4 P4 — 当前容量与隔离策略没有被负载证据验证
 
-所有 Python 服务 `--workers 1`（compose `command` 实配）。容器内没有并行度，扩容只能整容器复制，而每个容器都携带了它并不需要的三类职责（P2）。
+所有 Python 服务 `--workers 1`（compose `command` 实配），但“单 worker”本身不是缺陷：整容器复制、多 worker、独立进程池或拆服务都可能是正确答案。PPR-00 必须先证明实际容量或 noisy-neighbor 问题，PPR-02 再比较 T0 保留现状、T1 只拆 Governance、T2 拆 Edge+Governance 和条件性 T3 Rust model plane；不得从进程数直接跳到微服务结论。
 
 ### 2.5 已排除的问题（复核后不成立，不得进入实施范围）
 
@@ -101,7 +101,7 @@
 ### 3.1 产品目标
 
 1. 性能可治理：本地与供应商指标分开度量、分开设门禁，本地回归能被单独检出。
-2. 每个 plane 拥有独立的扩缩策略、内存预算与 SLO 类别。
+2. 每个逻辑 plane 有明确所有权和 SLO；只有实际采用的独立部署单元才拥有独立扩缩与内存预算。
 3. 扩大 Rust 面的边际成本降到「一条命令、15 分钟内」。
 4. 同样硬件包络下并发承载能力提高，且治理面（Eval）不再挤压边缘。
 5. 零公共契约变更。
@@ -110,21 +110,21 @@
 
 | # | 指标 | V1 门槛 | 测量位置 | 阶段 |
 | --- | --- | --- | --- | --- |
-| M1 | 本地开销 SLI 独立存在 | `local_overhead_seconds` 单独出报告并单独设门禁 | 探针脚本 | PPR-00 |
-| M2 | 供应商方差被刻画 | N ≥ 30 试次，报告 p50/p95/IQR | 探针报告 | PPR-00 |
-| M3 | 本地开销 p95 | ≤ 25 ms（当前 14–19 ms，留 30% 余量） | 探针报告 | PPR-00 起持续 |
+| M1 | 可加和 timing SLI | `local_pre_provider_seconds + provider_wait_seconds + local_projection_seconds ≈ ttft_seconds`；`local_overhead_seconds` 明确定义为两个 local 分量之和 | 探针脚本 | PPR-00 |
+| M2 | 供应商方差被刻画 | 探索性成功 N≥30，报告中位数/IQR/置信区间与原始试次；任何 p95/release 声明成功 N≥100 或采用预审精度方案 | 探针报告 | PPR-00 |
+| M3 | 本地开销 p95 | 用成功 N≥100 的确定性回放建立并在实现前锁定；25 ms 仅是待验证候选值 | 探针报告 | PPR-00 起持续 |
 | M4 | Rust 运行镜像 | ≤ 150 MB（当前 2.36 GB） | `docker images` | PPR-01 |
 | M5 | 单次 Rust 改动到容器可用 | ≤ 15 min，**单条命令** | 计时脚本 | PPR-01 |
 | M6 | crate 级 overlay 标识 | 改 worker 不改变 runtime 的 tag | 构建两次对比 | PPR-01 |
-| M7 | 平面边界可执行 | 越界 import / 越界调用测试失败 | `make plane-boundary-gate` | PPR-02 |
-| M8 | 边缘 p99 附加延迟 | ≤ 10 ms | 边缘压测 | PPR-03 |
-| M9 | 网关容器 RSS **（PPR-00 负载画像下，非空载）** | 拆出治理面后降 ≥ 30% | 压测中 `docker stats` | PPR-03/05 |
+| M7 | 拓扑决策与平面边界 | ADR 比较 T0–T3；越界 import、同步依赖和未映射模块测试失败 | `make plane-boundary-gate` | PPR-02 |
+| M8 | Edge 采用门 | 只有 T0/T1 无法满足预先锁定的容量/隔离门才拆；若拆，附加 p99 留在 PPR-00 本地预算内 | 同负载对照 | PPR-03 |
+| M9 | Governance 采用门 | 只有可复现 Governance 负载伤害 Edge/Data 且 bounded in-place 方案失败才拆 | 同负载对照 | PPR-05 |
 | M10 | 模型面等价 | SSE fixture 回放**字节一致** | `make sdk-sse-contract` 扩展 | PPR-04 |
-| M11 | 模型面内存 | **50 并发流下** RSS 较 Python 降 ≥ 60%（未达标则不切流） | 压测 | PPR-04 |
+| M11 | 模型面资源 | warmed 增量 RSS/stream 降 ≥60%，同预算支持流数 ≥1.5×，且 CPU/本地 p99 不回归 | 1/10/25/50 流曲线 | PPR-04 |
 | M12 | 摄入不影响检索 | 200 页 PDF 摄入期间检索 p99 抬升 ≤ 10% | 索引面压测 | PPR-06 |
-| M13 | 会话存储统一 | 网关路径不再写 `sessions.history` JSONB | schema + 查询审计 | PPR-07 |
-| M14 | 供应商侧 TTFT | 至少一个 variant 组合把 TTFT p50 打到 ≤ 3.41 s，或给出「门槛不可达」的结论与依据 | A/B 报告 | PPR-08 |
-| M15 | 现有回归 | 141 条真机 + Python 全量 **0 失败** | 既有套件 | 每阶段 |
+| M13 | 会话存储决策 | 通过隔离副本 parity 后统一 owner，或以有界增长证据明确 defer 并保留 legacy path | schema + 查询审计 | PPR-07 |
+| M14 | 供应商侧 TTFT | 随机交错 A/B 支持至少一个方案达到目标，或给出有置信区间、质量、失败率和成本依据的负向结论 | A/B 报告 | PPR-08 |
+| M15 | 现有回归 | 真机不少于 141 passed、0 failed，skip 不得超过具名 allowlist；Python 全量 0 failed | 既有套件 | 每阶段 |
 | M16 | 回滚 | 新拓扑上 current→frozen→current 演练通过 | `make agent-runtime-rollback-rehearsal` | PPR-09 |
 
 **M14 允许以「门槛不可达」结案。** 如果所有可用 variant 都打不到 3.41 s，正确产出是把门槛改成有依据的数字，而不是继续在本地找 15 ms。
@@ -147,20 +147,20 @@
 | PPR-00 | 本地/供应商 SLI 分离；N≥30 方差刻画；**并发负载画像与各服务 RSS 曲线**；回滚包冻结 |
 | PPR-01 | slim 运行镜像；单命令构建链；crate 级 overlay 标识 |
 | PPR-02 | ADR-008 平面契约；可执行边界门禁 |
-| PPR-03 | Edge plane 独立部署单元；多 worker |
+| PPR-03 | 条件性 Edge 部署单元；先证明 T0/T1 失败 |
 | PPR-04 | Rust 模型面（影子 → 条件切流） |
-| PPR-05 | 控制面瘦身；Eval/治理面拆出 |
-| PPR-06 | 索引面容量：worker 水平扩展；交互检索 profile；CPU 内核（条件） |
-| PPR-07 | 会话存储统一到规范化 item 表 |
-| PPR-08 | 供应商侧延迟策略：model/variant canary、prompt-cache SLI、thinking 预算 |
-| PPR-09 | 新拓扑的串行发布门禁与回滚演练 |
+| PPR-05 | 条件性 Governance 隔离；先证明 bounded in-place 方案不足 |
+| PPR-06 | 独立 Index 容量轨：worker 安全扩展；CPU 内核（条件）；不改检索策略 |
+| PPR-07 | 独立会话存储决策与可逆演练；真实数据需批准 |
+| PPR-08 | 随机交错的供应商 A/B、prompt-cache SLI、thinking 预算 |
+| PPR-09 | 对实际采用拓扑生成串行发布门禁并演练回滚 |
 
 ### 4.2 Out of scope
 
 - 鉴权 / RBAC / 配额策略 / 计费算法 / Eval 打分逻辑 / Agent Studio 的**重写**（拆分位置不等于重写实现）
 - BM25 / 稀疏检索重实现（已在 PG tsvector 与 Qdrant 原生）
 - 嵌入 / 重排客户端（纯远程 HTTP，换语言无收益）
-- 新增 RPC 协议、gRPC、服务网格
+- gRPC、服务网格或临时未版本化 RPC；物理拆分若需要内部 handoff，必须先在 ADR 中冻结并认证、版本化和可回放
 - `AgentSpec`、事件信封、能力契约的任何字段变更
 - §2.5 已排除的六项
 
@@ -171,10 +171,10 @@
 | 角色 | 本程序对其意味着什么 |
 | --- | --- |
 | 终端用户 | 无可见变化 |
-| 租户管理员 | 同配额下并发上限提高 |
-| 自托管部署者 | 镜像体积大幅下降；同内存跑更多并发 |
+| 租户管理员 | 只有 adopted phase 的实测容量收益才会提高并发上限 |
+| 自托管部署者 | 运行镜像缩小；同内存并发改善只在资源门通过时承诺 |
 | 平台开发者 | 领域逻辑仍在 Python；触碰数据面需要 Rust |
-| 运维 | 容器 9 → 10–11；每 plane 独立扩缩与告警 |
+| 运维 | 容器数量由 ADR 和采用门决定；只为实际独立部署单元增加扩缩、告警与回滚责任 |
 
 ---
 
@@ -184,7 +184,8 @@
 2. **先有预言机才动手。** 无可回放的等价证明 ⇒ 该项不做。
 3. **允许子项被取消。** 「测量后发现不值得做」是合格产出，必须写进 `reports/` 证据。
 4. **不得沿用未复核的历史结论。** 引用 SPO 或任何 2026-08-17 之前的清单前，先在当前树取证。
-5. **每阶段结束跑一次完整回归**（141 真机 + Python 全量），不得以「与本阶段无关」跳过。
+5. **每阶段结束跑风险匹配的完整回归**：真机不少于 141 passed、0 failed，skip 不得超过具名 allowlist；Python 全量 0 failed。未运行的 live path 必须标为未验证。
+6. **实现者不得自批。** 每个 risk-bearing phase 需要 `loop-state.json` 声明的独立 review；review 未 approved 或具名 waived，不得 done。
 
 ---
 
@@ -201,12 +202,15 @@
 | R7 | 双跑期运维复杂度翻倍 | 高 | 中 | 影子对比自动化；切流后立即删旧 | — |
 | R8 | 实施者按过期清单返工 | **高** | 中 | §2.5 显式排除 + 要求行号取证 | — |
 | R9 | 用空载数字验收内存门禁 | **高** | 中 | 所有内存门禁绑定 PPR-00 负载画像 | 报告未标注负载画像 → 该门禁不算通过 |
+| R10 | 逻辑 plane 被误写成必须新增容器 | 高 | 高 | PPR-02 比较 T0–T3；PPR-03/05 允许 measured-not-adopted | 无负载证据或简单方案已满足 → 不拆 |
+| R11 | 影子模式重复请求供应商 | 中 | 高 | 单请求 frame tee 或离线回放；provider request counter | 每 turn 超过一次 provider 请求 → 停止 |
+| R12 | 单个实现者自写、自验、自批高风险边界 | 中 | 高 | 风险触发的独立架构/安全/数据库/产品 review | review 未批准 → 不解锁切流/迁移/发布 |
 
 ---
 
 ## 8. 决策记录需求
 
-- **ADR-008** — 平面分层、每 plane 的 SLO 类别与硬规则（PPR-02，前置于任何拆分）
+- **ADR-008** — 五个逻辑应用 plane、存储底座、T0–T3 备选、每个选中 handoff 的安全/失败语义（PPR-02，前置于任何拆分）
 - **ADR-009** — 模型面独立服务（仅当 PPR-04 切流）
 - **ADR-010** — 会话存储统一（PPR-07）
 

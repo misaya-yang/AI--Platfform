@@ -6,45 +6,44 @@
 
 ## Outcome
 
-Changing one line of Rust reaches a running container through one command in under 15 minutes, the runtime image is a normal service image rather than a toolchain image, and changing one crate does not rebuild the other.
-
-## Why this is second
-
-Every later Rust decision is multiplied by this friction. Today: the runtime image is **2.36 GB** because `deploy/agent-runtime-source/Dockerfile.runtime:39` runs `FROM rust:1.95.0-bookworm` for the runtime stage; image identity is duplicated across `lock.json`, `.env`, `.env.example` and `docker-compose.yml` (two services); and `rust/agent-runtime-overlay/manifest.json` carries a single whole-tree `sha256`, so editing the capability worker changes the agent-runtime tag too.
+One authoritative command turns a scoped Rust source change into a healthy, service-sized, supply-chain-recorded container without rebuilding unrelated artifacts.
 
 ## Scope
 
 In:
 
-- Runtime stage on a slim/distroless base for `Dockerfile.runtime`; keep the capability worker on a Python base only for what `execute_python_code` genuinely needs.
-- One command that builds, records into the lock, and re-derives every downstream pin from the lock.
-- Per-crate overlay identity so each artifact tag tracks only its own sources.
+- Replace the agent-runtime toolchain runtime stage with an approved minimal non-root base that still provides required certificates and runtime libraries.
+- Make `deploy/agent-runtime-source/lock.json` the only editable image identity; derive environment and Compose defaults from it.
+- Derive each artifact identity from its true source closure so worker-only edits do not change runtime identity.
+- Measure cold and warm edit-to-healthy-container time, image size, cache behavior and reproducibility.
 
 Out:
 
-- Any behaviour change in the binaries.
-- Changing the supply-chain proof semantics (lock / SBOM / receipt remain authoritative).
+- Binary behavior changes, supply-chain semantic weakening, or unrelated Cargo refactors.
+- Keeping duplicate editable pins as fallbacks.
 
 ## Done when
 
-- [ ] `ai-gateway-agent-runtime` image ≤ 150 MB and the container still passes its healthcheck and the live suite.
-- [ ] One command performs build → `record-local-image` → re-derive `.env`, `.env.example`, and Compose defaults **from `lock.json`**; no file holds an independently editable copy of an image tag.
-- [ ] Editing a file under `ai-platform-capability-worker/` and rebuilding leaves the `ai-platform-agent-runtime` tag unchanged.
-- [ ] `make agent-runtime-source-contract` passes, including the SBOM-describes-the-locked-overlay check.
-- [ ] Measured wall time from a one-line Rust edit to a healthy container is ≤ 15 min, recorded in the report.
-- [ ] Full regression passes.
+- [ ] Agent-runtime image is at most 150 MB, runs non-root, has the required trust store and passes health and live product checks.
+- [ ] One command performs build, SBOM/receipt generation, lock update and derived-pin refresh.
+- [ ] No independently editable image tag remains outside `lock.json`.
+- [ ] A capability-worker-only fixture change leaves agent-runtime identity unchanged without modifying production sources for the test.
+- [ ] Warm one-line edit to healthy container is at most 15 minutes; cold and warm results are both recorded.
+- [ ] Supply-chain, security review and shared regression gates pass.
 
 ## Verify
 
 | Check | Command or observation | Proves |
 | --- | --- | --- |
-| Image size | `docker images --format '{{.Repository}}:{{.Tag}}\t{{.Size}}' \| grep agent-runtime` | ≤ 150 MB |
-| Single authority | Grep the tree for a hardcoded `local-<sha>-<sha>` outside `lock.json` | Pins are derived, not copied |
-| Crate isolation | Touch a worker source file, rebuild both, compare tags | Runtime tag unchanged |
-| Supply chain | `make agent-runtime-source-contract` | Lock, SBOM, receipt and image identity agree |
-| Round trip | Timed one-line edit → healthy container | ≤ 15 min |
+| Supply-chain contract | `make agent-runtime-source-contract` | Lock, SBOM, receipt and sources agree |
+| Derived pins | Repository test scans for independently editable local image tags | One authority |
+| Artifact closure | Controlled source-closure fixture comparison | Worker edit does not invalidate runtime |
+| Runtime image | Image inspection, healthcheck and non-root identity | Small image remains operational and hardened |
+| Round trip | Timed canonical build/update command | Delivery friction meets the gate |
 
 ## Stop or confirm
 
-- Confirm before changing the runtime base image family — it changes the deployed attack surface.
-- Stop if a slim base breaks the entrypoint or healthcheck rather than working around it with a fat base.
+- Read `docs/harness/runtime-and-secrets.md` before Docker work and confirm Compose ownership.
+- Ask before changing the runtime base-image family or rebuilding the active runtime.
+- Stop rather than add a fat compatibility layer if the minimal base lacks an explicitly required runtime dependency.
+- Required review: independent supply-chain and container-security review.
