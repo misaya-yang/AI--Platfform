@@ -4,8 +4,8 @@
 
 **最终结论：CONDITIONAL PASS**
 
-`worktree-kb-rag-upgrade` 已合入并复测 `origin/main@47b7a9b9`，当前功能分支
-`HEAD=966c9168`。本轮没有发现仍未解决的 P0/P1 正确性、安全性或数据一致性
+`worktree-kb-rag-upgrade` 已合入并复测 `origin/main@47b7a9b9`，受测代码提交为
+`966c9168`（本报告提交在其后，不改变受测代码）。本轮没有发现仍未解决的 P0/P1 正确性、安全性或数据一致性
 缺陷；知识库核心 API、真实 PostgreSQL/Qdrant/Redis 链路、付费模型 QA、真实
 双嵌入模型回填、内置浏览器 UI 主链路和合并后回归均已通过。分支没有 push，
 也没有反向合入根 `main`。
