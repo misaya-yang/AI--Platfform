@@ -44,13 +44,16 @@ import {
   updateSegment,
   batchReindexDocuments,
   batchDeleteDocuments,
+  setSegmentEnabled,
+  batchSetSegmentsEnabled,
 } from "@/api/knowledge";
-import type { Document } from "@/types/knowledge";
+import { parseSegmentKeywords, type Document } from "@/types/knowledge";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -83,6 +86,13 @@ const FILE_TYPE_CATEGORIES: Record<string, string[]> = {
   data: ["xls", "xlsx", "csv", "json", "xml"],
   image: ["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg"],
 };
+
+// Backend SegmentUpdateSchema / SegmentBatchEnableDisableSchema limits
+// (knowledge-service): at most 100 keywords of 1..256 chars each per
+// segment, and 1..500 segment ids per batch enable/disable call.
+const SEGMENT_KEYWORDS_LIMIT = 100;
+const SEGMENT_KEYWORD_MAX_LENGTH = 256;
+const SEGMENT_BATCH_LIMIT = 500;
 
 interface DocumentsTabProps {
   datasetId?: string;
@@ -124,11 +134,22 @@ export function DocumentsTab({
   const segmentsQuery = useSegments(datasetId, selectedDocId, debouncedSegmentSearch);
   const segments = segmentsQuery.data || [];
 
-  // Segment edit dialog
+  // Segment edit dialog — full-field edit: text + answer + keywords are
+  // loaded from the segment and saved together (PRD §5-#13).
   const [editOpen, setEditOpen] = useState(false);
   const [editSegmentId, setEditSegmentId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
+  const [editAnswer, setEditAnswer] = useState("");
+  const [editKeywords, setEditKeywords] = useState("");
   const [editSaving, setEditSaving] = useState(false);
+
+  // Segment batch operations (enable/disable many segments at once)
+  const [segmentBatchMode, setSegmentBatchMode] = useState(false);
+  const [selectedSegmentIds, setSelectedSegmentIds] = useState<Set<string>>(new Set());
+  const [segmentBatchLoading, setSegmentBatchLoading] = useState(false);
+  // Segments with an in-flight enable/disable mutation (single or batch):
+  // their switches/checkboxes render disabled until the mutation settles.
+  const [pendingSegmentIds, setPendingSegmentIds] = useState<Set<string>>(new Set());
 
   // Batch operations
   const [batchMode, setBatchMode] = useState(false);
@@ -343,23 +364,57 @@ export function DocumentsTab({
     }
   }
 
-  function openEdit(segmentId: string, text: string) {
+  // Selecting another document (or leaving the panel) drops segment-level
+  // batch state: it belongs to the previously open document's segment list.
+  function selectDocument(docId: string | undefined) {
+    setSelectedDocId(docId);
+    setSelectedSegmentIds(new Set());
+    setSegmentBatchMode(false);
+  }
+
+  function openEdit(segmentId: string) {
+    // Read every editable field from the loaded segment so the save below
+    // round-trips them all (the old text-only edit silently dropped
+    // answer/keywords — PRD §5-#13).
+    const segment = segments.find((s) => s.segment_id === segmentId);
     setEditSegmentId(segmentId);
-    setEditText(text);
+    setEditText(segment?.text ?? "");
+    setEditAnswer(segment?.answer ?? "");
+    setEditKeywords((segment?.keywords ?? []).join(", "));
     setEditOpen(true);
   }
 
   async function saveEdit() {
     if (!datasetId || !editSegmentId) return;
+    const keywords = parseSegmentKeywords(editKeywords);
+    if (keywords.length > SEGMENT_KEYWORDS_LIMIT) {
+      toast.error(t("knowledge.segment.keywordsTooMany"));
+      return;
+    }
+    if (keywords.some((keyword) => keyword.length > SEGMENT_KEYWORD_MAX_LENGTH)) {
+      toast.error(t("knowledge.segment.keywordTooLong"));
+      return;
+    }
     setEditSaving(true);
     try {
-      await updateSegment(datasetId, editSegmentId, editText);
+      await updateSegment(datasetId, editSegmentId, {
+        text: editText,
+        answer: editAnswer,
+        keywords,
+      });
       await qc.invalidateQueries({
         queryKey: ["kb-segments", datasetId, selectedDocId, debouncedSegmentSearch],
       });
+      toast.success(t("knowledge.segment.editSegmentSuccess"));
+      setEditOpen(false);
+    } catch (e) {
+      console.error("Segment update failed:", e);
+      toast.error(
+        t("knowledge.segment.editSegmentFailed"),
+        e instanceof Error ? e.message : String(e)
+      );
     } finally {
       setEditSaving(false);
-      setEditOpen(false);
     }
   }
 
@@ -369,6 +424,118 @@ export function DocumentsTab({
     await qc.invalidateQueries({
       queryKey: ["kb-segments", datasetId, selectedDocId, debouncedSegmentSearch],
     });
+  }
+
+  async function handleToggleSegmentEnabled(segmentId: string, enabled: boolean) {
+    if (!datasetId) return;
+    setPendingSegmentIds((prev) => new Set(prev).add(segmentId));
+    try {
+      await setSegmentEnabled(datasetId, segmentId, enabled);
+      toast.success(
+        enabled
+          ? t("knowledge.segment.segmentEnabled")
+          : t("knowledge.segment.segmentDisabled"),
+        enabled
+          ? t("knowledge.segment.segmentEnabledDesc")
+          : t("knowledge.segment.segmentDisabledDesc")
+      );
+      await qc.invalidateQueries({
+        queryKey: ["kb-segments", datasetId, selectedDocId, debouncedSegmentSearch],
+      });
+    } catch (e) {
+      console.error("Segment status update failed:", e);
+      toast.error(
+        t("knowledge.segment.segmentStatusFailed"),
+        e instanceof Error ? e.message : String(e)
+      );
+    } finally {
+      setPendingSegmentIds((prev) => {
+        const next = new Set(prev);
+        next.delete(segmentId);
+        return next;
+      });
+    }
+  }
+
+  function toggleSegmentBatchMode() {
+    if (segmentBatchMode) {
+      setSegmentBatchMode(false);
+      setSelectedSegmentIds(new Set());
+    } else {
+      setSegmentBatchMode(true);
+    }
+  }
+
+  function toggleSegmentSelect(segmentId: string) {
+    setSelectedSegmentIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(segmentId)) {
+        next.delete(segmentId);
+      } else {
+        next.add(segmentId);
+      }
+      return next;
+    });
+  }
+
+  function toggleSelectAllSegments() {
+    setSelectedSegmentIds((prev) =>
+      prev.size === segments.length
+        ? new Set()
+        : new Set(segments.map((s) => s.segment_id))
+    );
+  }
+
+  async function handleSegmentBatchEnable(enabled: boolean) {
+    if (!datasetId || selectedSegmentIds.size === 0) return;
+    if (selectedSegmentIds.size > SEGMENT_BATCH_LIMIT) {
+      toast.error(
+        t("knowledge.segment.batchLimitTitle"),
+        t("knowledge.segment.batchLimitText", { limit: SEGMENT_BATCH_LIMIT })
+      );
+      return;
+    }
+    const ids = Array.from(selectedSegmentIds);
+    setSegmentBatchLoading(true);
+    setPendingSegmentIds((prev) => {
+      const next = new Set(prev);
+      ids.forEach((id) => next.add(id));
+      return next;
+    });
+    try {
+      const result = await batchSetSegmentsEnabled(datasetId, ids, enabled);
+      await qc.invalidateQueries({
+        queryKey: ["kb-segments", datasetId, selectedDocId, debouncedSegmentSearch],
+      });
+      setSelectedSegmentIds(new Set());
+      setSegmentBatchMode(false);
+      // The endpoint skips per-item failures, so report exactly how many
+      // rows changed instead of assuming all-or-nothing.
+      if (result.updated < result.total) {
+        toast.warning(
+          t("knowledge.segment.batchDone"),
+          t("knowledge.segment.batchPartial", { updated: result.updated, total: result.total })
+        );
+      } else {
+        toast.success(
+          t("knowledge.segment.batchDone"),
+          t("knowledge.segment.batchSuccess", { count: result.updated })
+        );
+      }
+    } catch (e) {
+      console.error("Segment batch update failed:", e);
+      toast.error(
+        t("knowledge.segment.batchFailed"),
+        e instanceof Error ? e.message : String(e)
+      );
+    } finally {
+      setSegmentBatchLoading(false);
+      setPendingSegmentIds((prev) => {
+        const next = new Set(prev);
+        ids.forEach((id) => next.delete(id));
+        return next;
+      });
+    }
   }
 
   return (
@@ -608,7 +775,7 @@ export function DocumentsTab({
               selected={selectedDocId === doc.document_id}
               checked={selectedDocIds.has(doc.document_id)}
               showCheckbox={batchMode}
-              onSelect={() => setSelectedDocId(doc.document_id)}
+              onSelect={() => selectDocument(doc.document_id)}
               onCheck={() => toggleDocSelection(doc.document_id)}
               onReindex={() => handleReindex(doc)}
               onDelete={() => handleDeleteDoc(doc)}
@@ -632,7 +799,7 @@ export function DocumentsTab({
           <div className="px-5 py-4 border-b border-border bg-linear-to-r from-muted/70 via-card to-primary/10 flex items-center justify-between">
             <div className="flex items-center gap-4">
               <button
-                onClick={() => setSelectedDocId(undefined)}
+                onClick={() => selectDocument(undefined)}
                 className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-muted-foreground hover:text-primary bg-card hover:bg-primary/5 border border-border hover:border-primary/20 rounded-lg transition-[color,background-color,border-color] duration-150 shadow-xs"
               >
                 <ArrowLeft className="h-4 w-4" />
@@ -660,8 +827,74 @@ export function DocumentsTab({
                   className="pl-9 w-56 h-9 text-sm bg-card border-border"
                 />
               </div>
+              <Button
+                data-testid="segment-batch-toggle"
+                variant={segmentBatchMode ? "default" : "outline"}
+                size="icon"
+                className={`h-9 w-9 ${segmentBatchMode ? "bg-primary text-white hover:bg-primary/90" : "bg-card"}`}
+                onClick={toggleSegmentBatchMode}
+                title={t("knowledge.detail.batchOperations")}
+                aria-label={t("knowledge.detail.batchOperations")}
+                aria-pressed={segmentBatchMode}
+              >
+                <ListChecks className="h-4 w-4" />
+              </Button>
             </div>
           </div>
+
+          {/* 段落批量操作栏 */}
+          {segmentBatchMode && segments.length > 0 && (
+            <div
+              data-testid="segment-batch-bar"
+              className="flex flex-wrap items-center gap-3 px-5 py-2.5 border-b border-border bg-muted/40"
+            >
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  checked={segments.length > 0 && selectedSegmentIds.size === segments.length}
+                  onCheckedChange={toggleSelectAllSegments}
+                  aria-label={t("knowledge.detail.selectAll")}
+                />
+                <button
+                  type="button"
+                  onClick={toggleSelectAllSegments}
+                  className="text-sm text-muted-foreground hover:text-foreground"
+                >
+                  {t("knowledge.detail.selectAll")}
+                </button>
+              </div>
+              <span
+                data-testid="segment-batch-count"
+                className="text-sm text-muted-foreground"
+              >
+                {t("knowledge.segment.selectedCount", { count: selectedSegmentIds.size })}
+              </span>
+              <div className="ml-auto flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 bg-card"
+                  disabled={selectedSegmentIds.size === 0 || segmentBatchLoading}
+                  onClick={() => handleSegmentBatchEnable(true)}
+                >
+                  {t("knowledge.segment.enable")}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 bg-card"
+                  disabled={selectedSegmentIds.size === 0 || segmentBatchLoading}
+                  onClick={() => handleSegmentBatchEnable(false)}
+                >
+                  {t("knowledge.segment.disable")}
+                </Button>
+              </div>
+              {selectedSegmentIds.size > SEGMENT_BATCH_LIMIT && (
+                <p className="w-full text-xs text-amber-600 dark:text-amber-400">
+                  {t("knowledge.segment.batchLimitText", { limit: SEGMENT_BATCH_LIMIT })}
+                </p>
+              )}
+            </div>
+          )}
 
           {/* 切片网格 */}
           <div className="max-h-[500px] overflow-auto p-4 bg-muted/30">
@@ -676,8 +909,13 @@ export function DocumentsTab({
             ) : (
               <SegmentList
                 segments={segments}
-                onEdit={(id, text) => openEdit(id, text)}
+                onEdit={(id) => openEdit(id)}
                 onDelete={(id) => handleDeleteSegment(id)}
+                onToggleEnabled={(id, enabled) => handleToggleSegmentEnabled(id, enabled)}
+                busySegmentIds={pendingSegmentIds}
+                batchMode={segmentBatchMode}
+                selectedSegmentIds={selectedSegmentIds}
+                onToggleSelect={toggleSegmentSelect}
               />
             )}
           </div>
@@ -689,12 +927,47 @@ export function DocumentsTab({
           <DialogHeader>
             <DialogTitle>{t("knowledge.detail.editSegment")}</DialogTitle>
           </DialogHeader>
-          <Textarea value={editText} onChange={(e) => setEditText(e.target.value)} rows={12} />
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <Label className="text-sm font-medium">
+                {t("knowledge.segment.segmentTextLabel")}
+              </Label>
+              <Textarea value={editText} onChange={(e) => setEditText(e.target.value)} rows={10} />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-sm font-medium">
+                {t("knowledge.segment.segmentAnswer")}
+              </Label>
+              <Textarea
+                value={editAnswer}
+                onChange={(e) => setEditAnswer(e.target.value)}
+                rows={4}
+                placeholder={t("knowledge.segment.segmentAnswerPlaceholder")}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-sm font-medium">
+                {t("knowledge.segment.segmentKeywords")}
+              </Label>
+              <Input
+                value={editKeywords}
+                onChange={(e) => setEditKeywords(e.target.value)}
+                placeholder={t("knowledge.segment.segmentKeywordsPlaceholder")}
+              />
+              <p className="text-xs text-muted-foreground">
+                {t("knowledge.segment.segmentKeywordsHint")}
+              </p>
+            </div>
+          </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditOpen(false)}>
               {t("knowledge.detail.cancel")}
             </Button>
-            <Button onClick={saveEdit} disabled={editSaving} className="bg-primary hover:bg-primary/90">
+            <Button
+              onClick={saveEdit}
+              disabled={editSaving || !editText.trim()}
+              className="bg-primary hover:bg-primary/90"
+            >
               {editSaving ? t("knowledge.detail.saving") : t("knowledge.detail.save")}
             </Button>
           </DialogFooter>

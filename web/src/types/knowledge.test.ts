@@ -9,6 +9,7 @@ import {
   SAFE_CHUNK_HEADING_PATTERNS,
   deriveDisplayStatus,
   isSafeHeadingPatterns,
+  parseSegmentKeywords,
   resolveDisplayStatus,
 } from "./knowledge.ts";
 import type { DocumentDisplayStatus } from "./knowledge.ts";
@@ -159,6 +160,22 @@ test("chunking API allow-list: mirrors schema, excludes regex_pattern", () => {
   assert.ok(!fields.includes("regex_pattern"));
   assert.ok(!fields.includes("extract_metadata"));
   assert.ok(!fields.includes("metadata_fields"));
+});
+
+test("parseSegmentKeywords: splits on ASCII/full-width commas and CJK enumeration comma", () => {
+  assert.deepEqual(parseSegmentKeywords("报销,发票，审批、流程"), [
+    "报销",
+    "发票",
+    "审批",
+    "流程",
+  ]);
+  assert.deepEqual(parseSegmentKeywords("  spaced ,  items  "), ["spaced", "items"]);
+});
+
+test("parseSegmentKeywords: drops empties and de-duplicates keeping first order", () => {
+  assert.deepEqual(parseSegmentKeywords(""), []);
+  assert.deepEqual(parseSegmentKeywords(",,，、 ,"), []);
+  assert.deepEqual(parseSegmentKeywords("a, b, a, c,,b"), ["a", "b", "c"]);
 });
 
 test("isSafeHeadingPatterns: only the exact backend triple passes", () => {

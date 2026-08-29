@@ -171,6 +171,25 @@ export interface Segment {
   image_file_size?: number;
 }
 
+/**
+ * Parse the keyword editor's free-text input into the list shape the
+ * segment-update API expects. Splits on ASCII/full-width commas and the CJK
+ * enumeration comma, trims, drops empties, and de-duplicates (first wins).
+ * Count/length limits (100 items, 256 chars each) are validated by callers
+ * against the backend SegmentUpdateSchema.
+ */
+export function parseSegmentKeywords(raw: string): string[] {
+  const seen = new Set<string>();
+  const keywords: string[] = [];
+  for (const part of raw.split(/[,，、]/)) {
+    const keyword = part.trim();
+    if (!keyword || seen.has(keyword)) continue;
+    seen.add(keyword);
+    keywords.push(keyword);
+  }
+  return keywords;
+}
+
 // ============================================================
 // Chunking Configuration Types
 // ============================================================

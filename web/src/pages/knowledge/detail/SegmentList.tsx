@@ -27,13 +27,21 @@ interface Chunk {
   level?: number;
   parent_segment_id?: string;
   summary?: string;
+  /** Segments are enabled unless the backend explicitly stamped them off. */
+  enabled?: boolean;
   children: Chunk[];
 }
 
 interface SegmentListProps {
   segments: Segment[];
-  onEdit?: (segmentId: string, text: string) => void;
+  onEdit?: (segmentId: string) => void;
   onDelete?: (segmentId: string) => void;
+  onToggleEnabled?: (segmentId: string, enabled: boolean) => void;
+  /** Segments with an in-flight mutation render their controls disabled. */
+  busySegmentIds?: ReadonlySet<string>;
+  batchMode?: boolean;
+  selectedSegmentIds?: ReadonlySet<string>;
+  onToggleSelect?: (segmentId: string) => void;
 }
 
 // Build hierarchical structure from flat segments
@@ -52,6 +60,7 @@ function buildHierarchy(segments: Segment[]): Chunk[] {
       level: s.level,
       parent_segment_id: s.parent_segment_id,
       summary: s.summary,
+      enabled: s.enabled,
       children: []
     }));
   }
@@ -69,6 +78,7 @@ function buildHierarchy(segments: Segment[]): Chunk[] {
       level: seg.level,
       parent_segment_id: seg.parent_segment_id,
       summary: seg.summary,
+      enabled: seg.enabled,
       children: []
     };
     
@@ -106,24 +116,28 @@ function calculateStats(chunks: Chunk[]) {
   let totalParents = 0;
   let totalChildren = 0;
   let totalChars = 0;
-  
+  let disabledCount = 0;
+
   chunks.forEach(chunk => {
     totalChars += chunk.text?.length || 0;
+    if (chunk.enabled === false) disabledCount++;
     if (chunk.children.length > 0) {
       totalParents++;
       totalChildren += chunk.children.length;
       chunk.children.forEach(child => {
         totalChars += child.text?.length || 0;
+        if (child.enabled === false) disabledCount++;
       });
     } else {
       totalParents++;
     }
   });
-  
+
   return {
     totalParents,
     totalChildren,
     totalChars,
+    disabledCount,
     isHierarchical: totalChildren > 0,
   };
 }
@@ -132,6 +146,11 @@ export function SegmentList({
   segments,
   onEdit,
   onDelete,
+  onToggleEnabled,
+  busySegmentIds,
+  batchMode,
+  selectedSegmentIds,
+  onToggleSelect,
 }: SegmentListProps) {
   const { t } = useTranslation();
   const [viewMode, setViewMode] = useState<"hierarchical" | "flat">("hierarchical");
@@ -149,6 +168,7 @@ export function SegmentList({
         level: seg.level,
         parent_segment_id: seg.parent_segment_id,
         summary: seg.summary,
+        enabled: seg.enabled,
         children: []
       }));
   }, [segments]);
@@ -189,6 +209,15 @@ export function SegmentList({
               (~{Math.ceil(stats.totalChars / 4)} tokens)
             </span>
           </span>
+
+          {stats.disabledCount > 0 && (
+            <span
+              data-testid="segment-disabled-count"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/60 text-sm font-medium text-amber-700 dark:text-amber-300"
+            >
+              {stats.disabledCount} {t("knowledge.segment.disabledShort")}
+            </span>
+          )}
         </div>
         
         {stats.isHierarchical && (
@@ -230,6 +259,11 @@ export function SegmentList({
             index={index}
             onEdit={onEdit}
             onDelete={onDelete}
+            onToggleEnabled={onToggleEnabled}
+            busy={busySegmentIds?.has(chunk.segment_id)}
+            selectable={batchMode}
+            selectedSegmentIds={selectedSegmentIds}
+            onToggleSelect={onToggleSelect}
           />
         ))}
       </div>

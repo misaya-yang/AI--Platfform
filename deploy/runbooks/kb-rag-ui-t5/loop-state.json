@@ -48,7 +48,7 @@
       "DatasetUploadDialog 卡片 transition-all（既有；motion 静态扫描挂账，随设计轮收敛）"
     ]
   },
-  "active_phase": "C5 段落操作面（开关/批量/全字段编辑）+mock e2e",
+  "active_phase": "C6 文档归档+启用禁用开关+409 队列语义+mock e2e",
   "iterations": [
     {
       "phase": "C1",
@@ -103,6 +103,23 @@
         "useSegments：移除常驻 5s 轮询，改按需（打开面板按 staleTime 过期重取 + 变更后 invalidate）",
         "+useDebouncedValue（hooks/useKnowledge 导出，默认 300ms）：文档搜索（客户端过滤）与段落搜索（直连服务端）接入；防抖值同时是 query key，手动 invalidate 改用同一变量防 key 漂移",
         "withConflictRetry：列表读遇 409 带 Retry-After 等待（封顶 5s、默认 1s）重试一次，不弹错误带（并发生成切换）"
+      ]
+    },
+    {
+      "phase": "C5",
+      "date": "2026-08-29",
+      "scope": "段落操作面：单条开关（PATCH /status）+批量启停（/segments/batch/enable ≤500 部分成功）+全字段编辑（text/answer/keywords 一次往返）",
+      "result": "done",
+      "evidence": "新增 e2e/knowledge-segment-ops.spec.ts 4/4 + 既有 knowledge @mock 4/4（--grep @mock 共 8/8）；node --test 50/50（+2 parseSegmentKeywords）；lint/build(oversizedRoutes=[])/i18n:check 绿；真实 tsc 98=存量基线，KB 切片零新增",
+      "changes": [
+        "api/knowledge.ts: updateSegment 改发 SegmentUpdateFields{text,answer?,keywords?}（PUT，extra=allow 下三字段一次往返，修 §5-#13 只发 text 丢 answer/keywords）；+setSegmentEnabled（PATCH /segments/{id}/status 为正式端点，POST /enable 仅兼容）；+batchSetSegmentsEnabled（POST /segments/batch/enable，segment_ids 1..500、enabled 双向、{success,updated,total} 部分成功）",
+        "types/knowledge.ts: +parseSegmentKeywords（ASCII/全角逗号、顿号切分，trim、去空、保序去重）",
+        "ChunkCard/SegmentList: 三种卡形态（父卡/叶卡/子卡）统一加 Switch（checked=enabled!==false，busy 时禁用）、批量勾选 Checkbox、已禁用琥珀徽章+正文降饱和+统计位 disabledCount；父卡头部点击展开，内嵌控件均 stopPropagation",
+        "DocumentsTab: 编辑对话框扩为 text+answer+keywords 三字段（打开时从已载段落回填，保存仅成功即关），关键词客户端校验镜像 SegmentUpdateSchema（≤100 个、每个 ≤256 字符）；批量条（全选当前页/已选计数/启用/禁用，选择>500 内联提示+提交前拦截）",
+        "部分成功语义：批量返回 updated<total 时 toast.warning 明示 {updated}/{total}，只有全成才 toast.success；单条开关失败弹错误 toast 且不吞状态",
+        "testid 合同（e2e 稳定锚点）：segment-switch-{id}/segment-select-{id}/segment-edit-{id}/segment-delete-{id}/segment-batch-toggle/segment-batch-bar/segment-batch-count/segment-disabled-count；segment-edit 用 testid 是因为页头另有\"编辑\"菜单，getByRole 会误中",
+        "切换文档/返回列表时清空段落选择与批量模式（selectDocument 收口）；新控件用合法 outline/default 变体（不碰 outline-solid 挂账）；Switch 默认尺寸即 24px 触控门槛",
+        "i18n: knowledge.segment 新增 27 键双语，全部进 i18n:check"
       ]
     }
   ],

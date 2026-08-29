@@ -190,13 +190,65 @@ export async function listSegments(datasetId: string, params?: { documentId?: st
 }
 
 
-export async function updateSegment(datasetId: string, segmentId: string, text: string) {
-  const { data } = await api.put<Segment>(`/api/v1/knowledge/${datasetId}/segments/${segmentId}`, { text });
+/**
+ * Editable fields of a segment update. The backend SegmentUpdateSchema
+ * requires `text` (1..200_000 chars) and accepts optional `answer`
+ * (<= 200_000 chars) and `keywords` (<= 100 items, each 1..256 chars).
+ * Sending a field replaces it, so the edit dialog always sends all three;
+ * omitting `answer`/`keywords` keeps the stored values.
+ */
+export interface SegmentUpdateFields {
+  text: string;
+  answer?: string;
+  keywords?: string[];
+}
+
+export async function updateSegment(
+  datasetId: string,
+  segmentId: string,
+  fields: SegmentUpdateFields
+) {
+  const { data } = await api.put<Segment>(
+    `/api/v1/knowledge/${datasetId}/segments/${segmentId}`,
+    fields
+  );
   return data;
 }
 
 export async function deleteSegment(datasetId: string, segmentId: string) {
   const { data } = await api.delete(`/api/v1/knowledge/${datasetId}/segments/${segmentId}`);
+  return data;
+}
+
+/** Enable or disable a single segment (canonical PATCH status route). */
+export async function setSegmentEnabled(datasetId: string, segmentId: string, enabled: boolean) {
+  const { data } = await api.patch<Segment>(
+    `/api/v1/knowledge/${datasetId}/segments/${segmentId}/status`,
+    { enabled }
+  );
+  return data;
+}
+
+export interface SegmentBatchResult {
+  success: boolean;
+  updated: number;
+  total: number;
+}
+
+/**
+ * Batch enable/disable. The backend accepts 1..500 segment ids and reports
+ * partial success: per-item failures are skipped, so `updated` can be less
+ * than `total` and the UI must surface that instead of assuming all-or-nothing.
+ */
+export async function batchSetSegmentsEnabled(
+  datasetId: string,
+  segmentIds: string[],
+  enabled: boolean
+) {
+  const { data } = await api.post<SegmentBatchResult>(
+    `/api/v1/knowledge/${datasetId}/segments/batch/enable`,
+    { segment_ids: segmentIds, enabled }
+  );
   return data;
 }
 
