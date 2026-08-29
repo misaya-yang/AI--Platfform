@@ -71,6 +71,22 @@ Every target above accepts `ENV_FILE=/path/to/.env` when the real env file lives
 | Show applied vs pending | `make migrate-status` |
 | Back up / restore / list backups | `make backup` / `make restore` / `make backup-list` |
 
+`make migrate` is the canonical deployment runner. Both it and
+`database/cli.py` use `public.schema_migrations`; new databases use exact
+forward filenames, while legacy numeric ledgers are read compatibly and fail
+closed when a duplicate numeric revision is ambiguous. Rollback SQL files are
+never auto-discovered. The runner resolves KB tables in either the root
+`public` layout or the legal `knowledge` schema split.
+
+Both central runners acquire the same PostgreSQL session advisory lock before
+bootstrap, discovery, or DDL. A concurrent runner waits, then reloads the
+canonical ledger and exits as a no-op; connection loss releases the lock.
+
+`database/schema.sql` is the stable bootstrap baseline, not a selective copy
+of recent migrations. `make migrate-init` applies that baseline and then
+continues through every pending canonical migration in the same invocation;
+rerunning it is ledger-idempotent.
+
 Restoring over shared data requires a current backup and explicit approval.
 
 ## 4. Development
@@ -144,7 +160,14 @@ Run the gate that matches what you touched. These are the same commands CI runs.
 | Agent Studio | `make verify-agent-studio` |
 | Service boundaries, Agent API surface | `make test-isolation` |
 | Agent compatibility OpenAPI | `make test-isolation` |
-| RAG retrieval | `make rag-eval-regression-gate` |
+| Knowledge service (real KB suite, imports `knowledge_service`) | `make kb-unit-gate` |
+| KB migrations 100–110 + public/main-N-1/split full-chain ledger replay, 097 late-table handoff, 101 dump/restore boundary, and durable embedding-action jobs (needs Postgres with temporary-database privilege plus `pg_dump`/`pg_restore`) | `make kb-migration-gate` |
+| KB development fixture structure / manifest hashes / seed drift (`tests/fixtures/eval/rag/golden/**`; not a release claim) | `make kb-golden-gate` |
+| KB T0 release evidence (200–400 reviewed cases, source mix, manifest/pointer/reviewed real-corpus baseline binding) | `make kb-release-evidence-gate` |
+| Project a golden JSONL into the versioned Postgres store (PRD T0-#2; `--dry-run` first) | `uv run --all-packages python scripts/import_kb_eval_golden.py <jsonl> --dry-run` |
+| Qdrant integration smoke (needs `docker-compose.kbms.yml` up; skips when down) | `make kb-integration-smoke` |
+| Real-corpus retrieval baseline candidate (live KS; records distribution only, does not approve it) | `make kb-baseline-record KB_BASELINE_DATASET_ID=<id>` |
+| RAG eval fixtures / `scripts/eval_rag.py` | `make rag-eval-regression-gate` |
 | Deploy scripts, `.env.example`, Compose | `make validate-example-config` |
 | Python / CLI / Java / Dart SDK streaming | `make sdk-sse-contract` |
 
@@ -155,7 +178,33 @@ Run the gate that matches what you touched. These are the same commands CI runs.
 1. **Script Contracts** — shell syntax + focused script tests.
 2. **Compose and Harness** — `make validate-example-config`, Compose render, harness contract.
 3. **Frontend** — type-check, lint, build, open-source route smoke.
-4. **Eval Contract Gates** — `make eval-e1-gate`, `make agent-eval-core-gate`, supporting units.
-5. **Release Readiness** — public docs present, demo seed dry run.
+4. **Eval Contract Gates** — `make eval-e1-gate`, `make agent-eval-core-gate`, `make kb-unit-gate`, the KB development-fixture `make kb-golden-gate`, and supporting units. `make kb-release-evidence-gate` stays blocked until reviewed release evidence exists and is an explicit release gate, not a CI structure check.
+5. **KB Migration Gate** — `make kb-migration-gate` against a CI Postgres service.
+6. **Release Readiness** — public docs present, demo seed dry run.
 
 A change that cannot pass these locally will not pass in CI. Run the matching gate before saying done.
+
+### Migration 101 is restore-required
+
+Migration 101 replaces the segment conflict identity
+`(document_id, position)` with `(document_id, content_type, position)`. An N-1
+writer therefore cannot write safely after 101: its old `ON CONFLICT` target no
+longer has a matching unique constraint.
+
+Before the serial release window, run `make backup`, verify that the backup
+artifact is non-empty/readable, and retain it outside the database being
+upgraded. Apply 101 only with the matching application version. Returning to
+N-1 requires stopping the new application, restoring the pre-101 dump into a
+replacement database, verifying the restored N-1 constraint and retained
+rows, and only then starting the old image against that replacement database.
+Starting an old image against the post-101 database is not a rollback path.
+
+`make kb-migration-gate` proves both sides with real PostgreSQL: the N-1 upsert
+works before 101, fails after 101, and works again only after a real
+`pg_dump`/`pg_restore` round trip into a new temporary database. The supported
+central-chain entrypoints are `make migrate` and
+`python database/cli.py migrate`; `database/run_migration.py` is retired and
+always refuses single-file execution before reading credentials. The separate
+`database/migrate_per_service.py` image runner remains limited to the legal
+schema-split/per-service track and must not receive central RAG migrations
+100–110.

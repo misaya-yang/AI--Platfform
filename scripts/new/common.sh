@@ -244,14 +244,138 @@ run_sql() {
 
 run_sql_file() {
     local file="$1"
+    local search_path="${2:-}"
+    local search_path_sql=""
+    if [ -n "$search_path" ]; then
+        case "$search_path" in
+            public|knowledge,gateway,assistant,public) ;;
+            *)
+                log_error "Unsupported migration search_path: $search_path"
+                return 1
+                ;;
+        esac
+        search_path_sql="SET search_path TO ${search_path};"
+    fi
     if docker ps --format '{{.Names}}' | grep -q "^$(pg_container)$" 2>/dev/null; then
-        docker exec -i "$(pg_container)" psql -v ON_ERROR_STOP=1 -U "$(pg_user)" -d "$(pg_database)" < "$file" 2>&1
+        if [ -n "$search_path_sql" ]; then
+            { printf '%s\n' "$search_path_sql"; cat "$file"; } \
+                | docker exec -i "$(pg_container)" psql -v ON_ERROR_STOP=1 -U "$(pg_user)" -d "$(pg_database)" 2>&1
+        else
+            docker exec -i "$(pg_container)" psql -v ON_ERROR_STOP=1 -U "$(pg_user)" -d "$(pg_database)" < "$file" 2>&1
+        fi
     elif command -v psql &>/dev/null; then
-        PGPASSWORD="$(pg_password)" psql -v ON_ERROR_STOP=1 -h "$(pg_host)" -p "$(pg_port)" -U "$(pg_user)" -d "$(pg_database)" < "$file" 2>&1
+        if [ -n "$search_path_sql" ]; then
+            { printf '%s\n' "$search_path_sql"; cat "$file"; } \
+                | PGPASSWORD="$(pg_password)" psql -v ON_ERROR_STOP=1 -h "$(pg_host)" -p "$(pg_port)" -U "$(pg_user)" -d "$(pg_database)" 2>&1
+        else
+            PGPASSWORD="$(pg_password)" psql -v ON_ERROR_STOP=1 -h "$(pg_host)" -p "$(pg_port)" -U "$(pg_user)" -d "$(pg_database)" < "$file" 2>&1
+        fi
     else
         log_error "Cannot connect to PostgreSQL"
         return 1
     fi
+}
+
+# -- Canonical migration serialization --------------------------------------
+# Shared with database/cli.py. The helper keeps one dedicated PostgreSQL
+# session alive for the whole shell migration plan; all DDL sessions cooperate
+# by waiting on the same advisory lock. PostgreSQL releases the lock when this
+# session disconnects, including process/connection crashes.
+MIGRATION_ADVISORY_LOCK_NAMESPACE=1095781959
+MIGRATION_ADVISORY_LOCK_ID=1
+MIGRATION_LOCK_PID=""
+MIGRATION_LOCK_TOKEN=""
+MIGRATION_LOCK_DIR=""
+MIGRATION_LOCK_FIFO=""
+MIGRATION_LOCK_ACQUIRED=false
+
+acquire_migration_advisory_lock() {
+    MIGRATION_LOCK_TOKEN="ai_gateway_migrate_${PPID}_$$_${RANDOM}"
+    MIGRATION_LOCK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ai-gateway-migration-lock.XXXXXX")"
+    MIGRATION_LOCK_FIFO="${MIGRATION_LOCK_DIR}/stdin.fifo"
+    mkfifo "$MIGRATION_LOCK_FIFO"
+
+    if docker ps --format '{{.Names}}' | grep -q "^$(pg_container)$" 2>/dev/null; then
+        docker exec -i -e "PGAPPNAME=${MIGRATION_LOCK_TOKEN}" "$(pg_container)" \
+            psql -v ON_ERROR_STOP=1 -U "$(pg_user)" -d "$(pg_database)" \
+            < "$MIGRATION_LOCK_FIFO" >/dev/null 2>&1 &
+    elif command -v psql &>/dev/null; then
+        PGAPPNAME="$MIGRATION_LOCK_TOKEN" PGPASSWORD="$(pg_password)" \
+            psql -v ON_ERROR_STOP=1 -h "$(pg_host)" -p "$(pg_port)" \
+            -U "$(pg_user)" -d "$(pg_database)" \
+            < "$MIGRATION_LOCK_FIFO" >/dev/null 2>&1 &
+    else
+        rm -f "$MIGRATION_LOCK_FIFO"
+        rmdir "$MIGRATION_LOCK_DIR"
+        MIGRATION_LOCK_DIR=""
+        MIGRATION_LOCK_FIFO=""
+        log_error "Cannot connect to PostgreSQL to acquire migration lock"
+        return 1
+    fi
+    MIGRATION_LOCK_PID=$!
+    # FD 9 belongs to this runner. Normal exit writes unlock + \q; a hard
+    # process crash closes the FD, psql sees EOF, and PostgreSQL releases the
+    # session lock without any backend-wide cleanup query.
+    exec 9>"$MIGRATION_LOCK_FIFO"
+    printf 'SELECT pg_advisory_lock(%s, %s);\n' \
+        "$MIGRATION_ADVISORY_LOCK_NAMESPACE" "$MIGRATION_ADVISORY_LOCK_ID" >&9
+
+    while true; do
+        if ! kill -0 "$MIGRATION_LOCK_PID" 2>/dev/null; then
+            wait "$MIGRATION_LOCK_PID" 2>/dev/null || true
+            MIGRATION_LOCK_PID=""
+            exec 9>&-
+            rm -f "$MIGRATION_LOCK_FIFO"
+            rmdir "$MIGRATION_LOCK_DIR"
+            MIGRATION_LOCK_DIR=""
+            MIGRATION_LOCK_FIFO=""
+            log_error "Migration lock session exited before acquiring the lock"
+            return 1
+        fi
+        if run_sql "
+            SELECT 1
+            FROM pg_locks AS l
+            JOIN pg_stat_activity AS a ON a.pid = l.pid
+            WHERE a.application_name = '${MIGRATION_LOCK_TOKEN}'
+              AND l.locktype = 'advisory'
+              AND l.granted
+              AND l.classid::bigint = ${MIGRATION_ADVISORY_LOCK_NAMESPACE}
+              AND l.objid::bigint = ${MIGRATION_ADVISORY_LOCK_ID}
+              AND l.objsubid = 2
+            LIMIT 1;
+        " 2>/dev/null | grep -q "1"; then
+            MIGRATION_LOCK_ACQUIRED=true
+            log_info "Acquired canonical migration lock"
+            return 0
+        fi
+        sleep 0.2
+    done
+}
+
+release_migration_advisory_lock() {
+    if [ "$MIGRATION_LOCK_ACQUIRED" = true ] && [ -n "$MIGRATION_LOCK_PID" ]; then
+        printf 'SELECT pg_advisory_unlock(%s, %s);\n\\q\n' \
+            "$MIGRATION_ADVISORY_LOCK_NAMESPACE" "$MIGRATION_ADVISORY_LOCK_ID" \
+            >&9 2>/dev/null || true
+    fi
+    exec 9>&- 2>/dev/null || true
+    if [ -n "$MIGRATION_LOCK_PID" ]; then
+        if [ "$MIGRATION_LOCK_ACQUIRED" != true ]; then
+            kill "$MIGRATION_LOCK_PID" >/dev/null 2>&1 || true
+        fi
+        wait "$MIGRATION_LOCK_PID" 2>/dev/null || true
+    fi
+    if [ -n "$MIGRATION_LOCK_FIFO" ]; then
+        rm -f "$MIGRATION_LOCK_FIFO"
+    fi
+    if [ -n "$MIGRATION_LOCK_DIR" ]; then
+        rmdir "$MIGRATION_LOCK_DIR" 2>/dev/null || true
+    fi
+    MIGRATION_LOCK_PID=""
+    MIGRATION_LOCK_TOKEN=""
+    MIGRATION_LOCK_DIR=""
+    MIGRATION_LOCK_FIFO=""
+    MIGRATION_LOCK_ACQUIRED=false
 }
 
 # -- Health check helpers ----------------------------------------------------

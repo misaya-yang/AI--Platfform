@@ -63,12 +63,17 @@ main → 修 API 对接 → 完整 KB+UI 实机回归（串行窗口）→ 合�
 
 - 现状：无读端点。查询日志面板登记为等后端。
 
-### D7 — 评测集用例删除端点缺失
+### D7 — 评测集用例持久删除（已接通）
 
-- 现状：评测侧无用例删除端点。
-- 前端处理（C7 已上线）：工作台移除的用例只出本地列表，评测集侧
-  保留；保存 toast 如实报告"移除 N 个（评测集侧保留）"。
-- 点亮方式：补删除端点后，工作台保存时对被移除用例调用删除。
+- 后端：`DELETE /api/v1/eval/datasets/{dataset_id}/examples/{example_id}`；
+  要求 eval run 权限，按 tenant + dataset + example 三重过滤。成功返回 204，
+  缺失、重复删除与跨租户目标统一返回 404。
+- 前端：工作台只删除用户在当前页面明确移除的已持久用例；新增/更新成功后
+  串行执行删除，删除最后一个用例后保存按钮仍可用，刷新后不再恢复。
+- 回归：`tests/api/test_eval_traces.py`、
+  `tests/packages/ai_gateway_core/test_import_examples_dedup.py`、
+  `web/src/pages/knowledge/detail/evalCaseStore.test.ts` 与
+  `web/e2e/knowledge-eval-cases.spec.ts`。
 
 ### D8 — QA/hit-test 响应不暴露 `trace_id`
 

@@ -23,7 +23,7 @@
 #   make hot-update      热更新本地部署容器源码 (不 pip、不重建镜像)
 #
 #   make migrate         运行数据库迁移 (自动跳过已执行的)
-#   make migrate-init    首次初始化数据库 schema
+#   make migrate-init    首次初始化 schema 并运行全部待执行迁移
 #   make migrate-status  查看迁移状态
 #
 #   make backup          创建数据库备份
@@ -53,7 +53,7 @@ export COMPOSE_PARALLEL_LIMIT
 
 # -- Quick Start --------------------------------------------------------------
 
-.PHONY: doctor harness-check runtime-dependency-gate agent-runtime-source-build-local agent-runtime-source-contract agent-runtime-build-local agent-runtime-contract agent-runtime-smoke agent-runtime-text-gate agent-runtime-single-kernel-gate agent-runtime-readonly-gate agent-runtime-write-gate agent-thread-store-contract agent-capability-worker-build-local agent-capability-worker-smoke agent-runtime-release-gate agent-runtime-rollback-rehearsal sdk-sse-contract snapshot-gateway-openapi quickstart quickstart-build validate-config validate-example-config validate seed-demo seed-demo-apply
+.PHONY: doctor harness-check runtime-dependency-gate gateway-kb-boundary-gate agent-runtime-source-build-local agent-runtime-source-contract agent-runtime-build-local agent-runtime-contract agent-runtime-smoke agent-runtime-text-gate agent-runtime-single-kernel-gate agent-runtime-readonly-gate agent-runtime-write-gate agent-thread-store-contract agent-capability-worker-build-local agent-capability-worker-smoke agent-runtime-release-gate agent-runtime-rollback-rehearsal sdk-sse-contract snapshot-gateway-openapi quickstart quickstart-build validate-config validate-example-config validate seed-demo seed-demo-apply
 
 doctor:                     ## 环境体检: 工具/Docker/内存/端口/compose 归属 (只读)
 	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/doctor.sh --env "$(ENV_FILE)"
@@ -63,6 +63,9 @@ harness-check:              ## 校验 harness.yml 契约: 命令存在、必备�
 
 runtime-dependency-gate:    ## 检查已退役 Python 执行面/docgen/OpenAPI 依赖未回流
 	@python3 scripts/harness/runtime_dependency_gate.py
+
+gateway-kb-boundary-gate:   ## 阻止 gateway 重新持有 KB 表 SQL 或 KB 请求 schema（PRD T8.4）
+	@python3 scripts/harness/gateway_kb_boundary_gate.py
 
 agent-runtime-source-contract: ## 校验 Agent Runtime 不可变源码、Schema、SBOM、许可证和 OCI 身份
 	@python3 scripts/harness/agent_runtime_supply_chain.py validate \
@@ -227,7 +230,7 @@ hot-update:                 ## 热更新本地部署容器源码 (不 pip、不�
 migrate:                    ## 运行数据库迁移 (自动跳过已执行的)
 	@bash $(SCRIPTS)/migrate.sh --env "$(ENV_FILE)"
 
-migrate-init:               ## 首次初始化数据库 schema
+migrate-init:               ## 首次初始化 schema 并运行全部待执行迁移
 	@bash $(SCRIPTS)/migrate.sh --env "$(ENV_FILE)" --init
 
 migrate-status:             ## 查看迁移状态 (已执行/待执行)
@@ -275,7 +278,7 @@ dev-compose-logs:           ## 查看源码挂载开发服务日志
 
 # -- Agent Trace / Eval Development Gates ------------------------------------
 
-.PHONY: verify-agent-studio verify-eval-dev agent-eval-core-gate agent-runtime-eval-contract-gate eval-e1-gate eval-e1-unit-gate eval-regression-gate rag-eval-regression-gate verify-assistant-runtime-dev test-isolation
+.PHONY: verify-agent-studio verify-eval-dev agent-eval-core-gate agent-runtime-eval-contract-gate eval-e1-gate eval-e1-unit-gate eval-regression-gate rag-eval-regression-gate kb-unit-gate kb-golden-gate kb-release-evidence-gate kb-migration-gate kb-image-lock-refresh kb-image-lock-gate kb-integration-smoke kb-baseline-record verify-assistant-runtime-dev test-isolation
 
 EVAL_REGRESSION_REPORT_DIR ?= tmp/eval-regression
 EVAL_E1_ARTIFACT_DIR ?= tmp/eval-e1
@@ -348,6 +351,116 @@ rag-eval-regression-gate:   ## 验证离线双轨 RAG Eval fixture contract（�
 	@$(EVAL_UV_RUN) python scripts/eval_rag.py gate tests/fixtures/eval/rag/golden/rag_regression_v1.jsonl \
 		--observations tests/fixtures/eval/rag/observations/rag_regression_v1.jsonl \
 		--output $(EVAL_E1_ARTIFACT_DIR)/rag-latest.json
+
+# -- Knowledge Base gates ------------------------------------------------------
+# kb-unit-gate is the real KB suite: it imports knowledge_service, unlike
+# rag-eval-regression-gate which only replays fixtures offline.
+#
+# The two tests/scripts files MUST stay ahead of the directory args: they sit
+# inside the tests/scripts package, so collecting them inserts tests/ onto
+# sys.path, which then shadows the repo-root `scripts` namespace package for
+# every later module (collection breaks with "cannot import name
+# 'migrate_sparse_vectors' from 'scripts'"). Keep the order.
+
+KB_IMAGE_BUILD_LOCK := apps/knowledge-service/build-requirements.lock.txt
+KB_IMAGE_RUNTIME_LOCK := apps/knowledge-service/requirements.lock.txt
+
+kb-image-lock-refresh:      ## 从 uv.lock 重建 Knowledge Service 镜像依赖锁（带 SHA-256）
+	@uv export --locked --package knowledge-service --only-group image-build \
+		--no-annotate --no-header --no-emit-project --no-emit-workspace \
+		--output-file $(KB_IMAGE_BUILD_LOCK)
+	@uv export --locked --package knowledge-service --no-dev --no-group image-build \
+		--no-annotate --no-header \
+		--no-emit-package knowledge-service --no-emit-package ai-gateway-core \
+		--output-file $(KB_IMAGE_RUNTIME_LOCK)
+
+kb-image-lock-gate:         ## 校验 Knowledge Service 镜像锁同步、哈希与静态分发合同
+	@$(EVAL_RUFF_RUN) ruff check tests/scripts/test_knowledge_image_supply_chain.py
+	@$(EVAL_UV_RUN) pytest -q --no-cov tests/scripts/test_knowledge_image_supply_chain.py
+
+kb-unit-gate:               ## 运行 Knowledge Service 真实单元门禁（导入 knowledge_service,离线可跑）
+	@$(EVAL_UV_RUN) pytest -q --no-cov \
+		tests/scripts/test_backfill_bm25_v2.py \
+		tests/scripts/test_migrate_sparse_vectors.py \
+		tests/scripts/test_kb_golden_set.py \
+		tests/scripts/test_regen_rag_observations.py \
+		tests/scripts/test_import_kb_eval_golden.py \
+		tests/harness/test_kb_release_evidence_gate.py \
+		tests/services/eval/test_kb_ragas_client.py \
+		tests/services/eval/test_kb_ragas_service.py \
+		tests/services/eval/test_rag_regression_gate.py \
+		tests/services/eval/test_retrieval_metrics.py \
+		tests/services/knowledge \
+		tests/knowledge
+
+kb-migration-gate:          ## 运行 KB 100–110 + 097/101 restore + 完整链/账本迁移门禁（需临时 Postgres + pg_dump/restore）
+	@$(EVAL_UV_RUN) pytest -q --no-cov \
+		tests/database/test_run_migration.py \
+		tests/database/test_migration_runner_contract.py \
+		tests/database/test_migration_runner_concurrency.py \
+		tests/database/test_image_task_runtime_scope_migration.py \
+		tests/database/test_kb_migration_full_chain.py \
+		tests/database/test_kb_migration_101_restore.py \
+		tests/database/test_kb_migrations.py \
+		tests/database/test_kb_query_telemetry_migration.py \
+		tests/database/test_kb_query_feedback_migration.py \
+		tests/database/test_kb_ingestion_lifecycle_migration.py \
+		tests/database/test_kb_embedding_versioning_migration.py \
+		tests/database/test_kb_embedding_conflict_paths.py \
+		tests/database/test_kb_embedding_action_jobs.py \
+		tests/database/test_kb_process_rule_snapshot.py \
+		tests/database/test_kb_eval_golden_migration.py \
+		tests/database/test_bm25_v2_lifecycle_tierb.py \
+		tests/database/test_kb_artifact_migrations_tierb.py \
+		tests/database/test_kb_document_batch_migration.py
+
+# -- KB golden evaluation foundation (PRD T0-#2/#3/#4/#7) ---------------------
+# kb-golden-gate is a fully offline, CI-safe development-structure check. It
+# verifies manifest hashes, seed drift, and case shape; it does not establish
+# human review, a real-corpus baseline, or release readiness.
+
+KB_GOLDEN_DIR := tests/fixtures/eval/rag/golden
+
+kb-golden-gate:             ## 校验 KB 开发夹具结构: manifest 哈希 + 种子漂移 + case 合同
+	@$(EVAL_UV_RUN) python scripts/regen_rag_observations.py verify --manifest $(KB_GOLDEN_DIR)/manifest.json
+	@$(EVAL_UV_RUN) python scripts/seed_kb_golden_set.py --check
+	@$(EVAL_UV_RUN) python scripts/eval_rag.py validate $(KB_GOLDEN_DIR)/kb_golden_qa_v1.jsonl
+
+kb-release-evidence-gate:   ## T0 发布证据: 人审黄金集 + manifest + 真实语料基线绑定
+	@$(EVAL_UV_RUN) python scripts/harness/kb_release_evidence_gate.py
+
+# kb-integration-smoke is NOT wired into CI: it needs the docker-compose.kbms.yml
+# Qdrant up. The test skips itself when the stack is unreachable, so the target
+# is safe to run at any time.
+kb-integration-smoke:       ## Qdrant 集成冒烟（需 kbms 栈；栈未起时自动 skip）
+	@$(EVAL_UV_RUN) pytest -q --no-cov -m integration \
+		tests/knowledge/test_qdrant_integration_smoke.py
+
+# kb-baseline-record drives the T0-#3 discipline end to end against a LIVE
+# knowledge service: regenerate retrieval observations for the KB golden set
+# from /retrieve (read-only), then record the hit-rate/MRR/nDCG/recall@k
+# distribution into a versioned report under reports/kb-eval-baseline/.
+# First round records the distribution only — thresholds stay at zero until
+# the baseline is reviewed (agent-kb-eval discipline). Requires
+# KB_BASELINE_DATASET_ID: a dataset whose corpus the golden segment ids are
+# bound to. This is NOT a CI gate (needs the live stack).
+KB_BASELINE_URL ?= http://localhost:8092
+KB_BASELINE_DATASET_ID ?=
+KB_BASELINE_NAME ?= kb-golden-v1-$(shell date +%Y-%m-%d-run1)
+kb-baseline-record:         ## 记录真实语料检索基线候选（需活的 KS + 已绑定的评测数据集）
+	@test -n "$(KB_BASELINE_DATASET_ID)" || { echo "usage: make kb-baseline-record KB_BASELINE_DATASET_ID=<bound eval dataset id> [KB_BASELINE_URL=...]"; exit 2; }
+	@mkdir -p reports/kb-eval-baseline tmp/eval-e1
+	@$(EVAL_UV_RUN) python scripts/regen_rag_observations.py record --retrieval-only \
+		--expectations $(KB_GOLDEN_DIR)/kb_golden_qa_v1.jsonl \
+		--dataset-id $(KB_BASELINE_DATASET_ID) --url $(KB_BASELINE_URL) \
+		--output tmp/eval-e1/kb-baseline-observations.jsonl --force
+	@$(EVAL_UV_RUN) python scripts/eval_rag.py gate --track retrieval_only \
+		--expectations $(KB_GOLDEN_DIR)/kb_golden_qa_v1.jsonl \
+		--observations tmp/eval-e1/kb-baseline-observations.jsonl \
+		--min-recall 0 --min-mrr 0 --min-ndcg 0 \
+		--min-total-samples 1 --min-track-samples 1 \
+		--output reports/kb-eval-baseline/$(KB_BASELINE_NAME).json
+	@echo "baseline candidate recorded; it is not release evidence until reviewed, bound, and kb-release-evidence-gate passes"
 
 eval-e1-unit-gate:          ## 运行 Agent stateful 与 RAG Eval E1 单元门禁
 	@$(EVAL_UV_RUN) pytest -q --no-cov \

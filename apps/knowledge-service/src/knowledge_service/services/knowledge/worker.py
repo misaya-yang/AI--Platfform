@@ -2,21 +2,33 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ...core.auth.user_resolver import UserContext
 from ...core.exceptions import ValidationFailedError
 from ...core.observability.logging import get_logger
 from ...persistence.database import (
     CONFLUENCE_SYNC_GENERATION_KEY,
+    DOCUMENT_INGEST_ACTION_KEY,
     DOCUMENT_LIFECYCLE_REINDEX_KEY,
+    DOCUMENT_PIPELINE_EXECUTION_KEY,
+    DOCUMENT_RECOVER_STAGE_KEY,
     DOCUMENT_UPLOAD_GENERATION_KEY,
+    INGEST_ACTION_VOCABULARY,
     IndexLeaseUnavailableError,
     dataset_index_deletion_fence,
+    dataset_ingestion_identity,
 )
+from ...persistence.document_batches import (
+    ClaimedDocumentBatchItem,
+    DocumentBatchStore,
+)
+from .bm25_v2_lifecycle import Bm25V2LifecycleError
 from .chunking import validate_persisted_chunking_config
 from .ingestion_service import (
     _require_extracted_text_budget,
@@ -38,6 +50,19 @@ logger = get_logger(__name__)
 
 # Default large file threshold (50MB); overridden from settings in __init__
 DEFAULT_LARGE_FILE_THRESHOLD = 50 * 1024 * 1024
+REPLAY_SNAPSHOT_ACTIONS = frozenset({"reprocess", "recover", "retry"})
+CHUNKING_VALIDATION_EXEMPT_ACTIONS = REPLAY_SNAPSHOT_ACTIONS | {"reembed"}
+PROCESSING_MODE_VALUES = frozenset(mode.value for mode in ProcessingMode)
+
+
+def _require_enqueue_bm25_v2_available(service: Any, index_config: dict[str, Any]) -> None:
+    lexical = LexicalConfig.from_index_config(index_config)
+    if lexical.reads_bm25_v2 and not service.vector_store.bm25_v2_enabled:
+        raise Bm25V2LifecycleError(
+            "bm25_v2 active writes are unavailable while the service kill switch is off",
+            code="bm25_v2_disabled",
+            http_status=503,
+        )
 
 
 def _extract_pdf_text_sync(content: bytes) -> str:
@@ -131,6 +156,21 @@ class KnowledgeIngestTask:
     document_id: str
 
 
+@dataclass(frozen=True)
+class ReplayConfigSnapshot:
+    """Validated immutable configuration for one replay generation."""
+
+    index_config: dict[str, Any]
+    processing_mode: str
+
+    @property
+    def chunking(self) -> dict[str, Any]:
+        value = self.index_config.get("chunking", {})
+        if not isinstance(value, dict):
+            raise RuntimeError("validated replay snapshot lost its chunking config")
+        return copy.deepcopy(value)
+
+
 class DurableEnqueueProxy:
     """API-role producer that publishes only the durable PostgreSQL generation."""
 
@@ -140,18 +180,39 @@ class DurableEnqueueProxy:
         self._running = False
         self._workers: list[asyncio.Task] = []
 
-    async def enqueue(self, dataset_id: str, document_id: str) -> bool:
+    async def enqueue(
+        self,
+        dataset_id: str,
+        document_id: str,
+        *,
+        action: str | None = None,
+        recover_stage: str | None = None,
+        execution_id: str | None = None,
+    ) -> bool:
         dataset = await self.service.db.get_dataset(dataset_id)
         if not dataset:
             raise RuntimeError("dataset was deleted before enqueue")
         index_config = dataset.get("index_config") or {}
         if not isinstance(index_config, dict):
             raise RuntimeError("dataset index_config is invalid")
-        validate_persisted_chunking_config(index_config.get("chunking", {}))
+        _require_enqueue_bm25_v2_available(self.service, index_config)
+        # Replay verbs were validated and pinned before this claim. Re-reading
+        # the live chunking config here would reintroduce submission/claim
+        # drift. reembed never parses; only the default ingest uses live config.
+        if action not in CHUNKING_VALIDATION_EXEMPT_ACTIONS:
+            validate_persisted_chunking_config(index_config.get("chunking", {}))
         claim = getattr(self.service.db, "claim_document_for_enqueue", None)
         if not callable(claim):
             raise RuntimeError("durable document enqueue is unavailable")
-        return bool(await claim(dataset_id, document_id))
+        return bool(
+            await claim(
+                dataset_id,
+                document_id,
+                action=action,
+                recover_stage=recover_stage,
+                execution_id=execution_id,
+            )
+        )
 
     async def enqueue_claimed(self, dataset_id: str, document_id: str) -> None:
         _ = (dataset_id, document_id)
@@ -187,7 +248,11 @@ class KnowledgeWorker:
         self._workers: list[asyncio.Task] = []
         self._recovery_task: asyncio.Task | None = None
         self._durable_dispatch_task: asyncio.Task | None = None
+        self._document_batch_task: asyncio.Task | None = None
+        self._document_batch_store: DocumentBatchStore | None = None
+        self._document_batch_worker_id = f"knowledge-worker-{id(self):x}"
         self._scheduled_tasks: set[tuple[str, str]] = set()
+        self._durable_tenant_cursor: str | None = None
         self._running = False
         knowledge_settings = getattr(self.service.settings, "knowledge", None)
         self.large_file_threshold = getattr(
@@ -271,7 +336,7 @@ class KnowledgeWorker:
             raise RuntimeError(
                 "knowledge worker requires a verifiable database pool capacity"
             )
-        required_capacity = num_workers + 2
+        required_capacity = num_workers + 3
         actual_capacity = int(pool_capacity())
         if actual_capacity < required_capacity:
             raise RuntimeError(
@@ -287,6 +352,12 @@ class KnowledgeWorker:
         self._durable_dispatch_task = asyncio.create_task(
             self._durable_dispatch_loop()
         )
+        pool = getattr(self.service.db, "_pool", None)
+        if pool is not None:
+            self._document_batch_store = DocumentBatchStore(pool)
+            self._document_batch_task = asyncio.create_task(
+                self._document_batch_dispatch_loop()
+            )
 
     async def stop(self) -> None:
         # Stop discovery first so the bounded drain has a stable queue tail.
@@ -297,6 +368,10 @@ class KnowledgeWorker:
                 return_exceptions=True,
             )
             self._durable_dispatch_task = None
+        if self._document_batch_task is not None:
+            self._document_batch_task.cancel()
+            await asyncio.gather(self._document_batch_task, return_exceptions=True)
+            self._document_batch_task = None
 
         try:
             await asyncio.wait_for(
@@ -319,7 +394,9 @@ class KnowledgeWorker:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._workers = []
         self._recovery_task = None
+        self._document_batch_store = None
         self._scheduled_tasks.clear()
+        self._durable_tenant_cursor = None
 
     async def _durable_dispatch_loop(self) -> None:
         list_queued = getattr(self.service.db, "list_queued_documents", None)
@@ -327,7 +404,18 @@ class KnowledgeWorker:
             raise RuntimeError("durable queued-document discovery is unavailable")
         while self._running:
             try:
-                for row in await list_queued(limit=100):
+                rows = await list_queued(
+                    limit=100,
+                    tenant_cursor=self._durable_tenant_cursor,
+                )
+                for row in rows:
+                    tenant_id = str(row.get("tenant_id") or "").strip()
+                    if tenant_id:
+                        # The next poll starts after the last tenant observed,
+                        # including rows already present in the local queue.
+                        # This prevents a short fetch window from repeatedly
+                        # favoring the same lexical tenant ordering.
+                        self._durable_tenant_cursor = tenant_id
                     dataset_id = str(row.get("dataset_id") or "").strip()
                     document_id = str(row.get("document_id") or "").strip()
                     key = (dataset_id, document_id)
@@ -349,6 +437,92 @@ class KnowledgeWorker:
             except asyncio.CancelledError:
                 return
 
+    async def _document_batch_dispatch_loop(self) -> None:
+        store = self._document_batch_store
+        if store is None:
+            return
+        while self._running:
+            try:
+                item = await store.claim_next_item(
+                    worker_id=self._document_batch_worker_id,
+                )
+                if item is None:
+                    await asyncio.sleep(self._durable_poll_interval_seconds)
+                    continue
+                await self._dispatch_document_batch_item(store, item)
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("Knowledge document batch dispatch failed")
+                await asyncio.sleep(self._durable_poll_interval_seconds)
+
+    async def _dispatch_document_batch_item(
+        self,
+        store: DocumentBatchStore,
+        item: ClaimedDocumentBatchItem,
+    ) -> None:
+        try:
+            if item.operation == "reembed":
+                queued = await self.enqueue(
+                    item.dataset_id,
+                    item.document_id,
+                    action="reembed",
+                )
+                await store.complete_item(
+                    operation_id=item.operation_id,
+                    document_id=item.document_id,
+                    status="queued" if queued else "skipped",
+                    error_code=None if queued else "already_queued_or_ineligible",
+                )
+                return
+
+            if item.operation == "delete":
+                actor = UserContext(
+                    user_id=item.created_by,
+                    tenant_id=item.tenant_id,
+                    roles=list(item.actor_roles),
+                )
+                deleted = await self.service.delete_document(
+                    actor,
+                    item.dataset_id,
+                    item.document_id,
+                )
+                await store.complete_item(
+                    operation_id=item.operation_id,
+                    document_id=item.document_id,
+                    status="queued" if deleted else "skipped",
+                    error_code=None if deleted else "not_found",
+                )
+                return
+
+            await store.complete_item(
+                operation_id=item.operation_id,
+                document_id=item.document_id,
+                status="failed",
+                error_code="unsupported_operation",
+            )
+        except IndexLeaseUnavailableError:
+            await store.release_item(
+                operation_id=item.operation_id,
+                document_id=item.document_id,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Knowledge document batch item failed",
+                extra={
+                    "operation_id": item.operation_id,
+                    "dataset_id": item.dataset_id,
+                    "document_id": item.document_id,
+                },
+            )
+            await store.complete_item(
+                operation_id=item.operation_id,
+                document_id=item.document_id,
+                status="failed",
+                error_code="operation_failed",
+                error=str(exc),
+            )
+
     async def _recovery_loop(self) -> None:
         """Periodically replay atomically claimed durable ingestion rows."""
 
@@ -367,7 +541,15 @@ class KnowledgeWorker:
             except asyncio.CancelledError:
                 return
 
-    async def enqueue(self, dataset_id: str, document_id: str) -> bool:
+    async def enqueue(
+        self,
+        dataset_id: str,
+        document_id: str,
+        *,
+        action: str | None = None,
+        recover_stage: str | None = None,
+        execution_id: str | None = None,
+    ) -> bool:
         """Durably claim one generation before publishing it to local memory."""
 
         dataset = await self.service.db.get_dataset(dataset_id)
@@ -376,11 +558,22 @@ class KnowledgeWorker:
         index_config = dataset.get("index_config") or {}
         if not isinstance(index_config, dict):
             raise RuntimeError("dataset index_config is invalid")
-        validate_persisted_chunking_config(index_config.get("chunking", {}))
+        _require_enqueue_bm25_v2_available(self.service, index_config)
+        # Replay verbs were validated and pinned before this claim. Re-reading
+        # the live chunking config here would reintroduce submission/claim
+        # drift. reembed never parses; only the default ingest uses live config.
+        if action not in CHUNKING_VALIDATION_EXEMPT_ACTIONS:
+            validate_persisted_chunking_config(index_config.get("chunking", {}))
         claim = getattr(self.service.db, "claim_document_for_enqueue", None)
         if not callable(claim):
             raise RuntimeError("durable document enqueue is unavailable")
-        if not await claim(dataset_id, document_id):
+        if not await claim(
+            dataset_id,
+            document_id,
+            action=action,
+            recover_stage=recover_stage,
+            execution_id=execution_id,
+        ):
             logger.info(
                 "Skipped duplicate/ineligible document enqueue",
                 extra={"dataset_id": dataset_id, "document_id": document_id},
@@ -420,6 +613,29 @@ class KnowledgeWorker:
                     task.dataset_id,
                     task.document_id,
                 ) as lease_connection:
+                    queued_dataset = await self.service.db.get_dataset(
+                        task.dataset_id,
+                        connection=lease_connection,
+                    )
+                    if not queued_dataset:
+                        raise RuntimeError("dataset was deleted before consumer claim")
+                    queued_index_config = queued_dataset.get("index_config") or {}
+                    if not isinstance(queued_index_config, dict):
+                        raise RuntimeError("dataset index_config is invalid")
+                    try:
+                        _require_enqueue_bm25_v2_available(
+                            self.service,
+                            queued_index_config,
+                        )
+                    except Bm25V2LifecycleError:
+                        logger.warning(
+                            "Deferred active BM25 v2 queue claim while the kill switch is off",
+                            extra={
+                                "dataset_id": task.dataset_id,
+                                "document_id": task.document_id,
+                            },
+                        )
+                        continue
                     if not await claim(
                         task.dataset_id,
                         task.document_id,
@@ -434,13 +650,50 @@ class KnowledgeWorker:
                         )
                         continue
                     generation_prepared = False
+                    execution_id = ""
+                    # PRD T9-1 failure attribution: the dispatched path records
+                    # swallowed stage failures (hierarchical attempt -> silent
+                    # standard fallback) here so the execution receipt can
+                    # distinguish them from a plain successful generation.
+                    stage_receipt: list[dict[str, str]] = []
                     try:
+                        # PRD T1 items 3/4: the queued row pins its verb and its
+                        # replay-snapshot execution; both survive requeue because
+                        # they live in document metadata, not worker memory.
+                        queued_doc = await self.service.db.get_document(
+                            task.document_id,
+                            connection=lease_connection,
+                        )
+                        queued_meta = (
+                            self._document_metadata(queued_doc) if queued_doc else {}
+                        )
+                        ingest_action = (
+                            str(
+                                queued_meta.get(DOCUMENT_INGEST_ACTION_KEY) or "ingest"
+                            )
+                            .strip()
+                            .lower()
+                        )
+                        if ingest_action not in INGEST_ACTION_VOCABULARY:
+                            ingest_action = "ingest"
+                        execution_id = await self._ensure_pipeline_execution(
+                            task,
+                            ingest_action,
+                            str(
+                                queued_meta.get(DOCUMENT_PIPELINE_EXECUTION_KEY) or ""
+                            ).strip(),
+                            connection=lease_connection,
+                        )
                         await self._prepare_document_generation(
                             task,
                             connection=lease_connection,
                         )
                         generation_prepared = True
-                        await self._process_task(task)
+                        manifest = await self._process_task(
+                            task,
+                            connection=lease_connection,
+                            stage_receipt=stage_receipt,
+                        )
                         current = await self.service.db.get_document(
                             task.document_id,
                             connection=lease_connection,
@@ -449,6 +702,12 @@ class KnowledgeWorker:
                             raise RuntimeError(
                                 "document processor returned without a completed generation"
                             )
+                        await self._finish_pipeline_execution(
+                            execution_id,
+                            status="completed",
+                            manifest=manifest,
+                            stage_receipt=stage_receipt,
+                        )
                     except asyncio.CancelledError:
                         requeue = getattr(
                             self.service.db,
@@ -468,6 +727,33 @@ class KnowledgeWorker:
                             except asyncio.CancelledError:
                                 await requeue_task
                         raise
+                    except IndexLeaseUnavailableError:
+                        # The generation was already claimed, but a later
+                        # publication fence (for example embedding backfill)
+                        # won the race. Preserve the running execution receipt
+                        # and staged rows, then return the document to the
+                        # durable queue for a contention-free retry.
+                        requeue = getattr(
+                            self.service.db,
+                            "requeue_cancelled_document_generation",
+                            None,
+                        )
+                        if not callable(requeue) or not await requeue(
+                            task.dataset_id,
+                            task.document_id,
+                            connection=lease_connection,
+                        ):
+                            raise RuntimeError(
+                                "retryable index contention could not requeue the "
+                                "claimed document generation"
+                            )
+                        logger.info(
+                            "Requeued ingestion after a concurrent index transition",
+                            extra={
+                                "dataset_id": task.dataset_id,
+                                "document_id": task.document_id,
+                            },
+                        )
                     except Exception as exc:
                         # The document owner lease is still held here. Only a
                         # successfully claimed generation may write its failed
@@ -480,6 +766,12 @@ class KnowledgeWorker:
                                 "document_id": task.document_id,
                             },
                         )
+                        await self._finish_pipeline_execution(
+                            execution_id,
+                            status="error",
+                            error=str(exc),
+                            stage_receipt=stage_receipt,
+                        )
                         dataset = await self.service.db.get_dataset(
                             task.dataset_id,
                             connection=lease_connection,
@@ -487,37 +779,30 @@ class KnowledgeWorker:
                         deletion_fence = (
                             dataset_index_deletion_fence(dataset) if dataset else None
                         )
-                        lexical_config = LexicalConfig.from_index_config(
+                        LexicalConfig.from_index_config(
                             (dataset or {}).get("index_config") or {}
                         )
-                        if dataset and deletion_fence is None and not lexical_config.reads_bm25_v2:
+                        if dataset and deletion_fence is None:
+                            # T1: NO failure sweep. A partial generation leaves
+                            # its staged rows disabled (status='indexing') and
+                            # the previous serving generation intact; staged
+                            # rows carry deterministic lineage ids, so the next
+                            # run resumes them (hash match -> flip, no
+                            # re-embedding) instead of rebuilding from zero.
+                            # Sweeping here would destroy the serving rows the
+                            # staging contract exists to protect. Retry uses
+                            # the same atomic incremental publication path.
                             if generation_prepared:
-                                try:
-                                    current = await self.service.db.get_document(
-                                        task.document_id,
-                                        connection=lease_connection,
-                                    )
-                                    if current is not None:
-                                        await self._sweep_document_generation(
-                                            task,
-                                            dataset=dataset,
-                                            document=current,
-                                            connection=lease_connection,
-                                            clear_legacy_image_receipts=False,
-                                        )
-                                except Exception:
-                                    # PostgreSQL status remains the serving authority;
-                                    # retry preflight performs the same exact sweep.
-                                    logger.exception(
-                                        "Failed to compensate a partial document generation",
-                                        extra={
-                                            "dataset_id": task.dataset_id,
-                                            "document_id": task.document_id,
-                                        },
-                                    )
+                                logger.info(
+                                    "Partial generation kept staged for retry",
+                                    extra={
+                                        "dataset_id": task.dataset_id,
+                                        "document_id": task.document_id,
+                                    },
+                                )
                             await self.service.db.update_document_status(
                                 task.document_id,
-                                status="failed",
+                                status="error",
                                 progress=100,
                                 error=str(exc),
                                 connection=lease_connection,
@@ -569,7 +854,7 @@ class KnowledgeWorker:
         document: dict[str, Any],
         image_segments: list[dict[str, Any]],
     ) -> None:
-        """Fail before Qdrant deletion when image bytes cannot be rebuilt."""
+        """Fail before index regeneration when image bytes cannot be rebuilt."""
 
         metadata = KnowledgeWorker._document_metadata(document)
         extracted = metadata.get("extracted_images", [])
@@ -638,88 +923,540 @@ class KnowledgeWorker:
                 "legacy image receipt cannot be rebuilt completely"
             )
 
-    async def _sweep_document_generation(
+    async def _ensure_pipeline_execution(
+        self,
+        task: KnowledgeIngestTask,
+        action: str,
+        linked_execution_id: str,
+        *,
+        connection: Any,
+    ) -> str:
+        """Return the durable execution row for one claimed generation.
+
+        A linked replay row is immutable authority: missing/closed rows are a
+        hard failure, never a reason to rebuild a replacement from live
+        configuration. Automatic recoveries without a link reuse the
+        document's pinned process rule.
+        """
+
+        record = getattr(self.service.db, "record_pipeline_execution", None)
+        get_execution = getattr(self.service.db, "get_pipeline_execution", None)
+        link = getattr(self.service.db, "link_pipeline_execution", None)
+        replay_action = action in REPLAY_SNAPSHOT_ACTIONS
+        if not callable(record) or not callable(get_execution) or not callable(link):
+            if replay_action:
+                raise RuntimeError("pipeline execution persistence is unavailable")
+            return linked_execution_id
+
+        if linked_execution_id:
+            existing = await get_execution(linked_execution_id, connection=connection)
+            if existing and str(existing.get("status") or "") == "running":
+                return linked_execution_id
+            if replay_action:
+                raise RuntimeError(
+                    "linked replay execution is missing or no longer running"
+                )
+
+        document = await self.service.db.get_document(
+            task.document_id, connection=connection
+        )
+        if not isinstance(document, dict):
+            raise RuntimeError("document disappeared before execution snapshot")
+        doc_meta = self._document_metadata(document)
+
+        if action == "recover":
+            replay_snapshot, process_rule_id = await self._load_pinned_process_rule(
+                document,
+                expected_dataset_id=task.dataset_id,
+                connection=connection,
+            )
+            index_config = replay_snapshot.index_config
+            processing_mode = replay_snapshot.processing_mode
+        elif action in {"reprocess", "retry"}:
+            raise RuntimeError(
+                f"{action} generation is missing its submitted execution"
+            )
+        else:
+            dataset = await self.service.db.get_dataset(
+                task.dataset_id, connection=connection
+            )
+            raw_index_config = (dataset or {}).get("index_config") or {}
+            if not isinstance(raw_index_config, dict):
+                raise RuntimeError("dataset index_config is invalid")
+            index_config = copy.deepcopy(raw_index_config)
+            processing_mode = str(
+                doc_meta.get("processing_mode") or "text_only"
+            ).strip().lower()
+            try:
+                process_rule_id = await self._record_generation_process_rule(
+                    task,
+                    action=action,
+                    index_config=index_config,
+                    processing_mode=processing_mode,
+                    connection=connection,
+                )
+            except Exception:
+                logger.warning(
+                    "Process-rule snapshot record failed; non-replay generation continues",
+                    extra={
+                        "dataset_id": task.dataset_id,
+                        "document_id": task.document_id,
+                    },
+                    exc_info=True,
+                )
+                process_rule_id = None
+
+        chunking = index_config.get("chunking", {})
+        snapshot = {
+            "index_config": copy.deepcopy(index_config),
+            "chunking": copy.deepcopy(chunking) if isinstance(chunking, dict) else {},
+            "processing_mode": processing_mode,
+        }
+        trigger_source = "recover" if action == "recover" else "worker"
+        try:
+            execution_id = str(
+                await record(
+                    task.document_id,
+                    task.dataset_id,
+                    action=action,
+                    trigger_source=trigger_source,
+                    process_rule_id=process_rule_id,
+                    input_snapshot=snapshot,
+                    connection=connection,
+                )
+                or ""
+            ).strip()
+        except Exception:
+            if replay_action:
+                raise
+            logger.warning(
+                "Pipeline execution ledger entry failed; non-replay generation continues",
+                extra={
+                    "dataset_id": task.dataset_id,
+                    "document_id": task.document_id,
+                },
+                exc_info=True,
+            )
+            return linked_execution_id
+        if not execution_id:
+            if replay_action:
+                raise RuntimeError("pipeline execution ledger returned no id")
+            return linked_execution_id
+        try:
+            linked = await link(
+                task.document_id,
+                execution_id,
+                connection=connection,
+            )
+        except Exception:
+            if replay_action:
+                raise
+            logger.warning(
+                "Pipeline execution link failed; non-replay generation continues",
+                extra={"execution_id": execution_id},
+                exc_info=True,
+            )
+            return linked_execution_id
+        if not linked:
+            if replay_action:
+                raise RuntimeError("pipeline execution link was not persisted")
+            return linked_execution_id
+        return execution_id
+
+    async def _record_generation_process_rule(
+        self,
+        task: KnowledgeIngestTask,
+        *,
+        action: str,
+        index_config: dict[str, Any],
+        processing_mode: str,
+        connection: Any,
+    ) -> str | None:
+        """Record + pin the immutable rule snapshot for this generation.
+
+        The canonical payload includes the complete index_config plus the
+        compatibility chunking field and processing mode. reembed returns
+        None because vector repair never executes a chunking dialect.
+        """
+
+        if action == "reembed":
+            return None
+        record_rule = getattr(self.service.db, "record_process_rule", None)
+        pin_rule = getattr(self.service.db, "pin_document_process_rule", None)
+        if not callable(record_rule) or not callable(pin_rule):
+            raise RuntimeError("process-rule snapshot persistence is unavailable")
+        chunking_config = index_config.get("chunking", {})
+        if not isinstance(chunking_config, dict):
+            raise RuntimeError("snapshot chunking config is invalid")
+        mode = (
+            str(chunking_config.get("mode") or "automatic").strip().lower()
+            or "automatic"
+        )
+        rule_id = str(
+            await record_rule(
+                task.dataset_id,
+                mode=mode,
+                rules={
+                    "index_config": copy.deepcopy(index_config),
+                    "chunking": copy.deepcopy(chunking_config),
+                    "processing_mode": processing_mode,
+                },
+                connection=connection,
+            )
+            or ""
+        ).strip()
+        if not rule_id:
+            raise RuntimeError("process-rule snapshot returned no id")
+        if not await pin_rule(task.document_id, rule_id, connection=connection):
+            raise RuntimeError("process-rule document pin was not persisted")
+        return rule_id
+
+    async def _finish_pipeline_execution(
+        self,
+        execution_id: str,
+        *,
+        status: str,
+        error: str | None = None,
+        manifest: list[str] | None = None,
+        stage_receipt: list[dict[str, str]] | None = None,
+    ) -> None:
+        """Close the generation's execution row (best effort)."""
+
+        normalized = str(execution_id or "").strip()
+        if not normalized:
+            return
+        complete = getattr(self.service.db, "complete_pipeline_execution", None)
+        if not callable(complete):
+            return
+        # PRD T9-1: swallow-and-retry used to make a hierarchical-stage failure
+        # that fell back to standard indexing indistinguishable from a clean
+        # run on the receipt. Record which stage failed (jsonb manifest — no
+        # schema change) so scan-vs-hierarchical failures stay attributable.
+        receipt: dict[str, Any] = {}
+        if manifest is not None:
+            receipt["segment_ids"] = manifest
+        fallbacks = [entry for entry in (stage_receipt or []) if entry]
+        if fallbacks:
+            receipt["stage_fallbacks"] = fallbacks
+        try:
+            await complete(
+                normalized,
+                status=status,
+                error=error,
+                manifest=receipt or None,
+            )
+        except Exception:
+            logger.warning(
+                "Pipeline execution ledger completion failed",
+                extra={"execution_id": normalized},
+                exc_info=True,
+            )
+
+    @staticmethod
+    def _hierarchical_opted_in(index_config: Any) -> bool:
+        """PRD T9-1 grayscale gate: hierarchical indexing is explicit opt-in.
+
+        With the indexer finally wired into the default worker, dispatch must
+        not flip every ordinary text document onto the hierarchical path —
+        only datasets whose stored chunking mode is "hierarchical" take it.
+        AUTOMATIC and every malformed shape stay on the standard path.
+        """
+
+        if not isinstance(index_config, dict):
+            return False
+        chunking = index_config.get("chunking")
+        if not isinstance(chunking, dict):
+            return False
+        return str(chunking.get("mode") or "").strip().lower() == "hierarchical"
+
+    async def _dataset_hierarchical_opted_in(self, dataset_id: str) -> bool:
+        """Opt-in check for call sites that have no index_config in scope.
+
+        A read failure degrades to the standard path — the hierarchical route
+        is an enhancement, never a prerequisite for ingestion.
+        """
+
+        try:
+            dataset = await self.service.db.get_dataset(str(dataset_id or ""))
+        except Exception:
+            logger.warning(
+                "Hierarchical opt-in dataset lookup failed; using the standard path",
+                extra={"dataset_id": dataset_id},
+                exc_info=True,
+            )
+            return False
+        if not isinstance(dataset, dict):
+            return False
+        return self._hierarchical_opted_in(dataset.get("index_config"))
+
+    @staticmethod
+    def _note_stage_fallback(
+        stage_receipt: list[dict[str, str]] | None,
+        *,
+        stage: str,
+        error: Any,
+    ) -> None:
+        """Record a swallowed stage failure on the run's stage receipt."""
+
+        if stage_receipt is None:
+            return
+        stage_receipt.append({"stage": str(stage), "error": str(error)[:500]})
+
+    async def _ingest_document(
+        self,
+        task: KnowledgeIngestTask,
+        *,
+        chunking_config_override: dict[str, Any] | None = None,
+        index_config_override: dict[str, Any] | None = None,
+    ) -> list[str] | None:
+        """Call the standard engine with the complete pinned replay config."""
+
+        if chunking_config_override is None and index_config_override is None:
+            return await self.service.ingest_document(
+                task.dataset_id,
+                task.document_id,
+            )
+        return await self.service.ingest_document(
+            task.dataset_id,
+            task.document_id,
+            chunking_config_override=chunking_config_override,
+            index_config_override=index_config_override,
+        )
+
+    async def _apply_parsing_ir(
+        self,
+        task: KnowledgeIngestTask,
+        text: str,
+        *,
+        index_config: dict[str, Any] | None,
+    ) -> str:
+        """Apply the same pinned T4 parser contract to specialized paths."""
+
+        ingestion_service = getattr(self.service, "ingestion_service", None)
+        load_or_parse = getattr(
+            ingestion_service,
+            "_load_or_parse_document_ir",
+            None,
+        )
+        if not callable(load_or_parse):
+            return text
+        dataset = await self.service.db.get_dataset(task.dataset_id)
+        document = await self.service.db.get_document(task.document_id)
+        if not isinstance(dataset, dict) or not isinstance(document, dict):
+            raise RuntimeError("parsing IR source ownership is unavailable")
+        effective_index_config = (
+            index_config
+            if isinstance(index_config, dict)
+            else dataset.get("index_config") or {}
+        )
+        if not isinstance(effective_index_config, dict):
+            raise RuntimeError("dataset index_config is invalid")
+        return await load_or_parse(
+            dataset=dataset,
+            document=document,
+            index_config=effective_index_config,
+            source_text=text,
+        )
+
+    async def _finalize_scanned_image_generation(
         self,
         task: KnowledgeIngestTask,
         *,
         dataset: dict[str, Any],
-        document: dict[str, Any],
-        connection: Any,
-        clear_legacy_image_receipts: bool,
+        collection: str,
+        desired_segment_ids: set[str],
     ) -> None:
-        """Delete one complete DB/Q index generation under the owner lease."""
+        """Replace associations/bindings, then remove stale scanned points."""
 
-        tenant_id = str(dataset.get("tenant_id") or "").strip()
-        if not tenant_id:
-            raise RuntimeError("dataset tenant_id is required for generation cleanup")
-        delete_vectors = getattr(
-            self.service.vector_store,
-            "delete_document_points",
-            None,
-        )
-        delete_summary = getattr(self.service.db, "delete_document_summary", None)
-        clear_legacy_receipts = getattr(
+        associate = getattr(self.service, "associate_images_to_chunks", None)
+        if callable(associate):
+            await associate(
+                document_id=task.document_id,
+                max_images_per_chunk=10,
+                proximity_threshold=0.3,
+                image_segment_ids=desired_segment_ids,
+            )
+        replace_bindings = getattr(
             self.service.db,
-            "clear_document_legacy_image_receipts",
+            "replace_document_attachment_bindings",
             None,
         )
-        if not callable(delete_vectors) or not callable(delete_summary):
-            raise RuntimeError("document generation cleanup is unavailable")
-        if clear_legacy_image_receipts and not callable(clear_legacy_receipts):
-            raise RuntimeError("legacy image receipt cleanup is unavailable")
+        tenant_id = str(dataset.get("tenant_id") or "").strip()
+        if callable(replace_bindings):
+            await replace_bindings(
+                task.document_id,
+                task.dataset_id,
+                tenant_id=tenant_id,
+            )
 
-        # Remote deletion must complete in every owned collection before any
-        # PostgreSQL row is removed. A partial Qdrant failure is retried from
-        # the same durable non-completed generation.
-        await delete_vectors(
+        existing = await self.service.db.get_image_segments_by_document(
+            task.document_id
+        )
+        stale = [
+            segment
+            for segment in existing
+            if str(segment.get("segment_id") or "") not in desired_segment_ids
+        ]
+        if not stale:
+            return
+        cleanup = getattr(
+            getattr(self.service, "ingestion_service", None),
+            "_cleanup_stale_image_generation",
+            None,
+        )
+        if not callable(cleanup):
+            raise RuntimeError("scanned image cleanup protocol is unavailable")
+        await cleanup(
+            collection=collection,
+            stale_image_segments=stale,
             tenant_id=tenant_id,
             dataset_id=task.dataset_id,
             document_id=task.document_id,
-            lifecycle_lease_held=True,
-        )
-        if clear_legacy_image_receipts:
-            cleared = await clear_legacy_receipts(
-                task.document_id,
-                task.dataset_id,
-                connection=connection,
-            )
-            if not cleared:
-                raise RuntimeError(
-                    "legacy image receipt cleanup lost document generation authority"
-                )
-        await self.service.db.delete_segments_by_document(
-            task.document_id,
-            connection=connection,
-        )
-        await delete_summary(
-            task.document_id,
-            connection=connection,
+            expected_ingestion_identity=dataset_ingestion_identity(dataset),
         )
 
-        metadata = self._document_metadata(document)
-        if clear_legacy_image_receipts:
-            metadata.pop("images_embedded", None)
-            metadata.pop("embedded_image_count", None)
-        for stale_count_key in (
-            "l1_segments",
-            "l2_segments",
-            "l3_segments",
-            "total_vectors",
-        ):
-            metadata.pop(stale_count_key, None)
-        # Generic metadata updates preserve these internal markers from the
-        # authoritative row and reject callers that try to replace them.
-        metadata.pop(DOCUMENT_LIFECYCLE_REINDEX_KEY, None)
-        metadata.pop(DOCUMENT_UPLOAD_GENERATION_KEY, None)
-        metadata.pop(CONFLUENCE_SYNC_GENERATION_KEY, None)
-        await self.service.db.update_document_fields(
-            task.document_id,
-            {
-                "segment_count": 0,
-                "metadata": metadata,
-            },
-            connection=connection,
+    @staticmethod
+    def _decode_snapshot_object(value: Any, *, label: str) -> dict[str, Any]:
+        """Decode one jsonb snapshot without hiding corrupt storage values."""
+
+        decoded = value
+        if isinstance(decoded, str):
+            try:
+                decoded = json.loads(decoded)
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise RuntimeError(f"{label} contains invalid JSON") from exc
+        if not isinstance(decoded, dict):
+            raise RuntimeError(f"{label} must be a JSON object")
+        return decoded
+
+    @classmethod
+    def _normalize_replay_snapshot(
+        cls,
+        value: Any,
+        *,
+        label: str,
+    ) -> ReplayConfigSnapshot:
+        """Validate and normalize new and legacy snapshot payloads."""
+
+        payload = cls._decode_snapshot_object(value, label=label)
+        raw_index_config = payload.get("index_config")
+        raw_chunking = payload.get("chunking")
+        if raw_index_config is None:
+            if not isinstance(raw_chunking, dict):
+                raise RuntimeError(f"{label} has no pinned chunking config")
+            index_config = {"chunking": copy.deepcopy(raw_chunking)}
+        elif isinstance(raw_index_config, dict):
+            index_config = copy.deepcopy(raw_index_config)
+            index_chunking = index_config.get("chunking")
+            if index_chunking is None and isinstance(raw_chunking, dict):
+                index_config["chunking"] = copy.deepcopy(raw_chunking)
+            elif not isinstance(index_chunking, dict):
+                raise RuntimeError(f"{label} index_config.chunking is invalid")
+            elif isinstance(raw_chunking, dict) and index_chunking != raw_chunking:
+                raise RuntimeError(f"{label} chunking aliases disagree")
+        else:
+            raise RuntimeError(f"{label} index_config is invalid")
+
+        chunking = index_config.get("chunking")
+        if not isinstance(chunking, dict):
+            raise RuntimeError(f"{label} has no pinned chunking config")
+        validate_persisted_chunking_config(chunking)
+
+        processing_mode = payload.get("processing_mode")
+        if not isinstance(processing_mode, str) or not processing_mode.strip():
+            raise RuntimeError(f"{label} has no pinned processing mode")
+        normalized_mode = processing_mode.strip().lower()
+        if normalized_mode not in PROCESSING_MODE_VALUES:
+            raise RuntimeError(f"{label} processing mode is invalid")
+        return ReplayConfigSnapshot(
+            index_config=index_config,
+            processing_mode=normalized_mode,
         )
+
+    async def _load_replay_snapshot(
+        self,
+        task: KnowledgeIngestTask,
+        execution_id: str,
+        document: dict[str, Any],
+        *,
+        expected_action: str,
+        connection: Any | None = None,
+    ) -> ReplayConfigSnapshot:
+        """Load and cross-check both immutable replay snapshots.
+
+        Missing, unreadable, malformed, or disagreeing execution/process-rule
+        rows stop the generation. A replay must never drift to live config.
+        """
+
+        normalized = str(execution_id or "").strip()
+        if not normalized:
+            raise RuntimeError("replay execution id is missing")
+        get_execution = getattr(self.service.db, "get_pipeline_execution", None)
+        get_rule = getattr(self.service.db, "get_process_rule", None)
+        if not callable(get_execution) or not callable(get_rule):
+            raise RuntimeError("replay snapshot persistence is unavailable")
+
+        execution = await get_execution(normalized, connection=connection)
+        if not isinstance(execution, dict):
+            raise RuntimeError("replay execution snapshot is missing")
+        if str(execution.get("status") or "") != "running":
+            raise RuntimeError("replay execution snapshot is not running")
+        if str(execution.get("action") or "") != expected_action:
+            raise RuntimeError("replay execution action does not match queued verb")
+        if execution.get("document_id") not in (None, task.document_id):
+            raise RuntimeError("replay execution belongs to another document")
+        if execution.get("dataset_id") not in (None, task.dataset_id):
+            raise RuntimeError("replay execution belongs to another dataset")
+
+        process_rule_id = str(execution.get("process_rule_id") or "").strip()
+        if not process_rule_id:
+            raise RuntimeError("replay execution has no process-rule snapshot")
+        document_rule_id = str(document.get("process_rule_id") or "").strip()
+        if document_rule_id != process_rule_id:
+            raise RuntimeError("document process-rule pin does not match execution")
+
+        execution_snapshot = self._normalize_replay_snapshot(
+            execution.get("input_snapshot"),
+            label="pipeline execution snapshot",
+        )
+        rule = await get_rule(process_rule_id, connection=connection)
+        if not isinstance(rule, dict):
+            raise RuntimeError("pinned process-rule snapshot is missing")
+        if rule.get("dataset_id") not in (None, task.dataset_id):
+            raise RuntimeError("pinned process-rule belongs to another dataset")
+        rule_snapshot = self._normalize_replay_snapshot(
+            rule.get("rules"),
+            label="process-rule snapshot",
+        )
+        if rule_snapshot != execution_snapshot:
+            raise RuntimeError("execution and process-rule snapshots disagree")
+        return execution_snapshot
+
+    async def _load_pinned_process_rule(
+        self,
+        document: dict[str, Any] | None,
+        *,
+        expected_dataset_id: str,
+        connection: Any | None = None,
+    ) -> tuple[ReplayConfigSnapshot, str]:
+        """Load the document pin for automatic recovery without a ledger link."""
+
+        rule_id = str((document or {}).get("process_rule_id") or "").strip()
+        if not rule_id:
+            raise RuntimeError("document has no pinned process-rule snapshot")
+        get_rule = getattr(self.service.db, "get_process_rule", None)
+        if not callable(get_rule):
+            raise RuntimeError("process-rule snapshot persistence is unavailable")
+        rule = await get_rule(rule_id, connection=connection)
+        if not isinstance(rule, dict):
+            raise RuntimeError("pinned process-rule snapshot is missing")
+        if str(rule.get("dataset_id") or "") != expected_dataset_id:
+            raise RuntimeError("pinned process-rule belongs to another dataset")
+        snapshot = self._normalize_replay_snapshot(
+            rule.get("rules"),
+            label="process-rule snapshot",
+        )
+        return snapshot, rule_id
 
     async def _prepare_document_generation(
         self,
@@ -737,15 +1474,6 @@ class KnowledgeWorker:
             raise RuntimeError("dataset was deleted before generation cleanup")
         if dataset_index_deletion_fence(dataset) is not None:
             raise RuntimeError("dataset index deletion is pending")
-        index_config = dataset.get("index_config") or {}
-        if not isinstance(index_config, dict):
-            raise RuntimeError("dataset index_config is invalid")
-        validate_persisted_chunking_config(index_config.get("chunking", {}))
-        lexical_config = LexicalConfig.from_index_config(dataset.get("index_config") or {})
-        if lexical_config.reads_bm25_v2:
-            raise RuntimeError(
-                "bm25_v2 active mode is read-only; roll back before ingestion"
-            )
 
         document = await self.service.db.get_document(
             task.document_id,
@@ -753,7 +1481,7 @@ class KnowledgeWorker:
         )
         if not document or str(document.get("dataset_id") or "") != task.dataset_id:
             raise RuntimeError("document authority changed before generation cleanup")
-        if str(document.get("status") or "") != "processing":
+        if str(document.get("status") or "") != "parsing":
             raise RuntimeError("document generation is not owned by this worker")
         _require_extracted_text_budget(document.get("content"))
 
@@ -761,6 +1489,28 @@ class KnowledgeWorker:
         if "structured_parsing" in metadata:
             raise RuntimeError(
                 "structured parsing is disabled until a trusted source receipt exists"
+            )
+        verb = str(metadata.get(DOCUMENT_INGEST_ACTION_KEY) or "ingest").strip().lower()
+        if verb in REPLAY_SNAPSHOT_ACTIONS:
+            replay_snapshot = await self._load_replay_snapshot(
+                task,
+                str(metadata.get(DOCUMENT_PIPELINE_EXECUTION_KEY) or "").strip(),
+                document,
+                expected_action=verb,
+                connection=connection,
+            )
+            effective_index_config = replay_snapshot.index_config
+        else:
+            effective_index_config = dataset.get("index_config") or {}
+            if not isinstance(effective_index_config, dict):
+                raise RuntimeError("dataset index_config is invalid")
+        LexicalConfig.from_index_config(effective_index_config)
+        if verb != "reembed":
+            # Vector repair (reembed) must stay possible even when the chunking
+            # config is being reworked; every other verb rebuilds chunks and
+            # therefore needs a valid persisted config.
+            validate_persisted_chunking_config(
+                effective_index_config.get("chunking", {})
             )
         lifecycle = metadata.get(DOCUMENT_LIFECYCLE_REINDEX_KEY)
         pending_restore = (
@@ -782,28 +1532,48 @@ class KnowledgeWorker:
         ):
             raise RuntimeError("document source generation is not finalized")
 
-        get_image_segments = getattr(
-            self.service.db,
-            "get_image_segments_by_document",
-            None,
-        )
-        if not callable(get_image_segments):
-            raise RuntimeError("image generation authority is unavailable")
-        image_segments = await get_image_segments(
-            task.document_id,
-            connection=connection,
-        )
-        self._validate_rebuildable_image_source(document, image_segments)
-        await self._sweep_document_generation(
-            task,
-            dataset=dataset,
-            document=document,
-            connection=connection,
-            clear_legacy_image_receipts=True,
-        )
+        if verb != "reembed":
+            # The reembed verb repairs text vectors in place; it never rebuilds
+            # the image source, so a non-rebuildable image receipt must not
+            # block it. Every other verb regenerates and therefore requires a
+            # rebuildable image source.
+            get_image_segments = getattr(
+                self.service.db,
+                "get_image_segments_by_document",
+                None,
+            )
+            if not callable(get_image_segments):
+                raise RuntimeError("image generation authority is unavailable")
+            image_segments = await get_image_segments(
+                task.document_id,
+                connection=connection,
+            )
+            self._validate_rebuildable_image_source(document, image_segments)
+        # T1: NO pre-dispatch sweep. The ingestion engine is an incremental
+        # in-place upsert keyed by (document_id, content_type, position):
+        # unchanged chunks are skipped (zero re-embedding), changed chunks are
+        # updated at their existing segment/point identity, new chunks stage
+        # disabled with deterministic lineage ids, and excess rows are deleted
+        # only after staging succeeds. Sweeping first would destroy the
+        # serving generation and defeat the incremental skip. Reprocess,
+        # recover, and retry all preserve the prior serving generation until
+        # atomic publication succeeds.
 
-    async def _process_task(self, task: KnowledgeIngestTask) -> None:
-        """Process a single ingestion task based on processing mode."""
+    async def _process_task(
+        self,
+        task: KnowledgeIngestTask,
+        *,
+        connection: Any | None = None,
+        stage_receipt: list[dict[str, str]] | None = None,
+    ) -> list[str] | None:
+        """Process one queued generation under the dual-verb contract.
+
+        Returns the staged/repaired segment manifest for the execution ledger
+        (PRD T1.5) or None when the dispatched path produces no manifest.
+        ``stage_receipt`` collects PRD T9-1 fallback attributions recorded by
+        dispatched processors (which stage failed and why before the run fell
+        back to standard ingestion).
+        """
 
         dataset = await self.service.db.get_dataset(task.dataset_id)
         if not dataset:
@@ -812,16 +1582,7 @@ class KnowledgeWorker:
             raise ValueError(
                 "dataset index deletion is pending; queued ingestion is unavailable"
             )
-        index_config = dataset.get("index_config") or {}
-        if not isinstance(index_config, dict):
-            raise ValueError("dataset index_config is invalid")
-        validate_persisted_chunking_config(index_config.get("chunking", {}))
-        lexical_config = LexicalConfig.from_index_config(dataset.get("index_config") or {})
-        if lexical_config.reads_bm25_v2:
-            raise ValueError(
-                "bm25_v2 active mode is read-only; roll back to lexical_v1 shadow "
-                "before processing queued documents"
-            )
+        live_index_config = dataset.get("index_config") or {}
 
         # Get document to check processing mode
         doc = await self.service.db.get_document(task.document_id)
@@ -830,20 +1591,110 @@ class KnowledgeWorker:
         _require_extracted_text_budget(doc.get("content"))
 
         metadata = doc.get("metadata", {})
-        if isinstance(metadata, dict) and "structured_parsing" in metadata:
+        if not isinstance(metadata, dict):
+            raise ValueError("document metadata is malformed")
+        if "structured_parsing" in metadata:
             raise ValueError(
                 "structured parsing is disabled until a trusted source receipt exists"
             )
-        mode_str = metadata.get("processing_mode", "text_only")
+
+        # Dual-verb routing (PRD T1 items 3/4, addendum §1-T1). The verb was
+        # pinned on the queued row at claim time; recover additionally carries
+        # the stage the crashed generation died in.
+        verb = str(metadata.get(DOCUMENT_INGEST_ACTION_KEY) or "ingest").strip().lower()
+        if verb not in INGEST_ACTION_VOCABULARY:
+            verb = "ingest"
+        recover_stage = (
+            str(metadata.get(DOCUMENT_RECOVER_STAGE_KEY) or "").strip().lower()
+        )
+        execution_id = str(metadata.get(DOCUMENT_PIPELINE_EXECUTION_KEY) or "").strip()
+        # Addendum §1-T1.3: replay semantics belong to the VERB, not merely to
+        # the presence of a ledger row. Both durable snapshots must agree;
+        # failure or corruption is terminal instead of silently selecting the
+        # dataset's current configuration.
+        if verb in REPLAY_SNAPSHOT_ACTIONS:
+            replay_snapshot = await self._load_replay_snapshot(
+                task,
+                execution_id,
+                doc,
+                expected_action=verb,
+                connection=connection,
+            )
+            replay_index_config = replay_snapshot.index_config
+            effective_index_config = replay_index_config
+            replay_chunking = replay_snapshot.chunking
+            replay_mode: str | None = replay_snapshot.processing_mode
+        else:
+            if not isinstance(live_index_config, dict):
+                raise ValueError("dataset index_config is invalid")
+            replay_index_config = None
+            effective_index_config = live_index_config
+            replay_chunking = None
+            replay_mode = None
+
+        lexical_config = LexicalConfig.from_index_config(effective_index_config)
+        if lexical_config.reads_bm25_v2 and not self.service.vector_store.bm25_v2_enabled:
+            raise ValueError(
+                "bm25_v2 active writes are unavailable while the service kill "
+                "switch is off"
+            )
+
+        if verb == "reembed":
+            logger.info(
+                f"[Worker] Reembed (vector repair) for document {task.document_id}"
+            )
+            return await self.service.reembed_document(
+                task.dataset_id, task.document_id
+            )
+        if verb == "recover" and recover_stage == "indexing":
+            # PRD T1 item 4: a generation that died in indexing already
+            # persisted its chunks; rebuild vectors from them instead of
+            # re-parsing. (staged rows are resumed by the same path.)
+            logger.info(
+                f"[Worker] Recover document {task.document_id} from indexing stage "
+                "(vector rebuild from persisted chunks)"
+            )
+            return await self.service.reembed_document(
+                task.dataset_id, task.document_id
+            )
+
+        if verb != "reembed":
+            validate_persisted_chunking_config(
+                replay_chunking
+                if replay_chunking is not None
+                else effective_index_config.get("chunking", {})
+            )
+
+        if verb == "retry":
+            logger.info(
+                "[Worker] Retry document %s through atomic incremental publication",
+                task.document_id,
+            )
+
+        mode_str = replay_mode or metadata.get("processing_mode", "text_only")
         file_size = doc.get("size_bytes", 0)
         is_large_file = file_size > self.large_file_threshold
 
-        # Handle auto detection mode
+        # Handle auto detection mode. The detector owns the parse-stage mode,
+        # while every downstream chunk/index choice receives the same pinned
+        # config captured at submission.
         if mode_str == "auto" and self.detector:
-            await self._process_with_auto_detection(task, doc, is_large_file)
-            return
+            await self._process_with_auto_detection(
+                task,
+                doc,
+                is_large_file,
+                index_config_override=effective_index_config,
+                stage_receipt=stage_receipt,
+            )
+            return None
 
         mode = parse_processing_mode(mode_str)
+
+        if replay_chunking is not None:
+            logger.info(
+                f"[Worker] Replaying document {task.document_id} with its complete "
+                f"submission snapshot (mode={mode_str}, large_file={is_large_file})"
+            )
 
         logger.info(
             f"[Worker] Processing document {task.document_id} with mode={mode.value}, "
@@ -853,46 +1704,90 @@ class KnowledgeWorker:
         # Update status to processing
         await self.service.db.update_document_status(
             task.document_id,
-            status="processing",
+            status="parsing",
             progress=5,
         )
 
         # Route to appropriate processor
         if mode == ProcessingMode.SCANNED:
-            await self._process_scanned(task, doc)
+            await self._process_scanned(
+                task,
+                doc,
+                index_config_override=effective_index_config,
+                stage_receipt=stage_receipt,
+            )
+            return None
         elif mode == ProcessingMode.MULTIMODAL:
             # The streaming and hierarchical paths are text-only today. The
             # standard ingestion path owns the complete image receipt.
-            await self.service.ingest_document(task.dataset_id, task.document_id)
+            return await self._ingest_document(
+                task,
+                chunking_config_override=replay_chunking,
+                index_config_override=effective_index_config,
+            )
         elif is_large_file:
             # Use streaming processing for large files
-            await self._process_large_file(task, doc, mode)
-        elif self.hierarchical_indexer:
-            # Use hierarchical indexer for better chunking (L2/L3 structure)
-            await self._process_with_hierarchical_indexer(task, doc, mode)
+            await self._process_large_file(
+                task,
+                doc,
+                mode,
+                index_config_override=effective_index_config,
+                stage_receipt=stage_receipt,
+            )
+            return None
+        elif self.hierarchical_indexer and self._hierarchical_opted_in(
+            effective_index_config
+        ):
+            # PRD T9-1 grayscale gate: only datasets whose stored chunking
+            # mode is explicitly "hierarchical" take this branch; AUTOMATIC
+            # and legacy configs stay on the standard ingestion path even now
+            # that the indexer is wired into the default worker.
+            await self._process_with_hierarchical_indexer(
+                task,
+                doc,
+                mode,
+                index_config_override=effective_index_config,
+                stage_receipt=stage_receipt,
+            )
+            return None
         else:
             # Fallback to standard ingestion
-            await self.service.ingest_document(task.dataset_id, task.document_id)
+            return await self._ingest_document(
+                task,
+                chunking_config_override=replay_chunking,
+                index_config_override=effective_index_config,
+            )
 
     async def _process_with_auto_detection(
         self,
         task: KnowledgeIngestTask,
         doc: dict,
         is_large_file: bool,
+        index_config_override: dict[str, Any] | None = None,
+        stage_receipt: list[dict[str, str]] | None = None,
     ) -> None:
         """Process document with automatic type detection."""
         metadata = doc.get("metadata", {})
         original_key = metadata.get("original_file_key")
+        chunking_override = (
+            copy.deepcopy(index_config_override.get("chunking", {}))
+            if isinstance(index_config_override, dict)
+            else None
+        )
 
         if not original_key or not self.detector:
             # Fallback to text_only
-            await self.service.ingest_document(task.dataset_id, task.document_id)
+            await self._ingest_document(
+                task,
+                chunking_config_override=chunking_override,
+                index_config_override=index_config_override,
+            )
             return
 
         # Update status
         await self.service.db.update_document_status(
             task.document_id,
-            status="detecting",
+            status="parsing",
             progress=2,
         )
 
@@ -965,7 +1860,7 @@ class KnowledgeWorker:
 
         await self.service.db.update_document_status(
             task.document_id,
-            status="processing",
+            status="parsing",
             progress=5,
         )
 
@@ -973,17 +1868,37 @@ class KnowledgeWorker:
         if mode == ProcessingMode.SCANNED:
             if temp_path:
                 await self._cleanup_temp_file(temp_path)
-            await self._process_scanned(task, doc)
+            await self._process_scanned(
+                task,
+                doc,
+                index_config_override=index_config_override,
+                stage_receipt=stage_receipt,
+            )
         elif mode == ProcessingMode.MULTIMODAL:
             if temp_path:
                 await self._cleanup_temp_file(temp_path)
-            await self.service.ingest_document(task.dataset_id, task.document_id)
+            await self._ingest_document(
+                task,
+                chunking_config_override=chunking_override,
+                index_config_override=index_config_override,
+            )
         elif is_large_file:
-            await self._process_large_file(task, doc, mode, source_path=temp_path)
+            await self._process_large_file(
+                task,
+                doc,
+                mode,
+                source_path=temp_path,
+                index_config_override=index_config_override,
+                stage_receipt=stage_receipt,
+            )
         else:
             if temp_path:
                 await self._cleanup_temp_file(temp_path)
-            await self.service.ingest_document(task.dataset_id, task.document_id)
+            await self._ingest_document(
+                task,
+                chunking_config_override=chunking_override,
+                index_config_override=index_config_override,
+            )
 
     async def _process_large_file(
         self,
@@ -991,10 +1906,17 @@ class KnowledgeWorker:
         doc: dict,
         mode: ProcessingMode,
         source_path: str | None = None,
+        index_config_override: dict[str, Any] | None = None,
+        stage_receipt: list[dict[str, str]] | None = None,
     ) -> None:
         """Process large file using streaming loader."""
         metadata = doc.get("metadata", {})
         original_key = metadata.get("original_file_key")
+        chunking_override = (
+            copy.deepcopy(index_config_override.get("chunking", {}))
+            if isinstance(index_config_override, dict)
+            else None
+        )
 
         if not original_key:
             raise ValueError("No original file key found")
@@ -1030,7 +1952,7 @@ class KnowledgeWorker:
         async def on_progress(progress: float) -> None:
             await self.service.db.update_document_status(
                 task.document_id,
-                status="processing",
+                status="parsing",
                 progress=int(5 + progress * 85),
             )
 
@@ -1073,11 +1995,17 @@ class KnowledgeWorker:
                 if temp_path:
                     await self._cleanup_temp_file(temp_path)
 
-            preview_text = await asyncio.to_thread(self._read_text_preview, text_temp_path, 100000)
-            if not preview_text.strip():
+            full_text = await asyncio.to_thread(self._read_text_full, text_temp_path)
+            full_text = _require_extracted_text_budget(full_text)
+            full_text = await self._apply_parsing_ir(
+                task,
+                full_text,
+                index_config=index_config_override,
+            )
+            if not full_text.strip():
                 await self.service.db.update_document_status(
                     task.document_id,
-                    status="failed",
+                    status="error",
                     progress=100,
                     error="No text extracted from document",
                 )
@@ -1090,7 +2018,7 @@ class KnowledgeWorker:
                        SET content = $1,
                            metadata = metadata || $2::jsonb
                        WHERE document_id = $3""",
-                    preview_text,  # Truncate for storage
+                    full_text,
                     json.dumps(
                         {
                             "total_pages": total_pages,
@@ -1102,20 +2030,29 @@ class KnowledgeWorker:
             except Exception as e:
                 logger.warning(f"Failed to update document content: {e}")
 
-            # Use hierarchical indexer if available
-            if self.hierarchical_indexer:
-                full_text = await asyncio.to_thread(self._read_text_full, text_temp_path)
-                full_text = _require_extracted_text_budget(full_text)
-                # Load chunking config from dataset
+            # Use hierarchical indexer if the dataset explicitly opted in
+            # (PRD T9-1 grayscale gate: the default worker now carries one).
+            hierarchical_opted_in = (
+                self._hierarchical_opted_in(index_config_override)
+                if index_config_override is not None
+                else await self._dataset_hierarchical_opted_in(task.dataset_id)
+            )
+            if self.hierarchical_indexer and hierarchical_opted_in:
+                # Load chunking config from the replay snapshot when present.
                 chunking_config = None
                 try:
                     from .chunking import ChunkingConfig
 
-                    dataset = await self.service.db.get_dataset(task.dataset_id)
-                    if dataset:
-                        index_config = dataset.get("index_config") or {}
+                    if index_config_override is not None:
+                        index_config = index_config_override
+                    else:
+                        dataset = await self.service.db.get_dataset(task.dataset_id)
+                        index_config = (dataset or {}).get("index_config") or {}
+                    if isinstance(index_config, dict):
                         chunking_dict = (
-                            index_config.get("chunking") if isinstance(index_config, dict) else {}
+                            index_config.get("chunking")
+                            if isinstance(index_config, dict)
+                            else {}
                         )
                         if chunking_dict:
                             chunking_config = ChunkingConfig.from_dict(chunking_dict)
@@ -1134,8 +2071,12 @@ class KnowledgeWorker:
                                 f"[Worker] No chunking config found in dataset {task.dataset_id}"
                             )
                     else:
-                        logger.warning(f"[Worker] Dataset {task.dataset_id} not found")
+                        raise RuntimeError("dataset index_config is invalid")
                 except Exception as e:
+                    if index_config_override is not None:
+                        raise RuntimeError(
+                            "pinned large-file chunking config is invalid"
+                        ) from e
                     logger.warning(f"[Worker] Failed to load chunking config: {e}")
 
                 result = await self.hierarchical_indexer.index_document(
@@ -1146,9 +2087,19 @@ class KnowledgeWorker:
                     chunking_config=chunking_config,
                 )
 
+                if not result.success:
+                    # PRD T9-1: an unsuccessful index otherwise closes the
+                    # execution receipt as a clean completed run.
+                    self._note_stage_fallback(
+                        stage_receipt,
+                        stage="hierarchical_indexing_large_file",
+                        error="; ".join(str(item) for item in result.errors)
+                        or "hierarchical indexing reported no vectors",
+                    )
+
                 await self.service.db.update_document_status(
                     task.document_id,
-                    status="completed" if result.success else "failed",
+                    status="completed" if result.success else "error",
                     progress=100,
                 )
                 # Update segment counts in metadata
@@ -1171,7 +2122,11 @@ class KnowledgeWorker:
                     logger.debug(f"Failed to update segment counts: {e}")
             else:
                 # Fallback to standard ingestion
-                await self.service.ingest_document(task.dataset_id, task.document_id)
+                await self._ingest_document(
+                    task,
+                    chunking_config_override=chunking_override,
+                    index_config_override=index_config_override,
+                )
         finally:
             await self._cleanup_temp_file(text_temp_path)
 
@@ -1254,7 +2209,12 @@ class KnowledgeWorker:
         )
 
     async def _process_scanned_with_vlm_ocr(
-        self, task: KnowledgeIngestTask, doc: dict,
+        self,
+        task: KnowledgeIngestTask,
+        doc: dict,
+        *,
+        chunking_config_override: dict[str, Any] | None = None,
+        index_config_override: dict[str, Any] | None = None,
     ) -> None:
         """Process a scanned PDF using VLM OCR for text extraction, then standard ingestion.
 
@@ -1265,17 +2225,17 @@ class KnowledgeWorker:
         original_key = metadata.get("original_file_key")
         if not original_key:
             await self.service.db.update_document_status(
-                task.document_id, status="failed", progress=100, error="no original file"
+                task.document_id, status="error", progress=100, error="no original file"
             )
             return
 
-        await self.service.db.update_document_status(task.document_id, status="processing", progress=5)
+        await self.service.db.update_document_status(task.document_id, status="parsing", progress=5)
 
         # Download PDF from storage
         pdf_bytes = await self.service.image_storage_service.download_original_file(original_key)
         if not pdf_bytes:
             await self.service.db.update_document_status(
-                task.document_id, status="failed", progress=100, error="failed to download file"
+                task.document_id, status="error", progress=100, error="failed to download file"
             )
             return
 
@@ -1286,13 +2246,13 @@ class KnowledgeWorker:
             total_pages = await asyncio.to_thread(_pdf_page_count_sync, pdf_bytes)
         except Exception as exc:
             await self.service.db.update_document_status(
-                task.document_id, status="failed", progress=100, error=str(exc)
+                task.document_id, status="error", progress=100, error=str(exc)
             )
             return
         if total_pages > MAX_PDF_PAGE_MARKERS:
             await self.service.db.update_document_status(
                 task.document_id,
-                status="failed",
+                status="error",
                 progress=100,
                 error=f"PDF exceeds the {MAX_PDF_PAGE_MARKERS} page marker limit",
             )
@@ -1328,16 +2288,21 @@ class KnowledgeWorker:
 
             progress = 5 + int((batch_end / total_pages) * 60)
             await self.service.db.update_document_status(
-                task.document_id, status="processing", progress=progress,
+                task.document_id, status="parsing", progress=progress,
             )
 
         if not all_text_parts:
             await self.service.db.update_document_status(
-                task.document_id, status="failed", progress=100, error="VLM OCR extracted no text"
+                task.document_id, status="error", progress=100, error="VLM OCR extracted no text"
             )
             return
 
         full_text = _require_extracted_text_budget("\n\n".join(all_text_parts))
+        full_text = await self._apply_parsing_ir(
+            task,
+            full_text,
+            index_config=index_config_override,
+        )
         logger.info(f"[Worker] VLM OCR extracted {len(full_text)} chars from {total_pages} pages")
 
         # Update document content and re-ingest as text
@@ -1345,23 +2310,38 @@ class KnowledgeWorker:
         await self.service.db.update_document_fields(
             task.document_id, {"word_count": len(full_text.split())}
         )
-        await self.service.db.update_document_status(task.document_id, status="embedding", progress=70)
-        await self.service.ingest_document(task.dataset_id, task.document_id)
+        await self.service.db.update_document_status(task.document_id, status="indexing", progress=70)
+        await self._ingest_document(
+            task,
+            chunking_config_override=chunking_config_override,
+            index_config_override=index_config_override,
+        )
 
     async def _process_with_hierarchical_indexer(
         self,
         task: KnowledgeIngestTask,
         doc: dict,
         mode: ProcessingMode,
+        index_config_override: dict[str, Any] | None = None,
+        stage_receipt: list[dict[str, str]] | None = None,
     ) -> None:
         """Process document using hierarchical indexer for L2/L3 chunking."""
         del mode
         metadata = doc.get("metadata", {})
         original_key = metadata.get("original_file_key")
+        chunking_override = (
+            copy.deepcopy(index_config_override.get("chunking", {}))
+            if isinstance(index_config_override, dict)
+            else None
+        )
 
         if not original_key:
             # No original file, fallback to standard ingestion
-            await self.service.ingest_document(task.dataset_id, task.document_id)
+            await self._ingest_document(
+                task,
+                chunking_config_override=chunking_override,
+                index_config_override=index_config_override,
+            )
             return
 
         logger.info(f"[Worker] Processing with hierarchical indexer: {task.document_id}")
@@ -1377,11 +2357,16 @@ class KnowledgeWorker:
                 content, metadata.get("mime_type", "")
             )
             full_text = _require_extracted_text_budget(full_text)
+            full_text = await self._apply_parsing_ir(
+                task,
+                full_text,
+                index_config=index_config_override,
+            )
 
             if not full_text.strip():
                 await self.service.db.update_document_status(
                     task.document_id,
-                    status="failed",
+                    status="error",
                     progress=100,
                     error="No text extracted from document",
                 )
@@ -1390,7 +2375,7 @@ class KnowledgeWorker:
             # Update progress
             await self.service.db.update_document_status(
                 task.document_id,
-                status="processing",
+                status="parsing",
                 progress=50,
             )
 
@@ -1399,11 +2384,16 @@ class KnowledgeWorker:
             try:
                 from .chunking import ChunkingConfig, ChunkingMode
 
-                dataset = await self.service.db.get_dataset(task.dataset_id)
-                if dataset:
-                    index_config = dataset.get("index_config") or {}
+                if index_config_override is not None:
+                    index_config = index_config_override
+                else:
+                    dataset = await self.service.db.get_dataset(task.dataset_id)
+                    index_config = (dataset or {}).get("index_config") or {}
+                if isinstance(index_config, dict):
                     chunking_dict = (
-                        index_config.get("chunking") if isinstance(index_config, dict) else {}
+                        index_config.get("chunking")
+                        if isinstance(index_config, dict)
+                        else {}
                     )
                     if chunking_dict:
                         chunking_config = ChunkingConfig.from_dict(chunking_dict)
@@ -1448,8 +2438,12 @@ class KnowledgeWorker:
                             f"[Worker] No chunking config found in dataset {task.dataset_id}"
                         )
                 else:
-                    logger.warning(f"[Worker] Dataset {task.dataset_id} not found")
+                    raise RuntimeError("dataset index_config is invalid")
             except Exception as e:
+                if index_config_override is not None:
+                    raise RuntimeError(
+                        "pinned hierarchical chunking config is invalid"
+                    ) from e
                 logger.warning(f"[Worker] Failed to load chunking config: {e}")
 
             if chunking_config and chunking_config.mode not in (
@@ -1460,7 +2454,11 @@ class KnowledgeWorker:
                     f"[Worker] Chunking mode {chunking_config.mode} requested; "
                     "bypassing hierarchical indexer."
                 )
-                await self.service.ingest_document(task.dataset_id, task.document_id)
+                await self._ingest_document(
+                    task,
+                    chunking_config_override=chunking_override,
+                    index_config_override=index_config_override,
+                )
                 return
 
             # Index with hierarchical indexer
@@ -1472,9 +2470,19 @@ class KnowledgeWorker:
                 chunking_config=chunking_config,
             )
 
+            if not result.success:
+                # PRD T9-1: no exception is raised here, so without this the
+                # execution receipt would close as a clean completed run.
+                self._note_stage_fallback(
+                    stage_receipt,
+                    stage="hierarchical_indexing",
+                    error="; ".join(str(item) for item in result.errors)
+                    or "hierarchical indexing reported no vectors",
+                )
+
             await self.service.db.update_document_status(
                 task.document_id,
-                status="completed" if result.success else "failed",
+                status="completed" if result.success else "error",
                 progress=100,
             )
 
@@ -1506,8 +2514,17 @@ class KnowledgeWorker:
             raise
         except Exception as e:
             logger.error(f"Hierarchical indexing failed for {task.document_id}: {e}")
+            # PRD T9-1: the swallow-and-fallback stays, but the failed stage is
+            # now recorded on the execution receipt instead of disappearing.
+            self._note_stage_fallback(
+                stage_receipt, stage="hierarchical_indexing", error=e
+            )
             # Fallback to standard ingestion
-            await self.service.ingest_document(task.dataset_id, task.document_id)
+            await self._ingest_document(
+                task,
+                chunking_config_override=chunking_override,
+                index_config_override=index_config_override,
+            )
 
     async def _extract_text_from_content(self, content: bytes, mime_type: str) -> str:
         """Extract text from file content based on mime type.
@@ -1562,7 +2579,13 @@ class KnowledgeWorker:
             except Exception:
                 return ""
 
-    async def _process_scanned(self, task: KnowledgeIngestTask, doc: dict) -> None:
+    async def _process_scanned(
+        self,
+        task: KnowledgeIngestTask,
+        doc: dict,
+        index_config_override: dict[str, Any] | None = None,
+        stage_receipt: list[dict[str, str]] | None = None,
+    ) -> None:
         """Process a scanned document using VisionPDFProcessor.
 
         New flow:
@@ -1576,15 +2599,30 @@ class KnowledgeWorker:
         6. Cleanup temp files
         """
 
+        chunking_override = (
+            copy.deepcopy(index_config_override.get("chunking", {}))
+            if isinstance(index_config_override, dict)
+            else None
+        )
+
         if not self.vision_processor:
             if self.vlm_ocr_service:
                 logger.info("[Worker] No VisionPDFProcessor, using VLM OCR text extraction for scanned PDF")
-                await self._process_scanned_with_vlm_ocr(task, doc)
+                await self._process_scanned_with_vlm_ocr(
+                    task,
+                    doc,
+                    chunking_config_override=chunking_override,
+                    index_config_override=index_config_override,
+                )
                 return
             logger.warning(
                 "[Worker] VisionPDFProcessor not available, falling back to standard processing"
             )
-            await self.service.ingest_document(task.dataset_id, task.document_id)
+            await self._ingest_document(
+                task,
+                chunking_config_override=chunking_override,
+                index_config_override=index_config_override,
+            )
             return
 
         metadata = doc.get("metadata", {})
@@ -1597,17 +2635,24 @@ class KnowledgeWorker:
         dataset = await self.service.db.get_dataset(task.dataset_id)
         if not dataset:
             raise ValueError(f"Dataset {task.dataset_id} not found")
+        effective_index_config = (
+            index_config_override
+            if index_config_override is not None
+            else dataset.get("index_config") or {}
+        )
+        if not isinstance(effective_index_config, dict):
+            raise RuntimeError("dataset index_config is invalid")
 
         # Determine collection name for multimodal vectors
         vector_dim = 1024
         if self.vision_processor and getattr(self.vision_processor.embedder, "dimension", None):
             vector_dim = int(self.vision_processor.embedder.dimension)
         collection = f"kb_{task.dataset_id}_{vector_dim}"
-        lexical_config = LexicalConfig.from_index_config(dataset.get("index_config") or {})
-        if lexical_config.reads_bm25_v2:
+        lexical_config = LexicalConfig.from_index_config(effective_index_config)
+        if lexical_config.reads_bm25_v2 and not self.service.vector_store.bm25_v2_enabled:
             raise ValueError(
-                "bm25_v2 active mode is read-only; roll back to lexical_v1 shadow "
-                "before scanned-document indexing"
+                "bm25_v2 active writes are unavailable while the service kill "
+                "switch is off"
             )
         tenant_id = str(dataset.get("tenant_id") or "").strip()
         if not tenant_id:
@@ -1630,28 +2675,6 @@ class KnowledgeWorker:
                 }
             ),
         )
-
-        # Clean up existing image segments/vectors to avoid position conflicts
-        try:
-            existing_image_segments = await self.service.db.get_image_segments_by_document(
-                task.document_id
-            )
-            if existing_image_segments:
-                vector_ids = [
-                    seg.get("vector_id") for seg in existing_image_segments if seg.get("vector_id")
-                ]
-                if vector_ids:
-                    await self.service.vector_store.delete_points(
-                        collection,
-                        vector_ids,
-                        tenant_id=tenant_id,
-                        dataset_id=task.dataset_id,
-                    )
-                await self.service.db.delete_image_segments_by_document(task.document_id)
-        except Exception as cleanup_err:
-            logger.warning(
-                f"[Worker] Failed to cleanup image segments for {task.document_id}: {cleanup_err}"
-            )
 
         # Download original file to temp
         logger.info(f"[Worker] Downloading original file from storage: {original_key}")
@@ -1710,6 +2733,7 @@ class KnowledgeWorker:
             total_pages_all = 0
             total_failed = 0
             total_segments = 0
+            published_image_segment_ids: set[str] = set()
 
             for part_idx, part_path in enumerate(parts):
                 part_bytes = await asyncio.to_thread(Path(part_path).read_bytes)
@@ -1725,7 +2749,7 @@ class KnowledgeWorker:
                     part_progress = int((current / max(total, 1)) * (85 / len(parts)))
                     await self.service.db.update_document_status(
                         task.document_id,
-                        status="processing",
+                        status="parsing",
                         progress=base + part_progress,
                     )
 
@@ -1744,7 +2768,9 @@ class KnowledgeWorker:
                 if result.success:
                     total_processed += result.processed_pages
                     total_pages_all += result.total_pages
+                    total_failed += result.failed_pages
                     total_segments += result.segments_created
+                    published_image_segment_ids.update(result.segment_ids or [])
                     if result.extracted_texts:
                         for page_number, page_text_value in result.extracted_texts.items():
                             page_text = str(page_text_value or "")
@@ -1774,13 +2800,19 @@ class KnowledgeWorker:
                             extracted_text_bytes = next_bytes
                 else:
                     total_failed += result.total_pages
-                    logger.warning(
-                        f"[Worker] Part {part_idx} failed: {result.error}"
+                    raise RuntimeError(
+                        f"scanned PDF part {part_idx} failed: {result.error}"
                     )
 
                 logger.info(
                     f"[Worker] Part {part_idx}/{len(parts)} done: "
                     f"{result.processed_pages} pages, {result.segments_created} segments"
+                )
+
+            if total_failed or total_segments != total_processed:
+                raise RuntimeError(
+                    "scanned image generation was incomplete; the previous serving "
+                    "generation remains retained"
                 )
 
             # Merge extracted texts into document content
@@ -1790,13 +2822,18 @@ class KnowledgeWorker:
                     f"[Page {p}]\n{all_extracted_texts[p]}" for p in ordered_pages
                 )
                 full_text = _require_extracted_text_budget(full_text)
+                full_text = await self._apply_parsing_ir(
+                    task,
+                    full_text,
+                    index_config=index_config_override,
+                )
                 try:
                     await self.service.db.execute(
                         """UPDATE documents
                            SET content = $1,
                                metadata = metadata || $2::jsonb
                            WHERE document_id = $3""",
-                        full_text[:500_000],  # Truncate for DB storage
+                        full_text,
                         json.dumps({
                             "pages_processed": total_processed,
                             "total_pages": total_pages_all,
@@ -1837,33 +2874,91 @@ class KnowledgeWorker:
 
             # Run text ingestion for searchable text vectors
             await self.service.db.update_document_status(
-                task.document_id, status="processing", progress=90
+                task.document_id, status="parsing", progress=90
             )
 
-            if all_extracted_texts and self.hierarchical_indexer:
-                # Use hierarchical indexer on VLM OCR text for better chunking
+            hierarchical_opted_in = self._hierarchical_opted_in(
+                effective_index_config
+            )
+            text_generation_succeeded = False
+            if (
+                all_extracted_texts
+                and self.hierarchical_indexer
+                and hierarchical_opted_in
+            ):
+                # PRD T9-1 grayscale gate: OCR text goes through the
+                # hierarchical indexer only for explicitly opted-in datasets.
                 ordered_pages = sorted(all_extracted_texts.keys())
                 full_text = "\n\n".join(
                     f"[Page {p}]\n{all_extracted_texts[p]}" for p in ordered_pages
                 )
                 full_text = _require_extracted_text_budget(full_text)
                 try:
+                    from .chunking import ChunkingConfig
+
+                    chunking_config = (
+                        ChunkingConfig.from_dict(chunking_override)
+                        if chunking_override
+                        else None
+                    )
                     idx_result = await self.hierarchical_indexer.index_document(
                         document_id=task.document_id,
                         dataset_id=task.dataset_id,
                         text=full_text,
                         metadata=metadata,
+                        chunking_config=chunking_config,
                     )
+                    if not idx_result.success:
+                        # PRD T9-1: a silently unsuccessful OCR index used to
+                        # still close the run as completed.
+                        self._note_stage_fallback(
+                            stage_receipt,
+                            stage="hierarchical_ocr_indexing",
+                            error="; ".join(str(item) for item in idx_result.errors)
+                            or "hierarchical OCR indexing reported no vectors",
+                        )
+                    text_generation_succeeded = bool(idx_result.success)
                     logger.info(
                         f"[Worker] Hierarchical text indexing done: "
                         f"L1={idx_result.l1_count}, L2={idx_result.l2_count}, L3={idx_result.l3_count}"
                     )
                 except Exception as e:
                     logger.warning(f"Hierarchical indexing failed, falling back to standard: {e}")
-                    await self.service.ingest_document(task.dataset_id, task.document_id)
+                    # PRD T9-1: record the swallowed stage before retrying on
+                    # the standard path so scan-vs-hierarchical failures stay
+                    # distinguishable on the execution receipt.
+                    self._note_stage_fallback(
+                        stage_receipt, stage="hierarchical_ocr_indexing", error=e
+                    )
+                    fallback_manifest = await self._ingest_document(
+                        task,
+                        chunking_config_override=chunking_override,
+                        index_config_override=index_config_override,
+                    )
+                    text_generation_succeeded = fallback_manifest is not None
             else:
                 # Fallback to standard OCR-backed text ingestion
-                await self.service.ingest_document(task.dataset_id, task.document_id)
+                fallback_manifest = await self._ingest_document(
+                    task,
+                    chunking_config_override=chunking_override,
+                    index_config_override=index_config_override,
+                )
+                text_generation_succeeded = fallback_manifest is not None
+
+            if not text_generation_succeeded:
+                raise RuntimeError(
+                    "scanned document text generation did not publish successfully"
+                )
+            if total_segments and len(published_image_segment_ids) != total_segments:
+                raise RuntimeError(
+                    "scanned image generation returned an incomplete segment manifest"
+                )
+            await self._finalize_scanned_image_generation(
+                task,
+                dataset=dataset,
+                collection=collection,
+                desired_segment_ids=published_image_segment_ids,
+            )
 
             # Mark completed
             try:

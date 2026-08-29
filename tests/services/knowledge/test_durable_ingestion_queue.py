@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 from knowledge_service.persistence.database import IndexLeaseUnavailableError
+from knowledge_service.services.knowledge.bm25_v2_lifecycle import Bm25V2LifecycleError
 from knowledge_service.services.knowledge.knowledge_service import KnowledgeService
 from knowledge_service.services.knowledge.worker import KnowledgeWorker
 
@@ -23,6 +24,7 @@ class DurableQueueDatabase:
         self.on_busy: Any = None
         self.events: list[str] = []
         self.recovery_rows: list[dict[str, Any]] = []
+        self.dispatch_calls: list[str | None] = []
 
     def connection_pool_max_size(self) -> int:
         return self.pool_size
@@ -42,7 +44,15 @@ class DurableQueueDatabase:
             finally:
                 self.events.append("lease-exit")
 
-    async def claim_document_for_enqueue(self, dataset_id: str, document_id: str) -> bool:
+    async def claim_document_for_enqueue(
+        self,
+        dataset_id: str,
+        document_id: str,
+        *,
+        action: str | None = None,
+        recover_stage: str | None = None,
+        execution_id: str | None = None,
+    ) -> bool:
         async with self.document_index_update_lease(dataset_id, document_id):
             if self.status not in {"uploaded", "completed", "failed"}:
                 self.events.append("enqueue-duplicate")
@@ -50,6 +60,11 @@ class DurableQueueDatabase:
             if not self.enabled or self.archived:
                 return False
             self.status = "queued"
+            self.metadata["_document_ingest_action"] = action or "ingest"
+            if recover_stage:
+                self.metadata["_document_recover_stage"] = recover_stage
+            if execution_id:
+                self.metadata["_document_pipeline_execution_id"] = execution_id
             self.events.append("claimed-queued")
             return True
 
@@ -117,6 +132,16 @@ class DurableQueueDatabase:
             self.status = "queued"
         return rows
 
+    async def list_queued_documents(
+        self,
+        *,
+        limit: int = 100,
+        tenant_cursor: str | None = None,
+    ) -> list[dict[str, Any]]:
+        del limit
+        self.dispatch_calls.append(tenant_cursor)
+        return []
+
 
 class DurableQueueService:
     def __init__(self, database: DurableQueueDatabase) -> None:
@@ -168,6 +193,56 @@ def make_worker(
 
 
 @pytest.mark.asyncio
+async def test_durable_dispatch_rotates_tenant_cursor_and_deduplicates_local_rows() -> None:
+    worker, database, _service = make_worker(status="queued")
+    calls = 0
+
+    async def list_queued_documents(
+        *,
+        limit: int = 100,
+        tenant_cursor: str | None = None,
+    ) -> list[dict[str, Any]]:
+        nonlocal calls
+        assert limit == 100
+        database.dispatch_calls.append(tenant_cursor)
+        calls += 1
+        if calls == 1:
+            return [
+                {
+                    "tenant_id": "tenant-a",
+                    "dataset_id": "dataset-a",
+                    "document_id": "document-a",
+                },
+                {
+                    "tenant_id": "tenant-a",
+                    "dataset_id": "dataset-a",
+                    "document_id": "document-a",
+                },
+                {
+                    "tenant_id": "tenant-b",
+                    "dataset_id": "dataset-b",
+                    "document_id": "document-b",
+                },
+            ]
+        worker._running = False
+        return []
+
+    database.list_queued_documents = list_queued_documents  # type: ignore[method-assign]
+    worker._durable_poll_interval_seconds = 0.01
+    worker._running = True
+    await asyncio.wait_for(worker._durable_dispatch_loop(), timeout=1)
+
+    assert database.dispatch_calls == [None, "tenant-b"]
+    assert worker.queue.qsize() == 2
+    first = worker.queue.get_nowait()
+    second = worker.queue.get_nowait()
+    assert (first.dataset_id, first.document_id) == ("dataset-a", "document-a")
+    assert (second.dataset_id, second.document_id) == ("dataset-b", "document-b")
+    worker.queue.task_done()
+    worker.queue.task_done()
+
+
+@pytest.mark.asyncio
 async def test_production_worker_enqueue_claims_before_memory_and_deduplicates() -> None:
     worker, database, _service = make_worker()
 
@@ -181,13 +256,82 @@ async def test_production_worker_enqueue_claims_before_memory_and_deduplicates()
 
 
 @pytest.mark.asyncio
+async def test_active_queue_kill_switch_refuses_before_durable_claim() -> None:
+    worker, database, service = make_worker()
+    active = {
+        "dataset_id": "dataset-a",
+        "tenant_id": "tenant-a",
+        "index_config": {
+            "retrieval": {
+                "lexical": {
+                    "active_version": "bm25_v2",
+                    "bm25_v2": {"shadow_write_enabled": True},
+                }
+            }
+        },
+    }
+
+    async def get_active_dataset(_dataset_id: str, *, connection=None):
+        del connection
+        return active
+
+    database.get_dataset = get_active_dataset  # type: ignore[method-assign]
+    service.vector_store = SimpleNamespace(bm25_v2_enabled=False)
+    with pytest.raises(Bm25V2LifecycleError) as error:
+        await worker.enqueue("dataset-a", "document-a")
+    assert error.value.http_status == 503
+    assert database.status == "uploaded"
+    assert "claimed-queued" not in database.events
+    assert worker.queue.empty()
+
+    service.vector_store.bm25_v2_enabled = True
+    assert await worker.enqueue("dataset-a", "document-a") is True
+    assert database.status == "queued"
+
+
+@pytest.mark.asyncio
+async def test_active_consumer_kill_switch_leaves_waiting_row_unclaimed() -> None:
+    worker, database, service = make_worker(status="queued")
+    active = {
+        "dataset_id": "dataset-a",
+        "tenant_id": "tenant-a",
+        "index_config": {
+            "retrieval": {
+                "lexical": {
+                    "active_version": "bm25_v2",
+                    "bm25_v2": {"shadow_write_enabled": True},
+                }
+            }
+        },
+    }
+
+    async def get_active_dataset(_dataset_id: str, *, connection=None):
+        del connection
+        return active
+
+    database.get_dataset = get_active_dataset  # type: ignore[method-assign]
+    service.vector_store = SimpleNamespace(bm25_v2_enabled=False)
+    await worker.enqueue_claimed("dataset-a", "document-a")
+    worker._running = True
+    run = asyncio.create_task(worker._run())
+    await asyncio.wait_for(worker.queue.join(), timeout=1)
+    worker._running = False
+    await asyncio.wait_for(run, timeout=1)
+    assert database.status == "queued"
+    assert "claimed-processing" not in database.events
+
+
+@pytest.mark.asyncio
 async def test_production_worker_consumer_holds_owner_lease_through_terminal() -> None:
     worker, database, _service = make_worker()
     assert await worker.enqueue("dataset-a", "document-a")
 
-    async def process(_task: Any) -> None:
+    async def process(
+        _task: Any, *, connection: Any = None, stage_receipt: Any = None
+    ) -> None:
         database.events.append("process")
         assert database.document_lock.locked()
+        assert connection is not None
         database.status = "completed"
         worker._running = False
 
@@ -211,7 +355,9 @@ async def test_two_consumers_serialize_same_document_and_only_one_processes() ->
     release = asyncio.Event()
     processed = 0
 
-    async def process(_task: Any) -> None:
+    async def process(
+        _task: Any, *, connection: Any = None, stage_receipt: Any = None
+    ) -> None:
         nonlocal processed
         processed += 1
         started.set()
@@ -248,12 +394,48 @@ async def test_lifecycle_lease_contention_leaves_durable_queued_without_failed_w
 
 
 @pytest.mark.asyncio
+async def test_publication_contention_after_claim_requeues_without_failed_terminal() -> None:
+    worker, database, _service = make_worker(status="queued")
+
+    async def process(
+        _task: Any, *, connection: Any = None, stage_receipt: Any = None
+    ) -> None:
+        assert connection is not None
+        del stage_receipt
+        database.status = "indexing"
+        worker._running = False
+        raise IndexLeaseUnavailableError("embedding migration owns publication")
+
+    async def requeue(
+        _dataset_id: str, _document_id: str, *, connection: Any
+    ) -> bool:
+        assert connection is not None
+        assert database.status == "indexing"
+        database.status = "queued"
+        database.events.append("requeued-contention")
+        return True
+
+    worker._process_task = process  # type: ignore[method-assign]
+    database.requeue_cancelled_document_generation = requeue  # type: ignore[attr-defined]
+    await worker.enqueue_claimed("dataset-a", "document-a")
+    worker._running = True
+
+    await worker._run()
+
+    assert database.status == "queued"
+    assert "requeued-contention" in database.events
+    assert "status:error" not in database.events
+
+
+@pytest.mark.asyncio
 async def test_shutdown_drains_then_requeues_cancelled_owned_generation() -> None:
     worker, database, _service = make_worker(status="queued")
     worker._shutdown_drain_timeout_seconds = 0.02
     started = asyncio.Event()
 
-    async def process(_task: Any) -> None:
+    async def process(
+        _task: Any, *, connection: Any = None, stage_receipt: Any = None
+    ) -> None:
         started.set()
         await asyncio.Event().wait()
 
@@ -383,3 +565,95 @@ async def test_worker_start_runs_immediate_recovery_and_stop_cancels_it() -> Non
     assert worker._running is False
     assert worker._workers == []
     assert worker._recovery_task is None
+
+
+@pytest.mark.asyncio
+async def test_enqueue_threads_ingest_action_and_execution_onto_claim() -> None:
+    worker, database, _service = make_worker()
+
+    assert (
+        await worker.enqueue(
+            "dataset-a",
+            "document-a",
+            action="reembed",
+            execution_id="exec-1",
+        )
+        is True
+    )
+
+    assert database.metadata["_document_ingest_action"] == "reembed"
+    assert database.metadata["_document_pipeline_execution_id"] == "exec-1"
+    assert "_document_recover_stage" not in database.metadata
+    assert worker.queue.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_enqueue_threads_recover_stage_for_recover_action() -> None:
+    worker, database, _service = make_worker()
+
+    assert (
+        await worker.enqueue(
+            "dataset-a",
+            "document-a",
+            action="recover",
+            recover_stage="indexing",
+        )
+        is True
+    )
+
+    assert database.metadata["_document_ingest_action"] == "recover"
+    assert database.metadata["_document_recover_stage"] == "indexing"
+
+
+@pytest.mark.asyncio
+async def test_reembed_enqueue_skips_chunking_validation() -> None:
+    """A legacy/invalid persisted chunking config must not block vector repair."""
+
+    worker, database, _service = make_worker()
+
+    async def get_dataset(_dataset_id: str, *, connection: Any | None = None) -> dict[str, Any]:
+        del connection
+        return {
+            "dataset_id": "dataset-a",
+            "tenant_id": "tenant-a",
+            # A config the full pipeline would reject at enqueue time
+            # (chunk_size below the validated minimum of 50).
+            "index_config": {"chunking": {"chunk_size": 30}},
+        }
+
+    database.get_dataset = get_dataset  # type: ignore[method-assign]
+
+    assert (
+        await worker.enqueue("dataset-a", "document-a", action="reembed") is True
+    )
+    assert database.metadata["_document_ingest_action"] == "reembed"
+
+
+@pytest.mark.asyncio
+async def test_default_enqueue_still_validates_chunking_config() -> None:
+    from knowledge_service.services.knowledge.chunking import (
+        validate_persisted_chunking_config,
+    )
+
+    worker, database, _service = make_worker()
+
+    async def get_dataset(_dataset_id: str, *, connection: Any | None = None) -> dict[str, Any]:
+        del connection
+        return {
+            "dataset_id": "dataset-a",
+            "tenant_id": "tenant-a",
+            "index_config": {"chunking": {"chunk_size": 30}},
+        }
+
+    database.get_dataset = get_dataset  # type: ignore[method-assign]
+
+    rejected: type[BaseException] | None = None
+    try:
+        validate_persisted_chunking_config({"chunk_size": 30})
+    except Exception as exc:  # noqa: BLE001 - capture the validator's error type
+        rejected = type(exc)
+    if rejected is None:
+        pytest.skip("fixture config is accepted by the validator; nothing to prove")
+
+    with pytest.raises(rejected):
+        await worker.enqueue("dataset-a", "document-a")

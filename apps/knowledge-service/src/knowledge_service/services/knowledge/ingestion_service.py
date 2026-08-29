@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -18,7 +19,9 @@ from ...config.settings import Settings
 from ...core.exceptions import ValidationFailedError
 from ...core.observability.logging import get_logger
 from ...persistence.database import (
+    INDEX_PUBLICATION_REVISION_RESERVE,
     DatabaseStorage,
+    IndexLeaseUnavailableError,
     dataset_index_deletion_fence,
     dataset_ingestion_identity,
 )
@@ -47,6 +50,7 @@ if TYPE_CHECKING:
 
 MAX_EXTRACTED_TEXT_CHARS = 16_000_000
 MAX_EXTRACTED_TEXT_BYTES = 48 * 1024 * 1024
+_INDEX_ROLLBACK_PAYLOAD_KEY = "_kb_index_rollback"
 
 
 def _require_extracted_text_counts_budget(total_chars: int, total_bytes: int) -> None:
@@ -100,16 +104,11 @@ def _require_dataset_index_writable(dataset: dict[str, Any]) -> None:
             "dataset index deletion is pending; ingestion is unavailable"
         )
     try:
-        lexical_config = LexicalConfig.from_index_config(
+        LexicalConfig.from_index_config(
             _ensure_dict(dataset.get("index_config"))
         )
     except LexicalConfigError as exc:
         raise ValidationFailedError(str(exc)) from exc
-    if lexical_config.reads_bm25_v2:
-        raise ValidationFailedError(
-            "bm25_v2 active mode is read-only; roll back to lexical_v1 shadow "
-            "before ingesting documents"
-        )
 
 logger = get_logger(__name__)
 
@@ -118,10 +117,59 @@ class _ImageReceiptPersistenceError(RuntimeError):
     """A complete re-extracted image source generation could not be published."""
 
 
+class _Bm25V2WriteDisabled(ValidationFailedError):
+    """Kill-switch refusal that must not mutate pipeline state."""
+
+
 def _ingestion_dataset_identity(dataset: dict[str, Any]) -> str:
     """Canonical identity for choices that change persisted index generations."""
 
     return dataset_ingestion_identity(dataset)
+
+
+def _stable_segment_id(document_id: str, content_type: str, position: int) -> str:
+    """Deterministic lineage id for a chunk position (PRD T1.3 stable identity).
+
+    A crashed or replayed generation re-derives the SAME id for the same
+    (document, content_type, position), so its re-run upserts the rows and
+    Qdrant points it staged earlier instead of duplicating them. Mirrors the
+    uuid5(NAMESPACE_URL, "ai-platform:...") convention used for Confluence
+    document ids.
+    """
+
+    return str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"ai-platform:kb-segment:{document_id}:{content_type}:{position}",
+        )
+    )
+
+
+def _stable_index_node_id(document_id: str, content_type: str, position: int) -> str:
+    """Stable lookup identity persisted to segments.index_node_id."""
+
+    return f"{document_id}::{content_type}::{position}"
+
+
+def _rollback_backup_point_id(
+    dataset_id: str,
+    point_id: str,
+) -> str:
+    """Dataset-unique disabled backup ID for crash-resumable publication.
+
+    The ID deliberately excludes ``content_revision``: migration-076 triggers
+    may advance the negative seqlock while a publish is active, but the same
+    unfinished publication must still find its durable backups after restart.
+    Dataset publications are serialized, so one backup slot per original point
+    is sufficient; a fresh publication overwrites any disabled cleanup orphan.
+    """
+
+    return str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"ai-platform:kb-index-rollback:{dataset_id}:{point_id}",
+        )
+    )
 
 
 def _process_standard_chunks(
@@ -226,6 +274,178 @@ class IngestionService:
         executor = getattr(self, "_cpu_executor", None)
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
+
+    @staticmethod
+    def _parsing_cascade_config(
+        index_config: dict[str, Any],
+    ) -> tuple[Any, dict[str, Any]] | None:
+        """Resolve the opt-in T4 parser config without changing the default path.
+
+        ``index_config.parsing.enabled`` is the feature flag.  The legacy
+        ingestion path remains byte-for-byte unchanged when it is absent or
+        false.  Once enabled, the text-layer adapter is forced into its
+        boundary-preserving version so an IR round trip cannot silently move
+        existing chunk boundaries.
+        """
+
+        raw = index_config.get("parsing")
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise ValidationFailedError("index_config.parsing must be an object")
+        if raw.get("enabled") is not True:
+            return None
+
+        from .parsing import CascadeConfig, default_cascade_config
+
+        cascade_value = raw.get("cascade")
+        if cascade_value is None:
+            config = default_cascade_config()
+        elif isinstance(cascade_value, dict):
+            config = CascadeConfig.from_dict(cascade_value)
+        else:
+            raise ValidationFailedError("index_config.parsing.cascade must be an object")
+        if not config.stages:
+            raise ValidationFailedError("enabled parsing cascade has no stages")
+
+        if any(stage.backend == "text_layer" for stage in config.stages):
+            text_options = dict(config.backend_options.get("text_layer") or {})
+            text_options["preserve_boundaries"] = True
+            config.backend_options["text_layer"] = text_options
+        return config, config.to_dict()
+
+    async def _load_or_parse_document_ir(
+        self,
+        *,
+        dataset: dict[str, Any],
+        document: dict[str, Any],
+        index_config: dict[str, Any],
+        source_text: str,
+    ) -> str:
+        """Return the chunking input from a durable document-generation IR.
+
+        A matching generation/config row is the authority for rechunk and is
+        rendered without invoking a parser.  On a miss, ParserCascade writes
+        each accepted page to PostgreSQL before the document IR is published.
+        The current legacy adapter supplies one exact text page; page-oriented
+        PDF/scanned producers can pass multiple jobs through the same cache
+        without changing this persistence contract.
+        """
+
+        resolved = self._parsing_cascade_config(index_config)
+        if resolved is None:
+            return source_text
+        config, config_payload = resolved
+
+        from .parsing import (
+            DocIR,
+            PageJob,
+            PageSignals,
+            ParserCascade,
+            PostgresPageCache,
+            render_document_markdown,
+        )
+
+        tenant_id = str(dataset.get("tenant_id") or "").strip()
+        dataset_id = str(dataset.get("dataset_id") or "").strip()
+        document_id = str(document.get("document_id") or "").strip()
+        if not tenant_id or not dataset_id or not document_id:
+            raise ValidationFailedError("parsing IR ownership is incomplete")
+
+        source_bytes = source_text.encode("utf-8")
+        content_hash = hashlib.sha256(source_bytes).hexdigest()
+        generation_key = (
+            f"v{int(document.get('current_version') or 1)}:{content_hash}"
+        )
+        config_json = json.dumps(
+            config_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        parser_config_hash = hashlib.sha256(config_json.encode("utf-8")).hexdigest()
+
+        probe = ParserCascade(config)
+        parser_bundle = probe.bundle_version()
+        load_ir = getattr(self.db, "load_parsing_ir", None)
+        store_ir = getattr(self.db, "store_parsing_ir", None)
+        if not callable(load_ir) or not callable(store_ir):
+            raise RuntimeError("parsing IR persistence is unavailable")
+        row = await load_ir(
+            tenant_id=tenant_id,
+            dataset_id=dataset_id,
+            document_id=document_id,
+            generation_key=generation_key,
+            parser_bundle=parser_bundle,
+            parser_config_hash=parser_config_hash,
+        )
+        if row is not None:
+            payload = row.get("ir")
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            if not isinstance(payload, dict):
+                raise RuntimeError("persisted document parsing IR is malformed")
+            doc_ir = DocIR.from_dict(payload)
+            if doc_ir.doc_id != document_id or doc_ir.content_hash != content_hash:
+                raise RuntimeError("persisted document parsing IR identity mismatch")
+            return render_document_markdown(doc_ir)
+
+        job = PageJob(
+            doc_id=document_id,
+            page_number=1,
+            content_hash=content_hash,
+            text_layer=source_text,
+            filename=str(document.get("title") or ""),
+            mime=str(document.get("mime_type") or "") or None,
+            signals=PageSignals.derive(
+                text_layer=source_text,
+                mime=str(document.get("mime_type") or "") or None,
+            ),
+            options={"parser_config_hash": parser_config_hash},
+        )
+        page_cache = PostgresPageCache(
+            self.db,
+            tenant_id=tenant_id,
+            dataset_id=dataset_id,
+            document_id=document_id,
+            generation_key=generation_key,
+            parser_config_hash=parser_config_hash,
+            page_content_hashes={1: content_hash},
+        )
+        cascade = ParserCascade(config, cache=page_cache)
+        doc_ir = await cascade.parse_document(
+            document_id,
+            [job],
+            content_hash=content_hash,
+            filename=str(document.get("title") or ""),
+            mime=str(document.get("mime_type") or "") or None,
+            metadata={
+                "parser_config_hash": parser_config_hash,
+                "source_text_sha256": content_hash,
+            },
+        )
+        rendered = render_document_markdown(doc_ir)
+        text_layer_only = all(
+            page.parser == "text_layer" for page in doc_ir.pages
+        )
+        if text_layer_only and rendered.encode("utf-8") != source_bytes:
+            raise RuntimeError("text-layer IR changed the source byte boundaries")
+        stored = await store_ir(
+            tenant_id=tenant_id,
+            dataset_id=dataset_id,
+            document_id=document_id,
+            generation_key=generation_key,
+            content_hash=content_hash,
+            schema_version=doc_ir.schema_version,
+            parser_bundle=cascade.bundle_version(),
+            parser_config_hash=parser_config_hash,
+            cascade_config=config_payload,
+            ir=doc_ir.to_dict(),
+            stats=doc_ir.stats(),
+        )
+        if not stored:
+            raise RuntimeError("parsing IR lost document ownership during publication")
+        return rendered
 
     # ========================================================================
     # Main Ingestion Pipeline
@@ -415,25 +635,46 @@ class IngestionService:
         published_metadata["image_count"] = len(receipts)
         return published_metadata
 
-    async def ingest_document(self, dataset_id: str, document_id: str) -> None:
+    async def ingest_document(
+        self,
+        dataset_id: str,
+        document_id: str,
+        *,
+        chunking_config_override: dict[str, Any] | None = None,
+        index_config_override: dict[str, Any] | None = None,
+    ) -> list[str] | None:
+        """Run the full pipeline for one document.
+
+        ``chunking_config_override`` carries the replay snapshot's pinned
+        chunking config (addendum §1-T1.3): reprocess/recover replay the
+        snapshot version so an in-flight document cannot drift to a config
+        changed after submission. Returns the staged segment manifest for the
+        execution ledger (PRD T1.5), or None on failure paths.
+        """
         try:
             logger.info(f"Ingest started for document {document_id} (dataset={dataset_id})")
             dataset = await self._ks._get_dataset_or_404(dataset_id)
             _require_dataset_index_writable(dataset)
-            index_config = _ensure_dict(dataset.get("index_config"))
-            chunking_config_dict = index_config.get("chunking", {})
+            if index_config_override is None:
+                index_config = _ensure_dict(dataset.get("index_config"))
+            elif isinstance(index_config_override, dict):
+                index_config = dict(index_config_override)
+            else:
+                raise ValidationFailedError("pinned index_config must be an object")
+            if chunking_config_override is not None:
+                chunking_config_dict = dict(chunking_config_override)
+            else:
+                chunking_config_dict = index_config.get("chunking", {})
             validate_persisted_chunking_config(chunking_config_dict)
             ingestion_identity = _ingestion_dataset_identity(dataset)
             try:
-                lexical_config = LexicalConfig.from_index_config(
-                    _ensure_dict(dataset.get("index_config"))
-                )
+                lexical_config = LexicalConfig.from_index_config(index_config)
             except LexicalConfigError as exc:
                 raise ValidationFailedError(str(exc)) from exc
-            if lexical_config.reads_bm25_v2:
-                raise ValidationFailedError(
-                    "bm25_v2 active mode is read-only; roll back to lexical_v1 shadow "
-                    "before ingesting documents"
+            if lexical_config.reads_bm25_v2 and not self.vector_store.bm25_v2_enabled:
+                raise _Bm25V2WriteDisabled(
+                    "bm25_v2 active writes are unavailable while the service kill "
+                    "switch is off"
                 )
             dataset_tenant_id = str(dataset.get("tenant_id") or "").strip()
             if not dataset_tenant_id:
@@ -562,6 +803,12 @@ class IngestionService:
                         f"Failed to re-extract from original file: {e}, using stored content"
                     )
 
+            raw_text = await self._load_or_parse_document_ir(
+                dataset=dataset,
+                document=doc,
+                index_config=index_config,
+                source_text=_require_extracted_text_budget(raw_text),
+            )
             text = _require_extracted_text_budget(raw_text).strip()
             has_image_generation = self._has_complete_durable_image_receipt(
                 doc_meta,
@@ -569,11 +816,11 @@ class IngestionService:
             )
             if not text and not has_image_generation:
                 await self.db.update_document_status(
-                    document_id, status="failed", progress=100, error="empty document"
+                    document_id, status="error", progress=100, error="empty document"
                 )
                 return
 
-            await self.db.update_document_status(document_id, status="segmenting", progress=25)
+            await self.db.update_document_status(document_id, status="splitting", progress=25)
 
             # Check if structured parsing results are available (for enhanced multimodal docs)
             structured_parsing = doc_meta.get("structured_parsing", {})
@@ -656,7 +903,7 @@ class IngestionService:
 
             if not chunks and not has_image_generation:
                 await self.db.update_document_status(
-                    document_id, status="failed", progress=100, error="no segments generated"
+                    document_id, status="error", progress=100, error="no segments generated"
                 )
                 return
 
@@ -665,39 +912,67 @@ class IngestionService:
                 document_id, content_type="text"
             )
 
-            # Classify chunks: unchanged (skip), changed (update), new (insert)
-            # Also track which old segments to delete
-            chunks_to_embed = []  # (position, text, token_count, content_hash)
-            unchanged_segments = []  # segment_ids to keep as-is
-            vectors_to_delete = []  # old vector_ids that need replacement
+            # Classify chunks for the T1 stable-identity incremental upsert:
+            # - unchanged: same position AND content_hash AND the row already
+            #   serves (status != 'indexing') -> skipped entirely, zero
+            #   re-embedding; the row keeps serving with its existing vector.
+            # - staged: same position AND content_hash but the row is still in
+            #   staging (status='indexing') from an earlier crashed or replayed
+            #   generation -> no re-embedding (its vector was persisted
+            #   atomically with the row); it only joins the completion flip.
+            # - changed: same position, different hash -> KEEP the existing
+            #   row's segment_id/vector_id so the row is updated in place and
+            #   the Qdrant point is upserted at the SAME point id (no identity
+            #   rotation, no FK churn, no delete-then-insert window).
+            # - new: no row at that position -> deterministic uuid5 lineage id
+            #   so a crash/replay re-derives the same id instead of
+            #   duplicating rows and points.
+            # New/changed rows are staged enabled=false + status='indexing'
+            # and flipped to serving only after the WHOLE generation succeeds;
+            # unchanged rows keep serving until then (addendum §1-T1.4).
+            # Excess old rows are deleted only after staging succeeds.
+            chunks_to_embed = []  # (position, text, token_count, hash, meta, old_seg)
+            unchanged_segments = []  # serving segment_ids kept as-is
+            staged_resumable = []  # staged segment_ids only needing the flip
+            excess_segments = []  # old segment_ids beyond the new chunk range
+            excess_vectors = []  # vector ids owned by excess segments
 
             for pos, (text, token_count, content_hash, chunk_meta) in enumerate(chunks):
                 old_seg = existing_hashes.get(pos)
                 if old_seg and old_seg.get("content_hash") == content_hash:
-                    # Content unchanged - keep existing segment and vector
-                    unchanged_segments.append(old_seg["segment_id"])
-                    logger.info(f"Segment at position {pos} unchanged, skipping embed")
+                    if str(old_seg.get("status") or "completed") == "indexing":
+                        # A prior generation persisted this exact content but
+                        # never flipped it to serving; finish the flip instead
+                        # of re-embedding it.
+                        staged_resumable.append(old_seg["segment_id"])
+                    else:
+                        unchanged_segments.append(old_seg["segment_id"])
+                        logger.debug(
+                            f"Segment at position {pos} unchanged, skipping embed"
+                        )
                 else:
                     # Content changed or new - needs embedding
-                    chunks_to_embed.append((pos, text, token_count, content_hash, chunk_meta))
-                    if old_seg and old_seg.get("vector_id"):
-                        # Old vector needs to be replaced
-                        vectors_to_delete.append(old_seg["vector_id"])
+                    chunks_to_embed.append(
+                        (pos, text, token_count, content_hash, chunk_meta, old_seg)
+                    )
 
-            # Find excess old segments (positions beyond new chunk count)
+            # Find excess old segments (positions beyond new chunk count).
+            # Changed positions reuse their point ids, so only excess rows own
+            # vectors that must be deleted.
             max_new_pos = len(chunks) - 1
             max_existing_pos = max(existing_hashes.keys(), default=-1)
-            excess_segments = []
-            for pos, seg_info in existing_hashes.items():
+            for pos, seg_info in sorted(existing_hashes.items()):
                 if pos > max_new_pos:
                     excess_segments.append(seg_info["segment_id"])
                     if seg_info.get("vector_id"):
-                        vectors_to_delete.append(seg_info["vector_id"])
+                        excess_vectors.append(seg_info["vector_id"])
 
             logger.info(
-                f"Incremental update for document {document_id}: "
-                f"{len(unchanged_segments)} unchanged, {len(chunks_to_embed)} to embed, "
-                f"{len(excess_segments)} to delete"
+                f"Incremental upsert for document {document_id}: "
+                f"{len(unchanged_segments)} unchanged, "
+                f"{len(staged_resumable)} staged-resumable, "
+                f"{len(chunks_to_embed)} to embed, "
+                f"{len(excess_segments)} excess to delete after staging"
             )
 
             embedding_config = _ensure_dict(dataset.get("embedding_config"))
@@ -775,6 +1050,12 @@ class IngestionService:
                     tenant_id=dataset_tenant_id,
                     **({"lexical_config": lexical_config} if lexical_config.configured else {}),
                 )
+            except IndexLeaseUnavailableError:
+                # A concurrent lifecycle or blue-green transition owns the
+                # publication fence. This is retryable queue contention, not
+                # a failed generation; let the durable worker put the claimed
+                # row back to waiting without clearing the old index.
+                raise
             except Exception as exc:
                 await self._mark_document_failed_if_writable(
                     dataset_id,
@@ -785,7 +1066,7 @@ class IngestionService:
                     await embedder.close()
                 return
 
-            await self.db.update_document_status(document_id, status="embedding", progress=35)
+            await self.db.update_document_status(document_id, status="indexing", progress=35)
 
             # Incremental update strategy:
             # 1. Only embed chunks that changed or are new
@@ -794,6 +1075,7 @@ class IngestionService:
 
             segment_rows: list[dict[str, Any]] = []
             points = []
+            overwritten_vector_ids: list[str] = []
             try:
                 from qdrant_client.http import models as qmodels  # type: ignore
 
@@ -831,7 +1113,7 @@ class IngestionService:
                         batch_idx: int, batch: list
                     ) -> tuple[int, list, list]:
                         """Embed one batch; the provider owns retry and deadline."""
-                        texts = [text for _, text, _, _, _ in batch]
+                        texts = [text for _, text, _, _, _, _ in batch]
 
                         async with semaphore:
                             try:
@@ -862,13 +1144,34 @@ class IngestionService:
                             token_count,
                             content_hash,
                             chunk_meta,
+                            old_seg,
                         ) in enumerate(batch):
                             # Skip if embedding failed for this chunk
                             if vectors[j] is None:
                                 failed_batches += 1
                                 continue
 
-                            seg_id = str(uuid.uuid4())
+                            # Changed content at an existing position: keep the
+                            # row's identity so this is a true in-place upsert
+                            # (same segment row, same Qdrant point id). A
+                            # missing legacy id falls back to the deterministic
+                            # lineage id.
+                            seg_id = (
+                                str(old_seg.get("segment_id") or "").strip()
+                                if old_seg
+                                else ""
+                            )
+                            if not seg_id:
+                                seg_id = _stable_segment_id(document_id, "text", pos)
+                            # Reuse the row's existing vector (point) id when it
+                            # has one so the upsert replaces the vector in
+                            # place; new positions key the point by segment id.
+                            vector_id = (
+                                str((old_seg or {}).get("vector_id") or "").strip()
+                                or seg_id
+                            )
+                            if old_seg:
+                                overwritten_vector_ids.append(vector_id)
                             seg_metadata = dict(chunk_meta) if chunk_meta else {}
                             seg_metadata["position"] = pos
 
@@ -909,7 +1212,7 @@ class IngestionService:
                             }
                             points.append(
                                 qmodels.PointStruct(
-                                    id=seg_id,
+                                    id=vector_id,
                                     vector=vectors[j],
                                     payload=payload,
                                 )
@@ -922,11 +1225,30 @@ class IngestionService:
                                     "position": pos,
                                     "text": display_text,
                                     "token_count": token_count,
-                                    "vector_id": seg_id,
+                                    "vector_id": vector_id,
                                     "content_hash": content_hash,
                                     "metadata": seg_metadata,
+                                    # T1 staging: new/changed rows persist
+                                    # disabled and 'indexing' until the whole
+                                    # generation succeeds; unchanged rows keep
+                                    # serving until the completion flip.
+                                    "enabled": False,
+                                    "status": "indexing",
+                                    "index_node_id": _stable_index_node_id(
+                                        document_id, "text", pos
+                                    ),
+                                    "index_node_hash": content_hash,
                                 }
                             )
+
+                        embedded += len(batch)
+                        progress = 35 + (embedded / max(total, 1)) * 55
+                        await self.db.update_document_status(
+                            document_id, status="indexing", progress=min(progress, 95)
+                        )
+                        logger.debug(
+                            f"Batch {batch_idx + 1}/{len(batches)} embedded ({embedded}/{total} chunks)"
+                        )
 
                     if failed_batches > 0:
                         raise RuntimeError(
@@ -934,63 +1256,13 @@ class IngestionService:
                             "refusing a partial index replacement"
                         )
 
-                    embedded += len(batch)
-                    progress = 35 + (embedded / max(total, 1)) * 55
-                    await self.db.update_document_status(
-                        document_id, status="embedding", progress=min(progress, 95)
+                    # Do not mutate either serving store here.  Image work and
+                    # every other fallible preparation step must finish first;
+                    # the short publication phase below snapshots old points,
+                    # writes all Qdrant batches, and flips PostgreSQL once.
+                    logger.info(
+                        f"Prepared {len(points)} replacement points for document {document_id}"
                     )
-                    logger.debug(
-                        f"Batch {batch_idx + 1}/{len(batches)} embedded ({embedded}/{total} chunks)"
-                    )
-
-                    # Upsert new/changed vectors and segments with adaptive batching
-                    # Use smaller batches for large documents to avoid Qdrant timeout
-                    from .vector_store import VectorStoreConfig
-
-                    qdrant_batch_size = VectorStoreConfig.get_batch_size(len(points))
-
-                    total_points = len(points)
-                    upserted_count = 0
-
-                    for q_start in range(0, total_points, qdrant_batch_size):
-                        q_batch = points[q_start : q_start + qdrant_batch_size]
-                        batch_segment_rows = segment_rows[q_start : q_start + qdrant_batch_size]
-
-                        try:
-                            await self._require_ingestion_identity(
-                                dataset_id,
-                                ingestion_identity,
-                            )
-                            await self._persist_segment_batch(
-                                collection=collection,
-                                points=q_batch,
-                                segment_rows=batch_segment_rows,
-                                tenant_id=dataset_tenant_id,
-                                dataset_id=dataset_id,
-                                expected_ingestion_identity=ingestion_identity,
-                            )
-                            upserted_count += len(q_batch)
-                            logger.debug(
-                                f"Upserted sub-batch {q_start // qdrant_batch_size + 1}/"
-                                f"{(total_points + qdrant_batch_size - 1) // qdrant_batch_size} "
-                                f"({upserted_count}/{total_points} points)"
-                            )
-                        except Exception as upsert_err:
-                            logger.error(
-                                f"Failed to upsert sub-batch {q_start // qdrant_batch_size + 1}: {upsert_err}"
-                            )
-                            raise RuntimeError(
-                                "Segment batch persistence failed; old vectors were retained"
-                            ) from upsert_err
-
-                    if upserted_count > 0:
-                        logger.info(
-                            f"Upserted {upserted_count}/{len(segment_rows)} segments for document {document_id}"
-                        )
-                    else:
-                        raise RuntimeError(
-                            f"Failed to upsert any segments for document {document_id}"
-                        )
                 else:
                     logger.info(
                         f"All segments unchanged for document {document_id}, no embedding needed"
@@ -1000,36 +1272,6 @@ class IngestionService:
                     dataset_id,
                     ingestion_identity,
                 )
-
-                # Delete excess old segments (positions beyond new chunk count)
-                if excess_segments:
-                    deleted_count = await self.db.delete_segments_by_document(
-                        document_id,
-                        exclude_ids=unchanged_segments + [s["segment_id"] for s in segment_rows],
-                        content_type="text",
-                    )
-                    if deleted_count > 0:
-                        logger.info(
-                            f"Deleted {deleted_count} excess segments for document {document_id}"
-                        )
-
-                # Cleanup old vectors that were replaced or from deleted segments
-                if vectors_to_delete and collection:
-                    try:
-                        await self.vector_store.delete_points(
-                            collection,
-                            vectors_to_delete,
-                            tenant_id=dataset_tenant_id,
-                            dataset_id=dataset_id,
-                        )
-                        logger.info(
-                            f"Cleaned up {len(vectors_to_delete)} old vectors for document {document_id}"
-                        )
-                    except Exception as cleanup_err:
-                        # Non-fatal: old vectors may cause slight duplication but won't break search
-                        logger.warning(
-                            f"Failed to cleanup old vectors for document {document_id}: {cleanup_err}"
-                        )
 
                 # Persist dataset dimension/collection if missing.
                 if int(dataset.get("embedding_dimension") or 0) != dim or not dataset.get(
@@ -1085,6 +1327,9 @@ class IngestionService:
                     receipt_processing_mode in {"multimodal", "scanned"}
                     and (bool(image_metadata_list) or declared_image_count > 0)
                 )
+                desired_image_segment_ids: set[str] | None = (
+                    set() if requires_image_generation else None
+                )
                 if requires_image_generation and not image_metadata_list:
                     raise RuntimeError(
                         "document declares images without a durable rebuild receipt"
@@ -1100,6 +1345,17 @@ class IngestionService:
                         f"[Ingest] Images already embedded during upload: {embedded_count} images, skipping re-embedding"
                     )
                     image_count = embedded_count
+                    persisted_ids = {
+                        str(item.get("segment_id") or "").strip()
+                        for item in image_metadata_list
+                        if isinstance(item, dict)
+                        and str(item.get("segment_id") or "").strip()
+                    }
+                    desired_image_segment_ids = (
+                        persisted_ids
+                        if len(persisted_ids) == len(image_metadata_list)
+                        else None
+                    )
                 else:
                     # Determine which multimodal embedder to use
                     multimodal_embedder = None
@@ -1124,7 +1380,7 @@ class IngestionService:
 
                     if multimodal_embedder and self._ks.image_storage_service and image_metadata_list:
                         await self.db.update_document_status(
-                            document_id, status="embedding_images", progress=85
+                            document_id, status="indexing", progress=85
                         )
                         try:
                             image_collection = collection
@@ -1134,31 +1390,6 @@ class IngestionService:
                                     "dataset multimodal image dimension does not match its "
                                     "authoritative collection"
                                 )
-
-                            # Clean up existing image segments/vectors before re-embedding
-                            try:
-                                existing_image_segments = (
-                                    await self.db.get_image_segments_by_document(document_id)
-                                )
-                                if existing_image_segments:
-                                    vector_ids = [
-                                        seg.get("vector_id")
-                                        for seg in existing_image_segments
-                                        if seg.get("vector_id")
-                                    ]
-                                    if vector_ids:
-                                        await self.vector_store.delete_points(
-                                            image_collection,
-                                            vector_ids,
-                                            tenant_id=dataset_tenant_id,
-                                            dataset_id=dataset_id,
-                                        )
-                                    await self.db.delete_image_segments_by_document(document_id)
-                            except Exception as cleanup_err:
-                                raise RuntimeError(
-                                    "existing image generation cleanup failed; refusing a mixed "
-                                    "replacement"
-                                ) from cleanup_err
 
                             max_text_pos = max(max_new_pos, max_existing_pos)
                             image_base_position = max_text_pos + 1
@@ -1173,6 +1404,29 @@ class IngestionService:
                                 tenant_id=str(dataset.get("tenant_id") or "default"),
                                 expected_ingestion_identity=ingestion_identity,
                             )
+                            current_image_segments = (
+                                await self.db.get_image_segments_by_document(
+                                    document_id
+                                )
+                            )
+                            desired_positions = {
+                                image_base_position + idx
+                                for idx in range(len(image_metadata_list))
+                            }
+                            desired_image_segment_ids = {
+                                str(segment.get("segment_id") or "").strip()
+                                for segment in current_image_segments
+                                if int(segment.get("position") or 0)
+                                in desired_positions
+                                and str(segment.get("segment_id") or "").strip()
+                            }
+                            if len(desired_image_segment_ids) != len(
+                                image_metadata_list
+                            ):
+                                raise RuntimeError(
+                                    "image segment persistence did not publish the "
+                                    "complete attachment generation"
+                                )
                             logger.info(
                                 f"Processed {image_count} images for document {document_id}"
                             )
@@ -1182,39 +1436,109 @@ class IngestionService:
                                 "retryable"
                             ) from img_err
 
-                # Auto-associate images to text chunks
-                # This handles both:
-                # 1. Images from file uploads (processed above)
-                # 2. Images from Confluence sync (already in DB via _save_image_segment)
-                await self.db.update_document_status(
-                    document_id, status="associating_images", progress=95
-                )
-                try:
-                    # Check if there are any image segments for this document
-                    existing_image_segments = await self.db.get_image_segments_by_document(
-                        document_id
+                # T1 revision publication: image work and every embedding batch
+                # have now succeeded.  Publish text points/rows under the
+                # dataset seqlock; readers overlapping the short critical
+                # section retry from their entrypoint and can only return the
+                # complete old or complete new revision.
+                staged_manifest = [
+                    str(row.get("segment_id") or "").strip()
+                    for row in segment_rows
+                    if str(row.get("segment_id") or "").strip()
+                ] + staged_resumable
+                keep_segment_ids = unchanged_segments + staged_manifest
+                if points or staged_manifest or excess_segments:
+                    promoted, deleted_count = await self._publish_text_generation(
+                        collection=collection,
+                        points=points,
+                        segment_rows=segment_rows,
+                        excess_vector_ids=excess_vectors,
+                        overwritten_point_ids=overwritten_vector_ids,
+                        keep_segment_ids=keep_segment_ids,
+                        staged_segment_ids=staged_manifest,
+                        delete_excess=bool(excess_segments),
+                        tenant_id=dataset_tenant_id,
+                        dataset_id=dataset_id,
+                        document_id=document_id,
+                        expected_ingestion_identity=ingestion_identity,
                     )
-                    if existing_image_segments:
+                    logger.info(
+                        f"Activated {promoted}/{len(staged_manifest)} staged segments "
+                        f"and removed {deleted_count} excess rows for document {document_id}"
+                    )
+
+                # Build associations only after the new text rows exist.  The
+                # old attachment receipt remains untouched until both the
+                # association pass and its tenant-scoped replacement succeed.
+                await self.db.update_document_status(
+                    document_id, status="indexing", progress=95
+                )
+                existing_image_segments = await self.db.get_image_segments_by_document(
+                    document_id
+                )
+                if existing_image_segments:
+                    try:
                         association_result = await self._ks.associate_images_to_chunks(
                             document_id=document_id,
                             max_images_per_chunk=10,
                             proximity_threshold=0.3,
+                            image_segment_ids=desired_image_segment_ids,
                         )
                         logger.info(
                             f"Associated {association_result.get('associations_created', 0)} "
                             f"images to {association_result.get('segments_with_images', 0)} text chunks "
                             f"(total image segments: {len(existing_image_segments)})"
                         )
-                except Exception as assoc_err:
-                    logger.warning(
-                        f"Image association failed for document {document_id}: {assoc_err}"
-                    )
-                    # Continue even if association fails
+                    except Exception as assoc_err:
+                        if requires_image_generation:
+                            raise RuntimeError(
+                                "image association failed; refusing an incomplete "
+                                "multimodal publication"
+                            ) from assoc_err
+                        logger.warning(
+                            f"Image association failed for document {document_id}: {assoc_err}"
+                        )
 
-                # Update document segment_count after successful ingestion
+                replace_bindings = getattr(
+                    self.db,
+                    "replace_document_attachment_bindings",
+                    None,
+                )
+                if callable(replace_bindings):
+                    await replace_bindings(
+                        document_id,
+                        dataset_id,
+                        tenant_id=dataset_tenant_id,
+                    )
+                elif existing_image_segments:
+                    logger.warning(
+                        "Attachment binding persistence is unavailable; "
+                        "the runtime schema is older than migration 106"
+                    )
+
+                if desired_image_segment_ids is not None:
+                    stale_image_segments = [
+                        segment
+                        for segment in existing_image_segments
+                        if str(segment.get("segment_id") or "")
+                        not in desired_image_segment_ids
+                    ]
+                    await self._cleanup_stale_image_generation(
+                        collection=collection,
+                        stale_image_segments=stale_image_segments,
+                        tenant_id=dataset_tenant_id,
+                        dataset_id=dataset_id,
+                        document_id=document_id,
+                        expected_ingestion_identity=ingestion_identity,
+                    )
+
+                # Keep the denormalized count correct even for an unchanged
+                # generation that needed no cross-store publication.
                 await self.db.refresh_document_segment_count(document_id)
 
-                # Clear needs_reindex flag if this was a reindex operation
+                # Clear needs_reindex only after the new serving revision is
+                # provably published.  Clearing it earlier could advertise a
+                # failed replacement as healthy.
                 try:
                     await self.db.clear_dataset_needs_reindex(dataset_id)
                 except Exception as clear_err:
@@ -1222,19 +1546,64 @@ class IngestionService:
                         f"Failed to clear needs_reindex flag for {dataset_id}: {clear_err}"
                     )
 
-                await self.db.update_document_status(document_id, status="completed", progress=100)
+                # T3 embedding provenance: record which model embedded this
+                # document's vectors (migration 102 columns). Degrade-safe — a
+                # missing column (pre-102 DB) must never fail the generation.
+                try:
+                    await self.db.update_document_fields(
+                        document_id,
+                        {
+                            "embedding_model": str(
+                                dataset.get("embedding_model")
+                                or getattr(embedder, "model", "")
+                                or ""
+                            ),
+                            "embedding_model_version": str(
+                                dataset.get("embedding_model_version")
+                                or getattr(embedder, "model_version", "")
+                                or ""
+                            ),
+                            "embedding_dimension": int(dim or 0) or None,
+                        },
+                    )
+                except Exception as prov_err:
+                    logger.warning(
+                        f"Failed to stamp embedding provenance for document "
+                        f"{document_id}: {prov_err}"
+                    )
+
+                await self._complete_document_generation(
+                    collection=collection,
+                    tenant_id=dataset_tenant_id,
+                    dataset_id=dataset_id,
+                    document_id=document_id,
+                    expected_ingestion_identity=ingestion_identity,
+                    lexical_config=lexical_config,
+                )
+                return staged_manifest
+            except IndexLeaseUnavailableError:
+                raise
             except Exception as exc:
                 logger.error(
                     f"Embedding/vector store failed for document {document_id}: {exc}",
                     exc_info=True,
                 )
                 await self.db.update_document_status(
-                    document_id, status="failed", progress=100, error=str(exc)
+                    document_id, status="error", progress=100, error=str(exc)
                 )
             finally:
                 if embedder:
                     await embedder.close()
+        except IndexLeaseUnavailableError:
+            raise
         except Exception as exc:
+            if isinstance(exc, _Bm25V2WriteDisabled):
+                logger.warning(
+                    "BM25 v2 ingest refused before mutation for document %s: %s",
+                    document_id,
+                    exc,
+                )
+                return None
             # Best-effort: keep document status in a terminal state.
             logger.error(
                 f"Ingest failed for document {document_id}: {exc}",
@@ -1246,7 +1615,953 @@ class IngestionService:
                     document_id,
                     str(exc),
                 )
+            return None
+
+    async def reembed_document(
+        self, dataset_id: str, document_id: str
+    ) -> list[str] | None:
+        """PRD T1 item 3 reembed verb: in-place vector repair.
+
+        Re-embeds already-persisted text chunks at their EXISTING segment and
+        point identity — no re-parse, no re-split, no delete-first window, so
+        the serving generation never goes dark. Serving rows are repaired in
+        place; rows a crashed generation left staged (status='indexing'; their
+        vectors were persisted atomically with the row) are re-embedded and
+        then promoted by the same staging flip the full pipeline uses.
+        Operator-disabled rows keep their points deleted — re-enabling them is
+        not this verb's job. When nothing persisted exists yet the verb
+        degrades to the full pipeline so it never strands an unindexed
+        document.
+        """
+
+        try:
+            dataset = await self._ks._get_dataset_or_404(dataset_id)
+            _require_dataset_index_writable(dataset)
+            ingestion_identity = _ingestion_dataset_identity(dataset)
+            try:
+                lexical_config = LexicalConfig.from_index_config(
+                    _ensure_dict(dataset.get("index_config"))
+                )
+            except LexicalConfigError as exc:
+                raise ValidationFailedError(str(exc)) from exc
+            if lexical_config.reads_bm25_v2 and not self.vector_store.bm25_v2_enabled:
+                raise _Bm25V2WriteDisabled(
+                    "bm25_v2 active writes are unavailable while the service kill "
+                    "switch is off"
+                )
+            dataset_tenant_id = str(dataset.get("tenant_id") or "").strip()
+            if not dataset_tenant_id:
+                raise ValidationFailedError(
+                    "dataset tenant_id is required for re-embedding"
+                )
+            doc = await self.db.get_document(document_id)
+            if not doc or str(doc.get("dataset_id")) != dataset_id:
+                raise ValidationFailedError("document not found")
+
+            # Load the persisted text generation in position order: serving
+            # rows plus staged rows left by a crashed generation.
+            repair_rows: list[dict[str, Any]] = []
+            offset = 0
+            page_size = 500
+            while True:
+                page = await self.db.list_segments(
+                    dataset_id,
+                    document_id=document_id,
+                    limit=page_size,
+                    offset=offset,
+                )
+                if not page:
+                    break
+                for row in page:
+                    if str(row.get("content_type") or "text") != "text":
+                        continue
+                    row_status = str(row.get("status") or "")
+                    if row_status == "indexing" or (
+                        row_status == "completed"
+                        and row.get("enabled", True) is True
+                    ):
+                        repair_rows.append(row)
+                if len(page) < page_size:
+                    break
+                offset += page_size
+
+            if not repair_rows:
+                logger.info(
+                    f"Reembed of document {document_id} found no persisted chunks; "
+                    "falling back to the full pipeline"
+                )
+                return await self.ingest_document(dataset_id, document_id)
+
+            embedding_config = _ensure_dict(dataset.get("embedding_config"))
+            is_multimodal = self._ks._is_multimodal_dataset(dataset)
+            embedder: BaseEmbedding | None = None
+            try:
+                if is_multimodal:
+                    embedder = await maybe_await(
+                        self._ks._get_unified_multimodal_embedder(
+                            dataset, embedding_config
+                        )
+                    )
+                else:
+                    embedder = await maybe_await(
+                        self._ks._get_text_embedder(dataset, embedding_config)
+                    )
+                if embedder._dimension is None:
+                    await embedder.embed_query("test")
+                dim = embedder._dimension or 1024
+                await self._require_ingestion_identity(
+                    dataset_id, ingestion_identity
+                )
+                collection = await self.vector_store.ensure_collection(
+                    dataset_id=dataset_id,
+                    dimension=dim,
+                    collection_name=str(dataset.get("collection_name") or "") or None,
+                    tenant_id=dataset_tenant_id,
+                    **(
+                        {"lexical_config": lexical_config}
+                        if lexical_config.configured
+                        else {}
+                    ),
+                )
+
+                await self.db.update_document_status(
+                    document_id, status="indexing", progress=35
+                )
+
+                from qdrant_client.http import models as qmodels  # type: ignore
+
+                batch_size = (
+                    10
+                    if is_multimodal
+                    else self.settings.knowledge.text_embedding_batch_size
+                )
+                max_concurrent = (
+                    self.settings.knowledge.multimodal_embedding_max_concurrent
+                    if is_multimodal
+                    else self.settings.knowledge.text_embedding_max_concurrent
+                )
+                total = len(repair_rows)
+                batches = [
+                    repair_rows[i : i + batch_size]
+                    for i in range(0, total, batch_size)
+                ]
+                semaphore = asyncio.Semaphore(
+                    max(1, min(max_concurrent, len(batches)))
+                )
+
+                def _reembed_input(row: dict[str, Any]) -> str:
+                    # Vector parity contract: the engine embeds the
+                    # prefix-augmented chunk text while the row stores the
+                    # display text (contextual_prefix column carries the
+                    # prefix). Reconstruct exactly what the engine embedded so
+                    # a repair never rewrites vectors under different
+                    # semantics; the "\n\n" join is the canonical composition
+                    # any prefix producer must emit.
+                    text = str(row.get("text") or "")
+                    prefix = str(row.get("contextual_prefix") or "")
+                    return f"{prefix}\n\n{text}" if prefix else text
+
+                async def embed_indexed_batch(
+                    batch_idx: int, batch: list[dict[str, Any]]
+                ) -> tuple[int, list[Any], list[dict[str, Any]]]:
+                    texts = [_reembed_input(row) for row in batch]
+                    async with semaphore:
+                        try:
+                            vectors = await embedder.embed_documents(texts)
+                            return batch_idx, vectors, batch
+                        except Exception:
+                            logger.exception(
+                                f"Reembed embedding failed for batch {batch_idx + 1} "
+                                f"of document {document_id}"
+                            )
+                            return batch_idx, [None] * len(batch), batch
+
+                tasks = [
+                    embed_indexed_batch(idx, batch)
+                    for idx, batch in enumerate(batches)
+                ]
+
+                points: list[Any] = []
+                repaired_ids: list[str] = []
+                failed_chunks = 0
+                embedded = 0
+                for coro in asyncio.as_completed(tasks):
+                    _, vectors, batch = await coro
+                    await asyncio.sleep(0)
+                    for row, vector in zip(batch, vectors, strict=True):
+                        if vector is None:
+                            failed_chunks += 1
+                            continue
+                        segment_id = str(row.get("segment_id") or "").strip()
+                        if not segment_id:
+                            failed_chunks += 1
+                            continue
+                        vector_id = (
+                            str(row.get("vector_id") or "").strip() or segment_id
+                        )
+                        seg_metadata = row.get("metadata")
+                        seg_metadata = (
+                            seg_metadata if isinstance(seg_metadata, dict) else {}
+                        )
+                        payload_meta = {
+                            key: seg_metadata.get(key)
+                            for key in (
+                                "source_type",
+                                "citation_text",
+                                "source_reference",
+                                "section_title",
+                                "section_full_path",
+                                "page_number",
+                                "chunk_index",
+                                "paragraph_index",
+                                "source_document",
+                                "document_title",
+                                "madhab",
+                                "language",
+                            )
+                            if seg_metadata.get(key) is not None
+                        }
+                        payload = {
+                            "tenant_id": dataset_tenant_id,
+                            "dataset_id": dataset_id,
+                            "document_id": document_id,
+                            "segment_id": segment_id,
+                            "position": row.get("position"),
+                            # Same parity contract as the embedding input: the
+                            # engine's payload carries the prefix-augmented text.
+                            "text": _reembed_input(row),
+                            "token_count": row.get("token_count"),
+                            "source_type": payload_meta.get(
+                                "source_type", "unknown"
+                            ),
+                            "language": payload_meta.get("language", "en"),
+                            "metadata": payload_meta,
+                            "citation_text": payload_meta.get("citation_text"),
+                            "source_reference": payload_meta.get(
+                                "source_reference"
+                            ),
+                        }
+                        points.append(
+                            qmodels.PointStruct(
+                                id=vector_id, vector=vector, payload=payload
+                            )
+                        )
+                        repaired_ids.append(segment_id)
+                    embedded += len(batch)
+                    progress = 35 + (embedded / max(total, 1)) * 55
+                    await self.db.update_document_status(
+                        document_id, status="indexing", progress=min(progress, 95)
+                    )
+
+                if failed_chunks > 0:
+                    raise RuntimeError(
+                        f"Reembed failed for {failed_chunks} chunks; refusing a "
+                        "partial vector repair"
+                    )
+
+                staged_ids = [
+                    str(row.get("segment_id") or "").strip()
+                    for row in repair_rows
+                    if str(row.get("status") or "") == "indexing"
+                    and str(row.get("segment_id") or "").strip()
+                ]
+                upserted, promoted = await self._publish_reembed_generation(
+                    collection=collection,
+                    points=points,
+                    staged_segment_ids=staged_ids,
+                    tenant_id=dataset_tenant_id,
+                    dataset_id=dataset_id,
+                    document_id=document_id,
+                    expected_ingestion_identity=ingestion_identity,
+                )
+                if staged_ids:
+                    logger.info(
+                        f"Reembed promoted {promoted}/{len(staged_ids)} staged "
+                        f"segments for document {document_id}"
+                    )
+
+                await self.db.refresh_document_segment_count(document_id)
+                await self._complete_document_generation(
+                    collection=collection,
+                    tenant_id=dataset_tenant_id,
+                    dataset_id=dataset_id,
+                    document_id=document_id,
+                    expected_ingestion_identity=ingestion_identity,
+                    lexical_config=lexical_config,
+                )
+                logger.info(
+                    f"Reembed repaired {upserted} vectors for document {document_id}"
+                )
+                return repaired_ids
+            finally:
+                if embedder:
+                    await embedder.close()
+        except IndexLeaseUnavailableError:
+            raise
+        except Exception as exc:
+            if isinstance(exc, _Bm25V2WriteDisabled):
+                logger.warning(
+                    "BM25 v2 reembed refused before mutation for document %s: %s",
+                    document_id,
+                    exc,
+                )
+                return None
+            logger.error(
+                f"Reembed failed for document {document_id}: {exc}",
+                exc_info=True,
+            )
+            with contextlib.suppress(Exception):
+                await self._mark_document_failed_if_writable(
+                    dataset_id,
+                    document_id,
+                    str(exc),
+                )
+            return None
+
+    async def _snapshot_points_for_rollback(
+        self,
+        *,
+        collection: str,
+        point_ids: list[str],
+        tenant_id: str,
+        dataset_id: str,
+    ) -> dict[str, Any]:
+        snapshot = getattr(self.vector_store, "snapshot_points", None)
+        if not callable(snapshot):
+            raise RuntimeError(
+                "vector rollback snapshots are unavailable; refusing index publication"
+            )
+        result = await snapshot(
+            collection,
+            point_ids,
+            tenant_id=tenant_id,
+            dataset_id=dataset_id,
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError("vector rollback snapshot returned an invalid receipt")
+        return {str(point_id): point for point_id, point in result.items()}
+
+    async def _complete_document_generation(
+        self,
+        *,
+        collection: str,
+        tenant_id: str,
+        dataset_id: str,
+        document_id: str,
+        expected_ingestion_identity: str,
+        lexical_config: LexicalConfig,
+    ) -> None:
+        """Publish the terminal document authority with an active-v2 receipt.
+
+        ``documents.status`` participates in content_revision and the BM25
+        authority predicate. Active mode therefore closes the status change
+        under the same negative seqlock and full-scroll certification as point
+        writes. Shadow/legacy mode keeps the existing direct terminal update.
+        """
+
+        if not lexical_config.reads_bm25_v2:
+            await self.db.update_document_status(
+                document_id,
+                status="completed",
+                progress=100,
+            )
             return
+
+        async def commit(
+            connection: Any,
+            *,
+            finish_publication: bool = True,
+        ) -> None:
+            if finish_publication:
+                raise RuntimeError(
+                    "active document completion requires deferred publication finalization"
+                )
+            async with connection.transaction():
+                await self.db.update_document_status(
+                    document_id,
+                    status="completed",
+                    progress=100,
+                    connection=connection,
+                )
+
+        await self._publish_points_atomically(
+            collection=collection,
+            points=[],
+            delete_point_ids=[],
+            rollback_point_ids=[],
+            tenant_id=tenant_id,
+            dataset_id=dataset_id,
+            expected_ingestion_identity=expected_ingestion_identity,
+            commit=commit,
+        )
+
+    async def _prepare_durable_point_backups(
+        self,
+        *,
+        collection: str,
+        rollback_point_ids: list[str],
+        publication_revision: int,
+        recovered: bool,
+        tenant_id: str,
+        dataset_id: str,
+        expected_ingestion_identity: str,
+        lifecycle_lease_held: bool = False,
+    ) -> tuple[dict[str, Any], list[str]]:
+        """Create/recover disabled Qdrant backups before serving IDs mutate."""
+
+        from qdrant_client.http import models as qmodels  # type: ignore
+
+        from .vector_store import VectorStoreConfig
+
+        original_ids = list(dict.fromkeys(rollback_point_ids))
+        backup_ids = {
+            point_id: _rollback_backup_point_id(
+                dataset_id,
+                point_id,
+            )
+            for point_id in original_ids
+        }
+        observed_backup_points = await self._snapshot_points_for_rollback(
+            collection=collection,
+            point_ids=list(backup_ids.values()),
+            tenant_id=tenant_id,
+            dataset_id=dataset_id,
+        )
+        # A fresh publication owns the deterministic backup slots and replaces
+        # disabled cleanup orphans with a snapshot of the current serving
+        # points.  Only a recovered negative revision consumes old receipts.
+        backup_points = observed_backup_points if recovered else {}
+
+        snapshots: dict[str, Any] = {}
+        for original_id, backup_id in backup_ids.items():
+            backup = backup_points.get(backup_id)
+            if backup is None:
+                continue
+            backup_payload = dict(getattr(backup, "payload", None) or {})
+            receipt = backup_payload.get(_INDEX_ROLLBACK_PAYLOAD_KEY)
+            if not isinstance(receipt, dict):
+                raise RuntimeError("vector rollback backup receipt is malformed")
+            if str(receipt.get("original_point_id") or "") != original_id:
+                raise RuntimeError("vector rollback backup receipt has conflicting identity")
+            receipt_revision = int(receipt.get("publication_revision") or 0)
+            current_revision = abs(publication_revision)
+            if (
+                receipt_revision < current_revision
+                or receipt_revision - current_revision
+                > INDEX_PUBLICATION_REVISION_RESERVE
+            ):
+                raise RuntimeError("vector rollback backup belongs to another publication")
+            original_payload = receipt.get("payload")
+            if not isinstance(original_payload, dict):
+                raise RuntimeError("vector rollback backup payload is malformed")
+            snapshots[original_id] = qmodels.PointStruct(
+                id=receipt["original_point_id"],
+                vector=backup.vector,
+                payload=original_payload,
+            )
+
+        # No durable backup means the prior publisher never reached serving-ID
+        # mutation (backups are fully written first).  Snapshot the current old
+        # values and create the durable receipts.  If any backup exists, a
+        # missing sibling was originally absent and must be treated as new.
+        if not snapshots and original_ids:
+            snapshots = await self._snapshot_points_for_rollback(
+                collection=collection,
+                point_ids=original_ids,
+                tenant_id=tenant_id,
+                dataset_id=dataset_id,
+            )
+
+        missing_backup_points: list[Any] = []
+        for original_id, original in snapshots.items():
+            backup_id = backup_ids[original_id]
+            if backup_id in backup_points:
+                continue
+            original_payload = dict(getattr(original, "payload", None) or {})
+            document_id = str(original_payload.get("document_id") or "").strip()
+            if not document_id:
+                raise RuntimeError(
+                    "serving point lacks document identity required for durable rollback"
+                )
+            missing_backup_points.append(
+                qmodels.PointStruct(
+                    id=backup_id,
+                    vector=original.vector,
+                    payload={
+                        "tenant_id": tenant_id,
+                        "dataset_id": dataset_id,
+                        "document_id": document_id,
+                        "segment_id": original_payload.get("segment_id"),
+                        "enabled": False,
+                        _INDEX_ROLLBACK_PAYLOAD_KEY: {
+                            "publication_revision": abs(publication_revision),
+                            "original_point_id": original.id,
+                            "payload": original_payload,
+                        },
+                    },
+                )
+            )
+
+        batch_size = VectorStoreConfig.get_batch_size(len(missing_backup_points))
+        for start in range(0, len(missing_backup_points), batch_size):
+            await self._upsert_with_ingestion_identity(
+                collection=collection,
+                points=missing_backup_points[start : start + batch_size],
+                dataset_id=dataset_id,
+                expected_ingestion_identity=expected_ingestion_identity,
+                lifecycle_lease_held=lifecycle_lease_held,
+            )
+        return snapshots, list(backup_ids.values())
+
+    async def _restore_point_snapshot(
+        self,
+        *,
+        collection: str,
+        snapshots: dict[str, Any],
+        intended_point_ids: list[str],
+        tenant_id: str,
+        dataset_id: str,
+        expected_ingestion_identity: str,
+        lifecycle_lease_held: bool = False,
+        affects_bm25_scope: bool = True,
+    ) -> None:
+        """Restore overwritten points and delete only IDs that were truly new."""
+
+        from .vector_store import VectorStoreConfig
+
+        old_points = list(snapshots.values())
+        batch_size = VectorStoreConfig.get_batch_size(len(old_points))
+        for start in range(0, len(old_points), batch_size):
+            await self._upsert_with_ingestion_identity(
+                collection=collection,
+                points=old_points[start : start + batch_size],
+                dataset_id=dataset_id,
+                expected_ingestion_identity=expected_ingestion_identity,
+                lifecycle_lease_held=lifecycle_lease_held,
+            )
+
+        new_point_ids = sorted(set(intended_point_ids) - set(snapshots))
+        if new_point_ids:
+            delete_kwargs: dict[str, Any] = {}
+            if lifecycle_lease_held:
+                delete_kwargs["lifecycle_lease_held"] = True
+            if not affects_bm25_scope:
+                delete_kwargs["affects_bm25_scope"] = False
+            await self.vector_store.delete_points(
+                collection,
+                new_point_ids,
+                tenant_id=tenant_id,
+                dataset_id=dataset_id,
+                **delete_kwargs,
+            )
+
+    async def _publish_points_atomically(
+        self,
+        *,
+        collection: str,
+        points: list[Any],
+        delete_point_ids: list[str],
+        rollback_point_ids: list[str],
+        tenant_id: str,
+        dataset_id: str,
+        expected_ingestion_identity: str,
+        commit,
+        affects_bm25_scope: bool = True,
+    ) -> Any:
+        """Publish Qdrant writes behind a PG seqlock with exact rollback."""
+
+        from .vector_store import VectorStoreConfig
+
+        lease = getattr(self.db, "dataset_index_publication_lease", None)
+        abort = getattr(self.db, "abort_index_publication", None)
+        if not callable(lease) or not callable(abort):
+            raise RuntimeError("dataset index publication protocol is unavailable")
+
+        point_ids = [
+            str(point.id)
+            for point in points
+            if getattr(point, "id", None) is not None
+        ]
+        affected_point_ids = list(
+            dict.fromkeys(point_ids + [str(point_id) for point_id in delete_point_ids])
+        )
+        lifecycle_service = (
+            getattr(self._ks, "bm25_v2_lifecycle_service", None)
+            if self._ks is not None
+            else None
+        )
+        if lifecycle_service is not None:
+            # Preflight before the publication lease changes content_revision:
+            # an active dataset with the kill switch off must be a zero-side-
+            # effect refusal. The check is repeated under the shared lease.
+            await lifecycle_service.active_publication_context(dataset_id)
+        else:
+            get_live_profile = getattr(
+                self.vector_store,
+                "get_live_lexical_profile",
+                None,
+            )
+            if callable(get_live_profile):
+                live_profile, _receipt = await get_live_profile(collection)
+                if live_profile is not None and live_profile.reads_bm25_v2:
+                    raise RuntimeError(
+                        "active bm25_v2 publication requires PostgreSQL lifecycle authority"
+                    )
+
+        async def publish() -> Any:
+            async with lease(
+                dataset_id,
+                expected_ingestion_identity=expected_ingestion_identity,
+            ) as publication:
+                publication_connection = publication.connection
+                publication_revision = int(publication.revision)
+                backup_point_ids = [
+                    _rollback_backup_point_id(
+                        dataset_id,
+                        point_id,
+                    )
+                    for point_id in dict.fromkeys(rollback_point_ids)
+                ]
+                snapshots: dict[str, Any] = {}
+                backups_ready = False
+                mutation_started = False
+                authority_committed = False
+                active_context: dict[str, Any] | None = None
+                if lifecycle_service is not None:
+                    active_context = await lifecycle_service.active_publication_context(
+                        dataset_id
+                    )
+                else:
+                    get_live_profile = getattr(
+                        self.vector_store,
+                        "get_live_lexical_profile",
+                        None,
+                    )
+                    if callable(get_live_profile):
+                        live_profile, _receipt = await get_live_profile(collection)
+                        if live_profile is not None and live_profile.reads_bm25_v2:
+                            raise RuntimeError(
+                                "active bm25_v2 publication requires PostgreSQL "
+                                "lifecycle authority"
+                            )
+                try:
+                    snapshots, backup_point_ids = await self._prepare_durable_point_backups(
+                        collection=collection,
+                        rollback_point_ids=rollback_point_ids,
+                        publication_revision=publication_revision,
+                        recovered=bool(publication.recovered),
+                        tenant_id=tenant_id,
+                        dataset_id=dataset_id,
+                        expected_ingestion_identity=expected_ingestion_identity,
+                        lifecycle_lease_held=True,
+                    )
+                    backups_ready = True
+                    qdrant_batch_size = VectorStoreConfig.get_batch_size(len(points))
+                    for start in range(0, len(points), qdrant_batch_size):
+                        mutation_started = True
+                        await self._upsert_with_ingestion_identity(
+                            collection=collection,
+                            points=points[start : start + qdrant_batch_size],
+                            dataset_id=dataset_id,
+                            expected_ingestion_identity=expected_ingestion_identity,
+                            lifecycle_lease_held=True,
+                        )
+                    if delete_point_ids:
+                        mutation_started = True
+                        await self.vector_store.delete_points(
+                            collection,
+                            delete_point_ids,
+                            tenant_id=tenant_id,
+                            dataset_id=dataset_id,
+                            lifecycle_lease_held=True,
+                            affects_bm25_scope=affects_bm25_scope,
+                        )
+                    result = await commit(
+                        publication_connection,
+                        finish_publication=active_context is None,
+                    )
+                    authority_committed = True
+                    if active_context is not None:
+                        certification = (
+                            await lifecycle_service.recertify_active_publication(
+                                active_context,
+                                publication_revision=publication_revision,
+                            )
+                        )
+                        finish_publication = getattr(
+                            self.db,
+                            "finish_index_publication",
+                            None,
+                        )
+                        if not callable(finish_publication):
+                            raise RuntimeError(
+                                "deferred index publication finalization is unavailable"
+                            )
+                        async with publication_connection.transaction():
+                            final_revision = await finish_publication(
+                                dataset_id,
+                                connection=publication_connection,
+                            )
+                            if int(final_revision) != int(
+                                certification["target_revision"]
+                            ):
+                                raise RuntimeError(
+                                    "index publication revision disagrees with the "
+                                    "BM25 v2 receipt"
+                                )
+                            await lifecycle_service.settle_active_publication(
+                                active_context,
+                                certification,
+                                connection=publication_connection,
+                            )
+                except BaseException as publication_error:
+                    if not backups_ready and publication.recovered:
+                        raise RuntimeError(
+                            "unfinished index publication could not recover its durable backups; "
+                            "retrieval remains fenced"
+                        )
+                    if backups_ready and mutation_started:
+                        try:
+                            await self._restore_point_snapshot(
+                                collection=collection,
+                                snapshots=snapshots,
+                                intended_point_ids=affected_point_ids,
+                                tenant_id=tenant_id,
+                                dataset_id=dataset_id,
+                                expected_ingestion_identity=expected_ingestion_identity,
+                                lifecycle_lease_held=True,
+                                affects_bm25_scope=affects_bm25_scope,
+                            )
+                        except BaseException as rollback_error:
+                            raise RuntimeError(
+                                "index publication rollback was incomplete; retrieval remains "
+                                "fenced"
+                            ) from rollback_error
+                    if authority_committed and active_context is not None:
+                        raise RuntimeError(
+                            "active BM25 v2 publication failed after PostgreSQL authority "
+                            "committed; old vectors were restored and the negative revision "
+                            "remains fail-closed for recovery"
+                        ) from publication_error
+                    try:
+                        if backup_point_ids:
+                            await self.vector_store.delete_points(
+                                collection,
+                                backup_point_ids,
+                                tenant_id=tenant_id,
+                                dataset_id=dataset_id,
+                                lifecycle_lease_held=True,
+                                affects_bm25_scope=False,
+                            )
+                        await abort(
+                            dataset_id,
+                            connection=publication_connection,
+                        )
+                    except BaseException as rollback_error:
+                        raise RuntimeError(
+                            "index publication rollback was incomplete; retrieval remains fenced"
+                        ) from rollback_error
+                    raise
+
+                if backup_point_ids:
+                    try:
+                        await self.vector_store.delete_points(
+                            collection,
+                            backup_point_ids,
+                            tenant_id=tenant_id,
+                            dataset_id=dataset_id,
+                            lifecycle_lease_held=True,
+                            affects_bm25_scope=False,
+                        )
+                    except Exception:
+                        # Backups are explicitly disabled and PostgreSQL has
+                        # already committed the new revision.  A cleanup miss is
+                        # storage debt, not a serving-consistency failure.
+                        logger.warning(
+                            "Published index revision retained disabled rollback backups",
+                            exc_info=True,
+                        )
+                return result
+
+        # Propagate worker cancellation into the publisher, whose BaseException
+        # branch proves rollback (or leaves an already-committed active publish
+        # behind its negative fail-closed fence) before the document lease can
+        # be released.
+        task = asyncio.create_task(publish())
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except BaseException:
+                logger.exception("Index publication failed while worker cancellation was pending")
+            raise
+
+    async def _publish_text_generation(
+        self,
+        *,
+        collection: str,
+        points: list[Any],
+        segment_rows: list[dict[str, Any]],
+        excess_vector_ids: list[str],
+        overwritten_point_ids: list[str],
+        keep_segment_ids: list[str],
+        staged_segment_ids: list[str],
+        delete_excess: bool,
+        tenant_id: str,
+        dataset_id: str,
+        document_id: str,
+        expected_ingestion_identity: str,
+    ) -> tuple[int, int]:
+        commit_publication = getattr(self.db, "commit_text_segment_publication", None)
+        if not callable(commit_publication):
+            raise RuntimeError("text segment publication protocol is unavailable")
+
+        async def commit(
+            connection: Any,
+            *,
+            finish_publication: bool = True,
+        ) -> tuple[int, int]:
+            kwargs: dict[str, Any] = {}
+            if not finish_publication:
+                kwargs["finish_publication"] = False
+            return await commit_publication(
+                dataset_id=dataset_id,
+                document_id=document_id,
+                segment_rows=segment_rows,
+                keep_segment_ids=keep_segment_ids,
+                staged_segment_ids=staged_segment_ids,
+                delete_excess=delete_excess,
+                expected_ingestion_identity=expected_ingestion_identity,
+                connection=connection,
+                **kwargs,
+            )
+
+        return await self._publish_points_atomically(
+            collection=collection,
+            points=points,
+            delete_point_ids=excess_vector_ids,
+            rollback_point_ids=[
+                *overwritten_point_ids,
+                *excess_vector_ids,
+            ],
+            tenant_id=tenant_id,
+            dataset_id=dataset_id,
+            expected_ingestion_identity=expected_ingestion_identity,
+            commit=commit,
+        )
+
+    async def _publish_reembed_generation(
+        self,
+        *,
+        collection: str,
+        points: list[Any],
+        staged_segment_ids: list[str],
+        tenant_id: str,
+        dataset_id: str,
+        document_id: str,
+        expected_ingestion_identity: str,
+    ) -> tuple[int, int]:
+        commit_publication = getattr(self.db, "commit_reembed_publication", None)
+        if not callable(commit_publication):
+            raise RuntimeError("reembed publication protocol is unavailable")
+
+        async def commit(
+            connection: Any,
+            *,
+            finish_publication: bool = True,
+        ) -> int:
+            kwargs: dict[str, Any] = {}
+            if not finish_publication:
+                kwargs["finish_publication"] = False
+            return await commit_publication(
+                dataset_id=dataset_id,
+                document_id=document_id,
+                staged_segment_ids=staged_segment_ids,
+                expected_ingestion_identity=expected_ingestion_identity,
+                connection=connection,
+                **kwargs,
+            )
+
+        promoted = await self._publish_points_atomically(
+            collection=collection,
+            points=points,
+            delete_point_ids=[],
+            rollback_point_ids=[
+                str(point.id)
+                for point in points
+                if getattr(point, "id", None) is not None
+            ],
+            tenant_id=tenant_id,
+            dataset_id=dataset_id,
+            expected_ingestion_identity=expected_ingestion_identity,
+            commit=commit,
+        )
+        return len(points), int(promoted)
+
+    async def _cleanup_stale_image_generation(
+        self,
+        *,
+        collection: str,
+        stale_image_segments: list[dict[str, Any]],
+        tenant_id: str,
+        dataset_id: str,
+        document_id: str,
+        expected_ingestion_identity: str,
+    ) -> int:
+        """Remove stale image rows/points with exact Qdrant rollback."""
+
+        stale_segment_ids = [
+            str(segment.get("segment_id") or "").strip()
+            for segment in stale_image_segments
+            if str(segment.get("segment_id") or "").strip()
+        ]
+        if not stale_segment_ids:
+            return 0
+        stale_point_ids = [
+            str(segment.get("vector_id") or segment.get("segment_id") or "").strip()
+            for segment in stale_image_segments
+            if str(
+                segment.get("vector_id") or segment.get("segment_id") or ""
+            ).strip()
+        ]
+        commit_cleanup = getattr(self.db, "commit_image_segment_cleanup", None)
+        if not callable(commit_cleanup):
+            raise RuntimeError("image generation cleanup protocol is unavailable")
+
+        async def commit(
+            connection: Any,
+            *,
+            finish_publication: bool = True,
+        ) -> int:
+            kwargs: dict[str, Any] = {}
+            if not finish_publication:
+                kwargs["finish_publication"] = False
+            return await commit_cleanup(
+                dataset_id=dataset_id,
+                document_id=document_id,
+                stale_segment_ids=stale_segment_ids,
+                expected_ingestion_identity=expected_ingestion_identity,
+                connection=connection,
+                **kwargs,
+            )
+
+        return int(
+            await self._publish_points_atomically(
+                collection=collection,
+                points=[],
+                delete_point_ids=stale_point_ids,
+                rollback_point_ids=stale_point_ids,
+                tenant_id=tenant_id,
+                dataset_id=dataset_id,
+                expected_ingestion_identity=expected_ingestion_identity,
+                commit=commit,
+                affects_bm25_scope=False,
+            )
+        )
 
     async def _persist_segment_batch(
         self,
@@ -1258,7 +2573,15 @@ class IngestionService:
         dataset_id: str,
         expected_ingestion_identity: str,
     ) -> None:
-        """Persist one replacement batch without orphaning new Qdrant points."""
+        """Persist one batch while preserving overwritten points on DB failure."""
+
+        point_ids = [str(point.id) for point in points if getattr(point, "id", None)]
+        snapshots = await self._snapshot_points_for_rollback(
+            collection=collection,
+            point_ids=point_ids,
+            tenant_id=tenant_id,
+            dataset_id=dataset_id,
+        )
         await self._upsert_with_ingestion_identity(
             collection=collection,
             points=points,
@@ -1268,17 +2591,18 @@ class IngestionService:
         try:
             await self.db.insert_segments(segment_rows)
         except Exception:
-            point_ids = [str(point.id) for point in points if getattr(point, "id", None)]
             try:
-                await self.vector_store.delete_points(
-                    collection,
-                    point_ids,
+                await self._restore_point_snapshot(
+                    collection=collection,
+                    snapshots=snapshots,
+                    intended_point_ids=point_ids,
                     tenant_id=tenant_id,
                     dataset_id=dataset_id,
+                    expected_ingestion_identity=expected_ingestion_identity,
                 )
             except Exception:
                 logger.warning(
-                    "Failed to compensate Qdrant points after segment DB failure",
+                    "Failed to restore Qdrant points after segment DB failure",
                     exc_info=True,
                 )
             raise
@@ -1302,24 +2626,70 @@ class IngestionService:
         returns successfully.
         """
 
+        point_ids = [str(point.id) for point in points if getattr(point, "id", None)]
+        snapshot_points = getattr(self.vector_store, "snapshot_points", None)
+        if callable(snapshot_points):
+            snapshots = await self._snapshot_points_for_rollback(
+                collection=collection,
+                point_ids=point_ids,
+                tenant_id=tenant_id,
+                dataset_id=dataset_id,
+            )
+        else:
+            get_existing = getattr(
+                self.db,
+                "get_image_segments_by_document",
+                None,
+            )
+            if callable(get_existing) and image_segments:
+                existing_rows = await get_existing(
+                    str(image_segments[0].get("document_id") or "")
+                )
+            else:
+                existing_rows = []
+            existing_point_ids = {
+                str(row.get("vector_id") or row.get("segment_id") or "").strip()
+                for row in existing_rows
+                if str(
+                    row.get("vector_id") or row.get("segment_id") or ""
+                ).strip()
+            }
+            if existing_point_ids.intersection(point_ids):
+                raise RuntimeError(
+                    "vector rollback snapshots are unavailable for an image replacement"
+                )
+            snapshots = {}
         await self._upsert_with_ingestion_identity(
             collection=collection,
             points=points,
             dataset_id=dataset_id,
             expected_ingestion_identity=expected_ingestion_identity,
         )
+        fallback_stored_ids: list[str] = []
         try:
-            for segment in image_segments:
-                await self.db.save_image_segment(segment)
+            store_batch = getattr(self.db, "store_image_segments", None)
+            if callable(store_batch):
+                await store_batch(image_segments)
+            else:
+                store_one = getattr(self.db, "save_image_segment", None)
+                if not callable(store_one):
+                    raise RuntimeError("image segment persistence is unavailable")
+                for segment in image_segments:
+                    fallback_stored_ids.append(
+                        str(segment.get("segment_id") or "").strip()
+                    )
+                    await store_one(segment)
         except Exception as exc:
-            point_ids = [str(point.id) for point in points if getattr(point, "id", None)]
             cleanup_failures: list[str] = []
             try:
-                await self.vector_store.delete_points(
-                    collection,
-                    point_ids,
+                await self._restore_point_snapshot(
+                    collection=collection,
+                    snapshots=snapshots,
+                    intended_point_ids=point_ids,
                     tenant_id=tenant_id,
                     dataset_id=dataset_id,
+                    expected_ingestion_identity=expected_ingestion_identity,
+                    affects_bm25_scope=False,
                 )
             except Exception:
                 cleanup_failures.append("qdrant")
@@ -1328,22 +2698,20 @@ class IngestionService:
                     exc_info=True,
                 )
 
-            delete_segment = getattr(self.db, "delete_segment", None)
-            if not callable(delete_segment):
-                cleanup_failures.append("postgres")
-            else:
-                for segment in image_segments:
-                    segment_id = str(segment.get("segment_id") or "").strip()
-                    if not segment_id:
-                        continue
-                    try:
-                        await delete_segment(segment_id)
-                    except Exception:
-                        cleanup_failures.append("postgres")
-                        logger.warning(
-                            "Failed to compensate image segment row after batch failure",
-                            exc_info=True,
-                        )
+            if fallback_stored_ids:
+                delete_segment = getattr(self.db, "delete_segment", None)
+                if not callable(delete_segment):
+                    cleanup_failures.append("postgres")
+                else:
+                    for segment_id in fallback_stored_ids:
+                        try:
+                            await delete_segment(segment_id)
+                        except Exception:
+                            cleanup_failures.append("postgres")
+                            logger.warning(
+                                "Failed to compensate a fallback image segment row",
+                                exc_info=True,
+                            )
 
             suffix = (
                 f"; incomplete compensation: {','.join(sorted(set(cleanup_failures)))}"
@@ -1362,6 +2730,7 @@ class IngestionService:
         points: list[Any],
         dataset_id: str,
         expected_ingestion_identity: str,
+        lifecycle_lease_held: bool = False,
     ) -> None:
         """Publish Qdrant points only while the captured generation is current."""
 
@@ -1392,10 +2761,14 @@ class IngestionService:
             raise ValidationFailedError(
                 "vector writes are unavailable without the dataset identity fence"
             )
+        upsert_kwargs: dict[str, Any] = {}
+        if lifecycle_lease_held:
+            upsert_kwargs["lifecycle_lease_held"] = True
         await self.vector_store.upsert(
             collection_name=collection,
             points=points,
             expected_ingestion_identity=expected_ingestion_identity,
+            **upsert_kwargs,
         )
 
     async def _resolve_ingestion_identity(
@@ -1445,7 +2818,7 @@ class IngestionService:
             return
         await self.db.update_document_status(
             document_id,
-            status="failed",
+            status="error",
             progress=100,
             error=error,
         )
@@ -1490,6 +2863,23 @@ class IngestionService:
             dataset_id,
             expected_ingestion_identity,
         )
+        get_existing_images = getattr(
+            self.db,
+            "get_image_segments_by_document",
+            None,
+        )
+        existing_image_segments = (
+            await get_existing_images(document_id)
+            if callable(get_existing_images)
+            else []
+        )
+        existing_ids_by_position = {
+            int(segment.get("position") or 0): str(
+                segment.get("segment_id") or ""
+            ).strip()
+            for segment in existing_image_segments
+            if str(segment.get("segment_id") or "").strip()
+        }
 
         from qdrant_client.http import models as qmodels
 
@@ -1611,7 +3001,6 @@ class IngestionService:
                 if not vector:
                     continue
 
-                seg_id = str(uuid.uuid4())
                 position = base_position + idx
                 storage_url = img_meta.get("storage_url", "")
 
@@ -1624,6 +3013,13 @@ class IngestionService:
                 attachment_id = (
                     img_meta.get("confluence_attachment_id")
                     or img_meta.get("image_id")
+                )
+                if not str(attachment_id or "").strip():
+                    raise RuntimeError("durable image receipt has no attachment identity")
+                seg_id = existing_ids_by_position.get(position) or _stable_segment_id(
+                    document_id,
+                    "image",
+                    position,
                 )
                 image_filename = (
                     img_meta.get("filename")
@@ -1696,7 +3092,7 @@ class IngestionService:
             # Update progress after each batch
             progress = 85 + (batch_start + len(batch)) / len(loaded_images) * 10  # 85% -> 95%
             await self.db.update_document_status(
-                document_id, status="embedding_images", progress=progress
+                document_id, status="indexing", progress=progress
             )
             logger.info(
                 f"Batch complete: {processed}/{len(loaded_images)} images embedded, progress={progress:.1f}%"
@@ -1876,8 +3272,8 @@ class IngestionService:
                 if not vector:
                     continue
 
-                seg_id = str(uuid.uuid4())
                 position = base_position + idx
+                seg_id = _stable_segment_id(document_id, "image", position)
 
                 # Use context text as image description
                 image_text = (
@@ -1945,7 +3341,7 @@ class IngestionService:
             # Update progress
             progress = 10 + (batch_start + len(batch)) / len(image_data) * 50  # 10% -> 60%
             await self.db.update_document_status(
-                document_id, status="embedding_images", progress=progress
+                document_id, status="uploading_images", progress=progress
             )
             logger.info(
                 f"[MemoryEmbed] Progress: {processed}/{len(image_data)} images, {progress:.1f}%"
@@ -2046,8 +3442,8 @@ class IngestionService:
                     continue
 
                 vector = embeddings[0]
-                seg_id = str(uuid.uuid4())
                 position = base_position + idx
+                seg_id = _stable_segment_id(document_id, "image", position)
 
                 # Prepare payload for Qdrant
                 payload = {

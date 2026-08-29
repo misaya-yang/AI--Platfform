@@ -13,11 +13,13 @@ import logging
 import re as _re
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from . import datasets as _datasets
+from .knowledge_artifacts import KnowledgeArtifactPersistenceMixin
 
 try:
     import asyncpg
@@ -39,22 +41,48 @@ DOCUMENT_LIFECYCLE_REINDEX_KEY = _datasets.DOCUMENT_LIFECYCLE_REINDEX_KEY
 DOCUMENT_UPLOAD_GENERATION_KEY = _datasets.DOCUMENT_UPLOAD_GENERATION_KEY
 DOCUMENT_UPLOAD_FAILED_KEY = _datasets.DOCUMENT_UPLOAD_FAILED_KEY
 CONFLUENCE_SYNC_GENERATION_KEY = _datasets.CONFLUENCE_SYNC_GENERATION_KEY
+DOCUMENT_INGEST_ACTION_KEY = _datasets.DOCUMENT_INGEST_ACTION_KEY
+DOCUMENT_RECOVER_STAGE_KEY = _datasets.DOCUMENT_RECOVER_STAGE_KEY
+DOCUMENT_PIPELINE_EXECUTION_KEY = _datasets.DOCUMENT_PIPELINE_EXECUTION_KEY
+INGEST_ACTION_VOCABULARY = _datasets.INGEST_ACTION_VOCABULARY
+PRIORITY_INGEST_ACTIONS = _datasets.PRIORITY_INGEST_ACTIONS
+RECOVER_STAGE_VOCABULARY = _datasets.RECOVER_STAGE_VOCABULARY
 _INDEX_DELETION_OPERATIONS = _datasets._INDEX_DELETION_OPERATIONS
 _json_object = _datasets._json_object
-_dataset_lexical_active_version = _datasets._dataset_lexical_active_version
 make_dataset_index_deletion_fence = _datasets.make_dataset_index_deletion_fence
+
+
+def _escape_like_pattern(value: str) -> str:
+    """Escape LIKE/ILIKE metacharacters so user text matches literally.
+
+    Without this, ``%`` / ``_`` / ``\\`` in search input act as wildcards and
+    change what a chunk search returns (PRD addendum §1-T2-7: CJK-safe chunk
+    search recipe = escaped LIKE patterns + JSONB keywords). Values are still
+    bound as query parameters; this only fixes pattern semantics.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 dataset_index_deletion_fence = _datasets.dataset_index_deletion_fence
 index_config_has_reserved_deletion_fence = _datasets.index_config_has_reserved_deletion_fence
 dataset_ingestion_identity = _datasets.dataset_ingestion_identity
 
 _SAFE_COLUMN_RE = _re.compile(r"^[a-z][a-z0-9_]*$")
 CONFLUENCE_SYNC_STALE_SECONDS = 3600
+# One publication can execute up to MAX_CHUNK_OUTPUTS (10k) ON CONFLICT
+# statements, and migration 076 advances content_revision from a statement
+# trigger.  Keep the negative seqlock far enough below zero that those
+# increments cannot accidentally make an in-flight revision readable.
+INDEX_PUBLICATION_REVISION_RESERVE = 100_000
 SOURCE_OWNED_DOCUMENT_METADATA_KEYS = frozenset(
     {
         DOCUMENT_LIFECYCLE_REINDEX_KEY,
         DOCUMENT_UPLOAD_GENERATION_KEY,
         DOCUMENT_UPLOAD_FAILED_KEY,
         CONFLUENCE_SYNC_GENERATION_KEY,
+        # Dual-verb queue markers are owned by the enqueue/claim path; a user
+        # metadata update mid-generation must not reroute the queued verb.
+        DOCUMENT_INGEST_ACTION_KEY,
+        DOCUMENT_RECOVER_STAGE_KEY,
+        DOCUMENT_PIPELINE_EXECUTION_KEY,
         "_confluence_image_source_generation",
         "_confluence_attachment_manifest",
         "skipped_confluence_attachments",
@@ -70,6 +98,15 @@ SOURCE_OWNED_DOCUMENT_METADATA_KEYS = frozenset(
         "structured_parsing",
     }
 )
+
+
+@dataclass(frozen=True)
+class IndexPublicationLease:
+    """Connection plus durable revision for one serialized publication."""
+
+    connection: Any
+    revision: int
+    recovered: bool
 
 
 def _validate_column_name(name: str) -> str:
@@ -123,7 +160,7 @@ def build_service_query(
     return " ".join(query_parts), params
 
 
-class DatabaseStorage(DatasetPersistenceMixin):
+class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin):
     """PostgreSQL 数据库存储"""
 
     def __init__(
@@ -1542,7 +1579,10 @@ class DatabaseStorage(DatasetPersistenceMixin):
             params.append(status)
             param_idx += 1
 
-        query += f" ORDER BY created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
+        query += (
+            f" ORDER BY created_at DESC, document_id DESC"
+            f" LIMIT ${param_idx} OFFSET ${param_idx + 1}"
+        )
         params.extend([limit, offset])
 
         async with self._pool.acquire() as conn:
@@ -1635,7 +1675,7 @@ class DatabaseStorage(DatasetPersistenceMixin):
             document.get("source_uri"),
             document.get("mime_type"),
             document.get("size_bytes"),
-            document.get("status", "uploaded"),
+            document.get("status", "waiting"),
             float(document.get("progress", 0) or 0),
             document.get("error"),
             document.get("content"),
@@ -1793,7 +1833,7 @@ class DatabaseStorage(DatasetPersistenceMixin):
                 WHERE document_id = $1
                   AND dataset_id = $2
                   AND status IN (
-                        'uploading', 'uploaded', 'uploading_images', 'embedding_images'
+                        'uploading', 'waiting', 'uploading_images'
                   )
                   AND COALESCE(enabled, TRUE) = TRUE
                   AND COALESCE(archived, FALSE) = FALSE
@@ -1819,7 +1859,7 @@ class DatabaseStorage(DatasetPersistenceMixin):
                 document.get("source_uri"),
                 document.get("mime_type"),
                 document.get("size_bytes"),
-                document.get("status", "uploaded"),
+                document.get("status", "waiting"),
                 float(document.get("progress", 0) or 0),
                 document.get("error"),
                 document.get("content"),
@@ -1888,7 +1928,7 @@ class DatabaseStorage(DatasetPersistenceMixin):
               AND dataset_id = $2
               AND (
                     (
-                        status IN ('completed', 'failed', 'uploaded')
+                        status IN ('completed', 'error', 'waiting')
                         AND NOT (
                             COALESCE(metadata, '{{}}'::jsonb)
                             ? '{CONFLUENCE_SYNC_GENERATION_KEY}'
@@ -1958,7 +1998,7 @@ class DatabaseStorage(DatasetPersistenceMixin):
         row = await connection.fetchrow(
             f"""
             UPDATE documents
-            SET status = 'failed',
+            SET status = 'error',
                 progress = 100,
                 error = $4,
                 metadata = COALESCE(metadata, '{{}}'::jsonb)
@@ -2017,7 +2057,7 @@ class DatabaseStorage(DatasetPersistenceMixin):
                     - 'images_embedded'
                     - 'embedded_image_count'
                 ) || $6::jsonb,
-                status = 'queued',
+                status = 'waiting',
                 progress = 0,
                 error = NULL,
                 started_at = NULL,
@@ -2105,26 +2145,79 @@ class DatabaseStorage(DatasetPersistenceMixin):
         if not self._pool:
             return []
 
+        # D1 (frontend handoff): the list UI derives enabled/disabled/archived
+        # badges and per-stage durations from row fields, so the page SELECT
+        # must carry them — enabled/archived also feed the display_status
+        # stamp applied by the service layer.
         query = """
-            SELECT document_id, dataset_id, title, source_type, source_uri,
-                   mime_type, size_bytes, status, progress, error, metadata,
-                   started_at, completed_at, created_at, updated_at
-            FROM documents WHERE dataset_id = $1
+            SELECT d.document_id, d.dataset_id, d.title, d.source_type, d.source_uri,
+                   d.mime_type, d.size_bytes, d.status, d.progress, d.error, d.metadata,
+                   d.enabled, d.disabled_at, d.archived, d.archived_reason, d.archived_at,
+                   d.parsing_started_at, d.splitting_started_at, d.indexing_started_at,
+                   d.started_at, d.completed_at, d.created_at, d.updated_at,
+                   COALESCE(h.hit_count, 0)::bigint AS hit_count
+            FROM documents AS d
+            LEFT JOIN (
+                SELECT document_id, SUM(hit_count)::bigint AS hit_count
+                FROM segments
+                WHERE dataset_id = $1
+                GROUP BY document_id
+            ) AS h ON h.document_id = d.document_id
+            WHERE d.dataset_id = $1
         """
         params: list[Any] = [dataset_id]
         param_idx = 2
 
         if status:
-            query += f" AND status = ${param_idx}"
+            query += f" AND d.status = ${param_idx}"
             params.append(status)
             param_idx += 1
 
-        query += f" ORDER BY created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
+        query += f" ORDER BY d.created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
         params.extend([limit, offset])
 
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
             return [self._row_to_dict(row) for row in rows]
+
+    async def count_documents(
+        self,
+        dataset_id: str,
+        status: str | None = None,
+    ) -> int:
+        """Total document rows for a dataset page (pagination companion)."""
+        if not self._pool:
+            return 0
+
+        query = "SELECT COUNT(*) FROM documents WHERE dataset_id = $1"
+        params: list[Any] = [dataset_id]
+        if status:
+            query += " AND status = $2"
+            params.append(status)
+
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval(query, *params)
+
+    async def count_documents_by_source_type(self, dataset_id: str) -> dict[str, int]:
+        """Exact source totals; never derive dataset statistics from one UI page."""
+
+        if not self._pool:
+            return {}
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT COALESCE(NULLIF(source_type, ''), 'upload') AS source_type,
+                       COUNT(*) AS document_count
+                FROM documents
+                WHERE dataset_id = $1
+                GROUP BY COALESCE(NULLIF(source_type, ''), 'upload')
+                """,
+                dataset_id,
+            )
+        return {
+            str(row["source_type"]): int(row["document_count"] or 0)
+            for row in rows
+        }
 
     async def list_document_ids_by_dataset(
         self,
@@ -2170,7 +2263,7 @@ class DatabaseStorage(DatasetPersistenceMixin):
                             ->> 'desired_archived' = 'false'
                     )
                     OR (
-                        status NOT IN ('completed', 'failed')
+                        status NOT IN ('completed', 'error')
                         AND COALESCE(enabled, TRUE) = TRUE
                         AND COALESCE(archived, FALSE) = FALSE
                         AND NOT (
@@ -2241,7 +2334,7 @@ class DatabaseStorage(DatasetPersistenceMixin):
                 WHERE COALESCE(d.metadata, '{{}}'::jsonb)
                         ? '{DOCUMENT_UPLOAD_GENERATION_KEY}'
                   AND d.status IN (
-                        'uploading', 'uploaded', 'uploading_images', 'embedding_images'
+                        'uploading', 'waiting', 'uploading_images'
                   )
                   AND NOT (
                         COALESCE(d.metadata, '{{}}'::jsonb)
@@ -2262,7 +2355,7 @@ class DatabaseStorage(DatasetPersistenceMixin):
                 LIMIT $2
             )
             UPDATE documents AS d
-            SET status = 'failed',
+            SET status = 'error',
                 progress = 100,
                 error = 'document upload did not finalize; upload the source again',
                 metadata = (
@@ -2338,7 +2431,7 @@ class DatabaseStorage(DatasetPersistenceMixin):
                 updated_at = NOW()
             WHERE document_id = $1
               AND dataset_id = $2
-              AND status = 'failed'
+              AND status = 'error'
               AND metadata -> '{DOCUMENT_UPLOAD_FAILED_KEY}'
                     ->> 'status' = 'cleanup_pending'
             RETURNING document_id
@@ -2359,7 +2452,10 @@ class DatabaseStorage(DatasetPersistenceMixin):
         ``FOR UPDATE SKIP LOCKED`` makes concurrent service replicas divide the
         work. Updating ``updated_at`` creates a fresh recovery generation; if a
         claimant crashes before enqueue, the durable lifecycle marker makes the
-        row eligible again after the same TTL.
+        row eligible again after the same TTL. A processing-stage claim closes
+        the interrupted execution and atomically links a new execution carrying
+        the identical rule and input snapshot; indexing resumes through vector
+        repair and therefore never re-enters parsing.
         """
 
         if not self._pool:
@@ -2367,8 +2463,20 @@ class DatabaseStorage(DatasetPersistenceMixin):
         threshold = max(int(stuck_threshold_minutes), 1)
         bounded_limit = min(max(int(limit), 1), 1000)
         query = f"""
-            WITH candidates AS (
-                SELECT d.document_id, d.status AS old_status
+            WITH candidates AS MATERIALIZED (
+                SELECT d.document_id, d.dataset_id, d.status AS old_status,
+                       d.process_rule_id AS document_process_rule_id,
+                       COALESCE(
+                           NULLIF(
+                               d.metadata ->> '{DOCUMENT_INGEST_ACTION_KEY}',
+                               ''
+                           ),
+                           'ingest'
+                       ) AS old_action,
+                       NULLIF(
+                           d.metadata ->> '{DOCUMENT_PIPELINE_EXECUTION_KEY}',
+                           ''
+                       ) AS old_execution_id
                 FROM documents AS d
                 JOIN datasets AS ds ON ds.dataset_id = d.dataset_id
                 CROSS JOIN LATERAL (
@@ -2402,7 +2510,7 @@ class DatabaseStorage(DatasetPersistenceMixin):
                                 ->> 'desired_archived' = 'false'
                         )
                         OR (
-                            d.status NOT IN ('completed', 'failed')
+                            d.status NOT IN ('completed', 'error')
                             AND COALESCE(d.enabled, TRUE) = TRUE
                             AND COALESCE(d.archived, FALSE) = FALSE
                             AND NOT (
@@ -2441,17 +2549,160 @@ class DatabaseStorage(DatasetPersistenceMixin):
                 ORDER BY d.updated_at ASC
                 FOR UPDATE OF d SKIP LOCKED
                 LIMIT $2
+            ),
+            recovery_sources AS MATERIALIZED (
+                SELECT c.*,
+                       execution.execution_id AS previous_execution_id,
+                       execution.triggered_by,
+                       execution.process_rule_id,
+                       execution.input_snapshot,
+                       CASE
+                           WHEN execution.action = 'reembed' THEN 'reembed'
+                           ELSE 'recover'
+                       END AS recovery_action,
+                       rule.id AS verified_rule_id
+                FROM candidates AS c
+                LEFT JOIN document_pipeline_executions AS execution
+                  ON execution.execution_id = c.old_execution_id
+                 AND execution.document_id = c.document_id
+                 AND execution.dataset_id = c.dataset_id
+                 AND execution.action = c.old_action
+                 AND execution.status = 'running'
+                LEFT JOIN dataset_process_rules AS rule
+                  ON rule.id = execution.process_rule_id
+                 AND rule.dataset_id = c.dataset_id
+                 AND c.document_process_rule_id = execution.process_rule_id
+            ),
+            closed_executions AS (
+                UPDATE document_pipeline_executions AS execution
+                SET status = 'error',
+                    error = 'worker interrupted during ' || source.old_status
+                        || '; superseded by crash recovery',
+                    completed_at = NOW()
+                FROM recovery_sources AS source
+                WHERE source.old_status IN ('parsing', 'splitting', 'indexing')
+                  AND source.previous_execution_id = execution.execution_id
+                  AND jsonb_typeof(source.input_snapshot) = 'object'
+                  AND (
+                        source.old_action = 'reembed'
+                        OR source.verified_rule_id IS NOT NULL
+                  )
+                RETURNING execution.execution_id
+            ),
+            recovery_executions AS (
+                INSERT INTO document_pipeline_executions (
+                    execution_id,
+                    document_id,
+                    dataset_id,
+                    action,
+                    trigger_source,
+                    triggered_by,
+                    process_rule_id,
+                    input_snapshot,
+                    manifest,
+                    status
+                )
+                SELECT gen_random_uuid()::text,
+                       source.document_id,
+                       source.dataset_id,
+                       source.recovery_action,
+                       'recover',
+                       source.triggered_by,
+                       CASE
+                           WHEN source.recovery_action = 'reembed' THEN NULL
+                           ELSE source.process_rule_id
+                       END,
+                       source.input_snapshot,
+                       jsonb_build_object(
+                           'recovered_from_execution_id',
+                           source.previous_execution_id,
+                           'recovered_from_stage',
+                           source.old_status
+                       ),
+                       'running'
+                FROM recovery_sources AS source
+                WHERE source.old_status IN ('parsing', 'splitting', 'indexing')
+                  AND source.previous_execution_id IS NOT NULL
+                  AND jsonb_typeof(source.input_snapshot) = 'object'
+                  AND (
+                        source.old_action = 'reembed'
+                        OR source.verified_rule_id IS NOT NULL
+                  )
+                RETURNING execution_id, document_id, dataset_id, action
+            ),
+            updated_documents AS (
+                UPDATE documents AS d
+                SET status = CASE
+                        WHEN source.old_status IN ('parsing', 'splitting', 'indexing')
+                             AND recovery.execution_id IS NULL THEN 'error'
+                        ELSE 'waiting'
+                    END,
+                    progress = CASE
+                        WHEN source.old_status IN ('parsing', 'splitting', 'indexing')
+                             AND recovery.execution_id IS NULL THEN 100
+                        ELSE 0
+                    END,
+                    error = CASE
+                        WHEN source.old_status IN ('parsing', 'splitting', 'indexing')
+                             AND recovery.execution_id IS NULL THEN
+                            'stuck generation replay snapshot is unavailable'
+                        ELSE NULL
+                    END,
+                    completed_at = CASE
+                        WHEN source.old_status IN ('parsing', 'splitting', 'indexing')
+                             AND recovery.execution_id IS NULL THEN NOW()
+                        ELSE NULL
+                    END,
+                    updated_at = NOW(),
+                    -- A process death ends one immutable execution. Publish a
+                    -- new generation whose complete input snapshot and rule id
+                    -- are copied from the interrupted row. indexing always
+                    -- resumes as recover(indexing), so the worker can rebuild
+                    -- vectors from persisted segments without invoking a parser.
+                    -- reembed stays reembed because it deliberately has no
+                    -- process-rule snapshot. Waiting rows already belong to a
+                    -- durable generation and remain byte-for-byte pinned.
+                    metadata = CASE
+                        WHEN source.old_status IN ('parsing', 'splitting', 'indexing')
+                             AND recovery.execution_id IS NOT NULL THEN
+                            (
+                                COALESCE(d.metadata, '{{}}'::jsonb)
+                                    - '{DOCUMENT_INGEST_ACTION_KEY}'
+                                    - '{DOCUMENT_RECOVER_STAGE_KEY}'
+                                    - '{DOCUMENT_PIPELINE_EXECUTION_KEY}'
+                            )
+                            || jsonb_build_object(
+                                '{DOCUMENT_INGEST_ACTION_KEY}', recovery.action,
+                                '{DOCUMENT_PIPELINE_EXECUTION_KEY}',
+                                recovery.execution_id
+                            )
+                            || CASE
+                                WHEN recovery.action = 'recover' THEN
+                                    jsonb_build_object(
+                                        '{DOCUMENT_RECOVER_STAGE_KEY}',
+                                        source.old_status
+                                    )
+                                ELSE '{{}}'::jsonb
+                            END
+                        WHEN source.old_status IN ('parsing', 'splitting', 'indexing') THEN
+                            COALESCE(d.metadata, '{{}}'::jsonb)
+                                - '{DOCUMENT_INGEST_ACTION_KEY}'
+                                - '{DOCUMENT_RECOVER_STAGE_KEY}'
+                                - '{DOCUMENT_PIPELINE_EXECUTION_KEY}'
+                        ELSE COALESCE(d.metadata, '{{}}'::jsonb)
+                    END
+                FROM recovery_sources AS source
+                LEFT JOIN recovery_executions AS recovery
+                  ON recovery.document_id = source.document_id
+                 AND recovery.dataset_id = source.dataset_id
+                WHERE d.document_id = source.document_id
+                RETURNING d.document_id, d.dataset_id, d.title, d.status,
+                          source.old_status,
+                          d.started_at, d.updated_at, d.metadata
             )
-            UPDATE documents AS d
-            SET status = 'queued',
-                progress = 0,
-                error = NULL,
-                updated_at = NOW()
-            FROM candidates AS c
-            WHERE d.document_id = c.document_id
-            RETURNING d.document_id, d.dataset_id, d.title, d.status,
-                      c.old_status,
-                      d.started_at, d.updated_at, d.metadata
+            SELECT *
+            FROM updated_documents
+            WHERE status = 'waiting'
         """
         async with self._pool.acquire() as conn, conn.transaction():
             rows = await conn.fetch(query, threshold, bounded_limit)
@@ -2484,15 +2735,36 @@ class DatabaseStorage(DatasetPersistenceMixin):
             params.append(error)
             param_idx += 1
 
-        if status in ("parsing", "segmenting", "embedding"):
+        # T1 lifecycle (PRD T1.1): waiting -> parsing -> splitting -> indexing
+        # -> completed | error. Each stage entry stamps started_at (first
+        # processing entry) plus its own per-stage timestamp.
+        if status in ("parsing", "splitting", "indexing"):
             updates.append(f"started_at = COALESCE(started_at, ${param_idx})")
             params.append(datetime.utcnow())
             param_idx += 1
+            stage_column = {
+                "parsing": "parsing_started_at",
+                "splitting": "splitting_started_at",
+                "indexing": "indexing_started_at",
+            }[status]
+            updates.append(f"{stage_column} = ${param_idx}")
+            params.append(datetime.utcnow())
+            param_idx += 1
 
-        if status in ("completed", "failed"):
+        if status in ("completed", "error"):
             updates.append(f"completed_at = ${param_idx}")
             params.append(datetime.utcnow())
             param_idx += 1
+            if status == "error":
+                # PRD T1 items 3/4: the verb marker belongs to exactly one
+                # queued generation. Terminal writes retire it; the verb
+                # history lives in document_pipeline_executions.
+                updates.append(
+                    f"metadata = COALESCE(metadata, '{{}}'::jsonb)"
+                    f" - '{DOCUMENT_INGEST_ACTION_KEY}'"
+                    f" - '{DOCUMENT_RECOVER_STAGE_KEY}'"
+                    f" - '{DOCUMENT_PIPELINE_EXECUTION_KEY}'"
+                )
 
         if status == "completed":
             pending_reindex = (
@@ -2512,13 +2784,52 @@ class DatabaseStorage(DatasetPersistenceMixin):
                     f"archived_by = CASE WHEN {pending_reindex} THEN NULL ELSE archived_by END",
                     f"archived_reason = CASE WHEN {pending_reindex} THEN NULL ELSE archived_reason END",
                     f"error = CASE WHEN {pending_reindex} THEN NULL ELSE error END",
-                    f"metadata = CASE WHEN {pending_reindex} "
-                    f"THEN metadata - '{DOCUMENT_LIFECYCLE_REINDEX_KEY}' ELSE metadata END",
+                    f"metadata = (CASE WHEN {pending_reindex} "
+                    f"THEN metadata - '{DOCUMENT_LIFECYCLE_REINDEX_KEY}' ELSE metadata END)"
+                    f" - '{DOCUMENT_INGEST_ACTION_KEY}'"
+                    f" - '{DOCUMENT_RECOVER_STAGE_KEY}'"
+                    f" - '{DOCUMENT_PIPELINE_EXECUTION_KEY}'",
                 ]
             )
 
         params.append(document_id)
-        query = f"UPDATE documents SET {_build_safe_set_clause(updates)} WHERE document_id = ${param_idx}"
+        set_clause = _build_safe_set_clause(updates)
+        query = f"UPDATE documents SET {set_clause} WHERE document_id = ${param_idx}"
+
+        if status == "completed":
+            # PRD T1 unified lifecycle contract (§885-886): a restore becomes
+            # visible in exactly this statement — the CASE above flips
+            # enabled/archived when a pending lifecycle marker is present —
+            # and retrieval cache keys are bound to the dataset revision
+            # fingerprint. Advance content_revision in the same statement,
+            # gated on the identical pending-marker predicate, so a result
+            # cached while the document was hidden can never be served again
+            # (§129: 写后不可能读到旧值). An error-terminal restore stays
+            # hidden and must not invalidate anything, so only the completed
+            # branch carries the bump. Deactivation bumps on its own path.
+            query = f"""
+            WITH pending_restore AS (
+                SELECT 1
+                FROM documents
+                WHERE document_id = ${param_idx}
+                  AND COALESCE(metadata, '{{}}'::jsonb)
+                      -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}' ->> 'status' = 'pending'
+            ),
+            revision_bump AS (
+                UPDATE datasets AS ds
+                SET content_revision = COALESCE(content_revision, 0) + 1,
+                    updated_at = NOW()
+                WHERE ds.is_deleted = FALSE
+                  AND EXISTS (SELECT 1 FROM pending_restore)
+                  AND ds.dataset_id = (
+                      SELECT dataset_id
+                      FROM documents
+                      WHERE document_id = ${param_idx}
+                  )
+                RETURNING ds.dataset_id
+            )
+            UPDATE documents SET {set_clause} WHERE document_id = ${param_idx}
+            """
 
         if connection is not None:
             await connection.execute(query, *params)
@@ -2596,7 +2907,7 @@ class DatabaseStorage(DatasetPersistenceMixin):
                     updated_at = NOW()
                 WHERE document_id = $1
                   AND dataset_id = $2
-                  AND status = 'processing'
+                  AND status = 'parsing'
                   AND COALESCE(metadata ->> 'processing_mode', 'text_only') = $3
                   AND (
                         (
@@ -2703,7 +3014,7 @@ class DatabaseStorage(DatasetPersistenceMixin):
                     updated_at = NOW()
                 WHERE document_id = $1
                   AND dataset_id = $2
-                  AND status IN ('processing', 'parsing')
+                  AND status = 'parsing'
                   AND metadata ->> 'original_file_key' = $3
                   AND LOWER(COALESCE(metadata ->> 'processing_mode', 'text_only')) = $4
                   AND (
@@ -2853,6 +3164,11 @@ class DatabaseStorage(DatasetPersistenceMixin):
             "segment_count",
             "tokens",
             "process_rule_id",
+            # T3 embedding provenance (migration 102): which model embedded
+            # this document's vectors. Stamped at ingestion completion.
+            "embedding_model",
+            "embedding_model_version",
+            "embedding_dimension",
         }
         filtered = {k: v for k, v in fields.items() if k in allowed}
         if not filtered:
@@ -2862,6 +3178,9 @@ class DatabaseStorage(DatasetPersistenceMixin):
             DOCUMENT_UPLOAD_GENERATION_KEY in incoming_metadata
             or DOCUMENT_UPLOAD_FAILED_KEY in incoming_metadata
             or CONFLUENCE_SYNC_GENERATION_KEY in incoming_metadata
+            or DOCUMENT_INGEST_ACTION_KEY in incoming_metadata
+            or DOCUMENT_RECOVER_STAGE_KEY in incoming_metadata
+            or DOCUMENT_PIPELINE_EXECUTION_KEY in incoming_metadata
         ):
             raise ValueError("document internal metadata keys are reserved")
         if (
@@ -2978,6 +3297,247 @@ class DatabaseStorage(DatasetPersistenceMixin):
         async with self._pool.acquire() as conn:
             await _update(conn)
 
+    @contextlib.asynccontextmanager
+    async def dataset_index_publication_lease(
+        self,
+        dataset_id: str,
+        *,
+        expected_ingestion_identity: str,
+    ):
+        """Serialize a short cross-store publish and mark reads retryable.
+
+        Embedding and parsing happen before this lease.  While it is held,
+        ``content_revision`` is negative, which is the durable seqlock marker
+        consumed by retrieval.  A reader that began before the marker observes
+        a changed revision at its final fence; a reader that begins after it
+        waits/retries without ever returning the intermediate Qdrant/PG state.
+
+        The caller must make the revision positive with either
+        ``commit_text_segment_publication`` or ``abort_index_publication``.
+        Leaving it negative is intentional fail-closed behavior when rollback
+        itself cannot be proven complete.  Once the session advisory lock is
+        free, a later worker may reacquire the same negative revision and
+        resume from the durable disabled Qdrant backups keyed by that value.
+        """
+
+        normalized_dataset = str(dataset_id or "").strip()
+        if not normalized_dataset:
+            raise ValueError("dataset_id is required for index publication")
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        dataset_lock_name = self._dataset_index_lock_name(normalized_dataset)
+        publication_lock_name = f"knowledge-dataset-publication:{normalized_dataset}"
+        async with self._pool.acquire() as conn:
+            dataset_acquired = await conn.fetchval(
+                "SELECT pg_try_advisory_lock_shared(hashtextextended($1, 0))",
+                dataset_lock_name,
+            )
+            if dataset_acquired is not True:
+                raise IndexLeaseUnavailableError(
+                    "dataset index transition is in progress; refusing publication"
+                )
+            publication_acquired = False
+            try:
+                await conn.fetchval(
+                    "SELECT pg_advisory_lock(hashtextextended($1, 0))",
+                    publication_lock_name,
+                )
+                publication_acquired = True
+                async with conn.transaction():
+                    await self._require_dataset_ingestion_identity(
+                        conn,
+                        normalized_dataset,
+                        expected_ingestion_identity,
+                    )
+                    revision = await conn.fetchval(
+                        """
+                        SELECT content_revision
+                        FROM datasets
+                        WHERE dataset_id = $1 AND is_deleted = FALSE
+                        FOR UPDATE
+                        """,
+                        normalized_dataset,
+                    )
+                    if revision is None:
+                        raise RuntimeError("dataset disappeared before index publication")
+                    recovered = int(revision) < 0
+                    if recovered:
+                        publication_revision = int(revision)
+                    else:
+                        publication_revision = await conn.fetchval(
+                            """
+                            UPDATE datasets
+                            SET content_revision = (
+                                    -ABS(COALESCE(content_revision, 0))
+                                    - $2
+                                ),
+                                updated_at = NOW()
+                            WHERE dataset_id = $1 AND is_deleted = FALSE
+                            RETURNING content_revision
+                            """,
+                            normalized_dataset,
+                            INDEX_PUBLICATION_REVISION_RESERVE,
+                        )
+                yield IndexPublicationLease(
+                    connection=conn,
+                    revision=int(publication_revision),
+                    recovered=recovered,
+                )
+            finally:
+                try:
+                    if publication_acquired:
+                        unlock_task = asyncio.create_task(
+                            conn.fetchval(
+                                "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
+                                publication_lock_name,
+                            )
+                        )
+                        try:
+                            released = await asyncio.shield(unlock_task)
+                        except asyncio.CancelledError:
+                            released = await unlock_task
+                            raise
+                        if released is not True:
+                            raise RuntimeError(
+                                "dataset index publication lease was not released"
+                            )
+                finally:
+                    shared_unlock = asyncio.create_task(
+                        conn.fetchval(
+                            "SELECT pg_advisory_unlock_shared(hashtextextended($1, 0))",
+                            dataset_lock_name,
+                        )
+                    )
+                    try:
+                        dataset_released = await asyncio.shield(shared_unlock)
+                    except asyncio.CancelledError:
+                        dataset_released = await shared_unlock
+                        raise
+                    if dataset_released is not True:
+                        raise RuntimeError(
+                            "dataset shared publication lease was not released"
+                        )
+
+    @staticmethod
+    async def _finish_index_publication(
+        connection: Any,
+        dataset_id: str,
+    ) -> int:
+        row = await connection.fetchrow(
+            """
+            UPDATE datasets
+            SET content_revision = ABS(content_revision) + 1,
+                updated_at = NOW()
+            WHERE dataset_id = $1
+              AND is_deleted = FALSE
+              AND content_revision < 0
+            RETURNING content_revision
+            """,
+            dataset_id,
+        )
+        if row is None:
+            raise RuntimeError("dataset index publication fence was lost")
+        return int(row["content_revision"])
+
+    async def finish_index_publication(
+        self,
+        dataset_id: str,
+        *,
+        connection: Any,
+    ) -> int:
+        """Close a deferred publication fence and return its positive revision."""
+
+        return await self._finish_index_publication(connection, dataset_id)
+
+    async def abort_index_publication(
+        self,
+        dataset_id: str,
+        *,
+        connection: Any,
+    ) -> None:
+        """Release the read fence only after external rollback succeeded."""
+
+        async with connection.transaction():
+            await self._finish_index_publication(connection, dataset_id)
+
+    async def commit_text_segment_publication(
+        self,
+        *,
+        dataset_id: str,
+        document_id: str,
+        segment_rows: list[dict[str, Any]],
+        keep_segment_ids: list[str],
+        staged_segment_ids: list[str],
+        delete_excess: bool,
+        expected_ingestion_identity: str,
+        connection: Any,
+        finish_publication: bool = True,
+    ) -> tuple[int, int]:
+        """Atomically replace/activate PostgreSQL rows and release the fence."""
+
+        async with connection.transaction():
+            await self._require_dataset_ingestion_identity(
+                connection,
+                dataset_id,
+                expected_ingestion_identity,
+            )
+            await self.insert_segments(segment_rows, connection=connection)
+            deleted = 0
+            if delete_excess:
+                deleted = await self.delete_segments_by_document(
+                    document_id,
+                    exclude_ids=keep_segment_ids,
+                    content_type="text",
+                    connection=connection,
+                )
+            promoted = await self.activate_staged_segments(
+                document_id,
+                staged_segment_ids,
+                connection=connection,
+            )
+            await connection.execute(
+                """
+                UPDATE documents
+                SET segment_count = (
+                        SELECT COUNT(*) FROM segments WHERE document_id = $1
+                    ),
+                    updated_at = NOW()
+                WHERE document_id = $1 AND dataset_id = $2
+                """,
+                document_id,
+                dataset_id,
+            )
+            if finish_publication:
+                await self._finish_index_publication(connection, dataset_id)
+        return promoted, deleted
+
+    async def commit_reembed_publication(
+        self,
+        *,
+        dataset_id: str,
+        document_id: str,
+        staged_segment_ids: list[str],
+        expected_ingestion_identity: str,
+        connection: Any,
+        finish_publication: bool = True,
+    ) -> int:
+        """Atomically promote repaired staging rows and release the fence."""
+
+        async with connection.transaction():
+            await self._require_dataset_ingestion_identity(
+                connection,
+                dataset_id,
+                expected_ingestion_identity,
+            )
+            promoted = await self.activate_staged_segments(
+                document_id,
+                staged_segment_ids,
+                connection=connection,
+            )
+            if finish_publication:
+                await self._finish_index_publication(connection, dataset_id)
+        return promoted
+
     async def insert_segments(
         self,
         segments: list[dict[str, Any]],
@@ -3036,6 +3596,12 @@ class DatabaseStorage(DatasetPersistenceMixin):
                     seg.get("section_header") or seg_meta.get("section_header", ""),
                     seg.get("language") or seg_meta.get("language", "en"),
                     seg.get("contextual_prefix") or seg_meta.get("contextual_prefix", ""),
+                    # T1: content_type participates in the uniqueness target so
+                    # text upserts never clobber image rows sharing a position.
+                    seg.get("content_type") or "text",
+                    # T1 stable identity columns (document_id::content_type::position)
+                    seg.get("index_node_id"),
+                    seg.get("index_node_hash"),
                 )
             )
 
@@ -3049,10 +3615,12 @@ class DatabaseStorage(DatasetPersistenceMixin):
                     enabled, status, word_count, keywords, answer, created_by,
                     content_hash,
                     source_type, source_reference, citation_text,
-                    page_number, section_header, language, contextual_prefix
+                    page_number, section_header, language, contextual_prefix,
+                    content_type, index_node_id, index_node_hash
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                          $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
-                ON CONFLICT (document_id, position) DO UPDATE SET
+                          $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27,
+                          $28, $29, $30)
+                ON CONFLICT (document_id, content_type, position) DO UPDATE SET
                     segment_id = EXCLUDED.segment_id,
                     dataset_id = EXCLUDED.dataset_id,
                     level = EXCLUDED.level,
@@ -3064,8 +3632,21 @@ class DatabaseStorage(DatasetPersistenceMixin):
                     token_count = EXCLUDED.token_count,
                     vector_id = EXCLUDED.vector_id,
                     metadata = EXCLUDED.metadata,
-                    enabled = EXCLUDED.enabled,
-                    status = EXCLUDED.status,
+                    -- PRD T1 item 6 / §6.3: an operator's segment disable is an
+                    -- explicit visibility decision and survives re-ingestion.
+                    -- A content change re-stages the row's CONTENT (text, hash,
+                    -- vector) but must never revoke the disable: the row keeps
+                    -- enabled=FALSE and a non-staging status so the completion
+                    -- flip (status='indexing' only) can never promote it. New
+                    -- rows (INSERT leg) cannot be operator-disabled.
+                    enabled = CASE
+                        WHEN segments.disabled_by IS NOT NULL THEN FALSE
+                        ELSE EXCLUDED.enabled
+                    END,
+                    status = CASE
+                        WHEN segments.disabled_by IS NOT NULL THEN 'completed'
+                        ELSE EXCLUDED.status
+                    END,
                     word_count = EXCLUDED.word_count,
                     keywords = EXCLUDED.keywords,
                     answer = EXCLUDED.answer,
@@ -3077,15 +3658,26 @@ class DatabaseStorage(DatasetPersistenceMixin):
                     section_header = EXCLUDED.section_header,
                     language = EXCLUDED.language,
                     contextual_prefix = EXCLUDED.contextual_prefix,
+                    index_node_id = EXCLUDED.index_node_id,
+                    index_node_hash = EXCLUDED.index_node_hash,
                     updated_at = NOW()
                 """,
                 rows,
             )
 
         if connection is not None:
+            # The caller owns atomicity here (pass a transactional connection
+            # when a mid-batch failure must roll the whole batch back).
             await _insert(connection)
             return
-        async with self._pool.acquire() as conn:
+        # PRD T1 item 5 (revision atomicity): a replacement batch is
+        # all-or-nothing. asyncpg executemany without an explicit transaction
+        # can commit rows one at a time, so a mid-batch failure would leave
+        # durable rows whose vectors were compensated away — rows the replay
+        # classifier then treats as staged-resumable and flips to serving
+        # without a point (silent permanent retrieval miss). One transaction
+        # makes "row committed ⇒ its batch's vectors exist" hold.
+        async with self._pool.acquire() as conn, conn.transaction():
             await _insert(conn)
 
     async def get_segment_hashes_by_document(
@@ -3099,14 +3691,19 @@ class DatabaseStorage(DatasetPersistenceMixin):
             content_type: 内容类型过滤 (text/image)
 
         Returns:
-            position -> {segment_id, vector_id, content_hash} 的映射
+            position -> {segment_id, vector_id, content_hash, status, enabled}
+            的映射。status/enabled let the incremental engine distinguish
+            serving rows (completed) from rows a crashed generation left in
+            staging (indexing), so replay can finish staging without
+            re-embedding already-persisted vectors.
         """
         if not self._pool:
             return {}
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT position, segment_id, vector_id, content_hash
+                SELECT position, segment_id, vector_id, content_hash,
+                       status, enabled
                 FROM segments
                 WHERE document_id = $1 AND content_type = $2
                 ORDER BY position
@@ -3119,9 +3716,64 @@ class DatabaseStorage(DatasetPersistenceMixin):
                     "segment_id": row["segment_id"],
                     "vector_id": row["vector_id"],
                     "content_hash": row["content_hash"],
+                    "status": row["status"],
+                    "enabled": row["enabled"],
                 }
                 for row in rows
             }
+
+    async def activate_staged_segments(
+        self,
+        document_id: str,
+        segment_ids: list[str],
+        *,
+        connection: Any | None = None,
+    ) -> int:
+        """Flip staged segments to serving state once their generation completes.
+
+        T1 staging contract: new/changed chunks are persisted disabled with
+        status='indexing'; only rows STILL in that staging state are promoted
+        to enabled + 'completed'. Rows an operator disabled are never
+        re-enabled: the insert upsert keeps operator-disabled rows out of the
+        staging state (insert_segments DO UPDATE), and this flip additionally
+        refuses any row carrying disabled_by as defense in depth. Idempotent:
+        replaying the flip after success returns 0.
+
+        Returns:
+            number of rows promoted
+        """
+        normalized_ids = sorted(
+            {str(segment_id).strip() for segment_id in segment_ids if str(segment_id).strip()}
+        )
+        normalized_document = str(document_id or "").strip()
+        if not normalized_document or not normalized_ids:
+            return 0
+        if not self._pool and connection is None:
+            return 0
+
+        async def _activate(conn: Any) -> int:
+            result = await conn.execute(
+                """
+                UPDATE segments
+                SET enabled = TRUE,
+                    status = 'completed',
+                    updated_at = NOW()
+                WHERE document_id = $1
+                  AND segment_id = ANY($2::text[])
+                  AND status = 'indexing'
+                  AND disabled_by IS NULL
+                """,
+                normalized_document,
+                normalized_ids,
+            )
+            if result.startswith("UPDATE "):
+                return int(result.split()[-1])
+            return 0
+
+        if connection is not None:
+            return await _activate(connection)
+        async with self._pool.acquire() as conn:
+            return await _activate(conn)
 
     async def delete_segments_by_document(
         self,
@@ -3201,17 +3853,82 @@ class DatabaseStorage(DatasetPersistenceMixin):
 
         if query_text:
             query += f" AND text ILIKE ${param_idx}"
-            params.append(f"%{query_text}%")
+            params.append(f"%{_escape_like_pattern(query_text)}%")
             param_idx += 1
 
+        # content_type joins the sort key: positions restart per content type,
+        # so without it text/image rows tie and a paginated reader (reembed's
+        # full-generation walk) can skip or duplicate rows at a page boundary
+        # that splits a tied group.
         query += (
-            f" ORDER BY document_id ASC, position ASC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
+            f" ORDER BY document_id ASC, position ASC, content_type ASC, segment_id ASC"
+            f" LIMIT ${param_idx} OFFSET ${param_idx + 1}"
         )
         params.extend([limit, offset])
 
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
             return [self._row_to_dict(row) for row in rows]
+
+    async def count_segments(
+        self,
+        dataset_id: str,
+        document_id: str | None = None,
+        query_text: str | None = None,
+    ) -> int:
+        """Total segment rows for a list page (pagination companion).
+
+        Mirrors ``list_segments``' WHERE clause exactly so the count always
+        matches the filtered page it accompanies.
+        """
+        if not self._pool:
+            return 0
+
+        query = "SELECT COUNT(*) FROM segments WHERE dataset_id = $1"
+        params: list[Any] = [dataset_id]
+        param_idx = 2
+
+        if document_id:
+            query += f" AND document_id = ${param_idx}"
+            params.append(document_id)
+            param_idx += 1
+
+        if query_text:
+            query += f" AND text ILIKE ${param_idx}"
+            params.append(f"%{_escape_like_pattern(query_text)}%")
+            param_idx += 1
+
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval(query, *params)
+
+    async def get_document_statistics_aggregate(
+        self, dataset_id: str, document_id: str
+    ) -> dict[str, Any] | None:
+        """Return uncapped document/segment counters in one SQL query."""
+
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT d.document_id,
+                       d.word_count,
+                       d.status,
+                       d.enabled,
+                       d.archived,
+                       COUNT(s.segment_id)::bigint AS segment_count,
+                       COALESCE(SUM(s.hit_count), 0)::bigint AS hit_count
+                FROM documents AS d
+                LEFT JOIN segments AS s
+                  ON s.dataset_id = d.dataset_id
+                 AND s.document_id = d.document_id
+                WHERE d.dataset_id = $1 AND d.document_id = $2
+                GROUP BY d.document_id, d.word_count, d.status, d.enabled, d.archived
+                """,
+                dataset_id,
+                document_id,
+            )
+        return self._row_to_dict(row) if row else None
 
     async def search_segments_like_any(
         self,
@@ -3272,11 +3989,19 @@ class DatabaseStorage(DatasetPersistenceMixin):
         tenant_id: str,
         segment_ids: list[str],
     ) -> set[str]:
-        """Return exact-scope segment IDs whose document is retrieval-ready.
+        """Return exact-scope segment IDs that are serving.
 
         This is the authoritative candidate boundary for Qdrant dense,
         hierarchy, native-hybrid, and cached results. Callers must fail closed
         if this database check raises.
+
+        Zero-window contract (PRD T1): serving-ness is decided per segment
+        (enabled + status='completed'), never per document status. A document
+        mid re-ingest keeps serving its previous generation; staging rows are
+        invisible until the completion flip. Documents are hidden only when
+        disabled, archived, or under an explicit reindex marker. Gating on
+        d.status='completed' here would re-introduce the retrieval blackout
+        the incremental engine exists to eliminate.
         """
 
         normalized_ids = sorted(
@@ -3308,7 +4033,6 @@ class DatabaseStorage(DatasetPersistenceMixin):
                   AND s.status = 'completed'
                   AND COALESCE(d.enabled, TRUE) = TRUE
                   AND COALESCE(d.archived, FALSE) = FALSE
-                  AND d.status = 'completed'
                   AND NOT (
                       COALESCE(d.metadata, '{}'::jsonb)
                       ? '_document_lifecycle_reindex'
@@ -3354,7 +4078,6 @@ class DatabaseStorage(DatasetPersistenceMixin):
                   AND d.document_id = ANY($3::text[])
                   AND COALESCE(d.enabled, TRUE) = TRUE
                   AND COALESCE(d.archived, FALSE) = FALSE
-                  AND d.status = 'completed'
                   AND NOT (
                       COALESCE(d.metadata, '{}'::jsonb)
                       ? '_document_lifecycle_reindex'
@@ -3435,7 +4158,6 @@ class DatabaseStorage(DatasetPersistenceMixin):
               AND s.status = 'completed'
               AND COALESCE(d.enabled, TRUE) = TRUE
               AND COALESCE(d.archived, FALSE) = FALSE
-              AND d.status = 'completed'
               AND NOT (
                   COALESCE(d.metadata, '{}'::jsonb)
                   ? '_document_lifecycle_reindex'
@@ -3529,7 +4251,6 @@ class DatabaseStorage(DatasetPersistenceMixin):
               AND s.status = 'completed'
               AND COALESCE(d.enabled, TRUE) = TRUE
               AND COALESCE(d.archived, FALSE) = FALSE
-              AND d.status = 'completed'
               AND NOT (
                   COALESCE(d.metadata, '{}'::jsonb)
                   ? '_document_lifecycle_reindex'
@@ -3558,9 +4279,8 @@ class DatabaseStorage(DatasetPersistenceMixin):
         parts = []
         for t in terms:
             parts.append(f"s.text ILIKE ${param_idx}")
-            # Escape LIKE special characters to prevent wildcard injection
-            escaped = t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            params.append(f"%{escaped}%")
+            # Escape LIKE metacharacters to prevent wildcard injection
+            params.append(f"%{_escape_like_pattern(t)}%")
             param_idx += 1
 
         if parts:
@@ -3628,7 +4348,6 @@ class DatabaseStorage(DatasetPersistenceMixin):
                   AND s.status = 'completed'
                   AND COALESCE(d.enabled, TRUE) = TRUE
                   AND COALESCE(d.archived, FALSE) = FALSE
-                  AND d.status = 'completed'
                   AND NOT (
                       COALESCE(d.metadata, '{}'::jsonb)
                       ? '_document_lifecycle_reindex'
@@ -3669,7 +4388,6 @@ class DatabaseStorage(DatasetPersistenceMixin):
                   AND s.status = 'completed'
                   AND COALESCE(d.enabled, TRUE) = TRUE
                   AND COALESCE(d.archived, FALSE) = FALSE
-                  AND d.status = 'completed'
                   AND NOT (
                       COALESCE(d.metadata, '{}'::jsonb)
                       ? '_document_lifecycle_reindex'
@@ -3702,9 +4420,18 @@ class DatabaseStorage(DatasetPersistenceMixin):
         metadata: dict[str, Any] | None = None,
         vector_id: str | None = None,
         *,
+        answer: str | None = None,
+        keywords: list[str] | None = None,
+        content_hash: str | None = None,
         connection: Any | None = None,
     ) -> None:
-        """更新 Segment"""
+        """更新 Segment
+
+        ``answer``/``keywords``/``content_hash`` are keyword-only and
+        ``None`` means "leave the column untouched" — callers pass ``""`` or
+        ``[]`` to clear. This keeps the PUT /segments/{id} contract additive:
+        omitting a field never destroys stored data.
+        """
         if not self._pool:
             return
 
@@ -3725,6 +4452,21 @@ class DatabaseStorage(DatasetPersistenceMixin):
         if metadata is not None:
             updates.append(f"metadata = ${param_idx}")
             params.append(json.dumps(metadata))
+            param_idx += 1
+
+        if answer is not None:
+            updates.append(f"answer = ${param_idx}")
+            params.append(answer)
+            param_idx += 1
+
+        if keywords is not None:
+            updates.append(f"keywords = ${param_idx}::jsonb")
+            params.append(json.dumps(keywords))
+            param_idx += 1
+
+        if content_hash is not None:
+            updates.append(f"content_hash = ${param_idx}")
+            params.append(content_hash)
             param_idx += 1
 
         params.append(segment_id)
@@ -4287,14 +5029,12 @@ class DatabaseStorage(DatasetPersistenceMixin):
                   AND image_s.status = 'completed'
                   AND COALESCE(source_d.enabled, TRUE) = TRUE
                   AND COALESCE(source_d.archived, FALSE) = FALSE
-                  AND source_d.status = 'completed'
                   AND NOT (
                       COALESCE(source_d.metadata, '{}'::jsonb)
                       ? '_document_lifecycle_reindex'
                   )
                   AND COALESCE(image_d.enabled, TRUE) = TRUE
                   AND COALESCE(image_d.archived, FALSE) = FALSE
-                  AND image_d.status = 'completed'
                   AND NOT (
                       COALESCE(image_d.metadata, '{}'::jsonb)
                       ? '_document_lifecycle_reindex'
@@ -5968,7 +6708,7 @@ class DatabaseStorage(DatasetPersistenceMixin):
             synced_only: 如果为 True，只返回有 document_id 的记录（已入库的）
 
         返回结果包含关联文档的处理状态:
-        - document_status: 文档的实际处理状态 (uploaded/parsing/embedding/completed/failed)
+        - document_status: 文档的实际处理状态 (waiting/parsing/splitting/indexing/completed/error)
         - document_progress: 文档处理进度 (0-100)
         - effective_status: 计算后的有效状态，检测是否需要重新同步
           当页面标记为 'synced' 但关联文档不存在或没有任何 segment 时，
@@ -7442,7 +8182,14 @@ class DatabaseStorage(DatasetPersistenceMixin):
         result = dict(row)
 
         # JSON 字段列表 - 需要解析为 Python 对象（字典类型）
-        json_dict_fields = {"metadata", "embedding_config", "index_config", "result", "config"}
+        json_dict_fields = {
+            "metadata",
+            "embedding_config",
+            "index_config",
+            "result",
+            "config",
+            "stage_timings",
+        }
 
         # JSON 字段列表 - 需要解析为 Python 对象（列表类型）
         json_list_fields = {
@@ -8223,7 +8970,6 @@ class DatabaseStorage(DatasetPersistenceMixin):
                   AND ds.is_deleted = FALSE
                   AND COALESCE(d.enabled, TRUE) = TRUE
                   AND COALESCE(d.archived, FALSE) = FALSE
-                  AND d.status = 'completed'
                   AND NOT (
                       COALESCE(d.metadata, '{}'::jsonb)
                       ? '_document_lifecycle_reindex'

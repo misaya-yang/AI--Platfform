@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -7,6 +8,7 @@ from knowledge_service.services.knowledge import vector_store
 from knowledge_service.services.knowledge.lexical_config import (
     BM25_V2,
     COLLECTION_SCOPE_METADATA_KEY,
+    LEXICAL_V1_FIELD,
     LexicalConfig,
 )
 from knowledge_service.services.knowledge.vector_store import (
@@ -48,6 +50,101 @@ def _assert_legacy_or_enabled_filter(query_filter):
         and item.is_empty.key == "enabled"
         for item in should
     )
+
+
+@pytest.mark.asyncio
+async def test_embedding_migration_scope_scans_exact_point_and_source_digests(
+    monkeypatch,
+):
+    calls = []
+
+    class DummyClient:
+        async def scroll(self, **kwargs):
+            calls.append(kwargs)
+            offset = kwargs.get("offset")
+            point_id, text = (
+                ("segment-b", "second") if offset is None else ("segment-a", "first")
+            )
+            return (
+                [
+                    SimpleNamespace(
+                        id=point_id,
+                        payload={
+                            "tenant_id": "tenant-a",
+                            "dataset_id": "dataset-a",
+                            "text": text,
+                            "embedding_model": "model-v2",
+                            "embedding_model_version": "2026-08",
+                        },
+                        vector=[1.0, 0.0],
+                    )
+                ],
+                "next" if offset is None else None,
+            )
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
+    store = VectorStore(url="http://localhost:6333")
+    evidence = await store.scan_embedding_migration_scope(
+        "shadow-a",
+        tenant_id="tenant-a",
+        dataset_id="dataset-a",
+        embedding_model="model-v2",
+        embedding_model_version="2026-08",
+        embedding_dimension=2,
+    )
+
+    expected_ids = hashlib.sha256(b"segment-a\nsegment-b\n").hexdigest()
+    source_lines = "".join(
+        f"{point_id}\0{hashlib.sha256(text.encode()).hexdigest()}\n"
+        for point_id, text in [("segment-a", "first"), ("segment-b", "second")]
+    )
+    assert evidence == {
+        "point_count": 2,
+        "point_ids_sha256": expected_ids,
+        "source_text_sha256": hashlib.sha256(source_lines.encode()).hexdigest(),
+    }
+    assert len(calls) == 2
+    assert all(call["with_vectors"] is False for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_embedding_migration_scope_rejects_stale_point_provenance(monkeypatch):
+    class DummyClient:
+        async def scroll(self, **_kwargs):
+            return (
+                [
+                    SimpleNamespace(
+                        id="segment-a",
+                        payload={
+                            "tenant_id": "tenant-a",
+                            "dataset_id": "dataset-a",
+                            "text": "first",
+                            "embedding_model": "old-model",
+                            "embedding_model_version": "",
+                        },
+                        vector=[1.0, 0.0],
+                    )
+                ],
+                None,
+            )
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
+    store = VectorStore(url="http://localhost:6333")
+    with pytest.raises(VectorStoreError, match="stale embedding provenance"):
+        await store.scan_embedding_migration_scope(
+            "shadow-a",
+            tenant_id="tenant-a",
+            dataset_id="dataset-a",
+            embedding_model="model-v2",
+            embedding_model_version="2026-08",
+            embedding_dimension=2,
+        )
 
 
 @pytest.mark.asyncio
@@ -202,6 +299,65 @@ async def test_search_enforces_immutable_collection_scope(monkeypatch):
         )
 
 
+@pytest.mark.asyncio
+async def test_snapshot_points_preserves_vector_payload_and_normalizes_scope(
+    monkeypatch,
+):
+    metadata = {
+        COLLECTION_SCOPE_METADATA_KEY: {
+            "schema_version": 1,
+            "tenant_id": "tenant-a",
+            "dataset_id": "ds",
+        }
+    }
+    captured = {}
+
+    class DummyClient:
+        async def get_collection(self, _collection_name):
+            return SimpleNamespace(
+                config=SimpleNamespace(strict_mode_config=None, metadata=metadata),
+                payload_schema={},
+            )
+
+        async def retrieve(self, **kwargs):
+            captured.update(kwargs)
+            return [
+                SimpleNamespace(
+                    id="point-a",
+                    vector=[0.2, 0.8],
+                    payload={"document_id": "doc-a", "text": "old"},
+                )
+            ]
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
+    store = VectorStore(url="http://localhost:6333")
+
+    snapshots = await store.snapshot_points(
+        "kb_ds_3",
+        ["point-a", "point-new"],
+        tenant_id="tenant-a",
+        dataset_id="ds",
+    )
+
+    assert captured == {
+        "collection_name": "kb_ds_3",
+        "ids": ["point-a", "point-new"],
+        "with_payload": True,
+        "with_vectors": True,
+    }
+    assert set(snapshots) == {"point-a"}
+    assert snapshots["point-a"].vector == [0.2, 0.8]
+    assert snapshots["point-a"].payload == {
+        "tenant_id": "tenant-a",
+        "dataset_id": "ds",
+        "document_id": "doc-a",
+        "text": "old",
+    }
+
+
 def _read_info(metadata):
     return SimpleNamespace(
         config=SimpleNamespace(strict_mode_config=None, metadata=metadata),
@@ -242,7 +398,7 @@ async def _invoke_read_primitive(store, primitive):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("primitive", ["dense", "sparse", "hybrid"])
-@pytest.mark.parametrize("profile", ["stored_active", "malformed_scope", "malformed_lexical"])
+@pytest.mark.parametrize("profile", ["malformed_scope", "malformed_lexical"])
 async def test_read_primitives_reject_unsafe_collection_metadata(
     monkeypatch,
     primitive,
@@ -255,13 +411,7 @@ async def test_read_primitives_reject_unsafe_collection_metadata(
             "dataset_id": "dataset-a",
         }
     }
-    if profile == "stored_active":
-        active = LexicalConfig().with_runtime_selection(
-            active_version=BM25_V2,
-            shadow_write_enabled=True,
-        )
-        metadata = {**scope, **active.to_collection_metadata()}
-    elif profile == "malformed_scope":
+    if profile == "malformed_scope":
         metadata = {
             COLLECTION_SCOPE_METADATA_KEY: {
                 "schema_version": "bad",
@@ -293,6 +443,69 @@ async def test_read_primitives_reject_unsafe_collection_metadata(
 
     with pytest.raises(CollectionReadAuthorityError):
         await _invoke_read_primitive(store, primitive)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("primitive", ["dense", "sparse", "hybrid"])
+async def test_read_primitives_serve_cut_over_collection_on_the_legacy_leg(
+    monkeypatch,
+    primitive,
+):
+    """T6 replaced the blanket shadow-only fence with a direction rule: a
+    collection cut over to bm25_v2 retains the lexical_v1 field, so legacy
+    reads stay servable. That direction is load-bearing: rollback flips
+    PostgreSQL back to lexical_v1 FIRST and the Qdrant metadata follows, so
+    refusing a legacy read on v2-active metadata would take the dataset
+    offline mid-rollback. The opposite direction (an ACTIVE v2 read against a
+    collection that never cut over) stays refused — pinned in
+    test_bm25_v2_shadow.py ("not cut over")."""
+    scope = {
+        COLLECTION_SCOPE_METADATA_KEY: {
+            "schema_version": 1,
+            "tenant_id": "tenant-a",
+            "dataset_id": "dataset-a",
+        }
+    }
+    active = LexicalConfig().with_runtime_selection(
+        active_version=BM25_V2,
+        shadow_write_enabled=True,
+    )
+    metadata = {**scope, **active.to_collection_metadata()}
+    captured: dict[str, list] = {}
+
+    class DummyClient:
+        async def get_collection(self, _collection_name):
+            return _read_info(metadata)
+
+        async def count(self, **kwargs):
+            captured.setdefault("count", []).append(kwargs)
+            return SimpleNamespace(count=3)
+
+        async def query_points(self, **kwargs):
+            captured.setdefault("query_points", []).append(kwargs)
+            return SimpleNamespace(points=[])
+
+        async def query_batch_points(self, **kwargs):
+            captured.setdefault("query_batch_points", []).append(kwargs)
+            return [SimpleNamespace(points=[]), SimpleNamespace(points=[])]
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
+    store = VectorStore(url="http://localhost:6333")
+
+    await _invoke_read_primitive(store, primitive)
+
+    if primitive == "sparse":
+        # The legacy leg must hit the retained lexical_v1 field, never the
+        # bm25_v2 field of a collection this query never elected.
+        assert captured["query_points"]
+        assert captured["query_points"][0]["using"] == LEXICAL_V1_FIELD
+    elif primitive == "hybrid":
+        assert captured["query_batch_points"]
+    else:
+        assert captured["query_points"]
 
 
 @pytest.mark.asyncio
@@ -370,7 +583,11 @@ async def test_retrieve_vectors_is_server_and_client_scope_checked(monkeypatch):
     )
 
     assert vectors == {"segment-a": [1.0, 0.0]}
-    assert captured["with_payload"] is True
+    # B5 (PRD T1.8, lead-approved): MMR only needs vectors. The scroll must
+    # request ONLY the two scope fields that the authority check below reads
+    # — pinning this here so the payload scope never silently widens back to
+    # full payloads (perf-review 2026-08-16 rolling-fetch finding).
+    assert captured["with_payload"] == ["tenant_id", "dataset_id"]
     assert {
         condition.key: condition.match.value
         for condition in captured["scroll_filter"].must
@@ -422,26 +639,13 @@ async def test_retrieve_vectors_rejects_foreign_record_even_if_server_ignores_fi
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("profile", ["stored_active", "malformed_scope", "legacy_missing_scope"])
+@pytest.mark.parametrize("profile", ["malformed_scope", "legacy_missing_scope"])
 async def test_retrieve_vectors_rejects_unsafe_profile_before_scroll(
     monkeypatch,
     profile,
 ):
-    scope = {
-        COLLECTION_SCOPE_METADATA_KEY: {
-            "schema_version": 1,
-            "tenant_id": "tenant-a",
-            "dataset_id": "dataset-a",
-        }
-    }
     tenant_id = "tenant-a"
-    if profile == "stored_active":
-        active = LexicalConfig().with_runtime_selection(
-            active_version=BM25_V2,
-            shadow_write_enabled=True,
-        )
-        metadata = {**scope, **active.to_collection_metadata()}
-    elif profile == "malformed_scope":
+    if profile == "malformed_scope":
         metadata = {
             COLLECTION_SCOPE_METADATA_KEY: {
                 "schema_version": "bad",
@@ -473,6 +677,58 @@ async def test_retrieve_vectors_rejects_unsafe_profile_before_scroll(
             tenant_id=tenant_id,
             dataset_id="dataset-a",
         )
+
+
+@pytest.mark.asyncio
+async def test_retrieve_vectors_serves_cut_over_collection(monkeypatch):
+    """Vector fetch for MMR must survive a bm25_v2 cutover: the lexical
+    version in collection metadata never blocks vector retrieval (same
+    rollback-window direction rule as the read primitives above)."""
+    scope = {
+        COLLECTION_SCOPE_METADATA_KEY: {
+            "schema_version": 1,
+            "tenant_id": "tenant-a",
+            "dataset_id": "dataset-a",
+        }
+    }
+    active = LexicalConfig().with_runtime_selection(
+        active_version=BM25_V2,
+        shadow_write_enabled=True,
+    )
+    metadata = {**scope, **active.to_collection_metadata()}
+    scrolled = []
+
+    class DummyClient:
+        async def get_collection(self, _collection_name):
+            return _read_info(metadata)
+
+        async def scroll(self, **kwargs):
+            scrolled.append(kwargs)
+            return (
+                [
+                    SimpleNamespace(
+                        id="segment-a",
+                        payload={"tenant_id": "tenant-a", "dataset_id": "dataset-a"},
+                        vector=[1.0, 0.0],
+                    )
+                ],
+                None,
+            )
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
+    store = VectorStore(url="http://localhost:6333")
+
+    vectors = await store.retrieve_vectors(
+        "collection-a",
+        ["segment-a"],
+        tenant_id="tenant-a",
+        dataset_id="dataset-a",
+    )
+    assert vectors == {"segment-a": [1.0, 0.0]}
+    assert scrolled
 
 
 @pytest.mark.asyncio
@@ -939,3 +1195,56 @@ async def test_concurrent_outer_leased_upserts_take_zero_nested_database_leases(
 
     assert nested_lease_calls == 0
     assert len(qdrant_writes) == 4
+
+
+@pytest.mark.asyncio
+async def test_qdrant_call_does_not_retry_non_transient_404(monkeypatch):
+    class DummyClient:
+        async def close(self):
+            return None
+
+    class MissingCollectionError(RuntimeError):
+        status_code = 404
+
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
+    store = VectorStore(
+        url="http://localhost:6333",
+        max_retries=5,
+        retry_base_delay=0.001,
+    )
+    attempts = 0
+
+    async def missing_collection():
+        nonlocal attempts
+        attempts += 1
+        raise MissingCollectionError("collection not found")
+
+    with pytest.raises(VectorStoreError, match="collection not found"):
+        await store._call(missing_collection)
+
+    assert attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_qdrant_call_still_retries_transient_connection_failure(monkeypatch):
+    class DummyClient:
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
+    store = VectorStore(
+        url="http://localhost:6333",
+        max_retries=3,
+        retry_base_delay=0.001,
+    )
+    attempts = 0
+
+    async def flaky_call():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ConnectionError("temporary network failure")
+        return "ok"
+
+    assert await store._call(flaky_call) == "ok"
+    assert attempts == 2

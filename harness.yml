@@ -91,6 +91,9 @@ commands:
   runtime_dependency_gate:
     make: runtime-dependency-gate
     purpose: Reject reintroduction of the retired Python Agent/docgen execution ownership and stale OpenAPI snapshot entrypoints.
+  gateway_kb_boundary_gate:
+    make: gateway-kb-boundary-gate
+    purpose: Keep the KB domain contract out of the gateway — no KB-table SQL in the data plane, no mirrored knowledge-service request schemas (PRD T8.4).
   agent_runtime_source_contract:
     make: agent-runtime-source-contract
     purpose: Verify the immutable Agent source, schema, SBOM, license, and OCI release identity.
@@ -172,9 +175,25 @@ gates:
   eval_branch:
     make: verify-eval-dev
     triggers: ["src/api/v1/eval.py", "src/api/eval_export.py"]
+  kb:
+    make: kb-unit-gate
+    triggers: ["apps/knowledge-service/**"]
+  gateway_kb_boundary:
+    make: gateway-kb-boundary-gate
+    triggers: ["packages/ai-gateway-core/src/ai_gateway_core/persistence/**", "src/api/schemas/**", "src/api/v1/knowledge.py", "src/api/v1/kb_tools.py", "src/api/v1/_proxy_utils.py", "src/api/v1/presign.py", "src/services/knowledge_authz.py", "scripts/harness/gateway_kb_boundary_gate.py", "tests/harness/test_gateway_kb_boundary_gate.py"]
+  kb_migrations:
+    make: kb-migration-gate
+    triggers: ["database/cli.py", "database/migrate_per_service.py", "database/run_migration.py", "database/migrations/*kb*.sql", "database/migrations/097_image_task_runtime_scope.sql", "database/migrations/per_service/assistant/004_image_task_runtime_scope.sql", "scripts/new/common.sh", "scripts/new/migrate.sh", "tests/database/test_run_migration.py", "tests/database/test_migration_runner_contract.py", "tests/database/test_migration_runner_concurrency.py", "tests/database/test_image_task_runtime_scope_migration.py", "tests/database/test_kb_migration_full_chain.py", "tests/database/test_kb_migration_101_restore.py", "tests/database/test_kb_*migration*.py", "tests/database/test_bm25_v2_lifecycle_tierb.py", "apps/knowledge-service/src/knowledge_service/persistence/kb_eval_golden_store.py"]
+  kb_golden:
+    make: kb-golden-gate
+    triggers: ["tests/fixtures/eval/rag/golden/**", "scripts/seed_kb_golden_set.py", "scripts/regen_rag_observations.py", "scripts/import_kb_eval_golden.py", "tests/scripts/test_kb_golden_set.py", "tests/scripts/test_regen_rag_observations.py", "tests/scripts/test_import_kb_eval_golden.py"]
+  kb_release_evidence:
+    make: kb-release-evidence-gate
+    purpose: Fail-closed T0 release evidence; distinct from the development golden fixture gate.
+    triggers: ["tests/fixtures/eval/rag/golden/**", "reports/kb-eval-baseline/**", "scripts/harness/kb_release_evidence_gate.py", "tests/harness/test_kb_release_evidence_gate.py"]
   rag:
     make: rag-eval-regression-gate
-    triggers: ["apps/knowledge-service/**"]
+    triggers: ["scripts/eval_rag.py", "tests/fixtures/eval/rag/**"]
   agent_studio:
     make: verify-agent-studio
     triggers: ["web/src/pages/agents/**", "src/api/v1/agents.py", "src/api/v1/agent_runtime.py"]

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .lexical_config import (
+    BM25_V2_AUTHORITY_KIND,
     BM25_V2_BACKFILL_METADATA_KEY,
     BM25_V2_FIELD,
     BM25_V2_MODEL,
@@ -38,6 +39,21 @@ _INTERACTIVE_DEADLINE: ContextVar[float | None] = ContextVar(
     "knowledge_qdrant_interactive_deadline",
     default=None,
 )
+
+
+def remaining_interactive_budget_seconds() -> float | None:
+    """Seconds left on the active retrieval-entrypoint budget, if one is set.
+
+    ``None`` means no entrypoint opened a budget (e.g. unit tests calling the
+    pipeline directly). Callers outside the Qdrant path — notably the rerank
+    stage, whose own HTTP timeout sits outside this budget — use this to cap
+    themselves to what remains of the interactive budget (PRD T2-3).
+    """
+
+    deadline = _INTERACTIVE_DEADLINE.get()
+    if deadline is None:
+        return None
+    return deadline - time.monotonic()
 
 try:
     from qdrant_client.async_qdrant_client import AsyncQdrantClient
@@ -111,6 +127,7 @@ class VectorStore:
         retry_base_delay: float = 0.5,
         bm25_v2_enabled: bool = True,
         bm25_v2_capability_ttl_seconds: float = 300.0,
+        bm25_v2_readiness_ttl_seconds: float = 0.0,
         dataset_write_lease: Any | None = None,
         interactive_deadline_seconds: float = 3.0,
         interactive_max_retries: int = 2,
@@ -139,6 +156,10 @@ class VectorStore:
         self.bm25_v2_capability_ttl_seconds = max(
             float(bm25_v2_capability_ttl_seconds or 0.0), 0.0
         )
+        self.bm25_v2_readiness_ttl_seconds = max(
+            float(bm25_v2_readiness_ttl_seconds or 0.0),
+            0.0,
+        )
         self._dataset_write_lease = dataset_write_lease
         self._collection_dims: dict[str, int] = {}  # Cache: collection_name → dimension
         # SPO-04 / K1: short-TTL collection metadata cache with write
@@ -149,6 +170,13 @@ class VectorStore:
         self._sparse_readiness: dict[str, bool] = {}
         self._bm25_v2_capability_receipts: dict[str, float] = {}
         self._bm25_v2_capability_lock = asyncio.Lock()
+        self._bm25_v2_readiness_cache: dict[
+            tuple[str, ...], tuple[float, dict[str, Any]]
+        ] = {}
+        self._bm25_v2_readiness_inflight: dict[
+            tuple[str, ...], asyncio.Task[dict[str, Any]]
+        ] = {}
+        self._bm25_v2_readiness_lock = asyncio.Lock()
         self._bm25_v2_shadow_write_failures = 0
         self._bm25_v2_shadow_write_failure_points = 0
         self._client = AsyncQdrantClient(
@@ -175,6 +203,12 @@ class VectorStore:
         normalized = str(collection_name or "").strip()
         self._collection_info_cache.pop(normalized, None)
         self._collection_dims.pop(normalized, None)
+        for key in [
+            cache_key
+            for cache_key in self._bm25_v2_readiness_cache
+            if cache_key and cache_key[0] == normalized
+        ]:
+            self._bm25_v2_readiness_cache.pop(key, None)
 
     async def _cached_get_collection(
         self,
@@ -315,9 +349,7 @@ class VectorStore:
             except Exception as exc:
                 last_exc = exc
                 transient = self._is_transient_error(exc)
-                if attempt >= retries - 1 or (
-                    interactive and not transient
-                ):
+                if attempt >= retries - 1 or not transient:
                     if interactive and transient:
                         self._record_interactive_health(success=False)
                     raise VectorStoreError(
@@ -400,14 +432,20 @@ class VectorStore:
         *,
         tenant_id: str | None,
         dataset_id: str | None,
+        expected_active_v2: bool = False,
     ) -> dict[str, str]:
         """Return the collection's authoritative read scope or fail closed.
 
         Qdrant metadata is the last-mile authority for both immutable ownership
         and lexical serving mode.  Callers may use explicit scope for legacy
         collections, but a present metadata key must be valid; adoption and
-        malformed markers are never treated as legacy.  Persisted active
-        ``bm25_v2`` is hard-disabled even when PostgreSQL still says v1.
+        malformed markers are never treated as legacy.  An active ``bm25_v2``
+        lexical read (``expected_active_v2=True`` from the PostgreSQL-derived
+        dataset selection) requires the collection itself to be cut over —
+        the reverse direction (v2 metadata, v1 selection) stays servable
+        because cutover retains the ``lexical_v1`` field. Active callers still
+        get per-query receipt recomputation on the query path; this check only
+        proves the collection can serve the requested lexical mode.
         """
 
         normalized_collection = str(collection_name or "").strip()
@@ -443,9 +481,17 @@ class VectorStore:
             raise CollectionReadAuthorityError(
                 f"collection '{normalized_collection}' has invalid lexical metadata"
             )
-        if stored_lexical is not None and stored_lexical.reads_bm25_v2:
+        # A collection that says bm25_v2 while PostgreSQL still selects v1 is
+        # safe for legacy reads: cutover retains the lexical_v1 field and the
+        # v1 leg is served by it. Only an ACTIVE lexical read has to prove the
+        # collection itself was cut over — never quietly downgrade or upgrade
+        # the serving mode here.
+        if expected_active_v2 and (
+            stored_lexical is None or not stored_lexical.reads_bm25_v2
+        ):
             raise CollectionReadAuthorityError(
-                "bm25_v2 active serving is unavailable; this release is shadow-only"
+                f"collection '{normalized_collection}' is not cut over to "
+                "bm25_v2; refusing an active-lexical read"
             )
 
         supplied_tenant = str(tenant_id or "").strip()
@@ -749,6 +795,617 @@ class VectorStore:
             raise VectorStoreError(
                 f"collection '{collection_name}' BM25 v2 receipt invalidation did not converge"
             )
+
+    async def scan_embedding_migration_scope(
+        self,
+        collection_name: str,
+        *,
+        tenant_id: str,
+        dataset_id: str,
+        embedding_model: str,
+        embedding_model_version: str,
+        embedding_dimension: int,
+        batch_size: int = 256,
+    ) -> dict[str, Any]:
+        """Live point/source digest for a T3 shadow or serving generation.
+
+        This is deliberately a full, uncached scroll. Verify/gate/cutover use
+        it as cross-store evidence, so a count-only shortcut would miss a
+        deleted/replaced point and stale content with the same cardinality.
+        Every point must belong to the immutable dataset/tenant scope and
+        carry the target model provenance. Vectors are deliberately omitted
+        from the scroll: Qdrant enforces collection dimension on write, while
+        downloading every dense vector would make an operator health check
+        scale with embedding width as well as corpus size.
+        """
+
+        normalized_collection = str(collection_name or "").strip()
+        normalized_tenant = str(tenant_id or "").strip()
+        normalized_dataset = str(dataset_id or "").strip()
+        expected_model = str(embedding_model or "").strip()
+        expected_version = str(embedding_model_version or "").strip()
+        expected_dimension = int(embedding_dimension or 0)
+        if (
+            not normalized_collection
+            or not normalized_dataset
+            or not normalized_tenant
+            or not expected_model
+            or expected_dimension <= 0
+        ):
+            raise VectorStoreError(
+                "embedding migration scope needs collection, tenant, dataset, "
+                "model, and a positive dimension"
+            )
+
+        offset: Any = None
+        point_ids: list[str] = []
+        source_entries: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        while True:
+            records, next_offset = await self._call(
+                lambda scroll_offset=offset: self._client.scroll(
+                    collection_name=normalized_collection,
+                    limit=max(int(batch_size), 1),
+                    offset=scroll_offset,
+                    with_payload=[
+                        "tenant_id",
+                        "dataset_id",
+                        "text",
+                        "embedding_model",
+                        "embedding_model_version",
+                    ],
+                    with_vectors=False,
+                )
+            )
+            for record in records or []:
+                raw_id = getattr(record, "id", None)
+                if raw_id is None:
+                    raise VectorStoreError("Qdrant returned a point without an id")
+                point_id = str(raw_id)
+                if point_id in seen:
+                    raise VectorStoreError(
+                        f"Qdrant scroll returned duplicate point id {point_id}"
+                    )
+                seen.add(point_id)
+                payload = getattr(record, "payload", None)
+                payload = payload if isinstance(payload, dict) else {}
+                if (
+                    str(payload.get("tenant_id") or "") != normalized_tenant
+                    or str(payload.get("dataset_id") or "") != normalized_dataset
+                ):
+                    raise VectorStoreError(
+                        f"point {point_id} escaped the embedding migration scope"
+                    )
+                if str(payload.get("embedding_model") or "") != expected_model or str(
+                    payload.get("embedding_model_version") or ""
+                ) != expected_version:
+                    raise VectorStoreError(
+                        f"point {point_id} has stale embedding provenance"
+                    )
+
+                text = payload.get("text")
+                if not isinstance(text, str):
+                    raise VectorStoreError(
+                        f"point {point_id} has non-string source text"
+                    )
+                point_ids.append(point_id)
+                source_entries.append((point_id, text))
+            if next_offset is None:
+                break
+            if not records or next_offset == offset:
+                raise VectorStoreError(
+                    "Qdrant embedding-scope pagination did not make progress"
+                )
+            offset = next_offset
+
+        return {
+            "point_count": len(point_ids),
+            "point_ids_sha256": self._lexical_point_ids_sha256(point_ids),
+            "source_text_sha256": self._lexical_source_text_sha256(source_entries),
+        }
+
+    # ------------------------------------------------- T6 lifecycle surface
+
+    @staticmethod
+    def _lexical_point_ids_sha256(point_ids: Sequence[str]) -> str:
+        """Sorted-ID digest; frozen contract shared with the backfill script."""
+
+        encoded = "".join(f"{point_id}\n" for point_id in sorted(map(str, point_ids)))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _lexical_source_text_sha256(entries: Sequence[tuple[str, str]]) -> str:
+        """Sorted (id, sha256(text)) digest; frozen backfill contract."""
+
+        lines: list[str] = []
+        for point_id, text in sorted(entries, key=lambda item: str(item[0])):
+            text_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            lines.append(f"{point_id}\0{text_digest}\n")
+        return hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()
+
+    async def get_bm25_v2_receipt(self, collection_name: str) -> dict[str, Any] | None:
+        """Live (uncached) completion receipt persisted on the collection."""
+
+        info = await self._call(lambda: self._client.get_collection(collection_name))
+        raw = self._collection_metadata(info).get(BM25_V2_BACKFILL_METADATA_KEY)
+        return dict(raw) if isinstance(raw, dict) else None
+
+    async def get_live_lexical_profile(
+        self, collection_name: str
+    ) -> tuple[LexicalConfig | None, dict[str, Any] | None]:
+        """Live (uncached) collection lexical profile + receipt for the protocol."""
+
+        info = await self._call(lambda: self._client.get_collection(collection_name))
+        metadata = self._collection_metadata(info)
+        try:
+            stored = LexicalConfig.from_collection_metadata(metadata)
+        except LexicalConfigError as exc:
+            raise VectorStoreError(str(exc)) from exc
+        raw = metadata.get(BM25_V2_BACKFILL_METADATA_KEY)
+        return stored, dict(raw) if isinstance(raw, dict) else None
+
+    async def invalidate_bm25_v2_receipt(self, collection_name: str, *, reason: str) -> None:
+        """Public two-phase sentinel: swap a complete receipt for invalidated."""
+
+        info = await self._call(lambda: self._client.get_collection(collection_name))
+        return await self._invalidate_remote_bm25_v2_receipt(
+            collection_name,
+            self._collection_metadata(info),
+            reason=reason,
+        )
+
+    async def _scan_bm25_v2_lexical_points(
+        self,
+        collection_name: str,
+        *,
+        tenant_id: str,
+        dataset_id: str,
+        config: LexicalConfig,
+        batch_size: int = 256,
+    ) -> tuple[list[str], list[tuple[str, str]], int]:
+        """Scroll the enabled-L3-text lexical scope; return ids, texts, complete count.
+
+        The predicate is the same COALESCE-default scope PostgreSQL is
+        authoritative for; a point that escaped the scope or carries a
+        conflicting fingerprint fails loudly (addendum §T6.1: missing or
+        corrupt index state must never degrade into an empty result).
+        """
+
+        must = [
+            qmodels.FieldCondition(key="tenant_id", match=qmodels.MatchValue(value=tenant_id)),
+            qmodels.FieldCondition(key="dataset_id", match=qmodels.MatchValue(value=dataset_id)),
+        ]
+        scroll_filter = self._bm25_v2_lexical_filter(must)
+        offset: Any = None
+        point_ids: list[str] = []
+        source_entries: list[tuple[str, str]] = []
+        complete = 0
+        seen: set[str] = set()
+        while True:
+            records, next_offset = await self._call(
+                # offset is rebound every loop; bind it as a default so the
+                # retry wrapper cannot capture a drifted value (B023).
+                lambda scroll_offset=offset: self._client.scroll(
+                    collection_name=collection_name,
+                    scroll_filter=scroll_filter,
+                    limit=batch_size,
+                    offset=scroll_offset,
+                    with_payload=[
+                        "tenant_id",
+                        "dataset_id",
+                        "content_type",
+                        "level",
+                        "enabled",
+                        "text",
+                        "_lexical",
+                    ],
+                    with_vectors=[BM25_V2_FIELD],
+                ),
+                interactive=True,
+            )
+            for record in records or []:
+                raw_id = getattr(record, "id", None)
+                if raw_id is None:
+                    raise VectorStoreError("Qdrant returned a point without an id")
+                point_id = str(raw_id)
+                if point_id in seen:
+                    raise VectorStoreError(
+                        f"Qdrant scroll returned duplicate point id {raw_id!s}"
+                    )
+                seen.add(point_id)
+                payload = getattr(record, "payload", None)
+                payload = payload if isinstance(payload, dict) else {}
+                if (
+                    payload.get("tenant_id") != tenant_id
+                    or payload.get("dataset_id") != dataset_id
+                    or not self._bm25_v2_point_is_eligible(payload)
+                ):
+                    raise VectorStoreError(
+                        f"point {raw_id!s} escaped the requested lexical scope during verification"
+                    )
+                text = payload.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    raise VectorStoreError(f"point {raw_id!s} has empty or non-string text")
+                lexical = payload.get("_lexical")
+                lexical = lexical if isinstance(lexical, dict) else {}
+                observed_schema = lexical.get("bm25_v2_schema_fingerprint")
+                observed_filtering = lexical.get("filtering_profile_fingerprint")
+                observed_source = lexical.get("source_text_sha256")
+                expected_source = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                if (
+                    observed_schema is not None
+                    and observed_schema != config.bm25_v2.fingerprint
+                ) or (
+                    observed_filtering is not None
+                    and observed_filtering != config.filtering.fingerprint
+                ):
+                    raise VectorStoreError(
+                        f"point {raw_id!s} has a conflicting bm25_v2 fingerprint"
+                    )
+                vectors = getattr(record, "vector", None)
+                has_vector = isinstance(vectors, dict) and BM25_V2_FIELD in vectors
+                versions = lexical.get("versions")
+                versioned = (
+                    isinstance(versions, list)
+                    and {LEXICAL_V1, BM25_V2_FIELD}.issubset(versions)
+                )
+                if bool(
+                    has_vector
+                    and observed_schema == config.bm25_v2.fingerprint
+                    and observed_filtering == config.filtering.fingerprint
+                    and observed_source == expected_source
+                    and versioned
+                ):
+                    complete += 1
+                point_ids.append(point_id)
+                source_entries.append((point_id, text))
+            if next_offset is None:
+                break
+            if not records or next_offset == offset:
+                raise VectorStoreError("Qdrant scroll pagination did not make progress")
+            offset = next_offset
+        return point_ids, source_entries, complete
+
+    async def scan_bm25_v2_lexical_scope(
+        self,
+        collection_name: str,
+        *,
+        tenant_id: str,
+        dataset_id: str,
+        config: LexicalConfig,
+    ) -> dict[str, Any]:
+        """Public protocol view of the live lexical scope digests."""
+
+        point_ids, source_entries, complete = await self._scan_bm25_v2_lexical_points(
+            collection_name,
+            tenant_id=tenant_id,
+            dataset_id=dataset_id,
+            config=config,
+        )
+        return {
+            "point_count": len(point_ids),
+            "complete_count": complete,
+            "point_ids_sha256": self._lexical_point_ids_sha256(point_ids),
+            "source_text_sha256": self._lexical_source_text_sha256(source_entries),
+        }
+
+    async def verify_bm25_v2_active_readiness(
+        self,
+        collection_name: str,
+        *,
+        tenant_id: str,
+        dataset_id: str,
+        config: LexicalConfig | None = None,
+    ) -> dict[str, Any]:
+        """Verify active readiness with receipt-keyed TTL and singleflight.
+
+        The cache key includes the certified authority revision, both frozen
+        fingerprints, and the receipt digests.  Any runtime write invalidates
+        the receipt before mutating points, so an old positive result cannot
+        authorize a new generation.  TTL zero preserves full-scan behavior.
+        """
+
+        from ...core.observability.metrics import record_bm25_v2_readiness
+
+        if self.bm25_v2_readiness_ttl_seconds <= 0:
+            try:
+                result = await self._verify_bm25_v2_active_readiness_uncached(
+                    collection_name,
+                    tenant_id=tenant_id,
+                    dataset_id=dataset_id,
+                    config=config,
+                )
+            except Exception:
+                record_bm25_v2_readiness("failure")
+                raise
+            record_bm25_v2_readiness("miss")
+            return result
+
+        self._require_bm25_v2_enabled()
+        info = await self._call(
+            lambda: self._client.get_collection(collection_name),
+            interactive=True,
+        )
+        metadata = self._collection_metadata(info)
+        try:
+            stored = LexicalConfig.from_collection_metadata(metadata)
+        except LexicalConfigError as exc:
+            raise VectorStoreError(str(exc)) from exc
+        receipt = metadata.get(BM25_V2_BACKFILL_METADATA_KEY)
+        if stored is None or not isinstance(receipt, dict):
+            try:
+                result = await self._verify_bm25_v2_active_readiness_uncached(
+                    collection_name,
+                    tenant_id=tenant_id,
+                    dataset_id=dataset_id,
+                    config=config,
+                    _info=info,
+                )
+            except Exception:
+                record_bm25_v2_readiness("failure")
+                raise
+            record_bm25_v2_readiness("miss")
+            return result
+        requested_schema = config.bm25_v2.fingerprint if config is not None else ""
+        requested_filtering = (
+            config.filtering.fingerprint if config is not None else ""
+        )
+        receipt_fingerprint = hashlib.sha256(
+            json.dumps(
+                receipt,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        cache_key = (
+            collection_name,
+            tenant_id,
+            dataset_id,
+            stored.bm25_v2.fingerprint,
+            stored.filtering.fingerprint,
+            stored.active_version,
+            str(stored.runtime_revision),
+            receipt_fingerprint,
+            str(receipt.get("authority_content_revision") or ""),
+            str(receipt.get("point_count") or ""),
+            str(receipt.get("point_ids_sha256") or ""),
+            str(receipt.get("source_text_sha256") or ""),
+            str(receipt.get("status") or ""),
+            requested_schema,
+            requested_filtering,
+        )
+        now = time.monotonic()
+        owner = False
+        async with self._bm25_v2_readiness_lock:
+            cached = self._bm25_v2_readiness_cache.get(cache_key)
+            if cached is not None and cached[0] > now:
+                record_bm25_v2_readiness("hit")
+                return dict(cached[1])
+            task = self._bm25_v2_readiness_inflight.get(cache_key)
+            if task is None:
+                task = asyncio.create_task(
+                    self._verify_bm25_v2_active_readiness_uncached(
+                        collection_name,
+                        tenant_id=tenant_id,
+                        dataset_id=dataset_id,
+                        config=config,
+                        _info=info,
+                    )
+                )
+                self._bm25_v2_readiness_inflight[cache_key] = task
+                task.add_done_callback(
+                    lambda completed, key=cache_key: asyncio.create_task(
+                        self._complete_bm25_v2_readiness_singleflight(key, completed)
+                    )
+                )
+                owner = True
+            else:
+                record_bm25_v2_readiness("hit")
+        try:
+            result = await asyncio.shield(task)
+        except Exception:
+            record_bm25_v2_readiness("failure")
+            raise
+        if owner:
+            record_bm25_v2_readiness("miss")
+        return dict(result)
+
+    async def _complete_bm25_v2_readiness_singleflight(
+        self,
+        cache_key: tuple[str, ...],
+        task: asyncio.Task[dict[str, Any]],
+    ) -> None:
+        """Retire/cache a verification even if its first waiter is cancelled."""
+
+        result: dict[str, Any] | None = None
+        if not task.cancelled():
+            try:
+                result = dict(task.result())
+            except BaseException:
+                result = None
+        async with self._bm25_v2_readiness_lock:
+            if self._bm25_v2_readiness_inflight.get(cache_key) is task:
+                self._bm25_v2_readiness_inflight.pop(cache_key, None)
+                if result is not None:
+                    self._bm25_v2_readiness_cache[cache_key] = (
+                        time.monotonic() + self.bm25_v2_readiness_ttl_seconds,
+                        result,
+                    )
+
+    async def _verify_bm25_v2_active_readiness_uncached(
+        self,
+        collection_name: str,
+        *,
+        tenant_id: str,
+        dataset_id: str,
+        config: LexicalConfig | None = None,
+        _info: Any | None = None,
+    ) -> dict[str, Any]:
+        """Recompute active-serving readiness from Qdrant-side evidence only.
+
+        This uncached primitive re-verifies the filter profile and capability
+        and recomputes
+        the exact receipt point count, sorted-ID digest, and source-text
+        digest over the lexical scope (bm25-v2 doc §Failure behavior). The
+        PostgreSQL cross-authority side is verified by the T6 lifecycle
+        service at cutover time and stored in the receipt's
+        ``authority_content_revision``.
+        """
+
+        self._require_bm25_v2_enabled()
+        info = _info or await self._call(
+            lambda: self._client.get_collection(collection_name)
+        )
+        metadata = self._collection_metadata(info)
+        try:
+            stored = LexicalConfig.from_collection_metadata(metadata)
+        except LexicalConfigError as exc:
+            raise VectorStoreError(str(exc)) from exc
+        if stored is None or not stored.reads_bm25_v2:
+            raise VectorStoreError(
+                f"collection '{collection_name}' is not cut over to bm25_v2"
+            )
+        if config is not None and (
+            config.bm25_v2.fingerprint != stored.bm25_v2.fingerprint
+            or config.filtering.fingerprint != stored.filtering.fingerprint
+        ):
+            raise VectorStoreError(
+                f"collection '{collection_name}' bm25_v2 fingerprints disagree "
+                "with the PostgreSQL lexical selection"
+            )
+        scope = self._scope_from_metadata(metadata)
+        if scope is None:
+            raise VectorStoreError(
+                f"collection '{collection_name}' is missing immutable dataset/tenant scope"
+            )
+        if scope["tenant_id"] != tenant_id or scope["dataset_id"] != dataset_id:
+            raise VectorStoreError(f"collection '{collection_name}' dataset scope mismatch")
+        sparse_cfg = getattr(info.config.params, "sparse_vectors", None) or {}
+        v2_params = sparse_cfg.get(BM25_V2_FIELD)
+        modifier = getattr(v2_params, "modifier", None) if v2_params else None
+        if getattr(modifier, "value", modifier) != qmodels.Modifier.IDF.value:
+            raise VectorStoreError(
+                f"collection '{collection_name}' is missing the versioned bm25_v2 field"
+            )
+        await self._ensure_bm25_v2_capability(stored)
+        await self._ensure_filtering_profile(
+            collection_name,
+            stored,
+            info=info,
+            allow_mutation=False,
+        )
+        receipt = metadata.get(BM25_V2_BACKFILL_METADATA_KEY)
+        if not isinstance(receipt, dict) or receipt.get("status") != "complete":
+            raise VectorStoreError(
+                f"collection '{collection_name}' has no completed bm25_v2 receipt; "
+                "refusing active reads with unproven coverage"
+            )
+        if (
+            str(receipt.get("collection_name") or "") != collection_name
+            or str(receipt.get("tenant_id") or "") != tenant_id
+            or str(receipt.get("dataset_id") or "") != dataset_id
+            or str(receipt.get("bm25_v2_schema_fingerprint") or "")
+            != stored.bm25_v2.fingerprint
+            or str(receipt.get("filtering_profile_fingerprint") or "")
+            != stored.filtering.fingerprint
+            or str(receipt.get("authority_kind") or "") != BM25_V2_AUTHORITY_KIND
+        ):
+            raise VectorStoreError(
+                f"collection '{collection_name}' bm25_v2 receipt does not match "
+                "the collection profile"
+            )
+        point_ids, source_entries, complete = await self._scan_bm25_v2_lexical_points(
+            collection_name,
+            tenant_id=tenant_id,
+            dataset_id=dataset_id,
+            config=stored,
+        )
+        if complete != len(point_ids):
+            raise VectorStoreError(
+                f"collection '{collection_name}' has {len(point_ids) - complete} "
+                "points without a complete bm25_v2 marker; backfill a fresh receipt"
+            )
+        observed_ids = self._lexical_point_ids_sha256(point_ids)
+        observed_source = self._lexical_source_text_sha256(source_entries)
+        if int(receipt.get("point_count") or -1) != len(point_ids):
+            raise VectorStoreError(
+                f"collection '{collection_name}' bm25_v2 point count drifted from its receipt"
+            )
+        if str(receipt.get("point_ids_sha256") or "") != observed_ids:
+            raise VectorStoreError(
+                f"collection '{collection_name}' bm25_v2 sorted point-ID digest "
+                "drifted from its receipt"
+            )
+        if str(receipt.get("source_text_sha256") or "") != observed_source:
+            raise VectorStoreError(
+                f"collection '{collection_name}' bm25_v2 source-text digest drifted "
+                "from its receipt"
+            )
+        return {
+            "schema_version": 1,
+            "status": "complete",
+            "collection_name": collection_name,
+            "bm25_v2_schema_fingerprint": stored.bm25_v2.fingerprint,
+            "filtering_profile_fingerprint": stored.filtering.fingerprint,
+            "dataset_id": dataset_id,
+            "tenant_id": tenant_id,
+            "point_count": len(point_ids),
+            "point_ids_sha256": observed_ids,
+            "manifest_algorithm": "sha256(sorted-point-id-newline-v1)",
+            "source_text_sha256": observed_source,
+            "source_text_algorithm": "sha256(sorted-point-id-text-sha256-null-newline-v1)",
+            "authority_kind": BM25_V2_AUTHORITY_KIND,
+            "authority_content_revision": receipt.get("authority_content_revision"),
+            "certified_by": "active_readiness_recompute",
+        }
+
+    async def publish_bm25_v2_cutover_receipt(
+        self,
+        collection_name: str,
+        *,
+        receipt: dict[str, Any],
+        tenant_id: str,
+        dataset_id: str,
+    ) -> dict[str, Any]:
+        """Persist a cutover-certified completion receipt (T6 two-phase commit).
+
+        Only the lifecycle protocol calls this, and only after it has
+        recomputed agreement between PostgreSQL authority and the Qdrant
+        lexical scope under the writer barrier. A malformed receipt is refused
+        before any mutation; convergence is re-read from the server.
+        """
+
+        if not isinstance(receipt, dict) or receipt.get("status") != "complete":
+            raise VectorStoreError("refusing to publish an incomplete bm25_v2 receipt")
+        if (
+            str(receipt.get("collection_name") or "") != collection_name
+            or str(receipt.get("tenant_id") or "") != tenant_id
+            or str(receipt.get("dataset_id") or "") != dataset_id
+        ):
+            raise VectorStoreError(
+                f"refusing to publish a bm25_v2 receipt outside the "
+                f"collection '{collection_name}' scope"
+            )
+        updated = await self._call(
+            lambda: self._client.update_collection(
+                collection_name=collection_name,
+                metadata={BM25_V2_BACKFILL_METADATA_KEY: receipt},
+            )
+        )
+        self._invalidate_collection_info(collection_name)
+        if updated is not True:
+            raise VectorStoreError(
+                f"collection '{collection_name}' rejected the bm25_v2 cutover receipt"
+            )
+        refreshed = await self._call(lambda: self._client.get_collection(collection_name))
+        observed = self._collection_metadata(refreshed).get(BM25_V2_BACKFILL_METADATA_KEY)
+        if observed != receipt:
+            raise VectorStoreError(
+                f"collection '{collection_name}' bm25_v2 cutover receipt did not converge"
+            )
+        return dict(receipt)
 
     def bm25_v2_shadow_write_stats(self) -> dict[str, int]:
         """Expose process-local shadow failures for health/metrics adapters."""
@@ -1221,6 +1878,21 @@ class VectorStore:
         self._sparse_collections.discard(collection_name)
         self._sparse_readiness.pop(collection_name, None)
 
+    async def collection_exists(self, collection_name: str) -> bool:
+        """True when the named collection is present in the vector store.
+
+        Read-only probe (no lease needed): blue-green migration uses it to
+        detect hierarchical auxiliary siblings (``_summary``/``_sections``)
+        before opening a migration that cannot enumerate them.
+        """
+        if not collection_name:
+            return False
+        return bool(
+            await self._call(
+                lambda: self._client.collection_exists(collection_name=collection_name)
+            )
+        )
+
     async def ensure_collection(
         self,
         dataset_id: str,
@@ -1489,13 +2161,18 @@ class VectorStore:
         tenant_id: str | None = None,
         allow_runtime_transition: bool = False,
         authority_content_revision: int | None = None,
+        active_cutover_authorized: bool = False,
     ) -> bool:
         """Verify or transition the versioned lexical contract.
 
         Runtime selection changes are admin-only. Normal ingestion callers
         verify the persisted selection and cannot replay a stale dataset
-        snapshot over a newer shadow enablement or rollback. Active cutover is
-        unavailable in this release.
+        snapshot over a newer shadow enablement or rollback. An active
+        bm25_v2 flip is only honored with ``active_cutover_authorized``,
+        which the T6 lifecycle service sets exclusively while it holds the
+        dataset write barrier and has verified cross-store agreement — it is
+        not a configuration surface, so the production default stays
+        shadow-only.
         """
         _ = authority_content_revision
         info = await self._call(lambda: self._client.get_collection(collection_name))
@@ -1618,9 +2295,14 @@ class VectorStore:
             return False
 
         if config.reads_bm25_v2:
-            raise VectorStoreError(
-                "bm25_v2 active cutover is unavailable; this release is shadow-only"
-            )
+            if not active_cutover_authorized:
+                raise VectorStoreError(
+                    "bm25_v2 active cutover is unavailable; this release is shadow-only"
+                )
+            # Proof of protocol, not configuration: only the T6 lifecycle
+            # service passes this, and the service kill switch still has the
+            # final say (release decision stays separate from the protocol).
+            self._require_bm25_v2_enabled()
 
         if not self.bm25_v2_enabled:
             emergency_rollback = bool(
@@ -1822,18 +2504,29 @@ class VectorStore:
                 raise VectorStoreError("at least one RRF weight must be positive")
 
         selected_lexical = lexical_config or LexicalConfig()
-        if selected_lexical.reads_bm25_v2:
+        active_v2 = selected_lexical.reads_bm25_v2
+        if active_v2 and not self.bm25_v2_enabled:
             raise VectorStoreError(
-                "bm25_v2 active serving is unavailable; this release is shadow-only"
+                "bm25_v2 active serving is unavailable; the service kill switch is off"
             )
         authoritative_scope = await self.require_collection_readable(
             collection_name,
             tenant_id=tenant_id,
             dataset_id=dataset_id,
+            expected_active_v2=active_v2,
         )
         tenant_id = authoritative_scope["tenant_id"]
         dataset_id = authoritative_scope["dataset_id"]
-        sparse_field = LEXICAL_V1_FIELD
+        sparse_field = BM25_V2_FIELD if active_v2 else LEXICAL_V1_FIELD
+        if active_v2:
+            # Per-query evidence, no positive cache: an active hybrid leg may
+            # only run against a collection whose receipt still recomputes.
+            await self.verify_bm25_v2_active_readiness(
+                collection_name,
+                tenant_id=tenant_id,
+                dataset_id=dataset_id,
+                config=selected_lexical,
+            )
 
         requests = []
         for route in routes:
@@ -1879,13 +2572,22 @@ class VectorStore:
                         filter=dense_filter,
                     )
                 )
-            sparse_indices = list(route.get("sparse_indices") or [])
             sparse_query: Any | None = None
-            if sparse_indices:
-                sparse_query = qmodels.SparseVector(
-                    indices=sparse_indices,
-                    values=list(route.get("sparse_values") or []),
-                )
+            if active_v2:
+                route_text = str(route.get("query_text") or "").strip()
+                if not route_text:
+                    raise VectorStoreError(
+                        "bm25_v2 hybrid search requires non-empty query_text "
+                        "for every route; refusing a silently-degraded leg"
+                    )
+                sparse_query = self._bm25_v2_document(route_text, selected_lexical)
+            else:
+                sparse_indices = list(route.get("sparse_indices") or [])
+                if sparse_indices:
+                    sparse_query = qmodels.SparseVector(
+                        indices=sparse_indices,
+                        values=list(route.get("sparse_values") or []),
+                    )
             if sparse_query is not None:
                 prefetch.append(
                     qmodels.Prefetch(
@@ -1916,7 +2618,7 @@ class VectorStore:
 
         if not requests:
             return []
-        if not await self._is_sparse_ready(
+        if not active_v2 and not await self._is_sparse_ready(
             collection_name,
             interactive=True,
         ):
@@ -2008,20 +2710,31 @@ class VectorStore:
         authority_content_revision: int | None = None,
     ) -> list[VectorSearchHit]:
         """Sparse-only (BM25) search via Qdrant native sparse vectors."""
-        _ = (query_text, authority_content_revision)
+        _ = authority_content_revision
         selected_lexical = lexical_config or LexicalConfig()
-        if selected_lexical.reads_bm25_v2:
+        active_v2 = selected_lexical.reads_bm25_v2
+        if active_v2 and not self.bm25_v2_enabled:
             raise VectorStoreError(
-                "bm25_v2 active serving is unavailable; this release is shadow-only"
+                "bm25_v2 active serving is unavailable; the service kill switch is off"
             )
         authoritative_scope = await self.require_collection_readable(
             collection_name,
             tenant_id=tenant_id,
             dataset_id=dataset_id,
+            expected_active_v2=active_v2,
         )
         tenant_id = authoritative_scope["tenant_id"]
         dataset_id = authoritative_scope["dataset_id"]
-        if sparse_indices:
+        query: Any
+        if active_v2:
+            text = str(query_text or "").strip()
+            if not text:
+                raise VectorStoreError(
+                    "bm25_v2 sparse search requires non-empty query_text; "
+                    "refusing an empty-result fallback"
+                )
+            query = self._bm25_v2_document(text, selected_lexical)
+        elif sparse_indices:
             query = qmodels.SparseVector(
                 indices=sparse_indices,
                 values=sparse_values,
@@ -2079,7 +2792,17 @@ class VectorStore:
         flt = qmodels.Filter(must=conditions)
 
         sparse_field = selected_lexical.active_field
-        if not await self._is_sparse_ready(
+        if active_v2:
+            # Per-query evidence, no positive-readiness cache: an active bm25_v2
+            # leg only runs when the collection's receipt still recomputes
+            # against the live lexical scope.
+            await self.verify_bm25_v2_active_readiness(
+                collection_name,
+                tenant_id=tenant_id,
+                dataset_id=dataset_id,
+                config=selected_lexical,
+            )
+        elif not await self._is_sparse_ready(
             collection_name,
             sparse_field,
             interactive=True,
@@ -2140,6 +2863,74 @@ class VectorStore:
                 payload[field_name] = scope[field_name]
             normalized.append(point.model_copy(update={"payload": payload}))
         return normalized
+
+    async def snapshot_points(
+        self,
+        collection_name: str,
+        point_ids: Sequence[str],
+        *,
+        tenant_id: str,
+        dataset_id: str,
+    ) -> dict[str, qmodels.PointStruct]:
+        """Read exact points, including vectors, for compensating rollback.
+
+        A text-generation publish may replace an existing point in place.
+        Deleting that ID after a PostgreSQL failure would delete the previous
+        serving generation too, so callers snapshot the old value and restore
+        it instead.  IDs come from authoritative segment rows, but collection
+        scope and every returned payload are still verified before the backup
+        is accepted.
+        """
+
+        ids = list(
+            dict.fromkeys(
+                str(point_id or "").strip()
+                for point_id in point_ids
+                if str(point_id or "").strip()
+            )
+        )
+        if not ids:
+            return {}
+        scope = await self.require_collection_readable(
+            collection_name,
+            tenant_id=tenant_id,
+            dataset_id=dataset_id,
+        )
+        records = await self._call(
+            lambda: self._client.retrieve(
+                collection_name=collection_name,
+                ids=ids,
+                with_payload=True,
+                with_vectors=True,
+            )
+        )
+        snapshots: dict[str, qmodels.PointStruct] = {}
+        requested = set(ids)
+        for record in records or []:
+            point_id = str(getattr(record, "id", "") or "").strip()
+            if not point_id or point_id not in requested or point_id in snapshots:
+                raise VectorStoreError(
+                    "Qdrant returned an unexpected point during rollback snapshot"
+                )
+            payload = dict(getattr(record, "payload", None) or {})
+            for field_name in ("tenant_id", "dataset_id"):
+                supplied = str(payload.get(field_name) or "").strip()
+                if supplied and supplied != scope[field_name]:
+                    raise VectorStoreError(
+                        f"point '{point_id}' escaped {field_name} scope during rollback snapshot"
+                    )
+                payload[field_name] = scope[field_name]
+            vector = getattr(record, "vector", None)
+            if vector is None:
+                raise VectorStoreError(
+                    f"point '{point_id}' has no vector in rollback snapshot"
+                )
+            snapshots[point_id] = qmodels.PointStruct(
+                id=record.id,
+                vector=vector,
+                payload=payload,
+            )
+        return snapshots
 
     async def upsert(
         self,
@@ -2211,15 +3002,13 @@ class VectorStore:
         except LexicalConfigError as exc:
             raise VectorStoreError(str(exc)) from exc
         lexical_config = stored_lexical or LexicalConfig()
-
-        if lexical_config.reads_bm25_v2:
-            raise VectorStoreError(
-                "bm25_v2 active mode is read-only; roll back to lexical_v1 "
-                "shadow before writing points"
-            )
+        affects_bm25_scope = any(
+            self._bm25_v2_point_is_eligible(dict(point.payload or {}))
+            for point in points
+        )
 
         receipt_invalidation_error: Exception | None = None
-        if stored_lexical is not None:
+        if stored_lexical is not None and affects_bm25_scope:
             try:
                 await self._invalidate_remote_bm25_v2_receipt(
                     collection_name,
@@ -2355,7 +3144,7 @@ class VectorStore:
                     text_value.encode("utf-8")
                 ).hexdigest(),
             }
-            if lexical_config.reads_bm25_v2:
+            if lexical_config.reads_bm25_v2 and is_lexical_point:
                 active_vector = dict(base_vector)
                 active_vector[BM25_V2_FIELD] = self._bm25_v2_document(
                     text_value,
@@ -2367,6 +3156,8 @@ class VectorStore:
                         update={"vector": active_vector, "payload": active_payload}
                     )
                 )
+            elif lexical_config.reads_bm25_v2:
+                active_points.append(base_point)
             elif shadow_only and v2_preflight_error is None:
                 if is_lexical_point and text_value.strip():
                     shadow_updates.append((point.id, text_value, marker))
@@ -2673,11 +3464,6 @@ class VectorStore:
                     raise VectorStoreError(
                         f"collection '{collection_name}' has invalid lexical metadata"
                     )
-                if stored_lexical is not None and stored_lexical.reads_bm25_v2:
-                    raise VectorStoreError(
-                        "bm25_v2 active mode is read-only; roll back to lexical_v1 "
-                        "shadow before deleting points"
-                    )
                 owned.append((collection_name, metadata))
 
             touched: list[str] = []
@@ -2801,11 +3587,6 @@ class VectorStore:
                 if COLLECTION_METADATA_KEY in metadata and stored_lexical is None:
                     raise VectorStoreError(
                         f"collection '{collection_name}' has invalid lexical metadata"
-                    )
-                if stored_lexical is not None and stored_lexical.reads_bm25_v2:
-                    raise VectorStoreError(
-                        "bm25_v2 active mode is read-only; roll back to lexical_v1 "
-                        "shadow before changing segment visibility"
                     )
                 owned.append((collection_name, metadata))
 
@@ -2975,6 +3756,9 @@ class VectorStore:
         point_ids: Sequence[str],
         tenant_id: str | None = None,
         dataset_id: str | None = None,
+        *,
+        lifecycle_lease_held: bool = False,
+        affects_bm25_scope: bool = True,
     ) -> None:
         """Delete points while fenced against deletion of the owning dataset."""
 
@@ -2983,7 +3767,7 @@ class VectorStore:
             return
 
         lifecycle_dataset_id = str(dataset_id or "").strip()
-        if callable(self._dataset_write_lease):
+        if callable(self._dataset_write_lease) and not lifecycle_lease_held:
             # Collection metadata is the immutable ownership authority. Resolve
             # it before choosing the advisory-lock namespace; the implementation
             # re-reads and verifies it after the shared lease is acquired.
@@ -3000,6 +3784,7 @@ class VectorStore:
                         ids,
                         tenant_id=tenant_id,
                         dataset_id=dataset_id,
+                        affects_bm25_scope=affects_bm25_scope,
                     )
                 return
 
@@ -3008,6 +3793,7 @@ class VectorStore:
             ids,
             tenant_id=tenant_id,
             dataset_id=dataset_id,
+            affects_bm25_scope=affects_bm25_scope,
         )
 
     async def _delete_points_unfenced(
@@ -3016,6 +3802,8 @@ class VectorStore:
         point_ids: Sequence[str],
         tenant_id: str | None = None,
         dataset_id: str | None = None,
+        *,
+        affects_bm25_scope: bool = True,
     ) -> None:
         """Delete points from collection, optionally verifying tenant ownership.
 
@@ -3036,11 +3824,6 @@ class VectorStore:
         except LexicalConfigError as exc:
             raise VectorStoreError(str(exc)) from exc
         scope = self._scope_from_metadata(metadata)
-        if stored is not None and stored.reads_bm25_v2:
-            raise VectorStoreError(
-                "bm25_v2 active mode is read-only; roll back to lexical_v1 "
-                "shadow before deleting points"
-            )
         if scope is not None:
             if tenant_id and tenant_id != scope["tenant_id"]:
                 raise VectorStoreError("delete tenant scope mismatch")
@@ -3049,7 +3832,7 @@ class VectorStore:
             tenant_id = scope["tenant_id"]
             dataset_id = scope["dataset_id"]
 
-        if stored is not None:
+        if stored is not None and affects_bm25_scope:
             await self._invalidate_remote_bm25_v2_receipt(
                 collection_name,
                 metadata,
@@ -3295,7 +4078,11 @@ class VectorStore:
                 collection_name=collection_name,
                 scroll_filter=scoped_filter,
                 limit=len(ids),
-                with_payload=True,
+                # MMR only needs the vectors (perf-review 2026-08-16): the
+                # full payload used to be rolled through the wire on every
+                # diversification pass and discarded. These two fields are
+                # kept solely for the tenant/dataset authority check below.
+                with_payload=["tenant_id", "dataset_id"],
                 with_vectors=True,
             ),
             interactive=True,

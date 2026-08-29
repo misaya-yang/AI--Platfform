@@ -7,6 +7,12 @@ import pytest
 import yaml
 
 
+@pytest.fixture(autouse=True)
+def _use_explicit_test_idempotency(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "test")
+    monkeypatch.setenv("INTERNAL_IDEMPOTENCY_BACKEND", "memory")
+
+
 def test_runtime_role_defaults_to_all_and_rejects_unknown() -> None:
     from knowledge_service.config import Settings
 
@@ -64,6 +70,17 @@ def test_compose_splits_api_and_worker_roles() -> None:
     ]["knowledge-service"]["volumes"]
 
 
+def test_compose_defaults_knowledge_idempotency_to_redis() -> None:
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text())
+    api_environment = compose["services"]["knowledge-service"]["environment"]
+    worker_environment = compose["services"]["knowledge-worker"]["environment"]
+
+    # Compose is a production-like runtime. A stale workstation .env must not
+    # downgrade cross-process idempotency to per-process memory.
+    assert api_environment["INTERNAL_IDEMPOTENCY_BACKEND"] == "redis"
+    assert worker_environment["INTERNAL_IDEMPOTENCY_BACKEND"] == "redis"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("role", "worker_starts"),
@@ -81,6 +98,9 @@ async def test_runtime_role_uses_one_pool_and_closes_owned_resources(
     from ai_gateway_core.proxy import drain
     from knowledge_service import main
     from knowledge_service.persistence import database as database_module
+    from knowledge_service.services.knowledge import (
+        embedding_migration_worker as embedding_worker_module,
+    )
     from knowledge_service.services.knowledge import knowledge_service as service_module
     from knowledge_service.services.knowledge import worker as worker_module
 
@@ -123,6 +143,14 @@ async def test_runtime_role_uses_one_pool_and_closes_owned_resources(
             super().__init__()
             events.append("producer-open")
 
+    class EmbeddingWorker(Worker):
+        async def start(self) -> None:
+            self._running = True
+            events.append("embedding-worker-start")
+
+        async def stop(self) -> None:
+            events.append("embedding-worker-stop")
+
     class Qdrant:
         async def close(self) -> None:
             events.append("qdrant-close")
@@ -136,13 +164,20 @@ async def test_runtime_role_uses_one_pool_and_closes_owned_resources(
     monkeypatch.setattr(service_module, "KnowledgeService", Service)
     monkeypatch.setattr(worker_module, "KnowledgeWorker", Worker)
     monkeypatch.setattr(worker_module, "DurableEnqueueProxy", Producer)
+    monkeypatch.setattr(
+        embedding_worker_module,
+        "EmbeddingMigrationJobWorker",
+        EmbeddingWorker,
+    )
     monkeypatch.setattr(tracing, "init_tracing", lambda _service: None)
     monkeypatch.setattr(drain, "install_signal_handlers", lambda _loop: None)
 
     app = main.create_app(main.Settings(_env_file=None, runtime_role=role))
     async with app.router.lifespan_context(app):
         assert app.state.db is app.state.knowledge_service.db
+        assert app.state.knowledge_service._worker is app.state.knowledge_worker
         assert ("worker-start" in events) is worker_starts
+        assert ("embedding-worker-start" in events) is worker_starts
 
     assert events.count("db-open") == 1
     assert events.count("db-close") == 1

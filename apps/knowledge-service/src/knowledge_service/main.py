@@ -18,7 +18,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 
-from .config import Settings
+from .config import Settings, get_settings
 
 # ---------------------------------------------------------------------------
 # Structured logging
@@ -40,11 +40,10 @@ def configure_logging(level: str = "INFO") -> None:
     else simple. structlog is reconfigured to dispatch through stdlib so
     its kw-args still surface but ContextFilter can stamp request_id.
     """
-    log_format = os.environ.get("LOG_FORMAT")
+    env = get_settings()
+    log_format = env.log_format
     if not log_format:
-        log_format = (
-            "json" if os.environ.get("ENVIRONMENT", "").lower() == "production" else "simple"
-        )
+        log_format = "json" if env.environment.lower() == "production" else "simple"
 
     configure_structured_logging(
         level=level,
@@ -124,6 +123,60 @@ async def _database_is_ready(database: Any, *, timeout_seconds: float = 1.0) -> 
         return False
 
 
+_LOCAL_IDEMPOTENCY_ENVIRONMENTS = frozenset(
+    {"local", "dev", "development", "test", "testing"}
+)
+
+
+def _idempotency_store_from_settings(settings: Settings) -> tuple[Any, Any | None]:
+    """Build the configured store without silently weakening persistence."""
+    from ai_gateway_core.comm import (
+        InMemoryIdempotencyStore,
+        RedisIdempotencyStore,
+    )
+
+    backend = settings.internal_idempotency_backend.strip().lower()
+    environment = settings.environment.strip().lower()
+    if backend == "memory":
+        if environment not in _LOCAL_IDEMPOTENCY_ENVIRONMENTS:
+            raise RuntimeError(
+                "INTERNAL_IDEMPOTENCY_BACKEND=memory is allowed only when "
+                "ENVIRONMENT explicitly identifies local development or tests"
+            )
+        return InMemoryIdempotencyStore(), None
+
+    if backend != "redis":
+        raise RuntimeError("INTERNAL_IDEMPOTENCY_BACKEND must be redis or memory")
+
+    redis_url = (settings.internal_comm_redis_url or settings.redis_url).strip()
+    if not redis_url:
+        raise RuntimeError(
+            "Redis idempotency is configured but neither INTERNAL_COMM_REDIS_URL "
+            "nor REDIS_URL is set"
+        )
+
+    import redis.asyncio as aioredis
+
+    redis_client = aioredis.from_url(redis_url, decode_responses=False)
+    return RedisIdempotencyStore(redis_client), redis_client
+
+
+async def _probe_idempotency_redis(redis_client: Any) -> None:
+    """Refuse readiness when the configured durable store is unreachable."""
+    try:
+        await asyncio.wait_for(redis_client.ping(), timeout=5.0)
+    except Exception as exc:
+        raise RuntimeError("Redis idempotency backend is unavailable") from exc
+
+
+async def _close_idempotency_redis(redis_client: Any) -> None:
+    close = getattr(redis_client, "aclose", None)
+    if close is None:
+        close = getattr(redis_client, "close", None)
+    if callable(close):
+        await close()
+
+
 # ---------------------------------------------------------------------------
 # FastAPI app factory
 # ---------------------------------------------------------------------------
@@ -165,6 +218,9 @@ OPENAPI_TAGS = [
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Build the FastAPI application with lifespan hooks."""
     resolved = settings or Settings()
+    idempotency_store, idempotency_redis_client = _idempotency_store_from_settings(
+        resolved
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -197,9 +253,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # --- Initialize KnowledgeService + Worker ---
         knowledge_service = None
         knowledge_worker = None
+        embedding_migration_worker = None
         db_storage = None
         qdrant = None
         try:
+            if idempotency_redis_client is not None:
+                await _probe_idempotency_redis(idempotency_redis_client)
+
             from .persistence.database import DatabaseStorage as FullDatabaseStorage
             from .services.knowledge.knowledge_service import KnowledgeService
             from .services.knowledge.tenant_provider import (
@@ -252,7 +312,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                         s.qdrant, "bm25_v2_capability_ttl_seconds", 300.0
                                     ),
                                     "bm25_v2_readiness_ttl_seconds": getattr(
-                                        s.qdrant, "bm25_v2_readiness_ttl_seconds", 0.0
+                                        s.qdrant, "bm25_v2_readiness_ttl_seconds", 5.0
+                                    ),
+                                    "bm25_v2_cutover_test_tenants": getattr(
+                                        s.qdrant, "bm25_v2_cutover_test_tenants", ""
                                     ),
                                 },
                             )(),
@@ -373,7 +436,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 image_storage_service=image_storage,
                 tenant_embedding_credential_resolver=TenantEmbeddingCredentialResolver(
                     db_storage,
-                    encryption_key=os.environ.get("GATEWAY_ENCRYPTION_KEY", ""),
+                    encryption_key=get_settings().gateway_encryption_key,
                 ),
             )
             app.state.knowledge_service = knowledge_service
@@ -428,16 +491,62 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except Exception as e:
                 logger.warning("document_detector_init_failed", error=str(e))
 
+            # PRD T9 item 1: wire the hierarchical indexer into the default
+            # worker. Every construction site used to omit it, so the L1/L2/L3
+            # branches in worker.py were dead code. Embedding provider/model/
+            # dimension are dataset-level facts, so the indexer resolves its
+            # embedder per dataset through the embedding manager instead of a
+            # startup-time global. Grayscale stays on the worker side: the
+            # hierarchical plane only runs for datasets whose chunking config
+            # explicitly selects mode="hierarchical".
+            hierarchical_indexer = None
+            try:
+                from .services.knowledge.hierarchical_indexer import HierarchicalIndexer
+
+                async def _resolve_hierarchical_embedder(dataset_id: str):
+                    dataset = await db_storage.get_dataset(dataset_id)
+                    if not dataset:
+                        raise ValueError(
+                            f"hierarchical indexing: dataset {dataset_id} not found"
+                        )
+                    return await knowledge_service.embedding_manager.get_text_embedder(dataset)
+
+                hierarchical_indexer = HierarchicalIndexer(
+                    vector_store=knowledge_service.vector_store,
+                    database=db_storage,
+                    embedding_resolver=_resolve_hierarchical_embedder,
+                    knowledge_settings=compat_settings,
+                )
+                logger.info("hierarchical_indexer_initialized")
+            except Exception as e:
+                logger.warning("hierarchical_indexer_init_failed", error=str(e))
+
             if resolved.runtime_role in {"all", "worker"}:
                 knowledge_worker = KnowledgeWorker(
                     knowledge_service,
                     detector=doc_detector,
                     vlm_ocr_service=vlm_ocr_service,
+                    hierarchical_indexer=hierarchical_indexer,
                 )
                 await knowledge_worker.start()
+                from .services.knowledge.embedding_migration_worker import (
+                    EmbeddingMigrationJobWorker,
+                )
+
+                embedding_migration_worker = EmbeddingMigrationJobWorker(
+                    knowledge_service
+                )
+                await embedding_migration_worker.start()
             else:
                 knowledge_worker = DurableEnqueueProxy(knowledge_service)
+            # Lifecycle restore is orchestrated inside DocumentService, while
+            # normal create/reprocess routes receive the producer through
+            # FastAPI dependency injection. Keep both paths on the exact same
+            # durable producer; otherwise API-role deployments can ingest new
+            # documents but falsely reject enable/unarchive as "no worker".
+            knowledge_service._worker = knowledge_worker
             app.state.knowledge_worker = knowledge_worker
+            app.state.embedding_migration_worker = embedding_migration_worker
 
             logger.info(
                 "knowledge_service_initialized",
@@ -457,6 +566,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 except Exception as cleanup_error:
                     logger.warning(
                         "knowledge_worker_startup_cleanup_failed",
+                        error=str(cleanup_error),
+                    )
+            if embedding_migration_worker:
+                try:
+                    await embedding_migration_worker.stop()
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "embedding_migration_worker_startup_cleanup_failed",
                         error=str(cleanup_error),
                     )
             if knowledge_service:
@@ -483,6 +600,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "qdrant_startup_cleanup_failed",
                         error=str(cleanup_error),
                     )
+            if idempotency_redis_client is not None:
+                with suppress(Exception):
+                    await _close_idempotency_redis(idempotency_redis_client)
             raise
 
         app.state._ready = True
@@ -506,6 +626,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 stop_worker = getattr(knowledge_worker, "stop", None)
                 if callable(stop_worker):
                     await stop_worker()
+        if embedding_migration_worker:
+            with suppress(Exception):
+                await embedding_migration_worker.stop()
         if knowledge_service:
             with suppress(Exception):
                 await knowledge_service.close()
@@ -513,6 +636,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await qdrant.close()
         if db_storage:
             await db_storage.close()
+        if idempotency_redis_client is not None:
+            await _close_idempotency_redis(idempotency_redis_client)
         logger.info("knowledge_service_stopped")
 
     app = FastAPI(
@@ -533,6 +658,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         contact={"name": "AI Gateway Maintainers", "email": "maintainers@example.com"},
         license_info={"name": "MIT"},
     )
+
+    from .services.knowledge.bm25_v2_lifecycle import Bm25V2LifecycleError
+
+    @app.exception_handler(Bm25V2LifecycleError)
+    async def bm25_v2_lifecycle_error_handler(
+        _request: Request,
+        exc: Bm25V2LifecycleError,
+    ) -> ORJSONResponse:
+        return ORJSONResponse(
+            status_code=exc.http_status,
+            content={"detail": {"code": exc.code, "message": str(exc)}},
+        )
 
     # --- CORS ---
     _origins = resolved.cors.allow_origins
@@ -575,26 +712,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.add_middleware(RequestIDMiddleware)
 
-    from ai_gateway_core.comm import (
-        IdempotencyMiddleware,
-        InMemoryIdempotencyStore,
-        RedisIdempotencyStore,
-    )
-
-    def _idempotency_store_from_env():
-        backend = os.environ.get("INTERNAL_IDEMPOTENCY_BACKEND", "memory").strip().lower()
-        if backend == "redis":
-            redis_url = os.environ.get("INTERNAL_COMM_REDIS_URL") or os.environ.get("REDIS_URL", "")
-            if redis_url:
-                import redis.asyncio as aioredis
-
-                return RedisIdempotencyStore(aioredis.from_url(redis_url, decode_responses=False))
-        return InMemoryIdempotencyStore()
+    from ai_gateway_core.comm import IdempotencyMiddleware
 
     app.add_middleware(
         IdempotencyMiddleware,
-        store=_idempotency_store_from_env(),
-        ttl_seconds=int(os.environ.get("INTERNAL_IDEMPOTENCY_TTL_SECONDS", "86400")),
+        store=idempotency_store,
+        ttl_seconds=resolved.internal_idempotency_ttl_seconds,
     )
 
     # --- Phase K5c: Gateway HMAC verification (closes Polaris #6-KB) ---
@@ -606,7 +729,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     #
     # Use the platform-wide internal token as the HMAC key for this private
     # hop. The old Assistant-specific alias was removed with that service.
-    _gateway_secret_env = os.environ.get("AI_PLATFORM_INTERNAL_TOKEN", "").strip()
+    _internal_env = get_settings()
+    _gateway_secret_env = _internal_env.ai_platform_internal_token.strip()
     from ai_gateway_core.auth.gateway_secret_middleware import (
         validate_gateway_auth_configuration,
     )
@@ -615,7 +739,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         secret=_gateway_secret_env,
         allow_anonymous=resolved.app.allow_anonymous,
         allow_anonymous_setting="KNOWLEDGE_APP__ALLOW_ANONYMOUS",
-        environment=os.environ.get("ENVIRONMENT", ""),
+        environment=_internal_env.environment,
     )
     if _gateway_secret_env:
         from ai_gateway_core.auth.gateway_secret import (
@@ -626,11 +750,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         from .auth import GatewaySecretAuthMiddleware
 
-        auth_version = os.environ.get("INTERNAL_AUTH_VERSION", "v2").strip().lower()
+        auth_version = _internal_env.internal_auth_version.strip().lower()
         if auth_version != "v2":
             raise RuntimeError("INTERNAL_AUTH_VERSION must be v2 for private service traffic")
-        environment = os.environ.get("ENVIRONMENT", "").strip().lower()
-        replay_backend = os.environ.get("INTERNAL_COMM_STATE_BACKEND", "redis").strip().lower()
+        environment = _internal_env.environment.strip().lower()
+        replay_backend = _internal_env.internal_comm_state_backend.strip().lower()
         if (
             environment not in {"local", "dev", "development", "test", "testing"}
             and replay_backend != "redis"
@@ -640,7 +764,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         replay_store = InMemoryReplayStore()
         if replay_backend == "redis":
-            redis_url = os.environ.get("INTERNAL_COMM_REDIS_URL", "").strip()
+            redis_url = _internal_env.internal_comm_redis_url.strip()
             if not redis_url:
                 if not os.environ.get("PYTEST_CURRENT_TEST") and environment not in {
                     "local",
@@ -724,19 +848,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         )
 
+    # --- Metrics (PRD §7 Phase 0; drained /health-style path, no auth) ---
+    # DrainMiddleware already excludes "/metrics" so scrapes keep working
+    # while the instance stops accepting traffic. The scrape must never
+    # fail the request path: queue-depth refresh is best-effort.
+    @app.get("/metrics", tags=["Health"])
+    async def metrics(request: Request):
+        from fastapi.responses import Response
+        from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+        from .core.observability import metrics as kb_metrics
+
+        db = getattr(request.app.state, "db", None)
+        if db is not None:
+            with suppress(Exception):
+                kb_metrics.set_ingestion_queue_depth(
+                    await db.count_queued_documents()
+                )
+        return Response(
+            content=generate_latest(),
+            media_type=CONTENT_TYPE_LATEST,
+        )
+
     # --- API routes ---
     # These routers are part of the service's required API surface.  Import
     # failures must abort application construction so the process cannot
     # become ready while serving only a reduced placeholder API.
     if resolved.runtime_role != "worker":
+        from .api.routes.bm25_v2 import router as bm25_v2_router
         from .api.routes.capability_plane import router as capability_plane_router
+        from .api.routes.embedding_migration import router as embedding_migration_router
         from .api.routes.eval import router as kb_eval_router
         from .api.routes.knowledge import router as full_knowledge_router
 
         app.include_router(capability_plane_router)
+        app.include_router(bm25_v2_router, prefix="/api/v1")
         app.include_router(full_knowledge_router, prefix="/api/v1")
         app.include_router(kb_eval_router, prefix="/api/v1")
-        logger.info("knowledge_routes_loaded", mode="full", endpoints=51)
+        app.include_router(embedding_migration_router, prefix="/api/v1")
+        logger.info("knowledge_routes_loaded", mode="full", endpoints=64)
     else:
         logger.info("knowledge_routes_loaded", mode="worker", endpoints=0)
 
