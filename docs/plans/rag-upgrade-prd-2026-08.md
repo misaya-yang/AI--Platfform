@@ -219,8 +219,10 @@ Rust）。理由：
 
 **F. gateway 侧架构债**
 
-- `/api/v1/kb-tools/*` 代理把请求映射到 KS 不存在的路由（/search 等 404）；
-  却被冻结进 `sdk/openapi.json`（PPR H6 合同冻结）。
+- `/api/v1/kb-tools/*` 是冻结在 `sdk/openapi.json` 的旧公开代理面，部分路径仍
+  映射到 KS 不存在的路由（/search 等 404）；当前产品 Agent 不依赖它，而是
+  通过签名 internal retrieval 使用 `search_knowledge_base` capability。若未来
+  有外部消费者，另走公开契约变更。
 - gateway 直接 SELECT KS 表：`DatabaseAgentKnowledgeResolver`（每次 agent 运行
   重查 datasets/dataset_permissions）、`presign.py` 重新实现数据集 ACL（无视
   viewer/editor/owner 层级）、ai-gateway-core 里 569 行无调用者的
@@ -743,8 +745,9 @@ Done-when：摄入与检索的关键指标在 grafana 可见；镜像构建两�
    KS 内部授权端点（HMAC 签名，类 `/internal/eval/ragas` 模式）；
    删除 ai-gateway-core 的 KB SQL/仓储与 schema 死副本（先确认
    openapi.json 无引用）。保留 `AGENT_KNOWLEDGE_UNAVAILABLE` fail-closed。
-3. kb-tools 处置（§10 待决）：在 KS 实现真检索面，或显式废弃；
-   任何动作属公开契约变更，需按 §9 流程走。
+3. Agent/RAG 桥接边界：已确定由 Agent/边界层把 `search_knowledge_base`
+   封装为 tool，KS 只提供受权限保护的 HTTP/internal retrieval；当前计划不在
+   KS 新增 LangChain/LangGraph tool，也不改动旧 `/api/v1/kb-tools/*` 公开代理。
 4. 契约漂移栅栏：harness 门禁"gateway 不得定义 KB 请求 schema"
    （`docs/harness/workflow.md` §5 的规则化路径）。
 
@@ -1024,11 +1027,16 @@ gate 先落地，T8 的清理按其规则复核一次。
 
 ## 10. 开放问题（需用户/评审决策）
 
-1. **kb-tools 处置**：`/api/v1/kb-tools/*` 当前映射到不存在的上游路由，
-   但已冻结在公开合同中。选项：(a) 在 KS 实现真实检索面（search/
-   multi-search）并修映射；(b) 显式废弃并走合同变更流程。T8 需要方向。
-2. **T6 是否在本计划内**：BM25 v2 生命周期协议目前无主；本 PRD 已列为
-   主题，确认资源与优先级（否则 `lexical_v1` 事实上永久）。
+1. **kb-tools 处置（已决策）**：当前产品 Agent 已通过
+   `search_knowledge_base` tool → Capability Worker → Knowledge Service 的
+   签名 HTTP/internal retrieval 链路接入 RAG，并由 Agent 负责多步/重写查询。
+   Knowledge Service 只提供受权限保护的 HTTP/internal retrieval，不新增
+   LangChain/LangGraph tool 工厂；后续 LangChain 等接入在 Agent/边界层封装。
+   `/api/v1/kb-tools/*` 不属于当前 Agent 路径，本计划不新增其 search 面，也
+   不擅自删除既有公开代理；若未来有外部消费者，另走公开契约变更。
+2. **T6 全局升级（已决策）**：BM25 v2 生命周期协议纳入本计划，目标是对全局
+   租户完成安全的 `lexical_v1 -> bm25_v2` 放行与可回滚；实际切换仍必须满足
+   T0 门禁并完成 backfill、并发检索和 rollback 收据，不能只翻环境开关。
 3. **解析引擎选型**：MinerU 3.x（能力最全，许可证附加条件需法务）vs
    PaddleOCR 级联（许可干净，中文同级）。建议：接口先行、两者都挂后端，
    默认给许可干净者。

@@ -16,12 +16,13 @@
    release pointer 不存在。
 2. 真实 `text-embedding-v3 -> text-embedding-v4` 影子回填已成功，但 T0 门禁、
    原子 cutover、真实检索回归和 rollback 没有执行，故 H3 场景 4 仍为 BLOCKED。
-3. T6 `bm25_v2` 正式租户放行属于用户保留决策；H1 #29 只能显示阻塞状态。
-4. T8.3 `kb-tools` 的实现或退役属于用户保留决策。
-5. T4 的 50–200 页真实解析评测、T9 的真实语料灰度净收益证据未完成。
+3. T6 全局 `bm25_v2` 升级目标已获用户确认，但 T0 gate、全局 cutover、并发
+   检索和 rollback 收据尚未完成，H1 #29 仍只能显示阻塞状态。
+4. T4 的 50–200 页真实解析评测、T7 的 Helm/Grafana 告警验证、T9 的真实语料
+   灰度净收益证据未完成；T8.3 已按用户决定明确为当前 Agent 架构不需要新增。
 
-因此，本报告确认的是：**实现分支 merge-ready；正式发布仍被上述证据和用户
-决策阻塞。** H1 #4 的 SSE 合同和 H1 #7 的批量部分成功实机证据已在本轮补齐，
+因此，本报告确认的是：**实现分支 merge-ready；正式发布仍被上述证据和执行
+前置条件阻塞。** H1 #4 的 SSE 合同和 H1 #7 的批量部分成功实机证据已在本轮补齐，
 不再作为剩余阻塞。
 
 ## 2. 范围与代码盘点
@@ -59,10 +60,10 @@
 | T2 检索质量 | **BLOCKED** | 中文 jieba lexical shadow 与 12-case 真实 qwen3-rerank bake-off 通过，遥测/阈值/预算/降级/缓存版本已实现；正式默认模型晋升仍受 T0 阻塞。 |
 | T3 嵌入蓝绿迁移 | **BLOCKED** | 版本元数据、绑定、持久 202/job、回填/恢复/冲突/取消/授权代码与测试通过；真实 v3→v4 回填成功，但未执行 gate/cutover/rollback。 |
 | T4 解析与无损 IR | **BLOCKED** | IR、页块/附件、解析器级联、缓存/并发和 PDF 内存上限有代码与回归；本轮真实 2 页 PDF 主链路通过，50–200 页真实形状与 TEDS/CDM/VLM 指标未完成。 |
-| T5 前端优先管理面 | **BLOCKED** | 主管理、段落、评测、遥测、迁移面均已实现并通过 build/mock/内置浏览器；H1 #4 SSE 与 #7 批量部分成功本轮补齐，仍仅因 H1 #29 放行决策保持阻塞。 |
-| T6 BM25 v2 生命周期 | **BLOCKED** | 排他锁、持久 lifecycle、并发、回滚、kill switch 和 UI 收据通过测试；正式租户切换/回滚未获用户放行。 |
+| T5 前端优先管理面 | **BLOCKED** | 主管理、段落、评测、遥测、迁移面均已实现并通过 build/mock/内置浏览器；H1 #4 SSE 与 #7 批量部分成功本轮补齐，仍因 H1 #29 的 T0/cutover 前置条件保持阻塞。 |
+| T6 BM25 v2 生命周期 | **BLOCKED** | 排他锁、持久 lifecycle、并发、回滚、kill switch 和 UI 收据通过测试；用户已确认全局升级，但实际 backfill 后 gate/cutover/并发检索/rollback 仍受 T0 阻塞。 |
 | T7 可观测性与供给可靠性 | **BLOCKED** | `/metrics`、持久队列状态、锁定镜像、PDF offload、Redis 幂等和配置收敛通过；Helm/真实 Grafana 告警未在本轮环境验证。 |
-| T8 gateway 契约与权限 | **BLOCKED** | T8.1/2/4 PASS：scope、ACL 权威、gateway 无直读 KB 表/自定义 KB schema；双账户活栈越权返回 403。T8.3 `kb-tools` 处置待用户决定。 |
+| T8 gateway 契约与权限 | **PASS** | T8.1/2/4 PASS：scope、ACL 权威、gateway 无直读 KB 表/自定义 KB schema；双账户活栈越权返回 403。当前 Agent 已通过 `search_knowledge_base` 的签名 internal retrieval 接入 RAG，KS 不新增 tool 工厂；T8.3 不属于当前 Agent 路径。 |
 | T9 父子检索与结构路由 | **BLOCKED** | 父子/摘要/附件结构代码与回归存在；缺真实语料灰度、质量净胜和默认开启证据。 |
 
 ## 4. H1 前端 1–29 项矩阵
@@ -97,7 +98,7 @@
 | 26 | 查询日志/零结果 | **PASS** | 内置浏览器 Query Insights 显示查询、2 hits 和阶段计时；D5 读端通过。 |
 | 27 | 嵌入模型蓝绿管理面 | **PASS** | 设置页展示 serving generation、collection、任务与回滚操作；真实 v3→v4 backfill job 成功。发布切换仍归 H3 BLOCKED。 |
 | 28 | 集合/索引健康收据 | **PASS** | 内置浏览器展示 collection 与健康收据，未知状态不会伪装健康。 |
-| 29 | lexical_v1/bm25_v2 配置 | **BLOCKED** | UI 明确显示 H1 #29 / T6 待用户放行；未悄悄启用。 |
+| 29 | lexical_v1/bm25_v2 配置 | **BLOCKED** | 用户已确认全局 `bm25_v2` 升级目标；当前仍未悄悄启用，实际切换等待 T0 gate 与全局 cutover/rollback 收据。 |
 
 **H1 总结：BLOCKED**（#29）。
 
@@ -223,7 +224,9 @@ hit_count、段落全字段编辑、文档禁用/启用、归档/恢复、reembe
 完成并在刷新后保持。评测工作台完成用例新增、标注、保存和 Balanced/SOTA
 A/B；一次 SOTA 瞬时 fallback 被 UI 如实显示，随后的重试两侧均为
 `dashscope/qwen3-rerank` applied、IR 指标通过。设置页展示迁移任务、集合健康和
-H1 #29/T6 阻塞状态。
+H1 #29/T6 的 gate 阻塞状态（目标已确认，不是用户决策待定）。当前 Agent 的
+RAG tool bridge 走既有 `search_knowledge_base` capability；本轮未新增 KS
+tool 工厂或 `/kb-tools` 检索面。
 
 修复阶段时间戳后，再次在内置浏览器触发 reembed：新 generation 不再显示上一
 代的 “Splitting 2m51s”，最终 Completed。数据集故意保留，便于用户直接查看。
@@ -264,18 +267,18 @@ Completed；浏览器打开文档页期间网关日志记录了
 - `966c9168 fix(kb): close live acceptance findings`
 - `73faefa7 feat(kb): add durable document progress SSE`
 
-## 11. 未验证项与用户待决策项
+## 11. 未验证项与执行前置条件
 
 交给后续 Luna 或发布负责人时，不应再花时间重复已通过的 1824 单测和主 UI
-链路；优先处理/决定：
+链路；优先处理：
 
 1. 建立 200–400 条正式黄金集、provenance、人工复核和 release pointer，重跑
    `make kb-release-evidence-gate`。
 2. 在允许的测试租户执行完整 v3→v4 gate→cutover→并发检索→rollback；记录
    断连、续跑和回滚收据。
-3. 用户决定 T6 是否允许 `bm25_v2` 正式切换/回滚。
-4. 用户决定 T8.3：实现 KS `kb-tools` 真检索面，或显式退役。
-5. 完成 T4 真实长 PDF 指标和 T9 真实语料灰度。
+3. 在 T0 满足后按用户已确认的全局目标执行 `bm25_v2` backfill→gate→cutover→
+   并发检索→rollback，并记录全局收据。
+4. 完成 T4 真实长 PDF 指标、T7 Helm/Grafana 告警验证和 T9 真实语料灰度。
 
 ## 12. 与 main 的集成方式
 
