@@ -26,20 +26,28 @@ class _Database:
         if "ensure_assistant_runtime_thread" in query:
             if self.thread is None:
                 self.thread = {
-                    "runtime_thread_id": args[0], "tenant_id": args[1],
-                    "user_id": args[2], "session_id": args[3],
-                    "kernel_owner": "agent", "source_kind": "native",
-                    "import_status": "not_required", "last_sequence": 0,
+                    "runtime_thread_id": args[0],
+                    "tenant_id": args[1],
+                    "user_id": args[2],
+                    "session_id": args[3],
+                    "kernel_owner": "agent",
+                    "source_kind": "native",
+                    "import_status": "not_required",
+                    "last_sequence": 0,
                 }
             return {"ok": True}
         if "import_assistant_legacy_session" in query:
             if self.thread and self.thread["import_status"] == "ready":
                 return {"import_status": "ready"}
             self.thread = {
-                "runtime_thread_id": args[0], "tenant_id": args[1],
-                "user_id": args[2], "session_id": args[3],
-                "kernel_owner": "agent", "source_kind": "legacy_import",
-                "import_status": "ready", "last_sequence": 1,
+                "runtime_thread_id": args[0],
+                "tenant_id": args[1],
+                "user_id": args[2],
+                "session_id": args[3],
+                "kernel_owner": "agent",
+                "source_kind": "legacy_import",
+                "import_status": "ready",
+                "last_sequence": 1,
             }
             return {"import_status": "ready"}
         if "FROM assistant_runtime_threads" in query and "session_id = $3" in query:
@@ -47,12 +55,19 @@ class _Database:
         if "FROM assistant_runtime_threads" in query:
             return self.thread
         if "append_assistant_runtime_item" in query:
-            self.events.append({
-                "sequence": len(self.events) + 1,
-                "event_id": args[5], "event_key": args[6], "turn_id": args[7],
-                "item_id": args[8], "event_type": args[9], "item_type": args[10],
-                "status": args[11], "payload": args[12],
-            })
+            self.events.append(
+                {
+                    "sequence": len(self.events) + 1,
+                    "event_id": args[5],
+                    "event_key": args[6],
+                    "turn_id": args[7],
+                    "item_id": args[8],
+                    "event_type": args[9],
+                    "item_type": args[10],
+                    "status": args[11],
+                    "payload": args[12],
+                }
+            )
             if self.thread:
                 self.thread["last_sequence"] = len(self.events)
             return {"sequence": len(self.events)}
@@ -70,7 +85,9 @@ async def test_legacy_import_is_idempotent_and_scoped() -> None:
         tenant_id="tenant-a", user_id="user-a", session_id="session-a"
     )
     second = await store.import_legacy(
-        tenant_id="tenant-a", user_id="user-a", session_id="session-a",
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
         runtime_thread_id=first.runtime_thread_id,
     )
     assert first == second
@@ -86,14 +103,23 @@ async def test_append_event_uses_stable_event_key_and_cursor() -> None:
         tenant_id="tenant-a", user_id="user-a", session_id="session-a"
     )
     sequence = await store.append_event(
-        thread=thread, event_key="turn-1:item-1", event_type="text",
-        item_id="item-1", payload={"text": "ok"}, status="completed",
+        thread=thread,
+        event_key="turn-1:item-1",
+        event_type="text",
+        item_id="item-1",
+        payload={"text": "ok"},
+        status="completed",
     )
     assert sequence == 1
-    assert (await store.events(
-        tenant_id="tenant-a", user_id="user-a",
-        runtime_thread_id=thread.runtime_thread_id, after_sequence=0, limit=10,
-    ))[0]["event_key"] == "turn-1:item-1"
+    assert (
+        await store.events(
+            tenant_id="tenant-a",
+            user_id="user-a",
+            runtime_thread_id=thread.runtime_thread_id,
+            after_sequence=0,
+            limit=10,
+        )
+    )[0]["event_key"] == "turn-1:item-1"
 
 
 def test_thread_store_error_has_stable_http_contract() -> None:
@@ -125,7 +151,8 @@ async def test_history_messages_projects_runtime_rollout_in_chronological_order(
             assert "FROM assistant_runs AS run" in query
             assert "item_type = 'event_msg'" in query
             assert "JOIN LATERAL" in query
-            assert "delta.event_type = 'compat/v1/text_delta'" in query
+            assert "delta.event_type IN" in query
+            assert "jsonb_array_elements" in query
             assert args[1:] == ("tenant-a", "user-a", 10)
             return [
                 {
@@ -136,9 +163,7 @@ async def test_history_messages_projects_runtime_rollout_in_chronological_order(
                     "created_at": now,
                     "thinking_content": "Reasoning summary",
                     "tool_calls": [{"id": "call-1", "name": "search", "arguments": {}}],
-                    "tool_results": [
-                        {"tool_call_id": "call-1", "name": "search", "result": "ok"}
-                    ],
+                    "tool_results": [{"tool_call_id": "call-1", "name": "search", "result": "ok"}],
                     "runtime_events": [
                         {
                             "event_type": "subagent_started",
@@ -189,6 +214,50 @@ async def test_history_messages_projects_runtime_rollout_in_chronological_order(
     assert messages[1]["metadata"]["tool_results"][0]["result"] == "ok"
     assert messages[1]["metadata"]["runtime_events"][0]["event_type"] == "subagent_started"
     assert messages[1]["metadata"]["process_summary"]["steps"][0]["id"] == "context-compaction"
+
+
+@pytest.mark.asyncio
+async def test_history_messages_preserves_empty_cancelled_turn() -> None:
+    now = datetime.now(timezone.utc)
+
+    class _CancelledHistoryDatabase(_Database):
+        async def fetch(self, query: str, *args):
+            assert "delta.event_type IN" in query
+            assert "'compat/v1/cancelled'" in query
+            assert "jsonb_array_elements" in query
+            assert args[1:] == ("tenant-a", "user-a", 10)
+            return [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "sequence": 3,
+                    "run_id": "run-cancelled",
+                    "created_at": now,
+                    "thinking_content": "partial reasoning",
+                    "tool_calls": None,
+                    "tool_results": None,
+                    "runtime_events": [
+                        {
+                            "event_type": "cancelled",
+                            "data": {"status": "cancelled"},
+                            "timestamp": 1.0,
+                        }
+                    ],
+                    "total": 1,
+                }
+            ]
+
+    messages, total = await AgentThreadStore(_CancelledHistoryDatabase()).history_messages(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        runtime_thread_id="00000000-0000-0000-0000-000000000001",
+        limit=10,
+    )
+
+    assert total == 1
+    assert [(message["role"], message["content"]) for message in messages] == [("assistant", "")]
+    assert messages[0]["metadata"]["thinking_content"] == "partial reasoning"
+    assert messages[0]["metadata"]["process_summary"]["status"] == "cancelled"
 
 
 @pytest.mark.asyncio
