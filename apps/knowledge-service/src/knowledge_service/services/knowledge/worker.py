@@ -2308,7 +2308,17 @@ class KnowledgeWorker:
         # Update document content and re-ingest as text
         await self.service.db.update_document_content(task.document_id, full_text)
         await self.service.db.update_document_fields(
-            task.document_id, {"word_count": len(full_text.split())}
+            task.document_id,
+            {
+                "word_count": len(full_text.split()),
+                "metadata": {
+                    **metadata,
+                    "ocr_provider": getattr(self.vlm_ocr_service, "provider", None),
+                    "ocr_model": getattr(self.vlm_ocr_service, "model", None),
+                    "ocr_task": getattr(self.vlm_ocr_service, "task", None),
+                    "vlm_ocr_pages": sum(1 for part in all_text_parts if part.strip()),
+                },
+            },
         )
         await self.service.db.update_document_status(task.document_id, status="indexing", progress=70)
         await self._ingest_document(
@@ -2839,6 +2849,9 @@ class KnowledgeWorker:
                             "total_pages": total_pages_all,
                             "segments_created": total_segments,
                             "ocr_strategy": self._ocr_strategy,
+                            "ocr_provider": getattr(self.vlm_ocr_service, "provider", None),
+                            "ocr_model": getattr(self.vlm_ocr_service, "model", None),
+                            "ocr_task": getattr(self.vlm_ocr_service, "task", None),
                             "vlm_ocr_pages": len(all_extracted_texts),
                             "pdf_parts": len(parts),
                         }),

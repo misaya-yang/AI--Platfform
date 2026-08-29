@@ -1,29 +1,28 @@
-"""
-VLM-based OCR Service for High-Accuracy Text Extraction.
+"""Vision/OCR service for document ingestion.
 
-Supports multiple backends:
-- Gemini (default) — google-genai SDK, uses Gemini 3 Flash or 2.5 Flash
-- DashScope — Qwen-VL models
-- SiliconFlow — DeepSeek-OCR with multi-key round-robin (free/low-cost)
-
-Gemini 3 Flash achieves the lowest edit distance (0.115) on OmniDocBench,
-making it the best choice for OCR tasks including Arabic/RTL text.
+The default backend is Alibaba Cloud DashScope Qwen-OCR (``qwen-vl-ocr``).
+The native DashScope API is used instead of the OpenAI-compatible endpoint so
+the built-in OCR tasks (document parsing, tables, formulas, and positional
+recognition) and regional native endpoint are available. Gemini and
+SiliconFlow remain explicit compatibility backends.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import logging
-import os
-from typing import Any
 
 import httpx
+from ai_gateway_core.config.endpoints import normalize_dashscope_base
 
 logger = logging.getLogger(__name__)
 
 
-# Specialized OCR prompt for Arabic+English bilingual documents
+# Prompt retained for the compatibility backends. Qwen-OCR native tasks carry
+# their own optimized prompt and therefore intentionally do not receive this
+# free-form prompt.
 OCR_PROMPT = (
     "You are a highly accurate OCR engine. Extract ALL text from this scanned document image.\n"
     "Rules:\n"
@@ -83,62 +82,174 @@ class _GeminiOCRBackend:
 # ============================================================================
 
 
+_DASHSCOPE_DEFAULT_OCR_MODEL = "qwen-vl-ocr"
+_DASHSCOPE_DEFAULT_NATIVE_BASE_URL = "https://dashscope.aliyuncs.com/api/v1"
+_DASHSCOPE_OCR_PATH = "/services/aigc/multimodal-generation/generation"
+_DASHSCOPE_OCR_TASKS = frozenset(
+    {
+        "text_recognition",
+        "advanced_recognition",
+        "key_information_extraction",
+        "table_parsing",
+        "document_parsing",
+        "formula_recognition",
+        "multi_lan",
+    }
+)
+
+
 class _DashScopeOCRBackend:
-    """OCR backend using DashScope Qwen-VL API."""
+    """OCR backend using the native DashScope Qwen-OCR API.
 
-    def __init__(self, api_key: str, model: str) -> None:
-        from dashscope import MultiModalConversation
+    The DashScope SDK exposes this API, but its global base-url setting makes
+    it unsafe when chat and OCR use different regions in one process. A small
+    dedicated async HTTP client keeps the endpoint scoped to this backend and
+    also gives us bounded request timeouts and clean shutdown.
+    """
 
-        self._mmc = MultiModalConversation
-        self._api_key = api_key
-        self._model = model
+    def __init__(
+        self,
+        api_key: str = "",
+        model: str = _DASHSCOPE_DEFAULT_OCR_MODEL,
+        *,
+        api_keys: list[str] | None = None,
+        base_url: str | None = None,
+        task: str = "document_parsing",
+        min_pixels: int = 3_072,
+        max_pixels: int = 8_388_608,
+        max_tokens: int = 8_192,
+        enable_rotate: bool = True,
+        timeout_seconds: float = 60.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        keys = [key.strip() for key in (api_keys or []) if key and key.strip()]
+        if not keys and api_key.strip():
+            keys = [api_key.strip()]
+        if not keys:
+            raise ValueError("At least one API key is required for DashScope OCR")
+        if task not in _DASHSCOPE_OCR_TASKS:
+            raise ValueError(f"Unsupported DashScope OCR task: {task}")
+        if min_pixels <= 0 or max_pixels <= 0 or min_pixels > max_pixels:
+            raise ValueError("DashScope OCR pixel bounds are invalid")
+        if max_tokens <= 0 or max_tokens > 8_192:
+            raise ValueError("DashScope OCR max_tokens must be between 1 and 8192")
+
+        self._api_keys = keys
+        self._key_index = 0
+        self._key_lock = asyncio.Lock()
+        self._model = model or _DASHSCOPE_DEFAULT_OCR_MODEL
+        self._task = task
+        self._min_pixels = int(min_pixels)
+        self._max_pixels = int(max_pixels)
+        self._max_tokens = int(max_tokens)
+        self._enable_rotate = bool(enable_rotate)
+        self._base_url = normalize_dashscope_base(
+            base_url or _DASHSCOPE_DEFAULT_NATIVE_BASE_URL,
+            "ocr",
+        )
+        self._endpoint = self._base_url.rstrip("/") + _DASHSCOPE_OCR_PATH
+        timeout = max(float(timeout_seconds), 1.0)
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout, connect=min(10.0, timeout)),
+            limits=httpx.Limits(max_connections=50, max_keepalive_connections=25),
+            transport=transport,
+        )
+
+    async def _next_key(self) -> str:
+        async with self._key_lock:
+            key = self._api_keys[self._key_index % len(self._api_keys)]
+            self._key_index += 1
+            return key
 
     async def call(self, image_bytes: bytes) -> str:
+        if not image_bytes:
+            return ""
+
         media_type = _detect_media_type(image_bytes)
         b64_data = base64.b64encode(image_bytes).decode("utf-8")
         image_uri = f"data:{media_type};base64,{b64_data}"
 
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"image": image_uri},
-                    {"text": OCR_PROMPT},
-                ],
-            }
-        ]
-
-        response = await asyncio.to_thread(
-            self._mmc.call,
-            model=self._model,
-            messages=messages,
-            api_key=self._api_key,
-            max_tokens=4096,
+        payload = {
+            "model": self._model,
+            "input": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "image": image_uri,
+                                "min_pixels": self._min_pixels,
+                                "max_pixels": self._max_pixels,
+                                "enable_rotate": self._enable_rotate,
+                            }
+                        ],
+                    }
+                ]
+            },
+            "parameters": {
+                "max_tokens": self._max_tokens,
+                "ocr_options": {"task": self._task},
+            },
+        }
+        key = await self._next_key()
+        response = await self._client.post(
+            self._endpoint,
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            },
         )
 
-        status_code = getattr(response, "status_code", None)
-        if status_code and int(status_code) >= 400:
-            code = getattr(response, "code", "") or ""
-            message = getattr(response, "message", "") or ""
-            raise RuntimeError(f"DashScope OCR API error: {status_code} {code} {message}")
+        if response.status_code >= 400:
+            code = ""
+            message = ""
+            with contextlib.suppress(ValueError, TypeError):
+                error_body = response.json()
+                if isinstance(error_body, dict):
+                    code = str(error_body.get("code") or "")
+                    message = str(error_body.get("message") or "")
+            detail = " ".join(part for part in (code, message) if part)
+            raise RuntimeError(
+                f"DashScope OCR API error: HTTP {response.status_code}"
+                + (f" {detail}" if detail else "")
+            )
 
-        output = getattr(response, "output", None)
+        try:
+            body = response.json()
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError("DashScope OCR API returned invalid JSON") from exc
+        if not isinstance(body, dict):
+            return ""
+
+        output = body.get("output")
         if not output:
             return ""
 
-        choices = output.get("choices", [])
+        choices = output.get("choices", []) if isinstance(output, dict) else []
         if not choices:
             return ""
 
-        message_content = choices[0].get("message", {}).get("content", [])
+        first_choice = choices[0] if isinstance(choices[0], dict) else {}
+        message = first_choice.get("message", {})
+        message_content = message.get("content", []) if isinstance(message, dict) else []
+        if isinstance(message_content, str):
+            return message_content.strip()
+
         text_parts: list[str] = []
         for item in message_content:
             if isinstance(item, dict) and "text" in item:
-                text_parts.append(item["text"])
+                text_parts.append(str(item["text"]))
+            elif isinstance(item, dict) and "ocr_result" in item:
+                result = item["ocr_result"]
+                text_parts.append(result if isinstance(result, str) else str(result))
             elif isinstance(item, str):
                 text_parts.append(item)
 
         return "".join(text_parts).strip()
+
+    async def close(self) -> None:
+        await self._client.aclose()
 
 
 # ============================================================================
@@ -264,13 +375,18 @@ class VLMOCRService:
     def __init__(
         self,
         api_key: str = "",
-        model: str = "gemini-2.5-flash",
+        model: str = _DASHSCOPE_DEFAULT_OCR_MODEL,
         provider: str = "auto",
         concurrency: int = 4,
         timeout_seconds: int = 30,
         max_retries: int = 2,
         api_keys: list[str] | None = None,
         base_url: str | None = None,
+        task: str = "document_parsing",
+        min_pixels: int = 3_072,
+        max_pixels: int = 8_388_608,
+        max_tokens: int = 8_192,
+        enable_rotate: bool = True,
     ) -> None:
         """Initialize VLM OCR service.
 
@@ -283,16 +399,26 @@ class VLMOCRService:
             max_retries: Retry count on failure.
             api_keys: Multiple API keys for round-robin (siliconflow).
             base_url: Custom API base URL override.
+            task: Native DashScope OCR task (default: document_parsing).
+            min_pixels: Minimum pixels sent to the OCR model.
+            max_pixels: Maximum pixels sent to the OCR model.
+            max_tokens: Maximum OCR output tokens per page.
+            enable_rotate: Ask DashScope to auto-correct page rotation.
         """
-        self.model = model
+        self.model = model or _DASHSCOPE_DEFAULT_OCR_MODEL
+        self.task = task
+        self.min_pixels = int(min_pixels)
+        self.max_pixels = int(max_pixels)
+        self.max_tokens = int(max_tokens)
+        self.enable_rotate = bool(enable_rotate)
         self.timeout_seconds = timeout_seconds
         self.max_retries = max(1, max_retries)
 
         # Resolve provider
         if provider == "auto":
-            if model.startswith("gemini-"):
+            if self.model.startswith("gemini-"):
                 provider = "gemini"
-            elif "deepseek" in model.lower():
+            elif "deepseek" in self.model.lower():
                 provider = "siliconflow"
             else:
                 provider = "dashscope"
@@ -307,32 +433,46 @@ class VLMOCRService:
             self._semaphore = asyncio.Semaphore(self.concurrency)
             self._backend = _SiliconFlowOCRBackend(
                 api_keys=keys,
-                model=model or _SILICONFLOW_DEFAULT_MODEL,
+                model=self.model or _SILICONFLOW_DEFAULT_MODEL,
                 base_url=base_url or _SILICONFLOW_DEFAULT_URL,
                 max_retries=self.max_retries,
             )
             logger.info(
                 "VLMOCRService initialized: provider=siliconflow, model=%s, keys=%d, concurrency=%d",
-                model, len(keys), self.concurrency,
+                self.model, len(keys), self.concurrency,
             )
         else:
-            if not api_key:
+            keys = api_keys or ([api_key] if api_key else [])
+            if provider == "dashscope" and not keys:
+                raise ValueError("At least one API key is required for DashScope OCR")
+            if provider != "dashscope" and not api_key:
                 raise ValueError("API key is required for VLM OCR service")
-            self.api_key = api_key
+            self.api_key = api_key or (keys[0] if provider == "dashscope" else "")
             self.concurrency = max(1, concurrency)
             self._semaphore = asyncio.Semaphore(self.concurrency)
 
             if provider == "gemini":
-                self._backend = _GeminiOCRBackend(api_key=api_key, model=model)
+                self._backend = _GeminiOCRBackend(api_key=self.api_key, model=self.model)
             elif provider == "dashscope":
-                self._backend = _DashScopeOCRBackend(api_key=api_key, model=model)
+                self._backend = _DashScopeOCRBackend(
+                    api_key=self.api_key,
+                    api_keys=keys,
+                    model=self.model,
+                    base_url=base_url,
+                    task=task,
+                    min_pixels=self.min_pixels,
+                    max_pixels=self.max_pixels,
+                    max_tokens=self.max_tokens,
+                    enable_rotate=self.enable_rotate,
+                    timeout_seconds=timeout_seconds,
+                )
             else:
                 raise ValueError(
                     f"Unknown OCR provider: {provider}. Use 'gemini', 'dashscope', or 'siliconflow'."
                 )
             logger.info(
                 "VLMOCRService initialized: provider=%s, model=%s, concurrency=%d",
-                provider, model, self.concurrency,
+                provider, self.model, self.concurrency,
             )
 
     async def ocr_image(self, image_bytes: bytes) -> str:
@@ -379,6 +519,12 @@ class VLMOCRService:
 
         logger.error(f"VLM OCR failed after {self.max_retries} attempts: {last_error}")
         return ""
+
+    async def close(self) -> None:
+        """Close any provider-owned HTTP resources."""
+        close = getattr(self._backend, "close", None)
+        if callable(close):
+            await close()
 
     # Keep _detect_media_type as instance method for backward compatibility with tests
     def _detect_media_type(self, image_bytes: bytes) -> str:

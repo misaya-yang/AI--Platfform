@@ -23,6 +23,8 @@ _ENV_VARS = [
     "DASHSCOPE_IMAGE_BASE_URL",
     "DASHSCOPE_EMBEDDING_API_KEY",
     "DASHSCOPE_EMBEDDING_BASE_URL",
+    "DASHSCOPE_OCR_API_KEY",
+    "DASHSCOPE_OCR_BASE_URL",
     "GOOGLE_API_BACKEND",
     "GOOGLE_CHAT_BACKEND",
     "GOOGLE_IMAGE_BACKEND",
@@ -59,6 +61,20 @@ def test_dashscope_general_key_flows_through_to_all_domains(monkeypatch):
     assert endpoints.resolve_dashscope("chat")[0] == "sk-cn-paid"
     assert endpoints.resolve_dashscope("image")[0] == "sk-cn-paid"
     assert endpoints.resolve_dashscope("embedding")[0] == "sk-cn-paid"
+
+
+def test_dashscope_ocr_has_an_independent_native_endpoint(monkeypatch):
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-general")
+    monkeypatch.setenv("DASHSCOPE_OCR_API_KEY", "sk-ocr")
+    monkeypatch.setenv(
+        "DASHSCOPE_OCR_BASE_URL",
+        "https://workspace.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+    )
+
+    ocr_key, ocr_url = endpoints.resolve_dashscope("ocr")
+
+    assert ocr_key == "sk-ocr"
+    assert ocr_url == "https://workspace.ap-southeast-1.maas.aliyuncs.com/api/v1"
 
 
 def test_dashscope_chat_override_does_not_leak_to_image(monkeypatch):

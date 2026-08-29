@@ -334,6 +334,7 @@ def test_dashscope_endpoint_overrides_are_documented_and_injected() -> None:
         "DASHSCOPE_IMAGE_API_KEY",
         "DASHSCOPE_EMBEDDING_API_KEY",
     )
+    ocr_vars = ("DASHSCOPE_OCR_API_KEY", "DASHSCOPE_OCR_BASE_URL")
     endpoint_vars = (
         "DASHSCOPE_BASE_URL",
         "DASHSCOPE_CHAT_BASE_URL",
@@ -350,6 +351,10 @@ def test_dashscope_endpoint_overrides_are_documented_and_injected() -> None:
         section = _service_section(compose, service)
         for key in (*credential_vars, *endpoint_vars):
             assert f'{key}: "${{{key}:-}}"' in section
+    knowledge_section = _service_section(compose, "knowledge-service")
+    for key in ocr_vars:
+        assert env_values[key] == ""
+        assert f'{key}: "${{{key}:-}}"' in knowledge_section
 
     rerank_vars = (
         "DASHSCOPE_RERANK_BASE_URL",
@@ -377,12 +382,16 @@ def test_dashscope_endpoint_overrides_are_documented_and_injected() -> None:
         *endpoint_vars,
         *rerank_vars,
         "DASHSCOPE_RERANK_REQUEST_SCHEMA",
+        *ocr_vars,
     ):
         assert key in initializer
-    for key in (*rerank_vars, "DASHSCOPE_RERANK_REQUEST_SCHEMA"):
+    for key in (*rerank_vars, "DASHSCOPE_RERANK_REQUEST_SCHEMA", *ocr_vars):
         assert key in copied_keys
 
-    rendered = _render_compose()
+    rendered = _render_compose(
+        DASHSCOPE_OCR_API_KEY="test-ocr-key",
+        DASHSCOPE_OCR_BASE_URL="https://ocr.example.test",
+    )
     expected_credentials = {
         "DASHSCOPE_API_KEY": "test-general-key",
         "DASHSCOPE_CHAT_API_KEY": "test-chat-key",
@@ -398,6 +407,18 @@ def test_dashscope_endpoint_overrides_are_documented_and_injected() -> None:
             "KNOWLEDGE_EMBEDDINGS__DASHSCOPE_API_KEY"
         ]
         == "test-embedding-key"
+    )
+    assert (
+        rendered["services"]["knowledge-service"]["environment"][
+            "DASHSCOPE_OCR_API_KEY"
+        ]
+        == "test-ocr-key"
+    )
+    assert (
+        rendered["services"]["knowledge-service"]["environment"][
+            "DASHSCOPE_OCR_BASE_URL"
+        ]
+        == "https://ocr.example.test"
     )
 
 

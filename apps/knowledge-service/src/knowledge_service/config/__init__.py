@@ -130,8 +130,16 @@ class OCRSettings(BaseModel):
     tesseract_timeout_seconds: int = 60
     min_text_chars_for_ocr: int = 200
 
-    vlm_provider: str = "gemini"  # gemini | dashscope | siliconflow | auto
-    vlm_model: str = "gemini-3-flash-preview"
+    # Qwen-OCR is the primary document-recognition provider. ``hybrid`` keeps
+    # the local Tesseract fallback for provider outages; it does not replace
+    # Qwen for the normal scanned-document path.
+    vlm_provider: str = "dashscope"  # gemini | dashscope | siliconflow | auto
+    vlm_model: str = "qwen-vl-ocr"
+    vlm_task: str = "document_parsing"
+    vlm_min_pixels: int = Field(default=3_072, ge=1_024, le=30_720_000)
+    vlm_max_pixels: int = Field(default=8_388_608, ge=3_072, le=30_720_000)
+    vlm_max_tokens: int = Field(default=8_192, ge=256, le=8_192)
+    vlm_enable_rotate: bool = True
     vlm_api_keys: str = ""  # comma-separated keys for multi-key providers (siliconflow)
     vlm_base_url: str | None = None  # custom API URL override
     vlm_concurrency: int = 4
@@ -139,6 +147,29 @@ class OCRSettings(BaseModel):
     vlm_batch_size: int = 5
     vlm_max_concurrent: int = 8
     vlm_quality_threshold: float = 0.5
+
+    @field_validator("vlm_task")
+    @classmethod
+    def validate_vlm_task(cls, v: str) -> str:
+        allowed = {
+            "text_recognition",
+            "advanced_recognition",
+            "key_information_extraction",
+            "table_parsing",
+            "document_parsing",
+            "formula_recognition",
+            "multi_lan",
+        }
+        value = str(v or "document_parsing").strip()
+        if value not in allowed:
+            raise ValueError(f"Invalid Qwen-OCR task: {value}")
+        return value
+
+    @model_validator(mode="after")
+    def validate_vlm_pixel_range(self) -> OCRSettings:
+        if self.vlm_min_pixels > self.vlm_max_pixels:
+            raise ValueError("vlm_min_pixels must not exceed vlm_max_pixels")
+        return self
 
     @field_validator("languages")
     @classmethod

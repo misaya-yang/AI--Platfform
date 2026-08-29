@@ -446,31 +446,75 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ocr = resolved.ocr
             if ocr.enabled and ocr.strategy in ("vlm", "hybrid"):
                 try:
+                    from ai_gateway_core.config.endpoints import resolve_dashscope
+
                     from .services.knowledge.vlm_ocr_service import VLMOCRService
 
-                    if ocr.vlm_provider == "siliconflow" or "deepseek" in ocr.vlm_model.lower():
+                    ocr_provider = str(ocr.vlm_provider or "dashscope").strip().lower()
+                    ocr_model = str(ocr.vlm_model or "qwen-vl-ocr").strip()
+                    if ocr_provider == "auto":
+                        if ocr_model.startswith("gemini-"):
+                            ocr_provider = "gemini"
+                        elif "deepseek" in ocr_model.lower():
+                            ocr_provider = "siliconflow"
+                        else:
+                            ocr_provider = "dashscope"
+                    if ocr_provider == "siliconflow" or "deepseek" in ocr_model.lower():
                         keys = [k.strip() for k in ocr.vlm_api_keys.split(",") if k.strip()]
                         if keys:
                             vlm_ocr_service = VLMOCRService(
                                 api_keys=keys,
-                                model=ocr.vlm_model or "deepseek-ai/DeepSeek-OCR",
+                                model=ocr_model or "deepseek-ai/DeepSeek-OCR",
                                 provider="siliconflow",
                                 base_url=ocr.vlm_base_url,
                                 max_retries=3,
                             )
                     else:
-                        ocr_api_key = (
-                            resolved.embeddings.api_key
-                            if ocr.vlm_provider == "gemini"
-                            else ocr.vlm_api_keys or resolved.embeddings.api_key
-                        )
+                        ocr_api_keys = [
+                            key.strip()
+                            for key in str(ocr.vlm_api_keys or "").split(",")
+                            if key.strip()
+                        ]
+                        if ocr_provider == "gemini":
+                            ocr_api_key = (
+                                resolved.gemini_api_key
+                                or resolved.google_api_key
+                                or resolved.embeddings.google_api_key
+                                or (
+                                    resolved.embeddings.api_key
+                                    if resolved.embeddings.provider == "gemini"
+                                    else ""
+                                )
+                            )
+                            ocr_base_url = ocr.vlm_base_url
+                        else:
+                            dashscope_key, dashscope_base_url = resolve_dashscope("ocr")
+                            ocr_api_key = (
+                                ocr_api_keys[0]
+                                if ocr_api_keys
+                                else dashscope_key
+                                or resolved.embeddings.dashscope_api_key
+                                or (
+                                    resolved.embeddings.api_key
+                                    if resolved.embeddings.provider == "dashscope"
+                                    else ""
+                                )
+                            )
+                            ocr_base_url = ocr.vlm_base_url or dashscope_base_url
                         if ocr_api_key:
                             vlm_ocr_service = VLMOCRService(
                                 api_key=ocr_api_key,
-                                model=ocr.vlm_model,
-                                provider=ocr.vlm_provider,
+                                api_keys=ocr_api_keys or None,
+                                model=ocr_model,
+                                provider=ocr_provider,
+                                base_url=ocr_base_url,
                                 concurrency=ocr.vlm_concurrency,
                                 timeout_seconds=ocr.vlm_timeout_seconds,
+                                task=ocr.vlm_task,
+                                min_pixels=ocr.vlm_min_pixels,
+                                max_pixels=ocr.vlm_max_pixels,
+                                max_tokens=ocr.vlm_max_tokens,
+                                enable_rotate=ocr.vlm_enable_rotate,
                             )
                     if vlm_ocr_service:
                         logger.info(
@@ -576,6 +620,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "embedding_migration_worker_startup_cleanup_failed",
                         error=str(cleanup_error),
                     )
+            if vlm_ocr_service:
+                try:
+                    await vlm_ocr_service.close()
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "vlm_ocr_startup_cleanup_failed",
+                        error=str(cleanup_error),
+                    )
             if knowledge_service:
                 try:
                     await knowledge_service.close()
@@ -629,6 +681,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if embedding_migration_worker:
             with suppress(Exception):
                 await embedding_migration_worker.stop()
+        if vlm_ocr_service:
+            with suppress(Exception):
+                await vlm_ocr_service.close()
         if knowledge_service:
             with suppress(Exception):
                 await knowledge_service.close()

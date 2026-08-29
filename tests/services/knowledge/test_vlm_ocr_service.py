@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+import json
+from unittest.mock import MagicMock
 
+import httpx
 import pytest
-
-from knowledge_service.services.knowledge.vlm_ocr_service import VLMOCRService, _detect_media_type
+from knowledge_service.config import OCRSettings
+from knowledge_service.services.knowledge.vlm_ocr_service import (
+    VLMOCRService,
+    _DashScopeOCRBackend,
+    _detect_media_type,
+)
 
 
 def _make_service(api_key="test-key", model="gemini-2.5-flash", concurrency=2):
@@ -78,6 +84,95 @@ class TestVLMOCRServiceInit:
         with pytest.raises(ValueError, match="Unknown OCR provider"):
             svc = VLMOCRService.__new__(VLMOCRService)
             VLMOCRService.__init__(svc, api_key="key", model="x", provider="unknown")
+
+
+def test_qwen_ocr_is_the_default_vlm_configuration():
+    settings = OCRSettings()
+
+    assert settings.vlm_provider == "dashscope"
+    assert settings.vlm_model == "qwen-vl-ocr"
+    assert settings.vlm_task == "document_parsing"
+    assert settings.vlm_min_pixels == 3072
+    assert settings.vlm_max_pixels == 8_388_608
+    assert settings.vlm_max_tokens == 8_192
+    assert settings.vlm_enable_rotate is True
+
+
+@pytest.mark.asyncio
+async def test_dashscope_qwen_ocr_uses_native_document_parsing_contract():
+    observed: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        observed["url"] = str(request.url)
+        observed["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "output": {
+                    "choices": [
+                        {"message": {"content": [{"text": "Qwen OCR text"}]}}
+                    ]
+                }
+            },
+            request=request,
+        )
+
+    backend = _DashScopeOCRBackend(
+        api_key="test-key",
+        model="qwen-vl-ocr",
+        base_url="https://workspace.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+        task="document_parsing",
+        min_pixels=3072,
+        max_pixels=8_388_608,
+        max_tokens=8_192,
+        enable_rotate=True,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await backend.call(b"\x89PNG\r\n\x1a\nimage")
+    finally:
+        await backend.close()
+
+    assert result == "Qwen OCR text"
+    assert observed["url"] == (
+        "https://workspace.ap-southeast-1.maas.aliyuncs.com/api/v1/"
+        "services/aigc/multimodal-generation/generation"
+    )
+    payload = observed["payload"]
+    assert isinstance(payload, dict)
+    assert payload["model"] == "qwen-vl-ocr"
+    assert payload["parameters"] == {
+        "max_tokens": 8_192,
+        "ocr_options": {"task": "document_parsing"},
+    }
+    image = payload["input"]["messages"][0]["content"][0]
+    assert image["image"].startswith("data:image/png;base64,")
+    assert image["min_pixels"] == 3072
+    assert image["max_pixels"] == 8_388_608
+    assert image["enable_rotate"] is True
+
+
+@pytest.mark.asyncio
+async def test_dashscope_qwen_ocr_surfaces_api_errors_without_leaking_credentials():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            503,
+            json={"code": "ServiceUnavailable", "message": "temporarily unavailable"},
+            request=request,
+        )
+
+    backend = _DashScopeOCRBackend(
+        api_key="secret-must-not-appear",
+        model="qwen-vl-ocr",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="503") as exc_info:
+            await backend.call(b"image")
+    finally:
+        await backend.close()
+
+    assert "secret-must-not-appear" not in str(exc_info.value)
 
 
 class TestOCRImage:

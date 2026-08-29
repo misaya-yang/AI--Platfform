@@ -365,8 +365,13 @@ class KnowledgeSettings(BaseModel):
 
     # OCR strategy: tesseract (legacy), vlm (high-accuracy VLM), hybrid (VLM with Tesseract fallback)
     ocr_strategy: str = "hybrid"
-    ocr_vlm_provider: str = "gemini"  # gemini | dashscope | auto
-    ocr_vlm_model: str = "gemini-3-flash-preview"  # Gemini 3 Flash: lowest edit distance (0.115) on OmniDocBench
+    ocr_vlm_provider: str = "dashscope"  # gemini | dashscope | auto
+    ocr_vlm_model: str = "qwen-vl-ocr"
+    ocr_vlm_task: str = "document_parsing"
+    ocr_vlm_min_pixels: int = 3_072
+    ocr_vlm_max_pixels: int = 8_388_608
+    ocr_vlm_max_tokens: int = 8_192
+    ocr_vlm_enable_rotate: bool = True
     ocr_vlm_concurrency: int = 4
     ocr_vlm_timeout_seconds: int = 30
 

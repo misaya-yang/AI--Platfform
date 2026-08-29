@@ -1,7 +1,7 @@
 """Per-domain endpoint-switch resolver for DashScope and Google families.
 
 Both providers expose two interchangeable endpoints per domain
-(chat / image / embedding) — a paid/full one and a free-tier alternative.
+(chat / image / embedding / OCR) — a paid/full one and a free-tier alternative.
 Operators want to be able to route each domain independently, e.g. keep
 embeddings on the paid CN endpoint but flip chat to the Intl free tier.
 
@@ -37,7 +37,7 @@ Each domain's override falls back through a chain (first non-empty wins):
                         → GOOGLE_API_KEY
 
 Callers should prefer this helper over raw ``os.environ.get`` so the
-fallback behaviour stays consistent across chat/image/embedding. The
+    fallback behaviour stays consistent across chat/image/embedding/OCR. The
 module is intentionally pure — no I/O, no side effects, no logging.
 """
 
@@ -46,7 +46,7 @@ from __future__ import annotations
 import os
 from typing import Literal
 
-Domain = Literal["chat", "image", "embedding"]
+Domain = Literal["chat", "image", "embedding", "ocr"]
 
 # DashScope speaks two different URL conventions:
 #
@@ -121,7 +121,7 @@ def resolve_dashscope(domain: Domain) -> tuple[str, str]:
 
     * chat  → ``…/compatible-mode``
     * image → ``…/api/v1``
-    * embed → ``…/api/v1``
+    * embed/ocr → ``…/api/v1``
 
     Returns ``("", default_url)`` if no key is configured — callers
     decide whether to treat that as "not configured".
