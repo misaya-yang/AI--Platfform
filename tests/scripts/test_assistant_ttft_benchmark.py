@@ -116,9 +116,7 @@ def test_reconcile_trial_statuses() -> None:
     assert ok["server"]["provider_wait_seconds"] == 2.0
     exceeded = _reconcile_trial(lambda _s: [_timing_line()], "t", digest, 5.0)
     assert exceeded["status"] == "tolerance_exceeded"
-    incomplete = _reconcile_trial(
-        lambda _s: [_timing_line(ttft=None)], "t", digest, 2.6
-    )
+    incomplete = _reconcile_trial(lambda _s: [_timing_line(ttft=None)], "t", digest, 2.6)
     assert incomplete["status"] == "incomplete"
 
 
@@ -126,9 +124,7 @@ def test_reconcile_trial_dedups_repeated_reads_of_one_call() -> None:
     # Reviewer regression #3 (race hardening): the same call's line observed in
     # two delayed reads is one call, not a multi-call run.
     digest = hashlib.sha256(_RUN_ID.encode()).hexdigest()
-    result = _reconcile_trial(
-        lambda _s: [_timing_line(), _timing_line()], "t", digest, 2.6
-    )
+    result = _reconcile_trial(lambda _s: [_timing_line(), _timing_line()], "t", digest, 2.6)
     assert result["status"] == "ok"
 
 
@@ -310,9 +306,7 @@ def test_run_benchmark_readerless_run_is_never_recordable(monkeypatch, tmp_path)
     assert summary["recordable"] is False
 
 
-def test_run_benchmark_warmup_exclusion_fails_report_under_v2(
-    monkeypatch, tmp_path
-) -> None:
+def test_run_benchmark_warmup_exclusion_fails_report_under_v2(monkeypatch, tmp_path) -> None:
     # G3/v2 clause (1): exclusions still fail the report for *every* trial,
     # warm-ups included — a warm-up whose receipt was never collected means
     # the p99 claim covers 106/107 trials, so the report is not certified.
@@ -393,9 +387,7 @@ def test_run_benchmark_v2_isolated_tolerance_exceeded_still_certifies(
     assert summary["recordable"] is True
 
 
-def test_run_benchmark_v2_lower_bound_violation_blocks_certification(
-    monkeypatch, tmp_path
-) -> None:
+def test_run_benchmark_v2_lower_bound_violation_blocks_certification(monkeypatch, tmp_path) -> None:
     # G3/v2 clause (1): client TTFT earlier than server minus 0.010 is
     # structurally impossible (the server window is a sub-interval of the
     # client window) and blocks certification per trial, never quantiled.
@@ -409,9 +401,7 @@ def test_run_benchmark_v2_lower_bound_violation_blocks_certification(
     assert summary["recordable"] is False
 
 
-def test_run_benchmark_v2_defect_ceiling_blocks_certification(
-    monkeypatch, tmp_path
-) -> None:
+def test_run_benchmark_v2_defect_ceiling_blocks_certification(monkeypatch, tmp_path) -> None:
     # G3/v2 clause (3): a single gross outlier (residual 0.6 > the 0.500
     # ceiling) fails as structural even though a 1-trial p99 would be it.
     line = _receipt_with_server_ttft(2.0, (0.04, 1.5, 0.46))
@@ -427,9 +417,7 @@ def test_run_benchmark_report_never_contains_credentials(monkeypatch, tmp_path) 
     # Security review A5: the serialized report must not leak the benchmark
     # account. The sentinel is what _runtime_inputs is monkeypatched to
     # return; the fake adapter proves it actually flowed into the client.
-    summary, captured = _run_with_fake_adapter(
-        monkeypatch, tmp_path, receipt_model="qwen3.7-plus"
-    )
+    summary, captured = _run_with_fake_adapter(monkeypatch, tmp_path, receipt_model="qwen3.7-plus")
     assert summary["recordable"] is True
     assert captured["password"] == "SENTINEL-PW-9d3k"
     assert captured["email"] == "bench@corp.example"
@@ -451,9 +439,7 @@ def test_run_benchmark_g5_gate_set_floor_blocks_recordable(monkeypatch, tmp_path
     assert summary["recordable"] is False
 
 
-def test_run_benchmark_identity_violation_receipt_blocks_recordable(
-    monkeypatch, tmp_path
-) -> None:
+def test_run_benchmark_identity_violation_receipt_blocks_recordable(monkeypatch, tmp_path) -> None:
     # Client review NIT: end-to-end (not just _reconcile_trial unit) proof
     # that a receipt whose additive components don't sum to the server TTFT
     # (G1 violation) fails the report closed and can never certify.

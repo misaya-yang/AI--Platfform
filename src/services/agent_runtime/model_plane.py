@@ -480,9 +480,7 @@ def _native_responses_body(
         # accidentally drop a Provider capability from the outbound request.
         serialized_tools.append({"type": "web_search"})
     function_tool_names = {
-        str(tool["name"])
-        for tool in serialized_tools
-        if tool.get("type") == "function"
+        str(tool["name"]) for tool in serialized_tools if tool.get("type") == "function"
     }
     if allowed_tool_names is not None and not function_tool_names.issubset(allowed_tool_names):
         raise AgentModelPlaneError("RUNTIME_TOOL_SCHEMA_SCOPE_MISMATCH", status_code=422)
@@ -494,8 +492,7 @@ def _native_responses_body(
     )
     input_items = raw_input if isinstance(raw_input, list) else []
     has_tool_transcript = isinstance(raw_input, list) and any(
-        isinstance(item, Mapping)
-        and item.get("type") in {"function_call", "function_call_output"}
+        isinstance(item, Mapping) and item.get("type") in {"function_call", "function_call_output"}
         for item in raw_input
     )
     transcript_calls = [
@@ -525,7 +522,10 @@ def _native_responses_body(
     # create an unbounded post-tool loop.
     effective_tool_choice = "auto" if has_tool_transcript else tool_choice
     effective_parallel_tool_calls = True if has_tool_transcript else parallel_tool_calls
-    if isinstance(effective_tool_choice, dict) and effective_tool_choice["name"] not in function_tool_names:
+    if (
+        isinstance(effective_tool_choice, dict)
+        and effective_tool_choice["name"] not in function_tool_names
+    ):
         raise AgentModelPlaneError("RUNTIME_TOOL_CHOICE_INVALID", status_code=422)
     if effective_tool_choice == "required" and not function_tool_names:
         raise AgentModelPlaneError("RUNTIME_TOOL_CHOICE_INVALID", status_code=422)
@@ -605,9 +605,7 @@ def _native_responses_input(value: Any) -> Any:
                 and raw_part.get("type") == "encrypted_content"
                 and isinstance(raw_part.get("encrypted_content"), str)
             ):
-                content.append(
-                    {"type": "input_text", "text": raw_part["encrypted_content"]}
-                )
+                content.append({"type": "input_text", "text": raw_part["encrypted_content"]})
             else:
                 content.append(raw_part)
         item["content"] = content
@@ -1348,11 +1346,7 @@ class AgentModelPlane:
                 for key, value in expected_metadata.items()
             ):
                 raise AgentModelPlaneError("RUNTIME_MODEL_LEASE_SCOPE_MISMATCH", status_code=403)
-            if (
-                root_turn_id not in {"", claims.run_id}
-                or parent_thread_id
-                or parent_turn_id
-            ):
+            if root_turn_id not in {"", claims.run_id} or parent_thread_id or parent_turn_id:
                 raise AgentModelPlaneError("RUNTIME_MODEL_LEASE_SCOPE_MISMATCH", status_code=403)
             return
 
@@ -1377,7 +1371,9 @@ class AgentModelPlane:
             parent_thread_uuid = uuid.UUID(parent_thread_id)
             uuid.UUID(turn_id)
         except (ValueError, TypeError, AttributeError):
-            raise AgentModelPlaneError("RUNTIME_MODEL_LEASE_SCOPE_MISMATCH", status_code=403) from None
+            raise AgentModelPlaneError(
+                "RUNTIME_MODEL_LEASE_SCOPE_MISMATCH", status_code=403
+            ) from None
         member = await self.database.fetchrow(
             """
             SELECT parent_kernel_thread_id, relation_kind
@@ -1403,7 +1399,9 @@ class AgentModelPlane:
         try:
             stored_parent_uuid = uuid.UUID(str(stored_parent))
         except (ValueError, TypeError, AttributeError):
-            raise AgentModelPlaneError("RUNTIME_MODEL_LEASE_SCOPE_MISMATCH", status_code=403) from None
+            raise AgentModelPlaneError(
+                "RUNTIME_MODEL_LEASE_SCOPE_MISMATCH", status_code=403
+            ) from None
         if stored_parent_uuid != parent_thread_uuid:
             raise AgentModelPlaneError("RUNTIME_MODEL_LEASE_SCOPE_MISMATCH", status_code=403)
 
@@ -1614,7 +1612,10 @@ class AgentModelPlane:
             for item in chat_tools
             if isinstance(item.get("function"), Mapping)
         }
-        if isinstance(effective_tool_choice, dict) and effective_tool_choice["name"] not in chat_names:
+        if (
+            isinstance(effective_tool_choice, dict)
+            and effective_tool_choice["name"] not in chat_names
+        ):
             raise AgentModelPlaneError("RUNTIME_TOOL_CHOICE_INVALID", status_code=422)
         if effective_tool_choice == "required" and not chat_tools:
             raise AgentModelPlaneError("RUNTIME_TOOL_CHOICE_INVALID", status_code=422)
@@ -1791,9 +1792,7 @@ class AgentModelPlane:
         validator = _NativeResponsesStreamValidator(
             tool_aliases,
             reasoning_visibility=reasoning_visibility,
-            allow_tools=any(
-                isinstance(tool, Mapping) for tool in provider_body.get("tools", [])
-            ),
+            allow_tools=any(isinstance(tool, Mapping) for tool in provider_body.get("tools", [])),
         )
         header_request_id: str | None = None
         # TTFT breakdown: provider connect/headers vs. first usable event. The
@@ -1832,19 +1831,15 @@ class AgentModelPlane:
                     # generated arguments contain "reasoning" must not stamp
                     # first-visible.
                     event_type = event.split(b"\n", 1)[0]
-                    if (
-                        timing.first_visible is None
-                        and event_type
-                        in (
-                            b"event: response.output_text.delta",
-                            b"event: response.reasoning_text.delta",
-                            b"event: response.reasoning_summary_text.delta",
-                            # A refusal delta is client-visible text on this
-                            # wire (chat delivers refusals via delta.content);
-                            # omitting it under-measures TTFT for refusal-only
-                            # completions.
-                            b"event: response.refusal.delta",
-                        )
+                    if timing.first_visible is None and event_type in (
+                        b"event: response.output_text.delta",
+                        b"event: response.reasoning_text.delta",
+                        b"event: response.reasoning_summary_text.delta",
+                        # A refusal delta is client-visible text on this
+                        # wire (chat delivers refusals via delta.content);
+                        # omitting it under-measures TTFT for refusal-only
+                        # completions.
+                        b"event: response.refusal.delta",
                     ):
                         timing.note_first_visible()
                     if not first_event_logged:

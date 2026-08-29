@@ -338,9 +338,7 @@ async def test_chat_completions_pre_dispatch_delay_never_leaks_into_provider_wai
     """
     delta = 0.9
     clock = FakeClock(1000.0)
-    base_plane = _make_plane(
-        clock, _chat_stream(clock, provider_stall=1.0, projection_stall=0.3)
-    )
+    base_plane = _make_plane(clock, _chat_stream(clock, provider_stall=1.0, projection_stall=0.3))
     with caplog.at_level(logging.INFO, logger=logger_name):
         await _drain(base_plane, _make_call("chat_completions"))
     base = _only_logged_timing(caplog)
@@ -358,9 +356,7 @@ async def test_chat_completions_pre_dispatch_delay_never_leaks_into_provider_wai
     assert slow["local_pre_provider_seconds"] - base["local_pre_provider_seconds"] == pytest.approx(
         delta, abs=1e-9
     )
-    assert slow["provider_wait_seconds"] == pytest.approx(
-        base["provider_wait_seconds"], abs=1e-9
-    )
+    assert slow["provider_wait_seconds"] == pytest.approx(base["provider_wait_seconds"], abs=1e-9)
     assert slow["local_projection_seconds"] == pytest.approx(
         base["local_projection_seconds"], abs=1e-9
     )
@@ -375,9 +371,7 @@ async def test_chat_completions_post_first_frame_delay_never_leaks_into_provider
 ) -> None:
     """G2 second clause: pacing after the first frame moves projection only."""
     clock = FakeClock(1000.0)
-    base_plane = _make_plane(
-        clock, _chat_stream(clock, provider_stall=1.5, projection_stall=0.1)
-    )
+    base_plane = _make_plane(clock, _chat_stream(clock, provider_stall=1.5, projection_stall=0.1))
     with caplog.at_level(logging.INFO, logger=logger_name):
         await _drain(base_plane, _make_call("chat_completions"))
     base = _only_logged_timing(caplog)
@@ -391,9 +385,7 @@ async def test_chat_completions_post_first_frame_delay_never_leaks_into_provider
         await _drain(slow_plane, _make_call("chat_completions"))
     slow = _only_logged_timing(caplog)
 
-    assert slow["provider_wait_seconds"] == pytest.approx(
-        base["provider_wait_seconds"], abs=1e-9
-    )
+    assert slow["provider_wait_seconds"] == pytest.approx(base["provider_wait_seconds"], abs=1e-9)
     assert slow["local_pre_provider_seconds"] == pytest.approx(
         base["local_pre_provider_seconds"], abs=1e-9
     )
@@ -521,9 +513,7 @@ async def test_native_responses_timing_identity_and_attribution(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     clock = FakeClock(1000.0)
-    plane = _make_plane(
-        clock, _native_stream(clock, provider_stall=1.8, projection_stall=0.2)
-    )
+    plane = _make_plane(clock, _native_stream(clock, provider_stall=1.8, projection_stall=0.2))
     with caplog.at_level(logging.INFO, logger=logger_name):
         await _drain(plane, _make_call("responses_v1"))
 
@@ -707,9 +697,7 @@ async def test_native_function_call_arguments_never_stamp_first_visible(
                         "type": "message",
                         "status": "completed",
                         "role": "assistant",
-                        "content": [
-                            {"type": "output_text", "text": "你好", "annotations": []}
-                        ],
+                        "content": [{"type": "output_text", "text": "你好", "annotations": []}],
                     },
                 ],
                 "usage": {

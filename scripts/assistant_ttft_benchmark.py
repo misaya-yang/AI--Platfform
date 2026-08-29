@@ -90,6 +90,7 @@ class PprTtftAdapter(AIPlatformAdapter):
         if stream["failover_decisions"]:
             raise BenchmarkError("gateway_model_failover_invalidates_comparison")
 
+
 ROOT = Path(__file__).resolve().parents[1]
 
 _SERVER_COMPONENT_KEYS = (
@@ -270,8 +271,7 @@ def _bootstrap_ci(
     rng = random.Random(seed)
     size = len(values)
     draws = sorted(
-        _percentile(rng.choices(values, k=size), percentile) or 0.0
-        for _ in range(iterations)
+        _percentile(rng.choices(values, k=size), percentile) or 0.0 for _ in range(iterations)
     )
     return {
         "low": draws[min(iterations - 1, math.floor(0.025 * iterations))],
@@ -375,7 +375,12 @@ def run_benchmark(
     # proxy (or *_proxy env) otherwise intercepts loopback and returns 502;
     # urllib honours no_proxy/NO_PROXY for the bypass.
     bypass = os.environ.get("no_proxy") or os.environ.get("NO_PROXY") or ""
-    parts = [*[part.strip() for part in bypass.split(",") if part.strip()], "127.0.0.1", "localhost", "::1"]
+    parts = [
+        *[part.strip() for part in bypass.split(",") if part.strip()],
+        "127.0.0.1",
+        "localhost",
+        "::1",
+    ]
     joined = ",".join(dict.fromkeys(parts))
     os.environ["no_proxy"] = os.environ["NO_PROXY"] = joined
     runtime = _runtime_inputs(env_path)
@@ -409,9 +414,7 @@ def run_benchmark(
                 event_type in {"thinking_start", "thinking_delta"} for event_type in event_types
             )
             success = (
-                result.terminal_status == "succeeded"
-                and bool(result.text)
-                and thinking_observed
+                result.terminal_status == "succeeded" and bool(result.text) and thinking_observed
             )
             usage = result.metadata.get("usage") or {}
             client_ttft = result.metadata["timing"].get("ttft_seconds")
@@ -487,13 +490,14 @@ def run_benchmark(
         trial["timing_reconciliation"]
         for trial in gate_set
         if isinstance(trial.get("timing_reconciliation"), dict)
-        and trial["timing_reconciliation"].get("status")
-        in {"ok", "tolerance_exceeded"}
+        and trial["timing_reconciliation"].get("status") in {"ok", "tolerance_exceeded"}
     ]
     for key in _SERVER_COMPONENT_KEYS:
         metrics[key] = _metric_summary_nested(reconciled, "server", key)
     residuals = [
-        abs(float(record["residual_seconds"])) for record in reconciled if "residual_seconds" in record
+        abs(float(record["residual_seconds"]))
+        for record in reconciled
+        if "residual_seconds" in record
     ]
     reconciliation_counts = {
         status: sum(
@@ -656,9 +660,7 @@ def run_benchmark(
                 "are the G3/v2 certification inputs and include every trial"
             ),
             "status_counts": reconciliation_counts,
-            "gate_set_max_abs_residual_seconds": (
-                round(max(residuals), 6) if residuals else None
-            ),
+            "gate_set_max_abs_residual_seconds": (round(max(residuals), 6) if residuals else None),
             "gate_set_meets_recordable_min": gate_size_ok,
             "all_trials_abs_residual_p99_seconds": (
                 _percentile(abs_residuals, 0.99) if abs_residuals else None
@@ -698,7 +700,7 @@ def main() -> int:
         help=(
             "read-only command that takes the trial-start ISO-8601 timestamp "
             "as its single trailing argument and prints gateway log lines; "
-            'e.g. a wrapper script: docker compose logs --no-color '
+            "e.g. a wrapper script: docker compose logs --no-color "
             '--since "$1" gateway'
         ),
     )
