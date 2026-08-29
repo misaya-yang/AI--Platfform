@@ -45,12 +45,13 @@
       "hit-test scoreThreshold 初始 0（0=不过滤）与 fusionMethod 初始 weighted 为工作台语义，刻意保留",
       "默认值按多数值收敛：wizard chunk 600→500、wizard threshold 0.2→0.3、hit-test denseWeight 0.5→0.7、types 死常量 alpha 0.75→0.7"
     ],
-    "c2_debt": [
-      "DocumentsTab:462 variant=\"outline-solid\" 不在 Button 变体并集内（运行期 cva 忽略，渲染同 monolith）——需视觉判断+Button 属共享组件，留 C8 设计轮",
-      "DatasetUploadDialog 卡片 transition-all（既有；motion 静态扫描挂账，随设计轮收敛）"
-    ]
+    "c2_debt_resolved_c8": [
+      "outline-solid→outline（C8，KB 切片最后一个真实 tsc 错误清零）",
+      "knowledge/** 全部 7 处 transition-all→属性列表（C8）"
+    ],
+    "c8_motion_scan": "check-source.sh 切片扫描 7 pass 1 fail（切片目录内无 prefers-reduced-motion 声明）——已核实 web/src/index.css:469-474 全局 reduce 规则对 * 折叠 animation/transition，切片动效（含 animate-spin）全覆盖；静态扫描只扫切片目录故挂 fail，不重复添加规则，如实记录"
   },
-  "active_phase": "C8 徽章/状态词汇渲染/多模态对齐/i18n",
+  "active_phase": "C9 前向合同 mock e2e 补全 + 依赖清单交付",
   "iterations": [
     {
       "phase": "C1",
@@ -155,6 +156,24 @@
         "跨台架回归修复：rag-eval 台架补 /**/api/v1/eval/** 空数据集路由——C7 工作台挂载即探针关联评测集，未 mock 会穿透真网关，401 清掉 mock 鉴权会话致页面被踢回仪表盘（全套回归捕获，单跑不可见）",
         "testid 合同：save-eval-cases/eval-jsonl-import-open/eval-jsonl-textarea/eval-jsonl-file/eval-jsonl-skip-duplicates/eval-jsonl-submit/send-hits-to-eval/send-qa-to-eval-{id}；Radix toast aria-live 孪生 span 会同时命中标题与描述——e2e 标题断言用 exact:true、描述断言用全等文本",
         "i18n: knowledge.eval 新增 25 键 + knowledge.detail 4 键，双语进 i18n:check"
+      ]
+    },
+    {
+      "phase": "C8",
+      "date": "2026-08-29",
+      "scope": "徽章/状态词汇渲染/多模态滤镜对齐/阶段耗时/动效纪律收敛 + i18n 收口",
+      "result": "done",
+      "evidence": "e2e @mock 21/21（全套回归）；node --test 73/73（+8 documentStages）；lint/build(oversizedRoutes=[])/i18n:check 绿；真实 tsc 101 = C7 的 100 − 1（outline-solid 清零）+ 2（新测试文件 node:* 导入，惯例不计），KB 切片零真实错误；motion check-source.sh 切片扫描 7 pass 1 fail（见 notes.c8_motion_scan，全局 reduced-motion 规则已覆盖）",
+      "changes": [
+        "DocumentsTab: 状态筛选迁移到显示词表——state 改 \"all\"|DocumentDisplayStatus，过滤走 resolveDisplayStatus（与行徽章同一解析器，所见即所筛），选项由 DOCUMENT_DISPLAY_STATUS_VOCABULARY 顺序生成；旧 raw-status 四选项（completed/uploaded/processing/failed）连同 4 个仅此处使用的 i18n 键一并移除",
+        "DocumentsTab: 批量操作按钮 outline-solid→outline（KB 切片最后一个真实 tsc 错误清零；与相邻刷新钮 outline+bg-card 视觉一致；批量激活态仍走 default/primary）",
+        "documentStages.ts（新，纯模块可 node:test）：buildStageTimings 按 parsing/splitting/indexing 的 *_started_at 区间推导逐阶段耗时——缺起点跳过（部分数据不造阶段）、终点依次回退下一段起点→completed_at、时钟回拨钳零、无终点=running；formatStageDuration（<1s/Ns/Nm Ns/Nh NNm）；runningStageDurationMs；node:test 8 例（全管线/开尾 running/部分数据/回拨/非法时间戳）",
+        "DocumentRow: display ∈ {queuing,indexing} 且载荷带阶段时间戳的行在标题下渲染逐阶段耗时行（testid doc-stage-times-{id}，运行中阶段以 … 标记，2s 轮询自然刷新）；无时间戳保持 StatusBadge 粗进度=计划中的降级路径；+文档级 hit_count 徽章（有值即显，PRD §5-#16 显示侧，写入方属后端 T2，testid doc-hit-count-{id}）",
+        "ChunkCard/SegmentList: Chunk 本地类型补 hit_count 并在三处映射点透传；父卡/叶卡/子卡三形态 hit_count>0 显示 HitCountPill（Flame+计数，testid segment-hit-count-{id}，tooltip 全文）",
+        "Datasets.tsx: 类型滤镜移除 image/audio_video 滤镜项（PRD L689 text_only 现实——隐藏而非虚假解锁，注释固化复活方法）；存量多模态数据集卡片徽章保持真实渲染（getKBTypeIcon/getKBTypeLabelKey 不动，typeImageQA/typeAVSearch 键保留）；typeImage/typeAudioVideo 键删除",
+        "动效纪律：knowledge/** 7 处 transition-all→属性列表——选择卡/模式卡（边框+背景±ring）→ transition-colors 或 transition-[border-color,background-color,box-shadow]；向导步骤圆（色+背景+ring）→ transition-[color,background-color,box-shadow]；连接线→transition-colors；切片内 transition:all 归零",
+        "删除空转文件 detail/SegmentCard.tsx（C2 拆分遗留，全仓零引用）",
+        "i18n: +knowledge.displayStatus 组 7 键（显示词表标签单一来源，筛选器与 DocumentRow 徽章共用；原 knowledge.status.archived/disabled 迁入该组并删旧键）；+documentRow 4 键（stageParsing/stageSplitting/stageIndexing/hitCountTitle）；+segment.hitCountTitle；−detail 旧筛选 4 键、−datasets 多模态 2 键；双语进 i18n:check"
       ]
     }
   ],

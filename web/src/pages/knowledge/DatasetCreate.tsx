@@ -355,7 +355,7 @@ export default function DatasetCreatePage() {
               <div key={wizardStep.num} className="flex items-center">
                 <div className="flex items-center gap-2">
                   <div
-                    className={`w-7 h-7 rounded-full flex items-center justify-center text-sm font-medium transition-all ${
+                    className={`w-7 h-7 rounded-full flex items-center justify-center text-sm font-medium transition-[color,background-color,box-shadow] ${
                       step > wizardStep.num
                         ? "bg-primary text-white"
                         : step === wizardStep.num
@@ -379,7 +379,7 @@ export default function DatasetCreatePage() {
                 </div>
                 {index < 2 && (
                   <div
-                    className={`w-24 h-0.5 mx-4 transition-all ${
+                    className={`w-24 h-0.5 mx-4 transition-colors ${
                       step > wizardStep.num ? "bg-primary" : "bg-border"
                     }`}
                   />

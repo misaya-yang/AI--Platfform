@@ -13,7 +13,8 @@ import { useState, useMemo } from "react";
 import {
   ChevronDown,
   ChevronUp,
-  CornerDownRight
+  CornerDownRight,
+  Flame,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
@@ -29,6 +30,8 @@ interface Chunk {
   summary?: string;
   /** Segments are enabled unless the backend explicitly stamped them off. */
   enabled?: boolean;
+  /** Retrieval telemetry (PRD §5-#16): written by backend T2, shown if present. */
+  hit_count?: number;
   children?: Chunk[];
 }
 
@@ -56,6 +59,25 @@ function DisabledBadge() {
   return (
     <span className="shrink-0 rounded-md border border-amber-200/70 bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-300">
       {t("knowledge.segment.disabledShort")}
+    </span>
+  );
+}
+
+/**
+ * Retrieval hit counter (PRD §5-#16). The backend writer lands with T2; the
+ * pill renders whenever a count is already present and stays out of the way
+ * otherwise.
+ */
+function HitCountPill({ segmentId, count }: { segmentId: string; count: number }) {
+  const { t } = useTranslation();
+  return (
+    <span
+      data-testid={`segment-hit-count-${segmentId}`}
+      title={t("knowledge.segment.hitCountTitle", { count })}
+      className="inline-flex shrink-0 items-center gap-1 rounded-md border border-sky-200/70 bg-sky-100 px-1.5 py-0.5 text-[11px] font-medium text-sky-700 dark:border-sky-900/50 dark:bg-sky-950/40 dark:text-sky-300"
+    >
+      <Flame className="h-3 w-3" aria-hidden="true" />
+      {count}
     </span>
   );
 }
@@ -143,6 +165,9 @@ function ChildChunkCard({
               <span className="font-mono">~{tokenCount} tokens</span>
             </div>
             {child.enabled === false && <DisabledBadge />}
+            {typeof child.hit_count === "number" && child.hit_count > 0 && (
+              <HitCountPill segmentId={child.segment_id} count={child.hit_count} />
+            )}
 
             {charCount > 150 && (
               <button
@@ -277,6 +302,9 @@ export function ChunkCard({
           </span>
         </div>
         {chunk.enabled === false && <DisabledBadge />}
+        {typeof chunk.hit_count === "number" && chunk.hit_count > 0 && (
+          <HitCountPill segmentId={chunk.segment_id} count={chunk.hit_count} />
+        )}
         {(onEdit || onDelete || onToggleEnabled) && (
           <div className="ml-auto flex items-center gap-2">
             {onToggleEnabled && (
@@ -394,6 +422,9 @@ export function ChunkCard({
               <span className="text-xs px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300">
                 {children.length} {t("knowledge.segment.childChunks")}
               </span>
+            )}
+            {typeof chunk.hit_count === "number" && chunk.hit_count > 0 && (
+              <HitCountPill segmentId={chunk.segment_id} count={chunk.hit_count} />
             )}
             {chunk.enabled === false && <DisabledBadge />}
           </div>

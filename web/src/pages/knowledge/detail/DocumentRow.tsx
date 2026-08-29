@@ -1,9 +1,15 @@
 import { useState } from "react";
-import { Archive, ArchiveRestore, History, RefreshCcw, Trash2 } from "lucide-react";
+import { Archive, ArchiveRestore, Flame, History, RefreshCcw, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { resolveDisplayStatus, type Document } from "@/types/knowledge";
 import { StatusBadge } from "@/pages/knowledge/detail/StatusBadge";
+import {
+  buildStageTimings,
+  formatStageDuration,
+  runningStageDurationMs,
+  type DocumentStage,
+} from "@/pages/knowledge/detail/documentStages";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
@@ -18,6 +24,12 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { DocumentVersionHistory } from "./DocumentVersionHistory";
+
+const STAGE_LABEL_KEYS: Record<DocumentStage, string> = {
+  parsing: "knowledge.documentRow.stageParsing",
+  splitting: "knowledge.documentRow.stageSplitting",
+  indexing: "knowledge.documentRow.stageIndexing",
+};
 
 export function DocumentRow({
   doc,
@@ -64,6 +76,25 @@ export function DocumentRow({
   const isArchived = display === "archived";
   const isDisabled = display === "disabled";
   const inactive = isArchived || isDisabled;
+
+  // Per-stage durations (migration 101 forward contract, PRD A10): rendered
+  // only for actively-processing rows whose payloads carry stage timestamps;
+  // anything else keeps the existing coarse StatusBadge progress.
+  const stageSummary = (() => {
+    if (display !== "queuing" && display !== "indexing") return null;
+    const timings = buildStageTimings(doc);
+    if (timings.length === 0) return null;
+    const now = Date.now();
+    return timings
+      .map((timing) => {
+        const label = t(STAGE_LABEL_KEYS[timing.stage]);
+        const duration = timing.running
+          ? `${formatStageDuration(runningStageDurationMs(timing, now))}…`
+          : formatStageDuration(timing.durationMs ?? 0);
+        return `${label} ${duration}`;
+      })
+      .join(" · ");
+  })();
 
   const handleAction = async (action: () => Promise<void>) => {
     if (loading) return;
@@ -135,17 +166,28 @@ export function DocumentRow({
         )}
         <div className="flex min-w-0 basis-full items-center gap-3 sm:basis-auto sm:flex-1">
           {getFileIcon()}
-          <button
-            type="button"
-            className={`min-w-0 truncate text-left text-sm font-medium ${
-              inactive
-                ? "text-muted-foreground hover:text-foreground"
-                : "text-primary hover:text-primary/90"
-            }`}
-            onClick={onSelect}
-          >
-            {doc.title}
-          </button>
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <button
+              type="button"
+              className={`min-w-0 truncate text-left text-sm font-medium ${
+                inactive
+                  ? "text-muted-foreground hover:text-foreground"
+                  : "text-primary hover:text-primary/90"
+              }`}
+              onClick={onSelect}
+            >
+              {doc.title}
+            </button>
+            {stageSummary && (
+              <div
+                data-testid={`doc-stage-times-${doc.document_id}`}
+                className="truncate text-xs text-muted-foreground"
+                title={stageSummary}
+              >
+                {stageSummary}
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="hidden w-24 text-sm text-muted-foreground text-center sm:block">
@@ -165,7 +207,7 @@ export function DocumentRow({
               data-testid={`doc-archived-badge-${doc.document_id}`}
               className="text-xs font-medium bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30"
             >
-              {t("knowledge.status.archived")}
+              {t("knowledge.displayStatus.archived")}
             </Badge>
           )}
           {isDisabled && (
@@ -174,7 +216,20 @@ export function DocumentRow({
               data-testid={`doc-disabled-badge-${doc.document_id}`}
               className="text-xs font-medium bg-slate-500/15 text-slate-700 dark:text-slate-400 border-slate-500/30"
             >
-              {t("knowledge.status.disabled")}
+              {t("knowledge.displayStatus.disabled")}
+            </Badge>
+          )}
+          {/* Retrieval telemetry (PRD §5-#16): the backend writer lands with
+              T2; show the badge whenever a count is already present. */}
+          {typeof doc.hit_count === "number" && doc.hit_count > 0 && (
+            <Badge
+              variant="outline"
+              data-testid={`doc-hit-count-${doc.document_id}`}
+              title={t("knowledge.documentRow.hitCountTitle", { count: doc.hit_count })}
+              className="gap-1 text-xs font-medium bg-sky-500/10 text-sky-700 dark:text-sky-400 border-sky-500/30"
+            >
+              <Flame className="h-3 w-3" aria-hidden="true" />
+              {doc.hit_count}
             </Badge>
           )}
         </div>

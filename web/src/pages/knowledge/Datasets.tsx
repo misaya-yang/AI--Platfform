@@ -48,13 +48,14 @@ import { copyToClipboard } from "@/lib/clipboard";
 
 const { Text, Title, Paragraph } = Typography;
 
-// 类型 Tab 配置
+// 类型 Tab 配置。多模态项（image / audio_video）暂不提供：后端能力仍是
+// text_only（PRD T5-9，L689"要么解锁、要么隐藏滤镜项"），此处选择隐藏
+// 滤镜项；卡片上的类型徽章保留真实渲染，已有数据集仍如实标注。
+// 后端解锁多模态时，把这两行加回即可。
 const typeOptions = [
   { value: "all", labelKey: "knowledge.datasets.typeAll", icon: <DatabaseOutlined /> },
   { value: "document", labelKey: "knowledge.datasets.typeDocument", icon: <FileTextOutlined /> },
   { value: "data", labelKey: "knowledge.datasets.typeData", icon: <TableOutlined /> },
-  { value: "image", labelKey: "knowledge.datasets.typeImage", icon: <PictureOutlined /> },
-  { value: "audio_video", labelKey: "knowledge.datasets.typeAudioVideo", icon: <PlaySquareOutlined /> },
 ];
 
 // 根据知识库类型获取图标

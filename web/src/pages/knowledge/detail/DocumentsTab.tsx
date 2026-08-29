@@ -53,7 +53,13 @@ import {
   DOCUMENT_BATCH_REINDEX_LIMIT,
   DOCUMENT_ARCHIVE_REASON_LIMIT,
 } from "@/api/knowledge";
-import { parseSegmentKeywords, type Document } from "@/types/knowledge";
+import {
+  DOCUMENT_DISPLAY_STATUS_VOCABULARY,
+  parseSegmentKeywords,
+  resolveDisplayStatus,
+  type Document,
+  type DocumentDisplayStatus,
+} from "@/types/knowledge";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -185,7 +191,9 @@ export function DocumentsTab({
   const [archiveReason, setArchiveReason] = useState("");
   const [archiveSaving, setArchiveSaving] = useState(false);
   const [unarchiveDocId, setUnarchiveDocId] = useState<string | null>(null);
-  const [statusFilter, setStatusFilter] = useState<"all" | "completed" | "uploaded" | "processing" | "failed">("all");
+  // Status filtering runs on the display vocabulary, through the same
+  // resolver the row badges use, so a filter always matches what users see.
+  const [statusFilter, setStatusFilter] = useState<"all" | DocumentDisplayStatus>("all");
   const [contentTypeFilter, setContentTypeFilter] = useState<"all" | "document" | "data" | "image">("all");
 
   // Search state
@@ -212,24 +220,9 @@ export function DocumentsTab({
       });
     }
 
-    // Filter by status
+    // Filter by display status (same resolution the row badges render).
     if (statusFilter !== "all") {
-      if (statusFilter === "processing") {
-        result = result.filter((d) =>
-          [
-            "uploaded",
-            "queued",
-            "detecting",
-            "processing",
-            "parsing",
-            "segmenting",
-            "embedding",
-            "embedding_images",
-          ].includes(d.status)
-        );
-      } else {
-        result = result.filter((d) => d.status === statusFilter);
-      }
+      result = result.filter((d) => resolveDisplayStatus(d) === statusFilter);
     }
 
     // Filter by format
@@ -805,10 +798,11 @@ export function DocumentsTab({
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">{t("knowledge.detail.allStatus")}</SelectItem>
-              <SelectItem value="completed">{t("knowledge.detail.statusCompleted")}</SelectItem>
-              <SelectItem value="uploaded">{t("knowledge.detail.statusUploaded")}</SelectItem>
-              <SelectItem value="processing">{t("knowledge.detail.statusProcessing")}</SelectItem>
-              <SelectItem value="failed">{t("knowledge.detail.statusFailed")}</SelectItem>
+              {DOCUMENT_DISPLAY_STATUS_VOCABULARY.map((value) => (
+                <SelectItem key={value} value={value}>
+                  {t(`knowledge.displayStatus.${value}`)}
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
           <Select value={formatFilter} onValueChange={setFormatFilter}>
@@ -835,7 +829,7 @@ export function DocumentsTab({
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
-                variant={batchMode ? "default" : "outline-solid"}
+                variant={batchMode ? "default" : "outline"}
                 className={`h-9 ${batchMode ? "bg-primary text-white" : "bg-card"}`}
               >
                 <ListChecks className="h-4 w-4 mr-1.5" />

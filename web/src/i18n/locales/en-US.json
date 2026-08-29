@@ -975,12 +975,10 @@
       "totalSegments": "Total Segments",
       "typeAVSearch": "Audio & Video Search",
       "typeAll": "All",
-      "typeAudioVideo": "Audio & Video",
       "typeData": "Data",
       "typeDataQuery": "Data Query",
       "typeDocSearch": "Document Search",
       "typeDocument": "Document",
-      "typeImage": "Image",
       "typeImageQA": "Image Q&A",
       "viewDetail": "View Detail",
       "visPrivate": "Private",
@@ -1401,10 +1399,6 @@
       "separatorPlaceholder": "e.g.: \\n\\n or ---",
       "similarityThreshold": "Similarity Threshold",
       "statistics": "Statistics",
-      "statusCompleted": "Completed",
-      "statusFailed": "Failed",
-      "statusProcessing": "Processing",
-      "statusUploaded": "Uploaded",
       "tabDocuments": "Document Management",
       "tabEval": "Evaluation",
       "tabPermissions": "Permissions",
@@ -1474,6 +1468,15 @@
       "visTenant": "Tenant",
       "weightedFusion": "Weighted Fusion"
     },
+    "displayStatus": {
+      "archived": "Archived",
+      "available": "Available",
+      "disabled": "Disabled",
+      "error": "Failed",
+      "indexing": "Indexing",
+      "paused": "Paused",
+      "queuing": "Queuing"
+    },
     "documentRow": {
       "defaultCategory": "Default Category",
       "segments": "Segments",
@@ -1492,7 +1495,11 @@
       "enableDoc": "Enable this document",
       "selectDoc": "Select this document",
       "switchArchivedHint": "Archived documents cannot be enabled; restore it first",
-      "unarchiveTitle": "Restore"
+      "unarchiveTitle": "Restore",
+      "hitCountTitle": "Retrieved by {{count}} searches",
+      "stageParsing": "Parsing",
+      "stageSplitting": "Splitting",
+      "stageIndexing": "Indexing"
     },
     "eval": {
       "add": "Add",
@@ -1629,7 +1636,8 @@
       "keywordsTooMany": "At most 100 keywords",
       "keywordTooLong": "Each keyword can be at most 256 characters",
       "editSegmentSuccess": "Segment saved",
-      "editSegmentFailed": "Failed to save segment"
+      "editSegmentFailed": "Failed to save segment",
+      "hitCountTitle": "Retrieved by {{count}} searches"
     },
     "sources": {
       "fileUpload": "File Upload",
@@ -1663,9 +1671,7 @@
       "parsing": "Parsing",
       "parsingProgress": "Parsing {{progress}}%",
       "uploaded": "Uploaded",
-      "noTextContent": "No text content - please reprocess this document",
-      "archived": "Archived",
-      "disabled": "Disabled"
+      "noTextContent": "No text content - please reprocess this document"
     },
     "upload": {
       "recommended": "Recommended",

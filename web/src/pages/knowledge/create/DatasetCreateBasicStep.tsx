@@ -236,7 +236,7 @@ export function DatasetCreateBasicStep({
                 role="radio"
                 aria-checked={kbType === option.id}
                 tabIndex={0}
-                className={`p-4 cursor-pointer transition-all ${
+                className={`p-4 cursor-pointer transition-colors ${
                   kbType === option.id
                     ? "border-2 border-primary bg-primary/5"
                     : "border hover:border-primary/30"
@@ -312,7 +312,7 @@ export function DatasetCreateBasicStep({
                 role="radio"
                 aria-checked={useCase === option.id}
                 tabIndex={0}
-                className={`p-4 cursor-pointer transition-all ${
+                className={`p-4 cursor-pointer transition-colors ${
                   useCase === option.id
                     ? "border-2 border-primary bg-primary/5"
                     : "border hover:border-primary/30"
@@ -367,7 +367,7 @@ export function DatasetCreateBasicStep({
                 role="radio"
                 aria-checked={visibility === option.id}
                 tabIndex={0}
-                className={`p-4 cursor-pointer transition-all ${
+                className={`p-4 cursor-pointer transition-colors ${
                   visibility === option.id
                     ? "border-2 border-primary bg-primary/5"
                     : "border hover:border-primary/30"

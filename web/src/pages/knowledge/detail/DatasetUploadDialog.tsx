@@ -263,7 +263,7 @@ export function DatasetUploadDialog({
               ].map((mode) => (
                 <div
                   key={mode.id}
-                  className={`p-3 rounded-lg border cursor-pointer transition-all ${
+                  className={`p-3 rounded-lg border cursor-pointer transition-[border-color,background-color,box-shadow] ${
                     uploadChunkMode === mode.id
                       ? "border-primary bg-primary/5 ring-1 ring-primary/50"
                       : "border-border hover:border-border"

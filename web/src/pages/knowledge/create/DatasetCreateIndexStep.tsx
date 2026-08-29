@@ -243,7 +243,7 @@ export function DatasetCreateIndexStep({
               role="radio"
               aria-checked={chunkingMode === mode.id}
               tabIndex={0}
-              className={`p-4 cursor-pointer transition-all ${
+              className={`p-4 cursor-pointer transition-colors ${
                 chunkingMode === mode.id
                   ? "border-2 border-primary bg-primary/5"
                   : "border hover:border-border"

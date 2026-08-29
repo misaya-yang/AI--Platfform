@@ -29,6 +29,8 @@ interface Chunk {
   summary?: string;
   /** Segments are enabled unless the backend explicitly stamped them off. */
   enabled?: boolean;
+  /** Retrieval telemetry (PRD §5-#16): written by backend T2, shown if present. */
+  hit_count?: number;
   children: Chunk[];
 }
 
@@ -61,6 +63,7 @@ function buildHierarchy(segments: Segment[]): Chunk[] {
       parent_segment_id: s.parent_segment_id,
       summary: s.summary,
       enabled: s.enabled,
+      hit_count: s.hit_count,
       children: []
     }));
   }
@@ -79,6 +82,7 @@ function buildHierarchy(segments: Segment[]): Chunk[] {
       parent_segment_id: seg.parent_segment_id,
       summary: seg.summary,
       enabled: seg.enabled,
+      hit_count: seg.hit_count,
       children: []
     };
     
@@ -169,6 +173,7 @@ export function SegmentList({
         parent_segment_id: seg.parent_segment_id,
         summary: seg.summary,
         enabled: seg.enabled,
+        hit_count: seg.hit_count,
         children: []
       }));
   }, [segments]);

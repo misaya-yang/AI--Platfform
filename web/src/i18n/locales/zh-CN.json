@@ -975,12 +975,10 @@
       "totalSegments": "段落总数",
       "typeAVSearch": "音视频搜索",
       "typeAll": "全部",
-      "typeAudioVideo": "音视频",
       "typeData": "数据",
       "typeDataQuery": "数据查询",
       "typeDocSearch": "文档搜索",
       "typeDocument": "文档",
-      "typeImage": "图片",
       "typeImageQA": "图片问答",
       "viewDetail": "查看详情",
       "visPrivate": "私有",
@@ -1401,10 +1399,6 @@
       "separatorPlaceholder": "例如: \\n\\n 或 ---",
       "similarityThreshold": "相似度阈值",
       "statistics": "统计信息",
-      "statusCompleted": "已完成",
-      "statusFailed": "失败",
-      "statusProcessing": "处理中",
-      "statusUploaded": "已上传",
       "tabDocuments": "文档管理",
       "tabEval": "评测",
       "tabPermissions": "权限",
@@ -1474,6 +1468,15 @@
       "visTenant": "租户",
       "weightedFusion": "加权融合"
     },
+    "displayStatus": {
+      "archived": "已归档",
+      "available": "可用",
+      "disabled": "已禁用",
+      "error": "失败",
+      "indexing": "索引中",
+      "paused": "已暂停",
+      "queuing": "排队中"
+    },
     "documentRow": {
       "defaultCategory": "默认分类",
       "segments": "切片",
@@ -1492,7 +1495,11 @@
       "enableDoc": "启用该文档",
       "selectDoc": "选择该文档",
       "switchArchivedHint": "已归档的文档无法启用，请先恢复",
-      "unarchiveTitle": "恢复"
+      "unarchiveTitle": "恢复",
+      "hitCountTitle": "检索命中 {{count}} 次",
+      "stageParsing": "解析",
+      "stageSplitting": "切分",
+      "stageIndexing": "索引"
     },
     "eval": {
       "add": "添加",
@@ -1629,7 +1636,8 @@
       "keywordsTooMany": "关键词最多 100 个",
       "keywordTooLong": "单个关键词最长 256 字符",
       "editSegmentSuccess": "分块已保存",
-      "editSegmentFailed": "分块保存失败"
+      "editSegmentFailed": "分块保存失败",
+      "hitCountTitle": "检索命中 {{count}} 次"
     },
     "sources": {
       "fileUpload": "文件上传",
@@ -1663,9 +1671,7 @@
       "parsing": "解析中",
       "parsingProgress": "解析中 {{progress}}%",
       "uploaded": "已上传",
-      "noTextContent": "无文本内容 - 请重新处理该文档",
-      "archived": "已归档",
-      "disabled": "已禁用"
+      "noTextContent": "无文本内容 - 请重新处理该文档"
     },
     "upload": {
       "recommended": "推荐",
