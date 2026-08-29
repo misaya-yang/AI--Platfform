@@ -278,6 +278,15 @@ async function installMockKnowledgeHarness(
 
     await route.fulfill(jsonResponse([]));
   });
+
+  // The workbench persists cases into a linked eval dataset (C7) and probes
+  // it on mount. Keep this suite hermetic: no linked dataset, so the
+  // workbench starts empty and nothing leaks to the live gateway (an
+  // unmocked 401 there would wipe the seeded auth session mid-test).
+  await page.route("**/api/v1/eval/**", async (route) => {
+    await route.fulfill(jsonResponse({ datasets: [], total: 0, limit: 200, offset: 0 }));
+  });
+
   return evalBodies;
 }
 

@@ -26,7 +26,9 @@
     "D3": "反馈表+端点（§5-#25 前提）",
     "D4": "文档/段落列表分页参数",
     "D5": "迁移 100 遥测读端点（§5-#26 前提）",
-    "D6": "ChunkingConfigSchema（extra=forbid）字段集 < chunking.py 运行时字段集（extract_metadata、metadata_fields、normalize_whitespace、strip_html、page_marker、segmentation 等）——PUT /config 无法往返运行时字段，元数据抽取设置无法持久化；前端已按 allow-list 降级（C3），待 schema 扩宽"
+    "D6": "ChunkingConfigSchema（extra=forbid）字段集 < chunking.py 运行时字段集（extract_metadata、metadata_fields、normalize_whitespace、strip_html、page_marker、segmentation 等）——PUT /config 无法往返运行时字段，元数据抽取设置无法持久化；前端已按 allow-list 降级（C3），待 schema 扩宽",
+    "D7": "评测集用例删除端点缺失——工作台移除的用例只出本地列表，评测集侧保留；保存 toast 如实报告该计数（C7）",
+    "D8": "QA/hit-test 响应不暴露 trace_id——KB 路径无法走 createEvalExampleFromTrace，一键送评测集走 importEvalExamples 确定性 case_id（C7），待后端暴露后切换"
   },
   "notes": {
     "unit_tests": "node --test 'web/src/**/*.test.ts'（package.json 无 test script，Node>=22.18 原生 strip-types）",
@@ -48,7 +50,7 @@
       "DatasetUploadDialog 卡片 transition-all（既有；motion 静态扫描挂账，随设计轮收敛）"
     ]
   },
-  "active_phase": "C7 评测用例持久化+JSONL 导入+一键送黄金集+e2e",
+  "active_phase": "C8 徽章/状态词汇渲染/多模态对齐/i18n",
   "iterations": [
     {
       "phase": "C1",
@@ -135,6 +137,24 @@
         "testid 合同：doc-switch-{id}/doc-archive-{id}/doc-unarchive-{id}/doc-select-{id}/doc-reindex-{id}/doc-delete-{id}/doc-archived-badge-{id}/doc-disabled-badge-{id}/archive-reason-input/archive-reason-count/archive-confirm/unarchive-confirm/batch-reindex-skipped",
         "D1 未落地纪律：列表行徽章在 D1 前仅对刚操作过的行准确（响应合并），mock e2e 模拟 D1 后的列表（fixture 带 enabled/archived/display_status），spec 头注释明示该依赖；409 测试把浏览器对预期非 2xx 的资源日志列入 allowedConsoleErrors",
         "i18n: knowledge.detail/documentRow/status 新增 37 键双语，全部进 i18n:check"
+      ]
+    },
+    {
+      "phase": "C7",
+      "date": "2026-08-29",
+      "scope": "评测工作台用例持久化（§5-#22）+ JSONL 导入 + hit-test/QA 一键送评测集（§5-#23）",
+      "result": "done",
+      "evidence": "新增 e2e/knowledge-eval-cases.spec.ts 7/7 + 既有 @mock 14/14（--grep @mock 共 21/21，含 rag-eval 台架 eval 探针穿透修复）；node --test 65/65（+15 evalCaseStore）；lint/build(oversizedRoutes=[])/i18n:check 绿；真实 tsc 100=存量 98+新测试文件 2 个 node:* 导入（全库惯例不计），KB 切片零真实新增",
+      "changes": [
+        "evalCaseStore.ts（新，纯模块可 node:test）：常量+PersistedEvalCase；findKbEvalDataset 按 metadata.kb_dataset_id 配对；exampleToEvalCase（input.query 空→丢弃，caseId 回退 example_id）；evalCaseToImportItem 恒发 validate_case 六字段；diffEvalCases 内容键=trim 后 query+排序 id（换序/空白不算变更）；FNV-1a 确定性 case id（kb-hit-{dataset}-{hash8}，空白归一）",
+        "kbEvalDataset.ts（新，运行时层）：resolveKbEvalDataset list→find→懒创建（读路径绝不创建）；sendRetrievalCaseToEvalDataset 走 skip_duplicates（按 metadata.case_id 去重）——hit-test 与 QA 共用 id 空间，先送者胜；重复送报跳过不复制",
+        "RetrievalEvalWorkbench：易失 useState→挂载即从关联评测集载入（loading/ready/error+重试）；保存用例按 diffEvalCases 分流——新 case_id 走 import(skip_duplicates) 并把 exampleId 回写本地、已改用例走 PATCH（载荷含完整六字段且 metadata 保留 case_id，否则后续 import 会当新用例）；从工作台移除的用例留在评测集（无删除端点，D7），toast 如实报计数；JSONL 导入对话框（Radix max-w-2xl）：parseGoldenJsonl/validateGoldenCases/importGoldenCasesInBatches 复用、8MB 文件上限、跳过重复开关默认开、校验错误内联（含\"以下用例校验未通过\"列表≤6 条）",
+        "RetrievalTab/QATab：\"送评测集\"按钮（testid send-hits-to-eval / send-qa-to-eval-{msg.id}）；QA 取 assistant 消息的 response.query+context_segments；toast 报新增/跳过数",
+        "计划偏差（已声明）：components/GoldenJsonlImport.tsx 是 antd+eval/styles.css（页面级作用于 eval 路由 chunk，KB 路由拿不到样式且用 antd message 而非 Radix toast）——改为 KB 设计语言的 Radix 对话框，复用 goldenImport.ts 纯函数，未重写解析/批量逻辑，计划意图满足",
+        "KB 路径无 trace_id（D8）：createEvalExampleFromTrace 不适用，kbEvalDataset.ts 注释固化，待后端暴露",
+        "跨台架回归修复：rag-eval 台架补 /**/api/v1/eval/** 空数据集路由——C7 工作台挂载即探针关联评测集，未 mock 会穿透真网关，401 清掉 mock 鉴权会话致页面被踢回仪表盘（全套回归捕获，单跑不可见）",
+        "testid 合同：save-eval-cases/eval-jsonl-import-open/eval-jsonl-textarea/eval-jsonl-file/eval-jsonl-skip-duplicates/eval-jsonl-submit/send-hits-to-eval/send-qa-to-eval-{id}；Radix toast aria-live 孪生 span 会同时命中标题与描述——e2e 标题断言用 exact:true、描述断言用全等文本",
+        "i18n: knowledge.eval 新增 25 键 + knowledge.detail 4 键，双语进 i18n:check"
       ]
     }
   ],

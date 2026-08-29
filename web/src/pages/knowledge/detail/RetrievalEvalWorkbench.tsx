@@ -2,10 +2,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   CheckCircle2,
+  FileUp,
   FlaskConical,
   ListChecks,
   Loader2,
   Plus,
+  Save,
   Search,
   Trash2,
   XCircle,
@@ -15,6 +17,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -24,6 +33,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import {
   Table,
   TableBody,
@@ -32,6 +42,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
+import { toast } from "@/hooks/use-toast";
+import {
+  importEvalExamples,
+  listEvalDatasets,
+  listEvalExamples,
+  updateEvalExample,
+} from "@/api/eval";
 import {
   listRetrievalPresets,
   retrieve,
@@ -42,12 +60,29 @@ import {
   type RetrievalMetricsAtK,
   type RetrievalPreset,
 } from "@/api/knowledge";
+import {
+  importGoldenCasesInBatches,
+  parseGoldenJsonl,
+  validateGoldenCases,
+} from "@/pages/eval/goldenImport";
+import {
+  diffEvalCases,
+  exampleToEvalCase,
+  findKbEvalDataset,
+  KB_EVAL_DATASET_LIST_LIMIT,
+  KB_EVAL_DATASET_SOURCE,
+  KB_EVAL_EXAMPLE_LIST_LIMIT,
+  type PersistedEvalCase,
+} from "./evalCaseStore";
+import { resolveKbEvalDataset } from "./kbEvalDataset";
 
 interface TestCase {
   id: string;
   query: string;
   relevantSegmentIds: string[];
   relevantSegmentInput: string;
+  /** Server identity once persisted; absent for never-saved cases. */
+  exampleId?: string;
   candidates?: Array<{ segment_id: string; score: number; text: string }>;
   loadingCandidates?: boolean;
   candidateError?: string;
@@ -74,6 +109,7 @@ const PRESET_TIMEOUT_MS = 15_000;
 const CANDIDATE_TIMEOUT_MS = 30_000;
 const EVALUATION_TIMEOUT_MS = 120_000;
 const MAX_EVAL_CASES = 20;
+const JSONL_MAX_FILE_BYTES = 8 * 1024 * 1024;
 let fallbackCaseSequence = 0;
 
 function pct(value: number | undefined | null): string {
@@ -183,6 +219,14 @@ export function RetrievalEvalWorkbench({ datasetId }: { datasetId: string }) {
 
   const [cases, setCases] = useState<TestCase[]>([]);
   const [newQuery, setNewQuery] = useState("");
+  const [casesStatus, setCasesStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [casesError, setCasesError] = useState<string | null>(null);
+  const [casesReloadKey, setCasesReloadKey] = useState(0);
+  const [savingCases, setSavingCases] = useState(false);
+  const [jsonlImportOpen, setJsonlImportOpen] = useState(false);
+  const [jsonlText, setJsonlText] = useState("");
+  const [jsonlSkipDuplicates, setJsonlSkipDuplicates] = useState(true);
+  const [jsonlImporting, setJsonlImporting] = useState(false);
 
   const [kForGate, setKForGate] = useState(10);
   const [thresholds, setThresholds] = useState<GateThresholds>({
@@ -262,6 +306,65 @@ export function RetrievalEvalWorkbench({ datasetId }: { datasetId: string }) {
     setRunning(false);
   }, [datasetId]);
 
+  // Persisted cases (PRD §5-#22): load from the linked eval dataset. Reading
+  // never creates it — the dataset comes into being lazily on first save or
+  // import, so a fresh workbench simply starts empty.
+  useEffect(() => {
+    let cancelled = false;
+    setCasesStatus("loading");
+    setCasesError(null);
+    (async () => {
+      try {
+        const listed = await listEvalDatasets({ limit: KB_EVAL_DATASET_LIST_LIMIT });
+        if (cancelled) return;
+        const evalDataset = findKbEvalDataset(listed.datasets, datasetId);
+        if (!evalDataset) {
+          setCases([]);
+          setCasesStatus("ready");
+          return;
+        }
+        const examples = await listEvalExamples(evalDataset.dataset_id, {
+          limit: KB_EVAL_EXAMPLE_LIST_LIMIT,
+        });
+        if (cancelled) return;
+        const loaded = examples.examples
+          .map(exampleToEvalCase)
+          .filter((persisted): persisted is PersistedEvalCase => persisted !== null)
+          .map((persisted) => ({
+            id: persisted.caseId,
+            exampleId: persisted.exampleId,
+            query: persisted.query,
+            relevantSegmentIds: persisted.relevantSegmentIds,
+            relevantSegmentInput: persisted.relevantSegmentIds.join(", "),
+          }));
+        setCases(loaded);
+        setCasesStatus("ready");
+      } catch (loadError: unknown) {
+        if (cancelled) return;
+        setCasesStatus("error");
+        setCasesError(errorMessage(loadError));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [datasetId, casesReloadKey]);
+
+  const jsonlPreview = useMemo(() => {
+    const text = jsonlText.trim();
+    if (!text) return null;
+    try {
+      const parsed = parseGoldenJsonl(text);
+      return {
+        ok: true as const,
+        cases: parsed.cases,
+        validation: validateGoldenCases(parsed.cases),
+      };
+    } catch (parseError: unknown) {
+      return { ok: false as const, error: errorMessage(parseError) };
+    }
+  }, [jsonlText]);
+
   const presetByName = useMemo(
     () => new Map(presets.map((preset) => [preset.name, preset])),
     [presets]
@@ -291,6 +394,160 @@ export function RetrievalEvalWorkbench({ datasetId }: { datasetId: string }) {
     candidateControllersRef.current.delete(id);
     setCases((previous) => previous.filter((testCase) => testCase.id !== id));
   }
+
+  /**
+   * Persist the workbench into the linked eval dataset. The store's
+   * skip_duplicates import dedupes on metadata.case_id alone, so new cases go
+   * through import while edited cases go through PATCH (`diffEvalCases`
+   * computes the split). Cases removed from the workbench stay in the eval
+   * dataset — there is no delete endpoint yet (dependency D7) — and the
+   * success toast reports that count honestly.
+   */
+  async function saveCases() {
+    if (savingCases || casesStatus !== "ready" || cases.length === 0) return;
+    setSavingCases(true);
+    try {
+      const evalDataset = await resolveKbEvalDataset(datasetId);
+      const listed = await listEvalExamples(evalDataset.dataset_id, {
+        limit: KB_EVAL_EXAMPLE_LIST_LIMIT,
+      });
+      const serverCases = listed.examples
+        .map(exampleToEvalCase)
+        .filter((persisted): persisted is PersistedEvalCase => persisted !== null);
+      const diff = diffEvalCases({
+        localCases: cases.map((testCase) => ({
+          id: testCase.id,
+          query: testCase.query,
+          relevantSegmentIds: testCase.relevantSegmentIds,
+        })),
+        serverCases,
+        kbDatasetId: datasetId,
+      });
+
+      let imported = 0;
+      if (diff.toImport.length > 0) {
+        const response = await importEvalExamples(evalDataset.dataset_id, diff.toImport, {
+          mode: "skip_duplicates",
+        });
+        imported = response.imported;
+        const exampleByCaseId = new Map(
+          response.examples.map((example) => [
+            typeof example.metadata?.case_id === "string" ? example.metadata.case_id : "",
+            example,
+          ])
+        );
+        setCases((previous) =>
+          previous.map((testCase) => {
+            const example = exampleByCaseId.get(testCase.id);
+            return example ? { ...testCase, exampleId: example.example_id } : testCase;
+          })
+        );
+      }
+
+      let updated = 0;
+      for (const entry of diff.toUpdate) {
+        // PATCH carries the full validate_case shape; metadata keeps case_id
+        // so skip_duplicates still recognises the example on later imports.
+        await updateEvalExample(evalDataset.dataset_id, entry.exampleId, {
+          input: { query: entry.query },
+          expected_output: { relevant_segment_ids: entry.relevantSegmentIds },
+          expected_trajectory: {},
+          assertions: [],
+          metadata: {
+            case_id: entry.caseId,
+            source: KB_EVAL_DATASET_SOURCE,
+            kb_dataset_id: datasetId,
+          },
+        });
+        updated += 1;
+      }
+
+      const removedNote =
+        diff.removedFromWorkbenchCount > 0
+          ? t("knowledge.eval.casesRemovedNote", {
+              defaultValue: "；另有 {{count}} 个已保存用例不在工作台中（评测集暂无删除入口）",
+              count: diff.removedFromWorkbenchCount,
+            })
+          : "";
+      toast.success(
+        t("knowledge.eval.casesSavedTitle", "评测用例已保存"),
+        t("knowledge.eval.casesSavedText", {
+          defaultValue: "新增 {{imported}} 个，更新 {{updated}} 个，未变 {{unchanged}} 个",
+          imported,
+          updated,
+          unchanged: diff.unchangedCount,
+        }) + removedNote
+      );
+      setCasesReloadKey((key) => key + 1);
+    } catch (saveError: unknown) {
+      toast.error(
+        t("knowledge.eval.casesSaveFailedTitle", "评测用例保存失败"),
+        errorMessage(saveError)
+      );
+    } finally {
+      setSavingCases(false);
+    }
+  }
+
+  function handleJsonlFile(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (file.size > JSONL_MAX_FILE_BYTES) {
+      toast.error(t("knowledge.eval.jsonlTooLarge", "JSONL 文件过大（上限 8 MB）"));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") setJsonlText(reader.result);
+    };
+    reader.readAsText(file);
+  }
+
+  async function importJsonlCases() {
+    if (
+      jsonlImporting ||
+      !jsonlPreview?.ok ||
+      !jsonlPreview.validation.valid ||
+      jsonlPreview.cases.length === 0
+    ) {
+      return;
+    }
+    setJsonlImporting(true);
+    try {
+      const evalDataset = await resolveKbEvalDataset(datasetId);
+      const result = await importGoldenCasesInBatches(
+        evalDataset.dataset_id,
+        jsonlPreview.cases,
+        { mode: jsonlSkipDuplicates ? "skip_duplicates" : "append" }
+      );
+      toast.success(
+        t("knowledge.eval.jsonlImportedTitle", "JSONL 导入完成"),
+        t("knowledge.eval.jsonlImportedText", {
+          defaultValue: "导入 {{imported}} 个，跳过 {{skipped}} 个",
+          imported: result.imported,
+          skipped: result.skipped,
+        })
+      );
+      setJsonlImportOpen(false);
+      setJsonlText("");
+      setCasesReloadKey((key) => key + 1);
+    } catch (importError: unknown) {
+      toast.error(
+        t("knowledge.eval.jsonlImportFailedTitle", "JSONL 导入失败"),
+        errorMessage(importError)
+      );
+    } finally {
+      setJsonlImporting(false);
+    }
+  }
+
+  const canSaveCases = casesStatus === "ready" && cases.length > 0 && !savingCases;
+  const canImportJsonl =
+    jsonlPreview?.ok === true &&
+    jsonlPreview.validation.valid &&
+    jsonlPreview.cases.length > 0 &&
+    !jsonlImporting;
 
   async function loadCandidates(id: string) {
     const testCase = cases.find((candidate) => candidate.id === id);
@@ -530,7 +787,59 @@ export function RetrievalEvalWorkbench({ datasetId }: { datasetId: string }) {
             {t("knowledge.eval.testSet", "评测集（查询 + 正确分段标注）")}
           </h4>
           <Badge variant="secondary">{cases.length}</Badge>
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setJsonlImportOpen(true)}
+              disabled={casesStatus !== "ready"}
+              data-testid="eval-jsonl-import-open"
+            >
+              <FileUp className="mr-1 h-3.5 w-3.5" aria-hidden="true" />
+              {t("knowledge.eval.jsonlImport", "导入 JSONL")}
+            </Button>
+            <Button
+              size="sm"
+              onClick={saveCases}
+              disabled={!canSaveCases}
+              data-testid="save-eval-cases"
+            >
+              {savingCases ? (
+                <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+              ) : (
+                <Save className="mr-1 h-3.5 w-3.5" aria-hidden="true" />
+              )}
+              {savingCases
+                ? t("knowledge.eval.savingCases", "保存中…")
+                : t("knowledge.eval.saveCases", "保存用例")}
+            </Button>
+          </div>
         </div>
+
+        {casesStatus === "loading" && (
+          <p className="mb-3 flex items-center gap-2 text-xs text-muted-foreground" role="status">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+            {t("knowledge.eval.casesLoading", "正在载入已保存的评测用例…")}
+          </p>
+        )}
+        {casesStatus === "error" && (
+          <div
+            className="mb-3 flex flex-col gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-2 sm:flex-row sm:items-center sm:justify-between"
+            role="alert"
+          >
+            <p className="text-xs text-destructive">
+              {t("knowledge.eval.casesLoadFailed", "评测用例载入失败")}
+              {casesError ? `：${casesError}` : ""}
+            </p>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setCasesReloadKey((key) => key + 1)}
+            >
+              {t("knowledge.eval.retry", "重试")}
+            </Button>
+          </div>
+        )}
 
         <div className="mb-4 flex flex-col gap-2 sm:flex-row">
           <div className="flex-1">
@@ -910,6 +1219,112 @@ export function RetrievalEvalWorkbench({ datasetId }: { datasetId: string }) {
           </div>
         </Card>
       )}
+
+      <Dialog
+        open={jsonlImportOpen}
+        onOpenChange={(open) => {
+          if (jsonlImporting) return;
+          setJsonlImportOpen(open);
+          if (!open) setJsonlText("");
+        }}
+      >
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>
+              {t("knowledge.eval.jsonlImportTitle", "导入评测用例（JSONL）")}
+            </DialogTitle>
+          </DialogHeader>
+          <p className="text-xs text-muted-foreground">
+            {t(
+              "knowledge.eval.jsonlImportHint",
+              "粘贴或选择 .jsonl 文件，每行一个用例（含 case_id、input、expected_output 等字段）。只有 input.query 非空的用例会出现在工作台列表中。"
+            )}
+          </p>
+          <Textarea
+            value={jsonlText}
+            onChange={(event) => setJsonlText(event.target.value)}
+            placeholder={t(
+              "knowledge.eval.jsonlPlaceholder",
+              '{"case_id": "case_1", "input": {"query": "报销流程需要什么材料？"}, "expected_output": {"relevant_segment_ids": ["seg-1"]}}'
+            )}
+            rows={6}
+            className="font-mono text-xs"
+            data-testid="eval-jsonl-textarea"
+            aria-label={t("knowledge.eval.jsonlImportTitle", "导入评测用例（JSONL）")}
+          />
+          <div className="flex flex-wrap items-center gap-4">
+            <label className="inline-flex h-9 cursor-pointer items-center justify-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium shadow-xs hover:bg-accent hover:text-accent-foreground">
+              <FileUp className="h-4 w-4" aria-hidden="true" />
+              {t("knowledge.eval.jsonlChooseFile", "选择文件")}
+              <input
+                type="file"
+                accept=".jsonl,.json,.txt"
+                className="sr-only"
+                onChange={handleJsonlFile}
+                data-testid="eval-jsonl-file"
+              />
+            </label>
+            <label className="flex items-center gap-2">
+              <Switch
+                checked={jsonlSkipDuplicates}
+                onCheckedChange={setJsonlSkipDuplicates}
+                data-testid="eval-jsonl-skip-duplicates"
+              />
+              <span className="text-sm text-foreground/80">
+                {t("knowledge.eval.jsonlSkipDuplicates", "按 case_id 跳过重复")}
+              </span>
+            </label>
+          </div>
+
+          {jsonlPreview && !jsonlPreview.ok && (
+            <p className="text-xs text-destructive" role="alert">
+              {t("knowledge.eval.jsonlParseFailed", "JSONL 解析失败")}：{jsonlPreview.error}
+            </p>
+          )}
+          {jsonlPreview?.ok && !jsonlPreview.validation.valid && (
+            <div
+              className="max-h-32 space-y-0.5 overflow-y-auto rounded-md border border-destructive/30 bg-destructive/5 p-2 text-xs text-destructive"
+              role="alert"
+            >
+              <p>{t("knowledge.eval.jsonlInvalid", "以下用例校验未通过：")}</p>
+              {jsonlPreview.validation.errors.slice(0, 6).map((entry) => (
+                <p key={`${entry.case_id}-${entry.errors.join("|")}`}>
+                  {entry.case_id}: {entry.errors.join(", ")}
+                </p>
+              ))}
+            </div>
+          )}
+          {jsonlPreview?.ok && jsonlPreview.validation.valid && jsonlPreview.cases.length > 0 && (
+            <p className="text-xs text-emerald-700 dark:text-emerald-400" role="status">
+              {t("knowledge.eval.jsonlValid", "{{count}} 个用例校验通过", {
+                count: jsonlPreview.cases.length,
+              })}
+            </p>
+          )}
+          {jsonlPreview?.ok && jsonlPreview.cases.length === 0 && (
+            <p className="text-xs text-muted-foreground">
+              {t("knowledge.eval.jsonlEmpty", "没有可导入的用例")}
+            </p>
+          )}
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setJsonlImportOpen(false);
+                setJsonlText("");
+              }}
+              disabled={jsonlImporting}
+            >
+              {t("common.cancel", "取消")}
+            </Button>
+            <Button onClick={importJsonlCases} disabled={!canImportJsonl} data-testid="eval-jsonl-submit">
+              {jsonlImporting && <Loader2 className="mr-1 h-4 w-4 animate-spin" aria-hidden="true" />}
+              {t("knowledge.eval.jsonlSubmit", "导入")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

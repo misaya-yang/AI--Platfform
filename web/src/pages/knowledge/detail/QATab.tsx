@@ -23,10 +23,13 @@ import {
   Send,
   Zap,
   Brain,
+  BookmarkPlus,
   Database,
 } from "lucide-react";
 
 import { qaQuery, qaQueryStream } from "@/api/knowledge";
+import { toast } from "@/hooks/use-toast";
+import { sendRetrievalCaseToEvalDataset } from "@/pages/knowledge/detail/kbEvalDataset";
 import type { LLMConfig, QAResponse, QAStreamEvent } from "@/types/knowledge";
 
 import { Button } from "@/components/ui/button";
@@ -100,6 +103,44 @@ export function QATab({ datasetId, hitTest }: QATabProps) {
   const [qaShowSources, setQaShowSources] = useState(true);
   const [qaAutoScroll, setQaAutoScroll] = useState(true);
   const [qaStrictMode, setQaStrictMode] = useState(false);
+  const [sendingEvalMessageIds, setSendingEvalMessageIds] = useState<Set<string>>(new Set());
+
+  // One-click "send to eval set" (PRD §5-#23): a QA turn becomes a golden
+  // case — input=query, expected_output=the context segments the answer was
+  // grounded on. The case_id is shared with the hit-test console, so the same
+  // query dedupes instead of duplicating.
+  async function sendQaToEvalSet(message: QAChatMessage) {
+    if (!datasetId || !message.response || sendingEvalMessageIds.has(message.id)) return;
+    const queryText = message.response.query?.trim();
+    if (!queryText) return;
+    const segmentIds = message.response.context_segments.map((segment) => segment.segment_id);
+    setSendingEvalMessageIds((previous) => new Set(previous).add(message.id));
+    try {
+      const result = await sendRetrievalCaseToEvalDataset({
+        kbDatasetId: datasetId,
+        query: queryText,
+        relevantSegmentIds: segmentIds,
+      });
+      toast.success(
+        t("knowledge.detail.sentToEvalTitle"),
+        t("knowledge.detail.sentToEvalText", {
+          imported: result.imported,
+          skipped: result.skipped,
+        })
+      );
+    } catch (error: unknown) {
+      toast.error(
+        t("knowledge.detail.sendToEvalFailed"),
+        error instanceof Error ? error.message : String(error)
+      );
+    } finally {
+      setSendingEvalMessageIds((previous) => {
+        const next = new Set(previous);
+        next.delete(message.id);
+        return next;
+      });
+    }
+  }
 
   useEffect(() => {
     if (!qaAutoScroll) return;
@@ -607,6 +648,21 @@ export function QATab({ datasetId, hitTest }: QATabProps) {
                                 </span>
                                 <span>{t("knowledge.detail.qaTotalTiming", { ms: msg.response.timing.total_ms })}</span>
                                 {msg.response.tokens_used && <span>Tokens {msg.response.tokens_used}</span>}
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-6 px-2 text-xs"
+                                  onClick={() => sendQaToEvalSet(msg)}
+                                  disabled={sendingEvalMessageIds.has(msg.id)}
+                                  data-testid={`send-qa-to-eval-${msg.id}`}
+                                >
+                                  {sendingEvalMessageIds.has(msg.id) ? (
+                                    <Loader2 className="mr-1 h-3 w-3 animate-spin" aria-hidden="true" />
+                                  ) : (
+                                    <BookmarkPlus className="mr-1 h-3 w-3" aria-hidden="true" />
+                                  )}
+                                  {t("knowledge.detail.sendToEval")}
+                                </Button>
                               </div>
 
                               {qaShowSources && msg.response.context_segments.length > 0 && (
