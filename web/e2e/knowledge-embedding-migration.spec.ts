@@ -727,7 +727,13 @@ test.describe("@mock KB embedding migration", () => {
       jobId
     );
     harness.failNextJobPoll(503);
+    const failedPoll = page.waitForResponse(
+      (response) =>
+        response.url().includes(`/embedding-migration/${MIGRATION_ID}/jobs/${jobId}`) &&
+        response.status() === 503
+    );
     await page.reload();
+    await failedPoll;
     await expect(page.getByTestId("embedding-action-job")).toContainText(
       jobId
     );

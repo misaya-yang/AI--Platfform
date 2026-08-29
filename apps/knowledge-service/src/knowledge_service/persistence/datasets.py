@@ -665,6 +665,17 @@ class DatasetPersistenceMixin:
                 SET status = 'waiting',
                     progress = 0,
                     error = NULL,
+                    -- This claim opens a new pipeline generation. Stage
+                    -- timestamps describe that generation only; retaining a
+                    -- prior run makes the UI report ever-growing parsing /
+                    -- splitting durations. Cancellation/recovery requeues use
+                    -- requeue_cancelled_document_generation instead and keep
+                    -- their current-generation stamps.
+                    started_at = NULL,
+                    completed_at = NULL,
+                    parsing_started_at = NULL,
+                    splitting_started_at = NULL,
+                    indexing_started_at = NULL,
                     updated_at = NOW(),
                     metadata = CASE
                         WHEN $3::jsonb IS NULL THEN

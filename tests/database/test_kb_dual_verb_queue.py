@@ -379,6 +379,9 @@ async def test_claim_pins_action_and_execution_on_queued_row(
     await _put_document(
         pool,
         document_id="doc-a",
+        parsing_started_at=datetime.now(timezone.utc),
+        splitting_started_at=datetime.now(timezone.utc),
+        indexing_started_at=datetime.now(timezone.utc),
         metadata={
             DOCUMENT_INGEST_ACTION_KEY: "retry",
             DOCUMENT_RECOVER_STAGE_KEY: "parsing",
@@ -398,6 +401,9 @@ async def test_claim_pins_action_and_execution_on_queued_row(
     assert row["status"] == "waiting"
     assert row["metadata"][DOCUMENT_INGEST_ACTION_KEY] == "reembed"
     assert row["metadata"][DOCUMENT_PIPELINE_EXECUTION_KEY] == "exec-9"
+    assert row["parsing_started_at"] is None
+    assert row["splitting_started_at"] is None
+    assert row["indexing_started_at"] is None
     # A verb can never inherit stale replay state from a previous generation.
     assert DOCUMENT_RECOVER_STAGE_KEY not in row["metadata"]
     assert row["metadata"]["user_key"] == "kept"

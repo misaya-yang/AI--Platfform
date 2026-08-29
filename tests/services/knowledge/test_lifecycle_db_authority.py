@@ -435,6 +435,11 @@ async def test_document_enqueue_claim_uses_dataset_then_document_lock_and_active
     update_query, update_args = connection.fetchrow_calls[1]
     compact = normalized(update_query)
     assert "SET status = 'waiting'" in compact
+    assert "started_at = NULL" in compact
+    assert "completed_at = NULL" in compact
+    assert "parsing_started_at = NULL" in compact
+    assert "splitting_started_at = NULL" in compact
+    assert "indexing_started_at = NULL" in compact
     assert "status IN ('waiting', 'completed', 'error')" in compact
     assert "COALESCE(enabled, TRUE) = TRUE" in compact
     assert "COALESCE(archived, FALSE) = FALSE" in compact
