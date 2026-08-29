@@ -793,7 +793,7 @@ export function DocumentsTab({
 
         <div className="flex flex-wrap items-center gap-2">
           <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as typeof statusFilter)}>
-            <SelectTrigger className="w-28 bg-card h-9">
+            <SelectTrigger data-testid="doc-status-filter" className="w-28 bg-card h-9">
               <SelectValue placeholder={t("knowledge.detail.allStatus")} />
             </SelectTrigger>
             <SelectContent>

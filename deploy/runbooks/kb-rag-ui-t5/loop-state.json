@@ -51,7 +51,7 @@
     ],
     "c8_motion_scan": "check-source.sh 切片扫描 7 pass 1 fail（切片目录内无 prefers-reduced-motion 声明）——已核实 web/src/index.css:469-474 全局 reduce 规则对 * 折叠 animation/transition，切片动效（含 animate-spin）全覆盖；静态扫描只扫切片目录故挂 fail，不重复添加规则，如实记录"
   },
-  "active_phase": "C9 前向合同 mock e2e 补全 + 依赖清单交付",
+  "active_phase": "C1–C9 收口；等后端合入 → rebase 新 main → 对接修正 → 活栈串行回归",
   "iterations": [
     {
       "phase": "C1",
@@ -174,6 +174,19 @@
         "动效纪律：knowledge/** 7 处 transition-all→属性列表——选择卡/模式卡（边框+背景±ring）→ transition-colors 或 transition-[border-color,background-color,box-shadow]；向导步骤圆（色+背景+ring）→ transition-[color,background-color,box-shadow]；连接线→transition-colors；切片内 transition:all 归零",
         "删除空转文件 detail/SegmentCard.tsx（C2 拆分遗留，全仓零引用）",
         "i18n: +knowledge.displayStatus 组 7 键（显示词表标签单一来源，筛选器与 DocumentRow 徽章共用；原 knowledge.status.archived/disabled 迁入该组并删旧键）；+documentRow 4 键（stageParsing/stageSplitting/stageIndexing/hitCountTitle）；+segment.hitCountTitle；−detail 旧筛选 4 键、−datasets 多模态 2 键；双语进 i18n:check"
+      ]
+    },
+    {
+      "phase": "C9",
+      "date": "2026-08-29",
+      "scope": "前向合同 mock e2e 补全（display_status 戳优先级/阶段耗时/hit_count/显示词表筛选）+ D1–D8 依赖交付文档",
+      "result": "done",
+      "evidence": "新增 e2e/knowledge-forward-contract.spec.ts 4/4 + 既有 @mock 21/21（--grep @mock 共 25/25）；node --test 73/73；lint/build(oversizedRoutes=[])/i18n:check 绿；真实 tsc 101=存量 99+2 个测试文件 node:* 惯例不计，KB 切片零真实错误",
+      "changes": [
+        "knowledge-forward-contract.spec.ts（新）：四个合同测试——(1) display_status 戳胜过推导（completed+paused 戳的行不进\"可用\"筛选、只进\"已暂停\"），无戳行走推导回退（failed→\"失败\"），筛选器与徽章同一解析器；(2) 阶段时间戳只在活动行渲染逐阶段耗时（固定区间 解析 12s · 切分 34s + 运行中段 \\d+s…，共享基准时刻防秒界漂移），终态/无戳行零渲染；(3) hit_count 文档行徽章（7）+ 段落面板分块徽章（5），无遥测的分块不渲染；(4) 375px 移动端无横向滚动",
+        "DocumentsTab: 状态筛选触发器加 data-testid=doc-status-filter（工具栏三个 combobox，e2e 需稳定锚点）",
+        "reports/kb-rag-ui-t5/backend-dependency-handoff.md（新）：D1–D8 交付清单——阻塞级（D1 列表补列、D6 schema 字段集）与能力级（D2 列宽、D3 反馈、D4 分页、D5 遥测读端点、D7 用例删除、D8 trace_id）；每项含现状/前端兜底/点亮方式/验证入口；附前端合同面索引（api 客户端、前向渲染合同、e2e 台架清单与复跑命令、已知挂账）",
+        "纪律记录：D1 前列接口缺 enabled/archived，forward-contract fixture 即 D1 后的列表形状——mock 绿 ≠ 活栈绿，活栈验证在合并后串行窗口跑同一套件"
       ]
     }
   ],
