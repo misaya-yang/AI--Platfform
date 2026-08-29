@@ -4,11 +4,13 @@
 
 **最终结论：CONDITIONAL PASS**
 
-`worktree-kb-rag-upgrade` 已合入并复测 `origin/main@47b7a9b9`；此前受测代码提交为
-`966c9168`，本轮新增逻辑提交为 `73faefa7`、`701b3b0f`。本轮没有发现仍未解决的 P0/P1 正确性、安全性或数据一致性
+本地 `main` 已从 `origin/main@47b7a9b9` 安全快进至 `157e5918`；
+`worktree-kb-frontend@f75e709b` 是 `worktree-kb-rag-upgrade` 的祖先，因此两个
+worktree 的提交均已包含。此前受测代码提交为 `966c9168`，本轮新增逻辑提交为
+`73faefa7`、`701b3b0f`。本轮没有发现仍未解决的 P0/P1 正确性、安全性或数据一致性
 缺陷；知识库核心 API、真实 PostgreSQL/Qdrant/Redis 链路、付费模型 QA、真实
-双嵌入模型回填、文档进度 SSE、批量部分成功、DashScope Qwen-OCR 单页实机和内置浏览器 UI 主链路均已通过。分支没有 push，
-也没有反向合入根 `main`。
+双嵌入模型回填、文档进度 SSE、批量部分成功、DashScope Qwen-OCR 单页实机和内置浏览器 UI 主链路均已通过。
+本次集成未启动 Docker、未执行迁移或内置浏览器复测，因此没有新增运行时证据；没有 push。
 
 不能给出 PASS，原因是以下强制发布证据尚未完成：
 
@@ -299,16 +301,18 @@ Completed；浏览器打开文档页期间网关日志记录了
 
 ## 12. 与 main 的集成方式
 
-本分支已正常 merge 最新 `origin/main@47b7a9b9`，没有 Git 冲突，合并后完整门禁
-和活栈回归通过；没有改写历史、force push、push 或反向合入 main。
+本地 `main` 已使用旧值守卫从 `47b7a9b9` 快进至 `157e5918`，没有新建合并提交、
+没有改写历史、rebase、amend、force push 或 push。`worktree-kb-rag-upgrade` 与
+`worktree-kb-frontend` 均已由 `git merge-base --is-ancestor` 验证为 `main` 的祖先。
 
-根 main checkout 的未提交架构文档/harness 工作完整保留且未修改。它与本分支
-实际重叠的文件只有：
+集成时先对除两个重叠文件外的目标分支补丁执行了 `git apply --check --index`，再
+执行 `git apply --index`；两个重叠文件仅做三方内容合并，并用
+`git diff --cached --quiet worktree-kb-rag-upgrade` 验证索引等于目标树。根 checkout
+原有 27 个已修改 tracked 文件和 5 个未跟踪路径的集合前后完全一致；两个重叠文件
+保留了根 checkout 的架构/harness 改动，同时加入目标分支的 KB 合同内容：
 
 - `docs/harness/commands.md`
 - `harness.yml`
 
-建议集成顺序：先在根 main 单独提交架构文档/harness 改动；然后以普通 merge
-合入 `worktree-kb-rag-upgrade`，仅对上述两个文件人工保留双方命令合同；最后重跑
-`make harness-check`、KB/migration/gateway/frontend 门禁与活栈 smoke。不要在根
-dirty checkout 上直接覆盖、stash 或强行合并。
+本次仅完成 Git 集成与工作树保护核对；既有门禁和实机证据仍以本报告前文为准，
+未验证项仍保持 BLOCKED/CONDITIONAL PASS，不因本次快进而改变。
