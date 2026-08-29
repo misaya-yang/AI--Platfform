@@ -32,10 +32,14 @@ LINK_CHECKED = (
     "CLAUDE.md",
     "docs/README.md",
     "docs/harness/README.md",
+    "docs/harness/platform-architecture.md",
     "docs/harness/architecture.md",
     "docs/harness/commands.md",
     "docs/harness/workflow.md",
+    "docs/harness/work-packages.md",
     "docs/harness/runtime-and-secrets.md",
+    "docs/harness/integration-and-rollback.md",
+    "docs/harness/repository-quality.md",
 )
 
 errors: list[str] = []

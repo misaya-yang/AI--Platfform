@@ -1,5 +1,8 @@
 # Claude Code 交接：完成剩余 SOTA 性能优化
 
+> **状态:** archived — 此一次性交接已经消费，不得再次复制执行。现行性能状态只看
+> `deploy/runbooks/sota-performance-dual-gate/loop-state.json`。
+
 把下面「提示词」整段复制给 Claude Code。不要改范围。做完后不要 commit / push。Grok 会按本文 §验收清单 review 和跑测试。
 
 ---

@@ -1,9 +1,10 @@
 {
   "schema_version": "prd-phase-harness/loop-state/v4",
+  "lifecycle": "superseded",
   "goal": "Ship a general assistant that answers ordinary work immediately, uses tools when the model chooses, and never classifies user text into simple vs complex.",
   "cycle": ["observe", "act", "verify", "decide"],
-  "active_phase": "AGA-06",
-  "active_feature": "AGA-F007",
+  "active_phase": null,
+  "active_feature": null,
   "iteration": 1,
   "max_iterations": 8,
   "last_result": "Backend and API/UI thinking controls landed. tests/services/assistant: 2439 passed, 1 skipped.",

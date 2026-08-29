@@ -1,5 +1,6 @@
 {
   "schema_version": "prd-phase-harness/loop-state/v4",
+  "lifecycle": "superseded",
   "goal": "Replace the Python AgentLoop with a Agent Runtime source single kernel while preserving platform contracts, tenant safety, and rollback.",
   "cycle": [
     "observe",
@@ -7,8 +8,8 @@
     "verify",
     "decide"
   ],
-  "active_phase": "CHR-05",
-  "active_feature": "CHR-F006",
+  "active_phase": null,
+  "active_feature": null,
   "iteration": 1,
   "max_iterations": 8,
   "last_result": "CHR-05 lazy import now resolves authoritative assistant.* sources independently of caller search_path, rejects source drift and unpaired legacy tools atomically, blocks resumable Run/approval states, emits paired Agent response Items, and hashes approval arguments. PostgreSQL migration contracts returned 13/13; a real split-schema transaction with caller search_path=public produced message,function_call,function_call_output,message plus one approval receipt and rolled back cleanly. A final authenticated Qwen UI probe answered 9x9 correctly, retained think:minimal with one Activity step, reached first token in 4.30s, and produced no new browser warnings/errors. Production canary, rollback rehearsal, and legacy-loop deletion remain intentionally unverified.",

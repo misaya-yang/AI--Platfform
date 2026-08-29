@@ -1,9 +1,10 @@
 {
   "schema_version": "prd-phase-harness/loop-state/v1",
-  "active_phase": "ARO-05",
-  "active_feature": "ARO-F006",
+  "lifecycle": "superseded",
+  "active_phase": null,
+  "active_feature": null,
   "iteration": 5,
-  "status": "verified",
+  "status": "superseded",
   "last_decision": "ARO-05 passed after whole-demand regression evidence, open-source config validation, operating model publication, actor report, critic artifact, and final harness completion gates.",
   "next_action": "None \u2014 program superseded by the Rust kernel migration (agent-runtime-full-rust-cutover); see the note in superseded_by. Do not resume this loop without a new PRD.",
   "blockers": [],

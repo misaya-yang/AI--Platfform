@@ -45,7 +45,10 @@ required_docs:
   - docs/harness/architecture.md
   - docs/harness/commands.md
   - docs/harness/workflow.md
+  - docs/harness/work-packages.md
   - docs/harness/runtime-and-secrets.md
+  - docs/harness/integration-and-rollback.md
+  - docs/harness/repository-quality.md
   - deploy/runbooks/open-source-env-readiness-todo.md
 
 # -- Instruction-file line budgets --------------------------------------------
@@ -237,7 +240,7 @@ loop:
     - One feature per cycle.
     - A change is unverified until its gate has run; never merge act and verify into a claim.
     - Evidence means a named command and its real output.
-    - Status for multi-session programs lives in loop-state.json, not in prose.
+    - Status for multi-phase or context-spanning programs lives in loop-state.json, not in prose.
 
 # -- Multi-session programs ---------------------------------------------------
 programs:
@@ -251,8 +254,9 @@ programs:
     prd-phase-harness/loop-state/v3: [README.md, loop-state.json, agent-handoff.md, progress-log.md]
     prd-phase-harness/loop-state/v2: [README.md, loop-state.json, agent-handoff.md, progress-log.md]
     prd-phase-harness/loop-state/v1: [README.md, loop-state.json, agent-handoff.md, progress-log.md]
-  validator: "python3 ../prd-phase-harness/scripts/validate_harness_prd.py <program-dir> --strict"
-  convention: docs/harness/workflow.md#4-multi-phase-programs
+  structural_validator: "python3 scripts/harness/check_harness.py"
+  semantic_validator_target: "make program-check PROGRAM=<program-dir>  # queued for ARC-00"
+  convention: docs/harness/workflow.md#4-programs-and-large-changes
 
 # -- Knowledge locations ------------------------------------------------------
 knowledge:

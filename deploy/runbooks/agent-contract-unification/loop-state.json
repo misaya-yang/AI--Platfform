@@ -1,5 +1,6 @@
 {
   "schema_version": "prd-phase-harness/loop-state/v4",
+  "lifecycle": "superseded",
   "goal": "Make the built-in AI Assistant an instance of AgentSpec and make the public runtime API the only contract every surface uses, so a new product form or capability can be added without changing the agent kernel.",
   "cycle": [
     "observe",
@@ -7,8 +8,8 @@
     "verify",
     "decide"
   ],
-  "active_phase": "ACU-00",
-  "active_feature": "ACU-F001",
+  "active_phase": null,
+  "active_feature": null,
   "iteration": 0,
   "max_iterations": 12,
   "last_result": "Program scaffolded from the platform architecture review on 2026-08-14. No implementation has started; every feature is still failing by definition.",

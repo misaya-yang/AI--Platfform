@@ -1,5 +1,6 @@
 {
   "schema_version": "prd-phase-harness/loop-state/v4",
+  "lifecycle": "terminal",
   "goal": "Make the product users see match the README: gateway holds identity/credentials/models/connectors, agents declare capabilities, capabilities extend via plugins.",
   "cycle": [
     "observe",
@@ -7,7 +8,7 @@
     "verify",
     "decide"
   ],
-  "active_phase": "PC-04",
+  "active_phase": null,
   "active_feature": null,
   "iteration": 1,
   "max_iterations": 8,

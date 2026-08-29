@@ -1,7 +1,8 @@
 # Rust 扩面与微服务生态拓扑计划
 
-> **状态:** plan — 分析与判据。实施拆解见程序
-> [`deploy/runbooks/platform-plane-restructure/`](../../deploy/runbooks/platform-plane-restructure/README.md)。
+> **状态:** superseded — 分析与判据保留；后续实现由
+> [`platform-architecture-convergence-prd-2026-08.md`](platform-architecture-convergence-prd-2026-08.md)
+> 在 RAG 合入后接管。旧 PPR 后续阶段已 paused，不得继续执行。
 > **日期:** 2026-08-26（§2.4 为当日逐条复核）
 > **性质:** 架构判断。仓库数据全部可复核；外部数字标注来源，未本地复现。
 > **前置:** FRC-06 关闭。

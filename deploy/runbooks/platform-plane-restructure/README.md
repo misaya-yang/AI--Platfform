@@ -1,6 +1,7 @@
 # 平台平面化重构（PPR）
 
-> **状态：** authored，未开工。执行状态只看 `loop-state.json`。
+> **状态：** PPR-00 complete；其余阶段 paused，等待 RAG 合入后的 successor architecture ADR。
+> 执行状态只看 `loop-state.json`，当前不得按旧 phase next action 开工。
 > **创建：** 2026-08-26；执行契约修订：2026-08-27。
 
 ## Goal
@@ -72,4 +73,4 @@ PPR-03～PPR-08 是基础阶段之后的独立轨道，不得因为编号相邻�
 7. 结果满足 phase、oracle 和真实运行路径后才把 feature `passes` 设为 `true`。
 8. 更新 `loop-state.json` 和替换 `HANDOFF.md`；证据写已有测试、receipt 或报告路径，不为“有东西可引用”而制造报告。
 
-所有阶段共享的架构与回归门见 `architecture-contract.md`。PPR-00 当前是唯一 active phase。本次修订只负责文档；结构校验、实现、Docker、E2E、供应商实验和所有结果证据均由后续 Claude Code 在其执行会话中重新完成。
+所有阶段共享的架构与回归门见 `architecture-contract.md`。当前没有 active phase；PPR-00 仅保留为冻结证据，PPR-01 及后续阶段处于 paused，等待 RAG 合入后的 successor ADR。不得从旧 phase 文件自行恢复执行。

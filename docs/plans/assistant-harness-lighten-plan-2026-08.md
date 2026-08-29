@@ -1,5 +1,8 @@
 # Assistant Harness 减重方案
 
+> **状态:** superseded — Python AgentLoop 已删除；本文是历史产品/性能证据，任何后续优化必须落在
+> Rust Runtime + Capability Worker 当前边界。
+
 - **日期**: 2026-08-13
 - **问题**: harness 过重，模型把普通问题做成课题（「你好」13s、470 token Analyze / Option 1/2）
 - **对照**: 同目录 `grok-build`、`Hermes_agent`、`open claw/openclaw`、`opencode` 的**当前源码** + 本仓库线上日志 + DashScope / 真·Claude Code 代理实测
@@ -61,7 +64,7 @@ Claude Code 会思考。四家开源 harness 也会思考。差别是：
 | **OpenClaw** | 一句 *You are a personal assistant running inside OpenClaw.* 再加工具清单 | Skill 只进 index；「没有明显匹配就不要读 SKILL.md」。子代理 `promptMode=minimal/none` |
 | **opencode** | `default.txt` 偏 CLI 极简（1–3 句、甚至一词）。Qwen 走这条，没有 Qwen 专用稿 | Skill 目录；AGENTS.md 只取第一份；嵌套文件要 `read` 才进 |
 
-**我们该偷**: 短地图 +「回复量与任务复杂度成正比」+ skill/记忆/评测规则不进默认 system。  
+**我们该偷**: 短地图 +「回复量与任务复杂度成正比」+ skill/记忆/评测规则不进默认 system。
 **不该偷**: Hermes「Skills mandatory，宁可错载」；OpenClaw 模板 AGENTS.md「开口前先读 4 个文件」（和 harness 已注入打架）；opencode「少于 4 行 / 一词作答」（企业助手会显得无礼）。
 
 ### 3.2 思考档位：用户/模型级，不是「能思考就拉满」
@@ -74,8 +77,8 @@ Claude Code 会思考。四家开源 harness 也会思考。差别是：
 | **opencode** | 思考跟 variant 走。**DashScope `alibaba-cn` + reasoning 能力会强制 `enable_thinking=true`**（和我们同一坑） | 小任务（起标题）显式关思考 |
 | **我们** | Qwen → `enabled`（满），Gemini 3 → `high` | 比四家都重 |
 
-**我们该偷**: OpenClaw 的档位模型（off/low/medium/high + 用户可调）；reasoner 默认最多 `low`，绝不是 `high`/`enabled`。  
-**不该偷**: grok 的每轮 high；Hermes 的默认 medium；opencode/我们自己的「能思考就 enable_thinking=true」。  
+**我们该偷**: OpenClaw 的档位模型（off/low/medium/high + 用户可调）；reasoner 默认最多 `low`，绝不是 `high`/`enabled`。
+**不该偷**: grok 的每轮 high；Hermes 的默认 medium；opencode/我们自己的「能思考就 enable_thinking=true」。
 **Qwen 特判（有实测，不要盲抄 OpenClaw 的「off = 省略字段」）**: OpenClaw 对自家 provider 省略 reasoning 块即可。Qwen 3.7 Plus **省略 `enable_thinking` = 提供商默认 on**。因此 off 必须显式 `enable_thinking=false`。Claude 的 `low` 是短思考；Qwen 只要 `enable_thinking=true` 就会写 Analyze 五段论（无 prompt 也 438 token）。`low` 仅当用户打开思考时，用 `thinking_budget`（256–512）封顶。
 
 ### 3.3 工具面：核心小，其余可发现
@@ -88,14 +91,14 @@ Claude Code 会思考。四家开源 harness 也会思考。差别是：
 | **opencode** | 每轮同一套 bash/read/edit/write/task… | Skill 正文；实验 code-mode 才给 MCP 编目预算 |
 | **我们** | ALWAYS 钉死子代理/写记忆/KB；**另外** 2000 token 预算把 todo/compact/skill 也塞进第一轮 | 关键词只影响排序，几乎不影响「看不见」 |
 
-**我们该偷**: grok 的「discovery 永在、重工具不直挂」；OpenClaw 的 profile（聊天不要 `full`）；Hermes/OpenClaw/opencode 的 skill **目录而非正文**。  
+**我们该偷**: grok 的「discovery 永在、重工具不直挂」；OpenClaw 的 profile（聊天不要 `full`）；Hermes/OpenClaw/opencode 的 skill **目录而非正文**。
 **不该偷**: Hermes 把核心工具定义为「整个操作系统」；opencode 把 bash/edit 挂在企业问答第一轮。
 
 ### 3.4 第一次模型调用之前：不要再跑一个大脑
 
 四家都 **没有** 预热分类 LLM，也没有「先规划再生成」的默认路径。OpenClaw / opencode 写得很死：第一次用户可见的模型调用就是这一轮。Hermes 的 skill/记忆审查放在 **回复之后**。grok 会在问候上改写记忆检索词（这是分类器，**不要抄**），还会无条件做一次记忆搜索。
 
-**我们该偷**: 无预热 LLM；重活放在回复后。  
+**我们该偷**: 无预热 LLM；重活放在回复后。
 **不该偷**: grok 的问候分类改写记忆；OpenClaw 模板「先读完再说话」；我们自己的死分析器构造。
 
 ### 3.5 合同：干活或作答，禁止表演流程

@@ -27,9 +27,9 @@ Qdrant; Docker Compose in every environment.
 | `deploy/runbooks/` | Multi-session programs; `loop-state.json` is authoritative for status |
 | `reports/` | Evidence: reviews, benchmarks, regression output |
 
-Dependency direction is one-way and enforced by tests:
-`web` → `src` (gateway) → `apps/*` → `packages/ai-gateway-core`.
-`apps/*` must never import `src/`, and no app may import another app.
+Runtime calls: `web` → Gateway; Gateway → apps by HTTP. Code imports keep `src/` and `apps/*`
+as siblings that may depend on `packages/ai-gateway-core`; they must not import each other, and one
+app must not import another. Static enforcement is an ARC-00 gap, not a currently proven gate.
 Details: [`docs/harness/architecture.md`](docs/harness/architecture.md).
 
 ## Canonical commands
@@ -46,7 +46,7 @@ machine-readable in [`harness.yml`](harness.yml). Every Make target accepts `ENV
 | Apply Python source without rebuilding | `make hot-update` |
 | Python tests | `uv run --all-packages --extra test pytest -q --no-cov <paths>` |
 | Python lint | `uv run --all-packages --extra dev ruff check <paths>` |
-| Frontend | `pnpm -C web type-check` · `pnpm -C web lint` · `pnpm -C web build` |
+| Frontend | Direct app+node TS checks in [`commands.md`](docs/harness/commands.md) §6 · `pnpm -C web lint` · `pnpm -C web build` |
 | Harness contract | `make harness-check` |
 
 Use `uv` for Python and `pnpm` for `web/`. Never `npm install`, never bare `pip install`.
@@ -56,15 +56,17 @@ Use `uv` for Python and `pnpm` for `web/`. Never `npm install`, never bare `pip 
 1. Read before writing. Inspect the existing pattern, then match repo style.
 2. Make the smallest change that solves the task. No drive-by refactors, renames, or reformatting.
 3. Preserve public contracts — signatures, API shapes, DB schemas — unless changing them is the task.
-   The list that must not drift silently is `docs/harness/architecture.md` §4.
+   The list that must not drift silently is `docs/harness/architecture.md` §6.
 4. Reuse what exists. State why before adding a dependency.
 5. When a task is ambiguous but derivable from the code, state the assumption in one line and proceed.
 6. Update the doc that owns the area in the same change, not later.
 7. Put files where they belong: Playwright specs in `web/e2e/` ([convention](web/e2e/README.md)),
    scratch and screenshots in `tmp/`, evidence in `reports/`. Never at the repository root —
    `make harness-check` fails on strays.
-8. Work spanning more than one session becomes a program under `deploy/runbooks/`
+8. Multi-phase or context-spanning work becomes a program under `deploy/runbooks/`
    — see [`docs/harness/workflow.md`](docs/harness/workflow.md).
+9. One product-scale change has one primary writer worktree; parallel agents are read-only explorers
+   or reviewers. Architecture work follows [`docs/harness/work-packages.md`](docs/harness/work-packages.md).
 
 ## Verification
 

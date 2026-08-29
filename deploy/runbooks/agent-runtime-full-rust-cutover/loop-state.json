@@ -1,5 +1,6 @@
 {
   "schema_version": "prd-phase-harness/loop-state/v4",
+  "lifecycle": "closeout_only",
   "goal": "Migrate the complete Assistant execution surface to one Rust Agent Runtime plus a Rust capability worker, preserve every public product contract, and delete the Python AgentLoop only after parity evidence passes.",
   "cycle": [
     "observe",
@@ -7,12 +8,12 @@
     "verify",
     "decide"
   ],
-  "active_phase": "FRC-06",
-  "active_feature": "FRC-F007",
+  "active_phase": null,
+  "active_feature": null,
   "iteration": 1,
   "max_iterations": 5,
   "last_result": "Full Rust cutover, authenticated product acceptance, serial release gate, and digest-pinned current-to-frozen-to-current rollback rehearsal passed on main; final evidence commit is pending.",
-  "next_action": "Commit and push the rollback evidence, then verify local main equals origin/main and mark FRC-06 done.",
+  "next_action": "Ledger closeout only: independently reconcile the existing final report, rollback receipt and main/origin SHA, then mark FRC-06 terminal. Do not resume implementation from this program.",
   "blockers": [],
   "confirmation": null,
   "phases": [

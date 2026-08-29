@@ -3,7 +3,7 @@
 Everything an agent or a new engineer needs is reachable from this page. If knowledge is not in
 this repository, it does not exist — see [`harness/README.md`](harness/README.md) §1.
 
-**Updated:** 2026-08-28
+**Updated:** 2026-08-29
 
 ---
 
@@ -28,7 +28,7 @@ this repository, it does not exist — see [`harness/README.md`](harness/README.
 | [`plans/`](plans/) | Plans for work that is scoped but not yet a program | Deleted or archived once delivered |
 | [`research/`](research/) | External comparisons and background reading | Dated; archived when stale |
 | [`archive/<yyyy-mm>/`](archive/) | Superseded snapshots kept for provenance | Never edited; read-only history |
-| [`../deploy/runbooks/`](../deploy/runbooks/) | Multi-session programs; `loop-state.json` is authoritative | Living while active, then terminal |
+| [`../deploy/runbooks/`](../deploy/runbooks/) | Multi-phase/context-spanning programs; `loop-state.json` is authoritative | Living while active, then terminal |
 | [`../reports/`](../reports/) | Evidence: reviews, benchmarks, regression output | Append-only, dated |
 | [`../web/e2e/`](../web/e2e/README.md) | The only home for Playwright specs, helpers, and fixtures | Living |
 
@@ -44,7 +44,10 @@ Rule of thumb: **design** says why, **plans** say what next, **runbooks** track 
 | [`harness/architecture.md`](harness/architecture.md) | Topology, module ownership, dependency direction, contracts that must not drift |
 | [`harness/commands.md`](harness/commands.md) | Canonical command for every routine action; which gate to run for what |
 | [`harness/workflow.md`](harness/workflow.md) | Task loop, definition of done, program convention, git rules |
+| [`harness/work-packages.md`](harness/work-packages.md) | Single-owner package contract for architecture and repository-wide changes |
 | [`harness/runtime-and-secrets.md`](harness/runtime-and-secrets.md) | Mandatory before any Docker, deploy, or E2E action |
+| [`harness/integration-and-rollback.md`](harness/integration-and-rollback.md) | Singleton-runtime ownership, verification ladder, integration and rollback |
+| [`harness/repository-quality.md`](harness/repository-quality.md) | Dead code/docs/tests, dependencies, large files and browser-evidence lifecycle |
 
 ## Design
 
@@ -65,19 +68,21 @@ Rule of thumb: **design** says why, **plans** say what next, **runbooks** track 
 | [`ADR-007`](architecture/ADR-007-agent-runtime-data-boundaries.md) | Gateway model plane, ThreadStore, and capability-service boundaries |
 
 Write a new ADR when a change alters a dependency boundary, adds a service, or changes a contract
-listed in [`harness/architecture.md`](harness/architecture.md) §4.
+listed in [`harness/architecture.md`](harness/architecture.md) §6.
 
 ## Plans
 
 | Plan | Subject |
 | --- | --- |
-| [`plans/sota-performance-optimization-2026-08.md`](plans/sota-performance-optimization-2026-08.md) | **active** — 核心微服务 SOTA 性能优化（网关 / 助手 / 知识 / Web / 数据面）。证据：[`reports/performance/sota-microservice-review-2026-08-17.md`](../reports/performance/sota-microservice-review-2026-08-17.md)。剩余阶段已按交接提示词实施（[`reports/performance/sota-spo-remaining-2026-08.md`](../reports/performance/sota-spo-remaining-2026-08.md)）；现行性能程序为 `deploy/runbooks/sota-performance-dual-gate/`。 |
-| [`plans/sota-performance-claude-handoff.md`](plans/sota-performance-claude-handoff.md) | Claude Code 交接提示词：做完剩余 SPO 阶段；Grok 按文内清单 review/测试 |
+| [`plans/sota-performance-optimization-2026-08.md`](plans/sota-performance-optimization-2026-08.md) | **superseded as execution instruction** — 证据保留；现行 provider/stability blocker 在 `sota-performance-dual-gate`。 |
+| [`plans/sota-performance-claude-handoff.md`](plans/sota-performance-claude-handoff.md) | **archived intent, pending move** — 已消费的一次性交接提示词，不得再次执行。 |
 | [`plans/assistant-upgrade-plan-2026-08.md`](plans/assistant-upgrade-plan-2026-08.md) | **superseded** — Assistant runtime upgrade snapshot retained for measured evidence; current direction is the lighten plan below. |
-| [`plans/assistant-harness-lighten-plan-2026-08.md`](plans/assistant-harness-lighten-plan-2026-08.md) | Reducing assistant harness weight |
-| [`plans/kb-rag-optimization-plan.md`](plans/kb-rag-optimization-plan.md) | KB retrieval quality / UX（不要与运行时性能计划混淆） |
-| [`plans/rust-expansion-and-service-topology-2026-08.md`](plans/rust-expansion-and-service-topology-2026-08.md) | **plan** — 执行面 Rust 化之后：迁移判据、平面拓扑、业界 SOTA 对照。实施拆解见 `deploy/runbooks/platform-plane-restructure/` |
-| [`plans/knowledge-bm25-v2-shadow-rollout.md`](plans/knowledge-bm25-v2-shadow-rollout.md) | BM25 v2 shadow rollout |
+| [`plans/assistant-harness-lighten-plan-2026-08.md`](plans/assistant-harness-lighten-plan-2026-08.md) | **superseded** — Python AgentLoop 已删除；后续优化以 Rust Runtime/Worker 为准。 |
+| [`plans/kb-rag-optimization-plan.md`](plans/kb-rag-optimization-plan.md) | **superseded pending RAG merge** — 当前 RAG PRD/增补在验收 worktree；旧计划不再指导实现。 |
+| [`plans/rust-expansion-and-service-topology-2026-08.md`](plans/rust-expansion-and-service-topology-2026-08.md) | **superseded by queued architecture convergence** — 仅保留调查与迁移判据。 |
+| [`plans/knowledge-bm25-v2-shadow-rollout.md`](plans/knowledge-bm25-v2-shadow-rollout.md) | **active design contract, pending move to `docs/design/`** — BM25 v2 safety/rollout，不是程序状态。 |
+| [`plans/rust-0828-full-acceptance-and-kb-integration-test-plan-2026-08-28.md`](plans/rust-0828-full-acceptance-and-kb-integration-test-plan-2026-08-28.md) | **archived evidence, pending move** — 已完成的 Rust 0828 验收计划，不得重新执行。 |
+| [`plans/platform-architecture-convergence-prd-2026-08.md`](plans/platform-architecture-convergence-prd-2026-08.md) | **queued** — KB 合入后的单一主 Session：可信门禁/低内存 Rust 构建、统一 launch、模块/数据 owner、durable jobs、健康/trace、部署与仓库质量/证据治理。 |
 
 ## Research
 
@@ -85,15 +90,17 @@ listed in [`harness/architecture.md`](harness/architecture.md) §4.
 
 ## Programs
 
-All multi-session programs live in [`../deploy/runbooks/`](../deploy/runbooks/). Status comes from
-each program's `loop-state.json`, never from prose. Verified 2026-08-28:
+All programs live in [`../deploy/runbooks/`](../deploy/runbooks/). Status comes from each program's
+`loop-state.json`, never from prose. The table below is a dated navigation snapshot, not a second
+state authority; lifecycle conflicts in older ledgers are a named ARC-00 cleanup. Verified
+2026-08-29 against pre-RAG `main`:
 
 | Program | Terminal phase | Status |
 | --- | --- | --- |
-| **`platform-plane-restructure`** | PPR-00 → PPR-09 | **PPR-00 complete** — 计时归因、供应商基线与并发资源剖面已冻结；PPR-01 等待用户批准进入。PRD: [`product-requirements.md`](../deploy/runbooks/platform-plane-restructure/product-requirements.md) |
-| **`agent-runtime-full-rust-cutover`** | FRC-00 → FRC-06 | **FRC-06 未闭合** — 全面 Rust 切换、验收与回滚演练已在 main 通过；尚差提交/推送回滚证据并标记 FRC-06 done。Python AgentLoop 已删除 |
+| **`platform-plane-restructure`** | PPR-00 → PPR-09 | **PPR-00 evidence complete; future phases paused for convergence** — PPR-01 构建经济性与 PPR-08 provider 实验将被提取，PPR-02～07/09 由 queued architecture successor ADR裁决；当前不要按旧 next_action 开工。 |
+| **`agent-runtime-full-rust-cutover`** | FRC-00 → FRC-06 | **closeout-only** — Rust 切换、验收与回滚演练已有报告；只允许核对 ledger/receipt/SHA 后终结，不得继续实现。Python AgentLoop 已删除 |
 | **`agent-runtime-single-kernel`** | CHR-00 → CHR-06 | **superseded** — CHR-05 source-lock checkpoint 后由 `agent-runtime-full-rust-cutover`（Rust kernel 迁移）接替；无新 PRD 不得重启。运行流量从未移动。 |
-| **`performance-correctness-hardening`** | PCH-00 → PCH-07 | **active** — PCH-07 is the stop-safe tool-exchange gate. 后续性能工作：计划在 [`plans/sota-performance-optimization-2026-08.md`](plans/sota-performance-optimization-2026-08.md)，现行程序为 `sota-performance-dual-gate`（见下表）。 |
+| **`performance-correctness-hardening`** | PCH-00 → PCH-07 | **superseded by full Rust cutover** — 保留验证证据；不得从旧 Python 执行路径继续。剩余质量差距需新 Rust 计划。 |
 | **`sota-performance-dual-gate`** | SPD-00 → SPD-04 | **blocked（SPD-04）** — Grok hardening 批次集成与性能/质量双门禁；SPD-00→03 已过，实现收尾完成。blockers：live TTFT p50 9.28s 超 3.41s gate；三个八任务稳定性 cohort 未跑。 |
 | **`agent-contract-unification`** | ACU-00 → ACU-06 | **superseded** — 2026-08-14 scaffold 后从未开工，由 `agent-runtime-full-rust-cutover` 接替；无新 PRD 不得重启。原目标：assistant 成为 `AgentSpec` 实例、公共 runtime API 为唯一面契约（见 [`harness/platform-architecture.md`](harness/platform-architecture.md)） |
 | **`product-convergence`** | PC-04 | **verified** — review findings #1–#5+#8: first-run onboarding, connectors as the only Confluence story, ai-quiz plugin, nav groups, DEFAULT_MODEL. Report: [`reports/code-review/product-convergence-2026-08.md`](../reports/code-review/product-convergence-2026-08.md) |

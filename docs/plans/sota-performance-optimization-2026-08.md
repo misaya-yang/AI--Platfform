@@ -1,10 +1,11 @@
 # 核心微服务 SOTA 性能优化计划
 
-> **状态:** active — 计划已写，尚未提升为 `deploy/runbooks/` 程序。
+> **状态:** superseded as execution instruction — 后续状态只看
+> `deploy/runbooks/sota-performance-dual-gate/loop-state.json`；本文仅保留分析与历史指标。
 > **日期:** 2026-08-17
 > **性质:** 计划，不是实测验收。文中延迟数字除标明「2026-08-16 实测」外，均为当前代码结构推断。
 > **证据:** [`reports/performance/sota-microservice-review-2026-08-17.md`](../../reports/performance/sota-microservice-review-2026-08-17.md)
-> **前置程序:** [`deploy/runbooks/performance-correctness-hardening/`](../../deploy/runbooks/performance-correctness-hardening/) 的 PCH-07 必须先闭合。
+> **前置程序:** 历史 PCH 已被 Rust cutover supersede；不得按旧 Python 执行路径恢复。
 > **不要做:** 关闭思考、按 prompt 关键词硬编码分流、用估算数字当验收、用吞吐换租户隔离或计费正确性。
 
 ---

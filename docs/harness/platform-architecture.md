@@ -7,11 +7,11 @@
 > Read this before proposing a new surface, a new extension mechanism, or a new field on
 > `AgentSpec`.
 
-**Schema:** `harness/platform-architecture/v1`
+**Schema:** `harness/platform-architecture/v2`
 
 ---
 
-## 1. The four layers
+## 1. The five product layers
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -68,9 +68,12 @@ The agent finds tools at runtime through discovery. What an agent is *allowed* t
 up front. `permissions` therefore expresses the boundary, and static `capabilities` bindings
 express only what must be *frozen* — see §3.
 
-**L5. The gateway carries no agent semantics.**
-Model routing, identity, quota, billing, and framework adaptation live below the kernel and know
-nothing about agent behaviour. A LangGraph-shaped concept leaking upward is a layering defect.
+**L5. The gateway owns control policy, not execution semantics.**
+Identity, tenant policy, model access, quota, billing, provider adaptation, and immutable launch /
+snapshot signing live below the kernel. The Gateway may resolve what an Agent is allowed to run; it
+must not own model/tool iteration, compaction, cancellation state, approval state transitions, or
+event ordering. A provider- or framework-shaped concept leaking into `AgentSpec` remains a layering
+defect.
 
 ## 3. Permissions and capabilities coexist — on purpose
 
@@ -112,8 +115,10 @@ Python service; a domain concept there forces the gateway and the knowledge serv
 Every surface speaks the contract layer and nothing else. A surface may not import kernel code,
 may not add a bespoke endpoint, and may not require a kernel change.
 
-Reference implementations worth reading before adding one — all four are checked out beside this
-repository:
+Optional external reference implementations are summarized in the in-repository
+[`four-OSS comparison`](../research/ai-assistant-harness-4oss-comparison-research-2026-08.md).
+Their local checkouts are not an execution prerequisite and must not be treated as system-of-record
+input:
 
 | Project | What to look at | Why |
 | --- | --- | --- |
@@ -129,6 +134,8 @@ can add — one adapter reaches every ACP-compatible editor.
 ## 6. How to change this file
 
 This document states intent that should outlive any one program. Change it when a law changes,
-not when an implementation does. The program that brings the codebase in line with it is
-[`deploy/runbooks/agent-contract-unification/`](../../deploy/runbooks/agent-contract-unification/README.md);
-its `loop-state.json` is authoritative for progress, and this file is authoritative for the target.
+not when an implementation does. The prior `agent-contract-unification` scaffold is superseded by
+the completed Rust single-kernel cutover. The next queued conformance work is
+[`platform-architecture-convergence-prd-2026-08.md`](../plans/platform-architecture-convergence-prd-2026-08.md);
+it becomes executable only after RAG acceptance and after exactly one authoritative program is
+created or adopted. This file remains authoritative for product law, not execution status.
