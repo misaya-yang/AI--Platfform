@@ -75,6 +75,7 @@ import {
 } from "@/api/knowledge";
 import { scoreKbRagasRetrieval, type KbRagasScoreRetrievalResult } from "@/api/eval";
 import type { Document, RetrieveHit, QAResponse, QAStreamEvent, DatasetConfig, DatasetDebugInfo } from "@/types/knowledge";
+import { DEFAULT_CHUNKING_CONFIG, DEFAULT_RETRIEVAL_CONFIG } from "@/types/knowledge";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -250,18 +251,22 @@ export function KnowledgeDatasetDetailPage() {
   const [deletePassword, setDeletePassword] = useState("");
 
   // Retrieval testing
+  // Defaults read from the single source in @/types/knowledge. Two deliberate
+  // workbench exceptions: scoreThreshold starts at 0 (no filtering, so every
+  // hit is inspectable) and fusionMethod starts "weighted" so the weight
+  // sliders are meaningful on first use.
   const [query, setQuery] = useState("");
-  const [topK, setTopK] = useState(5);
-  const [mode, setMode] = useState<"dense" | "bm25" | "hybrid">("hybrid");
-  const [denseWeight, setDenseWeight] = useState(0.5);  // 0-1 weight for dense scores
-  const [bm25Weight, setBm25Weight] = useState(0.5);    // 0-1 weight for BM25 scores
+  const [topK, setTopK] = useState(DEFAULT_RETRIEVAL_CONFIG.top_k);
+  const [mode, setMode] = useState<"dense" | "bm25" | "hybrid">(DEFAULT_RETRIEVAL_CONFIG.mode);
+  const [denseWeight, setDenseWeight] = useState(DEFAULT_RETRIEVAL_CONFIG.fusion.alpha);  // 0-1 weight for dense scores
+  const [bm25Weight, setBm25Weight] = useState(1 - DEFAULT_RETRIEVAL_CONFIG.fusion.alpha);    // 0-1 weight for BM25 scores
   const [fusionMethod, setFusionMethod] = useState<"weighted" | "rrf">("weighted");
   const [scoreThreshold, setScoreThreshold] = useState(0);  // 0 means no filtering
   const [rerank, setRerank] = useState(false);
-  const [hitRerankModel, setHitRerankModel] = useState("gte-rerank");
+  const [hitRerankModel, setHitRerankModel] = useState(DEFAULT_RETRIEVAL_CONFIG.rerank.model);
   const [hitRerankTopN, setHitRerankTopN] = useState<number | undefined>(undefined);
   const [mmr, setMmr] = useState(false);
-  const [hitMmrLambda, setHitMmrLambda] = useState(0.5);
+  const [hitMmrLambda, setHitMmrLambda] = useState(DEFAULT_RETRIEVAL_CONFIG.mmr.lambda);
   const [hitLoading, setHitLoading] = useState(false);
 
   // Presets are opt-in so the existing manual retrieval defaults remain stable.
@@ -326,10 +331,10 @@ export function KnowledgeDatasetDetailPage() {
       setBm25Weight(config.bm25_weight ?? 1 - config.dense_weight);
     }
     setRerank(config.rerank ?? false);
-    setHitRerankModel(config.rerank_model ?? "gte-rerank");
+    setHitRerankModel(config.rerank_model ?? DEFAULT_RETRIEVAL_CONFIG.rerank.model);
     setHitRerankTopN(config.rerank_top_n);
     setMmr(config.mmr ?? false);
-    setHitMmrLambda(config.mmr_lambda ?? 0.5);
+    setHitMmrLambda(config.mmr_lambda ?? DEFAULT_RETRIEVAL_CONFIG.mmr.lambda);
   };
 
   const markRetrievalConfigCustom = () => {
@@ -388,9 +393,9 @@ export function KnowledgeDatasetDetailPage() {
   // Config editing - Chunking
   const [configEditing, setConfigEditing] = useState(false);
   const [configSaving, setConfigSaving] = useState(false);
-  const [editChunkingMode, setEditChunkingMode] = useState("automatic");
-  const [editChunkSize, setEditChunkSize] = useState(500);
-  const [editChunkOverlap, setEditChunkOverlap] = useState(50);
+  const [editChunkingMode, setEditChunkingMode] = useState(DEFAULT_CHUNKING_CONFIG.mode);
+  const [editChunkSize, setEditChunkSize] = useState(DEFAULT_CHUNKING_CONFIG.chunk_size);
+  const [editChunkOverlap, setEditChunkOverlap] = useState(DEFAULT_CHUNKING_CONFIG.chunk_overlap);
 
   // Config editing - Embedding
   const [embeddingEditing, setEmbeddingEditing] = useState(false);
@@ -399,16 +404,16 @@ export function KnowledgeDatasetDetailPage() {
 
   // Config editing - Retrieval
   const [retrievalEditing, setRetrievalEditing] = useState(false);
-  const [editRetrievalMode, setEditRetrievalMode] = useState<"vector" | "keyword" | "hybrid">("hybrid");
-  const [editTopK, setEditTopK] = useState(5);
-  const [editFusionStrategy, setEditFusionStrategy] = useState<"weighted" | "rrf">("rrf");
-  const [editDenseWeight, setEditDenseWeight] = useState(0.7);
-  const [editBm25Weight, setEditBm25Weight] = useState(0.3);
-  const [editRerankEnabled, setEditRerankEnabled] = useState(false);
-  const [editRerankModel, setEditRerankModel] = useState("gte-rerank");
-  const [editMmrEnabled, setEditMmrEnabled] = useState(false);
-  const [editMmrLambda, setEditMmrLambda] = useState(0.5);
-  const [editScoreThreshold, setEditScoreThreshold] = useState(0.3);
+  const [editRetrievalMode, setEditRetrievalMode] = useState<"vector" | "keyword" | "hybrid">(DEFAULT_RETRIEVAL_CONFIG.mode);
+  const [editTopK, setEditTopK] = useState(DEFAULT_RETRIEVAL_CONFIG.top_k);
+  const [editFusionStrategy, setEditFusionStrategy] = useState<"weighted" | "rrf">(DEFAULT_RETRIEVAL_CONFIG.fusion.strategy);
+  const [editDenseWeight, setEditDenseWeight] = useState(DEFAULT_RETRIEVAL_CONFIG.fusion.alpha);
+  const [editBm25Weight, setEditBm25Weight] = useState(1 - DEFAULT_RETRIEVAL_CONFIG.fusion.alpha);
+  const [editRerankEnabled, setEditRerankEnabled] = useState(DEFAULT_RETRIEVAL_CONFIG.rerank.enabled);
+  const [editRerankModel, setEditRerankModel] = useState(DEFAULT_RETRIEVAL_CONFIG.rerank.model);
+  const [editMmrEnabled, setEditMmrEnabled] = useState(DEFAULT_RETRIEVAL_CONFIG.mmr.enabled);
+  const [editMmrLambda, setEditMmrLambda] = useState(DEFAULT_RETRIEVAL_CONFIG.mmr.lambda);
+  const [editScoreThreshold, setEditScoreThreshold] = useState(DEFAULT_RETRIEVAL_CONFIG.score_threshold);
 
   // Chunk preview
   const [previewText, setPreviewText] = useState("");
@@ -552,22 +557,22 @@ export function KnowledgeDatasetDetailPage() {
           bm25: "keyword", keyword: "keyword",
           hybrid: "hybrid"
         };
-        setEditRetrievalMode(modeMap[config.retrieval.mode] || "hybrid");
-        setEditTopK(config.retrieval.top_k || 5);
+        setEditRetrievalMode(modeMap[config.retrieval.mode] || DEFAULT_RETRIEVAL_CONFIG.mode);
+        setEditTopK(config.retrieval.top_k || DEFAULT_RETRIEVAL_CONFIG.top_k);
         // Fusion config
         const fusion = config.retrieval.fusion;
-        setEditFusionStrategy(fusion?.strategy === "weighted" ? "weighted" : "rrf");
+        setEditFusionStrategy(fusion?.strategy === "weighted" ? "weighted" : DEFAULT_RETRIEVAL_CONFIG.fusion.strategy);
         // Alpha -> weights: alpha is dense weight, (1-alpha) is bm25 weight
-        const alpha = fusion?.alpha ?? 0.7;
+        const alpha = fusion?.alpha ?? DEFAULT_RETRIEVAL_CONFIG.fusion.alpha;
         setEditDenseWeight(alpha);
         setEditBm25Weight(1 - alpha);
         // Rerank & MMR
-        setEditRerankEnabled(config.retrieval.rerank?.enabled ?? false);
-        setEditRerankModel(config.retrieval.rerank?.model || "gte-rerank");
-        setEditMmrEnabled(config.retrieval.mmr?.enabled ?? false);
-        setEditMmrLambda(config.retrieval.mmr?.lambda ?? 0.5);
+        setEditRerankEnabled(config.retrieval.rerank?.enabled ?? DEFAULT_RETRIEVAL_CONFIG.rerank.enabled);
+        setEditRerankModel(config.retrieval.rerank?.model || DEFAULT_RETRIEVAL_CONFIG.rerank.model);
+        setEditMmrEnabled(config.retrieval.mmr?.enabled ?? DEFAULT_RETRIEVAL_CONFIG.mmr.enabled);
+        setEditMmrLambda(config.retrieval.mmr?.lambda ?? DEFAULT_RETRIEVAL_CONFIG.mmr.lambda);
         // Score threshold
-        setEditScoreThreshold(config.retrieval.score_threshold ?? 0.3);
+        setEditScoreThreshold(config.retrieval.score_threshold ?? DEFAULT_RETRIEVAL_CONFIG.score_threshold);
       }
     } catch (e) {
       console.error("Failed to load config:", e);
@@ -2927,7 +2932,7 @@ export function KnowledgeDatasetDetailPage() {
                       </p>
                     </div>
                     <Badge variant="outline" className="text-xs border-emerald-500/30 text-emerald-600 dark:text-emerald-400 bg-emerald-500/5">
-                      {{vector: "Dense", dense: "Dense", keyword: "BM25", bm25: "BM25", hybrid: "Hybrid"}[datasetConfig.retrieval?.mode || "hybrid"]}
+                      {{vector: "Dense", dense: "Dense", keyword: "BM25", bm25: "BM25", hybrid: "Hybrid"}[datasetConfig.retrieval?.mode || DEFAULT_RETRIEVAL_CONFIG.mode]}
                     </Badge>
                   </div>
 
@@ -2935,11 +2940,11 @@ export function KnowledgeDatasetDetailPage() {
                   <div className="grid grid-cols-2 gap-3">
                     <div className="p-3.5 rounded-xl border border-border/50 bg-muted/30">
                       <p className="text-xs text-muted-foreground">Top K</p>
-                      <p className="text-xl font-bold text-foreground mt-1 tabular-nums">{datasetConfig.retrieval?.top_k || 5}</p>
+                      <p className="text-xl font-bold text-foreground mt-1 tabular-nums">{datasetConfig.retrieval?.top_k || DEFAULT_RETRIEVAL_CONFIG.top_k}</p>
                     </div>
                     <div className="p-3.5 rounded-xl border border-border/50 bg-muted/30">
                       <p className="text-xs text-muted-foreground">{t("knowledge.detail.scoreThreshold")}</p>
-                      <p className="text-xl font-bold text-foreground mt-1 tabular-nums">{((datasetConfig.retrieval?.score_threshold ?? 0.3) * 100).toFixed(0)}%</p>
+                      <p className="text-xl font-bold text-foreground mt-1 tabular-nums">{((datasetConfig.retrieval?.score_threshold ?? DEFAULT_RETRIEVAL_CONFIG.score_threshold) * 100).toFixed(0)}%</p>
                     </div>
                   </div>
 
@@ -2949,19 +2954,19 @@ export function KnowledgeDatasetDetailPage() {
                       <div className="flex items-center justify-between mb-2.5">
                         <p className="text-xs font-medium text-primary">{t("knowledge.detail.fusionWeight")}</p>
                         <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
-                          <span>{t("knowledge.detail.vectorWeight", { pct: ((datasetConfig.retrieval.fusion?.alpha || 0.7) * 100).toFixed(0) })}</span>
+                          <span>{t("knowledge.detail.vectorWeight", { pct: ((datasetConfig.retrieval.fusion?.alpha || DEFAULT_RETRIEVAL_CONFIG.fusion.alpha) * 100).toFixed(0) })}</span>
                           <span className="text-muted-foreground/40">|</span>
-                          <span>BM25 {((1 - (datasetConfig.retrieval.fusion?.alpha || 0.7)) * 100).toFixed(0)}%</span>
+                          <span>BM25 {((1 - (datasetConfig.retrieval.fusion?.alpha || DEFAULT_RETRIEVAL_CONFIG.fusion.alpha)) * 100).toFixed(0)}%</span>
                         </div>
                       </div>
                       <div className="h-2 rounded-full bg-muted/60 overflow-hidden flex">
                         <div
                           className="h-full bg-primary/60 rounded-l-full transition-[width] duration-200"
-                          style={{ width: `${(datasetConfig.retrieval.fusion?.alpha || 0.7) * 100}%` }}
+                          style={{ width: `${(datasetConfig.retrieval.fusion?.alpha || DEFAULT_RETRIEVAL_CONFIG.fusion.alpha) * 100}%` }}
                         />
                         <div
                           className="h-full bg-amber-500/40 rounded-r-full transition-[width] duration-200"
-                          style={{ width: `${(1 - (datasetConfig.retrieval.fusion?.alpha || 0.7)) * 100}%` }}
+                          style={{ width: `${(1 - (datasetConfig.retrieval.fusion?.alpha || DEFAULT_RETRIEVAL_CONFIG.fusion.alpha)) * 100}%` }}
                         />
                       </div>
                     </div>

@@ -9,6 +9,7 @@ import {
   type ProcessingMode,
 } from "@/api/knowledge";
 import { toast } from "@/hooks/use-toast";
+import { DEFAULT_CHUNKING_CONFIG } from "@/types/knowledge";
 
 export const DATASET_EMBEDDING_MODELS = [
   {
@@ -67,9 +68,9 @@ export function useDatasetUploadController({
 }: DatasetUploadControllerOptions) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
-  const [uploadChunkMode, setUploadChunkMode] = useState("automatic");
-  const [uploadChunkSize, setUploadChunkSize] = useState(500);
-  const [uploadChunkOverlap, setUploadChunkOverlap] = useState(50);
+  const [uploadChunkMode, setUploadChunkMode] = useState(DEFAULT_CHUNKING_CONFIG.mode);
+  const [uploadChunkSize, setUploadChunkSize] = useState(DEFAULT_CHUNKING_CONFIG.chunk_size);
+  const [uploadChunkOverlap, setUploadChunkOverlap] = useState(DEFAULT_CHUNKING_CONFIG.chunk_overlap);
   const [uploadMinParagraphLength, setUploadMinParagraphLength] = useState(50);
   const [uploadMergeShortParagraphs, setUploadMergeShortParagraphs] = useState(true);
   const [uploadHeadingLevel, setUploadHeadingLevel] = useState<"h1" | "h2" | "h3">("h2");
@@ -96,8 +97,11 @@ export function useDatasetUploadController({
   const [uploadEmbeddingModel, setUploadEmbeddingModel] = useState(
     "dashscope:text-embedding-v4"
   );
+  // NOTE: rerank defaults ON here but OFF in the platform defaults
+  // (DEFAULT_RETRIEVAL_CONFIG.rerank.enabled). The upload dialog has always
+  // shipped this way; changing it is a product decision, tracked for C3.
   const [rerankEnabled, setRerankEnabled] = useState(true);
-  const [rerankModel, setRerankModel] = useState("gte-rerank");
+  const [rerankModel, setRerankModel] = useState(DEFAULT_RETRIEVAL_CONFIG.rerank.model);
   const uploadProcessingMode: ProcessingMode = "text_only";
 
   function buildChunkingConfig() {

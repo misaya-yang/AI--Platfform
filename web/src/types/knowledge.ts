@@ -15,7 +15,51 @@ export type RetrieveMode = "keyword" | "hybrid" | "vector" | "dense" | "bm25";
 export type ChunkingMode = "automatic" | "fixed_size" | "paragraph" | "page" | "heading" | "regex" | "separator" | "recursive" | "hierarchical" | "qa";
 export type FusionStrategy = "rrf" | "weighted";
 export type Visibility = "private" | "tenant" | "public";
-export type DocumentStatus = "pending" | "parsing" | "segmenting" | "embedding" | "completed" | "failed";
+/**
+ * Internal document lifecycle vocabulary as it appears on the wire.
+ *
+ * Current pipeline: queued/pending -> parsing -> segmenting -> embedding
+ * (-> embedding_images / uploading_images for multimodal) -> completed/failed.
+ * Forward contract (migration 101): waiting -> parsing -> splitting ->
+ * indexing -> completed/error, plus legacy "syncing" and upload-phase states.
+ *
+ * UIs must render `display_status` instead of these raw values — see
+ * `deriveDisplayStatus` below.
+ */
+export type DocumentStatus =
+  | "pending"
+  | "queued"
+  | "waiting"
+  | "detecting"
+  | "processing"
+  | "uploading"
+  | "parsing"
+  | "segmenting"
+  | "splitting"
+  | "embedding"
+  | "embedding_images"
+  | "uploading_images"
+  | "indexing"
+  | "syncing"
+  | "uploaded"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "error";
+
+/**
+ * Display-safe document status vocabulary (Dify-parity contract, PRD T1.1).
+ * The backend stamps `display_status` on every document payload so the raw
+ * lifecycle states never reach the UI verbatim.
+ */
+export type DocumentDisplayStatus =
+  | "queuing"
+  | "indexing"
+  | "paused"
+  | "error"
+  | "available"
+  | "disabled"
+  | "archived";
 export type KBType = "document" | "data" | "image" | "audio_video";
 export type UseCase = "basic_qa" | "rich_text_response";
 
@@ -63,6 +107,9 @@ export interface Document {
   doc_form?: string;
   doc_language?: string;
   status: DocumentStatus;
+  /** Derived display status stamped by the backend (PRD T1.1). When a payload
+   *  does not carry it yet, fall back to `resolveDisplayStatus`. */
+  display_status?: DocumentDisplayStatus;
   progress?: number;
   error?: string;
   segment_count?: number;
@@ -72,11 +119,21 @@ export interface Document {
   hit_count?: number;
   enabled?: boolean;
   archived?: boolean;
+  /** Archive metadata returned by PATCH /documents/{id}/archive. */
+  archived_at?: string;
+  archived_by?: string;
+  archived_reason?: string;
   metadata?: Record<string, unknown>;
   source_type?: "upload" | "url" | "confluence";
   created_at?: string;
   updated_at?: string;
   created_by?: string;
+  /** Lifecycle stage timestamps (migration 101 forward contract). */
+  started_at?: string;
+  completed_at?: string;
+  parsing_started_at?: string;
+  splitting_started_at?: string;
+  indexing_started_at?: string;
 }
 
 // ============================================================
@@ -520,18 +577,32 @@ export interface BatchOperationResult {
 // ============================================================
 // Default Configurations
 // ============================================================
+//
+// Single source of truth for KB configuration defaults (PRD T5-1, §5-#19/#20).
+// Every inline default in the KB pages (create wizard, settings tab, upload
+// dialog, hit-test panel, e2e fixtures) must read from these constants.
+//
+// The values below are the PRODUCT BASELINE — the majority values the running
+// UI already uses (chunk 500/50, hybrid top_k 5, score threshold 0.3, fusion
+// alpha 0.7, gte-rerank). Per the "先基线后阈值" discipline they are frozen
+// until the T0 baseline metrics exist: unify the source, do not tune values.
+//
+// `satisfies` keeps the constants assignable to their config types while
+// preserving precise member types (callers can read `.fusion.alpha` etc.
+// without null assertions).
 
-export const DEFAULT_CHUNKING_CONFIG: ChunkingConfig = {
+export const DEFAULT_CHUNKING_CONFIG = {
   mode: "automatic",
   chunk_size: 500,
   chunk_overlap: 50,
   remove_extra_spaces: true,
   remove_urls_emails: false,
-};
+} satisfies ChunkingConfig;
 
-export const DEFAULT_RETRIEVAL_CONFIG: RetrievalConfig = {
+export const DEFAULT_RETRIEVAL_CONFIG = {
   mode: "hybrid",
   top_k: 5,
+  score_threshold: 0.3,
   vector: {
     enabled: true,
     top_k: 20,
@@ -543,7 +614,7 @@ export const DEFAULT_RETRIEVAL_CONFIG: RetrievalConfig = {
   fusion: {
     strategy: "rrf",
     rrf_k: 60,
-    alpha: 0.75,
+    alpha: 0.7,
   },
   rerank: {
     enabled: false,
@@ -553,7 +624,7 @@ export const DEFAULT_RETRIEVAL_CONFIG: RetrievalConfig = {
     enabled: false,
     lambda: 0.5,
   },
-};
+} satisfies RetrievalConfig;
 
 // ============================================================
 // Helper Functions
@@ -579,4 +650,84 @@ export function getChunkingModeDescription(mode: ChunkingMode): string {
 export function getRetrievalModeLabel(mode: RetrieveMode): string {
   // Deprecated: use t("knowledge.retrieveModeLabels.<mode>") from i18n
   return mode;
+}
+
+// ============================================================
+// Document Display Status Derivation (PRD T1.1)
+// ============================================================
+
+/**
+ * The fixed display vocabulary the backend stamps onto every document payload
+ * as `display_status` (Dify-parity contract). Kept as a runtime list so the
+ * resolver below can fail-closed against unexpected values.
+ */
+export const DOCUMENT_DISPLAY_STATUS_VOCABULARY: readonly DocumentDisplayStatus[] = [
+  "queuing",
+  "indexing",
+  "paused",
+  "error",
+  "available",
+  "disabled",
+  "archived",
+];
+
+export interface DocumentDisplayStatusInput {
+  status?: string | null;
+  enabled?: boolean | null;
+  archived?: boolean | null;
+  display_status?: DocumentDisplayStatus | string | null;
+}
+
+/**
+ * Client-side mirror of the backend's `derive_document_display_status`.
+ *
+ * Collapses the internal lifecycle vocabulary (waiting/parsing/splitting/
+ * indexing/completed/error plus legacy syncing and upload-phase states) into
+ * the display vocabulary. Precedence, exactly matching the backend:
+ *   archived > error/failed > paused > completed(enabled?) > waiting > else.
+ * Unknown or in-flight states FAIL CLOSED to "indexing" rather than leaking
+ * raw internal text into the UI.
+ */
+export function deriveDisplayStatus(
+  input: DocumentDisplayStatusInput | null | undefined
+): DocumentDisplayStatus {
+  const doc = input ?? {};
+  if (doc.archived === true) {
+    return "archived";
+  }
+  const status = String(doc.status ?? "").trim().toLowerCase();
+  if (status === "error" || status === "failed") {
+    return "error";
+  }
+  if (status === "paused") {
+    return "paused";
+  }
+  if (status === "completed") {
+    return doc.enabled === false ? "disabled" : "available";
+  }
+  if (status === "waiting") {
+    return "queuing";
+  }
+  // parsing/splitting/indexing/syncing/uploading*/unknown in-flight states.
+  return "indexing";
+}
+
+/**
+ * Resolve the display status to render: prefer the backend-stamped
+ * `display_status` when it is a known vocabulary member, otherwise derive it
+ * client-side. This double-safety covers the transition window where some
+ * payloads (e.g. list rows before backend dependency D1 lands) do not yet
+ * carry `display_status`.
+ */
+export function resolveDisplayStatus(
+  doc: DocumentDisplayStatusInput | null | undefined
+): DocumentDisplayStatus {
+  const stamped = doc?.display_status;
+  if (
+    typeof stamped === "string" &&
+    (DOCUMENT_DISPLAY_STATUS_VOCABULARY as readonly string[]).includes(stamped)
+  ) {
+    return stamped as DocumentDisplayStatus;
+  }
+  return deriveDisplayStatus(doc);
 }

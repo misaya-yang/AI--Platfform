@@ -31,6 +31,7 @@ import {
   type VisibilityType,
 } from "@/pages/knowledge/create/datasetCreateModel";
 import type { ChunkingMode } from "@/types/knowledge";
+import { DEFAULT_CHUNKING_CONFIG, DEFAULT_RETRIEVAL_CONFIG } from "@/types/knowledge";
 
 export default function DatasetCreatePage() {
   const navigate = useNavigate();
@@ -54,14 +55,14 @@ export default function DatasetCreatePage() {
   const [urlInput, setUrlInput] = useState("");
   const [urlTitle, setUrlTitle] = useState("");
 
-  const [chunkingMode, setChunkingMode] = useState<ChunkingMode>("automatic");
-  const [maxChunkSize, setMaxChunkSize] = useState(600);
+  const [chunkingMode, setChunkingMode] = useState<ChunkingMode>(DEFAULT_CHUNKING_CONFIG.mode);
+  const [maxChunkSize, setMaxChunkSize] = useState(DEFAULT_CHUNKING_CONFIG.chunk_size);
   const [metadataExtract, setMetadataExtract] = useState(false);
   const [excelHeaderConcat, setExcelHeaderConcat] = useState(false);
   const [multiTurnRewrite, setMultiTurnRewrite] = useState(true);
   const [rerankModel, setRerankModel] = useState("default");
-  const [scoreThreshold, setScoreThreshold] = useState(0.2);
-  const [maxRecall, setMaxRecall] = useState(5);
+  const [scoreThreshold, setScoreThreshold] = useState(DEFAULT_RETRIEVAL_CONFIG.score_threshold);
+  const [maxRecall, setMaxRecall] = useState(DEFAULT_RETRIEVAL_CONFIG.top_k);
 
   const handleChunkingModeSelect = useCallback((mode: ChunkingMode) => {
     setChunkingMode(mode);
@@ -175,18 +176,18 @@ export default function DatasetCreatePage() {
             chunking: {
               mode: chunkingMode,
               chunk_size: maxChunkSize,
-              chunk_overlap: Math.min(50, Math.floor(maxChunkSize * 0.1)),
+              chunk_overlap: Math.min(DEFAULT_CHUNKING_CONFIG.chunk_overlap, Math.floor(maxChunkSize * 0.1)),
               extract_metadata: metadataExtract,
-              remove_extra_spaces: true,
+              remove_extra_spaces: DEFAULT_CHUNKING_CONFIG.remove_extra_spaces,
             },
             retrieval: {
-              mode: "hybrid",
+              mode: DEFAULT_RETRIEVAL_CONFIG.mode,
               top_k: maxRecall,
               score_threshold: scoreThreshold,
               rerank: {
                 enabled: rerankModel !== "default",
                 provider: rerankProvider,
-                model: rerankModel === "default" ? "gte-rerank" : rerankModel,
+                model: rerankModel === "default" ? DEFAULT_RETRIEVAL_CONFIG.rerank.model : rerankModel,
               },
             },
           },

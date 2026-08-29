@@ -1,0 +1,56 @@
+{
+  "program": "kb-rag-ui-t5",
+  "title": "KB 升级 PRD · T5 前端切片（与后端 session 并行）",
+  "created": "2026-08-28",
+  "owner_session": "kb-frontend worktree",
+  "branch": "worktree-kb-frontend",
+  "base_ref": "worktree-kb-rag-upgrade@7a7fc3a",
+  "plan_file": "~/.claude/plans/iridescent-tickling-kahn.md",
+  "prd": "（后端 worktree 未提交）docs/plans/rag-upgrade-prd-2026-08.md + addendum",
+  "boundary": {
+    "owned": [
+      "web/src/pages/knowledge/**",
+      "web/src/api/knowledge.ts",
+      "web/src/api/eval.ts (KB 用法)",
+      "web/src/types/knowledge.ts",
+      "web/src/hooks/useKnowledge.ts",
+      "web/src/i18n/locales/*.json knowledge.* 段",
+      "web/e2e/knowledge-*.spec.ts"
+    ],
+    "forbidden": ["apps/", "src/（网关）", "database/", "Makefile", "harness.yml", "uv.lock", "PRD 文档", "另一 worktree 的任何写入"],
+    "docker_hot_update_migrations_live_ui": "串行，归后端 session 窗口"
+  },
+  "backend_dependencies": {
+    "D1": "list_documents SELECT 补 enabled/archived/阶段时间戳（阻塞 §5-#9/#4 全绿）",
+    "D2": "archived_reason 列 VARCHAR(255) vs schema 2000",
+    "D3": "反馈表+端点（§5-#25 前提）",
+    "D4": "文档/段落列表分页参数",
+    "D5": "迁移 100 遥测读端点（§5-#26 前提）"
+  },
+  "notes": {
+    "unit_tests": "node --test 'web/src/**/*.test.ts'（package.json 无 test script，Node>=22.18 原生 strip-types）",
+    "c1_findings": [
+      "上传对话框 rerank 默认 enabled=true，与平台默认 false 不一致——行为保持不动，C3 决策",
+      "e2e mockPreset 是服务端检索预设夹具（fast/balanced），非 UI 默认值复制，单一来源改造不涉及",
+      "hit-test scoreThreshold 初始 0（0=不过滤）与 fusionMethod 初始 weighted 为工作台语义，刻意保留",
+      "默认值按多数值收敛：wizard chunk 600→500、wizard threshold 0.2→0.3、hit-test denseWeight 0.5→0.7、types 死常量 alpha 0.75→0.7"
+    ]
+  },
+  "active_phase": "C2 拆分 DatasetDetail.tsx",
+  "iterations": [
+    {
+      "phase": "C1",
+      "date": "2026-08-28",
+      "scope": "types+默认值单一来源+deriveDisplayStatus",
+      "result": "done",
+      "evidence": "type-check/lint/build/i18n:check 绿；node --test 46/46（含 12 新测试）",
+      "changes": [
+        "types/knowledge.ts: DocumentStatus 补齐在网词表；+DocumentDisplayStatus/阶段时间戳/归档字段；+deriveDisplayStatus+resolveDisplayStatus（镜像后端 document_service 合同，未知态 fail-closed→indexing）",
+        "DEFAULT_CHUNKING/RETRIEVAL_CONFIG satisfies 化+基线值冻结（单测锁定）",
+        "默认值单一来源接入：DatasetDetail（hit-test/设置编辑/配置载入回退/展示回退）、DatasetCreate 向导、useDatasetUploadController",
+        "e2e mockPreset 不动（服务端预设夹具）"
+      ]
+    }
+  ],
+  "blockers": []
+}
