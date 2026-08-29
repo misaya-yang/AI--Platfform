@@ -27,6 +27,7 @@ from ...persistence.database import (
     index_config_has_reserved_deletion_fence,
     make_dataset_index_deletion_fence,
 )
+from ...persistence.datasets import NON_INGESTION_INDEX_CONFIG_KEYS
 from .chunking import (
     ChunkingConfig,
     flatten_chunks,
@@ -37,6 +38,12 @@ from .common import ensure_dict as _ensure_dict
 from .common import maybe_await
 from .common import permission_rank as _permission_rank
 from .lexical_config import LEXICAL_V1, LexicalConfig, LexicalConfigError
+from .query_observability import (
+    QueryObservationConflictError,
+    decode_query_cursor,
+    encode_query_cursor,
+)
+from .query_preset_config import parse_query_preset_settings
 
 if TYPE_CHECKING:
     from .knowledge_service import KnowledgeService
@@ -53,6 +60,7 @@ _RETRIEVAL_FINGERPRINT_FIELDS = frozenset(
         "enforce_config",
         "fusion",
         "fusion_method",
+        "hyde",
         "keyword_candidate_k",
         "keyword_top_k",
         "lexical",
@@ -62,13 +70,18 @@ _RETRIEVAL_FINGERPRINT_FIELDS = frozenset(
         "mmr_lambda",
         "mmr_threshold",
         "mode",
+        "multi_query_expansion",
         "native_hybrid",
+        "parent_child",
+        "query_rewrite",
         "rerank",
         "rerank_model",
         "rerank_top_n",
         "rrf_k",
         "rrf_weights",
         "score_threshold",
+        "structural_routing",
+        "summary_index",
         "top_k",
         "vector_top_k",
     }
@@ -88,6 +101,16 @@ _RETRIEVAL_NESTED_FINGERPRINT_FIELDS = {
     "rerank": frozenset({"enabled", "provider", "model", "top_n"}),
     "mmr": frozenset({"enabled", "lambda", "threshold"}),
     "rrf_weights": frozenset({"vector", "keyword", "dense", "bm25"}),
+    # T9 dataset switches alter retrieval evidence, so their knobs must change
+    # the cache fingerprint (boolean shorthand survives via the scalar branch).
+    "parent_child": frozenset({"enabled", "return_mode", "fanout_top_k"}),
+    "summary_index": frozenset({"enabled", "prepend_summary"}),
+    "structural_routing": frozenset({"enabled", "mode", "boost", "min_affinity"}),
+    # T2-8 flags are inert today, but registering them keeps the cache version
+    # key ready for the day the eval gate promotes a real behaviour change.
+    "query_rewrite": frozenset({"enabled", "preset"}),
+    "multi_query_expansion": frozenset({"enabled", "preset"}),
+    "hyde": frozenset({"enabled"}),
 }
 _EMBEDDING_FINGERPRINT_FIELDS = frozenset({"base_url", "dimension", "max_concurrent"})
 _DATASET_CONFIG_FIELDS = frozenset(
@@ -441,6 +464,9 @@ def _require_bounded_persisted_retrieval_config(index_config: Any) -> None:
     if not isinstance(retrieval, dict):
         raise ValidationFailedError("index_config.retrieval must be an object")
     _validate_persisted_retrieval_node(retrieval)
+    # T2-8: same parser the retrieval pipeline uses at read time, so a config
+    # that would fail a query can never be persisted (reject/accept parity).
+    parse_query_preset_settings(retrieval)
 
 
 def _require_safe_persisted_chunking_config(index_config: Any) -> None:
@@ -614,7 +640,7 @@ def _ingestion_index_config(index_config: Any) -> dict[str, Any]:
     return {
         key: value
         for key, value in _ensure_dict(index_config).items()
-        if key != "retrieval"
+        if key not in NON_INGESTION_INDEX_CONFIG_KEYS
     }
 
 
@@ -669,10 +695,14 @@ class DatasetService:
                     ds["statistics"] = {
                         "document_count": ds_stats.get("document_count", 0),
                         "segment_count": ds_stats.get("segment_count", 0),
-                        "available_document_count": ds_stats.get("document_count", 0),
-                        "available_segment_count": ds_stats.get("segment_count", 0),
-                        "word_count": 0,
-                        "hit_count": 0,
+                        "available_document_count": ds_stats.get(
+                            "available_document_count", 0
+                        ),
+                        "available_segment_count": ds_stats.get(
+                            "available_segment_count", 0
+                        ),
+                        "word_count": ds_stats.get("word_count", 0),
+                        "hit_count": ds_stats.get("hit_count", 0),
                     }
             except Exception as e:
                 logger.warning(f"Failed to fetch batch statistics: {e}")
@@ -926,6 +956,25 @@ class DatasetService:
         if embedding_changed or indexing_config_changed:
             docs = await self.db.list_documents(dataset_id=dataset_id, limit=1, offset=0)
             if docs:
+                embedding_identity_changed = any(
+                    updated.get(field) != dataset.get(field)
+                    for field in (
+                        "embedding_provider",
+                        "embedding_model",
+                        "embedding_dimension",
+                    )
+                )
+                if embedding_identity_changed:
+                    # T3: a model/dimension change is not an in-place edit once
+                    # vectors exist — it is a blue-green migration. Point the
+                    # operator at the migration endpoint instead of a dead end.
+                    raise ValidationFailedError(
+                        "Cannot change embedding or ingestion index identity when "
+                        "documents exist; an embedding provider/model/dimension "
+                        "change must go through a blue-green migration — POST "
+                        f"/api/v1/knowledge/datasets/{dataset_id}"
+                        "/embedding-migration/start"
+                    )
                 raise ValidationFailedError(
                     "Cannot change embedding or ingestion index identity when documents "
                     "exist; create a reindexed generation"
@@ -1288,6 +1337,132 @@ class DatasetService:
         return deleted
 
     # ========================================================================
+    # Query observability and feedback
+    # ========================================================================
+
+    async def list_query_history(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        *,
+        limit: int = 50,
+        zero_results: bool | None = None,
+        mode: str | None = None,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        _require_not_guest(user)
+        dataset = await self.require_dataset_access(user, dataset_id, required="editor")
+        normalized_mode = str(mode or "").strip().lower() or None
+        if normalized_mode not in {None, "dense", "bm25", "hybrid", "keyword", "vector"}:
+            raise ValidationFailedError("unsupported query-history mode")
+        cursor_created_at = None
+        cursor_id = None
+        if cursor:
+            try:
+                cursor_created_at, cursor_id = decode_query_cursor(cursor)
+            except ValueError as exc:
+                raise ValidationFailedError(str(exc)) from exc
+        page_limit = max(1, min(int(limit), 100))
+        rows = await self.db.list_dataset_queries(
+            dataset_id=dataset_id,
+            tenant_id=str(dataset.get("tenant_id") or ""),
+            limit=page_limit + 1,
+            zero_results=zero_results,
+            mode=normalized_mode,
+            cursor_created_at=cursor_created_at,
+            cursor_id=cursor_id,
+        )
+        has_more = len(rows) > page_limit
+        items = rows[:page_limit]
+        next_cursor = None
+        if has_more and items:
+            next_cursor = encode_query_cursor(items[-1]["created_at"], str(items[-1]["id"]))
+        return {"queries": items, "next_cursor": next_cursor, "has_more": has_more}
+
+    async def upsert_query_feedback(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        *,
+        trace_id: str,
+        query_fingerprint: str,
+        target_type: str,
+        target_id: str,
+        rating: str,
+        reason_code: str,
+        comment: str | None,
+    ) -> dict[str, Any]:
+        _require_not_guest(user)
+        dataset = await self.require_dataset_access(user, dataset_id, required="viewer")
+        tenant_id = str(dataset.get("tenant_id") or "").strip()
+        persisted_fingerprint = await self.db.get_dataset_query_fingerprint(
+            dataset_id=dataset_id,
+            tenant_id=tenant_id,
+            trace_id=trace_id,
+        )
+        if persisted_fingerprint and persisted_fingerprint != query_fingerprint:
+            raise QueryObservationConflictError(
+                "query fingerprint does not match the persisted trace"
+            )
+        feedback = await self.db.upsert_dataset_query_feedback(
+            tenant_id=tenant_id,
+            dataset_id=dataset_id,
+            trace_id=trace_id,
+            query_fingerprint=query_fingerprint,
+            target_type=target_type,
+            target_id=target_id,
+            rating=rating,
+            reason_code=reason_code,
+            comment=str(comment or "").strip() or None,
+            created_by=str(user.user_id),
+        )
+        if not feedback:
+            raise RuntimeError("query feedback persistence is unavailable")
+        return feedback
+
+    async def list_query_feedback(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        *,
+        limit: int = 50,
+        rating: str | None = None,
+        reason_code: str | None = None,
+        target_type: str | None = None,
+        trace_id: str | None = None,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        _require_not_guest(user)
+        dataset = await self.require_dataset_access(user, dataset_id, required="editor")
+        cursor_created_at = None
+        cursor_id = None
+        if cursor:
+            try:
+                cursor_created_at, cursor_id = decode_query_cursor(cursor)
+            except ValueError as exc:
+                raise ValidationFailedError(str(exc)) from exc
+        page_limit = max(1, min(int(limit), 100))
+        rows = await self.db.list_dataset_query_feedback(
+            tenant_id=str(dataset.get("tenant_id") or ""),
+            dataset_id=dataset_id,
+            limit=page_limit + 1,
+            rating=rating,
+            reason_code=reason_code,
+            target_type=target_type,
+            trace_id=trace_id,
+            cursor_created_at=cursor_created_at,
+            cursor_id=cursor_id,
+        )
+        has_more = len(rows) > page_limit
+        items = rows[:page_limit]
+        next_cursor = None
+        if has_more and items:
+            next_cursor = encode_query_cursor(
+                items[-1]["created_at"], str(items[-1]["feedback_id"])
+            )
+        return {"feedback": items, "next_cursor": next_cursor, "has_more": has_more}
+
+    # ========================================================================
     # Permissions
     # ========================================================================
 
@@ -1348,7 +1523,15 @@ class DatasetService:
     async def _effective_dataset_permission(
         self, dataset: dict[str, Any], user: UserContext
     ) -> str | None:
-        if user.tier == "admin" or "admin" in (user.roles or []):
+        dataset_tenant_id = str(dataset.get("tenant_id") or "").strip()
+        user_tenant_id = str(user.tenant_id or "").strip()
+        same_tenant = bool(
+            dataset_tenant_id
+            and user_tenant_id
+            and dataset_tenant_id == user_tenant_id
+        )
+        # ``admin`` is tenant-scoped; it is not a platform-wide dataset grant.
+        if same_tenant and (user.tier == "admin" or "admin" in (user.roles or [])):
             return "owner"
 
         created_by = str(dataset.get("created_by") or "")
@@ -1370,11 +1553,7 @@ class DatasetService:
         visibility = str(dataset.get("visibility") or "private").lower()
         if visibility == "public":
             return "viewer"
-        if (
-            visibility == "tenant"
-            and dataset.get("tenant_id")
-            and dataset.get("tenant_id") == user.tenant_id
-        ):
+        if visibility == "tenant" and same_tenant:
             return "viewer"
 
         return None
@@ -1389,6 +1568,36 @@ class DatasetService:
                 f"Missing dataset permission: {required} (current={perm or 'none'})"
             )
         return dataset
+
+    async def authorize_datasets(
+        self, user: UserContext, dataset_ids: list[str], required: str = "viewer"
+    ) -> list[str]:
+        """Batch ACL filter backing the gateway's agent-runtime authz call.
+
+        PRD T8.2: the gateway resolves agent KB bindings through the KS
+        internal authorize endpoint instead of reading KB tables directly.
+        Returns the subset of ``dataset_ids`` this identity may access at the
+        ``required`` level, preserving request order, de-duplicated. The
+        effective-permission contract is exactly require_dataset_access's —
+        one ACL source of truth for KB. Fail-closed: unknown, soft-deleted,
+        or denied ids simply never appear in the result.
+        """
+
+        allowed: list[str] = []
+        seen: set[str] = set()
+        required_rank = _permission_rank(required)
+        for raw_id in dataset_ids or []:
+            dataset_id = str(raw_id or "").strip()
+            if not dataset_id or dataset_id in seen:
+                continue
+            seen.add(dataset_id)
+            dataset = await self.db.get_dataset(dataset_id)
+            if not dataset:
+                continue
+            perm = await self._effective_dataset_permission(dataset, user)
+            if _permission_rank(perm) >= required_rank:
+                allowed.append(dataset_id)
+        return allowed
 
     def _redact_dataset_secrets(self, dataset: dict[str, Any]) -> dict[str, Any]:
         ds = copy.deepcopy(dataset or {})

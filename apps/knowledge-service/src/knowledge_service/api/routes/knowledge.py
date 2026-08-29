@@ -6,11 +6,24 @@ import copy
 import json
 import logging
 import math
+import uuid
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
@@ -22,7 +35,12 @@ from ...persistence.database import (
     IndexLeaseUnavailableError,
     dataset_index_deletion_fence,
 )
+from ...persistence.document_batches import DocumentBatchStore
+from ...persistence.document_metadata import MetadataRegistryRevisionConflict
+from ...services.knowledge.chunking import validate_persisted_chunking_config
 from ...services.knowledge.common import maybe_await
+from ...services.knowledge.document_detector import DocumentTypeDetector
+from ...services.knowledge.document_metadata import DocumentMetadataManager
 from ...services.knowledge.document_service import (
     _dataset_content_generation,
     _require_dataset_index_readable,
@@ -30,6 +48,7 @@ from ...services.knowledge.document_service import (
     _require_unchanged_dataset_content,
 )
 from ...services.knowledge.knowledge_service import KnowledgeService
+from ...services.knowledge.query_observability import QueryObservationConflictError
 from ...services.knowledge.worker import KnowledgeWorker
 from ..deps import get_knowledge_service, get_knowledge_worker, get_settings, get_user_context
 from ..schemas.knowledge import (
@@ -47,9 +66,15 @@ from ..schemas.knowledge import (
     DocumentCreateTextSchema,
     DocumentCreateUrlSchema,
     DocumentEnableDisableSchema,
+    DocumentMetadataBatchUpdateSchema,
+    DocumentMetadataRegistryUpdateSchema,
     DocumentUpdateSchema,
     QABatchTestSchema,
     QAQuerySchema,
+    QueryFeedbackListSchema,
+    QueryFeedbackSchema,
+    QueryFeedbackUpsertSchema,
+    QueryHistoryListSchema,
     RetrievalEvalRequestSchema,
     RetrieveRequestSchema,
     SegmentBatchEnableDisableSchema,
@@ -57,12 +82,19 @@ from ..schemas.knowledge import (
     SegmentEnableDisableSchema,
     SegmentUpdateSchema,
 )
+from .eval import require_verified_gateway
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 RETRIEVAL_EVAL_MAX_CASES = 20
 RETRIEVAL_EVAL_TIMEOUT_SECONDS = 30.0
+_REPLAY_SNAPSHOT_ACTIONS = frozenset({"reprocess", "recover", "retry"})
+_REPLAY_SNAPSHOT_UNAVAILABLE_DETAIL = (
+    "Replay snapshot persistence is unavailable; document was not queued"
+)
+_PDF_MAX_PAGES_HARD_LIMIT = 2_000
+_PDF_SPLIT_MAX_OUTPUT_BYTES_HARD_LIMIT = 96 * 1024 * 1024
 
 _UNRELEASED_MULTIMODAL_TYPES = frozenset({"image", "page_image", "mixed", "multimodal", "vision"})
 _UNRELEASED_IMAGE_METADATA_KEYS = frozenset(
@@ -79,6 +111,18 @@ _UNRELEASED_IMAGE_METADATA_KEYS = frozenset(
         "vlmdescription",
     }
 )
+
+
+def _document_batch_store(svc: KnowledgeService) -> DocumentBatchStore:
+    return DocumentBatchStore(getattr(svc.db, "_pool", None))
+
+
+def _document_metadata_manager(svc: KnowledgeService) -> DocumentMetadataManager:
+    manager = getattr(svc, "_document_metadata_manager", None)
+    if manager is None:
+        manager = DocumentMetadataManager(svc)
+        svc._document_metadata_manager = manager
+    return manager
 
 
 def _is_unreleased_multimodal_result(item: Any) -> bool:
@@ -183,6 +227,16 @@ def _require_authenticated_user(user: UserContext) -> None:
         raise PermissionDeniedError("Authenticated user required")
 
 
+def _index_lease_conflict(exc: IndexLeaseUnavailableError) -> HTTPException:
+    """Map transient index publication contention to a retryable response."""
+
+    return HTTPException(
+        status_code=409,
+        detail=str(exc),
+        headers={"Retry-After": "1"},
+    )
+
+
 async def _require_authenticated_dataset_editor(
     svc: KnowledgeService,
     user: UserContext,
@@ -230,11 +284,251 @@ async def _try_enqueue_document(
     worker: KnowledgeWorker,
     dataset_id: str,
     document_id: str,
+    *,
+    action: str | None = None,
+    recover_stage: str | None = None,
+    execution_id: str | None = None,
 ) -> bool:
     try:
-        return await worker.enqueue(dataset_id, document_id) is True
+        return (
+            await worker.enqueue(
+                dataset_id,
+                document_id,
+                action=action,
+                recover_stage=recover_stage,
+                execution_id=execution_id,
+            )
+            is True
+        )
     except IndexLeaseUnavailableError:
         return False
+
+
+async def _record_ingest_execution(
+    svc: KnowledgeService,
+    *,
+    dataset_id: str,
+    document_id: str,
+    action: str,
+    trigger_source: str = "api",
+) -> str | None:
+    """Capture the replay snapshot at submission time (PRD T1 / addendum §1).
+
+    The execution row is created BEFORE the claim so the worker replays exactly
+    the configuration the operator saw, never a config mutated mid-flight.
+    reprocess/recover/retry are fail-closed: both immutable snapshots and the
+    document pin must be durable before the queue claim is attempted.
+    """
+
+    snapshot_required = action in _REPLAY_SNAPSHOT_ACTIONS
+    record = getattr(svc.db, "record_pipeline_execution", None)
+    if not callable(record):
+        if snapshot_required:
+            raise HTTPException(
+                status_code=503,
+                detail=_REPLAY_SNAPSHOT_UNAVAILABLE_DETAIL,
+            )
+        return None
+    try:
+        dataset = await svc.db.get_dataset(dataset_id)
+        document = await svc.db.get_document(document_id)
+    except Exception as exc:
+        if snapshot_required:
+            logger.exception(
+                "Failed to read replay snapshot inputs for document %s",
+                document_id,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=_REPLAY_SNAPSHOT_UNAVAILABLE_DETAIL,
+            ) from exc
+        dataset, document = None, None
+
+    if snapshot_required and not isinstance(dataset, Mapping):
+        raise HTTPException(
+            status_code=503,
+            detail=_REPLAY_SNAPSHOT_UNAVAILABLE_DETAIL,
+        )
+    if snapshot_required and not isinstance(document, Mapping):
+        raise HTTPException(
+            status_code=503,
+            detail=_REPLAY_SNAPSHOT_UNAVAILABLE_DETAIL,
+        )
+
+    raw_index_config = (
+        dataset.get("index_config") if isinstance(dataset, Mapping) else None
+    )
+    if raw_index_config is None:
+        raw_index_config = {}
+    if not isinstance(raw_index_config, Mapping):
+        if snapshot_required:
+            raise HTTPException(
+                status_code=503,
+                detail=_REPLAY_SNAPSHOT_UNAVAILABLE_DETAIL,
+            )
+        raw_index_config = {}
+    index_config = copy.deepcopy(dict(raw_index_config))
+    raw_chunking = index_config.get("chunking", {})
+    if raw_chunking is None:
+        raw_chunking = {}
+    if not isinstance(raw_chunking, Mapping):
+        if snapshot_required:
+            raise HTTPException(
+                status_code=503,
+                detail=_REPLAY_SNAPSHOT_UNAVAILABLE_DETAIL,
+            )
+        raw_chunking = {}
+    chunking = copy.deepcopy(dict(raw_chunking))
+    if snapshot_required:
+        validate_persisted_chunking_config(chunking)
+
+    doc_metadata = (
+        document.get("metadata") if isinstance(document, Mapping) else None
+    )
+    processing_mode = str(
+        doc_metadata.get("processing_mode", "text_only")
+        if isinstance(doc_metadata, Mapping)
+        else "text_only"
+    ).strip().lower() or "text_only"
+    input_snapshot: dict[str, Any] = {
+        "index_config": index_config,
+        # Kept as a top-level field for compatibility with pre-upgrade rows.
+        "chunking": chunking,
+        "processing_mode": processing_mode,
+    }
+
+    # PRD T1 item 7: route-submitted verbs record their immutable rule at the
+    # same instant as the execution input. reembed is exempt because vector
+    # repair never executes the chunking dialect.
+    process_rule_id: str | None = None
+    pin_rule = None
+    if action != "reembed":
+        record_rule = getattr(svc.db, "record_process_rule", None)
+        pin_rule = getattr(svc.db, "pin_document_process_rule", None)
+        if snapshot_required and (
+            not callable(record_rule) or not callable(pin_rule)
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail=_REPLAY_SNAPSHOT_UNAVAILABLE_DETAIL,
+            )
+        if callable(record_rule):
+            mode = str(chunking.get("mode") or "automatic").strip().lower()
+            rule_snapshot: dict[str, Any] = {
+                "index_config": copy.deepcopy(index_config),
+                "chunking": copy.deepcopy(chunking),
+                "processing_mode": processing_mode,
+            }
+            try:
+                recorded_rule_id = await record_rule(
+                    dataset_id,
+                    mode=mode or "automatic",
+                    rules=rule_snapshot,
+                )
+                process_rule_id = str(recorded_rule_id or "").strip() or None
+                if snapshot_required and process_rule_id is None:
+                    raise RuntimeError("process-rule snapshot returned no id")
+            except Exception as exc:
+                logger.exception(
+                    "Failed to record process-rule snapshot for document %s",
+                    document_id,
+                )
+                if snapshot_required:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=_REPLAY_SNAPSHOT_UNAVAILABLE_DETAIL,
+                    ) from exc
+                process_rule_id = None
+
+    try:
+        recorded_execution_id = await record(
+            document_id,
+            dataset_id,
+            action=action,
+            trigger_source=trigger_source,
+            process_rule_id=process_rule_id,
+            input_snapshot=input_snapshot,
+        )
+        execution_id = str(recorded_execution_id or "").strip() or None
+        if snapshot_required and execution_id is None:
+            raise RuntimeError("pipeline execution ledger returned no id")
+    except Exception as exc:
+        logger.exception(
+            "Failed to record pipeline execution for document %s", document_id
+        )
+        if snapshot_required:
+            raise HTTPException(
+                status_code=503,
+                detail=_REPLAY_SNAPSHOT_UNAVAILABLE_DETAIL,
+            ) from exc
+        return None
+
+    if process_rule_id and callable(pin_rule):
+        try:
+            pinned = await pin_rule(document_id, process_rule_id)
+            if not pinned:
+                raise RuntimeError("document process-rule pin was not persisted")
+        except Exception as exc:
+            logger.exception(
+                "Failed to pin process-rule snapshot for document %s",
+                document_id,
+            )
+            await _fail_ingest_execution(
+                svc,
+                execution_id,
+                "process-rule document pin failed before queue claim",
+            )
+            if snapshot_required:
+                raise HTTPException(
+                    status_code=503,
+                    detail=_REPLAY_SNAPSHOT_UNAVAILABLE_DETAIL,
+                ) from exc
+
+    return execution_id
+
+
+async def _fail_ingest_execution(
+    svc: KnowledgeService, execution_id: str | None, error: str
+) -> None:
+    if not execution_id:
+        return
+    complete = getattr(svc.db, "complete_pipeline_execution", None)
+    if not callable(complete):
+        return
+    with contextlib.suppress(Exception):
+        await complete(execution_id, status="error", error=error)
+
+
+def _stage_timestamp(value: Any) -> float | None:
+    if value is None or not hasattr(value, "timestamp"):
+        return None
+    try:
+        return float(value.timestamp())
+    except Exception:
+        return None
+
+
+def _latest_stage_reached(document: Mapping[str, Any]) -> str | None:
+    """Derive the recover branch from the furthest stage timestamp."""
+
+    best_stage: str | None = None
+    best_value: float | None = None
+    for stage in ("indexing", "splitting", "parsing"):
+        value = _stage_timestamp(document.get(f"{stage}_started_at"))
+        if value is None:
+            continue
+        if best_value is None or value > best_value:
+            best_stage, best_value = stage, value
+    return best_stage
+
+
+async def _get_route_document_or_404(
+    svc: KnowledgeService, dataset_id: str, document_id: str
+) -> dict[str, Any]:
+    document = await svc.db.get_document(document_id)
+    if not document or str(document.get("dataset_id") or "") != dataset_id:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return document
 
 
 async def _require_active_document(
@@ -371,7 +665,9 @@ async def get_dataset(
 ):
     try:
         dataset = await svc.require_dataset_access(user, dataset_id, required="viewer")
-        return svc.sanitize_dataset_for_response(dataset)
+        result = svc.sanitize_dataset_for_response(dataset)
+        result["my_permission"] = await svc._effective_dataset_permission(dataset, user)
+        return result
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
@@ -475,11 +771,23 @@ async def revoke_dataset_permission(
 @router.get("/knowledge/{dataset_id}/documents")
 async def list_documents(
     dataset_id: str,
+    response: Response,
+    # D4 (frontend handoff): pagination. The body stays a bare array for
+    # backwards compatibility; the page total is exposed via X-Total-Count.
+    limit: int = Query(default=200, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     svc: KnowledgeService = Depends(get_knowledge_service),
     user: UserContext = Depends(get_user_context),
 ):
     try:
-        return await svc.list_documents(user, dataset_id)
+        page = await svc.list_documents_page(
+            user,
+            dataset_id,
+            limit=limit,
+            offset=offset,
+        )
+        response.headers["X-Total-Count"] = str(page["total"])
+        return page["items"]
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
@@ -516,6 +824,111 @@ async def create_document_text(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+class _PDFSplitError(ValueError):
+    """The uploaded PDF cannot be split safely."""
+
+
+class _PDFSplitLimitExceeded(_PDFSplitError):
+    """A PDF page or expanded-output safety limit was exceeded."""
+
+
+@dataclass(frozen=True)
+class _PDFSplitPart:
+    first_page: int
+    last_page: int
+    path: str
+
+
+def _split_pdf_parts_to_temp_sync(
+    source_path: str | Path,
+    pages_per_part: int,
+    *,
+    max_pages: int,
+    max_output_bytes: int,
+    temp_dir: str,
+) -> tuple[int, list[_PDFSplitPart]]:
+    """Split a path-backed PDF into bounded temporary files.
+
+    The source document and one output document are open at a time; PDF bytes
+    are never accumulated in memory. The caller must consume and remove the
+    returned paths. Any failure before return removes every path created here.
+    Run this CPU-bound function through ``asyncio.to_thread``.
+    """
+    import tempfile
+
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz  # type: ignore
+
+    if pages_per_part < 1:
+        raise _PDFSplitError("PDF pages per part must be positive")
+    if max_pages < 1 or max_output_bytes < 1:
+        raise _PDFSplitError("PDF safety limits must be positive")
+
+    created_paths: list[Path] = []
+    source_doc = None
+    try:
+        source_doc = fitz.open(str(source_path))
+        total_pages = len(source_doc)
+        if total_pages < 1:
+            raise _PDFSplitError("PDF contains no pages")
+        if total_pages > max_pages:
+            raise _PDFSplitLimitExceeded(
+                f"PDF has {total_pages} pages; maximum allowed is {max_pages}"
+            )
+
+        parts: list[_PDFSplitPart] = []
+        total_output_bytes = 0
+        for start in range(0, total_pages, pages_per_part):
+            end = min(start + pages_per_part, total_pages)
+            part_doc = fitz.open()
+            try:
+                part_doc.insert_pdf(source_doc, from_page=start, to_page=end - 1)
+                with tempfile.NamedTemporaryFile(
+                    delete=False,
+                    suffix=".pdf",
+                    prefix="kb_pdf_part_",
+                    dir=temp_dir,
+                ) as handle:
+                    part_path = Path(handle.name)
+                created_paths.append(part_path)
+                part_doc.save(str(part_path))
+            finally:
+                with contextlib.suppress(Exception):
+                    part_doc.close()
+
+            part_size = part_path.stat().st_size
+            total_output_bytes += part_size
+            if total_output_bytes > max_output_bytes:
+                raise _PDFSplitLimitExceeded(
+                    "PDF split output exceeds the cumulative safety limit of "
+                    f"{max_output_bytes} bytes"
+                )
+            parts.append(
+                _PDFSplitPart(
+                    first_page=start + 1,
+                    last_page=end,
+                    path=str(part_path),
+                )
+            )
+        return total_pages, parts
+    except _PDFSplitError:
+        for path in created_paths:
+            with contextlib.suppress(OSError):
+                path.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        for path in created_paths:
+            with contextlib.suppress(OSError):
+                path.unlink(missing_ok=True)
+        raise _PDFSplitError("PDF could not be split safely") from exc
+    finally:
+        if source_doc is not None:
+            with contextlib.suppress(Exception):
+                source_doc.close()
+
+
 @router.post("/knowledge/{dataset_id}/documents/upload")
 async def upload_document(
     dataset_id: str,
@@ -542,15 +955,34 @@ async def upload_document(
             - scanned: Page-as-Image vision embedding (for scanned PDFs)
             - multimodal: Combined text + image embedding
     """
-    import os
     import tempfile
 
     ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".html"}
-    KB_MAX_FILE_SIZE_MB = max(1, min(int(os.getenv("KB_MAX_FILE_SIZE_MB", "16")), 48))
+    KB_MAX_FILE_SIZE_MB = max(1, min(settings.kb_max_file_size_mb, 48))
     KB_MAX_FILE_SIZE = KB_MAX_FILE_SIZE_MB * 1024 * 1024
+    PDF_MAX_PAGES = max(
+        1,
+        min(
+            int(getattr(settings, "kb_pdf_max_pages", _PDF_MAX_PAGES_HARD_LIMIT)),
+            _PDF_MAX_PAGES_HARD_LIMIT,
+        ),
+    )
+    PDF_SPLIT_MAX_OUTPUT_BYTES = max(
+        1,
+        min(
+            int(
+                getattr(
+                    settings,
+                    "kb_pdf_split_max_output_bytes",
+                    _PDF_SPLIT_MAX_OUTPUT_BYTES_HARD_LIMIT,
+                )
+            ),
+            _PDF_SPLIT_MAX_OUTPUT_BYTES_HARD_LIMIT,
+        ),
+    )
     CHUNK_SIZE = 64 * 1024  # 64KB
 
-    temp_path = None
+    temp_workspace = None
     try:
         dataset = await _require_authenticated_dataset_editor(svc, user, dataset_id)
         _require_dataset_index_writable(dataset)
@@ -573,21 +1005,25 @@ async def upload_document(
                 f"Unsupported file type: {ext}. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
             )
 
-        # Stream upload to temp file to avoid memory exhaustion
-        with tempfile.NamedTemporaryFile(delete=False, suffix=ext, prefix="kb_upload_") as tmp:
-            temp_path = tmp.name
+        # One private workspace owns the source and every derived part. Its
+        # final cleanup is the last-resort fence for cancellation or failures.
+        temp_workspace = tempfile.TemporaryDirectory(prefix="kb_upload_")
+        temp_path = Path(temp_workspace.name) / f"source{ext}"
 
         size_bytes = 0
-        with open(temp_path, "wb") as out:
+        with temp_path.open("wb") as out:
             while True:
                 chunk = await file.read(CHUNK_SIZE)
                 if not chunk:
                     break
                 size_bytes += len(chunk)
                 if size_bytes > KB_MAX_FILE_SIZE:
-                    raise ValidationFailedError(
-                        f"File too large: {size_bytes / 1024 / 1024:.1f}MB exceeds "
-                        f"limit of {KB_MAX_FILE_SIZE_MB}MB"
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(
+                            f"File too large: {size_bytes / 1024 / 1024:.1f}MB exceeds "
+                            f"limit of {KB_MAX_FILE_SIZE_MB}MB"
+                        ),
                     )
                 out.write(chunk)
 
@@ -599,50 +1035,83 @@ async def upload_document(
             processing_mode,
         )
 
-        # Read back for document creation (service layer stores original to OSS/S3)
-        with open(temp_path, "rb") as f:
-            content = f.read()
+        PDF_SPLIT_THRESHOLD = (
+            max(0, min(int(settings.kb_pdf_split_max_size_mb), 48)) * 1024 * 1024
+        )
+        PDF_SPLIT_PAGES = max(
+            1,
+            min(int(settings.kb_pdf_split_pages_per_part), PDF_MAX_PAGES),
+        )
 
-        # --- Auto-split large PDFs ---
-        PDF_SPLIT_THRESHOLD = int(os.getenv("KB_PDF_SPLIT_MAX_SIZE_MB", "20")) * 1024 * 1024
-        PDF_SPLIT_PAGES = int(os.getenv("KB_PDF_SPLIT_PAGES_PER_PART", "500"))
+        # Probe every PDF from its path before any document row or object is
+        # published. This bounds compressed high-page-count files as well as
+        # PDFs large enough to enter the split path.
+        if ext == ".pdf":
+            detection = await DocumentTypeDetector().detect(
+                temp_path,
+                filename=filename,
+                mime_type=file.content_type or "application/pdf",
+            )
+            if detection.page_count is None:
+                raise ValidationFailedError("Invalid or unreadable PDF")
+            if detection.page_count > PDF_MAX_PAGES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        f"PDF has {detection.page_count} pages; maximum allowed is "
+                        f"{PDF_MAX_PAGES}"
+                    ),
+                )
 
         if ext == ".pdf" and size_bytes > PDF_SPLIT_THRESHOLD:
-            import math
-
-            import fitz
-
-            doc_fitz = fitz.open(stream=content, filetype="pdf")
-            total_pages = len(doc_fitz)
-            num_parts = math.ceil(total_pages / PDF_SPLIT_PAGES)
+            try:
+                total_pages, parts = await asyncio.to_thread(
+                    _split_pdf_parts_to_temp_sync,
+                    temp_path,
+                    PDF_SPLIT_PAGES,
+                    max_pages=PDF_MAX_PAGES,
+                    max_output_bytes=PDF_SPLIT_MAX_OUTPUT_BYTES,
+                    temp_dir=temp_workspace.name,
+                )
+            except _PDFSplitLimitExceeded as exc:
+                raise HTTPException(status_code=413, detail=str(exc)) from exc
+            except _PDFSplitError as exc:
+                logger.warning("Rejected unsafe PDF split for %s: %s", filename, exc)
+                raise ValidationFailedError("Invalid or unreadable PDF") from exc
 
             logger.info(
                 "Auto-splitting large PDF: %s (%d pages, %.1fMB) into %d parts",
                 filename,
                 total_pages,
                 size_bytes / 1024 / 1024,
-                num_parts,
+                len(parts),
             )
 
             results = []
-            for i in range(num_parts):
-                start = i * PDF_SPLIT_PAGES
-                end = min(start + PDF_SPLIT_PAGES, total_pages)
-                part_doc = fitz.open()
-                part_doc.insert_pdf(doc_fitz, from_page=start, to_page=end - 1)
-                part_bytes = part_doc.tobytes()
-                part_doc.close()
-
-                part_name = f"{Path(filename).stem}_Part_{i + 1}_p{start + 1}-{end}.pdf"
-
-                doc = await svc.create_document_from_upload(
-                    user,
-                    dataset_id,
-                    filename=part_name,
-                    content_bytes=part_bytes,
-                    mime_type="application/pdf",
-                    processing_mode=processing_mode,
+            for i, part in enumerate(parts):
+                part_name = (
+                    f"{Path(filename).stem}_Part_{i + 1}_"
+                    f"p{part.first_page}-{part.last_page}.pdf"
                 )
+                part_path = Path(part.path)
+                try:
+                    # The service contract still accepts bytes, so load only
+                    # the current bounded part and release it before enqueueing.
+                    part_bytes = await asyncio.to_thread(part_path.read_bytes)
+                    try:
+                        doc = await svc.create_document_from_upload(
+                            user,
+                            dataset_id,
+                            filename=part_name,
+                            content_bytes=part_bytes,
+                            mime_type="application/pdf",
+                            processing_mode=processing_mode,
+                        )
+                    finally:
+                        del part_bytes
+                finally:
+                    with contextlib.suppress(OSError):
+                        part_path.unlink(missing_ok=True)
                 await _enqueue_document_or_conflict(
                     worker,
                     dataset_id,
@@ -652,14 +1121,12 @@ async def upload_document(
                 logger.info(
                     "Part %d/%d created: %s, pages %d-%d, doc=%s",
                     i + 1,
-                    num_parts,
+                    len(parts),
                     part_name,
-                    start + 1,
-                    end,
+                    part.first_page,
+                    part.last_page,
                     doc["document_id"],
                 )
-
-            doc_fitz.close()
 
             return {
                 "status": "split_and_queued",
@@ -670,6 +1137,9 @@ async def upload_document(
             }
 
         # --- Standard single-document upload ---
+        # The storage contract accepts bytes. This read remains bounded by the
+        # 48 MiB compressed-upload fence and runs off the event loop.
+        content = await asyncio.to_thread(temp_path.read_bytes)
         doc = await svc.create_document_from_upload(
             user,
             dataset_id,
@@ -691,9 +1161,9 @@ async def upload_document(
     except ValidationFailedError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     finally:
-        if temp_path:
+        if temp_workspace is not None:
             with contextlib.suppress(Exception):
-                os.unlink(temp_path)
+                temp_workspace.cleanup()
 
 
 @router.post("/knowledge/{dataset_id}/documents/batch-upload")
@@ -734,18 +1204,18 @@ async def batch_upload_documents(
         dataset = await _require_authenticated_dataset_editor(svc, user, dataset_id)
         _require_dataset_index_writable(dataset)
 
-        MAX_FILES = 63
+        MAX_FILES = 50
         CHUNK_SIZE = 64 * 1024  # 64KB chunks for streaming
         ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".html"}
         max_file_size_mb = max(
             1,
-            min(int(os.getenv("KB_MAX_FILE_SIZE_MB", "16")), 48),
+            min(settings.kb_max_file_size_mb, 48),
         )
         max_file_size = max_file_size_mb * 1024 * 1024
         max_batch_size_mb = max(
             1,
             min(
-                int(os.getenv("KB_MAX_BATCH_SIZE_MB", "32")),
+                settings.kb_max_batch_size_mb,
                 48,
             ),
         )
@@ -983,17 +1453,233 @@ async def reindex_document(
     worker: KnowledgeWorker = Depends(get_knowledge_worker),
     user: UserContext = Depends(get_user_context),
 ):
+    """PRD T1 item 3: reindex is the reembed verb — in-place vector repair.
+
+    The document is never re-parsed or re-split; persisted chunks keep their
+    segment and point identity, so the serving generation never goes dark.
+    """
+
     try:
         dataset = await svc.require_dataset_access(user, dataset_id, required="editor")
         _require_dataset_index_writable(dataset)
-        queued = await _try_enqueue_document(worker, dataset_id, document_id)
+        document = await _get_route_document_or_404(svc, dataset_id, document_id)
+        if str(document.get("status") or "") == "waiting":
+            # Contract B2: an already-queued generation belongs to the queue.
+            # Rejecting here also prevents the identical-verb re-claim from
+            # re-pinning a fresh ledger row over the queued one's.
+            raise HTTPException(
+                status_code=409,
+                detail="Document is already queued; the durable queue owns this generation",
+            )
+        execution_id = await _record_ingest_execution(
+            svc,
+            dataset_id=dataset_id,
+            document_id=document_id,
+            action="reembed",
+        )
+        queued = await _try_enqueue_document(
+            worker,
+            dataset_id,
+            document_id,
+            action="reembed",
+            execution_id=execution_id,
+        )
         if not queued:
+            await _fail_ingest_execution(
+                svc, execution_id, "reembed claim rejected or ineligible document"
+            )
             raise HTTPException(
                 status_code=409,
                 detail="Document is already queued/processing or is not eligible for reindex",
             )
-        logger.info("Reindex queued for document %s (dataset=%s)", document_id, dataset_id)
-        return {"status": "queued", "document_id": document_id}
+        logger.info("Reindex (reembed) queued for document %s (dataset=%s)", document_id, dataset_id)
+        return {"status": "queuing", "document_id": document_id}
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/knowledge/{dataset_id}/documents/{document_id}/reprocess")
+async def reprocess_document(
+    dataset_id: str,
+    document_id: str,
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    worker: KnowledgeWorker = Depends(get_knowledge_worker),
+    user: UserContext = Depends(get_user_context),
+):
+    """PRD T1 item 3: full pipeline rerun with the submission-time snapshot.
+
+    Replays the chunking configuration captured when THIS request was
+    submitted, so a concurrent dataset-config change can never split the
+    generation mid-flight (addendum §1 anti-drift contract).
+    """
+
+    try:
+        dataset = await svc.require_dataset_access(user, dataset_id, required="editor")
+        _require_dataset_index_writable(dataset)
+        document = await _get_route_document_or_404(svc, dataset_id, document_id)
+        if str(document.get("status") or "") == "waiting":
+            raise HTTPException(
+                status_code=409,
+                detail="Document is already queued; the durable queue owns this generation",
+            )
+        execution_id = await _record_ingest_execution(
+            svc,
+            dataset_id=dataset_id,
+            document_id=document_id,
+            action="reprocess",
+        )
+        queued = await _try_enqueue_document(
+            worker,
+            dataset_id,
+            document_id,
+            action="reprocess",
+            execution_id=execution_id,
+        )
+        if not queued:
+            await _fail_ingest_execution(
+                svc, execution_id, "reprocess claim rejected or ineligible document"
+            )
+            raise HTTPException(
+                status_code=409,
+                detail="Document is already queued/processing or is not eligible for reprocess",
+            )
+        logger.info("Reprocess queued for document %s (dataset=%s)", document_id, dataset_id)
+        return {"status": "queuing", "document_id": document_id, "action": "reprocess"}
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/knowledge/{dataset_id}/documents/{document_id}/recover")
+async def recover_document(
+    dataset_id: str,
+    document_id: str,
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    worker: KnowledgeWorker = Depends(get_knowledge_worker),
+    user: UserContext = Depends(get_user_context),
+):
+    """PRD T1 item 4: manual incremental continuation of a dead generation.
+
+    The replay branch is derived from the furthest stage timestamp: a death
+    in 'indexing' re-embeds persisted chunks in place; deaths in
+    'parsing'/'splitting' redo the full pipeline. Documents still mid-flight
+    are owned by automatic crash recovery and are rejected here.
+    """
+
+    try:
+        dataset = await svc.require_dataset_access(user, dataset_id, required="editor")
+        _require_dataset_index_writable(dataset)
+        document = await _get_route_document_or_404(svc, dataset_id, document_id)
+        status = str(document.get("status") or "")
+        if status == "waiting":
+            raise HTTPException(
+                status_code=409,
+                detail="Document is already queued; automatic crash recovery owns it",
+            )
+        if status in ("parsing", "splitting", "indexing"):
+            raise HTTPException(
+                status_code=409,
+                detail="Document is still processing; automatic crash recovery owns it",
+            )
+        recover_stage = _latest_stage_reached(document)
+        execution_id = await _record_ingest_execution(
+            svc,
+            dataset_id=dataset_id,
+            document_id=document_id,
+            action="recover",
+        )
+        queued = await _try_enqueue_document(
+            worker,
+            dataset_id,
+            document_id,
+            action="recover",
+            recover_stage=recover_stage,
+            execution_id=execution_id,
+        )
+        if not queued:
+            await _fail_ingest_execution(
+                svc, execution_id, "recover claim rejected or ineligible document"
+            )
+            raise HTTPException(
+                status_code=409,
+                detail="Document is already queued/processing or is not eligible for recover",
+            )
+        logger.info(
+            "Recover queued for document %s (dataset=%s, stage=%s)",
+            document_id,
+            dataset_id,
+            recover_stage,
+        )
+        receipt: dict[str, Any] = {
+            "status": "queuing",
+            "document_id": document_id,
+            "action": "recover",
+        }
+        if recover_stage:
+            receipt["recover_stage"] = recover_stage
+        return receipt
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/knowledge/{dataset_id}/documents/{document_id}/retry")
+async def retry_document(
+    dataset_id: str,
+    document_id: str,
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    worker: KnowledgeWorker = Depends(get_knowledge_worker),
+    user: UserContext = Depends(get_user_context),
+):
+    """PRD T1 item 4: rerun from a pinned snapshot with atomic publication.
+
+    Unlike recover-from-indexing, retry re-enters parsing/chunking. The prior
+    serving rows and points remain readable until the replacement commits;
+    failure or cancellation restores the old generation.
+    """
+
+    try:
+        dataset = await svc.require_dataset_access(user, dataset_id, required="editor")
+        _require_dataset_index_writable(dataset)
+        document = await _get_route_document_or_404(svc, dataset_id, document_id)
+        status = str(document.get("status") or "")
+        if status == "waiting":
+            raise HTTPException(
+                status_code=409,
+                detail="Document is already queued; wait for it to run or be recovered",
+            )
+        if status in ("parsing", "splitting", "indexing"):
+            raise HTTPException(
+                status_code=409,
+                detail="Document is still processing; wait for it to finish or be recovered",
+            )
+        execution_id = await _record_ingest_execution(
+            svc,
+            dataset_id=dataset_id,
+            document_id=document_id,
+            action="retry",
+        )
+        queued = await _try_enqueue_document(
+            worker,
+            dataset_id,
+            document_id,
+            action="retry",
+            execution_id=execution_id,
+        )
+        if not queued:
+            await _fail_ingest_execution(
+                svc, execution_id, "retry claim rejected or ineligible document"
+            )
+            raise HTTPException(
+                status_code=409,
+                detail="Document is already queued/processing or is not eligible for retry",
+            )
+        logger.info("Retry queued for document %s (dataset=%s)", document_id, dataset_id)
+        return {"status": "queuing", "document_id": document_id, "action": "retry"}
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
@@ -1019,15 +1705,36 @@ async def delete_document(
 @router.get("/knowledge/{dataset_id}/segments")
 async def list_segments(
     dataset_id: str,
+    response: Response,
     document_id: str | None = Query(default=None),
     q: str | None = Query(default=None),
+    # D4 (frontend handoff): pagination; total exposed via X-Total-Count.
+    limit: int = Query(default=500, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     svc: KnowledgeService = Depends(get_knowledge_service),
     user: UserContext = Depends(get_user_context),
 ):
     try:
-        return await svc.list_segments(user, dataset_id, document_id=document_id, q=q)
+        page = await svc.list_segments_page(
+            user,
+            dataset_id,
+            document_id=document_id,
+            q=q,
+            limit=limit,
+            offset=offset,
+        )
+        response.headers["X-Total-Count"] = str(page["total"])
+        return page["items"]
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        if str(exc) == "dataset content generation changed during read; retry the request":
+            raise HTTPException(
+                status_code=409,
+                detail=str(exc),
+                headers={"Retry-After": "1"},
+            ) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.put("/knowledge/{dataset_id}/segments/{segment_id}")
@@ -1039,7 +1746,14 @@ async def update_segment(
     user: UserContext = Depends(get_user_context),
 ):
     try:
-        return await svc.update_segment(user, dataset_id, segment_id, new_text=payload.text)
+        return await svc.update_segment(
+            user,
+            dataset_id,
+            segment_id,
+            new_text=payload.text,
+            new_answer=payload.answer,
+            new_keywords=payload.keywords,
+        )
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
@@ -1257,7 +1971,24 @@ async def retrieve(
                 user=user,
             )
 
-            # Build hierarchical response
+            hierarchical_metadata = svc.record_external_retrieval_observation(
+                user=user,
+                dataset_id=dataset_id,
+                query=payload.query,
+                mode="hybrid",
+                top_k=payload.top_k,
+                results=hierarchical_results,
+                meta={
+                    "strategy": hierarchical_meta.strategy,
+                    "l1_candidates": hierarchical_meta.l1_candidates,
+                    "l2_candidates": hierarchical_meta.l2_candidates,
+                    "l3_results": hierarchical_meta.l3_results,
+                    "total_time_ms": hierarchical_meta.total_time_ms,
+                    "filtered_documents": hierarchical_meta.filtered_documents,
+                    "timings_ms": {"total_ms": hierarchical_meta.total_time_ms},
+                },
+                source="hierarchical",
+            )
             return {
                 "results": [
                     {
@@ -1272,14 +2003,9 @@ async def retrieve(
                     }
                     for r in hierarchical_results
                 ],
-                "metadata": {
-                    "strategy": hierarchical_meta.strategy,
-                    "l1_candidates": hierarchical_meta.l1_candidates,
-                    "l2_candidates": hierarchical_meta.l2_candidates,
-                    "l3_results": hierarchical_meta.l3_results,
-                    "total_time_ms": hierarchical_meta.total_time_ms,
-                    "filtered_documents": hierarchical_meta.filtered_documents,
-                },
+                "metadata": hierarchical_metadata,
+                "trace_id": hierarchical_metadata["trace_id"],
+                "query_fingerprint": hierarchical_metadata["query_fingerprint"],
             }
 
         # Use multimodal retrieval if include_associated_images is requested
@@ -1375,9 +2101,13 @@ async def retrieve(
                 for r in retrieval_results
             ],
             "metadata": retrieval_meta,
+            "trace_id": retrieval_meta.get("trace_id"),
+            "query_fingerprint": retrieval_meta.get("query_fingerprint"),
         }
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    except IndexLeaseUnavailableError as exc:
+        raise _index_lease_conflict(exc) from exc
     except ValidationFailedError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -1454,9 +2184,13 @@ async def retrieve_batch(
             "total_queries": meta.get("total_queries", len(queries)),
             "total_results": meta.get("total_results", 0),
             "execution_time_ms": meta.get("execution_time_ms", 0),
+            "trace_id": meta.get("trace_id"),
+            "query_fingerprint": meta.get("query_fingerprint"),
         }
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    except IndexLeaseUnavailableError as exc:
+        raise _index_lease_conflict(exc) from exc
     except ValidationFailedError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -1497,6 +2231,7 @@ async def hit_test(
             mmr=payload.mmr,
             mmr_lambda=payload.mmr_lambda,
             mmr_threshold=payload.mmr_threshold,
+            telemetry_source="hit_test",
         )
         return {
             "results": [
@@ -1510,9 +2245,13 @@ async def hit_test(
                 for r in results
             ],
             "metadata": meta,
+            "trace_id": meta.get("trace_id"),
+            "query_fingerprint": meta.get("query_fingerprint"),
         }
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    except IndexLeaseUnavailableError as exc:
+        raise _index_lease_conflict(exc) from exc
     except ValidationFailedError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -1961,6 +2700,68 @@ async def list_retrieval_presets():
     }
 
 
+@router.get("/knowledge/{dataset_id}/metadata-schema")
+async def get_document_metadata_schema(
+    dataset_id: str,
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    try:
+        return await _document_metadata_manager(svc).get_registry(user, dataset_id)
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.put("/knowledge/{dataset_id}/metadata-schema")
+async def update_document_metadata_schema(
+    dataset_id: str,
+    payload: DocumentMetadataRegistryUpdateSchema = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    try:
+        return await _document_metadata_manager(svc).update_registry(
+            user,
+            dataset_id,
+            expected_revision=payload.expected_revision,
+            fields=[field.model_dump(exclude_none=True) for field in payload.fields],
+        )
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except MetadataRegistryRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.patch("/knowledge/{dataset_id}/documents/metadata/batch")
+async def batch_update_document_metadata(
+    dataset_id: str,
+    payload: DocumentMetadataBatchUpdateSchema = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    try:
+        return await _document_metadata_manager(svc).patch_documents(
+            user,
+            dataset_id,
+            payload.document_ids,
+            metadata_patch=payload.metadata_patch,
+            metadata_remove=payload.metadata_remove,
+            metadata_schema_revision=payload.metadata_schema_revision,
+        )
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except MetadataRegistryRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except IndexLeaseUnavailableError as exc:
+        raise _index_lease_conflict(exc) from exc
+
+
 @router.patch("/knowledge/{dataset_id}/documents/{document_id}")
 async def update_document(
     dataset_id: str,
@@ -1971,14 +2772,29 @@ async def update_document(
 ):
     """Update document metadata."""
     try:
+        if payload.metadata_patch is not None or payload.metadata_remove is not None:
+            return await _document_metadata_manager(svc).patch_document(
+                user,
+                dataset_id,
+                document_id,
+                metadata_patch=payload.metadata_patch or {},
+                metadata_remove=payload.metadata_remove or [],
+                metadata_schema_revision=int(payload.metadata_schema_revision or 0),
+            )
         doc = await svc.update_document(
             user, dataset_id, document_id, payload.model_dump(exclude_none=True)
         )
         return doc
     except PermissionDeniedError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except MetadataRegistryRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="document not found") from exc
+    except IndexLeaseUnavailableError as exc:
+        raise _index_lease_conflict(exc) from exc
     except ValidationFailedError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/knowledge/preview")
@@ -2066,7 +2882,7 @@ async def batch_create_documents(
         results["documents"] = queued_documents
         results["queued_count"] = len(queued_documents)
         results["skipped_document_ids"] = skipped_document_ids
-        results["status"] = "partial" if skipped_document_ids else "queued"
+        results["status"] = "partial" if skipped_document_ids else "queuing"
         return results
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
@@ -2074,68 +2890,84 @@ async def batch_create_documents(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-@router.post("/knowledge/{dataset_id}/documents/batch-reindex")
+@router.post("/knowledge/{dataset_id}/documents/batch-reindex", status_code=202)
 async def batch_reindex_documents(
     dataset_id: str,
     payload: BatchReindexSchema = Body(...),
     svc: KnowledgeService = Depends(get_knowledge_service),
-    worker: KnowledgeWorker = Depends(get_knowledge_worker),
     user: UserContext = Depends(get_user_context),
 ):
-    """Batch reindex documents."""
+    """Persist a fair, restart-safe reembed operation."""
     try:
         dataset = await svc.require_dataset_access(user, dataset_id, required="editor")
         _require_dataset_index_writable(dataset)
-
-        if payload.all_documents:
-            docs = await svc.list_documents(user, dataset_id)
-            doc_ids = [d["document_id"] for d in docs]
-        else:
-            doc_ids = payload.document_ids
-
-        queued_ids = []
-        skipped_ids = []
-        for doc_id in doc_ids:
-            if await _try_enqueue_document(worker, dataset_id, doc_id):
-                queued_ids.append(doc_id)
-            else:
-                skipped_ids.append(doc_id)
-
-        if skipped_ids and not queued_ids:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "message": "No document entered a new ingestion generation",
-                    "skipped_document_ids": skipped_ids,
-                },
-            )
-        return {
-            "status": "partial" if skipped_ids else "queued",
-            "document_count": len(queued_ids),
-            "queued_document_ids": queued_ids,
-            "skipped_document_ids": skipped_ids,
-        }
+        return await _document_batch_store(svc).create_operation(
+            tenant_id=str(dataset.get("tenant_id") or ""),
+            dataset_id=dataset_id,
+            operation="reembed",
+            created_by=user.user_id,
+            actor_roles=user.roles or [],
+            document_ids=payload.document_ids,
+            all_documents=payload.all_documents,
+        )
     except PermissionDeniedError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValidationFailedError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@router.post("/knowledge/{dataset_id}/documents/batch-delete")
+@router.post("/knowledge/{dataset_id}/documents/batch-delete", status_code=202)
 async def batch_delete_documents(
     dataset_id: str,
     payload: BatchDeleteSchema = Body(...),
     svc: KnowledgeService = Depends(get_knowledge_service),
     user: UserContext = Depends(get_user_context),
 ):
-    """Batch delete documents."""
+    """Persist a fair, restart-safe batch delete operation."""
     try:
-        results = await svc.batch_delete_documents(user, dataset_id, payload.document_ids)
-        return results
+        dataset = await svc.require_dataset_access(user, dataset_id, required="editor")
+        _require_dataset_index_writable(dataset)
+        return await _document_batch_store(svc).create_operation(
+            tenant_id=str(dataset.get("tenant_id") or ""),
+            dataset_id=dataset_id,
+            operation="delete",
+            created_by=user.user_id,
+            actor_roles=user.roles or [],
+            document_ids=payload.document_ids,
+        )
     except PermissionDeniedError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValidationFailedError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/knowledge/{dataset_id}/document-batches/{operation_id}")
+async def get_document_batch_operation(
+    dataset_id: str,
+    operation_id: str,
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    try:
+        dataset = await svc.require_dataset_access(user, dataset_id, required="viewer")
+        result = await _document_batch_store(svc).get_operation(
+            operation_id=operation_id,
+            tenant_id=str(dataset.get("tenant_id") or ""),
+            dataset_id=dataset_id,
+        )
+        if result is None:
+            raise HTTPException(status_code=404, detail="document batch not found")
+        return result
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="document batch not found") from exc
 
 
 # ============================================================
@@ -2341,6 +3173,114 @@ async def get_document_statistics(
 
 
 # ============================================================
+# Query observability and feedback
+# ============================================================
+
+
+@router.get(
+    "/knowledge/{dataset_id}/queries",
+    response_model=QueryHistoryListSchema,
+)
+async def list_query_history(
+    dataset_id: str,
+    limit: int = Query(default=50, ge=1, le=100),
+    zero_results: bool | None = Query(default=None),
+    mode: str | None = Query(default=None, max_length=32),
+    cursor: str | None = Query(default=None, max_length=1024),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    try:
+        return await svc.list_query_history(
+            user,
+            dataset_id,
+            limit=limit,
+            zero_results=zero_results,
+            mode=mode,
+            cursor=cursor,
+        )
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Knowledge query-history read failed")
+        raise HTTPException(status_code=503, detail="Query history is unavailable") from exc
+
+
+@router.put(
+    "/knowledge/{dataset_id}/feedback",
+    response_model=QueryFeedbackSchema,
+)
+async def upsert_query_feedback(
+    dataset_id: str,
+    payload: QueryFeedbackUpsertSchema = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    trace_id = str(payload.trace_id)
+    target_id = payload.segment_id if payload.target_type == "retrieval_hit" else trace_id
+    try:
+        return await svc.upsert_query_feedback(
+            user,
+            dataset_id,
+            trace_id=trace_id,
+            query_fingerprint=payload.query_fingerprint,
+            target_type=payload.target_type,
+            target_id=str(target_id),
+            rating=payload.rating,
+            reason_code=payload.reason_code,
+            comment=payload.comment,
+        )
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except QueryObservationConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Knowledge query-feedback write failed")
+        raise HTTPException(status_code=503, detail="Query feedback is unavailable") from exc
+
+
+@router.get(
+    "/knowledge/{dataset_id}/feedback",
+    response_model=QueryFeedbackListSchema,
+)
+async def list_query_feedback(
+    dataset_id: str,
+    limit: int = Query(default=50, ge=1, le=100),
+    rating: str | None = Query(default=None, pattern="^(positive|negative)$"),
+    reason_code: str | None = Query(default=None, max_length=32),
+    target_type: str | None = Query(
+        default=None, pattern="^(retrieval_hit|qa_answer)$"
+    ),
+    trace_id: uuid.UUID | None = Query(default=None),
+    cursor: str | None = Query(default=None, max_length=1024),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    try:
+        return await svc.list_query_feedback(
+            user,
+            dataset_id,
+            limit=limit,
+            rating=rating,
+            reason_code=reason_code,
+            target_type=target_type,
+            trace_id=str(trace_id) if trace_id else None,
+            cursor=cursor,
+        )
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Knowledge query-feedback read failed")
+        raise HTTPException(status_code=503, detail="Query feedback is unavailable") from exc
+
+
+# ============================================================
 # QA Testing Endpoints
 # ============================================================
 
@@ -2404,12 +3344,16 @@ async def qa_query(
                 },
                 "model": result.model,
                 "tokens_used": result.tokens_used,
+                "trace_id": result.trace_id,
+                "query_fingerprint": result.query_fingerprint,
             }
         finally:
             await qa_service.close()
 
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    except IndexLeaseUnavailableError as exc:
+        raise _index_lease_conflict(exc) from exc
     except ValidationFailedError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -2434,12 +3378,16 @@ async def qa_query_stream(
     await require_admin_user(user)
 
     from ...services.knowledge.qa_service import QAService
+    from ...services.knowledge.retrieval_service import dataset_retrieval_generation
 
     try:
-        await _require_authenticated_dataset_editor(svc, user, dataset_id)
+        dataset = await _require_authenticated_dataset_editor(svc, user, dataset_id)
+        dataset_retrieval_generation(dataset)
         llm_config = _build_server_qa_llm_config(payload.llm_config, settings)
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except IndexLeaseUnavailableError as exc:
+        raise _index_lease_conflict(exc) from exc
     except ValidationFailedError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -2469,6 +3417,19 @@ async def qa_query_stream(
         except PermissionDeniedError as exc:
             payload_json = json.dumps(
                 {"event": "error", "data": {"message": str(exc)}}, ensure_ascii=False
+            )
+            yield f"data: {payload_json}\n\n"
+        except IndexLeaseUnavailableError as exc:
+            payload_json = json.dumps(
+                {
+                    "event": "error",
+                    "data": {
+                        "message": str(exc),
+                        "status": 409,
+                        "retry_after": 1,
+                    },
+                },
+                ensure_ascii=False,
             )
             yield f"data: {payload_json}\n\n"
         except ValidationFailedError as exc:
@@ -2563,6 +3524,8 @@ async def qa_batch_test(
 
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    except IndexLeaseUnavailableError as exc:
+        raise _index_lease_conflict(exc) from exc
     except ValidationFailedError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -2844,12 +3807,9 @@ async def get_dataset_sources(
         dataset = await svc.require_dataset_access(user, dataset_id, required="viewer")
         generation = _dataset_content_generation(dataset)
 
-        # Get document statistics by source_type using database
-        docs = await svc.list_documents(user, dataset_id)
-        source_counts: dict[str, int] = {}
-        for doc in docs:
-            source_type = doc.get("source_type") or "upload"
-            source_counts[source_type] = source_counts.get(source_type, 0) + 1
+        # Exact aggregate: a paginated document page must never become a
+        # dataset-wide source count.
+        source_counts = await svc.db.count_documents_by_source_type(dataset_id)
 
         # Get Confluence bindings if service is available
         confluence_bindings = []
@@ -3331,7 +4291,7 @@ async def restore_document_version(
                 restored_content = str(version_to_restore.get("content") or "")
                 await svc.db.update_document_status(
                     document_id,
-                    status="queued",
+                    status="waiting",
                     progress=0,
                     error="",
                     connection=lease_connection,
@@ -3426,3 +4386,86 @@ async def force_complete_document(
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Internal gateway endpoints (HMAC v2 signature-bound identity)
+# ---------------------------------------------------------------------------
+
+
+class DatasetAuthorizeRequest(BaseModel):
+    dataset_ids: list[str] = Field(
+        default_factory=list,
+        max_length=200,
+        description="Candidate dataset ids from the agent's KB bindings",
+    )
+    is_tenant_admin: bool = Field(
+        default=False,
+        description=(
+            "Advisory copy of the caller's tenant-admin state. KS enforces "
+            "admin scope from the signature-bound identity headers only; "
+            "this flag can never widen access."
+        ),
+    )
+
+
+class DatasetAuthorizeResponse(BaseModel):
+    allowed_dataset_ids: list[str]
+
+
+@router.post(
+    "/internal/knowledge/datasets/authorize",
+    response_model=DatasetAuthorizeResponse,
+    dependencies=[Depends(require_verified_gateway)],
+)
+async def authorize_gateway_datasets(
+    request: Request,
+    body: DatasetAuthorizeRequest = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+) -> DatasetAuthorizeResponse:
+    """Batch dataset ACL for the gateway's agent runtime (PRD T8.2).
+
+    The gateway resolves agent KB bindings through this endpoint instead of
+    reading KB tables directly ("gateway 零 KB 表直读"). Identity arrives in
+    the signature-bound trusted headers verified by the gateway-secret
+    middleware; fail-closed by construction:
+
+    * a verified signature without X-User-Id/X-Tenant-Id is a contract
+      violation -> 401 (never an empty 200 the caller could mistake for a
+      completed check);
+    * ``is_tenant_admin`` from the body is advisory only — admin scope is
+      granted exclusively by the signed X-User-Tier/X-User-Roles headers,
+      matching the _effective_dataset_permission contract every other KB
+      surface uses;
+    * unknown, soft-deleted, or denied datasets are silently dropped, so the
+      runtime only ever sees a (possibly empty) subset of what it asked for.
+    """
+
+    user_id = request.headers.get("X-User-Id", "").strip()
+    tenant_id = request.headers.get("X-Tenant-Id", "").strip()
+    if not user_id or not tenant_id:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "AUTH_DENIED",
+                "message": "Signature-bound identity headers are required",
+            },
+        )
+    roles_raw = request.headers.get("X-User-Roles", "").strip()
+    roles = [role.strip() for role in roles_raw.split(",") if role.strip()] or [
+        "user"
+    ]
+    user = UserContext(
+        user_id=user_id,
+        tenant_id=tenant_id,
+        user_tier=request.headers.get("X-User-Tier", "normal").strip(),
+        user_type=request.headers.get("X-User-Type", "user").strip(),
+        roles=roles,
+    )
+    try:
+        allowed = await svc.dataset_service.authorize_datasets(
+            user, body.dataset_ids
+        )
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    return DatasetAuthorizeResponse(allowed_dataset_ids=allowed)

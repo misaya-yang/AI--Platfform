@@ -745,20 +745,22 @@ async def test_default_store_allows_shadow_but_rejects_active_cutover_before_mut
 
 
 @pytest.mark.asyncio
-async def test_default_store_rejects_active_sparse_serving_before_qdrant_query(
+async def test_kill_switch_rejects_active_sparse_serving_before_any_qdrant_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """T6: serving an active profile stays gated by the kill switch (release
+    decision) — and it must refuse before any Qdrant validation traffic."""
     config = LexicalConfig.from_index_config(_index_config(active=BM25_V2_FIELD))
     qdrant_calls: list[str] = []
 
     class Client:
         async def get_collection(self, _collection_name: str) -> Any:
             qdrant_calls.append("get_collection")
-            raise AssertionError("active serving must fail before Qdrant validation")
+            raise AssertionError("kill-switched serving must fail before Qdrant validation")
 
         async def query_points(self, **_kwargs: Any) -> Any:
             qdrant_calls.append("query_points")
-            raise AssertionError("active serving must fail before the sparse query")
+            raise AssertionError("kill-switched serving must fail before the sparse query")
 
         async def close(self) -> None:
             return None
@@ -767,7 +769,7 @@ async def test_default_store_rejects_active_sparse_serving_before_qdrant_query(
         "knowledge_service.services.knowledge.vector_store.AsyncQdrantClient",
         lambda **_kwargs: Client(),
     )
-    store = VectorStore(url="http://qdrant", max_retries=1)
+    store = VectorStore(url="http://qdrant", max_retries=1, bm25_v2_enabled=False)
 
     with pytest.raises(VectorStoreError, match="active serving is unavailable"):
         await store.sparse_search(
@@ -780,6 +782,51 @@ async def test_default_store_rejects_active_sparse_serving_before_qdrant_query(
         )
 
     assert qdrant_calls == []
+
+
+@pytest.mark.asyncio
+async def test_active_sparse_search_refuses_uncut_collection_before_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T6 replaced the blanket query-time rejection with a per-collection
+    authority proof: an active profile may consult Qdrant, but a collection
+    that never cut over must fail loudly and never receive the v2 query."""
+    config = LexicalConfig.from_index_config(_index_config(active=BM25_V2_FIELD))
+    info = _collection_info(
+        LexicalConfig.from_index_config(_index_config()),
+        include_v2=True,
+    )
+    qdrant_calls: list[str] = []
+
+    class Client:
+        async def get_collection(self, _collection_name: str) -> Any:
+            qdrant_calls.append("get_collection")
+            return info
+
+        async def query_points(self, **_kwargs: Any) -> Any:
+            qdrant_calls.append("query_points")
+            raise AssertionError("active query must not reach an uncut collection")
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "knowledge_service.services.knowledge.vector_store.AsyncQdrantClient",
+        lambda **_kwargs: Client(),
+    )
+    store = VectorStore(url="http://qdrant", max_retries=1)
+
+    with pytest.raises(CollectionReadAuthorityError, match="not cut over"):
+        await store.sparse_search(
+            collection_name="collection-a",
+            sparse_indices=[],
+            sparse_values=[],
+            query_text="alpha",
+            lexical_config=config,
+            authority_content_revision=7,
+        )
+
+    assert qdrant_calls == ["get_collection"]
 
 
 @pytest.mark.asyncio
@@ -1177,6 +1224,55 @@ async def test_existing_documents_freeze_dense_and_chunking_identity(
             patch,
         )
 
+    assert database.patch_calls == []
+    assert store.selections == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("patch", "expected_fragment"),
+    [
+        # An embedding provider/model/dimension change is a blue-green
+        # migration once vectors exist (T3): the freeze points the operator
+        # at the migration endpoint instead of a dead end.
+        (
+            {"embedding_model": "other-model"},
+            "/embedding-migration/start",
+        ),
+        (
+            {"embedding_dimension": 4},
+            "/embedding-migration/start",
+        ),
+        # A config-only change keeps the legacy reindex-generation guidance.
+        (
+            {"embedding_config": {"max_concurrent": 5}},
+            "create a reindexed generation",
+        ),
+    ],
+)
+async def test_embedding_identity_freeze_offers_migration_path(
+    patch: dict[str, Any], expected_fragment: str
+) -> None:
+    initial = {
+        "dataset_id": "dataset-a",
+        "name": "Original",
+        "tenant_id": "tenant-a",
+        "collection_name": "collection-a",
+        "embedding_provider": "local",
+        "embedding_model": "hash-384",
+        "embedding_dimension": 2,
+        "embedding_config": {},
+        "index_config": {},
+        "content_revision": 7,
+    }
+    database = _SharedDatasetCasDatabase(initial)
+    store = _ReplicaLexicalStore()
+    service = _dataset_replica(database, store, deepcopy(initial))
+
+    with pytest.raises(ValidationFailedError) as excinfo:
+        await service.update_dataset(SimpleNamespace(), "dataset-a", patch)
+
+    assert expected_fragment in str(excinfo.value)
     assert database.patch_calls == []
     assert store.selections == []
 
@@ -1629,9 +1725,30 @@ async def test_segment_batch_compensates_qdrant_when_database_write_fails() -> N
     class Store:
         def __init__(self) -> None:
             self.deleted: list[str] = []
+            self.points = {
+                "segment-a": qmodels.PointStruct(
+                    id="segment-a",
+                    vector=[0.25, 0.75],
+                    payload={
+                        "dataset_id": "dataset-a",
+                        "document_id": "document-a",
+                        "text": "old serving payload",
+                    },
+                )
+            }
 
-        async def upsert(self, **_kwargs: Any) -> None:
-            return None
+        async def snapshot_points(
+            self, _collection: str, point_ids: list[str], **_kwargs: Any
+        ) -> dict[str, qmodels.PointStruct]:
+            return {
+                point_id: deepcopy(self.points[point_id])
+                for point_id in point_ids
+                if point_id in self.points
+            }
+
+        async def upsert(self, *, points: list[Any], **_kwargs: Any) -> None:
+            for point in points:
+                self.points[str(point.id)] = deepcopy(point)
 
         async def delete_points(
             self,
@@ -1640,6 +1757,8 @@ async def test_segment_batch_compensates_qdrant_when_database_write_fails() -> N
             **_scope: Any,
         ) -> None:
             self.deleted.extend(point_ids)
+            for point_id in point_ids:
+                self.points.pop(point_id, None)
 
     class Database:
         @contextlib.asynccontextmanager
@@ -1680,12 +1799,26 @@ async def test_segment_batch_compensates_qdrant_when_database_write_fails() -> N
             dataset_id="dataset-a",
             expected_ingestion_identity="identity-a",
         )
-    assert store.deleted == ["segment-a", "segment-b"]
+    # The overwritten serving point is restored exactly; compensation deletes
+    # only the point that did not exist before this attempted generation.
+    assert store.deleted == ["segment-b"]
+    assert set(store.points) == {"segment-a"}
+    assert store.points["segment-a"].vector == [0.25, 0.75]
+    assert store.points["segment-a"].payload == {
+        "dataset_id": "dataset-a",
+        "document_id": "document-a",
+        "text": "old serving payload",
+    }
 
 
 @pytest.mark.asyncio
 async def test_segment_batch_does_not_touch_database_after_qdrant_failure() -> None:
     class Store:
+        async def snapshot_points(
+            self, _collection: str, _point_ids: list[str], **_kwargs: Any
+        ) -> dict[str, qmodels.PointStruct]:
+            return {}
+
         async def upsert(self, **_kwargs: Any) -> None:
             raise RuntimeError("qdrant rejected batch")
 
@@ -1729,7 +1862,70 @@ async def test_segment_batch_does_not_touch_database_after_qdrant_failure() -> N
 
 
 @pytest.mark.asyncio
-async def test_active_profile_is_read_only_and_preserves_completion_receipt(
+async def test_active_profile_strictly_dual_writes_and_invalidates_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = LexicalConfig.from_index_config(_index_config(active=BM25_V2_FIELD))
+    records = [_record(config, "segment-a", "old text")]
+    info = _collection_info(
+        config,
+        include_v2=True,
+        records=records,
+        with_receipt=True,
+    )
+    upserts: list[Any] = []
+    deletes: list[Any] = []
+
+    class Client:
+        async def get_collection(self, _collection_name: str) -> Any:
+            return info
+
+        async def update_collection(self, **kwargs: Any) -> bool:
+            info.config.metadata.update(kwargs.get("metadata") or {})
+            return True
+
+        async def upsert(self, **kwargs: Any) -> SimpleNamespace:
+            upserts.extend(kwargs["points"])
+            return SimpleNamespace(status="completed")
+
+        async def delete(self, **kwargs: Any) -> SimpleNamespace:
+            deletes.append(kwargs)
+            return SimpleNamespace(status="completed")
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "knowledge_service.services.knowledge.vector_store.AsyncQdrantClient",
+        lambda **_kwargs: Client(),
+    )
+    store = VectorStore(url="http://qdrant", max_retries=1, bm25_v2_enabled=True)
+    _grant_capability(store, config)
+
+    await store.upsert(
+        "collection-a",
+        [
+            qmodels.PointStruct(
+                id="segment-a",
+                vector=[1.0, 0.0],
+                payload={"text": "new text"},
+            )
+        ],
+    )
+    await store.delete_points("collection-a", ["segment-a"])
+
+    assert len(upserts) == 1
+    assert set(upserts[0].vector) == {"", LEXICAL_V1_FIELD, BM25_V2_FIELD}
+    assert set(upserts[0].payload["_lexical"]["versions"]) == {
+        "lexical_v1",
+        "bm25_v2",
+    }
+    assert info.config.metadata[BM25_V2_BACKFILL_METADATA_KEY]["status"] == "invalidated"
+    assert len(deletes) == 1
+
+
+@pytest.mark.asyncio
+async def test_active_nonlexical_image_write_preserves_bm25_receipt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = LexicalConfig.from_index_config(_index_config(active=BM25_V2_FIELD))
@@ -1741,19 +1937,23 @@ async def test_active_profile_is_read_only_and_preserves_completion_receipt(
         with_receipt=True,
     )
     original_receipt = dict(info.config.metadata[BM25_V2_BACKFILL_METADATA_KEY])
+    upserts: list[Any] = []
+    deletes: list[Any] = []
 
     class Client:
         async def get_collection(self, _collection_name: str) -> Any:
             return info
 
         async def update_collection(self, **kwargs: Any) -> bool:
-            raise AssertionError(f"active mutation changed metadata: {kwargs}")
+            raise AssertionError(f"image write invalidated lexical receipt: {kwargs}")
 
         async def upsert(self, **kwargs: Any) -> SimpleNamespace:
-            raise AssertionError(f"active point upsert escaped: {kwargs}")
+            upserts.extend(kwargs["points"])
+            return SimpleNamespace(status="completed")
 
-        async def delete(self, **kwargs: Any) -> None:
-            raise AssertionError(f"active point delete escaped: {kwargs}")
+        async def delete(self, **kwargs: Any) -> SimpleNamespace:
+            deletes.append(kwargs)
+            return SimpleNamespace(status="completed")
 
         async def close(self) -> None:
             return None
@@ -1762,24 +1962,29 @@ async def test_active_profile_is_read_only_and_preserves_completion_receipt(
         "knowledge_service.services.knowledge.vector_store.AsyncQdrantClient",
         lambda **_kwargs: Client(),
     )
-    store = VectorStore(url="http://qdrant", max_retries=1)
+    store = VectorStore(url="http://qdrant", max_retries=1, bm25_v2_enabled=True)
     _grant_capability(store, config)
+    await store.upsert(
+        "collection-a",
+        [
+            qmodels.PointStruct(
+                id="image-a",
+                vector=[1.0, 0.0],
+                payload={"text": "image description", "content_type": "image"},
+            )
+        ],
+    )
+    await store.delete_points(
+        "collection-a",
+        ["image-a"],
+        affects_bm25_scope=False,
+    )
 
-    with pytest.raises(VectorStoreError, match="active mode is read-only"):
-        await store.upsert(
-            "collection-a",
-            [
-                qmodels.PointStruct(
-                    id="segment-a",
-                    vector=[1.0, 0.0],
-                    payload={"text": "new text"},
-                )
-            ],
-        )
-    with pytest.raises(VectorStoreError, match="active mode is read-only"):
-        await store.delete_points("collection-a", ["segment-a"])
-
+    assert len(upserts) == 1
+    assert set(upserts[0].vector) == {"", LEXICAL_V1_FIELD}
+    assert "_lexical" not in upserts[0].payload
     assert info.config.metadata[BM25_V2_BACKFILL_METADATA_KEY] == original_receipt
+    assert len(deletes) == 1
 
 
 
@@ -1846,15 +2051,25 @@ def _make_v2_retrieval_service(vector_store: Any) -> tuple[RetrievalService, _No
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["dense", "bm25", "hybrid"])
-async def test_retrieval_service_rejects_active_v2_before_any_store_call(
+async def test_retrieval_active_v2_serves_from_store_authority_not_blanket_gate(
     mode: str,
 ) -> None:
-    class RejectStore:
-        def __getattr__(self, name: str) -> Any:
-            raise AssertionError(f"active retrieval reached vector store: {name}")
+    """T6: the blanket "shadow-only" retrieval refusal is gone — a protocol-
+    cut-over dataset serves. Safety moved to the per-collection authority
+    check, so an active profile against a non-readable collection still fails
+    loudly, and the PostgreSQL FTS fallback leg is never reached."""
 
-    service, database = _make_v2_retrieval_service(RejectStore())
-    with pytest.raises(ValidationFailedError, match="shadow-only"):
+    class AuthorityStore:
+        readable_calls: list[tuple[Any, ...]] = []
+
+        async def require_collection_readable(self, *args: Any, **kwargs: Any) -> dict:
+            self.readable_calls.append((args, kwargs))
+            raise CollectionReadAuthorityError(
+                "collection 'collection-a' is not cut over to bm25_v2"
+            )
+
+    service, database = _make_v2_retrieval_service(AuthorityStore())
+    with pytest.raises(ValidationFailedError, match="not readable"):
         await service.retrieve(
             user=SimpleNamespace(),
             dataset_id="dataset-a",
@@ -1863,12 +2078,22 @@ async def test_retrieval_service_rejects_active_v2_before_any_store_call(
             top_k=1,
         )
     assert database.calls == 0
+    assert len(service.vector_store.readable_calls) == 1
 
 
 @pytest.mark.asyncio
-async def test_retrieval_batch_rejects_active_v2_before_error_fallback() -> None:
-    service, database = _make_v2_retrieval_service(SimpleNamespace())
-    with pytest.raises(ValidationFailedError, match="shadow-only"):
+async def test_retrieval_batch_active_v2_reaches_store_before_error_fallback() -> None:
+    class AuthorityStore:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def require_collection_readable(self, *_args: Any, **_kwargs: Any) -> dict:
+            self.calls += 1
+            raise CollectionReadAuthorityError("not cut over")
+
+    store = AuthorityStore()
+    service, database = _make_v2_retrieval_service(store)
+    with pytest.raises(ValidationFailedError, match="not readable"):
         await service.retrieve_batch(
             user=SimpleNamespace(),
             dataset_id="dataset-a",
@@ -1876,10 +2101,14 @@ async def test_retrieval_batch_rejects_active_v2_before_error_fallback() -> None
             mode="dense",
         )
     assert database.calls == 0
+    assert store.calls >= 1
 
 
 @pytest.mark.asyncio
-async def test_hierarchical_route_rejects_active_v2_before_embedding() -> None:
+async def test_hierarchical_route_continues_past_active_v2_profile() -> None:
+    """The route-level blanket refusal was a shadow-release artifact; T6
+    replaces it with store-side per-query gating, so the hierarchical route
+    must no longer reject an active profile — it proceeds to the store."""
     from knowledge_service.api.routes.knowledge import _run_hierarchical_retrieval
 
     class Service:
@@ -1899,7 +2128,7 @@ async def test_hierarchical_route_rejects_active_v2_before_embedding() -> None:
         def __getattr__(self, name: str) -> Any:
             raise AssertionError(f"active hierarchical retrieval continued: {name}")
 
-    with pytest.raises(ValidationFailedError, match="shadow-only"):
+    with pytest.raises(AssertionError, match="hierarchical retrieval continued"):
         await _run_hierarchical_retrieval(
             dataset_id="dataset-a",
             query="alpha",

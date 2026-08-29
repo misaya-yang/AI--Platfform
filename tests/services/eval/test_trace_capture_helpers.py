@@ -22,6 +22,9 @@ from src.services.eval.trace_capture import schedule_gateway_trace_ingest
 def test_is_retrieve_path_matches_knowledge_retrieve_routes() -> None:
     assert is_retrieve_path("dataset-1/retrieve")
     assert is_retrieve_path("knowledge/dataset-1/retrieve")
+    assert is_retrieve_path("dataset-1/hit_test")
+    assert is_retrieve_path("dataset-1/qa")
+    assert is_retrieve_path("dataset-1/qa/stream")
     assert not is_retrieve_path("dataset-1/documents")
 
 
@@ -156,6 +159,19 @@ def test_parse_retrieve_response_and_build_retrieval_documents() -> None:
     assert "content_preview" in documents[0]
 
 
+def test_parse_qa_sse_response_preserves_backend_trace() -> None:
+    trace_id = "d04d53c8-acde-49d0-b3eb-49890dbd5673"
+    body = (
+        'data: {"event":"done","data":{"result":'
+        '{"context_segments":[{"text":"answer context"}],'
+        f'"retrieval_metadata":{{}},"trace_id":"{trace_id}",'
+        '"query_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}\n\n'
+    ).encode()
+    results, metadata = parse_retrieve_response(body)
+    assert results[0]["text"] == "answer context"
+    assert metadata["trace_id"] == trace_id
+
+
 class _IngestRepository:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -222,12 +238,16 @@ def test_record_rag_retrieval_trace_schedules_payload(monkeypatch) -> None:
         path="dataset-1/retrieve",
         body=b'{"query":"hello"}',
         response_status=200,
-        response_body=b'{"results":[{"text":"hello chunk"}]}',
+        response_body=(
+            b'{"trace_id":"d04d53c8-acde-49d0-b3eb-49890dbd5673",'
+            b'"results":[{"text":"hello chunk"}]}'
+        ),
         started_at=time.time(),
     )
     assert len(scheduled) == 1
     assert scheduled[0]["enqueue"] is True
     assert scheduled[0]["trace"]["trace_family"] == "rag"
+    assert scheduled[0]["trace"]["trace_id"] == "d04d53c8-acde-49d0-b3eb-49890dbd5673"
     assert scheduled[0]["trace"]["metadata"]["dataset_id"] == "dataset-1"
     retriever_span = next(
         span for span in scheduled[0]["trace"]["spans"] if span["span_kind"] == "retriever"

@@ -170,7 +170,14 @@ def _repository(request: Request) -> Any:
             "AGENT_STORAGE_UNAVAILABLE",
             "Agent storage unavailable",
         )
-    repository = DatabaseAgentRepository(database)
+    repository = DatabaseAgentRepository(
+        database,
+        knowledge_resolver=getattr(
+            request.app.state,
+            "agent_runtime_knowledge_resolver",
+            None,
+        ),
+    )
     request.app.state.agent_repository = repository
     return repository
 

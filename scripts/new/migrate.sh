@@ -2,7 +2,8 @@
 # =============================================================================
 # AI Gateway - Database Migration (with version tracking)
 # =============================================================================
-# Tracks which migrations have been applied using a schema_migrations table.
+# Tracks forward migration filenames in public.schema_migrations. Legacy
+# numeric ledgers remain readable, but new databases always use filenames.
 # Safe to run repeatedly — only new migrations are applied.
 #
 # Usage:  make migrate
@@ -22,6 +23,7 @@ INIT=false
 STATUS=false
 AUTO=false
 EXPLICIT_ENV_FILE=false
+BASE_SCHEMA_READY=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -112,6 +114,7 @@ migration_version() {
 }
 
 assert_unique_forward_migration_versions() {
+    local mode="${1:-$(tracking_mode)}"
     local seen_entries=""
     local migration_file filename version existing_line existing_file
 
@@ -128,18 +131,37 @@ assert_unique_forward_migration_versions() {
         existing_line=$(printf "%s" "$seen_entries" | grep -E "^${version}:" || true)
         if [ -n "$existing_line" ]; then
             existing_file="${existing_line#*:}"
+            if [ "$mode" = "filename" ] && is_historical_filename_duplicate \
+                "$version" "$existing_file" "$filename"; then
+                continue
+            fi
             log_error "Duplicate migration version prefix ${version}: ${existing_file} and ${filename}"
-            log_error "Legacy numeric tracking cannot prove which duplicate filename ran; reconcile schema_migrations before running shell migrations."
+            log_error "Each new forward migration needs a unique numeric prefix; reconcile the migration chain before running it."
             return 1
         fi
         seen_entries="${seen_entries}${version}:${filename}"$'\n'
     done
 }
 
+is_historical_filename_duplicate() {
+    local version="$1"
+    local first="$2"
+    local second="$3"
+    local pair
+    pair=$(printf '%s\n%s\n' "$first" "$second" | LC_ALL=C sort | paste -sd '|' -)
+    case "${version}:${pair}" in
+        "16:016_confluence_multi_root_pages.sql|016_usage_hourly_aggregates.sql"|\
+        "31:031_align_model_prices_20260211.sql|031_hierarchical_segments.sql")
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 guard_legacy_version_tracking() {
-    if [ "$(tracking_mode)" = "version" ]; then
-        assert_unique_forward_migration_versions
-    fi
+    local mode
+    mode=$(tracking_mode)
+    assert_unique_forward_migration_versions "$mode"
 }
 
 base_schema_exists() {
@@ -191,6 +213,11 @@ ensure_base_schema() {
     fi
 }
 
+migration_search_path() {
+    run_sql "CREATE SCHEMA IF NOT EXISTS knowledge;" >/dev/null
+    echo "knowledge,gateway,assistant,public"
+}
+
 # -- Check if migration was already applied ----------------------------------
 legacy_filename_alias() {
     case "$1" in
@@ -213,7 +240,11 @@ is_applied() {
     if [ "$(tracking_mode)" = "version" ]; then
         local version
         version=$(migration_version "$filename")
-        result=$(run_sql "SELECT 1 FROM public.schema_migrations WHERE version = ${version};" 2>/dev/null | grep -c "1" || true)
+        if legacy_tracking_has_dirty; then
+            result=$(run_sql "SELECT 1 FROM public.schema_migrations WHERE version = ${version} AND dirty = FALSE;" 2>/dev/null | grep -c "1" || true)
+        else
+            result=$(run_sql "SELECT 1 FROM public.schema_migrations WHERE version = ${version};" 2>/dev/null | grep -c "1" || true)
+        fi
     else
         result=$(run_sql "SELECT 1 FROM public.schema_migrations WHERE filename = '${filename}';" 2>/dev/null | grep -c "1" || true)
         if [ "$result" -eq 0 ]; then
@@ -239,6 +270,13 @@ record_migration() {
         version=$(migration_version "$filename")
         if legacy_tracking_has_dirty; then
             run_sql "INSERT INTO public.schema_migrations (version, dirty) VALUES (${version}, FALSE) ON CONFLICT (version) DO UPDATE SET dirty = FALSE;" >/dev/null
+        elif run_sql "
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'schema_migrations'
+              AND column_name = 'name';
+        " 2>/dev/null | grep -q "1"; then
+            run_sql "INSERT INTO public.schema_migrations (version, name) VALUES ('${version}', '${filename}') ON CONFLICT (version) DO NOTHING;" >/dev/null
         else
             run_sql "INSERT INTO public.schema_migrations (version) VALUES (${version}) ON CONFLICT (version) DO NOTHING;" >/dev/null
         fi
@@ -246,6 +284,14 @@ record_migration() {
         run_sql "INSERT INTO public.schema_migrations (filename) VALUES ('${filename}') ON CONFLICT DO NOTHING;" >/dev/null
     fi
 }
+
+# Hold one cross-process lock for bootstrap + discovery + every ledger read.
+# A waiter acquires only after the first runner exits, then re-reads the ledger
+# below and becomes a no-op instead of replaying stale pending work.
+acquire_migration_advisory_lock
+trap release_migration_advisory_lock EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # -- Show status -------------------------------------------------------------
 if [ "$STATUS" = true ]; then
@@ -308,13 +354,14 @@ if [ "$INIT" = true ]; then
     fi
     echo "$output" | grep -E "^(CREATE|INSERT|ALTER|NOTICE|ERROR)" | head -30 || true
     log_success "Schema initialized"
-    ensure_tracking_table
-    exit 0
+    BASE_SCHEMA_READY=true
 fi
 
 # -- Run pending migrations --------------------------------------------------
 log_step "Running database migrations"
-ensure_base_schema
+if [ "$BASE_SCHEMA_READY" != true ]; then
+    ensure_base_schema
+fi
 ensure_tracking_table
 guard_legacy_version_tracking
 
@@ -325,6 +372,7 @@ fi
 
 applied=0
 skipped=0
+migration_path=$(migration_search_path)
 
 for migration_file in database/migrations/*.sql; do
     [ -f "$migration_file" ] || continue
@@ -345,7 +393,7 @@ for migration_file in database/migrations/*.sql; do
     fi
 
     log_info "Applying: $filename"
-    if ! output=$(run_sql_file "$migration_file" 2>&1); then
+    if ! output=$(run_sql_file "$migration_file" "$migration_path" 2>&1); then
         log_error "Migration failed: $filename"
         echo "$output" | grep "^ERROR" || true
         if [ "$AUTO" = true ]; then

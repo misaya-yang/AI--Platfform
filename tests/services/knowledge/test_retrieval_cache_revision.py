@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from knowledge_service.core.exceptions import ValidationFailedError
 from knowledge_service.persistence.database import make_dataset_index_deletion_fence
+from knowledge_service.persistence.datasets import IndexLeaseUnavailableError
 from knowledge_service.services.knowledge.cache_manager import CacheManager
 from knowledge_service.services.knowledge.retrieval_service import RetrievalService
 from knowledge_service.services.knowledge.vector_store import CollectionReadAuthorityError
@@ -196,7 +197,7 @@ async def test_retrieval_discards_complete_set_and_clear_generation_overlap() ->
 
     service._retrieve_queries = retrieve_across_complete_delete
 
-    with pytest.raises(ValidationFailedError, match="generation changed"):
+    with pytest.raises(IndexLeaseUnavailableError, match="publication is still in progress"):
         await service.retrieve_with_images_v2(
             user=SimpleNamespace(user_id="user-a"),
             dataset_id="dataset-a",

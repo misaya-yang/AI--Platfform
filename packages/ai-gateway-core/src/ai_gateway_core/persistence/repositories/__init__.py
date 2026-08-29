@@ -5,10 +5,8 @@
 """
 
 from .agent_repository import DatabaseAgentRepository
-from .agent_resource_resolver import DatabaseAgentKnowledgeResolver
 from .api_key_repository import APIKeyRepository, DatabaseAPIKeyRepository
 from .base import BaseRepository
-from .knowledge_repository import DatabaseKnowledgeRepository, KnowledgeRepository
 from .mcp_repository import DatabaseMCPRepository
 from .service_repository import DatabaseServiceRepository, ServiceRepository
 from .session_repository import DatabaseSessionRepository, SessionRepository
@@ -18,7 +16,6 @@ from .user_repository import DatabaseUserRepository, UserRepository
 __all__ = [
     "BaseRepository",
     "DatabaseAgentRepository",
-    "DatabaseAgentKnowledgeResolver",
     "ServiceRepository",
     "DatabaseServiceRepository",
     "SessionRepository",
@@ -29,7 +26,5 @@ __all__ = [
     "DatabaseUserRepository",
     "APIKeyRepository",
     "DatabaseAPIKeyRepository",
-    "KnowledgeRepository",
-    "DatabaseKnowledgeRepository",
     "DatabaseMCPRepository",
 ]

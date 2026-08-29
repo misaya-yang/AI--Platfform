@@ -33,8 +33,8 @@ import asyncio
 import logging
 import os
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 try:
     import asyncpg
@@ -48,6 +48,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 ROOT = Path(__file__).resolve().parent
 PER_SVC = ROOT / "migrations" / "per_service"
 SERVICE_ORDER = ("_global", "gateway", "assistant", "knowledge")
+MIGRATION_ADVISORY_LOCK_NAMESPACE = 1_095_781_959
+MIGRATION_ADVISORY_LOCK_ID = 1
 LEDGER_DDL = """
 CREATE TABLE IF NOT EXISTS public.schema_migrations_meta (
     name        TEXT PRIMARY KEY,
@@ -132,6 +134,13 @@ async def main(argv: Iterable[str] | None = None) -> int:
     logger.info("connecting to %s", dsn.split("@", 1)[-1])
     conn = await asyncpg.connect(dsn)
     try:
+        # Serialize the legal per-service track with both central runners.
+        # Closing this session releases the lock even after a process crash.
+        await conn.execute(
+            "SELECT pg_advisory_lock($1::integer, $2::integer)",
+            MIGRATION_ADVISORY_LOCK_NAMESPACE,
+            MIGRATION_ADVISORY_LOCK_ID,
+        )
         await conn.execute(LEDGER_DDL)
         total = 0
         for svc in SERVICE_ORDER:

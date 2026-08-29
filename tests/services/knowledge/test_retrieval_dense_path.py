@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 from knowledge_service.core.exceptions import ValidationFailedError
+from knowledge_service.persistence.datasets import IndexLeaseUnavailableError
 from knowledge_service.services.knowledge import retrieval_service
 from knowledge_service.services.knowledge.retrieval_service import RetrievalService
 
@@ -206,7 +207,7 @@ async def test_retrieval_entrypoint_discards_deletion_generation_overlap(
         _normalize_local_image_url=lambda raw_url, _segment_id: raw_url,
     )
 
-    with pytest.raises(ValidationFailedError, match="generation changed"):
+    with pytest.raises(IndexLeaseUnavailableError, match="publication is still in progress"):
         if entrypoint == "normal":
             await service.retrieve(
                 user=SimpleNamespace(),

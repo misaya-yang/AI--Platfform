@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import hmac
 import logging
-import os
 from typing import Any
 
 from ai_gateway_core.auth.capability_proof import CapabilityProofError, verify_capability_proof
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from ...config import get_settings
 from ...core.auth.user_resolver import UserContext
 from ...core.exceptions import PermissionDeniedError, ValidationFailedError
 from ...services.knowledge.knowledge_service import KnowledgeService
@@ -36,13 +36,13 @@ class CapabilityRetrieveRequest(BaseModel):
 
 
 def _internal_authorized(request: Request) -> bool:
-    expected = os.getenv("AI_PLATFORM_INTERNAL_TOKEN", "")
+    expected = get_settings().ai_platform_internal_token
     provided = request.headers.get("x-ai-platform-internal-token", "")
     return bool(expected) and bool(provided) and hmac.compare_digest(expected, provided)
 
 
 def _proof_authorized(request: Request, *, path: str, body: Any) -> bool:
-    secret = os.getenv("AI_PLATFORM_CAPABILITY_PROOF_SECRET", "")
+    secret = get_settings().ai_platform_capability_proof_secret
     proof = request.headers.get("x-ai-capability-proof", "")
     execution_id = request.headers.get("x-ai-execution-id", "")
     run_id = request.headers.get("x-ai-run-id", "")

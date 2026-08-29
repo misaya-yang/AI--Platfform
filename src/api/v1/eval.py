@@ -404,6 +404,7 @@ list_eval_datasets = _eval_dataset_routes.list_eval_datasets
 get_eval_dataset = _eval_dataset_routes.get_eval_dataset
 list_eval_examples = _eval_dataset_routes.list_eval_examples
 update_eval_example = _eval_dataset_routes.update_eval_example
+delete_eval_example = _eval_dataset_routes.delete_eval_example
 import_eval_examples = _eval_dataset_routes.import_eval_examples
 export_eval_examples = _eval_dataset_routes.export_eval_examples
 create_eval_dataset = _eval_dataset_routes.create_eval_dataset

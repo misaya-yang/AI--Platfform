@@ -47,7 +47,9 @@ def _parse_dataset_id(path: str) -> str | None:
         index = parts.index("knowledge")
         if len(parts) > index + 1:
             return parts[index + 1]
-    if parts[-1] == "retrieve" and len(parts) >= 2:
+    if len(parts) >= 3 and parts[-2:] == ["qa", "stream"]:
+        return parts[-3]
+    if parts[-1] in {"retrieve", "retrieve_batch", "hit_test", "qa"} and len(parts) >= 2:
         return parts[-2]
     if len(parts) == 1 and parts[0] != "retrieve":
         return parts[0]
@@ -56,7 +58,16 @@ def _parse_dataset_id(path: str) -> str | None:
 
 def is_retrieve_path(path: str) -> bool:
     normalized = path.strip("/")
-    return normalized.endswith("/retrieve") or normalized.endswith("retrieve")
+    return any(
+        normalized.endswith(suffix)
+        for suffix in (
+            "retrieve",
+            "retrieve_batch",
+            "hit_test",
+            "qa",
+            "qa/stream",
+        )
+    )
 
 
 def _bounded_eval_text(value: Any, *, limit: int | None = None) -> str:
@@ -101,18 +112,54 @@ def parse_retrieve_response(response_body: bytes) -> tuple[list[dict[str, Any]],
     try:
         payload = json.loads(response_body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return [], {}
+        # QA streaming responses contain one JSON payload per SSE data line.
+        terminal: dict[str, Any] | None = None
+        retrieval: dict[str, Any] | None = None
+        for raw_line in response_body.decode("utf-8", errors="ignore").splitlines():
+            if not raw_line.startswith("data:"):
+                continue
+            try:
+                event = json.loads(raw_line[len("data:") :].strip())
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            if event.get("event") == "done" and isinstance(data.get("result"), dict):
+                terminal = data["result"]
+            elif event.get("event") == "retrieval":
+                retrieval = data
+        selected = terminal or retrieval
+        if selected is None:
+            return [], {}
+        return parse_retrieve_response(json.dumps(selected).encode("utf-8"))
     if not isinstance(payload, dict):
         if isinstance(payload, list):
             return [item for item in payload if isinstance(item, dict)], {}
         return [], {}
 
     results = payload.get("results")
+    if not isinstance(results, list) and isinstance(payload.get("batch_results"), list):
+        first = next(
+            (item for item in payload["batch_results"] if isinstance(item, dict)),
+            {},
+        )
+        results = first.get("results")
+        if not isinstance(payload.get("metadata"), dict):
+            payload["metadata"] = first.get("meta")
+    if not isinstance(results, list) and isinstance(payload.get("context_segments"), list):
+        results = payload.get("context_segments")
     if not isinstance(results, list):
         chunks = payload.get("chunks")
         results = chunks if isinstance(chunks, list) else []
     metadata = payload.get("metadata")
-    return [item for item in results if isinstance(item, dict)], metadata if isinstance(metadata, dict) else {}
+    if not isinstance(metadata, dict):
+        metadata = payload.get("retrieval_metadata")
+    metadata = dict(metadata) if isinstance(metadata, dict) else {}
+    for key in ("trace_id", "query_fingerprint"):
+        if payload.get(key):
+            metadata[key] = payload[key]
+    return [item for item in results if isinstance(item, dict)], metadata
 
 
 def build_rag_trace_payload(
@@ -131,8 +178,13 @@ def build_rag_trace_payload(
     traceparent: str | None,
     retrieval_documents: list[dict[str, Any]] | None = None,
     retrieval_metadata: dict[str, Any] | None = None,
+    trace_id: str | None = None,
 ) -> dict[str, Any]:
-    trace_id = trace_id_for_request(
+    try:
+        trace_id = str(uuid.UUID(str(trace_id))) if trace_id else None
+    except ValueError:
+        trace_id = None
+    trace_id = trace_id or trace_id_for_request(
         request_id=request_id or str(uuid.uuid4()),
         trace_family="rag",
         route_key=f"retrieve:{dataset_id or 'unknown'}:{query[:80]}",
@@ -297,6 +349,7 @@ def record_rag_retrieval_trace(
         traceparent=traceparent,
         retrieval_documents=documents,
         retrieval_metadata=retrieval_metadata,
+        trace_id=str(retrieval_metadata.get("trace_id") or "") or None,
     )
     schedule_gateway_trace_ingest(
         database,

@@ -42,7 +42,7 @@ class _Database:
             "document_id": "document-a",
             "dataset_id": "dataset-a",
             "source_type": "upload",
-            "status": "processing",
+            "status": "parsing",
             "enabled": True,
             "archived": False,
             "content": content,
@@ -328,5 +328,5 @@ async def test_vlm_ocr_rejects_cumulative_page_text_before_content_or_ingestion(
         await worker._process_scanned_with_vlm_ocr(TASK, doc)
 
     assert pdf_document.closed is True
-    assert database.events == ["status:processing"]
+    assert database.events == ["status:parsing"]
     assert service.ingest_calls == []

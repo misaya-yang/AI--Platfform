@@ -6,7 +6,6 @@ Tests include:
 - MultimodalReranker (VLM-based image scoring, score parsing)
 - Retrieval with images (retrieve_with_images)
 - API multimodal response format
-- RetrievalCandidate multimodal fields
 """
 
 from __future__ import annotations
@@ -14,7 +13,6 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from knowledge_service.services.knowledge.chunking import (
     AssociatedImage,
     Chunk,
@@ -24,10 +22,6 @@ from knowledge_service.services.knowledge.multimodal_reranker import (
     MultimodalReranker,
     RerankCandidate,
     create_multimodal_reranker,
-)
-from knowledge_service.services.knowledge.retrieval_v2 import (
-    AssociatedImageInfo,
-    RetrievalCandidate,
 )
 
 # ============ Test AssociatedImage ============
@@ -425,102 +419,6 @@ class TestMultimodalReranker:
         # Should filter out the low score candidate
         assert len(result) == 1
         assert result[0].segment_id == "high"
-
-
-# ============ Test RetrievalCandidate Multimodal Fields ============
-
-
-class TestRetrievalCandidateMultimodal:
-    """Tests for RetrievalCandidate multimodal extensions"""
-
-    def test_candidate_default_values(self):
-        """Test default multimodal values"""
-        candidate = RetrievalCandidate(
-            segment_id="seg_001",
-            document_id="doc_001",
-            text="Test text",
-        )
-
-        assert candidate.content_type == "text"
-        assert candidate.image_url is None
-        assert candidate.vlm_description is None
-        assert candidate.associated_images == []
-        assert candidate.multimodal_score is None
-
-    def test_candidate_with_image_fields(self):
-        """Test candidate with image-specific fields"""
-        candidate = RetrievalCandidate(
-            segment_id="img_001",
-            document_id="doc_001",
-            text="",
-            content_type="image",
-            image_url="s3://bucket/diagram.png",
-            vlm_description="Architecture diagram",
-        )
-
-        assert candidate.content_type == "image"
-        assert candidate.image_url == "s3://bucket/diagram.png"
-        assert candidate.vlm_description == "Architecture diagram"
-
-    def test_candidate_with_associated_images(self):
-        """Test candidate with associated images"""
-        associated = [
-            AssociatedImageInfo(
-                image_segment_id="img_001",
-                storage_url="s3://bucket/img1.png",
-                proximity_score=0.9,
-            ),
-            AssociatedImageInfo(
-                image_segment_id="img_002",
-                storage_url="s3://bucket/img2.png",
-                proximity_score=0.7,
-            ),
-        ]
-
-        candidate = RetrievalCandidate(
-            segment_id="seg_001",
-            document_id="doc_001",
-            text="Text with images",
-            content_type="text",
-            associated_images=associated,
-        )
-
-        assert len(candidate.associated_images) == 2
-        assert candidate.associated_images[0].image_segment_id == "img_001"
-
-
-# ============ Test AssociatedImageInfo ============
-
-
-class TestAssociatedImageInfo:
-    """Tests for AssociatedImageInfo (retrieval response model)"""
-
-    def test_create_associated_image_info(self):
-        """Test creating AssociatedImageInfo"""
-        info = AssociatedImageInfo(
-            image_segment_id="img_001",
-            storage_url="s3://bucket/test.png",
-            filename="test.png",
-            vlm_description="Test description",
-            proximity_score=0.85,
-            media_type="image/png",
-        )
-
-        assert info.image_segment_id == "img_001"
-        assert info.storage_url == "s3://bucket/test.png"
-        assert info.proximity_score == 0.85
-
-    def test_associated_image_info_defaults(self):
-        """Test default values"""
-        info = AssociatedImageInfo(
-            image_segment_id="img_001",
-            storage_url="s3://bucket/test.png",
-        )
-
-        assert info.filename == ""
-        assert info.vlm_description is None
-        assert info.proximity_score == 1.0
-        assert info.media_type == "image/png"
 
 
 # ============ Test ContentType Enum ============

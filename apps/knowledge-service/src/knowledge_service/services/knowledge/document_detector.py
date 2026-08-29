@@ -10,6 +10,7 @@ Automatically detects document type and recommends the optimal processing mode:
 Detection is performed by sampling the first few pages to minimize I/O.
 """
 
+import asyncio
 import contextlib
 import os
 from dataclasses import dataclass, field
@@ -20,6 +21,8 @@ from ...core.observability.logging import get_logger
 from .processing_mode import ProcessingMode
 
 logger = get_logger(__name__)
+
+DocumentContent = bytes | str | os.PathLike[str]
 
 
 class DocumentType(str, Enum):
@@ -131,7 +134,7 @@ class DocumentTypeDetector:
 
     async def detect(
         self,
-        content: bytes | str,
+        content: DocumentContent,
         filename: str | None = None,
         mime_type: str | None = None,
     ) -> DetectionResult:
@@ -226,7 +229,7 @@ class DocumentTypeDetector:
 
     async def _detect_pdf(
         self,
-        content: bytes | str,
+        content: DocumentContent,
         file_size: int,
         is_large: bool,
     ) -> DetectionResult:
@@ -237,16 +240,29 @@ class DocumentTypeDetector:
         - Native (has text layer)
         - Scanned (image-only)
         - Mixed (some pages text, some images)
+
+        The fitz page sampling is CPU-bound, so it runs off the event loop
+        (T7 provisioning reliability): a large upload must not stall other
+        requests sharing this worker.
         """
+        return await asyncio.to_thread(self._detect_pdf_sync, content, file_size, is_large)
+
+    def _detect_pdf_sync(
+        self,
+        content: DocumentContent,
+        file_size: int,
+        is_large: bool,
+    ) -> DetectionResult:
+        """Synchronous PDF sampling; call via ``_detect_pdf`` only."""
         fitz = self._get_fitz()
         doc = None
 
         try:
             # Open PDF document
-            if isinstance(content, str):
-                doc = fitz.open(content)
-            else:
+            if isinstance(content, bytes):
                 doc = fitz.open(stream=content, filetype="pdf")
+            else:
+                doc = fitz.open(os.fspath(content))
 
             total_pages = len(doc)
             pages_to_check = min(self.sample_pages, total_pages)
@@ -377,23 +393,23 @@ class DocumentTypeDetector:
         )
 
     @staticmethod
-    def _resolve_file_size(content: bytes | str) -> int:
-        if isinstance(content, str):
-            try:
-                return os.path.getsize(content)
-            except OSError:
-                return 0
-        return len(content)
+    def _resolve_file_size(content: DocumentContent) -> int:
+        if isinstance(content, bytes):
+            return len(content)
+        try:
+            return os.path.getsize(os.fspath(content))
+        except OSError:
+            return 0
 
     @staticmethod
-    def _is_pdf_magic(content: bytes | str) -> bool:
-        if isinstance(content, str):
-            try:
-                with open(content, "rb") as handle:
-                    return handle.read(4) == b"%PDF"
-            except OSError:
-                return False
-        return content[:4] == b"%PDF"
+    def _is_pdf_magic(content: DocumentContent) -> bool:
+        if isinstance(content, bytes):
+            return content[:4] == b"%PDF"
+        try:
+            with open(os.fspath(content), "rb") as handle:
+                return handle.read(4) == b"%PDF"
+        except OSError:
+            return False
 
     @staticmethod
     def get_mode_display_name(mode: ProcessingMode) -> str:

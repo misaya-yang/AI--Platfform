@@ -3,12 +3,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from ...config import get_settings
 from ...core.exceptions import ValidationFailedError
 from ...core.observability.logging import get_logger
 from .common import ensure_dict as _ensure_dict
 from .embedding import (
     BaseEmbedding,
     EmbeddingConfig,
+    _embeddings_endpoint,
     create_embedding,
 )
 
@@ -188,6 +190,10 @@ class EmbeddingManager:
             "siliconflow": "BAAI/bge-m3",
             "silicon": "BAAI/bge-m3",
             "sf": "BAAI/bge-m3",
+            "openai_compatible": "Qwen/Qwen3-Embedding-0.6B",
+            "openai-compatible": "Qwen/Qwen3-Embedding-0.6B",
+            "vllm": "Qwen/Qwen3-Embedding-0.6B",
+            "tei": "Qwen/Qwen3-Embedding-0.6B",
         }.get(provider, "hash-384")
         resolved_model = model or default_model
 
@@ -231,18 +237,18 @@ class EmbeddingManager:
         if provider_key in {"gemini", "google"}:
             if not api_key:
                 api_key = str(self.settings.knowledge.gemini.api_key or "").strip()
-            # Env-level fallback: DASHSCOPE_EMBEDDING_API_KEY /
-            # VERTEX_EMBEDDING_API_KEY are resolved inline here (mirrors
+            # Env-level fallback: VERTEX_EMBEDDING_API_KEY / GEMINI_API_KEY /
+            # GOOGLE_API_KEY are resolved through Settings here (mirrors
             # ai_gateway_core.config.endpoints; duplicated intentionally
             # because knowledge-service ships as a standalone image that
             # does not depend on ai-gateway-core).
             if not api_key:
-                import os as _os
+                env = get_settings()
                 api_key = (
-                    _os.environ.get("VERTEX_EMBEDDING_API_KEY", "").strip()
-                    if _os.environ.get("GOOGLE_EMBEDDING_BACKEND", "").strip().lower() == "vertex"
+                    env.vertex_embedding_api_key.strip()
+                    if env.google_embedding_backend.strip().lower() == "vertex"
                     else ""
-                ) or _os.environ.get("GEMINI_API_KEY", "").strip() or _os.environ.get("GOOGLE_API_KEY", "").strip()
+                ) or env.gemini_api_key.strip() or env.google_api_key.strip()
             if not api_key:
                 raise ValidationFailedError(
                     "server-owned Gemini embedding credentials are unavailable"
@@ -280,10 +286,23 @@ class EmbeddingManager:
                 str(self.settings.knowledge.siliconflow.base_url or "").strip()
                 or "https://api.siliconflow.cn/v1"
             )
-            if endpoint.rstrip("/").endswith("/embeddings"):
-                base_url = endpoint
-            else:
-                base_url = f"{endpoint.rstrip('/')}/embeddings"
+            base_url = _embeddings_endpoint(endpoint)
+        elif provider_key in {"openai_compatible", "openai-compatible", "vllm", "tei"}:
+            # Self-hosted OpenAI-compatible server (vLLM / TEI) — the
+            # Qwen3-Embedding upgrade hook. Deliberately no cloud default
+            # endpoint: the operator supplies the server address via env
+            # (KNOWLEDGE_EMBEDDINGS__OPENAI_COMPATIBLE_BASE_URL) and the
+            # API key stays optional for unauthenticated internal serving.
+            embeddings = get_settings().embeddings
+            if not api_key:
+                api_key = str(embeddings.openai_compatible_api_key or "").strip() or None
+            endpoint = base_url or str(embeddings.openai_compatible_base_url or "").strip()
+            if not endpoint:
+                raise ValidationFailedError(
+                    "openai_compatible embedding provider requires a server-owned "
+                    "base URL for the vLLM / TEI endpoint"
+                )
+            base_url = _embeddings_endpoint(endpoint)
         else:
             raise ValidationFailedError(f"Unsupported embedding provider: {provider}")
 

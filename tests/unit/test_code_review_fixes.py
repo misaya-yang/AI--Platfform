@@ -2,14 +2,13 @@
 Code Review 修复验证测试
 
 测试内容：
-1. SQL 参数化查询 (find_stuck_documents)
-2. 图片魔数验证 (validate_image_magic)
-3. 页面标题后备逻辑
-4. 嵌入重试机制
+1. 图片魔数验证 (validate_image_magic)
+2. 页面标题后备逻辑
+3. 嵌入重试机制
 """
 
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -99,63 +98,6 @@ class TestImageMagicValidation:
         # 内容是文本，但可能被伪造为 image/jpeg
         fake_jpeg = b"Not a real JPEG file content"
         assert self.validate_image_magic(fake_jpeg) is False
-
-
-class TestSQLParameterization:
-    """SQL 参数化查询测试"""
-
-    @pytest.mark.asyncio
-    async def test_find_stuck_documents_uses_parameterized_query(self):
-        """测试 find_stuck_documents 使用参数化查询而非字符串格式化"""
-        from src.persistence.database import DatabaseStorage
-
-        db = DatabaseStorage.__new__(DatabaseStorage)
-        mock_pool = MagicMock()
-        mock_conn = AsyncMock()
-        mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
-        mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
-        mock_conn.fetch = AsyncMock(return_value=[])
-        db._pool = mock_pool
-
-        # 调用方法
-        await db.find_stuck_documents(stuck_threshold_minutes=15)
-
-        # 验证使用了参数化查询
-        mock_conn.fetch.assert_called_once()
-        call_args = mock_conn.fetch.call_args
-
-        # 检查 SQL 查询
-        query = call_args[0][0]
-        assert "%s" not in query, "SQL query should not use %s formatting"
-        assert "%d" not in query, "SQL query should not use %d formatting"
-        assert "make_interval" in query, "SQL query should use make_interval function"
-        assert "$1" in query, "SQL query should use $1 parameterized placeholder"
-
-        # 检查参数
-        assert call_args[0][1] == 15, "Should pass stuck_threshold_minutes as parameter"
-
-    @pytest.mark.asyncio
-    async def test_find_stuck_documents_with_different_thresholds(self):
-        """测试不同阈值的 find_stuck_documents"""
-        from src.persistence.database import DatabaseStorage
-
-        db = DatabaseStorage.__new__(DatabaseStorage)
-        mock_pool = MagicMock()
-        mock_conn = AsyncMock()
-        mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
-        mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
-        mock_conn.fetch = AsyncMock(return_value=[])
-        db._pool = mock_pool
-
-        # 测试不同阈值
-        for threshold in [5, 30, 60, 120]:
-            mock_conn.fetch.reset_mock()
-            await db.find_stuck_documents(stuck_threshold_minutes=threshold)
-
-            call_args = mock_conn.fetch.call_args
-            assert call_args[0][1] == threshold, f"Should pass {threshold} as parameter"
-
-
 class TestPageTitleFallback:
     """页面标题后备逻辑测试"""
 

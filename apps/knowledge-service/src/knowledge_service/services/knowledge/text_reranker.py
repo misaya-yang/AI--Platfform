@@ -23,7 +23,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import os
 import re
 import threading
 import time
@@ -31,6 +30,8 @@ from collections import OrderedDict
 from dataclasses import dataclass
 
 import httpx
+
+from ...config import get_settings
 
 
 # =============================================================================
@@ -250,13 +251,14 @@ def _resolve_dashscope_rerank_url(model: str | None = None) -> str:
     when neither is configured instead of silently selecting the China host.
     """
 
-    explicit = os.getenv("DASHSCOPE_RERANK_BASE_URL", "").strip()
+    env = get_settings()
+    explicit = env.dashscope_rerank_base_url.strip()
     if explicit:
         return explicit.rstrip("/")
 
     normalized_model = str(model or "").strip().lower()
     qwen3_text_rerank = normalized_model == "qwen3-rerank"
-    general = os.getenv("DASHSCOPE_BASE_URL", "").strip()
+    general = env.dashscope_base_url.strip()
     if not general:
         if qwen3_text_rerank:
             raise ValueError(
@@ -326,7 +328,7 @@ class AsyncTextReranker:
         self.model = model
         self.base_url = base_url or _resolve_dashscope_rerank_url(self.model)
         configured_schema = str(
-            request_schema or os.getenv("DASHSCOPE_RERANK_REQUEST_SCHEMA") or "auto"
+            request_schema or get_settings().dashscope_rerank_request_schema or "auto"
         ).strip().lower()
         if configured_schema not in {"auto", "legacy", "flat"}:
             raise ValueError("DashScope rerank request_schema must be auto|legacy|flat")
@@ -337,7 +339,7 @@ class AsyncTextReranker:
             if configured_schema == "auto"
             else configured_schema
         )
-        self.instruct = instruct or os.getenv("DASHSCOPE_RERANK_INSTRUCT") or None
+        self.instruct = instruct or get_settings().dashscope_rerank_instruct or None
         if self.instruct and self.model not in {"qwen3-rerank", "qwen3-vl-rerank"}:
             raise ValueError(f"rerank instruct is not supported by model {self.model}")
         self._cache_profile = ":".join(
@@ -574,26 +576,43 @@ class BGEReranker:
         self.use_fp16 = use_fp16
         self._model = None
         self._initialized = False
+        # Guards the model load: rerank() runs it inside asyncio.to_thread,
+        # and concurrent callers must not each instantiate the model.
+        self._init_lock = threading.Lock()
 
     def _ensure_initialized(self):
-        """Lazy load the model (synchronous, call from thread context)."""
+        """Lazy load the model (synchronous, call from thread context).
+
+        Double-checked under ``_init_lock`` so concurrent worker threads load
+        the model exactly once. Combined with the shared instance from
+        ``get_bge_reranker`` this also keeps the cold-load cost off the
+        interactive rerank budget: only the first request after process start
+        pays it, instead of every request re-downloading/reloading the model
+        in an orphaned worker thread.
+        """
         if self._initialized:
             return
 
-        try:
-            from FlagEmbedding import FlagReranker
+        with self._init_lock:
+            if self._initialized:
+                return
 
-            logger.info(f"Loading BGE Reranker: {self.model_name}")
-            self._model = FlagReranker(
-                self.model_name,
-                device=self.device,
-                use_fp16=self.use_fp16,
-            )
-            self._initialized = True
-            logger.info("BGE Reranker loaded")
+            try:
+                from FlagEmbedding import FlagReranker
 
-        except ImportError:
-            raise RuntimeError("FlagEmbedding package required: pip install FlagEmbedding")
+                logger.info(f"Loading BGE Reranker: {self.model_name}")
+                self._model = FlagReranker(
+                    self.model_name,
+                    device=self.device,
+                    use_fp16=self.use_fp16,
+                )
+                self._initialized = True
+                logger.info("BGE Reranker loaded")
+
+            except ImportError:
+                raise RuntimeError(
+                    "FlagEmbedding package required: pip install FlagEmbedding"
+                ) from None
 
     async def rerank(
         self,
@@ -632,6 +651,33 @@ class BGEReranker:
             results = results[:top_n]
 
         return results
+
+
+_bge_reranker_cache: dict[str, BGEReranker] = {}
+_bge_reranker_cache_lock = threading.Lock()
+
+
+def get_bge_reranker(
+    model: str = "BAAI/bge-reranker-v2-m3",
+    device: str | None = None,
+    use_fp16: bool = True,
+) -> BGEReranker:
+    """Get or create the shared BGE reranker for a model/device profile.
+
+    The FlagEmbedding model is heavyweight and loads inside an
+    ``asyncio.to_thread`` worker that a budget-cancelled await cannot stop.
+    A fresh instance per retrieval therefore meant a fresh cold model load per
+    request: the load latency permanently blew the interactive rerank budget
+    (always degrade) and orphaned one loader thread per request. Sharing one
+    instance per profile loads the model once and keeps it warm.
+    """
+    key = f"{model}:{device}:{use_fp16}"
+    with _bge_reranker_cache_lock:
+        cached = _bge_reranker_cache.get(key)
+        if cached is None:
+            cached = BGEReranker(model=model, device=device, use_fp16=use_fp16)
+            _bge_reranker_cache[key] = cached
+        return cached
 
 
 # =============================================================================
@@ -972,7 +1018,7 @@ def create_reranker(
         )
 
     if normalized_provider == "bge":
-        return BGEReranker(
+        return get_bge_reranker(
             model=normalized_model,
             **kwargs,
         )

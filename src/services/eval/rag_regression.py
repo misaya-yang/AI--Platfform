@@ -12,6 +12,7 @@ import json
 import math
 import os
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
@@ -605,6 +606,7 @@ def evaluate_rag_regression(
     retrieval_thresholds: dict[str, float] | None = None,
     min_total_samples: int = 8,
     min_track_samples: int = 4,
+    required_tracks: Sequence[str] | None = None,
     bootstrap_samples: int = 2_000,
     enable_external_judge_gate: bool = False,
     judge_rows: list[dict[str, Any]] | None = None,
@@ -680,7 +682,11 @@ def evaluate_rag_regression(
     }
     if len(cases) < min_total_samples:
         failures.append(f"sample_count {len(cases)} < minimum {min_total_samples}")
-    for track, track_cases in tracks.items():
+    checked_tracks = RAG_TRACKS if required_tracks is None else tuple(required_tracks)
+    if set(checked_tracks) - set(RAG_TRACKS):
+        raise ValueError("required_tracks must be a subset of the RAG tracks")
+    for track in checked_tracks:
+        track_cases = tracks.get(track, [])
         if len(track_cases) < min_track_samples:
             failures.append(
                 f"{track} sample_count {len(track_cases)} < minimum {min_track_samples}"

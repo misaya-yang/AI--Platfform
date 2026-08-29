@@ -7,6 +7,7 @@ Migrated from KnowledgeService as part of Phase 2 refactoring (Step 3).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -94,12 +95,7 @@ def _require_dataset_index_writable(
     if not isinstance(index_config, dict):
         raise ValidationFailedError("dataset index_config is invalid")
     validate_persisted_chunking_config(index_config.get("chunking", {}))
-    lexical = LexicalConfig.from_index_config(index_config)
-    if lexical.reads_bm25_v2:
-        raise ValidationFailedError(
-            "bm25_v2 active mode is read-only; roll back to lexical_v1 shadow "
-            "before changing indexed content"
-        )
+    LexicalConfig.from_index_config(index_config)
 
 
 def _validate_segment_batch_enable_request(
@@ -209,6 +205,89 @@ def _segment_vector_payload(
         "section_header": segment.get("section_header")
         or metadata.get("section_header"),
     }
+
+
+# PRD T1.1: the API never leaks internal lifecycle states. Every document
+# payload returned to callers carries a derived ``display_status`` from this
+# fixed vocabulary (Dify-parity contract):
+#   queuing / indexing / paused / error / available / disabled / archived
+DOCUMENT_DISPLAY_STATUS_VOCABULARY = (
+    "queuing",
+    "indexing",
+    "paused",
+    "error",
+    "available",
+    "disabled",
+    "archived",
+)
+
+# Internal document states that mean "accepted, not yet being indexed".
+_DISPLAY_QUEUING_STATES = frozenset({"waiting"})
+# Internal states that mean "actively moving through the pipeline". This is
+# the catch-all bucket on purpose: parsing/splitting/indexing, the legacy
+# Confluence 'syncing', upload-phase 'uploading'/'uploading_images', and any
+# unknown in-flight value must never surface verbatim.
+_DISPLAY_ACTIVE_STATES = frozenset(
+    {
+        "parsing",
+        "splitting",
+        "indexing",
+        "syncing",
+        "uploading",
+        "uploading_images",
+    }
+)
+
+# D4 (frontend handoff): list pagination. A single page is capped; callers
+# walk further pages via offset. Caps keep the documented pre-pagination
+# behaviour as the default page (200 documents / 500 segments).
+DOCUMENT_LIST_PAGE_CAP = 200
+SEGMENT_LIST_PAGE_CAP = 500
+
+
+def _clamp_page_limit(limit: int, cap: int) -> int:
+    """Clamp a requested page size into [1, cap]."""
+    try:
+        value = int(limit)
+    except (TypeError, ValueError):
+        return cap
+    return max(1, min(value, cap))
+
+
+def derive_document_display_status(document: Any) -> str:
+    """Derive the display-safe document status (PRD T1.1).
+
+    Collapses the internal machine vocabulary
+    (waiting/parsing/splitting/indexing/completed/error plus legacy
+    'syncing' and upload-phase states) into the display vocabulary.
+    Archived wins over every other state; then error; then the
+    completed-state enabled/disabled split; then queued vs actively indexing.
+    Unknown states fail closed into 'indexing' rather than leaking raw text.
+    """
+
+    doc = document if isinstance(document, dict) else {}
+    if bool(doc.get("archived", False)):
+        return "archived"
+    status = str(doc.get("status") or "").strip().lower()
+    if status == "error" or status == "failed":
+        return "error"
+    if status == "paused":
+        return "paused"
+    if status == "completed":
+        return "disabled" if doc.get("enabled", True) is False else "available"
+    if status in _DISPLAY_QUEUING_STATES:
+        return "queuing"
+    # parsing/splitting/indexing/syncing/uploading*/unknown in-flight states.
+    return "indexing"
+
+
+def _with_display_status(document: dict[str, Any]) -> dict[str, Any]:
+    """Stamp the derived display_status onto an API-bound document payload."""
+
+    if not isinstance(document, dict):
+        return document
+    document["display_status"] = derive_document_display_status(document)
+    return document
 
 
 async def _require_unchanged_dataset_content(
@@ -343,13 +422,13 @@ class DocumentService:
             "source_type": "text",
             "mime_type": "text/plain",
             "size_bytes": len(clean_content.encode("utf-8")),
-            "status": "uploaded",
+            "status": "waiting",
             "progress": 0,
             "content": clean_content,
             "metadata": metadata or {},
         }
         await self._save_document_for_dataset(doc, dataset)
-        return await self.db.get_document(doc_id) or doc
+        return _with_display_status(await self.db.get_document(doc_id) or doc)
 
     async def create_document_from_upload(
         self,
@@ -457,7 +536,7 @@ class DocumentService:
                     "source_type": "upload",
                     "mime_type": mime_type or "application/octet-stream",
                     "size_bytes": len(content_bytes),
-                    "status": "uploaded",
+                    "status": "waiting",
                     "progress": 0,
                     "content": "",
                     "metadata": doc_metadata,
@@ -475,7 +554,7 @@ class DocumentService:
                 )
                 if not persisted:
                     raise RuntimeError("finalized document upload is not readable")
-                return persisted
+                return _with_display_status(persisted)
         except BaseException:
             if not finalized:
                 cleanup = asyncio.create_task(
@@ -549,25 +628,94 @@ class DocumentService:
             "source_uri": source_url,
             "mime_type": detected_mime or content_type or "text/html",
             "size_bytes": len(content_bytes),
-            "status": "uploaded",
+            "status": "waiting",
             "progress": 0,
             "content": text,
             "metadata": metadata or {},
         }
         await self._save_document_for_dataset(doc, dataset)
-        return await self.db.get_document(doc_id) or doc
+        return _with_display_status(await self.db.get_document(doc_id) or doc)
 
-    async def list_documents(self, user: UserContext, dataset_id: str) -> list[dict[str, Any]]:
+    async def list_documents(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        *,
+        limit: int = DOCUMENT_LIST_PAGE_CAP,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
         dataset = await self._ks.require_dataset_access(user, dataset_id, required="viewer")
         generation = _dataset_content_generation(dataset)
-        documents = await self.db.list_documents(dataset_id=dataset_id, limit=200, offset=0)
+        documents = await self.db.list_documents(
+            dataset_id=dataset_id,
+            limit=_clamp_page_limit(limit, DOCUMENT_LIST_PAGE_CAP),
+            offset=max(0, offset),
+        )
         await _require_unchanged_dataset_content(
             self._ks,
             user,
             dataset_id,
             generation,
         )
-        return documents
+        return [_with_display_status(document) for document in documents]
+
+    async def list_documents_page(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        *,
+        limit: int = DOCUMENT_LIST_PAGE_CAP,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Return one page and its total under one content-generation fence."""
+
+        dataset = await self._ks.require_dataset_access(user, dataset_id, required="viewer")
+        generation = _dataset_content_generation(dataset)
+        page_limit = _clamp_page_limit(limit, DOCUMENT_LIST_PAGE_CAP)
+        page_offset = max(0, offset)
+        total = int(await self.db.count_documents(dataset_id=dataset_id) or 0)
+        documents = await self.db.list_documents(
+            dataset_id=dataset_id,
+            limit=page_limit,
+            offset=page_offset,
+        )
+        await _require_unchanged_dataset_content(
+            self._ks,
+            user,
+            dataset_id,
+            generation,
+        )
+        return {
+            "items": [_with_display_status(document) for document in documents],
+            "total": total,
+            "limit": page_limit,
+            "offset": page_offset,
+        }
+
+    async def count_documents(self, user: UserContext, dataset_id: str) -> int:
+        """Total document rows the caller may see (pagination total)."""
+        await self._ks.require_dataset_access(user, dataset_id, required="viewer")
+        return await self.db.count_documents(dataset_id=dataset_id)
+
+    async def list_all_document_ids(
+        self, user: UserContext, dataset_id: str
+    ) -> list[str]:
+        """Enumerate every document ID in the dataset without a page cap.
+
+        ``list_documents`` intentionally caps a single page (used by the list
+        UI); bulk operations such as batch-reindex must see all documents or
+        they silently skip everything past the cap.
+        """
+        dataset = await self._ks.require_dataset_access(user, dataset_id, required="viewer")
+        generation = _dataset_content_generation(dataset)
+        document_ids = await self.db.list_document_ids_by_dataset(dataset_id)
+        await _require_unchanged_dataset_content(
+            self._ks,
+            user,
+            dataset_id,
+            generation,
+        )
+        return document_ids
 
     async def get_document(
         self, user: UserContext, dataset_id: str, document_id: str
@@ -583,7 +731,7 @@ class DocumentService:
             dataset_id,
             generation,
         )
-        return doc
+        return _with_display_status(doc)
 
     async def enqueue_ingest(self, dataset_id: str, document_id: str) -> None:
         # Worker will be injected from app.state; this is a convenience for API.
@@ -716,11 +864,18 @@ class DocumentService:
         dataset_id: str,
         document_id: str | None = None,
         q: str | None = None,
+        *,
+        limit: int = SEGMENT_LIST_PAGE_CAP,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         dataset = await self._ks.require_dataset_access(user, dataset_id, required="viewer")
         generation = _dataset_content_generation(dataset)
         segments = await self.db.list_segments(
-            dataset_id=dataset_id, document_id=document_id, query_text=q, limit=500, offset=0
+            dataset_id=dataset_id,
+            document_id=document_id,
+            query_text=q,
+            limit=_clamp_page_limit(limit, SEGMENT_LIST_PAGE_CAP),
+            offset=max(0, offset),
         )
         await _require_unchanged_dataset_content(
             self._ks,
@@ -730,13 +885,79 @@ class DocumentService:
         )
         return segments
 
+    async def list_segments_page(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        document_id: str | None = None,
+        q: str | None = None,
+        *,
+        limit: int = SEGMENT_LIST_PAGE_CAP,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Return a filtered segment page and exact total under one fence."""
+
+        dataset = await self._ks.require_dataset_access(user, dataset_id, required="viewer")
+        generation = _dataset_content_generation(dataset)
+        page_limit = _clamp_page_limit(limit, SEGMENT_LIST_PAGE_CAP)
+        page_offset = max(0, offset)
+        total = int(
+            await self.db.count_segments(
+                dataset_id=dataset_id,
+                document_id=document_id,
+                query_text=q,
+            )
+            or 0
+        )
+        segments = await self.db.list_segments(
+            dataset_id=dataset_id,
+            document_id=document_id,
+            query_text=q,
+            limit=page_limit,
+            offset=page_offset,
+        )
+        await _require_unchanged_dataset_content(
+            self._ks,
+            user,
+            dataset_id,
+            generation,
+        )
+        return {
+            "items": segments,
+            "total": total,
+            "limit": page_limit,
+            "offset": page_offset,
+        }
+
+    async def count_segments(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        document_id: str | None = None,
+        q: str | None = None,
+    ) -> int:
+        """Total segment rows for the filtered list (pagination total)."""
+        await self._ks.require_dataset_access(user, dataset_id, required="viewer")
+        return await self.db.count_segments(
+            dataset_id=dataset_id, document_id=document_id, query_text=q
+        )
+
     async def update_segment(
         self,
         user: UserContext,
         dataset_id: str,
         segment_id: str,
         new_text: str,
+        new_answer: str | None = None,
+        new_keywords: list[str] | None = None,
     ) -> dict[str, Any]:
+        """Hot-update one segment under its stable point ID.
+
+        ``new_answer`` / ``new_keywords`` follow the PUT contract: ``None``
+        leaves the stored value untouched, ``""`` / ``[]`` clears it. The
+        content hash is refreshed alongside the text so incremental re-ingest
+        skip logic never sees a stale hash for an edited segment.
+        """
         dataset = await self._ks.require_dataset_access(user, dataset_id, required="editor")
         _require_dataset_index_writable(dataset)
         seg = await self.db.get_segment(segment_id)
@@ -745,6 +966,12 @@ class DocumentService:
 
         # Sanitize text for PostgreSQL
         clean_text = self._ks._sanitize_text_for_db(new_text)
+        clean_answer = (
+            self._ks._sanitize_text_for_db(new_answer)
+            if new_answer is not None
+            else None
+        )
+        content_hash = hashlib.sha256(clean_text.encode("utf-8")).hexdigest()
 
         # Re-embed and upsert under one cross-replica segment generation.
         embedding_provider = str(dataset.get("embedding_provider") or "local")
@@ -815,6 +1042,9 @@ class DocumentService:
                 await self.db.update_segment(
                     segment_id,
                     text=clean_text,
+                    answer=clean_answer,
+                    keywords=new_keywords,
+                    content_hash=content_hash,
                     connection=lease_connection,
                 )
                 embedder: BaseEmbedding | None = None
@@ -1078,7 +1308,11 @@ class DocumentService:
             None,
         )
         clear_marker = getattr(self.db, "clear_document_lifecycle_marker", None)
-        if not all(callable(value) for value in (lease_factory, delete_vectors, clear_marker)):
+        bump_revision = getattr(self.db, "bump_dataset_content_revision", None)
+        if not all(
+            callable(value)
+            for value in (lease_factory, delete_vectors, clear_marker, bump_revision)
+        ):
             raise ValidationFailedError(
                 "document lifecycle changes require the index lifecycle fence"
             )
@@ -1143,7 +1377,7 @@ class DocumentService:
                     state_updates,
                     connection=lease_connection,
                 )
-                return (
+                return _with_display_status(
                     await self.db.get_document(
                         document_id,
                         connection=lease_connection,
@@ -1186,6 +1420,19 @@ class DocumentService:
                         "document vectors could not be fully deactivated; the document "
                         "remains hidden and the same transition is retryable"
                     ) from exc
+                # PRD T1 unified lifecycle contract (§885-886): deactivation
+                # changes which content is visible for retrieval, so the
+                # dataset's authoritative revision advances with it — the
+                # retrieval cache is keyed on the revision fingerprint, and a
+                # result cached before the document went hidden must not
+                # outlive the transition (the restore direction bumps
+                # atomically inside the activation status write). A crash
+                # before the marker clear leaves the document hidden under
+                # its marker, and a replay simply bumps once more.
+                await bump_revision(
+                    dataset_id,
+                    connection=lease_connection,
+                )
                 cleared = await clear_marker(
                     document_id,
                     expected_status="deactivating",
@@ -1196,7 +1443,7 @@ class DocumentService:
                         "document vectors were deactivated but lifecycle finalization failed"
                     )
                 metadata.pop(DOCUMENT_LIFECYCLE_REINDEX_KEY, None)
-                return (
+                return _with_display_status(
                     await self.db.get_document(
                         document_id,
                         connection=lease_connection,
@@ -1213,14 +1460,14 @@ class DocumentService:
 
             document_status = str(document.get("status") or "")
             stale_processing = bool(pending) and document_status not in {
-                "failed",
+                "error",
                 "completed",
             } and self._lifecycle_reindex_is_stale(document)
-            if pending and document_status not in {"failed", "completed"}:
+            if pending and document_status not in {"error", "completed"}:
                 if not stale_processing:
                     # A fresh worker owns this durable generation. Do not
                     # duplicate its work or destroy partial progress.
-                    return document
+                    return _with_display_status(document)
             else:
                 if not pending:
                     pending = {
@@ -1239,27 +1486,42 @@ class DocumentService:
                         allow_lifecycle_marker_update=True,
                     )
 
-                # Initial restore and explicit failed retry rebuild from a
-                # clean generation. A stale-processing replay deliberately
-                # skips this branch so useful partial progress is retained.
-                receipt_changed = False
-                for receipt_key in ("images_embedded", "embedded_image_count"):
-                    if receipt_key in metadata:
-                        metadata.pop(receipt_key, None)
-                        receipt_changed = True
-                if receipt_changed:
-                    # The old receipt only proves persistence in the generation
-                    # that is about to be swept. Keeping it would make retry
-                    # skip image embedding and falsely complete without images.
-                    cleared_receipts = await self.db.clear_document_legacy_image_receipts(
-                        document_id,
-                        dataset_id,
-                        connection=lease_connection,
-                    )
-                    if not cleared_receipts:
-                        raise ValidationFailedError(
-                            "document restore lost image-receipt generation authority"
+                # Hot restore (PRD T1 item 6): a text-only generation keeps
+                # its persisted rows and rebuilds every point row-by-row
+                # through the reembed engine at existing segment/point
+                # identity, instead of the legacy clear-rows full re-ingest.
+                # Image-capable generations cannot hot-restore because the
+                # reembed engine repairs text rows only; image points would
+                # stay deleted, so they keep the clean rebuild.
+                hot_restore = (
+                    str(metadata.get("processing_mode") or "text_only")
+                    not in {"multimodal", "scanned"}
+                    and "images_embedded" not in metadata
+                    and "embedded_image_count" not in metadata
+                    and int(metadata.get("image_count") or 0) <= 0
+                )
+                if not hot_restore:
+                    # Initial restore and explicit failed retry rebuild from a
+                    # clean generation. A stale-processing replay deliberately
+                    # skips this branch so useful partial progress is retained.
+                    receipt_changed = False
+                    for receipt_key in ("images_embedded", "embedded_image_count"):
+                        if receipt_key in metadata:
+                            metadata.pop(receipt_key, None)
+                            receipt_changed = True
+                    if receipt_changed:
+                        # The old receipt only proves persistence in the generation
+                        # that is about to be swept. Keeping it would make retry
+                        # skip image embedding and falsely complete without images.
+                        cleared_receipts = await self.db.clear_document_legacy_image_receipts(
+                            document_id,
+                            dataset_id,
+                            connection=lease_connection,
                         )
+                        if not cleared_receipts:
+                            raise ValidationFailedError(
+                                "document restore lost image-receipt generation authority"
+                            )
                 try:
                     await delete_vectors(
                         tenant_id=tenant_id,
@@ -1271,29 +1533,48 @@ class DocumentService:
                     raise ValidationFailedError(
                         "document restore cleanup failed; the document remains hidden"
                     ) from exc
-                await self.db.delete_segments_by_document(
-                    document_id,
-                    connection=lease_connection,
-                )
-                await self.db.update_document_fields(
-                    document_id,
-                    {"segment_count": 0},
-                    connection=lease_connection,
-                )
+                if hot_restore:
+                    pin_ingest_action = getattr(
+                        self.db, "pin_document_ingest_action", None
+                    )
+                    if not callable(pin_ingest_action):
+                        raise ValidationFailedError(
+                            "document hot restore requires the ingest-action pin"
+                        )
+                    pinned = await pin_ingest_action(
+                        dataset_id,
+                        document_id,
+                        "reembed",
+                        connection=lease_connection,
+                    )
+                    if not pinned:
+                        raise ValidationFailedError(
+                            "document restore could not pin the rebuild verb"
+                        )
+                else:
+                    await self.db.delete_segments_by_document(
+                        document_id,
+                        connection=lease_connection,
+                    )
+                    await self.db.update_document_fields(
+                        document_id,
+                        {"segment_count": 0},
+                        connection=lease_connection,
+                    )
 
             # The dataset-exclusive lifecycle lease is stronger than the
             # normal dataset/document enqueue claim. Persist the outbox state
             # on this connection, then publish to memory only after release.
             await self.db.update_document_status(
                 document_id,
-                status="queued",
+                status="waiting",
                 progress=0,
                 error="",
                 connection=lease_connection,
             )
 
         # Publish only after releasing the dataset-exclusive cleanup lease.
-        # A process crash or queue failure leaves ``queued`` durable and the
+        # A process crash or queue failure leaves ``waiting`` durable and the
         # periodic SKIP LOCKED recovery pass will replay it after the TTL.
         try:
             await enqueue_claimed(dataset_id, document_id)
@@ -1304,15 +1585,18 @@ class DocumentService:
             ) from exc
 
         result = await self.db.get_document(document_id)
-        return result or {
-            **document,
-            "metadata": metadata,
-            "segment_count": document.get("segment_count", 0)
-            if stale_processing
-            else 0,
-            "status": "queued",
-            "progress": 0,
-        }
+        return _with_display_status(
+            result
+            or {
+                **document,
+                "metadata": metadata,
+                "segment_count": document.get("segment_count", 0)
+                if stale_processing
+                else 0,
+                "status": "waiting",
+                "progress": 0,
+            }
+        )
 
     async def set_document_enabled(
         self, user: UserContext, dataset_id: str, document_id: str, enabled: bool
@@ -1399,7 +1683,7 @@ class DocumentService:
             _require_no_reserved_document_metadata(filtered["metadata"])
         if filtered:
             await self.db.update_document_fields(document_id, filtered)
-        return await self.db.get_document(document_id) or doc
+        return _with_display_status(await self.db.get_document(document_id) or doc)
 
     # ========================================================================
     # Batch Operations
@@ -1414,6 +1698,16 @@ class DocumentService:
         batch_name: str | None = None,
     ) -> dict[str, Any]:
         """Batch create documents from text."""
+        # Documented gap (PRD T1 item 7): the Dify-shaped ProcessRuleSchema
+        # payload stays ACCEPTED for wire compatibility but is intentionally
+        # UNWIRED here. The authoritative rule snapshots are recorded at
+        # generation-open from the dataset's live chunking config (worker
+        # _record_generation_process_rule / route _record_ingest_execution,
+        # canonical dialect {"chunking", "processing_mode"}). Mapping the
+        # Dify dialect (pre_processing_rules/segmentation/parent_mode) into
+        # that config belongs to a future rule-cascade theme, not to this
+        # upgrade — wiring it ad hoc would diverge generation behaviour from
+        # the pinned snapshots.
         _ = process_rule
         await self._ks.require_dataset_access(user, dataset_id, required="editor")
 

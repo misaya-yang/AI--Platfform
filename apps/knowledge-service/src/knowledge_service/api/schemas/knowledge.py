@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import math
+import uuid
+from datetime import datetime
 from enum import Enum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import Self
@@ -166,8 +168,62 @@ class DocumentUpdateSchema(BaseModel):
 
     title: str | None = Field(default=None, min_length=1, max_length=512)
     metadata: dict[str, Any] | None = Field(default=None, max_length=64)
+    metadata_patch: dict[str, Any] | None = Field(default=None, max_length=32)
+    metadata_remove: list[str] | None = Field(default=None, max_length=32)
+    metadata_schema_revision: int | None = Field(default=None, ge=0)
     doc_type: str | None = Field(default=None, max_length=64)
     doc_language: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def _validate_metadata_edit_shape(self) -> Self:
+        uses_patch = self.metadata_patch is not None or self.metadata_remove is not None
+        if uses_patch and self.metadata is not None:
+            raise ValueError("metadata replacement and metadata merge-patch are mutually exclusive")
+        if uses_patch and any(
+            value is not None for value in (self.title, self.doc_type, self.doc_language)
+        ):
+            raise ValueError("metadata merge-patch must be submitted separately")
+        if uses_patch and self.metadata_schema_revision is None:
+            raise ValueError("metadata_schema_revision is required for metadata merge-patch")
+        if self.metadata_schema_revision is not None and not uses_patch:
+            raise ValueError("metadata_schema_revision requires metadata_patch or metadata_remove")
+        return self
+
+
+class DocumentMetadataFieldSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    label: str = Field(min_length=1, max_length=128)
+    type: str = Field(pattern=r"^(string|number|datetime)$")
+    description: str | None = Field(default=None, max_length=512)
+
+
+class DocumentMetadataRegistryUpdateSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=0)
+    fields: list[DocumentMetadataFieldSchema] = Field(default_factory=list, max_length=32)
+
+
+class DocumentMetadataBatchUpdateSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    document_ids: list[Annotated[str, Field(min_length=1, max_length=255)]] = Field(
+        min_length=1,
+        max_length=500,
+    )
+    metadata_patch: dict[str, Any] = Field(default_factory=dict, max_length=32)
+    metadata_remove: list[str] = Field(default_factory=list, max_length=32)
+    metadata_schema_revision: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _validate_non_empty_patch(self) -> Self:
+        if not self.metadata_patch and not self.metadata_remove:
+            raise ValueError("metadata_patch or metadata_remove is required")
+        if len(set(self.document_ids)) != len(self.document_ids):
+            raise ValueError("document_ids must be unique")
+        return self
 
 
 class DocumentEnableDisableSchema(BaseModel):
@@ -180,7 +236,9 @@ class DocumentArchiveSchema(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     archived: bool
-    reason: str | None = Field(default=None, max_length=2_000)
+    # Matches database/schema.sql archived_reason VARCHAR(255) and the web
+    # counter; reject before persistence rather than surfacing a database 500.
+    reason: str | None = Field(default=None, max_length=255)
 
 
 def _validate_retrieval_fusion_parameters(value: Any) -> None:
@@ -635,6 +693,8 @@ class RetrieveHitSchema(BaseModel):
 class RetrieveResponseSchema(BaseModel):
     results: list[RetrieveHitSchema] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    trace_id: str | None = None
+    query_fingerprint: str | None = None
 
 
 class SegmentUpdateSchema(BaseModel):
@@ -706,6 +766,7 @@ class DatasetStatisticsSchema(BaseModel):
     word_count: int = 0
     available_document_count: int = 0
     available_segment_count: int = 0
+    hit_count: int = 0
 
 
 class DocumentStatisticsSchema(BaseModel):
@@ -730,15 +791,91 @@ class QueryHistorySchema(BaseModel):
     content: str
     source: str
     source_app_id: str | None = None
+    created_by_role: str | None = None
     created_by: str | None = None
-    created_at: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    trace_id: uuid.UUID | None = None
+    query_fingerprint: str | None = None
+    mode: str | None = None
+    top_k: int | None = None
+    hit_count: int | None = None
+    stage_timings: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
 
 
 class QueryHistoryListSchema(BaseModel):
     """Query history list response"""
 
     queries: list[QueryHistorySchema] = Field(default_factory=list)
-    total: int = 0
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
+class QueryFeedbackUpsertSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    trace_id: uuid.UUID
+    query_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    target_type: Literal["retrieval_hit", "qa_answer"]
+    segment_id: str | None = Field(default=None, min_length=1, max_length=255)
+    rating: Literal["positive", "negative"]
+    reason_code: Literal[
+        "relevant",
+        "helpful",
+        "well_cited",
+        "irrelevant",
+        "incorrect",
+        "missing_context",
+        "bad_citation",
+        "stale",
+        "unsafe",
+        "other",
+    ]
+    comment: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def _validate_feedback_shape(self) -> Self:
+        if self.target_type == "retrieval_hit" and not self.segment_id:
+            raise ValueError("retrieval-hit feedback requires segment_id")
+        if self.target_type == "qa_answer" and self.segment_id is not None:
+            raise ValueError("qa-answer feedback must not include segment_id")
+        positive = {"relevant", "helpful", "well_cited", "other"}
+        negative = {
+            "irrelevant",
+            "incorrect",
+            "missing_context",
+            "bad_citation",
+            "stale",
+            "unsafe",
+            "other",
+        }
+        allowed = positive if self.rating == "positive" else negative
+        if self.reason_code not in allowed:
+            raise ValueError("reason_code is incompatible with rating")
+        return self
+
+
+class QueryFeedbackSchema(BaseModel):
+    feedback_id: uuid.UUID
+    tenant_id: str
+    dataset_id: str
+    trace_id: uuid.UUID
+    query_fingerprint: str
+    target_type: Literal["retrieval_hit", "qa_answer"]
+    target_id: str
+    rating: Literal["positive", "negative"]
+    reason_code: str
+    comment: str | None = None
+    created_by: str
+    query_content: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class QueryFeedbackListSchema(BaseModel):
+    feedback: list[QueryFeedbackSchema] = Field(default_factory=list)
+    next_cursor: str | None = None
+    has_more: bool = False
 
 
 # ============================================================
@@ -751,8 +888,19 @@ class BatchReindexSchema(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    document_ids: list[str] = Field(default_factory=list, max_length=100)
+    document_ids: list[Annotated[str, Field(min_length=1, max_length=255)]] = Field(
+        default_factory=list,
+        max_length=1000,
+    )
     all_documents: bool = False  # If true, reindex all documents in dataset
+
+    @model_validator(mode="after")
+    def _validate_selector(self) -> Self:
+        if self.all_documents == bool(self.document_ids):
+            raise ValueError("choose exactly one of all_documents or document_ids")
+        if len(set(self.document_ids)) != len(self.document_ids):
+            raise ValueError("document_ids must be unique")
+        return self
 
 
 class BatchDeleteSchema(BaseModel):
@@ -760,7 +908,16 @@ class BatchDeleteSchema(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    document_ids: list[str] = Field(min_length=1, max_length=100)
+    document_ids: list[Annotated[str, Field(min_length=1, max_length=255)]] = Field(
+        min_length=1,
+        max_length=1000,
+    )
+
+    @model_validator(mode="after")
+    def _validate_unique_ids(self) -> Self:
+        if len(set(self.document_ids)) != len(self.document_ids):
+            raise ValueError("document_ids must be unique")
+        return self
 
 
 class BatchOperationResultSchema(BaseModel):
@@ -829,6 +986,8 @@ class QAResultSchema(BaseModel):
     timing: dict[str, int] = Field(default_factory=dict)
     model: str
     tokens_used: int | None = None
+    trace_id: str | None = None
+    query_fingerprint: str | None = None
 
 
 class QATestCaseSchema(BaseModel):
@@ -1007,11 +1166,21 @@ class BatchRetrieveResponseSchema(BaseModel):
     total_queries: int = 0
     total_results: int = 0
     execution_time_ms: float = 0.0
+    trace_id: str | None = None
+    query_fingerprint: str | None = None
 
 
 # ============================================================
 # Chunking Configuration Schemas
 # ============================================================
+
+
+class ChunkingSegmentationSchema(BaseModel):
+    """Safe Dify-compatible segmentation override."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_tokens: int = Field(ge=1, le=100_000)
 
 
 class ChunkingConfigSchema(BaseModel):
@@ -1034,16 +1203,21 @@ class ChunkingConfigSchema(BaseModel):
     mode: str = Field(default="automatic", min_length=1, max_length=32)
     chunk_size: int = Field(default=2000, ge=50, le=100_000)
     chunk_overlap: int = Field(default=300, ge=0, le=50_000)
+    overlap: int | None = Field(default=None, ge=0, le=50_000)
+    max_chunk_size: int | None = Field(default=None, ge=50, le=100_000)
+    min_chunk_size: int | None = Field(default=None, ge=50, le=100_000)
 
     # Token-based (preferred for production)
     use_token_count: bool = True
     token_limit: int | None = Field(default=None, ge=1, le=100_000)
+    max_tokens: int | None = Field(default=None, ge=1, le=100_000)
     min_chunk_tokens: int | None = Field(default=None, ge=1, le=100_000)
     max_chunk_tokens: int | None = Field(default=None, ge=1, le=100_000)
     parent_token_limit: int | None = Field(default=None, ge=1, le=100_000)
     child_token_limit: int | None = Field(default=None, ge=1, le=100_000)
 
     # Separator mode
+    separators: list[str] | None = Field(default=None, max_length=32)
     separator: str = Field(default="\n", max_length=1_024)
     primary_separator: str | None = Field(default=None, max_length=1_024)
     keep_separator: bool | None = None
@@ -1052,7 +1226,7 @@ class ChunkingConfigSchema(BaseModel):
     regex_pattern: str | None = Field(default=None, max_length=256)
 
     # Heading mode
-    heading_level: str | None = None  # h1 | h2 | h3 etc
+    heading_level: str | None = Field(default=None, max_length=32)  # h1 | h2 | h3 etc
     heading_patterns: list[str] | None = Field(default=None, max_length=20)
 
     # Paragraph mode
@@ -1060,10 +1234,13 @@ class ChunkingConfigSchema(BaseModel):
     merge_short_paragraphs: bool | None = None
 
     # Hierarchical mode
-    parent_mode: str | None = None  # paragraph | full_doc | section
+    parent_mode: str | None = Field(default=None, max_length=32)
     parent_chunk_size: int | None = Field(default=None, ge=50, le=100_000)
+    parent_overlap: int | None = Field(default=None, ge=0, le=50_000)
+    parent_chunk_overlap: int | None = Field(default=None, ge=0, le=50_000)
     child_chunk_size: int | None = Field(default=None, ge=10, le=100_000)
     child_overlap: int | None = Field(default=None, ge=0, le=50_000)
+    child_chunk_overlap: int | None = Field(default=None, ge=0, le=50_000)
 
     # QA mode
     question_prefix: str | None = Field(default=None, max_length=128)
@@ -1072,6 +1249,17 @@ class ChunkingConfigSchema(BaseModel):
     # Pre-processing
     remove_extra_spaces: bool = True
     remove_urls_emails: bool = False
+    normalize_whitespace: bool | None = None
+    strip_html: bool | None = None
+    extract_metadata: bool | None = None
+    metadata_fields: list[str] | None = Field(default=None, max_length=32)
+    page_marker: str | None = Field(default=None, max_length=16)
+    strict_section_traceability: bool | None = None
+
+    # Optional image and compatibility knobs consumed by the runtime parser.
+    preserve_images: bool | None = None
+    image_context_chars: int | None = Field(default=None, ge=0, le=1_000_000)
+    segmentation: ChunkingSegmentationSchema | None = None
 
     @model_validator(mode="after")
     def _validate_safe_chunking_contract(self) -> Self:
@@ -1103,14 +1291,51 @@ class ChunkingConfigSchema(BaseModel):
         )
         if self.heading_patterns and tuple(self.heading_patterns) != safe_heading_patterns:
             raise ValueError("custom heading regex patterns are disabled")
-        if self.chunk_overlap >= self.chunk_size:
+        if self.page_marker not in (None, "", r"\f", "\f"):
+            raise ValueError("custom page marker regex is disabled")
+        if self.separators is not None and (
+            not self.separators
+            or any(
+                not separator or len(separator) > 1_024
+                for separator in self.separators
+            )
+        ):
+            raise ValueError("separators must contain non-empty strings up to 1024 chars")
+        if self.metadata_fields is not None and any(
+            not field_name or len(field_name) > 64 for field_name in self.metadata_fields
+        ):
+            raise ValueError("metadata_fields must contain non-empty names up to 64 chars")
+        effective_overlap = self.overlap if self.overlap is not None else self.chunk_overlap
+        if effective_overlap >= self.chunk_size:
             raise ValueError("chunk_overlap must be smaller than chunk_size")
         if (
-            self.child_overlap is not None
+            self.min_chunk_size is not None
+            and self.max_chunk_size is not None
+            and self.min_chunk_size > self.max_chunk_size
+        ):
+            raise ValueError("min_chunk_size must not exceed max_chunk_size")
+        child_overlap = (
+            self.child_overlap
+            if self.child_overlap is not None
+            else self.child_chunk_overlap
+        )
+        if (
+            child_overlap is not None
             and self.child_chunk_size is not None
-            and self.child_overlap >= self.child_chunk_size
+            and child_overlap >= self.child_chunk_size
         ):
             raise ValueError("child_overlap must be smaller than child_chunk_size")
+        parent_overlap = (
+            self.parent_overlap
+            if self.parent_overlap is not None
+            else self.parent_chunk_overlap
+        )
+        if (
+            parent_overlap is not None
+            and self.parent_chunk_size is not None
+            and parent_overlap >= self.parent_chunk_size
+        ):
+            raise ValueError("parent_overlap must be smaller than parent_chunk_size")
         if (
             self.min_chunk_tokens is not None
             and self.max_chunk_tokens is not None

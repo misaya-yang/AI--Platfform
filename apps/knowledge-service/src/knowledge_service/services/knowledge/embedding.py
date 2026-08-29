@@ -1146,6 +1146,14 @@ def _parse_dashscope_embeddings(output: Any) -> list[list[float]]:
 # =============================================================================
 # SiliconFlow Embedding
 # =============================================================================
+def _embeddings_endpoint(endpoint: str | None) -> str:
+    """Append the OpenAI-compatible embeddings path exactly once."""
+    value = (endpoint or "").strip()
+    if not value or value.rstrip("/").endswith("/embeddings"):
+        return value
+    return f"{value.rstrip('/')}/embeddings"
+
+
 class SiliconFlowEmbedding(BaseEmbedding):
     """SiliconFlow embedding adapter.
 
@@ -1342,6 +1350,63 @@ class SiliconFlowEmbedding(BaseEmbedding):
 
 
 # =============================================================================
+# OpenAI-compatible self-hosted embedding server (vLLM / TEI)
+# =============================================================================
+class OpenAICompatibleEmbedding(SiliconFlowEmbedding):
+    """Embeddings served by any OpenAI-compatible ``/v1/embeddings`` endpoint.
+
+    Reuses the SiliconFlow wire protocol (POST ``{"model", "input"}`` →
+    ``{"data": [{"embedding": [...]}]}``), which is what vLLM's OpenAI server
+    and Hugging Face Text Embeddings Inference expose, with the defaults a
+    self-hosted deployment needs:
+
+    * ``base_url`` is REQUIRED — there is deliberately no public-cloud
+      fallback, so a half-configured upgrade fails at startup instead of
+      silently embedding against SiliconFlow;
+    * ``api_key`` is optional — unauthenticated internal serving is the norm;
+      when omitted a placeholder bearer token is sent for servers that still
+      require the header to be present.
+
+    This is the config hook for the Qwen3-Embedding default-model upgrade:
+    set the provider to ``openai_compatible`` (aliases: ``vllm``, ``tei``),
+    point the base URL at the deployment, and the blue-green migration
+    machine can re-embed datasets into the new space with no code change.
+    """
+
+    MODEL_DIMENSIONS = {
+        **SiliconFlowEmbedding.MODEL_DIMENSIONS,
+        "Qwen/Qwen3-Embedding-0.6B": 1024,
+        "Qwen/Qwen3-Embedding-4B": 2560,
+        "Qwen/Qwen3-Embedding-8B": 4096,
+    }
+
+    DEFAULT_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str = "",
+        model: str = DEFAULT_MODEL,
+        dimension: int | None = None,
+        timeout_seconds: float = 30.0,
+    ):
+        endpoint = _embeddings_endpoint(base_url)
+        if not endpoint:
+            raise EmbeddingError(
+                "openai_compatible embedding provider requires an explicit base_url "
+                "(the vLLM / TEI server address); refusing to fall back to a cloud default"
+            )
+        super().__init__(
+            api_key=(api_key or "").strip() or "unused",
+            model=(model or "").strip() or self.DEFAULT_MODEL,
+            dimension=dimension,
+            base_url=endpoint,
+            timeout_seconds=timeout_seconds,
+        )
+        self.provider = "openai_compatible"
+
+
+# =============================================================================
 # Embedder Cache - Singleton per config to reuse HTTP connections
 # =============================================================================
 _embedder_cache: dict[str, BaseEmbedding] = {}
@@ -1363,6 +1428,9 @@ _PROVIDER_ALIASES: dict[str, str] = {
     "google": "gemini",
     "silicon": "siliconflow",
     "sf": "siliconflow",
+    "vllm": "openai_compatible",
+    "tei": "openai_compatible",
+    "openai-compatible": "openai_compatible",
 }
 
 
@@ -1500,7 +1568,7 @@ def _build_embedder_instance_profile(
         api_key=config.api_key,
     )
     provider = _canonical_provider(config.provider)
-    if provider in {"gemini", "siliconflow"}:
+    if provider in {"gemini", "siliconflow", "openai_compatible"}:
         profile["timeout_seconds"] = config.timeout_seconds
     profile["instance_options"] = dict(extra)
     return profile
@@ -1631,10 +1699,19 @@ def create_embedding(config: EmbeddingConfig, dimension: int | None = None) -> B
             base_url=config.base_url,
             timeout_seconds=config.timeout_seconds,
         )
-    elif provider in {"openai"}:
+    elif provider == "openai_compatible":
+        embedding = OpenAICompatibleEmbedding(
+            api_key=config.api_key or "",
+            model=model or OpenAICompatibleEmbedding.DEFAULT_MODEL,
+            dimension=dimension or (config.extra or {}).get("dimension"),
+            base_url=config.base_url or "",
+            timeout_seconds=config.timeout_seconds,
+        )
+    elif provider == "openai":
         raise EmbeddingError(
             "OpenAI embedding provider has been removed. "
-            "Please update your dataset to use 'gemini', 'dashscope', or 'siliconflow'."
+            "Please update your dataset to use 'gemini', 'dashscope', 'siliconflow', "
+            "or 'openai_compatible' for a self-hosted OpenAI-compatible server."
         )
     else:
         raise EmbeddingError(f"Unsupported embedding provider: {config.provider}")
@@ -2090,7 +2167,7 @@ def create_unified_embedding(
 
     Example:
         ```python
-        unified = create_unified_embedding(api_key=os.environ["DASHSCOPE_KEY"])
+        unified = create_unified_embedding(api_key=get_settings().dashscope_api_key)
 
         # Embed text query
         query_vec = await unified.embed_query("What does the architecture diagram show?")

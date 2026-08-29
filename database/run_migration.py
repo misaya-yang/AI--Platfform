@@ -1,88 +1,43 @@
-"""
-Run database migrations.
-Usage: python database/run_migration.py <migration_file>
+"""Retired single-file migration entrypoint.
 
-NOTE: This is a legacy script. Prefer using: python database/cli.py migrate
+Only the canonical full-chain runners may mutate schema:
+
+    make migrate
+    python database/cli.py migrate
+
+Executing one SQL file bypasses ordered discovery, the canonical ledger,
+schema ownership, and restore-required checks, so this module always fails
+closed before reading a DSN or opening a database connection.
 """
 
-import asyncio
-import os
+from __future__ import annotations
+
 import sys
-from pathlib import Path
 
-import asyncpg
+RETIREMENT_MESSAGE = (
+    "database/run_migration.py is retired and cannot execute SQL; "
+    "use `make migrate` or `python database/cli.py migrate`"
+)
+
+
+class RetiredMigrationRunnerError(RuntimeError):
+    """A caller attempted to bypass the canonical migration chain."""
 
 
 def get_dsn() -> str:
-    """Get database DSN from environment or settings."""
-    dsn = os.environ.get("DATABASE_URL") or os.environ.get("GATEWAY_DATABASE__DSN")
-    if dsn:
-        return dsn
-
-    try:
-        project_root = str(Path(__file__).parent.parent)
-        if project_root not in sys.path:
-            sys.path.insert(0, project_root)
-        from src.config.settings import Settings
-        settings = Settings()
-        if getattr(settings, "database", None) and settings.database.dsn:
-            return settings.database.dsn
-    except Exception:
-        print("Failed to load Settings for migration DSN.", file=sys.stderr)
-
-    print(
-        "DATABASE_URL and GATEWAY_DATABASE__DSN are not set, and Settings "
-        "could not provide a DSN. "
-        "Cannot determine database connection string.",
-        file=sys.stderr,
-    )
-    sys.exit(2)
+    """Fail before inspecting configuration or credentials."""
+    raise RetiredMigrationRunnerError(RETIREMENT_MESSAGE)
 
 
-async def run_migration(file_path: str, dsn: str):
-    """Run a single migration file."""
-    print(f"Running migration: {file_path}")
-
-    conn = await asyncpg.connect(dsn)
-
-    try:
-        with open(file_path, encoding="utf-8") as f:
-            sql = f.read()
-
-        async with conn.transaction():
-            await conn.execute(sql)
-        print(f"Migration completed successfully: {file_path}")
-
-    except asyncpg.PostgresSyntaxError as e:
-        print(f"SQL Syntax Error: {e}")
-        raise
-    except Exception as e:
-        print(f"Error running migration: {e}")
-        raise
-    finally:
-        await conn.close()
+async def run_migration(file_path: str, dsn: str) -> None:
+    """Refuse the legacy programmatic single-file execution surface."""
+    raise RetiredMigrationRunnerError(RETIREMENT_MESSAGE)
 
 
-async def main():
-    dsn = get_dsn()
-
-    if len(sys.argv) > 1:
-        migration_file = sys.argv[1]
-    else:
-        print("Usage: python database/run_migration.py <migration_file>")
-        print("Example: python database/run_migration.py database/migrations/028_segments_fulltext_search.sql")
-        sys.exit(1)
-
-    file_path = Path(migration_file)
-    if not file_path.exists():
-        file_path = Path(__file__).parent / migration_file
-
-    if not file_path.exists():
-        print(f"Migration file not found: {file_path}")
-        sys.exit(1)
-
-    await run_migration(str(file_path), dsn)
+def main() -> int:
+    print(RETIREMENT_MESSAGE, file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(main())

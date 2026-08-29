@@ -545,6 +545,31 @@ async def test_generic_preview_rejects_guest_before_service_call() -> None:
 
 
 @pytest.mark.asyncio
+async def test_batch_upload_rejects_more_than_fifty_files() -> None:
+    class Service:
+        async def require_dataset_access(self, *_args: Any, **_kwargs: Any) -> dict[str, str]:
+            return {"dataset_id": "dataset-a"}
+
+    files = [
+        UploadFile(filename=f"document-{index}.txt", file=io.BytesIO(b"ok"))
+        for index in range(51)
+    ]
+
+    with pytest.raises(HTTPException) as exc_info:
+        await routes.batch_upload_documents(
+            "dataset-a",
+            files=files,
+            svc=Service(),  # type: ignore[arg-type]
+            worker=object(),  # type: ignore[arg-type]
+            user=USER,
+            settings=Settings(),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Maximum 50 files allowed per batch"
+
+
+@pytest.mark.asyncio
 async def test_batch_upload_rejects_oversize_before_create_or_enqueue(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -631,7 +656,9 @@ async def test_batch_upload_aggregate_cap_has_bounded_partial_success(
         def __init__(self) -> None:
             self.enqueued: list[str] = []
 
-        async def enqueue(self, _dataset_id: str, document_id: str) -> bool:
+        async def enqueue(
+            self, _dataset_id: str, document_id: str, **_kwargs: Any
+        ) -> bool:
             self.enqueued.append(document_id)
             return True
 

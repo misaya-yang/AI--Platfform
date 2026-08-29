@@ -38,7 +38,7 @@ from ai_gateway_core.skills.artifact_repository import (
     manifest_from_artifact,
 )
 
-from .agent_resource_resolver import authorized_dataset_ids
+from .agent_resource_resolver import AgentKnowledgeResolver, authorized_dataset_ids
 from .base import BaseRepository
 
 AGENT_SPEC_SCHEMA_VERSION: Final = _agent_spec.AGENT_SPEC_SCHEMA_VERSION
@@ -235,6 +235,15 @@ def _decode_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
 
 class DatabaseAgentRepository(BaseRepository):
     """Async PostgreSQL Agent repository with tenant and ACL enforcement."""
+
+    def __init__(
+        self,
+        pool_holder: Any,
+        *,
+        knowledge_resolver: AgentKnowledgeResolver | None = None,
+    ) -> None:
+        super().__init__(pool_holder)
+        self._knowledge_resolver = knowledge_resolver
 
     def _require_enabled(self) -> None:
         if not self.enabled:
@@ -831,6 +840,42 @@ class DatabaseAgentRepository(BaseRepository):
             )
         return bindings
 
+    async def _authorized_knowledge_dataset_ids(
+        self,
+        conn: Any,
+        *,
+        tenant_id: str,
+        user_id: str,
+        dataset_ids: list[str],
+        is_tenant_admin: bool,
+    ) -> set[str]:
+        """Ask KS for the effective Dataset ACL using signed actor roles."""
+
+        if not dataset_ids:
+            return set()
+        raw_roles = await conn.fetchval(
+            """
+            SELECT roles
+            FROM users
+            WHERE tenant_id = $1 AND user_id = $2 AND status = 'active'
+            """,
+            tenant_id,
+            user_id,
+        )
+        roles = (
+            [str(role) for role in raw_roles if str(role)]
+            if isinstance(raw_roles, (list, tuple))
+            else []
+        )
+        return await authorized_dataset_ids(
+            self._knowledge_resolver,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            dataset_ids=dataset_ids,
+            is_tenant_admin=is_tenant_admin,
+            roles=roles,
+        )
+
     async def _replace_draft_knowledge(
         self,
         conn: Any,
@@ -844,7 +889,7 @@ class DatabaseAgentRepository(BaseRepository):
         bindings = self._knowledge_bindings(spec)
         if bindings:
             dataset_ids = [item["dataset_id"] for item in bindings]
-            visible = await authorized_dataset_ids(
+            visible = await self._authorized_knowledge_dataset_ids(
                 conn,
                 tenant_id=tenant_id,
                 user_id=user_id,
@@ -1302,7 +1347,7 @@ class DatabaseAgentRepository(BaseRepository):
         )
         knowledge_ids = [str(binding["dataset_id"]) for binding in knowledge]
         if knowledge_ids:
-            allowed_datasets = await authorized_dataset_ids(
+            allowed_datasets = await self._authorized_knowledge_dataset_ids(
                 conn,
                 tenant_id=tenant_id,
                 user_id=user_id,
@@ -1564,7 +1609,7 @@ class DatabaseAgentRepository(BaseRepository):
             )
             knowledge_ids = [str(binding["dataset_id"]) for binding in knowledge]
             if knowledge_ids:
-                allowed_datasets = await authorized_dataset_ids(
+                allowed_datasets = await self._authorized_knowledge_dataset_ids(
                     conn,
                     tenant_id=tenant_id,
                     user_id=user_id,
@@ -3383,7 +3428,7 @@ class DatabaseAgentRepository(BaseRepository):
         )
         dataset_ids = [str(row["dataset_id"]) for row in knowledge_rows]
         if dataset_ids:
-            allowed = await authorized_dataset_ids(
+            allowed = await self._authorized_knowledge_dataset_ids(
                 conn,
                 tenant_id=tenant_id,
                 user_id=user_id,

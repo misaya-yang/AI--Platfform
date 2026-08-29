@@ -25,6 +25,7 @@ class ProcessingResult:
     segments_created: int = 0
     error: str | None = None
     extracted_texts: dict[int, str] | None = None  # page_number -> OCR text
+    segment_ids: list[str] | None = None
 
 
 class VisionPDFProcessor:
@@ -77,7 +78,7 @@ class VisionPDFProcessor:
             img_bytes = pix.tobytes("png")
             if len(img_bytes) <= self.max_image_bytes:
                 return img_bytes, (pix.width, pix.height)
-        except Exception as exc:
+        except BaseException as exc:
             logger.debug(f"Render failed at low scale: {exc}")
         return None, None
 
@@ -117,6 +118,9 @@ class VisionPDFProcessor:
         text_extractor: Callable[[bytes], Awaitable[str]] | None = None,
         page_offset: int = 0,
     ) -> ProcessingResult:
+        mutated_point_ids: set[str] = set()
+        original_point_snapshots: dict[str, Any] = {}
+        existing_segments: list[dict[str, Any]] = []
         try:
             # PyMuPDF does not support sharing Document/Page objects across
             # worker threads. Each bounded render batch opens, uses, and closes
@@ -126,6 +130,65 @@ class VisionPDFProcessor:
             failed_pages = 0
             segments_created = 0
             extracted_texts: dict[int, str] = {}
+            published_segment_ids: list[str] = []
+
+            get_existing = getattr(
+                self.db,
+                "get_image_segments_by_document",
+                None,
+            )
+            existing_segments = (
+                await get_existing(document_id)
+                if callable(get_existing)
+                else []
+            )
+            existing_ids_by_position = {
+                int(segment.get("position") or 0): str(
+                    segment.get("segment_id") or ""
+                ).strip()
+                for segment in existing_segments
+                if str(segment.get("segment_id") or "").strip()
+            }
+            planned_ids = [
+                existing_ids_by_position.get(
+                    self.position_offset + page_offset + page_index
+                )
+                or str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        "ai-platform:kb-segment:"
+                        f"{document_id}:image:"
+                        f"{self.position_offset + page_offset + page_index}",
+                    )
+                )
+                for page_index in range(total_pages)
+            ]
+            snapshot_points = getattr(self.vector_store, "snapshot_points", None)
+            existing_point_ids = {
+                str(
+                    segment.get("vector_id")
+                    or segment.get("segment_id")
+                    or ""
+                ).strip()
+                for segment in existing_segments
+                if str(
+                    segment.get("vector_id")
+                    or segment.get("segment_id")
+                    or ""
+                ).strip()
+            }
+            overwritten_ids = sorted(existing_point_ids.intersection(planned_ids))
+            if overwritten_ids and not callable(snapshot_points):
+                raise RuntimeError(
+                    "scanned image replacement requires vector rollback snapshots"
+                )
+            if callable(snapshot_points):
+                original_point_snapshots = await snapshot_points(
+                    collection,
+                    planned_ids,
+                    tenant_id=tenant_id,
+                    dataset_id=dataset_id,
+                )
 
             from qdrant_client.http import models as qmodels
 
@@ -144,6 +207,7 @@ class VisionPDFProcessor:
                     meta = batch_meta[idx]
                     seg_id = meta["segment_id"]
                     payload = {
+                        "tenant_id": tenant_id,
                         "dataset_id": dataset_id,
                         "document_id": document_id,
                         "segment_id": seg_id,
@@ -159,10 +223,10 @@ class VisionPDFProcessor:
                     points.append(qmodels.PointStruct(id=seg_id, vector=vector, payload=payload))
 
                 await self.vector_store.upsert(collection_name=collection, points=points)
+                mutated_point_ids.update(str(point.id) for point in points)
 
-                for meta in batch_meta:
-                    await self.db.save_image_segment(
-                        {
+                segment_rows = [
+                    {
                             "segment_id": meta["segment_id"],
                             "document_id": document_id,
                             "dataset_id": dataset_id,
@@ -182,7 +246,17 @@ class VisionPDFProcessor:
                                 "source_position": meta["source_position"],
                             },
                         }
-                    )
+                    for meta in batch_meta
+                ]
+                store_batch = getattr(self.db, "store_image_segments", None)
+                if callable(store_batch):
+                    await store_batch(segment_rows)
+                else:
+                    for row in segment_rows:
+                        await self.db.save_image_segment(row)
+                published_segment_ids.extend(
+                    str(meta["segment_id"]) for meta in batch_meta
+                )
                 segments_created += len(batch_meta)
                 batch_images.clear()
                 batch_meta.clear()
@@ -243,10 +317,17 @@ class VisionPDFProcessor:
                             )
 
                     batch_images.append(img_bytes)
+                    position = self.position_offset + global_page_index
+                    segment_id = existing_ids_by_position.get(position) or str(
+                        uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            f"ai-platform:kb-segment:{document_id}:image:{position}",
+                        )
+                    )
                     batch_meta.append(
                         {
-                            "segment_id": str(uuid.uuid4()),
-                            "position": self.position_offset + global_page_index,
+                            "segment_id": segment_id,
+                            "position": position,
                             "text": f"[Page {page_number}]",
                             "image_id": f"{document_id}_page_{page_number}",
                             "image_mime_type": image_media_type,
@@ -278,13 +359,67 @@ class VisionPDFProcessor:
                 failed_pages=failed_pages,
                 segments_created=segments_created,
                 extracted_texts=extracted_texts if extracted_texts else None,
+                segment_ids=published_segment_ids,
             )
         except Exception as exc:
+            rollback_failures: list[str] = []
+            if mutated_point_ids:
+                try:
+                    snapshots = [
+                        point
+                        for point_id, point in original_point_snapshots.items()
+                        if point_id in mutated_point_ids
+                    ]
+                    if snapshots:
+                        await self.vector_store.upsert(
+                            collection_name=collection,
+                            points=snapshots,
+                        )
+                    new_point_ids = sorted(
+                        mutated_point_ids - set(original_point_snapshots)
+                    )
+                    if new_point_ids:
+                        await self.vector_store.delete_points(
+                            collection,
+                            new_point_ids,
+                            tenant_id=tenant_id,
+                            dataset_id=dataset_id,
+                        )
+                except Exception:
+                    rollback_failures.append("qdrant")
+                    logger.exception("Failed to restore scanned image points")
+                try:
+                    store_batch = getattr(self.db, "store_image_segments", None)
+                    if existing_segments and callable(store_batch):
+                        await store_batch(existing_segments)
+                    original_segment_ids = {
+                        str(segment.get("segment_id") or "").strip()
+                        for segment in existing_segments
+                        if str(segment.get("segment_id") or "").strip()
+                    }
+                    delete_segment = getattr(self.db, "delete_segment", None)
+                    new_segment_ids = sorted(
+                        mutated_point_ids - original_segment_ids
+                    )
+                    if new_segment_ids and not callable(delete_segment):
+                        raise RuntimeError("segment rollback delete is unavailable")
+                    for segment_id in new_segment_ids:
+                        await delete_segment(segment_id)
+                except Exception:
+                    rollback_failures.append("postgres")
+                    logger.exception("Failed to restore scanned image rows")
+            suffix = (
+                f"; incomplete rollback: {','.join(rollback_failures)}"
+                if rollback_failures
+                else ""
+            )
+            if not isinstance(exc, Exception):
+                raise
             logger.error(f"VisionPDFProcessor failed: {exc}")
             return ProcessingResult(
                 success=False,
                 total_pages=0,
                 processed_pages=0,
                 failed_pages=0,
-                error=str(exc),
+                error=f"{exc}{suffix}",
             )

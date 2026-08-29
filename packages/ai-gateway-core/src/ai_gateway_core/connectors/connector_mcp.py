@@ -3,7 +3,7 @@ Connector MCP Service — dynamically manages MCP connections for user connector
 
 When a user activates Confluence (or other services), this module:
 1. Registers Confluence search/read as tools via the ToolRegistry
-2. Tools use stored credentials from confluence_connections table
+2. Tools use the connector OAuth credentials stored by the gateway connector plane
 3. On deactivation, tools are deregistered
 
 Note: The server-side MCPClient uses HTTP transport, but mcp-atlassian
@@ -16,7 +16,6 @@ but avoids subprocess management complexity in a Docker environment.
 from __future__ import annotations
 
 import threading
-from typing import Any
 
 from ai_gateway_core.logging import get_logger
 

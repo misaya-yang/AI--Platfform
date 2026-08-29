@@ -5,14 +5,12 @@ Tests cover:
 - ImageStorageService (Local and S3 backends)
 - DashScopeMultimodalEmbedding
 - ConfluenceImageProcessor
-- Database save_image_segment method
 """
 
 from __future__ import annotations
 
 import base64
 import tempfile
-import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -858,150 +856,7 @@ class TestConfluenceImageProcessor:
         assert len(segment.embedding) == 1024
 
 
-# ============ Database save_image_segment Tests ============
-
-
-class TestDatabaseSaveImageSegment:
-    """Tests for DatabaseStorage.save_image_segment method"""
-
-    @pytest.fixture
-    def mock_pool(self):
-        """Create mock database pool"""
-        pool = AsyncMock()
-        conn = AsyncMock()
-        conn.execute = AsyncMock()
-        conn.fetchrow = AsyncMock()
-
-        # Context manager for pool.acquire()
-        pool.acquire = MagicMock(return_value=AsyncMock())
-        pool.acquire.return_value.__aenter__ = AsyncMock(return_value=conn)
-        pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
-
-        return pool, conn
-
-    @pytest.fixture
-    def database_storage(self, mock_pool):
-        """Create DatabaseStorage with mocked pool"""
-        from src.persistence.database import DatabaseStorage
-
-        pool, conn = mock_pool
-        storage = DatabaseStorage.__new__(DatabaseStorage)
-        storage._pool = pool
-        storage._row_to_dict = lambda row: dict(row) if row else None
-
-        # Mock get_document to return dataset_id
-        storage.get_document = AsyncMock(return_value={"dataset_id": TEST_DATASET_ID})
-
-        return storage, conn
-
-    @pytest.mark.asyncio
-    async def test_save_image_segment_with_dataset_id(self, database_storage):
-        """Test saving image segment with explicit dataset_id"""
-        storage, conn = database_storage
-
-        segment_data = {
-            "segment_id": str(uuid.uuid4()),
-            "document_id": TEST_DOCUMENT_ID,
-            "dataset_id": TEST_DATASET_ID,
-            "content_type": "image",
-            "image_url": "https://s3.example.com/image.png",
-            "image_attachment_id": TEST_ATTACHMENT_ID,
-            "image_filename": TEST_FILENAME,
-            "image_media_type": TEST_MEDIA_TYPE,
-            "image_file_size": len(MINIMAL_PNG_BYTES),
-        }
-
-        await storage.save_image_segment(segment_data)
-
-        conn.execute.assert_called_once()
-        call_args = conn.execute.call_args[0]
-        # Verify SQL contains INSERT INTO segments
-        assert "INSERT INTO segments" in call_args[0]
-
-    @pytest.mark.asyncio
-    async def test_save_image_segment_lookup_dataset_id(self, database_storage):
-        """Test saving image segment with dataset_id lookup from document"""
-        storage, conn = database_storage
-
-        segment_data = {
-            "segment_id": str(uuid.uuid4()),
-            "document_id": TEST_DOCUMENT_ID,
-            # No dataset_id - should be looked up
-            "content_type": "image",
-            "image_url": "https://s3.example.com/image.png",
-            "image_attachment_id": TEST_ATTACHMENT_ID,
-            "image_filename": TEST_FILENAME,
-            "image_media_type": TEST_MEDIA_TYPE,
-            "image_file_size": len(MINIMAL_PNG_BYTES),
-        }
-
-        await storage.save_image_segment(segment_data)
-
-        # Verify get_document was called
-        storage.get_document.assert_called_once_with(TEST_DOCUMENT_ID)
-        conn.execute.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_save_image_segment_no_dataset_id_raises(self, database_storage):
-        """Test that missing dataset_id raises error"""
-        storage, conn = database_storage
-        storage.get_document = AsyncMock(return_value=None)
-
-        segment_data = {
-            "segment_id": str(uuid.uuid4()),
-            "document_id": "nonexistent_doc",
-            "content_type": "image",
-            "image_url": "https://s3.example.com/image.png",
-        }
-
-        with pytest.raises(ValueError) as exc_info:
-            await storage.save_image_segment(segment_data)
-
-        assert "dataset_id is required" in str(exc_info.value)
-
-    @pytest.mark.asyncio
-    async def test_save_image_segment_with_context_text(self, database_storage):
-        """Test saving image segment with context text"""
-        storage, conn = database_storage
-
-        segment_data = {
-            "segment_id": str(uuid.uuid4()),
-            "document_id": TEST_DOCUMENT_ID,
-            "dataset_id": TEST_DATASET_ID,
-            "content_type": "image",
-            "image_url": "https://s3.example.com/image.png",
-            "text": "Context text around the image",
-            "vector_id": "vec_001",
-            "metadata": {"source": "confluence"},
-        }
-
-        await storage.save_image_segment(segment_data)
-
-        conn.execute.assert_called_once()
-        # Verify all parameters were passed
-        call_args = conn.execute.call_args[0]
-        assert len(call_args) > 10  # Multiple parameters
-
-    @pytest.mark.asyncio
-    async def test_save_image_segment_no_pool(self, database_storage):
-        """Test early return when no pool"""
-        storage, conn = database_storage
-        storage._pool = None
-
-        # Should not raise, just return early
-        await storage.save_image_segment(
-            {
-                "segment_id": "test",
-                "document_id": "test",
-            }
-        )
-
-        conn.execute.assert_not_called()
-
-
-# ============ Integration Tests (Mocked) ============
-
-
+# ============ Image Sync Integration Tests ============
 class TestImageSyncIntegration:
     """Integration tests for the complete image sync flow"""
 

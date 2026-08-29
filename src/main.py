@@ -909,6 +909,13 @@ def create_app() -> FastAPI:
         agent_runtime_control = getattr(app.state, "agent_runtime_control", None)
         if agent_runtime_control is not None:
             await agent_runtime_control.close()
+        agent_knowledge_resolver = getattr(
+            app.state,
+            "agent_runtime_knowledge_resolver",
+            None,
+        )
+        if agent_knowledge_resolver is not None:
+            await agent_knowledge_resolver.close()
 
         # Stop Assistant TaskManager lifecycle
         from ai_gateway_core.tasks import shutdown_task_manager
@@ -1013,9 +1020,7 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
         DatabaseMCPAgentCapabilityResolver,
         DatabaseMCPRepository,
     )
-    from ai_gateway_core.persistence.repositories.agent_resource_resolver import (
-        DatabaseAgentKnowledgeResolver,
-    )
+    from .services.knowledge_authz import KnowledgeServiceAgentKnowledgeResolver
     from ai_gateway_core.skills import DatabaseSkillArtifactRepository
     from .api.internal.confluence_capabilities import ConfiguredEnvironmentSecretResolver
 
@@ -1057,7 +1062,9 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
         mcp_enabled=mcp_enabled,
         skill_repository=app.state.skill_artifact_repository,
     )
-    app.state.agent_runtime_knowledge_resolver = DatabaseAgentKnowledgeResolver(container.database)
+    # Dataset ACL authority lives in knowledge-service (PRD T8.2): the gateway
+    # never reads KB tables to authorize a run.
+    app.state.agent_runtime_knowledge_resolver = KnowledgeServiceAgentKnowledgeResolver()
 
     # LangGraph 相关
     app.state.langgraph_proxy = container.langgraph_proxy

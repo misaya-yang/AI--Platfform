@@ -48,12 +48,7 @@ def _require_dataset_index_writable(dataset: dict[str, Any]) -> None:
         raise ValidationFailedError(
             "dataset index deletion is pending; indexed content is unavailable"
         )
-    lexical = LexicalConfig.from_index_config(dataset.get("index_config") or {})
-    if lexical.reads_bm25_v2:
-        raise ValidationFailedError(
-            "bm25_v2 active mode is read-only; roll back to lexical_v1 shadow "
-            "before changing indexed content"
-        )
+    LexicalConfig.from_index_config(dataset.get("index_config") or {})
 
 
 def _require_active_segment_document(

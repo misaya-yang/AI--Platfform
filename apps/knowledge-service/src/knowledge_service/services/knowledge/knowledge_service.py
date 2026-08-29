@@ -13,7 +13,9 @@ from ...persistence.database import (
     DOCUMENT_UPLOAD_FAILED_KEY,
     DatabaseStorage,
     IndexLeaseUnavailableError,
+    dataset_ingestion_identity,
 )
+from .bm25_v2_lifecycle import Bm25V2LifecycleError
 from .chunking import (
     AssociatedImage,
     Chunk,
@@ -29,6 +31,7 @@ from .embedding import (
 )
 from .ingestion import DocumentImageExtractor
 from .ingestion import ExtractedImage as IngestionExtractedImage
+from .lexical_config import LexicalConfig, LexicalConfigError
 from .pdf_image_processor import ExtractedImage, PDFImageProcessor
 from .retrieval_service import RetrieveResult
 from .structured_document_parser import StructuredDocumentParser
@@ -131,6 +134,11 @@ class KnowledgeService:
                 "bm25_v2_capability_ttl_seconds",
                 300.0,
             ),
+            bm25_v2_readiness_ttl_seconds=getattr(
+                settings.knowledge.qdrant,
+                "bm25_v2_readiness_ttl_seconds",
+                5.0,
+            ),
             dataset_write_lease=database.dataset_index_write_lease,
         )
 
@@ -145,6 +153,18 @@ class KnowledgeService:
             settings, database, self.vector_store
         )
         self.ingestion_service._ks = self
+
+        # T3 embedding versioning / blue-green migration. Both are resolved
+        # lazily so a not-yet-connected pool (or degraded mode) never breaks
+        # service construction; they activate once the PG pool is live.
+        self._embedding_version_store: Any | None = None
+        self._embedding_migration_service: Any | None = None
+
+        # T6 BM25 v2 cross-storage lifecycle protocol. Same lazy pattern as
+        # T3: no pool, no transition machinery (and no accidental writes to
+        # kb_bm25_v2_lifecycle from a degraded-mode boot).
+        self._bm25_v2_lifecycle_store: Any | None = None
+        self._bm25_v2_lifecycle_service: Any | None = None
 
         # Extracted sub-components (Phase 2 refactoring)
         from .cache_manager import CacheManager
@@ -686,6 +706,27 @@ class KnowledgeService:
             user, dataset_id, subject_type, subject_id
         )
 
+    async def list_query_history(
+        self, user: UserContext, dataset_id: str, **kwargs: Any
+    ) -> dict[str, Any]:
+        return await self.dataset_service.list_query_history(
+            user, dataset_id, **kwargs
+        )
+
+    async def upsert_query_feedback(
+        self, user: UserContext, dataset_id: str, **kwargs: Any
+    ) -> dict[str, Any]:
+        return await self.dataset_service.upsert_query_feedback(
+            user, dataset_id, **kwargs
+        )
+
+    async def list_query_feedback(
+        self, user: UserContext, dataset_id: str, **kwargs: Any
+    ) -> dict[str, Any]:
+        return await self.dataset_service.list_query_feedback(
+            user, dataset_id, **kwargs
+        )
+
     # ========================= Document (delegated to DocumentService) =========================
 
     async def create_document_from_text(
@@ -713,8 +754,41 @@ class KnowledgeService:
             user, dataset_id, url, title, metadata
         )
 
-    async def list_documents(self, user: UserContext, dataset_id: str) -> list[dict[str, Any]]:
-        return await self.document_service.list_documents(user, dataset_id)
+    async def list_documents(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        kwargs: dict[str, Any] = {}
+        if limit is not None:
+            kwargs["limit"] = limit
+        return await self.document_service.list_documents(
+            user, dataset_id, offset=offset, **kwargs
+        )
+
+    async def count_documents(self, user: UserContext, dataset_id: str) -> int:
+        return await self.document_service.count_documents(user, dataset_id)
+
+    async def list_documents_page(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        *,
+        limit: int,
+        offset: int,
+    ) -> dict[str, Any]:
+        return await self.document_service.list_documents_page(
+            user,
+            dataset_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def list_all_document_ids(self, user: UserContext, dataset_id: str) -> list[str]:
+        return await self.document_service.list_all_document_ids(user, dataset_id)
 
     async def get_document(
         self, user: UserContext, dataset_id: str, document_id: str
@@ -732,21 +806,210 @@ class KnowledgeService:
     async def list_segments(
         self, user: UserContext, dataset_id: str,
         document_id: str | None = None, q: str | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
-        return await self.document_service.list_segments(user, dataset_id, document_id, q)
+        kwargs: dict[str, Any] = {}
+        if limit is not None:
+            kwargs["limit"] = limit
+        return await self.document_service.list_segments(
+            user, dataset_id, document_id, q, offset=offset, **kwargs
+        )
+
+    async def count_segments(
+        self, user: UserContext, dataset_id: str,
+        document_id: str | None = None, q: str | None = None,
+    ) -> int:
+        return await self.document_service.count_segments(user, dataset_id, document_id, q)
+
+    async def list_segments_page(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        document_id: str | None = None,
+        q: str | None = None,
+        *,
+        limit: int,
+        offset: int,
+    ) -> dict[str, Any]:
+        return await self.document_service.list_segments_page(
+            user,
+            dataset_id,
+            document_id,
+            q,
+            limit=limit,
+            offset=offset,
+        )
 
     async def update_segment(
-        self, user: UserContext, dataset_id: str, segment_id: str, new_text: str,
+        self,
+        user: UserContext,
+        dataset_id: str,
+        segment_id: str,
+        new_text: str,
+        new_answer: str | None = None,
+        new_keywords: list[str] | None = None,
     ) -> dict[str, Any]:
-        return await self.document_service.update_segment(user, dataset_id, segment_id, new_text)
+        return await self._run_segment_mutation_with_bm25_publication(
+            user,
+            dataset_id,
+            lambda: self.document_service.update_segment(
+                user,
+                dataset_id,
+                segment_id,
+                new_text,
+                new_answer=new_answer,
+                new_keywords=new_keywords,
+            ),
+        )
 
     async def delete_segment(self, user: UserContext, dataset_id: str, segment_id: str) -> bool:
-        return await self.document_service.delete_segment(user, dataset_id, segment_id)
+        return await self._run_segment_mutation_with_bm25_publication(
+            user,
+            dataset_id,
+            lambda: self.document_service.delete_segment(
+                user,
+                dataset_id,
+                segment_id,
+            ),
+        )
+
+    async def _run_segment_mutation_with_bm25_publication(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        operation: Any,
+    ) -> Any:
+        """Fence active-v2 manual segment writes behind one publication.
+
+        Legacy/shadow datasets keep their existing short segment lease. In
+        active mode the outer shared publication lock makes the whole remote +
+        PostgreSQL change retryable to readers, then full-scroll evidence and
+        the positive revision are certified atomically. Failed but coherent
+        no-op/idempotent operations can close the fence; mismatches leave its
+        negative revision fail-closed for repair.
+        """
+
+        dataset = await self.require_dataset_access(user, dataset_id, required="editor")
+        try:
+            lexical = LexicalConfig.from_index_config(dataset.get("index_config"))
+        except LexicalConfigError as exc:
+            raise ValidationFailedError(str(exc)) from exc
+        if not lexical.reads_bm25_v2:
+            return await operation()
+        if not self.vector_store.bm25_v2_enabled:
+            raise Bm25V2LifecycleError(
+                "bm25_v2 active writes are unavailable while the service kill switch is off",
+                code="bm25_v2_disabled",
+                http_status=503,
+            )
+
+        lifecycle = self.bm25_v2_lifecycle_service
+        lease = getattr(self.db, "dataset_index_publication_lease", None)
+        finish = getattr(self.db, "finish_index_publication", None)
+        abort = getattr(self.db, "abort_index_publication", None)
+        if (
+            lifecycle is None
+            or not callable(lease)
+            or not callable(finish)
+            or not callable(abort)
+        ):
+            raise Bm25V2LifecycleError(
+                "BM25 v2 publication authority is unavailable",
+                code="bm25_v2_authority_unavailable",
+                http_status=503,
+            )
+
+        # Zero-side-effect active/kill-switch/state preflight before the lease
+        # writes the negative revision; repeat under the shared lock below.
+        await lifecycle.active_publication_context(dataset_id)
+        async with lease(
+            dataset_id,
+            expected_ingestion_identity=dataset_ingestion_identity(dataset),
+        ) as publication:
+            context = await lifecycle.active_publication_context(dataset_id)
+            if context is None:
+                # A rollback won between the initial authorization read and
+                # shared-lock acquisition. The negative seqlock still safely
+                # wraps this legacy publication; no active receipt CAS applies.
+                try:
+                    result = await operation()
+                finally:
+                    await abort(
+                        dataset_id,
+                        connection=publication.connection,
+                    )
+                return result
+
+            async def finalize() -> None:
+                certification = await lifecycle.recertify_active_publication(
+                    context,
+                    publication_revision=int(publication.revision),
+                )
+                async with publication.connection.transaction():
+                    revision = await finish(
+                        dataset_id,
+                        connection=publication.connection,
+                    )
+                    if int(revision) != int(certification["target_revision"]):
+                        raise RuntimeError(
+                            "segment publication revision disagrees with BM25 v2 receipt"
+                        )
+                    await lifecycle.settle_active_publication(
+                        context,
+                        certification,
+                        connection=publication.connection,
+                    )
+
+            try:
+                result = await operation()
+            except BaseException as operation_error:
+                try:
+                    finalize_task = asyncio.create_task(finalize())
+                    await asyncio.shield(finalize_task)
+                except BaseException as certification_error:
+                    logger.error(
+                        "Active BM25 v2 segment mutation failed and remains fenced: %s",
+                        certification_error,
+                    )
+                    if isinstance(operation_error, asyncio.CancelledError):
+                        raise operation_error
+                    raise RuntimeError(
+                        "segment mutation failed with cross-authority mismatch; "
+                        "the dataset remains fail-closed"
+                    ) from operation_error
+                raise
+            await finalize()
+            return result
 
     # ========================= Ingest pipeline (delegated to IngestionService) =========================
 
-    async def ingest_document(self, dataset_id: str, document_id: str) -> None:
-        return await self.ingestion_service.ingest_document(dataset_id, document_id)
+    async def ingest_document(
+        self,
+        dataset_id: str,
+        document_id: str,
+        *,
+        chunking_config_override: dict[str, Any] | None = None,
+        index_config_override: dict[str, Any] | None = None,
+    ) -> list[str] | None:
+        return await self.ingestion_service.ingest_document(
+            dataset_id,
+            document_id,
+            chunking_config_override=chunking_config_override,
+            index_config_override=index_config_override,
+        )
+
+    async def reembed_document(
+        self, dataset_id: str, document_id: str
+    ) -> list[str] | None:
+        """PRD T1 item 3 reembed verb: re-embed persisted chunks in place.
+
+        No re-parse, no re-split — vector repair under unchanged model and
+        parameters. Chunks keep their segment/point identity. Falls back to
+        the full pipeline when nothing serving is persisted yet.
+        """
+        return await self.ingestion_service.reembed_document(dataset_id, document_id)
 
     async def _process_document_images_with_embedder(
         self,
@@ -837,6 +1100,7 @@ class KnowledgeService:
         source_type_filter: str | None = None,
         language_filter: str | None = None,
         metadata_filter: dict[str, Any] | None = None,
+        telemetry_source: str = "api",
     ) -> tuple[list[RetrieveResult], dict[str, Any]]:
         return await self.retrieval_service.retrieve(
             user=user, dataset_id=dataset_id, query=query, top_k=top_k,
@@ -851,6 +1115,7 @@ class KnowledgeService:
             mmr=mmr, mmr_lambda=mmr_lambda, mmr_threshold=mmr_threshold,
             source_type_filter=source_type_filter, language_filter=language_filter,
             metadata_filter=metadata_filter,
+            telemetry_source=telemetry_source,
         )
 
     async def retrieve_with_images(
@@ -879,6 +1144,9 @@ class KnowledgeService:
             use_separate_thresholds=use_separate_thresholds,
             **kwargs,
         )
+
+    def record_external_retrieval_observation(self, **kwargs: Any) -> dict[str, Any]:
+        return self.retrieval_service.record_external_retrieval_observation(**kwargs)
 
     async def retrieve_with_images_v2(
         self,
@@ -1005,6 +1273,89 @@ class KnowledgeService:
             tenant_id=tenant_id,
         )
 
+    # ---------------- T6 BM25 v2 cutover/rollback lifecycle -----------------
+
+    @property
+    def bm25_v2_lifecycle_store(self) -> Any | None:
+        """Lazily bound Bm25V2LifecycleStore; None until the PG pool is up."""
+        if self._bm25_v2_lifecycle_store is None:
+            from ...persistence.bm25_v2_lifecycle import Bm25V2LifecycleStore
+
+            pool = getattr(self.db, "_pool", None)
+            if pool is not None:
+                self._bm25_v2_lifecycle_store = Bm25V2LifecycleStore(pool)
+        return self._bm25_v2_lifecycle_store
+
+    @property
+    def bm25_v2_lifecycle_service(self) -> Any | None:
+        """Lazily bound T6 protocol service over the lifecycle store.
+
+        None in degraded mode (no pool). Route integrators must surface that
+        as "lifecycle tables unavailable", never attempt a transition.
+        """
+        if self._bm25_v2_lifecycle_service is None:
+            store = self.bm25_v2_lifecycle_store
+            if store is not None:
+                from .bm25_v2_lifecycle import Bm25V2LifecycleService
+
+                self._bm25_v2_lifecycle_service = Bm25V2LifecycleService(
+                    vector_store=self.vector_store,
+                    lifecycle_store=store,
+                )
+        return self._bm25_v2_lifecycle_service
+
+    # --------------------- T3 embedding versioning / blue-green ------------
+
+    @property
+    def embedding_version_store(self) -> Any | None:
+        """Lazily bound EmbeddingVersionStore; None until the PG pool is up.
+
+        Callers must treat None as "T3 tables unavailable" and degrade, not
+        crash: legacy datasets predate the binding tables entirely.
+        """
+        if self._embedding_version_store is None:
+            from ...persistence.embedding_version_store import EmbeddingVersionStore
+
+            pool = getattr(self.db, "_pool", None)
+            if pool is not None:
+                self._embedding_version_store = EmbeddingVersionStore(pool)
+        return self._embedding_version_store
+
+    @property
+    def embedding_migration_service(self) -> Any | None:
+        """Lazily bound blue-green orchestrator over the version store.
+
+        ``embedder_factory`` resolves the target-generation embedder through
+        the same server-owned config path dataset creation uses, so a backfill
+        never needs caller-supplied credentials.
+        """
+        store = self.embedding_version_store
+        if store is None:
+            return None
+        if self._embedding_migration_service is None:
+            from .embedding_migration import EmbeddingMigrationService
+
+            async def _embedder_for(identity: dict[str, Any]) -> Any:
+                from .embedding import create_embedding
+
+                econf = await self._resolve_embedding_config(
+                    provider=str(identity.get("embedding_provider") or ""),
+                    model=str(identity.get("embedding_model") or ""),
+                    embedding_config={},
+                    tenant_id=str(identity.get("tenant_id") or ""),
+                )
+                return create_embedding(
+                    econf,
+                    dimension=int(identity.get("embedding_dimension") or 0) or None,
+                )
+
+            self._embedding_migration_service = EmbeddingMigrationService(
+                store=store,
+                vector_store=self.vector_store,
+                embedder_factory=_embedder_for,
+            )
+        return self._embedding_migration_service
+
     # ========================= Document Enable/Disable/Archive (delegated to DocumentService) =====
 
     async def set_document_enabled(
@@ -1048,7 +1399,16 @@ class KnowledgeService:
     async def set_segment_enabled(
         self, user: UserContext, dataset_id: str, segment_id: str, enabled: bool
     ) -> dict[str, Any]:
-        return await self.document_service.set_segment_enabled(user, dataset_id, segment_id, enabled)
+        return await self._run_segment_mutation_with_bm25_publication(
+            user,
+            dataset_id,
+            lambda: self.document_service.set_segment_enabled(
+                user,
+                dataset_id,
+                segment_id,
+                enabled,
+            ),
+        )
 
     async def set_segments_enabled_batch(
         self,
@@ -1057,19 +1417,32 @@ class KnowledgeService:
         segment_ids: Any,
         enabled: Any,
     ) -> dict[str, Any]:
-        return await self.document_service.set_segments_enabled_batch(
+        return await self._run_segment_mutation_with_bm25_publication(
             user,
             dataset_id,
-            segment_ids,
-            enabled,
+            lambda: self.document_service.set_segments_enabled_batch(
+                user,
+                dataset_id,
+                segment_ids,
+                enabled,
+            ),
         )
 
     async def create_segment(
         self, user: UserContext, dataset_id: str, document_id: str, content: str,
         answer: str | None = None, keywords: list[str] | None = None,
     ) -> dict[str, Any]:
-        return await self.document_service.create_segment(
-            user, dataset_id, document_id, content, answer, keywords
+        return await self._run_segment_mutation_with_bm25_publication(
+            user,
+            dataset_id,
+            lambda: self.document_service.create_segment(
+                user,
+                dataset_id,
+                document_id,
+                content,
+                answer,
+                keywords,
+            ),
         )
 
     # ========================= Statistics =========================
@@ -1084,35 +1457,17 @@ class KnowledgeService:
         dataset = await self.require_dataset_access(user, dataset_id, required="viewer")
         generation = _dataset_content_generation(dataset)
 
-        docs = await self.db.list_documents(dataset_id=dataset_id, limit=10000, offset=0)
-        segs = await self.db.list_segments(dataset_id=dataset_id, limit=50000, offset=0)
-
-        total_docs = len(docs)
-        available_docs = len(
-            [
-                d
-                for d in docs
-                if d.get("status") == "completed"
-                and d.get("enabled", True)
-                and not d.get("archived", False)
-            ]
+        stats = (await self.db.get_datasets_statistics_batch([dataset_id])).get(
+            dataset_id, {}
         )
-        total_segs = len(segs)
-        available_segs = len(
-            [s for s in segs if s.get("enabled", True) and s.get("status") == "completed"]
-        )
-
-        word_count = sum(d.get("word_count", 0) or 0 for d in docs)
-        hit_count = sum(s.get("hit_count", 0) or 0 for s in segs)
-
         result = {
             "dataset_id": dataset_id,
-            "document_count": total_docs,
-            "available_document_count": available_docs,
-            "segment_count": total_segs,
-            "available_segment_count": available_segs,
-            "word_count": word_count,
-            "hit_count": hit_count,
+            "document_count": stats.get("document_count", 0),
+            "available_document_count": stats.get("available_document_count", 0),
+            "segment_count": stats.get("segment_count", 0),
+            "available_segment_count": stats.get("available_segment_count", 0),
+            "word_count": stats.get("word_count", 0),
+            "hit_count": stats.get("hit_count", 0),
         }
         await _require_unchanged_dataset_content(
             self,
@@ -1133,22 +1488,17 @@ class KnowledgeService:
 
         dataset = await self.require_dataset_access(user, dataset_id, required="viewer")
         generation = _dataset_content_generation(dataset)
-        doc = await self.db.get_document(document_id)
-        if not doc or str(doc.get("dataset_id")) != dataset_id:
+        stats = await self.db.get_document_statistics_aggregate(dataset_id, document_id)
+        if not stats:
             raise ValidationFailedError("document not found")
-
-        segs = await self.db.list_segments(
-            dataset_id=dataset_id, document_id=document_id, limit=10000, offset=0
-        )
-
         result = {
             "document_id": document_id,
-            "segment_count": len(segs),
-            "word_count": doc.get("word_count", 0) or 0,
-            "hit_count": sum(s.get("hit_count", 0) or 0 for s in segs),
-            "status": doc.get("status", "unknown"),
-            "enabled": doc.get("enabled", True),
-            "archived": doc.get("archived", False),
+            "segment_count": stats.get("segment_count", 0),
+            "word_count": stats.get("word_count", 0) or 0,
+            "hit_count": stats.get("hit_count", 0),
+            "status": stats.get("status", "unknown"),
+            "enabled": stats.get("enabled", True),
+            "archived": stats.get("archived", False),
         }
         await _require_unchanged_dataset_content(
             self,
@@ -1220,6 +1570,7 @@ class KnowledgeService:
         document_id: str,
         max_images_per_chunk: int = 10,
         proximity_threshold: float = 0.3,
+        image_segment_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         """
         Associate image segments with text segments based on proximity.
@@ -1265,13 +1616,35 @@ class KnowledgeService:
             s for s in all_segments if str(s.get("content_type", "text")).lower() == "text"
         ]
         image_segments = [
-            s for s in all_segments if str(s.get("content_type", "text")).lower() == "image"
+            s
+            for s in all_segments
+            if str(s.get("content_type", "text")).lower() == "image"
+            and (
+                image_segment_ids is None
+                or str(s.get("segment_id") or "") in image_segment_ids
+            )
         ]
 
         if not text_segments or not image_segments:
             logger.info(
                 f"Document {document_id}: {len(text_segments)} text, {len(image_segments)} image segments - skipping association"
             )
+            replace_associations = getattr(
+                self.db,
+                "replace_document_image_associations",
+                None,
+            )
+            if (
+                text_segments
+                and image_segment_ids is not None
+                and callable(replace_associations)
+            ):
+                await replace_associations(
+                    document_id,
+                    dataset_id,
+                    tenant_id,
+                    [],
+                )
             return {
                 "document_id": document_id,
                 "text_segments": len(text_segments),
@@ -1399,19 +1772,39 @@ class KnowledgeService:
                     }
                 )
 
-        # Batch insert associations
-        if associations:
+        # Replace the complete set in one transaction.  Reprocess must remove
+        # stale pairs just as it creates new ones; append-only association
+        # writes leave bindings and image points reachable forever.
+        replace_associations = getattr(
+            self.db,
+            "replace_document_image_associations",
+            None,
+        )
+        if callable(replace_associations):
+            count = await replace_associations(
+                document_id,
+                dataset_id,
+                tenant_id,
+                associations,
+            )
+        elif associations:
             count = await self.db.add_segment_image_associations_batch(
                 associations,
                 dataset_id=dataset_id,
                 tenant_id=tenant_id,
             )
+        else:
+            count = 0
+
+        if associations:
             logger.info(f"Created {count} image associations for document {document_id}")
 
-            # Update segment flags in batch
+            # Compatibility for narrow fakes without the atomic replacement
+            # method; production updates flags inside the same transaction.
             affected_segment_ids = list({a["segment_id"] for a in associations})
-            for seg_id in affected_segment_ids:
-                await self.db.update_segment_image_flags(seg_id)
+            if not callable(replace_associations):
+                for seg_id in affected_segment_ids:
+                    await self.db.update_segment_image_flags(seg_id)
 
         return {
             "document_id": document_id,
@@ -1600,9 +1993,10 @@ class KnowledgeService:
         """
         Recover documents stuck in processing state.
 
-        This method detects documents that have been stuck in 'parsing', 'segmenting',
-        or 'embedding' status for longer than the threshold and resets them to 'uploaded'
-        status so they can be re-queued for processing.
+        This method detects documents that have been stuck in 'parsing',
+        'splitting', or 'indexing' status for longer than the threshold and
+        resets them to 'waiting' status so they can be re-queued for
+        processing.
 
         Args:
             stuck_threshold_minutes: Minutes after which a document is considered stuck
@@ -1742,7 +2136,7 @@ class KnowledgeService:
                         # Compatibility fallback for non-PostgreSQL test stores.
                         await self.db.update_document_status(
                             doc_id,
-                            status="uploaded",
+                            status="waiting",
                             progress=0,
                             error=None,
                         )

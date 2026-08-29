@@ -12,7 +12,7 @@ from starlette.responses import Response
 from ...core.auth.user_resolver import UserContext
 from ...core.gateway.multi_dimension_rate_limiter import MultiDimensionRateLimiter, RateLimitContext
 from ..deps import get_rate_limiter, get_user_context
-from ._proxy_utils import proxy_to_kb_service
+from ._proxy_utils import enforce_knowledge_scope, proxy_to_kb_service
 
 router = APIRouter(prefix="/kb-tools", tags=["KB Tools"])
 
@@ -29,6 +29,7 @@ async def proxy_kb_tools(
     rate_limiter: MultiDimensionRateLimiter | None = Depends(get_rate_limiter),
 ) -> Response:
     """Forward /kb-tools/* requests with the standard knowledge rate limit."""
+    enforce_knowledge_scope(request, path=path)
     if rate_limiter is not None:
         ctx = RateLimitContext.from_user_context(user)
         result = await rate_limiter.check(ctx)

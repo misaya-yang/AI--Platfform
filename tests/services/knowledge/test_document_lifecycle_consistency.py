@@ -9,7 +9,12 @@ from unittest.mock import AsyncMock
 import pytest
 from knowledge_service.core.auth.user_resolver import UserContext
 from knowledge_service.core.exceptions import ValidationFailedError
-from knowledge_service.persistence.database import DOCUMENT_LIFECYCLE_REINDEX_KEY
+from knowledge_service.persistence.database import (
+    DOCUMENT_INGEST_ACTION_KEY,
+    DOCUMENT_LIFECYCLE_REINDEX_KEY,
+    DOCUMENT_PIPELINE_EXECUTION_KEY,
+    DOCUMENT_RECOVER_STAGE_KEY,
+)
 from knowledge_service.services.knowledge.document_service import DocumentService
 from knowledge_service.services.knowledge.knowledge_service import KnowledgeService
 
@@ -25,6 +30,7 @@ class LifecycleDatabase:
             "embedding_dimension": 384,
             "embedding_config": {},
             "index_config": {},
+            "content_revision": 0,
         }
         self.document = {
             "document_id": "document-a",
@@ -111,6 +117,20 @@ class LifecycleDatabase:
         self.document.update(fields)
         self.document["updated_at"] = datetime.now(timezone.utc)
 
+    async def bump_dataset_content_revision(
+        self,
+        dataset_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> bool:
+        assert dataset_id == "dataset-a"
+        assert connection is not None
+        self.events.append("revision-bump")
+        self.dataset["content_revision"] = (
+            int(self.dataset.get("content_revision") or 0) + 1
+        )
+        return True
+
     async def clear_document_lifecycle_marker(
         self,
         document_id: str,
@@ -157,7 +177,17 @@ class LifecycleDatabase:
             self.document["archived"] = False
             metadata = dict(self.document.get("metadata") or {})
             metadata.pop(DOCUMENT_LIFECYCLE_REINDEX_KEY, None)
+            # Terminal writes retire the verb markers (production parity).
+            metadata.pop(DOCUMENT_INGEST_ACTION_KEY, None)
+            metadata.pop(DOCUMENT_RECOVER_STAGE_KEY, None)
+            metadata.pop(DOCUMENT_PIPELINE_EXECUTION_KEY, None)
             self.document["metadata"] = metadata
+            # Production parity: the activation statement itself advances the
+            # dataset content revision the retrieval cache is keyed on.
+            self.events.append("revision-bump")
+            self.dataset["content_revision"] = (
+                int(self.dataset.get("content_revision") or 0) + 1
+            )
 
     async def get_segment(
         self,
@@ -194,6 +224,40 @@ class LifecycleDatabase:
         deleted = self.segment_count
         self.segment_count = 0
         return deleted
+
+    async def pin_document_ingest_action(
+        self,
+        dataset_id: str,
+        document_id: str,
+        action: str,
+        *,
+        connection: Any | None = None,
+    ) -> bool:
+        assert (dataset_id, document_id) == ("dataset-a", "document-a")
+        assert connection is not None
+        self.events.append("ingest-action-pin")
+        metadata = dict(self.document.get("metadata") or {})
+        metadata.pop(DOCUMENT_RECOVER_STAGE_KEY, None)
+        metadata.pop(DOCUMENT_PIPELINE_EXECUTION_KEY, None)
+        metadata[DOCUMENT_INGEST_ACTION_KEY] = action
+        self.document["metadata"] = metadata
+        return True
+
+    async def clear_document_legacy_image_receipts(
+        self,
+        document_id: str,
+        dataset_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> bool:
+        assert (document_id, dataset_id) == ("document-a", "dataset-a")
+        assert connection is not None
+        self.events.append("receipts-clear")
+        metadata = dict(self.document.get("metadata") or {})
+        metadata.pop("images_embedded", None)
+        metadata.pop("embedded_image_count", None)
+        self.document["metadata"] = metadata
+        return True
 
 
 class LifecycleVectorStore:
@@ -303,6 +367,17 @@ async def test_inactive_transition_persists_hidden_marker_before_qdrant_sweep(
     assert DOCUMENT_LIFECYCLE_REINDEX_KEY not in result["metadata"]
     assert len(vector_store.delete_calls) == 1
     assert worker is not None and worker.calls == []
+    # PRD T1 unified contract (§885-886): hiding the document changes the
+    # visible content set, so the retrieval-cache revision advances between
+    # the vector sweep and the marker clear; a cached result from before the
+    # transition cannot outlive it.
+    assert database.events.index("qdrant-delete") < database.events.index(
+        "revision-bump"
+    )
+    assert database.events.index("revision-bump") < database.events.index(
+        "marker-clear"
+    )
+    assert database.dataset["content_revision"] == 1
 
 
 @pytest.mark.asyncio
@@ -328,6 +403,10 @@ async def test_partial_deactivation_is_hidden_same_target_replays_and_other_targ
     assert result["enabled"] is False
     assert DOCUMENT_LIFECYCLE_REINDEX_KEY not in result["metadata"]
     assert len(vector_store.delete_calls) == 2
+    # A failed sweep must not invalidate the cache (nothing was hidden yet);
+    # the successful replay bumps exactly once.
+    assert database.events.count("revision-bump") == 1
+    assert database.dataset["content_revision"] == 1
 
 
 @pytest.mark.asyncio
@@ -337,17 +416,28 @@ async def test_restore_stays_inactive_until_atomic_ingestion_completion() -> Non
     result = await service.set_document_enabled(USER, "dataset-a", "document-a", True)
 
     assert result["enabled"] is False
-    assert result["status"] == "queued"
-    assert result["segment_count"] == 0
+    assert result["status"] == "waiting"
+    # Hot restore (PRD T1 item 6): persisted rows are retained and the
+    # queued generation is pinned to the reembed verb, which rebuilds every
+    # point row-by-row at existing identity. No clear-rows full rebuild.
+    assert result["segment_count"] == 2
+    assert result["metadata"][DOCUMENT_INGEST_ACTION_KEY] == "reembed"
     marker = result["metadata"][DOCUMENT_LIFECYCLE_REINDEX_KEY]
     assert marker["status"] == "pending"
     assert marker["desired_enabled"] is True
     assert marker["desired_archived"] is False
     assert worker is not None and worker.calls == [("dataset-a", "document-a")]
     assert database.events.index("document-fields") < database.events.index("qdrant-delete")
-    assert database.events.index("segments-delete") < database.events.index("status:queued")
-    assert database.events.index("status:queued") < database.events.index("enqueue")
+    assert database.events.index("qdrant-delete") < database.events.index("ingest-action-pin")
+    assert "segments-delete" not in database.events
+    assert database.events.index("ingest-action-pin") < database.events.index("status:waiting")
+    assert database.events.index("status:waiting") < database.events.index("enqueue")
     assert vector_store.delete_calls[0]["tenant_id"] == "tenant-a"
+    # While the rebuild is queued the document stays hidden, so the cache
+    # revision must not move yet — cached results remain valid for the
+    # hidden state.
+    assert "revision-bump" not in database.events
+    assert database.dataset["content_revision"] == 0
 
     await database.update_document_status(
         "document-a",
@@ -358,6 +448,69 @@ async def test_restore_stays_inactive_until_atomic_ingestion_completion() -> Non
     assert database.document["enabled"] is True
     assert database.document["archived"] is False
     assert DOCUMENT_LIFECYCLE_REINDEX_KEY not in database.document["metadata"]
+    assert DOCUMENT_INGEST_ACTION_KEY not in database.document["metadata"]
+    # The activation statement itself advances the retrieval-cache revision
+    # (§885-886 / §129): a result cached while the document was hidden can
+    # never be served once the document is visible again.
+    assert database.events.count("revision-bump") == 1
+    assert database.dataset["content_revision"] == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_restore_stays_hidden_and_keeps_cache_revision() -> None:
+    """An error-terminal restore is fail-closed: the document remains hidden
+    under its marker (retryable by crash recovery), the cache revision does
+    not move, and nothing visible changed."""
+
+    service, database, _vector_store, worker = make_service(enabled=False)
+
+    await service.set_document_enabled(USER, "dataset-a", "document-a", True)
+    assert worker is not None and worker.calls == [("dataset-a", "document-a")]
+
+    await database.update_document_status(
+        "document-a",
+        "error",
+        error="embedding failed",
+        connection=SimpleNamespace(),
+    )
+
+    assert database.document["enabled"] is False
+    assert database.document["status"] == "error"
+    assert database.document["metadata"][DOCUMENT_LIFECYCLE_REINDEX_KEY]["status"] == "pending"
+    assert database.dataset["content_revision"] == 0
+    assert "revision-bump" not in database.events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "image_signal",
+    ["multimodal", "scanned", "receipt", "declared-count"],
+)
+async def test_restore_with_image_content_keeps_clean_full_rebuild(
+    image_signal: str,
+) -> None:
+    """Image points are out of reembed scope: image-capable generations keep
+    the legacy clear-rows rebuild so restored documents never come back
+    missing their image vectors."""
+
+    service, database, vector_store, worker = make_service(enabled=False)
+    if image_signal == "receipt":
+        database.document["metadata"] = {"kept": True, "images_embedded": True}
+    elif image_signal == "declared-count":
+        database.document["metadata"] = {"kept": True, "image_count": 3}
+    else:
+        database.document["metadata"] = {"kept": True, "processing_mode": image_signal}
+
+    result = await service.set_document_enabled(USER, "dataset-a", "document-a", True)
+
+    assert result["status"] == "waiting"
+    assert result["segment_count"] == 0
+    assert DOCUMENT_INGEST_ACTION_KEY not in result["metadata"]
+    assert "ingest-action-pin" not in database.events
+    assert worker is not None and worker.calls == [("dataset-a", "document-a")]
+    assert database.events.index("segments-delete") < database.events.index("status:waiting")
+    if image_signal == "receipt":
+        assert "receipts-clear" in database.events
 
 
 @pytest.mark.asyncio
@@ -370,12 +523,12 @@ async def test_enqueue_failure_remains_durably_queued_for_periodic_recovery() ->
         await service.set_document_enabled(USER, "dataset-a", "document-a", True)
 
     assert database.document["enabled"] is False
-    assert database.document["status"] == "queued"
+    assert database.document["status"] == "waiting"
     assert database.document["metadata"][DOCUMENT_LIFECYCLE_REINDEX_KEY]["status"] == "pending"
 
     result = await service.set_document_enabled(USER, "dataset-a", "document-a", True)
     assert result["enabled"] is False
-    assert result["status"] == "queued"
+    assert result["status"] == "waiting"
     assert worker.calls == [("dataset-a", "document-a")]
 
 
@@ -384,7 +537,7 @@ async def test_fresh_restore_deduplicates_but_stale_restore_requeues_without_cle
     service, database, vector_store, worker = make_service(enabled=False)
     assert worker is not None
     database.document.update(
-        status="processing",
+        status="parsing",
         metadata={
             DOCUMENT_LIFECYCLE_REINDEX_KEY: {
                 "status": "pending",
@@ -404,6 +557,9 @@ async def test_fresh_restore_deduplicates_but_stale_restore_requeues_without_cle
     assert worker.calls == [("dataset-a", "document-a")]
     assert "segments-delete" not in database.events
     assert "qdrant-delete" not in database.events
+    # A stale replay re-enqueues the crashed generation as-is; it must not
+    # swap the verb or re-run any cleanup.
+    assert "ingest-action-pin" not in database.events
     assert vector_store.delete_calls == []
 
 
@@ -489,7 +645,13 @@ async def test_production_knowledge_service_delegates_segment_toggle_to_document
             calls.append(args)
             return {"enabled": False}
 
-    fake = SimpleNamespace(document_service=Delegate())
+    async def run_publication(_user, _dataset_id, operation):
+        return await operation()
+
+    fake = SimpleNamespace(
+        document_service=Delegate(),
+        _run_segment_mutation_with_bm25_publication=run_publication,
+    )
     result = await KnowledgeService.set_segment_enabled(
         fake, USER, "dataset-a", "segment-a", False
     )

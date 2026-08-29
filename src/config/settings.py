@@ -271,7 +271,8 @@ class KnowledgeQdrantSettings(BaseModel):
     retry_base_delay: float = 2.0  # Increased base delay for better recovery
     bm25_v2_enabled: bool = False
     bm25_v2_capability_ttl_seconds: float = 300.0
-    bm25_v2_readiness_ttl_seconds: float = 0.0
+    bm25_v2_readiness_ttl_seconds: float = 5.0
+    bm25_v2_cutover_test_tenants: str = ""
 
 
 class KnowledgeProviderSettings(BaseModel):

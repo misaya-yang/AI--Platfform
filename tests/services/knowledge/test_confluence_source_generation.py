@@ -433,7 +433,7 @@ async def test_same_generation_queued_create_retry_only_republishes_queue() -> N
                 "document_id": document_id,
                 "dataset_id": "dataset-a",
                 "source_type": "confluence",
-                "status": "queued",
+                "status": "waiting",
                 "metadata": {
                     "_confluence_image_source_generation": {
                         "sync_generation": generation,
@@ -467,7 +467,7 @@ async def test_same_generation_queued_create_retry_only_republishes_queue() -> N
         tenant_id="tenant-a",
     )
 
-    assert result["status"] == "queued"
+    assert result["status"] == "waiting"
     assert calls == [("dataset-a", result["document_id"])]
 
 

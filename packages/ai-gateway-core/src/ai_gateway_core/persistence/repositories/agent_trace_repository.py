@@ -1182,6 +1182,27 @@ class AgentTraceRepository(BaseRepository):
         )
         return self._decode_eval_row(row) if row else None
 
+    async def delete_example(
+        self,
+        *,
+        tenant_id: str,
+        dataset_id: str,
+        example_id: str,
+    ) -> bool:
+        row = await self.fetchrow(
+            """
+            DELETE FROM eval_examples
+            WHERE tenant_id = $1
+              AND dataset_id = $2::uuid
+              AND example_id = $3::uuid
+            RETURNING example_id
+            """,
+            tenant_id,
+            dataset_id,
+            example_id,
+        )
+        return row is not None
+
     async def list_dataset_example_case_ids(
         self,
         *,

@@ -3,7 +3,6 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 import pytest
-
 from ai_gateway_core.persistence.repositories.agent_trace_repository import AgentTraceRepository
 
 
@@ -68,3 +67,32 @@ async def test_import_examples_append_mode_allows_duplicates(repo: AgentTraceRep
     assert result["skipped"] == 0
     assert repo.create_example.await_count == 2
     repo.fetch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_delete_example_scopes_the_delete_to_tenant_dataset_and_example() -> None:
+    repository = AgentTraceRepository.__new__(AgentTraceRepository)
+    repository.fetchrow = AsyncMock(
+        side_effect=[{"example_id": "example-a"}, None],
+    )
+
+    assert await repository.delete_example(
+        tenant_id="tenant-a",
+        dataset_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        example_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    )
+    assert not await repository.delete_example(
+        tenant_id="tenant-b",
+        dataset_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        example_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    )
+
+    query, tenant_id, dataset_id, example_id = repository.fetchrow.await_args_list[0].args
+    assert "tenant_id = $1" in query
+    assert "dataset_id = $2::uuid" in query
+    assert "example_id = $3::uuid" in query
+    assert (tenant_id, dataset_id, example_id) == (
+        "tenant-a",
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    )

@@ -1091,8 +1091,11 @@ def test_migrate_auto_stops_on_failed_pending_migration(tmp_path: Path) -> None:
         'log_error() { echo "[ERROR] $1"; }\n'
         'log_step() { echo "=> $1"; }\n'
         "load_env() { :; }\n"
+        "acquire_migration_advisory_lock() { :; }\n"
+        "release_migration_advisory_lock() { :; }\n"
         "run_sql() {\n"
         '  case "$1" in\n'
+        "    *\"column_name = 'filename'\"*) echo filename ;;\n"
         "    *\"to_regclass('public.datasets')\"*) echo present ;;\n"
         "  esac\n"
         "}\n"
@@ -1144,8 +1147,11 @@ def test_migrate_auto_initializes_base_schema_before_pending_migrations(
         'log_error() { echo "[ERROR] $1"; }\n'
         'log_step() { echo "=> $1"; }\n'
         "load_env() { :; }\n"
+        "acquire_migration_advisory_lock() { :; }\n"
+        "release_migration_advisory_lock() { :; }\n"
         "run_sql() {\n"
         '  case "$1" in\n'
+        "    *\"column_name = 'filename'\"*) echo filename ;;\n"
         "    *\"to_regclass('public.datasets')\"*) echo missing ;;\n"
         "  esac\n"
         "}\n"
@@ -1179,7 +1185,9 @@ def test_migrate_init_handles_long_schema_output_without_pipefail_sigpipe(
     script_dir = tmp_path / "scripts" / "new"
     script_dir.mkdir(parents=True)
     (tmp_path / "database").mkdir()
+    (tmp_path / "database" / "migrations").mkdir()
     (tmp_path / "database" / "schema.sql").write_text("CREATE TABLE datasets;\n")
+    (tmp_path / "database" / "migrations" / "100_after_init.sql").write_text("SELECT 1;\n")
 
     migrate_script = script_dir / "migrate.sh"
     migrate_script.write_text(Path("scripts/new/migrate.sh").read_text())
@@ -1194,11 +1202,21 @@ def test_migrate_init_handles_long_schema_output_without_pipefail_sigpipe(
         'log_error() { echo "[ERROR] $1"; }\n'
         'log_step() { echo "=> $1"; }\n'
         "load_env() { :; }\n"
-        "run_sql() { :; }\n"
+        "acquire_migration_advisory_lock() { :; }\n"
+        "release_migration_advisory_lock() { :; }\n"
+        "run_sql() {\n"
+        '  case "$1" in\n'
+        "    *\"column_name = 'filename'\"*) echo filename ;;\n"
+        "  esac\n"
+        "}\n"
         "run_sql_file() {\n"
-        "  for i in $(seq 1 200000); do\n"
-        '    echo "CREATE TABLE t_$i"\n'
-        "  done\n"
+        '  if [ "$1" = "database/schema.sql" ]; then\n'
+        "    for i in $(seq 1 200000); do\n"
+        '      echo "CREATE TABLE t_$i"\n'
+        "    done\n"
+        "  else\n"
+        '    echo "CREATE TABLE migration_result"\n'
+        "  fi\n"
         "}\n"
     )
 
@@ -1214,6 +1232,8 @@ def test_migrate_init_handles_long_schema_output_without_pipefail_sigpipe(
     assert "CREATE TABLE t_30" in output
     assert "CREATE TABLE t_31" not in output
     assert "Schema initialized" in output
+    assert "Applying: 100_after_init.sql" in output
+    assert "Applied 1 new migration" in output
 
 
 def test_migration_sql_file_execution_stops_on_first_psql_error() -> None:

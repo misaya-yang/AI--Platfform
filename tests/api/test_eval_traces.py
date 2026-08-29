@@ -39,6 +39,7 @@ from src.api.v1.eval import (
     create_eval_example_from_trace,
     create_eval_experiment,
     create_eval_trace_score,
+    delete_eval_example,
     dry_run_eval_gate,
     export_eval_examples,
     export_eval_trace,
@@ -230,6 +231,7 @@ class FakeTraceRepository:
             "created_at": datetime.now(timezone.utc),
         }
         self.imported_case_ids: set[str] = set()
+        self.example_exists = True
         self.evaluator = {
             "evaluator_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
             "tenant_id": "tenant-a",
@@ -355,6 +357,18 @@ class FakeTraceRepository:
             "metadata": metadata,
         }
         return self.example
+
+    async def delete_example(self, **kwargs: Any) -> bool:
+        self.calls.append(("delete_example", kwargs))
+        matches = (
+            self.example_exists
+            and kwargs["tenant_id"] == self.example["tenant_id"]
+            and kwargs["dataset_id"] == self.example["dataset_id"]
+            and kwargs["example_id"] == self.example["example_id"]
+        )
+        if matches:
+            self.example_exists = False
+        return matches
 
     async def list_dataset_example_case_ids(self, **kwargs: Any) -> set[str]:
         self.calls.append(("list_dataset_example_case_ids", kwargs))
@@ -1454,6 +1468,90 @@ async def test_eval_example_review_import_and_export(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_delete_eval_example_is_tenant_scoped_and_repeated_delete_is_404(
+    monkeypatch,
+) -> None:
+    repo = FakeTraceRepository()
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+    auth = _auth(permissions=["console:eval:view", "console:eval:run"])
+
+    deleted = await delete_eval_example(
+        dataset_id=repo.dataset["dataset_id"],
+        example_id=repo.example["example_id"],
+        request=_request(),
+        auth=auth,
+    )
+
+    assert deleted is None
+    assert repo.calls[-1] == (
+        "delete_example",
+        {
+            "tenant_id": "tenant-a",
+            "dataset_id": repo.dataset["dataset_id"],
+            "example_id": repo.example["example_id"],
+        },
+    )
+
+    with pytest.raises(HTTPException) as error:
+        await delete_eval_example(
+            dataset_id=repo.dataset["dataset_id"],
+            example_id=repo.example["example_id"],
+            request=_request(),
+            auth=auth,
+        )
+    assert error.value.status_code == 404
+    assert error.value.detail == "Example not found"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tenant_id", "example_id"),
+    [
+        ("tenant-b", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        ("tenant-a", "ffffffff-ffff-4fff-8fff-ffffffffffff"),
+    ],
+)
+async def test_delete_eval_example_hides_cross_tenant_and_missing_targets(
+    monkeypatch,
+    tenant_id: str,
+    example_id: str,
+) -> None:
+    repo = FakeTraceRepository()
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+
+    with pytest.raises(HTTPException) as error:
+        await delete_eval_example(
+            dataset_id=repo.dataset["dataset_id"],
+            example_id=example_id,
+            request=_request(),
+            auth=_auth(
+                tenant_id=tenant_id,
+                permissions=["console:eval:view", "console:eval:run"],
+            ),
+        )
+
+    assert error.value.status_code == 404
+    assert repo.calls[-1][1]["tenant_id"] == tenant_id
+
+
+@pytest.mark.asyncio
+async def test_delete_eval_example_requires_eval_run_permission(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+
+    with pytest.raises(HTTPException) as error:
+        await delete_eval_example(
+            dataset_id=repo.dataset["dataset_id"],
+            example_id=repo.example["example_id"],
+            request=_request(),
+            auth=_auth(permissions=["console:eval:view"]),
+        )
+
+    assert error.value.status_code == 403
+    assert not any(call[0] == "delete_example" for call in repo.calls)
+
+
+@pytest.mark.asyncio
 async def test_eval_example_import_skips_duplicate_case_ids(monkeypatch) -> None:
     repo = FakeTraceRepository()
     monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
@@ -1949,6 +2047,10 @@ def test_eval_dataset_subrouter_reexports_endpoint_identity() -> None:
             "PATCH",
             "/datasets/{dataset_id}/examples/{example_id}",
         ): eval_routes.update_eval_example,
+        (
+            "DELETE",
+            "/datasets/{dataset_id}/examples/{example_id}",
+        ): eval_routes.delete_eval_example,
         (
             "POST",
             "/datasets/{dataset_id}/examples:import",

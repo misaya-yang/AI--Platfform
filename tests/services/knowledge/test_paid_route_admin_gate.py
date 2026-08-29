@@ -107,6 +107,8 @@ async def test_admin_can_reach_qa_service_fixture_without_network(
         total_time_ms=3.0,
         model="server-model",
         tokens_used=4,
+        trace_id="00000000-0000-4000-8000-000000000001",
+        query_fingerprint="a" * 64,
     )
 
     class _QAService:
@@ -139,6 +141,8 @@ async def test_admin_can_reach_qa_service_fixture_without_network(
     )
 
     assert response["answer"] == "answer"
+    assert response["trace_id"] == result.trace_id
+    assert response["query_fingerprint"] == result.query_fingerprint
     svc.require_dataset_access.assert_awaited_once_with(
         admin,
         "dataset-a",

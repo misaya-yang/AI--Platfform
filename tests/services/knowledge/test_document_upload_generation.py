@@ -12,7 +12,6 @@ from knowledge_service.core.exceptions import ValidationFailedError
 from knowledge_service.persistence.database import DOCUMENT_UPLOAD_GENERATION_KEY
 from knowledge_service.services.knowledge.document_service import DocumentService
 
-
 DATASET = {
     "dataset_id": "dataset-a",
     "tenant_id": "tenant-a",
@@ -165,7 +164,7 @@ async def test_upload_request_path_only_persists_original_and_finalizes_generati
         processing_mode=processing_mode,
     )
 
-    assert result["status"] == "uploaded"
+    assert result["status"] == "waiting"
     assert result["content"] == ""
     assert result["metadata"]["processing_mode"] == processing_mode
     assert result["metadata"]["user_key"] == "value"

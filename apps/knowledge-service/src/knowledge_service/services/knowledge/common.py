@@ -6,7 +6,7 @@ Consolidates duplicated functions that previously existed in multiple files:
 - _permission_rank: knowledge_service, dataset_service
 - import_pymupdf: 10+ files with identical try/except pattern
 - normalize_arabic / Arabic diacritics: retrieval, chunking
-- detect_language / detect_query_language: retrieval, retrieval_v2, chunking
+- detect_language / detect_query_language: retrieval, chunking
 """
 
 from __future__ import annotations

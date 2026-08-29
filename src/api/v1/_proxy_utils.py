@@ -168,6 +168,83 @@ async def _read_bounded_body(request: Request, *, limit_bytes: int) -> bytes:
     return body.getvalue()
 
 
+_KB_READ_SCOPE: Final = "knowledge:read"
+_KB_WRITE_SCOPE: Final = "knowledge:write"
+_KB_READ_METHODS: Final = frozenset({"GET", "HEAD", "OPTIONS"})
+# Retrieval verbs are POST on the wire but read-only against KB state; a
+# knowledge:read key must be able to search. Derived from the KS route
+# surface (POST /knowledge/{dataset_id}/retrieve, /retrieve_batch).
+_KB_READ_ACTIONS: Final = frozenset({"retrieve", "retrieve_batch"})
+
+
+def _normalize_key_scopes(raw: object) -> list[str]:
+    if raw is None or raw == "":
+        return []
+    if isinstance(raw, str):
+        return [part.strip() for part in raw.split(",") if part.strip()]
+    if isinstance(raw, (list, tuple, set)):
+        return [str(item).strip() for item in raw if item is not None and str(item).strip()]
+    return []
+
+
+def _api_key_declared_scopes(request: Request) -> frozenset[str] | None:
+    """Return scopes for a recognized DB API key, or ``None`` for other callers.
+
+    The schema has exposed key scopes through both ``scopes`` and
+    ``permissions``.  An empty set is therefore meaningful: the request was
+    authenticated with a DB key, but that key grants no knowledge access.
+    """
+    state = getattr(request, "state", None)
+    key_info = getattr(state, "api_key_info", None)
+    if not isinstance(key_info, Mapping):
+        return None
+    scopes: list[str] = []
+    for column in ("scopes", "permissions"):
+        scopes.extend(_normalize_key_scopes(key_info.get(column)))
+    return frozenset(scopes)
+
+
+def _required_knowledge_scope(request: Request, *, path: str) -> str:
+    """Classify one proxy request as read-only or state-changing."""
+    method = str(getattr(request, "method", "GET") or "GET").upper()
+    if method in _KB_READ_METHODS:
+        return _KB_READ_SCOPE
+
+    tail = path.rstrip("/").rsplit("/", 1)[-1].lower()
+    if method == "POST" and tail in _KB_READ_ACTIONS:
+        return _KB_READ_SCOPE
+    return _KB_WRITE_SCOPE
+
+
+def enforce_knowledge_scope(request: Request, *, path: str) -> None:
+    """Gate the KB proxy surface on API-key scopes (PRD T8.1).
+
+    DB-issued API keys must hold ``knowledge:read`` for read traffic and
+    ``knowledge:write`` for everything else, so a read-scope key cannot write.
+    Recognized keys with no scopes fail closed and must be reissued or updated.
+    Callers outside the DB key model (including JWT sessions and static env
+    keys) are not scope-gated here; dataset-level ACL remains enforced by
+    knowledge-service on every proxied request.
+    """
+    scopes = _api_key_declared_scopes(request)
+    if scopes is None:
+        return
+    required = _required_knowledge_scope(request, path=path)
+    if required not in scopes:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": (
+                    f"API key is missing required scope '{required}' "
+                    "for this knowledge-base operation; reissue or update "
+                    "keys that have no assigned scopes"
+                ),
+                "required_scope": required,
+                "key_scopes": sorted(scopes),
+            },
+        )
+
+
 def _build_signer() -> GatewaySecret | None:
     secret = os.getenv("AI_PLATFORM_INTERNAL_TOKEN", "").strip()
     if not secret:

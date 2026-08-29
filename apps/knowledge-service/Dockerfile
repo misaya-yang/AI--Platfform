@@ -19,20 +19,31 @@ ARG PIP_TRUSTED_HOST=""
 
 WORKDIR /build
 
-# Build context is the repository root. Copy only the shared package used by
-# this service instead of the full packages/ tree.
+# uv.lock is the single dependency source. These generated exports keep image
+# build tooling separate from runtime dependencies while retaining hashes for
+# every accepted artifact.
+COPY apps/knowledge-service/build-requirements.lock.txt /build/knowledge-service/build-requirements.lock.txt
+COPY apps/knowledge-service/requirements.lock.txt /build/knowledge-service/requirements.lock.txt
 COPY packages/ai-gateway-core/ /build/packages/ai-gateway-core/
-RUN --mount=type=cache,id=ai-gateway-pip,target=/root/.cache/pip,sharing=locked \
-    pip install --upgrade pip && \
-    pip install /build/packages/ai-gateway-core \
-    --index-url ${PIP_INDEX_URL} \
-    ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
-
 COPY apps/knowledge-service/pyproject.toml apps/knowledge-service/README.md /build/knowledge-service/
 COPY apps/knowledge-service/src /build/knowledge-service/src
 
+# PRD T7-3: install the hash-locked build toolchain first so source-only
+# transitive packages cannot pull floating setuptools/wheel versions. The two
+# local workspace wheels use the exact-pinned Hatchling from that toolchain,
+# with build isolation disabled. `make kb-image-lock-refresh` regenerates the
+# exports and `make kb-image-lock-gate` rejects drift.
 RUN --mount=type=cache,id=ai-gateway-pip,target=/root/.cache/pip,sharing=locked \
-    pip install /build/knowledge-service \
+    python -m pip install --require-hashes \
+    -r /build/knowledge-service/build-requirements.lock.txt \
+    --index-url ${PIP_INDEX_URL} \
+    ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}} && \
+    python -m pip install --require-hashes --no-build-isolation \
+    -r /build/knowledge-service/requirements.lock.txt \
+    --index-url ${PIP_INDEX_URL} \
+    ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}} && \
+    python -m pip install --no-deps --no-build-isolation \
+    /build/packages/ai-gateway-core /build/knowledge-service \
     --index-url ${PIP_INDEX_URL} \
     ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
 

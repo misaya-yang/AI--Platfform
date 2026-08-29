@@ -64,19 +64,41 @@ def _fixture_validation(
     args: argparse.Namespace,
 ) -> tuple[list[dict], dict[str, dict], dict, dict[str, str]]:
     cases, expectations_sha256 = _load_jsonl_snapshot(args.expectations)
-    observation_rows, observations_sha256 = _load_jsonl_snapshot(args.observations)
-    observations = _observation_map(observation_rows)
+    track = getattr(args, "track", None)
+    if track:
+        cases = [case for case in cases if case.get("track") == track]
+        if not cases:
+            raise ValueError(f"expectations contain no {track!r}-track cases")
+    hashes = {"expectations": expectations_sha256, "observations": None}
+    if getattr(args, "observations", None):
+        observation_rows, observations_sha256 = _load_jsonl_snapshot(args.observations)
+        observations = _observation_map(observation_rows)
+        if track:
+            case_ids = {str(case.get("case_id")) for case in cases}
+            observations = {
+                case_id: replay for case_id, replay in observations.items() if case_id in case_ids
+            }
+        hashes["observations"] = observations_sha256
+    else:
+        observations = {}
     case_validation = validate_rag_cases(cases)
-    observation_validation = validate_rag_observations(cases, observations)
-    validation = {
-        "valid": case_validation["valid"] and observation_validation["valid"],
-        "expectations": case_validation,
-        "observations": observation_validation,
-    }
-    return cases, observations, validation, {
-        "expectations": expectations_sha256,
-        "observations": observations_sha256,
-    }
+    if getattr(args, "observations", None):
+        observation_validation = validate_rag_observations(cases, observations)
+        validation = {
+            "valid": case_validation["valid"] and observation_validation["valid"],
+            "expectations": case_validation,
+            "observations": observation_validation,
+        }
+    else:
+        # Expectations-only mode (kb-golden-gate): the KB golden set ships
+        # without observations because its live evidence is recorded per
+        # dataset binding by scripts/regen_rag_observations.py.
+        validation = {
+            "valid": case_validation["valid"],
+            "expectations": case_validation,
+            "observations": {"valid": True, "skipped": "no --observations given"},
+        }
+    return cases, observations, validation, hashes
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -100,6 +122,10 @@ def cmd_gate(args: argparse.Namespace) -> int:
         else None
     )
     k_values = [int(item.strip()) for item in args.k_values.split(",") if item.strip()]
+    # A --track join is single-track by construction; enforce the per-track
+    # minimum on the selected track only. Sample sufficiency for the join
+    # still holds via min_total_samples over the selected subset.
+    required_tracks = [args.track] if getattr(args, "track", None) else None
     result = evaluate_rag_regression(
         cases,
         observations,
@@ -111,6 +137,7 @@ def cmd_gate(args: argparse.Namespace) -> int:
         },
         min_total_samples=args.min_total_samples,
         min_track_samples=args.min_track_samples,
+        required_tracks=required_tracks,
         bootstrap_samples=args.bootstrap_samples,
         enable_external_judge_gate=args.enable_external_judge_gate,
         judge_rows=judge_rows,
@@ -151,6 +178,13 @@ def cmd_gate(args: argparse.Namespace) -> int:
 def _add_fixture_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("expectations")
     parser.add_argument("--observations", required=True)
+    parser.add_argument(
+        "--track",
+        choices=("retrieval_only", "answer_aware"),
+        default=None,
+        help="restrict the join to one track (e.g. record-only baseline runs that "
+        "only regenerated retrieval evidence)",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -158,7 +192,13 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     validate = subparsers.add_parser("validate")
-    _add_fixture_arguments(validate)
+    validate.add_argument("expectations")
+    validate.add_argument(
+        "--observations",
+        default=None,
+        help="omit to validate expectations only (used by kb-golden-gate)",
+    )
+    validate.add_argument("--track", choices=("retrieval_only", "answer_aware"), default=None)
     validate.set_defaults(func=cmd_validate)
 
     gate = subparsers.add_parser("gate")

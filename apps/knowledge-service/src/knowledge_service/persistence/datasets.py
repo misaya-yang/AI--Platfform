@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import uuid
 from typing import Any
 
 try:
@@ -26,6 +27,30 @@ DOCUMENT_LIFECYCLE_REINDEX_KEY = "_document_lifecycle_reindex"
 DOCUMENT_UPLOAD_GENERATION_KEY = "_document_upload_generation"
 DOCUMENT_UPLOAD_FAILED_KEY = "_document_upload_failed"
 CONFLUENCE_SYNC_GENERATION_KEY = "_confluence_sync_generation"
+
+# PRD T1 items 3/4 + addendum §1-T1: dual-verb reprocessing contract.
+# The durable queue is the set of documents.status='waiting' rows; the verb a
+# queued generation must run is pinned on the row at claim time so it cannot
+# drift between enqueue and dispatch. 'ingest' is the default first-generation
+# pipeline and carries no marker. The marker vocabulary mirrors the action
+# column of document_pipeline_executions (migration 101).
+DOCUMENT_INGEST_ACTION_KEY = "_document_ingest_action"
+DOCUMENT_RECOVER_STAGE_KEY = "_document_recover_stage"
+DOCUMENT_PIPELINE_EXECUTION_KEY = "_document_pipeline_execution_id"
+INGEST_ACTION_VOCABULARY = frozenset(
+    {"ingest", "reprocess", "reembed", "recover", "retry"}
+)
+# Interactive single-document verbs jump the durable queue ahead of bulk
+# import backlogs (PRD §3.1 dual queue, adapt-3: routing by operation type).
+PRIORITY_INGEST_ACTIONS = frozenset({"reprocess", "reembed", "recover", "retry"})
+# Interactive work may overtake bulk work queued at most this much earlier.
+# The finite bias preserves low-latency repairs without letting a continuous
+# stream of repairs starve an older bulk generation forever.
+INTERACTIVE_QUEUE_BIAS_SECONDS = 5 * 60
+# Stuck stages the crash-recovery loop can observe; they decide the recover
+# branch (PRD T1 item 4: splitting redoes the full pipeline, indexing rebuilds
+# vectors only from already-persisted chunks).
+RECOVER_STAGE_VOCABULARY = frozenset({"parsing", "splitting", "indexing"})
 
 _INDEX_DELETION_OPERATIONS = frozenset({"dataset_delete", "document_delete", "segment_delete"})
 
@@ -96,6 +121,11 @@ def index_config_has_reserved_deletion_fence(index_config: Any) -> bool:
     return INDEX_DELETION_FENCE_KEY in retrieval
 
 
+NON_INGESTION_INDEX_CONFIG_KEYS = frozenset(
+    {"retrieval", "document_metadata_registry"}
+)
+
+
 def dataset_ingestion_identity(dataset: dict[str, Any]) -> str:
     """Hash the dataset choices that determine persisted index generations.
 
@@ -113,7 +143,9 @@ def dataset_ingestion_identity(dataset: dict[str, Any]) -> str:
         "embedding_dimension": int(dataset.get("embedding_dimension") or 0),
         "embedding_config": _json_object(dataset.get("embedding_config")),
         "ingestion_index_config": {
-            key: value for key, value in index_config.items() if key != "retrieval"
+            key: value
+            for key, value in index_config.items()
+            if key not in NON_INGESTION_INDEX_CONFIG_KEYS
         },
     }
     canonical = json.dumps(
@@ -123,13 +155,6 @@ def dataset_ingestion_identity(dataset: dict[str, Any]) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _dataset_lexical_active_version(dataset: dict[str, Any]) -> str:
-    index_config = _json_object(dataset.get("index_config"))
-    retrieval = _json_object(index_config.get("retrieval"))
-    lexical = _json_object(retrieval.get("lexical"))
-    return str(lexical.get("active_version") or "lexical_v1")
 
 
 class DatasetPersistenceMixin:
@@ -591,27 +616,71 @@ class DatasetPersistenceMixin:
         self,
         dataset_id: str,
         document_id: str,
+        *,
+        action: str | None = None,
+        recover_stage: str | None = None,
+        execution_id: str | None = None,
     ) -> bool:
-        """Durably move one eligible document into the queued generation."""
+        """Durably move one eligible document into the queued generation.
+
+        ``action`` pins the dual-verb contract (PRD T1 item 3) on the queued
+        row atomically with the waiting-transition; ``None`` means the default
+        first-generation pipeline and clears any stale verb left by an earlier
+        generation. ``recover_stage`` records the stage a crashed generation
+        died in (recover verb only); ``execution_id`` links the queued row to
+        its document_pipeline_executions replay snapshot (addendum §1-T1.3).
+        """
+
+        normalized_action = str(action or "").strip().lower() or None
+        if normalized_action is not None and normalized_action not in INGEST_ACTION_VOCABULARY:
+            raise ValueError(f"unsupported ingest action: {action}")
+        normalized_stage = str(recover_stage or "").strip().lower() or None
+        if normalized_stage is not None and normalized_stage not in RECOVER_STAGE_VOCABULARY:
+            raise ValueError(f"unsupported recover stage: {recover_stage}")
+        if normalized_stage and normalized_action != "recover":
+            raise ValueError("recover_stage is only valid with the recover action")
+        normalized_execution_id = str(execution_id or "").strip() or None
+
+        # Build the exact metadata patch in Python; the UPDATE merges it over
+        # the authoritative row after stripping stage/exec keys so a verb can
+        # never inherit stale replay state from a previous generation.
+        if normalized_action is None or normalized_action == "ingest":
+            metadata_patch: dict[str, Any] | None = None
+        else:
+            metadata_patch = {DOCUMENT_INGEST_ACTION_KEY: normalized_action}
+            if normalized_stage:
+                metadata_patch[DOCUMENT_RECOVER_STAGE_KEY] = normalized_stage
+            if normalized_execution_id:
+                metadata_patch[DOCUMENT_PIPELINE_EXECUTION_KEY] = normalized_execution_id
 
         async with self.document_index_update_lease(dataset_id, document_id) as conn:
-            dataset = await self._require_dataset_ingestion_identity(
+            await self._require_dataset_ingestion_identity(
                 conn,
                 dataset_id,
                 None,
             )
-            if _dataset_lexical_active_version(dataset) != "lexical_v1":
-                raise RuntimeError("bm25_v2 active mode is read-only; refusing document enqueue")
             row = await conn.fetchrow(
                 f"""
                 UPDATE documents
-                SET status = 'queued',
+                SET status = 'waiting',
                     progress = 0,
                     error = NULL,
-                    updated_at = NOW()
+                    updated_at = NOW(),
+                    metadata = CASE
+                        WHEN $3::jsonb IS NULL THEN
+                            COALESCE(metadata, '{{}}'::jsonb)
+                                - '{DOCUMENT_INGEST_ACTION_KEY}'
+                                - '{DOCUMENT_RECOVER_STAGE_KEY}'
+                                - '{DOCUMENT_PIPELINE_EXECUTION_KEY}'
+                        ELSE
+                            (COALESCE(metadata, '{{}}'::jsonb)
+                                - '{DOCUMENT_RECOVER_STAGE_KEY}'
+                                - '{DOCUMENT_PIPELINE_EXECUTION_KEY}')
+                            || $3::jsonb
+                    END
                 WHERE document_id = $1
                   AND dataset_id = $2
-                  AND status IN ('uploaded', 'completed', 'failed')
+                  AND status IN ('waiting', 'completed', 'error')
                   AND NOT (
                         COALESCE(metadata, '{{}}'::jsonb)
                         ? '{DOCUMENT_UPLOAD_GENERATION_KEY}'
@@ -640,32 +709,194 @@ class DatasetPersistenceMixin:
                             AND metadata -> '{DOCUMENT_LIFECYCLE_REINDEX_KEY}'
                                 ->> 'desired_archived' = 'false'
                   )
+                  -- A row already queued under a verb belongs to that verb:
+                  -- only an identical re-claim may re-pin it. A different
+                  -- verb (or a plain claim that would strip the marker) is
+                  -- rejected so a queued generation can never be silently
+                  -- swapped or demoted. Terminal rows are exempt: they never
+                  -- legitimately carry a marker, and re-claiming is the
+                  -- self-healing path for stale ones.
+                  AND (
+                        status <> 'waiting'
+                        OR NOT (
+                            COALESCE(metadata, '{{}}'::jsonb)
+                            ? '{DOCUMENT_INGEST_ACTION_KEY}'
+                        )
+                        OR COALESCE(metadata ->> '{DOCUMENT_INGEST_ACTION_KEY}', '')
+                            = $4
+                  )
                 RETURNING document_id
                 """,
                 document_id,
                 dataset_id,
+                json.dumps(metadata_patch) if metadata_patch is not None else None,
+                normalized_action or "",
             )
             return row is not None
 
-    async def list_queued_documents(self, *, limit: int = 100) -> list[dict[str, Any]]:
+    async def pin_document_ingest_action(
+        self,
+        dataset_id: str,
+        document_id: str,
+        action: str,
+        *,
+        connection: Any | None = None,
+    ) -> bool:
+        """Pin the dual-verb marker on a lifecycle-owned restore generation.
+
+        Restore transitions persist ``status='waiting'`` directly under the
+        dataset-exclusive lifecycle lease, whose exclusive advisory lock makes
+        the shared lock taken by claim_document_for_enqueue unacquirable, so
+        the verb marker needs this owner-scoped writer. Like the claim path,
+        the write strips stale replay state first so the verb never inherits
+        a previous generation's stage/exec keys. Generic callers cannot reach
+        the verb keys through update_document_fields.
+        """
+
+        normalized_action = str(action or "").strip().lower()
+        if normalized_action not in INGEST_ACTION_VOCABULARY:
+            raise ValueError(f"unsupported ingest action: {action}")
+        query = f"""
+            UPDATE documents
+            SET metadata = (
+                    (COALESCE(metadata, '{{}}'::jsonb)
+                        - '{DOCUMENT_RECOVER_STAGE_KEY}'
+                        - '{DOCUMENT_PIPELINE_EXECUTION_KEY}')
+                    || jsonb_build_object('{DOCUMENT_INGEST_ACTION_KEY}', $3::text)
+                ),
+                updated_at = NOW()
+            WHERE document_id = $1 AND dataset_id = $2
+            RETURNING document_id
+        """
+        if connection is not None:
+            row = await connection.fetchrow(
+                query, document_id, dataset_id, normalized_action
+            )
+            return row is not None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                query, document_id, dataset_id, normalized_action
+            )
+            return row is not None
+
+    async def list_queued_documents(
+        self,
+        *,
+        limit: int = 100,
+        tenant_cursor: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Return bounded durable work for worker-role dispatch.
 
         This is discovery only. The consumer still performs the authoritative
         queued-to-processing CAS while holding the document owner lease, so
         concurrent worker replicas may observe the same row but cannot process
-        the same generation twice.
+        the same generation twice. Rows are round-robin by tenant; within each
+        tenant, interactive verbs receive a finite age bias over bulk work.
+        ``tenant_cursor`` rotates the first tenant across polling batches.
         """
 
         if not self._pool:
             return []
         bounded_limit = min(max(int(limit), 1), 1000)
+        normalized_cursor = str(tenant_cursor or "").strip()
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT d.dataset_id, d.document_id
+                WITH eligible AS (
+                    SELECT
+                        ds.tenant_id,
+                        d.dataset_id,
+                        d.document_id,
+                        d.updated_at,
+                        CASE
+                            WHEN COALESCE(d.metadata, '{{}}'::jsonb)
+                                ->> '{DOCUMENT_INGEST_ACTION_KEY}'
+                                = ANY($4::text[])
+                            THEN 'interactive'
+                            ELSE 'bulk'
+                        END AS dispatch_lane,
+                        d.updated_at - (
+                            CASE
+                                WHEN COALESCE(d.metadata, '{{}}'::jsonb)
+                                    ->> '{DOCUMENT_INGEST_ACTION_KEY}'
+                                    = ANY($4::text[])
+                                THEN $3::double precision
+                                ELSE 0
+                            END * INTERVAL '1 second'
+                        ) AS dispatch_order_at
+                    FROM documents AS d
+                    JOIN datasets AS ds ON ds.dataset_id = d.dataset_id
+                    WHERE d.status = 'waiting'
+                      AND ds.is_deleted = FALSE
+                      AND NOT (
+                            COALESCE(d.metadata, '{{}}'::jsonb)
+                            ? '{DOCUMENT_UPLOAD_GENERATION_KEY}'
+                      )
+                      AND NOT (
+                            COALESCE(d.metadata, '{{}}'::jsonb)
+                            ? '{DOCUMENT_UPLOAD_FAILED_KEY}'
+                      )
+                      AND NOT (
+                            COALESCE(d.metadata, '{{}}'::jsonb)
+                            ? '{CONFLUENCE_SYNC_GENERATION_KEY}'
+                      )
+                      AND NOT COALESCE(
+                            COALESCE(ds.index_config, '{{}}'::jsonb)
+                                -> 'retrieval' ? '{INDEX_DELETION_FENCE_KEY}',
+                            FALSE
+                      )
+                ), tenant_ranked AS (
+                    SELECT
+                        eligible.*,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY tenant_id
+                            ORDER BY dispatch_order_at, updated_at, document_id
+                        ) AS tenant_round
+                    FROM eligible
+                )
+                SELECT
+                    tenant_id,
+                    dataset_id,
+                    document_id,
+                    dispatch_lane
+                FROM tenant_ranked
+                ORDER BY
+                    tenant_round,
+                    CASE
+                        WHEN $2::text = '' OR tenant_id > $2::text THEN 0
+                        ELSE 1
+                    END,
+                    tenant_id,
+                    dispatch_order_at,
+                    updated_at,
+                    document_id
+                LIMIT $1
+                """,
+                bounded_limit,
+                normalized_cursor,
+                float(INTERACTIVE_QUEUE_BIAS_SECONDS),
+                sorted(PRIORITY_INGEST_ACTIONS),
+            )
+        return [self._row_to_dict(row) for row in rows]
+
+    async def count_queued_documents(self) -> int:
+        """Count the same dispatchable rows ``list_queued_documents`` serves.
+
+        Feeds the ``kb_ingestion_queue_depth`` gauge at ``/metrics`` scrape
+        time. The WHERE clause must stay in lockstep with
+        ``list_queued_documents``: a depth that disagrees with what workers
+        can actually claim misleads capacity alerts.
+        """
+
+        if not self._pool:
+            return 0
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""
+                SELECT count(*) AS depth
                 FROM documents AS d
                 JOIN datasets AS ds ON ds.dataset_id = d.dataset_id
-                WHERE d.status = 'queued'
+                WHERE d.status = 'waiting'
                   AND ds.is_deleted = FALSE
                   AND NOT (
                         COALESCE(d.metadata, '{{}}'::jsonb)
@@ -684,17 +915,11 @@ class DatasetPersistenceMixin:
                             -> 'retrieval' ? '{INDEX_DELETION_FENCE_KEY}',
                         FALSE
                   )
-                  AND COALESCE(
-                        ds.index_config -> 'retrieval' -> 'lexical'
-                            ->> 'active_version',
-                        'lexical_v1'
-                  ) = 'lexical_v1'
-                ORDER BY d.updated_at ASC, d.document_id ASC
-                LIMIT $1
-                """,
-                bounded_limit,
+                """
             )
-        return [self._row_to_dict(row) for row in rows]
+        if row is None:
+            return 0
+        return int(row["depth"] or 0)
 
     async def claim_queued_document_for_processing(
         self,
@@ -706,26 +931,23 @@ class DatasetPersistenceMixin:
         """CAS one durable queued row to processing before consuming it."""
 
         async def _claim(conn: Any) -> bool:
-            dataset = await self._require_dataset_ingestion_identity(
+            await self._require_dataset_ingestion_identity(
                 conn,
                 dataset_id,
                 None,
             )
-            if _dataset_lexical_active_version(dataset) != "lexical_v1":
-                raise RuntimeError(
-                    "bm25_v2 active mode is read-only; refusing document consumer claim"
-                )
             row = await conn.fetchrow(
                 f"""
                 UPDATE documents
-                SET status = 'processing',
+                SET status = 'parsing',
                     progress = 0,
                     error = NULL,
                     updated_at = NOW(),
-                    started_at = COALESCE(started_at, NOW())
+                    started_at = COALESCE(started_at, NOW()),
+                    parsing_started_at = COALESCE(parsing_started_at, NOW())
                 WHERE document_id = $1
                   AND dataset_id = $2
-                  AND status = 'queued'
+                  AND status = 'waiting'
                   AND NOT (
                         COALESCE(metadata, '{{}}'::jsonb)
                         ? '{DOCUMENT_UPLOAD_GENERATION_KEY}'
@@ -780,18 +1002,16 @@ class DatasetPersistenceMixin:
         row = await connection.fetchrow(
             """
             UPDATE documents
-            SET status = 'queued',
+            SET status = 'waiting',
                 progress = 0,
                 error = NULL,
                 updated_at = NOW()
             WHERE document_id = $1
               AND dataset_id = $2
               AND status IN (
-                    'processing',
                     'parsing',
-                    'segmenting',
-                    'embedding',
-                    'embedding_images'
+                    'splitting',
+                    'indexing'
               )
             RETURNING document_id
             """,
@@ -799,6 +1019,394 @@ class DatasetPersistenceMixin:
             dataset_id,
         )
         return row is not None
+
+    # ------------------------------------------------------------------
+    # Per-document pipeline executions (migration 101). One row per queued
+    # generation: the immutable input snapshot reprocess/recover replay
+    # (addendum §1-T1.3 — in-flight documents must not drift to a config
+    # changed after submission) plus the staging manifest for the revision
+    # flip (PRD T1.5).
+    # ------------------------------------------------------------------
+
+    async def record_pipeline_execution(
+        self,
+        document_id: str,
+        dataset_id: str,
+        *,
+        action: str,
+        trigger_source: str = "api",
+        triggered_by: str | None = None,
+        process_rule_id: str | None = None,
+        input_snapshot: dict[str, Any] | None = None,
+        connection: Any | None = None,
+    ) -> str:
+        """Insert one execution row at submission time; returns its id."""
+
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        normalized_action = str(action or "").strip().lower()
+        if normalized_action not in INGEST_ACTION_VOCABULARY:
+            raise ValueError(f"unsupported pipeline execution action: {action}")
+        normalized_trigger = str(trigger_source or "").strip().lower() or "api"
+        if normalized_trigger not in {
+            "upload",
+            "api",
+            "worker",
+            "confluence_sync",
+            "recover",
+        }:
+            raise ValueError(f"unsupported pipeline execution trigger: {trigger_source}")
+        snapshot = input_snapshot if isinstance(input_snapshot, dict) else {}
+        execution_id = uuid.uuid4().hex
+
+        async def _insert(conn: Any) -> None:
+            await conn.execute(
+                """
+                INSERT INTO document_pipeline_executions (
+                    execution_id,
+                    document_id,
+                    dataset_id,
+                    action,
+                    trigger_source,
+                    triggered_by,
+                    process_rule_id,
+                    input_snapshot,
+                    manifest,
+                    status
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, '{}'::jsonb, 'running')
+                """,
+                execution_id,
+                document_id,
+                dataset_id,
+                normalized_action,
+                normalized_trigger,
+                str(triggered_by or "").strip() or None,
+                str(process_rule_id or "").strip() or None,
+                json.dumps(snapshot),
+            )
+
+        if connection is not None:
+            await _insert(connection)
+            return execution_id
+        async with self._pool.acquire() as conn:
+            await _insert(conn)
+        return execution_id
+
+    async def link_pipeline_execution(
+        self,
+        document_id: str,
+        execution_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> bool:
+        """Persist the queued-generation -> execution link on the document row.
+
+        Internal writer only (the key is reserved against API callers). Keeping
+        the link in metadata lets a requeued generation (cancel/requeue, crash
+        recovery) find its execution row instead of opening a duplicate.
+        """
+
+        if not self._pool:
+            return False
+        normalized_document = str(document_id or "").strip()
+        normalized_execution = str(execution_id or "").strip()
+        if not normalized_document or not normalized_execution:
+            return False
+
+        async def _link(conn: Any) -> bool:
+            row = await conn.fetchrow(
+                f"""
+                UPDATE documents
+                SET metadata = jsonb_set(
+                        COALESCE(metadata, '{{}}'::jsonb),
+                        '{{{DOCUMENT_PIPELINE_EXECUTION_KEY}}}',
+                        to_jsonb($2::text)
+                    )
+                WHERE document_id = $1
+                RETURNING document_id
+                """,
+                normalized_document,
+                normalized_execution,
+            )
+            return row is not None
+
+        if connection is not None:
+            return await _link(connection)
+        async with self._pool.acquire() as conn:
+            return await _link(conn)
+
+    async def get_pipeline_execution(
+        self,
+        execution_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> dict[str, Any] | None:
+        """Return one execution row (snapshot + manifest + status)."""
+
+        if not self._pool:
+            return None
+        normalized = str(execution_id or "").strip()
+        if not normalized:
+            return None
+
+        async def _fetch(conn: Any) -> Any:
+            return await conn.fetchrow(
+                """
+                SELECT execution_id, document_id, dataset_id, action,
+                       trigger_source, triggered_by, process_rule_id,
+                       input_snapshot, manifest, status, error,
+                       created_at, completed_at
+                FROM document_pipeline_executions
+                WHERE execution_id = $1
+                """,
+                normalized,
+            )
+
+        if connection is not None:
+            row = await _fetch(connection)
+        else:
+            async with self._pool.acquire() as conn:
+                row = await _fetch(conn)
+        return self._row_to_dict(row) if row is not None else None
+
+    async def get_latest_pipeline_execution(
+        self,
+        document_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the newest execution row for one document, if any."""
+
+        if not self._pool:
+            return None
+        normalized = str(document_id or "").strip()
+        if not normalized:
+            return None
+
+        async def _fetch(conn: Any) -> Any:
+            return await conn.fetchrow(
+                """
+                SELECT execution_id, document_id, dataset_id, action,
+                       trigger_source, triggered_by, process_rule_id,
+                       input_snapshot, manifest, status, error,
+                       created_at, completed_at
+                FROM document_pipeline_executions
+                WHERE document_id = $1
+                ORDER BY created_at DESC, execution_id DESC
+                LIMIT 1
+                """,
+                normalized,
+            )
+
+        if connection is not None:
+            row = await _fetch(connection)
+        else:
+            async with self._pool.acquire() as conn:
+                row = await _fetch(conn)
+        return self._row_to_dict(row) if row is not None else None
+
+    async def complete_pipeline_execution(
+        self,
+        execution_id: str,
+        *,
+        status: str,
+        error: str | None = None,
+        manifest: dict[str, Any] | list[Any] | None = None,
+        connection: Any | None = None,
+    ) -> bool:
+        """Close one execution row; the manifest records the revision flip."""
+
+        if not self._pool:
+            return False
+        normalized = str(execution_id or "").strip()
+        if not normalized:
+            return False
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status not in {"completed", "error"}:
+            raise ValueError("pipeline execution status must be completed or error")
+
+        async def _close(conn: Any) -> bool:
+            if manifest is None:
+                row = await conn.fetchrow(
+                    """
+                    UPDATE document_pipeline_executions
+                    SET status = $2,
+                        error = $3,
+                        completed_at = NOW()
+                    WHERE execution_id = $1 AND status = 'running'
+                    RETURNING execution_id
+                    """,
+                    normalized,
+                    normalized_status,
+                    str(error or "").strip() or None,
+                )
+            else:
+                row = await conn.fetchrow(
+                    """
+                    UPDATE document_pipeline_executions
+                    SET status = $2,
+                        error = $3,
+                        manifest = $4::jsonb,
+                        completed_at = NOW()
+                    WHERE execution_id = $1 AND status = 'running'
+                    RETURNING execution_id
+                    """,
+                    normalized,
+                    normalized_status,
+                    str(error or "").strip() or None,
+                    json.dumps(manifest),
+                )
+            return row is not None
+
+        if connection is not None:
+            return await _close(connection)
+        async with self._pool.acquire() as conn:
+            return await _close(conn)
+
+    # ------------------------------------------------------------------
+    # Process-rule snapshots (PRD T1 item 7). A rule row is an immutable,
+    # content-addressed snapshot of the complete index configuration that
+    # actually built a generation: {"index_config", "chunking",
+    # "processing_mode"}. Rows
+    # are pinned onto documents at generation-open and referenced from
+    # document_pipeline_executions.process_rule_id; replay verbs (reprocess/
+    # recover) require both snapshots to exist and agree before processing.
+    # ------------------------------------------------------------------
+
+    async def record_process_rule(
+        self,
+        dataset_id: str,
+        *,
+        mode: str,
+        rules: dict[str, Any],
+        created_by: str | None = None,
+        connection: Any | None = None,
+    ) -> str | None:
+        """Return the rule id for this (dataset, mode, rules) content.
+
+        Content-dedup by jsonb equality keeps the rule id stable while the
+        dataset config is unchanged. The dedup is best-effort (select-then-
+        insert): a concurrent race may leave one extra immutable row for the
+        same content, which is harmless — every row is frozen by the
+        migration-103 immutability trigger and pins resolve per row.
+        """
+
+        if not self._pool:
+            return None
+        normalized_dataset = str(dataset_id or "").strip()
+        normalized_mode = str(mode or "").strip().lower()
+        if not normalized_dataset or not normalized_mode:
+            return None
+        if not isinstance(rules, dict):
+            raise ValueError("process rule snapshot must be a dict")
+        payload = json.dumps(rules)
+        rule_id = uuid.uuid4().hex
+
+        async def _record(conn: Any) -> str:
+            existing = await conn.fetchval(
+                """
+                SELECT id
+                FROM dataset_process_rules
+                WHERE dataset_id = $1 AND mode = $2 AND rules = $3::jsonb
+                ORDER BY created_at ASC, id ASC
+                LIMIT 1
+                """,
+                normalized_dataset,
+                normalized_mode,
+                payload,
+            )
+            if existing is not None:
+                return str(existing)
+            row = await conn.fetchrow(
+                """
+                INSERT INTO dataset_process_rules (
+                    id, dataset_id, mode, rules, created_by
+                )
+                VALUES ($1, $2, $3, $4::jsonb, $5)
+                RETURNING id
+                """,
+                rule_id,
+                normalized_dataset,
+                normalized_mode,
+                payload,
+                str(created_by or "").strip() or None,
+            )
+            return str(row["id"]) if row is not None else rule_id
+
+        if connection is not None:
+            return await _record(connection)
+        async with self._pool.acquire() as conn:
+            return await _record(conn)
+
+    async def get_process_rule(
+        self,
+        process_rule_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> dict[str, Any] | None:
+        """Return one immutable rule snapshot row, if it exists."""
+
+        if not self._pool:
+            return None
+        normalized = str(process_rule_id or "").strip()
+        if not normalized:
+            return None
+
+        async def _fetch(conn: Any) -> Any:
+            return await conn.fetchrow(
+                """
+                SELECT id, dataset_id, mode, rules, created_by, created_at
+                FROM dataset_process_rules
+                WHERE id = $1
+                """,
+                normalized,
+            )
+
+        if connection is not None:
+            row = await _fetch(connection)
+        else:
+            async with self._pool.acquire() as conn:
+                row = await _fetch(conn)
+        return self._row_to_dict(row) if row is not None else None
+
+    async def pin_document_process_rule(
+        self,
+        document_id: str,
+        process_rule_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> bool:
+        """Pin the rule snapshot that governs this document's generations.
+
+        The pin is cross-checked against the execution row during replay. A
+        missing or disagreeing row is terminal; replay never uses live config.
+        """
+
+        if not self._pool:
+            return False
+        normalized_document = str(document_id or "").strip()
+        normalized_rule = str(process_rule_id or "").strip()
+        if not normalized_document or not normalized_rule:
+            return False
+
+        async def _pin(conn: Any) -> bool:
+            row = await conn.fetchrow(
+                """
+                UPDATE documents
+                SET process_rule_id = $2
+                WHERE document_id = $1
+                RETURNING document_id
+                """,
+                normalized_document,
+                normalized_rule,
+            )
+            return row is not None
+
+        if connection is not None:
+            return await _pin(connection)
+        async with self._pool.acquire() as conn:
+            return await _pin(conn)
 
     async def next_segment_position(
         self,
@@ -1112,6 +1720,50 @@ class DatasetPersistenceMixin:
             )
             logger.info(f"Cleared needs_reindex flag for dataset {dataset_id}")
 
+    async def bump_dataset_content_revision(
+        self,
+        dataset_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> bool:
+        """Advance the dataset's authoritative content revision.
+
+        Retrieval cache keys and lexical-transition identities are bound to
+        ``content_revision`` via the dataset revision fingerprint (PRD T1
+        unified lifecycle contract, §885-886; retrieval cache contract §129:
+        写后不可能读到旧值). Every transition that changes which content is
+        visible for retrieval must advance the revision so a cached result
+        can never outlive the transition. The restore direction bumps
+        atomically inside the activation status write instead.
+
+        Deployments also carry the 076 provenance triggers, which advance
+        the revision on retrieval-effective documents/segments writes; this
+        writer is the knowledge service's own explicit guarantee, kept
+        independent of that platform trigger so the cache contract holds
+        even on a schema provisioned without it. Extra advancement is
+        harmless — nothing depends on revision adjacency.
+        """
+
+        normalized_dataset = str(dataset_id or "").strip()
+        if not normalized_dataset:
+            raise ValueError("dataset_id is required")
+        query = """
+            UPDATE datasets
+            SET content_revision = COALESCE(content_revision, 0) + 1,
+                updated_at = NOW()
+            WHERE dataset_id = $1
+              AND is_deleted = FALSE
+            RETURNING dataset_id
+        """
+        if connection is not None:
+            row = await connection.fetchrow(query, normalized_dataset)
+            return row is not None
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(query, normalized_dataset)
+            return row is not None
+
     async def get_dataset(
         self,
         dataset_id: str,
@@ -1237,6 +1889,267 @@ class DatasetPersistenceMixin:
         async with self._pool.acquire() as conn:
             return await _delete(conn)
 
+    async def record_dataset_query(
+        self,
+        *,
+        dataset_id: str,
+        content: str,
+        source: str = "api",
+        source_app_id: str | None = None,
+        created_by_role: str | None = None,
+        created_by: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        trace_id: str | None = None,
+        query_fingerprint: str | None = None,
+        mode: str | None = None,
+        top_k: int | None = None,
+        hit_count: int | None = None,
+        stage_timings: dict[str, Any] | None = None,
+        segment_ids: list[str] | None = None,
+    ) -> bool:
+        """Append one retrieval-query telemetry row.
+
+        Telemetry contract (PRD C1): independent transaction, never raises.
+        A failure here must not surface to the retrieve() caller, so errors
+        are logged and swallowed.
+        """
+        if not self._pool:
+            return False
+        try:
+            async with self._pool.acquire() as conn:
+                if trace_id:
+                    async with conn.transaction():
+                        inserted = await conn.fetchval(
+                            """
+                            INSERT INTO dataset_queries (
+                                dataset_id, content, source, source_app_id,
+                                created_by_role, created_by, metadata,
+                                trace_id, query_fingerprint, mode, top_k,
+                                hit_count, stage_timings
+                            ) VALUES (
+                                $1, $2, $3, $4, $5, $6, $7::jsonb,
+                                $8::uuid, $9, $10, $11, $12, $13::jsonb
+                            )
+                            ON CONFLICT (trace_id) WHERE trace_id IS NOT NULL
+                            DO NOTHING
+                            RETURNING 1
+                            """,
+                            dataset_id,
+                            content,
+                            source,
+                            source_app_id,
+                            created_by_role,
+                            created_by,
+                            json.dumps(metadata or {}, ensure_ascii=False),
+                            trace_id,
+                            query_fingerprint,
+                            mode,
+                            top_k,
+                            hit_count,
+                            json.dumps(stage_timings or {}, ensure_ascii=False),
+                        )
+                        if inserted and segment_ids:
+                            await conn.execute(
+                                """
+                                UPDATE segments
+                                SET hit_count = hit_count + 1
+                                WHERE dataset_id = $1
+                                  AND segment_id = ANY($2::text[])
+                                """,
+                                dataset_id,
+                                sorted(set(segment_ids)),
+                            )
+                    return True
+
+                await conn.execute(
+                    """
+                    INSERT INTO dataset_queries (
+                        dataset_id, content, source, source_app_id,
+                        created_by_role, created_by, metadata
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                    """,
+                    dataset_id,
+                    content,
+                    source,
+                    source_app_id,
+                    created_by_role,
+                    created_by,
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                )
+            return True
+        except Exception as exc:  # telemetry must never break retrieval
+            logger.warning("dataset query telemetry insert failed: %s", exc)
+            return False
+
+    async def list_dataset_queries(
+        self,
+        *,
+        dataset_id: str,
+        tenant_id: str,
+        limit: int,
+        zero_results: bool | None = None,
+        mode: str | None = None,
+        cursor_created_at: Any | None = None,
+        cursor_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return one tenant-bound keyset page of query observations."""
+
+        if not self._pool:
+            return []
+        clauses = ["q.dataset_id = $1", "d.tenant_id = $2", "d.is_deleted = FALSE"]
+        params: list[Any] = [dataset_id, tenant_id]
+        if zero_results is not None:
+            params.append(0)
+            operator = "=" if zero_results else ">"
+            clauses.append(f"q.hit_count {operator} ${len(params)}")
+        if mode:
+            params.append(mode)
+            clauses.append(f"q.mode = ${len(params)}")
+        if cursor_created_at is not None and cursor_id:
+            params.extend([cursor_created_at, cursor_id])
+            clauses.append(f"(q.created_at, q.id) < (${len(params) - 1}, ${len(params)})")
+        params.append(limit)
+        query = f"""
+            SELECT q.id, q.dataset_id, q.content, q.source, q.source_app_id,
+                   q.created_by_role, q.created_by, q.metadata, q.trace_id,
+                   q.query_fingerprint, q.mode, q.top_k, q.hit_count,
+                   q.stage_timings, q.created_at
+            FROM dataset_queries AS q
+            JOIN datasets AS d ON d.dataset_id = q.dataset_id
+            WHERE {' AND '.join(clauses)}
+            ORDER BY q.created_at DESC, q.id DESC
+            LIMIT ${len(params)}
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+        return [self._row_to_dict(row) for row in rows]
+
+    async def get_dataset_query_fingerprint(
+        self,
+        *,
+        dataset_id: str,
+        tenant_id: str,
+        trace_id: str,
+    ) -> str | None:
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval(
+                """
+                SELECT q.query_fingerprint
+                FROM dataset_queries AS q
+                JOIN datasets AS d ON d.dataset_id = q.dataset_id
+                WHERE q.dataset_id = $1
+                  AND d.tenant_id = $2
+                  AND d.is_deleted = FALSE
+                  AND q.trace_id = $3::uuid
+                """,
+                dataset_id,
+                tenant_id,
+                trace_id,
+            )
+
+    async def upsert_dataset_query_feedback(
+        self,
+        *,
+        tenant_id: str,
+        dataset_id: str,
+        trace_id: str,
+        query_fingerprint: str,
+        target_type: str,
+        target_id: str,
+        rating: str,
+        reason_code: str,
+        comment: str | None,
+        created_by: str,
+    ) -> dict[str, Any] | None:
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO knowledge.dataset_query_feedback (
+                    tenant_id, dataset_id, trace_id, query_fingerprint,
+                    target_type, target_id, rating, reason_code, comment, created_by
+                ) VALUES ($1, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10)
+                ON CONFLICT (
+                    tenant_id, dataset_id, trace_id, target_type, target_id, created_by
+                ) DO UPDATE SET
+                    query_fingerprint = EXCLUDED.query_fingerprint,
+                    rating = EXCLUDED.rating,
+                    reason_code = EXCLUDED.reason_code,
+                    comment = EXCLUDED.comment,
+                    updated_at = NOW()
+                RETURNING *
+                """,
+                tenant_id,
+                dataset_id,
+                trace_id,
+                query_fingerprint,
+                target_type,
+                target_id,
+                rating,
+                reason_code,
+                comment,
+                created_by,
+            )
+        return self._row_to_dict(row) if row else None
+
+    async def list_dataset_query_feedback(
+        self,
+        *,
+        tenant_id: str,
+        dataset_id: str,
+        limit: int,
+        rating: str | None = None,
+        reason_code: str | None = None,
+        target_type: str | None = None,
+        trace_id: str | None = None,
+        cursor_created_at: Any | None = None,
+        cursor_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if not self._pool:
+            return []
+        clauses = [
+            "f.tenant_id = $1",
+            "f.dataset_id = $2",
+            "d.tenant_id = $1",
+            "d.is_deleted = FALSE",
+        ]
+        params: list[Any] = [tenant_id, dataset_id]
+        for column, value in (
+            ("rating", rating),
+            ("reason_code", reason_code),
+            ("target_type", target_type),
+        ):
+            if value:
+                params.append(value)
+                clauses.append(f"f.{column} = ${len(params)}")
+        if trace_id:
+            params.append(trace_id)
+            clauses.append(f"f.trace_id = ${len(params)}::uuid")
+        if cursor_created_at is not None and cursor_id:
+            params.extend([cursor_created_at, cursor_id])
+            clauses.append(
+                f"(f.created_at, f.feedback_id) < "
+                f"(${len(params) - 1}, ${len(params)}::uuid)"
+            )
+        params.append(limit)
+        query = f"""
+            SELECT f.*, q.content AS query_content
+            FROM knowledge.dataset_query_feedback AS f
+            JOIN datasets AS d ON d.dataset_id = f.dataset_id
+            LEFT JOIN dataset_queries AS q
+              ON q.dataset_id = f.dataset_id AND q.trace_id = f.trace_id
+            WHERE {' AND '.join(clauses)}
+            ORDER BY f.created_at DESC, f.feedback_id DESC
+            LIMIT ${len(params)}
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+        return [self._row_to_dict(row) for row in rows]
+
     async def get_datasets_statistics_batch(
         self, dataset_ids: list[str]
     ) -> dict[str, dict[str, int]]:
@@ -1245,13 +2158,41 @@ class DatasetPersistenceMixin:
             return {}
 
         async with self._pool.acquire() as conn:
-            # Two lightweight sub-selects instead of double LEFT JOIN (avoids cartesian on 52K segments)
             query = """
+                WITH document_stats AS (
+                    SELECT dataset_id,
+                           COUNT(*)::bigint AS document_count,
+                           COUNT(*) FILTER (
+                               WHERE status = 'completed'
+                                 AND enabled = TRUE
+                                 AND archived = FALSE
+                           )::bigint AS available_document_count,
+                           COALESCE(SUM(word_count), 0)::bigint AS word_count
+                    FROM documents
+                    WHERE dataset_id = ANY($1)
+                    GROUP BY dataset_id
+                ), segment_stats AS (
+                    SELECT dataset_id,
+                           COUNT(*)::bigint AS segment_count,
+                           COUNT(*) FILTER (
+                               WHERE enabled = TRUE AND status = 'completed'
+                           )::bigint AS available_segment_count,
+                           COALESCE(SUM(hit_count), 0)::bigint AS hit_count
+                    FROM segments
+                    WHERE dataset_id = ANY($1)
+                    GROUP BY dataset_id
+                )
                 SELECT
                     d.dataset_id,
-                    COALESCE((SELECT COUNT(*) FROM documents doc WHERE doc.dataset_id = d.dataset_id), 0) as document_count,
-                    COALESCE((SELECT COUNT(*) FROM segments seg WHERE seg.dataset_id = d.dataset_id), 0) as segment_count
+                    COALESCE(doc.document_count, 0) AS document_count,
+                    COALESCE(doc.available_document_count, 0) AS available_document_count,
+                    COALESCE(doc.word_count, 0) AS word_count,
+                    COALESCE(seg.segment_count, 0) AS segment_count,
+                    COALESCE(seg.available_segment_count, 0) AS available_segment_count,
+                    COALESCE(seg.hit_count, 0) AS hit_count
                 FROM datasets d
+                LEFT JOIN document_stats doc ON doc.dataset_id = d.dataset_id
+                LEFT JOIN segment_stats seg ON seg.dataset_id = d.dataset_id
                 WHERE d.dataset_id = ANY($1)
                   AND d.is_deleted = FALSE
             """
@@ -1262,12 +2203,23 @@ class DatasetPersistenceMixin:
                 result[row["dataset_id"]] = {
                     "document_count": row["document_count"] or 0,
                     "segment_count": row["segment_count"] or 0,
+                    "available_document_count": row["available_document_count"] or 0,
+                    "available_segment_count": row["available_segment_count"] or 0,
+                    "word_count": row["word_count"] or 0,
+                    "hit_count": row["hit_count"] or 0,
                 }
 
             # Ensure all requested dataset_ids have entries (even if empty)
             for ds_id in dataset_ids:
                 if ds_id not in result:
-                    result[ds_id] = {"document_count": 0, "segment_count": 0}
+                    result[ds_id] = {
+                        "document_count": 0,
+                        "segment_count": 0,
+                        "available_document_count": 0,
+                        "available_segment_count": 0,
+                        "word_count": 0,
+                        "hit_count": 0,
+                    }
 
             return result
 

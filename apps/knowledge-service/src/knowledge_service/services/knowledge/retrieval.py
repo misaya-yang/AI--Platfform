@@ -871,6 +871,27 @@ class MMRPick:
     max_sim_to_selected: float
 
 
+MMR_FILL_POLICIES = ("strict", "fill")
+
+
+def _mmr_unit_vector(vec: Sequence[float] | None) -> list[float] | None:
+    """Return a unit-length copy of ``vec``, or None when it cannot be used.
+
+    Missing/empty/zero-norm/malformed vectors map to similarity 0.0, the same
+    convention the pre-B5 implementation produced via cosine_similarity().
+    """
+    if not vec:
+        return None
+    try:
+        floats = [float(x) for x in vec]
+        norm = math.sqrt(sum(x * x for x in floats))
+    except (TypeError, ValueError):
+        return None
+    if norm <= 0.0:
+        return None
+    return [x / norm for x in floats]
+
+
 def mmr_select(
     candidates: list[str],
     relevance: dict[str, float],
@@ -879,65 +900,132 @@ def mmr_select(
     top_k: int,
     lambda_mult: float = 0.5,
     similarity_threshold: float | None = None,
+    fill_policy: str = "strict",
 ) -> tuple[list[str], dict[str, MMRPick]]:
     """MMR selection (diversify while keeping relevance).
 
     Returns (selected_ids, pick_info_by_id).
+
+    ``fill_policy`` (B5 contract):
+      - ``"strict"`` (default): a candidate rejected by
+        ``similarity_threshold`` stays rejected. Maximal similarity against
+        the selected set is non-decreasing as picks accumulate, so rejection
+        is permanent; when rejection empties the pool the result is simply
+        shorter than ``top_k``. Returning fewer results is preferred over
+        resurrecting a diversity-violating candidate.
+      - ``"fill"`` (legacy escape hatch): if the threshold pass leaves fewer
+        than ``top_k`` selected, the unselected candidates are appended in
+        the given candidate order (callers pass relevance-descending order),
+        reproducing the pre-B5 caller-side fill-remaining behaviour.
+
+    Complexity (perf-review 2026-08-16): the running per-candidate maximum
+    similarity is updated only against the vector picked in the current
+    round — O(k * n * d) dot products total. The pre-B5 implementation
+    recomputed similarity of every remaining candidate against the whole
+    selected set on every round: O(k^2 * n * d). Numpy is used when
+    importable; results are identical without it.
     """
     if not candidates or top_k <= 0:
         return [], {}
+    policy = "strict" if fill_policy is None else str(fill_policy).strip().lower()
+    if policy not in MMR_FILL_POLICIES:
+        raise ValueError(
+            f"unknown MMR fill_policy {fill_policy!r}; expected one of {MMR_FILL_POLICIES}"
+        )
 
     lam = float(lambda_mult)
     lam = max(0.0, min(1.0, lam))
     threshold = float(similarity_threshold) if similarity_threshold is not None else None
 
-    remaining = [c for c in candidates if c]
+    remaining = list(dict.fromkeys(c for c in candidates if c))
+    n = len(remaining)
+    if n == 0:
+        return [], {}
+    rel = [float(relevance.get(cid, 0.0)) for cid in remaining]
+    units = [_mmr_unit_vector(vectors.get(cid)) for cid in remaining]
+
     selected: list[str] = []
     picks: dict[str, MMRPick] = {}
+    alive = [True] * n
+    max_sim = [0.0] * n
 
-    def max_sim(cid: str) -> float:
-        if not selected:
-            return 0.0
-        v = vectors.get(cid)
-        if v is None:
-            return 0.0
-        best = 0.0
-        for sid in selected:
-            sv = vectors.get(sid)
-            if sv is None:
+    try:
+        import numpy as np
+    except ImportError:  # pragma: no cover - numpy absence is env-dependent
+        np = None
+
+    mat = None
+    dims = {len(u) for u in units if u is not None}
+    if np is not None and len(dims) <= 1:
+        dim = next(iter(dims), 0)
+        if dim:
+            mat = np.zeros((n, dim), dtype=float)
+            for i, u in enumerate(units):
+                if u is not None and len(u) == dim:
+                    mat[i] = u
+
+    def refresh_max_sim(pick_idx: int) -> None:
+        """Fold similarity-to-newly-picked into each candidate's running max."""
+        if not any(alive):
+            return
+        if mat is not None:
+            sims = mat @ mat[pick_idx]
+            for i in range(n):
+                if alive[i]:
+                    s = float(sims[i])
+                    if s > max_sim[i]:
+                        max_sim[i] = s
+            return
+        picked = units[pick_idx]
+        if picked is None:
+            return
+        for i in range(n):
+            if not alive[i]:
                 continue
-            best = max(best, cosine_similarity(v, sv))
-        return float(best)
+            u = units[i]
+            if u is None or len(u) != len(picked):
+                continue
+            s = sum(a * b for a, b in zip(u, picked, strict=True))
+            if s > max_sim[i]:
+                max_sim[i] = s
 
-    while remaining and len(selected) < int(top_k):
-        best_id: str | None = None
+    for _ in range(min(int(top_k), n)):
+        if threshold is not None and selected:
+            # B5: rejection is permanent — max_sim never decreases.
+            for i in range(n):
+                if alive[i] and max_sim[i] >= threshold:
+                    alive[i] = False
+        best_idx = -1
         best_mmr = -1e30
-        best_rel = 0.0
-        best_sim = 0.0
-
-        for cid in remaining:
-            rel = float(relevance.get(cid, 0.0))
-            sim = max_sim(cid)
-            if threshold is not None and selected and sim >= threshold:
+        for i in range(n):
+            if not alive[i]:
                 continue
-            mmr = lam * rel - (1.0 - lam) * sim
+            mmr = lam * rel[i] - (1.0 - lam) * max_sim[i]
             if mmr > best_mmr:
-                best_id = cid
                 best_mmr = mmr
-                best_rel = rel
-                best_sim = sim
-
-        if best_id is None:
-            # If threshold filtered everything, stop early.
+                best_idx = i
+        if best_idx < 0:
+            # Every remaining candidate is diversity-rejected (or pool empty).
             break
-
-        selected.append(best_id)
-        remaining = [c for c in remaining if c != best_id]
-        picks[best_id] = MMRPick(
-            item_id=best_id,
+        alive[best_idx] = False
+        cid = remaining[best_idx]
+        selected.append(cid)
+        picks[cid] = MMRPick(
+            item_id=cid,
             mmr_score=float(best_mmr),
-            relevance=float(best_rel),
-            max_sim_to_selected=float(best_sim),
+            relevance=float(rel[best_idx]),
+            max_sim_to_selected=float(max_sim[best_idx]),
         )
+        refresh_max_sim(best_idx)
+
+    if policy == "fill" and len(selected) < int(top_k):
+        chosen = set(selected)
+        for cid in remaining:
+            if len(selected) >= int(top_k):
+                break
+            if cid in chosen:
+                continue
+            selected.append(cid)
+            chosen.add(cid)
 
     return selected, picks

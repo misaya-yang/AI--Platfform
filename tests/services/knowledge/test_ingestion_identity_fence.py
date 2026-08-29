@@ -108,7 +108,7 @@ async def test_ingestion_identity_fence_rejects_pending_dataset_deletion() -> No
 
 
 @pytest.mark.asyncio
-async def test_active_bm25_v2_ingest_does_not_mutate_document_status() -> None:
+async def test_active_bm25_v2_kill_switch_does_not_mutate_document_status() -> None:
     active = _dataset()
     active["index_config"]["retrieval"] = {
         "lexical": {
@@ -132,6 +132,7 @@ async def test_active_bm25_v2_ingest_does_not_mutate_document_status() -> None:
     service = IngestionService.__new__(IngestionService)
     service.db = Database()
     service._ks = Knowledge()
+    service.vector_store = SimpleNamespace(bm25_v2_enabled=False)
 
     await service.ingest_document("dataset-a", "document-a")
 
@@ -296,7 +297,9 @@ async def test_image_receipt_compensates_qdrant_when_segment_db_write_fails() ->
             *,
             tenant_id: str,
             dataset_id: str,
+            affects_bm25_scope: bool = True,
         ) -> None:
+            assert affects_bm25_scope is False
             events.append(
                 (
                     "qdrant-delete",
@@ -736,7 +739,7 @@ async def test_image_receipt_compensation_rejects_false_storage_delete() -> None
     ("dataset_multimodal", "document_text", "expected_status", "expected_images"),
     [
         (True, "", "completed", 1),
-        (False, "", "failed", 0),
+        (False, "", "error", 0),
         (False, "searchable text " * 30, "completed", 0),
     ],
 )
@@ -794,6 +797,19 @@ async def test_image_receipt_requires_unified_space_but_preserves_text_fallback(
         async def dataset_index_write_lease(self, *_args: Any, **_kwargs: Any):
             yield
 
+        @contextlib.asynccontextmanager
+        async def dataset_index_publication_lease(
+            self, *_args: Any, **_kwargs: Any
+        ):
+            yield SimpleNamespace(
+                connection=self,
+                revision=-100_000,
+                recovered=False,
+            )
+
+        async def abort_index_publication(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
         async def get_dataset(self, _dataset_id: str) -> dict[str, Any]:
             return deepcopy(dataset)
 
@@ -840,6 +856,29 @@ async def test_image_receipt_requires_unified_space_but_preserves_text_fallback(
         async def insert_segments(self, segments: list[dict[str, Any]]) -> None:
             text_segments.extend(deepcopy(segments))
 
+        async def activate_staged_segments(
+            self,
+            _document_id: str,
+            segment_ids: list[str],
+            **_kwargs: Any,
+        ) -> int:
+            # T1 staging flip: this fake models every staged row as promoted.
+            return len([sid for sid in segment_ids if sid])
+
+        async def commit_text_segment_publication(
+            self,
+            *,
+            segment_rows: list[dict[str, Any]],
+            staged_segment_ids: list[str],
+            **_kwargs: Any,
+        ) -> tuple[int, int]:
+            await self.insert_segments(segment_rows)
+            promoted = await self.activate_staged_segments(
+                "document-a",
+                staged_segment_ids,
+            )
+            return promoted, 0
+
         async def refresh_document_segment_count(self, _document_id: str) -> int:
             return len(image_segments)
 
@@ -855,6 +894,24 @@ async def test_image_receipt_requires_unified_space_but_preserves_text_fallback(
 
         async def upsert(self, **kwargs: Any) -> None:
             self.points.extend(kwargs["points"])
+
+        async def snapshot_points(
+            self, _collection: str, point_ids: list[str], **_kwargs: Any
+        ) -> dict[str, qmodels.PointStruct]:
+            wanted = set(point_ids)
+            return {
+                str(point.id): deepcopy(point)
+                for point in self.points
+                if str(point.id) in wanted
+            }
+
+        async def delete_points(
+            self, _collection: str, point_ids: list[str], **_kwargs: Any
+        ) -> None:
+            removed = set(point_ids)
+            self.points = [
+                point for point in self.points if str(point.id) not in removed
+            ]
 
     class Storage:
         async def download_original_file(self, _key: str) -> bytes:

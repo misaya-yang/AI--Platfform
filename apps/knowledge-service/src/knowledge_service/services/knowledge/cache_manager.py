@@ -1,4 +1,10 @@
-"""Retrieval result caching with TTL and LRU eviction."""
+"""Retrieval result caching with TTL and true LRU eviction.
+
+Eviction is least-recently-*used*, not least-recently-*inserted*: a cache hit
+refreshes the entry's recency (PRD T2-#7; the old FIFO pop order under high
+query-concurrency evicted hot entries while cold ones survived).
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -6,18 +12,21 @@ import copy
 import hashlib
 import json
 import time
+from collections import OrderedDict
 from typing import Any
 
 from .retrieval_service import RetrieveResult
 
 
 class CacheManager:
-    """In-memory cache for retrieval results with TTL-based expiration."""
+    """In-memory cache for retrieval results with TTL + LRU eviction."""
 
     def __init__(self, ttl_seconds: int = 0, max_entries: int = 2000):
         self._ttl_seconds = max(ttl_seconds, 0)
         self._max_entries = max_entries
-        self._cache: dict[str, tuple[float, list[RetrieveResult], dict[str, Any]]] = {}
+        self._cache: OrderedDict[str, tuple[float, list[RetrieveResult], dict[str, Any]]] = (
+            OrderedDict()
+        )
         self._lock = asyncio.Lock()
 
     @staticmethod
@@ -46,9 +55,7 @@ class CacheManager:
         serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:20]
 
-    async def get(
-        self, cache_key: str
-    ) -> tuple[list[RetrieveResult], dict[str, Any]] | None:
+    async def get(self, cache_key: str) -> tuple[list[RetrieveResult], dict[str, Any]] | None:
         """Return cached results if present and not expired, else None."""
         if self._ttl_seconds <= 0:
             return None
@@ -61,6 +68,8 @@ class CacheManager:
             if now >= expires_at:
                 self._cache.pop(cache_key, None)
                 return None
+            # A hit is a use: keep the entry ahead of the eviction queue.
+            self._cache.move_to_end(cache_key)
         return self.clone_results(cached_results), copy.deepcopy(cached_meta)
 
     async def set(
@@ -73,8 +82,13 @@ class CacheManager:
         if self._ttl_seconds <= 0:
             return
         async with self._lock:
-            while len(self._cache) >= self._max_entries:
-                self._cache.pop(next(iter(self._cache)))
+            if cache_key in self._cache:
+                # Update in place: a rewrite is also a use, and it never
+                # grows the cache, so it must not evict anything.
+                self._cache.move_to_end(cache_key)
+            else:
+                while len(self._cache) >= self._max_entries:
+                    self._cache.popitem(last=False)  # evict least recently used
             self._cache[cache_key] = (
                 time.monotonic() + self._ttl_seconds,
                 self.clone_results(results),

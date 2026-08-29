@@ -53,6 +53,7 @@ class EvalDatasetRouteFamily:
     get_eval_dataset: Callable[..., Any]
     list_eval_examples: Callable[..., Any]
     update_eval_example: Callable[..., Any]
+    delete_eval_example: Callable[..., Any]
     import_eval_examples: Callable[..., Any]
     export_eval_examples: Callable[..., Any]
     create_eval_dataset: Callable[..., Any]
@@ -165,6 +166,26 @@ def build_eval_dataset_routes(
         if not example:
             raise HTTPException(status_code=404, detail="Example not found")
         return EvalExample(**example)
+
+    @router.delete(
+        "/datasets/{dataset_id}/examples/{example_id}",
+        status_code=204,
+    )
+    async def delete_eval_example(
+        dataset_id: str,
+        example_id: str,
+        request: Request,
+        auth: AuthContext = Depends(get_auth_context),
+    ) -> None:
+        """Delete one tenant-scoped example; a missing or repeated target is 404."""
+        _require_eval_run_access(request, auth)
+        deleted = await _get_trace_repository(request).delete_example(
+            tenant_id=auth.tenant_id,
+            dataset_id=dataset_id,
+            example_id=example_id,
+        )
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Example not found")
 
     @router.post(
         "/datasets/{dataset_id}/examples:import",
@@ -359,6 +380,7 @@ def build_eval_dataset_routes(
         get_eval_dataset=get_eval_dataset,
         list_eval_examples=list_eval_examples,
         update_eval_example=update_eval_example,
+        delete_eval_example=delete_eval_example,
         import_eval_examples=import_eval_examples,
         export_eval_examples=export_eval_examples,
         create_eval_dataset=create_eval_dataset,

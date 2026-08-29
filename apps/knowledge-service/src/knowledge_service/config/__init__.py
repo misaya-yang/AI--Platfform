@@ -1,14 +1,18 @@
 """Knowledge Service configuration.
 
-All settings are read from environment variables with the ``KNOWLEDGE_`` prefix
-and double-underscore nesting (e.g. ``KNOWLEDGE_QDRANT__URL``).
+Settings are read from environment variables with the ``KNOWLEDGE_`` prefix
+and double-underscore nesting (e.g. ``KNOWLEDGE_QDRANT__URL``). The
+env-passthrough fields on ``Settings`` below additionally pin the unprefixed
+legacy environment names that replaced bare ``os.getenv`` call sites (Phase 0
+of ``docs/plans/rag-upgrade-prd-2026-08.md`` §7); those names are frozen for
+compatibility and must never be renamed.
 """
 
 from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ---------------------------------------------------------------------------
@@ -64,13 +68,16 @@ class QdrantSettings(BaseModel):
     # Global emergency gate. Dataset config alone cannot enable native BM25.
     bm25_v2_enabled: bool = False
     bm25_v2_capability_ttl_seconds: float = Field(default=300.0, ge=0.0)
-    bm25_v2_readiness_ttl_seconds: float = Field(default=0.0, ge=0.0)
+    bm25_v2_readiness_ttl_seconds: float = Field(default=5.0, ge=0.0)
+    # Comma-separated tenant ids allowed to exercise the pre-release cutover.
+    # Empty is fail-closed; rollback remains available independently.
+    bm25_v2_cutover_test_tenants: str = ""
 
 
 class EmbeddingSettings(BaseModel):
     """Text embedding provider settings."""
 
-    provider: str = "dashscope"  # dashscope | gemini | siliconflow
+    provider: str = "dashscope"  # dashscope | gemini | siliconflow | openai_compatible
     api_key: str = ""
     model: str = "text-embedding-v4"
     dimension: int = 1024
@@ -84,6 +91,12 @@ class EmbeddingSettings(BaseModel):
     dashscope_api_key: str = ""
     siliconflow_api_key: str = ""
     siliconflow_base_url: str = "https://api.siliconflow.cn/v1"
+    # Self-hosted OpenAI-compatible embedding server (vLLM / TEI) — the
+    # Qwen3-Embedding upgrade path. No base-URL default on purpose: a
+    # half-configured deployment must fail closed rather than silently
+    # embed against a public cloud endpoint.
+    openai_compatible_api_key: str = ""
+    openai_compatible_base_url: str = ""
 
     def get_api_key_for_provider(self, provider: str) -> str:
         """Get the correct API key for a given embedding provider."""
@@ -91,6 +104,7 @@ class EmbeddingSettings(BaseModel):
             "gemini": self.google_api_key,
             "dashscope": self.dashscope_api_key,
             "siliconflow": self.siliconflow_api_key,
+            "openai_compatible": self.openai_compatible_api_key,
         }.get(provider)
         return provider_key or self.api_key
 
@@ -315,3 +329,144 @@ class Settings(BaseSettings):
     ragas_eval: RagasEvalSettings = Field(default_factory=RagasEvalSettings)
     processing: ProcessingSettings = Field(default_factory=ProcessingSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
+
+    # -----------------------------------------------------------------------
+    # Env passthrough: unprefixed legacy names (Phase 0 getenv consolidation)
+    #
+    # Each field replaces one or more bare ``os.getenv``/``os.environ.get``
+    # reads at call sites across the service. Hard compatibility contract:
+    #   * ``validation_alias`` is the EXACT original env name (aliases bypass
+    #     the ``KNOWLEDGE_`` prefix) — renaming one breaks live deployments.
+    #   * The field default equals the old ``os.getenv(name, default)`` value.
+    #   * Legacy fallback chains stay as ordered per-name fields so callers
+    #     reproduce the original first-truthy-value ``or``-chains exactly
+    #     (pydantic-settings reports an env var as present even when it is set
+    #     to the empty string, which ``or``-chains but not ``AliasChoices``
+    #     handle with the original semantics).
+    # -----------------------------------------------------------------------
+    log_format: str = Field(default="", validation_alias=AliasChoices("LOG_FORMAT"))
+    environment: str = Field(default="", validation_alias=AliasChoices("ENVIRONMENT"))
+    gateway_encryption_key: str = Field(
+        default="", validation_alias=AliasChoices("GATEWAY_ENCRYPTION_KEY")
+    )
+    redis_url: str = Field(default="", validation_alias=AliasChoices("REDIS_URL"))
+    internal_idempotency_backend: str = Field(
+        default="redis", validation_alias=AliasChoices("INTERNAL_IDEMPOTENCY_BACKEND")
+    )
+    internal_idempotency_ttl_seconds: int = Field(
+        default=86400, validation_alias=AliasChoices("INTERNAL_IDEMPOTENCY_TTL_SECONDS")
+    )
+    internal_comm_redis_url: str = Field(
+        default="", validation_alias=AliasChoices("INTERNAL_COMM_REDIS_URL")
+    )
+    internal_comm_state_backend: str = Field(
+        default="redis", validation_alias=AliasChoices("INTERNAL_COMM_STATE_BACKEND")
+    )
+    internal_auth_version: str = Field(
+        default="v2", validation_alias=AliasChoices("INTERNAL_AUTH_VERSION")
+    )
+    ai_platform_internal_token: str = Field(
+        default="", validation_alias=AliasChoices("AI_PLATFORM_INTERNAL_TOKEN")
+    )
+    ai_platform_capability_proof_secret: str = Field(
+        default="", validation_alias=AliasChoices("AI_PLATFORM_CAPABILITY_PROOF_SECRET")
+    )
+
+    # QA-service LLM selection (services/knowledge/qa_service.py).
+    llm_model: str = Field(
+        default="gemini-2.0-flash", validation_alias=AliasChoices("LLM_MODEL")
+    )
+    llm_base_url: str = Field(default="", validation_alias=AliasChoices("LLM_BASE_URL"))
+    llm_api_key: str = Field(default="", validation_alias=AliasChoices("LLM_API_KEY"))
+    deepseek_api_key: str = Field(default="", validation_alias=AliasChoices("DEEPSEEK_API_KEY"))
+    deepseek_key: str = Field(default="", validation_alias=AliasChoices("DEEPSEEK_KEY"))
+    gemini_api_key: str = Field(default="", validation_alias=AliasChoices("GEMINI_API_KEY"))
+    google_api_key: str = Field(default="", validation_alias=AliasChoices("GOOGLE_API_KEY"))
+    dashscope_api_key: str = Field(
+        default="", validation_alias=AliasChoices("DASHSCOPE_API_KEY")
+    )
+    # ALIYUN_KEY also covers the historical "Aliyun_KEY" spelling because
+    # pydantic-settings matches env var names case-insensitively.
+    aliyun_key: str = Field(default="", validation_alias=AliasChoices("ALIYUN_KEY"))
+
+    # Gemini/Vertex embedding env fallbacks (services/knowledge/embedding_manager.py).
+    vertex_embedding_api_key: str = Field(
+        default="", validation_alias=AliasChoices("VERTEX_EMBEDDING_API_KEY")
+    )
+    google_embedding_backend: str = Field(
+        default="", validation_alias=AliasChoices("GOOGLE_EMBEDDING_BACKEND")
+    )
+
+    # DashScope rerank endpoint/schema overrides (services/knowledge/text_reranker.py).
+    dashscope_rerank_base_url: str = Field(
+        default="", validation_alias=AliasChoices("DASHSCOPE_RERANK_BASE_URL")
+    )
+    dashscope_base_url: str = Field(
+        default="", validation_alias=AliasChoices("DASHSCOPE_BASE_URL")
+    )
+    dashscope_rerank_request_schema: str = Field(
+        default="", validation_alias=AliasChoices("DASHSCOPE_RERANK_REQUEST_SCHEMA")
+    )
+    dashscope_rerank_instruct: str = Field(
+        default="", validation_alias=AliasChoices("DASHSCOPE_RERANK_INSTRUCT")
+    )
+
+    # Cohere rerank key fallback (services/knowledge/retrieval_service.py).
+    cohere_api_key: str = Field(
+        default="", validation_alias=AliasChoices("COHERE_API_KEY")
+    )
+
+    # Upload / PDF-split limits (api/routes/knowledge.py). Existing defaults
+    # preserve the historical ``os.getenv(name, default)`` values. The page
+    # and expanded-output budgets are new safety fences for the 512 MiB
+    # knowledge-service profile; route-level hard caps prevent unsafe raises.
+    kb_max_file_size_mb: int = Field(
+        default=16, validation_alias=AliasChoices("KB_MAX_FILE_SIZE_MB")
+    )
+    kb_max_batch_size_mb: int = Field(
+        default=32, validation_alias=AliasChoices("KB_MAX_BATCH_SIZE_MB")
+    )
+    kb_pdf_split_max_size_mb: int = Field(
+        default=20, validation_alias=AliasChoices("KB_PDF_SPLIT_MAX_SIZE_MB")
+    )
+    kb_pdf_split_pages_per_part: int = Field(
+        default=500, validation_alias=AliasChoices("KB_PDF_SPLIT_PAGES_PER_PART")
+    )
+    kb_pdf_max_pages: int = Field(
+        default=2000, validation_alias=AliasChoices("KB_PDF_MAX_PAGES")
+    )
+    kb_pdf_split_max_output_bytes: int = Field(
+        default=96 * 1024 * 1024,
+        validation_alias=AliasChoices("KB_PDF_SPLIT_MAX_OUTPUT_BYTES"),
+    )
+
+    def qa_llm_api_key(self, provider: str) -> str | None:
+        """API key for QA LLM calls, mirroring the historical env fallback chain.
+
+        Order (first truthy wins, exactly like the old per-name ``os.getenv``
+        loop): ``LLM_API_KEY`` → provider chain
+        (deepseek: ``DEEPSEEK_API_KEY`` → ``DEEPSEEK_KEY``; gemini:
+        ``GEMINI_API_KEY`` → ``GOOGLE_API_KEY``; dashscope:
+        ``DASHSCOPE_API_KEY`` → ``ALIYUN_KEY``/``Aliyun_KEY``; any other
+        provider has no fallback).
+        """
+        provider_chain = {
+            "deepseek": self.deepseek_api_key or self.deepseek_key,
+            "gemini": self.gemini_api_key or self.google_api_key,
+            "dashscope": self.dashscope_api_key or self.aliyun_key,
+        }.get(provider, "")
+        return self.llm_api_key or provider_chain or None
+
+
+def get_settings() -> Settings:
+    """Resolve :class:`Settings` from the live process environment only.
+
+    This mirrors the semantics of the bare ``os.environ.get`` call sites it
+    replaces: every call re-reads the current environment (so tests that
+    monkeypatch env vars and code that resolves config at construction time
+    behave identically), and a repository ``.env`` file is *not* consulted,
+    exactly like ``os.getenv`` would ignore it. The application's startup
+    config is the separate ``Settings()`` instance built in ``main.py``
+    (which does read ``.env`` for the ``KNOWLEDGE_``-prefixed fields).
+    """
+    return Settings(_env_file=None)

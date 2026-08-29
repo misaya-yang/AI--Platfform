@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import asyncpg
 import pytest
@@ -13,10 +14,6 @@ import pytest_asyncio
 from ai_gateway_core.persistence.repositories.agent_repository import (
     AgentValidationError,
     DatabaseAgentRepository,
-)
-from ai_gateway_core.persistence.repositories.agent_resource_resolver import (
-    AgentKnowledgeAuthorizationError,
-    DatabaseAgentKnowledgeResolver,
 )
 from ai_gateway_core.skills import (
     DatabaseSkillArtifactRepository,
@@ -212,6 +209,22 @@ async def binding_pool() -> AsyncIterator[asyncpg.Pool]:
 
 def _holder(pool: asyncpg.Pool) -> SimpleNamespace:
     return SimpleNamespace(enabled=True, _pool=pool)
+
+
+class MutableKnowledgeResolver:
+    """Test double for the KS authorization endpoint."""
+
+    def __init__(self) -> None:
+        self.allowed: set[str] = set()
+        self.calls: list[dict[str, Any]] = []
+
+    async def resolve(self, **kwargs: Any) -> list[dict[str, Any]]:
+        self.calls.append(kwargs)
+        return [
+            dict(binding)
+            for binding in kwargs["bindings"]
+            if binding["dataset_id"] in self.allowed
+        ]
 
 
 def _skill_content(name: str, instruction: str) -> str:
@@ -419,7 +432,11 @@ async def test_dataset_acl_is_rechecked_at_save_publish_and_run(
             ) VALUES ('private-kb', 'tenant-a', 'Private KB', 'private', 'dataset-owner')
             """
         )
-    repository = DatabaseAgentRepository(_holder(binding_pool))
+    resolver = MutableKnowledgeResolver()
+    repository = DatabaseAgentRepository(
+        _holder(binding_pool),
+        knowledge_resolver=resolver,
+    )
     spec = {
         "schema_version": "agent-spec/v1",
         "identity": {},
@@ -444,14 +461,7 @@ async def test_dataset_acl_is_rechecked_at_save_publish_and_run(
             description="",
             spec=spec,
         )
-    async with binding_pool.acquire() as connection:
-        await connection.execute(
-            """
-            INSERT INTO dataset_permissions (
-                dataset_id, subject_type, subject_id, permission
-            ) VALUES ('private-kb', 'user', 'owner-a', 'viewer')
-            """
-        )
+    resolver.allowed.add("private-kb")
     agent = await repository.create_agent(
         tenant_id="tenant-a",
         user_id="owner-a",
@@ -486,8 +496,7 @@ async def test_dataset_acl_is_rechecked_at_save_publish_and_run(
     assert sealed["content_mode"] == "live_latest"
     assert sealed["historical_replayable"] is False
 
-    async with binding_pool.acquire() as connection:
-        await connection.execute("DELETE FROM dataset_permissions WHERE dataset_id = 'private-kb'")
+    resolver.allowed.clear()
     with pytest.raises(AgentValidationError):
         await repository.create_version(
             tenant_id="tenant-a",
@@ -497,30 +506,11 @@ async def test_dataset_acl_is_rechecked_at_save_publish_and_run(
             expected_revision=1,
         )
 
-    async with binding_pool.acquire() as connection:
-        await connection.execute(
-            """
-            INSERT INTO dataset_permissions (
-                dataset_id, subject_type, subject_id, permission
-            ) VALUES ('private-kb', 'user', 'owner-a', 'viewer')
-            """
-        )
-    resolver = DatabaseAgentKnowledgeResolver(_holder(binding_pool))
-    assert await resolver.resolve(
-        tenant_id="tenant-a",
-        user_id="owner-a",
-        bindings=[{"dataset_id": "private-kb", "retrieval_config": {}}],
-    )
-    async with binding_pool.acquire() as connection:
-        await connection.execute(
-            "UPDATE datasets SET is_deleted = TRUE WHERE dataset_id = 'private-kb'"
-        )
-    with pytest.raises(AgentKnowledgeAuthorizationError):
-        await resolver.resolve(
-            tenant_id="tenant-a",
-            user_id="owner-a",
-            bindings=[{"dataset_id": "private-kb", "retrieval_config": {}}],
-        )
+    assert resolver.calls
+    assert all(call["tenant_id"] == "tenant-a" for call in resolver.calls)
+    assert all(call["user_id"] == "owner-a" for call in resolver.calls)
+    assert all(call["roles"] == ["user"] for call in resolver.calls)
+    assert all(call["channel"] == "authoring" for call in resolver.calls)
 
 
 @pytest.mark.asyncio

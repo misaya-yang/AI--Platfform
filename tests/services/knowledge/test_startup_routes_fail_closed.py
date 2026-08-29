@@ -7,6 +7,12 @@ import builtins
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _use_explicit_test_idempotency(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "test")
+    monkeypatch.setenv("INTERNAL_IDEMPOTENCY_BACKEND", "memory")
+
+
 def test_storage_signing_key_is_loaded_as_a_redacted_secret(monkeypatch) -> None:
     monkeypatch.setenv(
         "AI_PLATFORM_INTERNAL_TOKEN",
@@ -27,6 +33,79 @@ def test_storage_signing_key_is_loaded_as_a_redacted_secret(monkeypatch) -> None
         == "unit-test-storage-signing-secret"
     )
     assert "unit-test-storage-signing-secret" not in repr(settings)
+
+
+def test_redis_idempotency_without_url_aborts_app_creation(monkeypatch) -> None:
+    monkeypatch.setenv("AI_PLATFORM_INTERNAL_TOKEN", "unit-test-shared-secret")
+    monkeypatch.setenv("KNOWLEDGE_APP__ALLOW_ANONYMOUS", "false")
+
+    from knowledge_service import main
+
+    settings = main.Settings(
+        _env_file=None,
+        environment="production",
+        internal_idempotency_backend="redis",
+        internal_comm_redis_url="",
+        redis_url="",
+    )
+
+    with pytest.raises(RuntimeError, match="neither INTERNAL_COMM_REDIS_URL nor REDIS_URL"):
+        main.create_app(settings)
+
+
+def test_memory_idempotency_is_rejected_outside_local_or_test(monkeypatch) -> None:
+    monkeypatch.setenv("AI_PLATFORM_INTERNAL_TOKEN", "unit-test-shared-secret")
+    monkeypatch.setenv("KNOWLEDGE_APP__ALLOW_ANONYMOUS", "false")
+
+    from knowledge_service import main
+
+    settings = main.Settings(
+        _env_file=None,
+        environment="production",
+        internal_idempotency_backend="memory",
+    )
+
+    with pytest.raises(RuntimeError, match="allowed only"):
+        main.create_app(settings)
+
+
+@pytest.mark.asyncio
+async def test_unreachable_idempotency_redis_aborts_startup(monkeypatch) -> None:
+    monkeypatch.setenv("AI_PLATFORM_INTERNAL_TOKEN", "unit-test-shared-secret")
+    monkeypatch.setenv("KNOWLEDGE_APP__ALLOW_ANONYMOUS", "false")
+
+    import redis.asyncio as aioredis
+    from knowledge_service import main
+
+    events: list[str] = []
+
+    class UnreachableRedis:
+        async def ping(self) -> None:
+            events.append("probe")
+            raise ConnectionError("synthetic redis outage")
+
+        async def aclose(self) -> None:
+            events.append("closed")
+
+    monkeypatch.setattr(
+        aioredis,
+        "from_url",
+        lambda *_args, **_kwargs: UnreachableRedis(),
+    )
+    app = main.create_app(
+        main.Settings(
+            _env_file=None,
+            environment="production",
+            internal_idempotency_backend="redis",
+            internal_comm_redis_url="redis://unreachable:6379/3",
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="Redis idempotency backend is unavailable"):
+        async with app.router.lifespan_context(app):
+            pytest.fail("lifespan yielded with an unreachable idempotency store")
+
+    assert events == ["probe", "closed"]
 
 
 @pytest.mark.parametrize("route_module", ["api.routes.eval", "api.routes.knowledge"])

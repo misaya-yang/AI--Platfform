@@ -7,7 +7,10 @@ from typing import Any
 import pytest
 from knowledge_service.persistence.database import (
     CONFLUENCE_SYNC_GENERATION_KEY,
+    DOCUMENT_INGEST_ACTION_KEY,
     DOCUMENT_LIFECYCLE_REINDEX_KEY,
+    DOCUMENT_PIPELINE_EXECUTION_KEY,
+    DOCUMENT_RECOVER_STAGE_KEY,
     DOCUMENT_UPLOAD_GENERATION_KEY,
     SOURCE_OWNED_DOCUMENT_METADATA_KEYS,
     DatabaseStorage,
@@ -104,9 +107,13 @@ ACTIVE_SQL_FRAGMENTS = (
     "s.status = 'completed'",
     "COALESCE(d.enabled, TRUE) = TRUE",
     "COALESCE(d.archived, FALSE) = FALSE",
-    "d.status = 'completed'",
     "? '_document_lifecycle_reindex'",
 )
+
+# Zero-window fence (PRD T1): serving gates must decide per segment, never
+# per document lifecycle status. Gating on d.status='completed' blacks out
+# the previous generation for the whole re-ingest run.
+FORBIDDEN_DOCUMENT_STATUS_GATE = "d.status = 'completed'"
 
 
 @pytest.mark.asyncio
@@ -126,6 +133,7 @@ async def test_fts_requires_exact_tenant_dataset_and_active_document() -> None:
     compact = normalized(query)
     for fragment in ACTIVE_SQL_FRAGMENTS:
         assert fragment in compact
+    assert FORBIDDEN_DOCUMENT_STATUS_GATE not in compact
     assert "s.text_search @@" in compact
     assert args[:2] == ("dataset-a", "tenant-a")
 
@@ -155,6 +163,7 @@ async def test_ilike_fallback_preserves_active_scope_predicates() -> None:
     compact = normalized(query)
     for fragment in ACTIVE_SQL_FRAGMENTS:
         assert fragment in compact
+    assert FORBIDDEN_DOCUMENT_STATUS_GATE not in compact
     assert "s.text ILIKE $3" in compact
     assert args == ("dataset-a", "tenant-a", "%needle%", 5)
 
@@ -184,6 +193,8 @@ async def test_active_candidate_filters_are_tenant_scoped_and_deduplicated() -> 
     document_query, document_args = connection.fetch_calls[1]
     assert "s.segment_id = ANY($3::text[])" in normalized(segment_query)
     assert "d.document_id = ANY($3::text[])" in normalized(document_query)
+    assert FORBIDDEN_DOCUMENT_STATUS_GATE not in normalized(segment_query)
+    assert FORBIDDEN_DOCUMENT_STATUS_GATE not in normalized(document_query)
     assert segment_args == ("dataset-a", "tenant-a", ["segment-a"])
     assert document_args == ("dataset-a", "tenant-a", ["document-a"])
 
@@ -212,7 +223,7 @@ async def test_scoped_context_reads_join_active_authority() -> None:
         assert "ds.tenant_id = $3" in compact
         assert "COALESCE(d.enabled, TRUE) = TRUE" in compact
         assert "COALESCE(d.archived, FALSE) = FALSE" in compact
-        assert "d.status = 'completed'" in compact
+        assert FORBIDDEN_DOCUMENT_STATUS_GATE not in compact
         assert args[1:] == ("dataset-a", "tenant-a")
 
 
@@ -233,7 +244,7 @@ async def test_tenant_first_segment_lookup_has_no_cross_tenant_existence_oracle(
         compact = normalized(query)
         assert "ds.tenant_id = $2" in compact
         assert "s.status = 'completed'" in compact
-        assert "d.status = 'completed'" in compact
+        assert FORBIDDEN_DOCUMENT_STATUS_GATE not in compact
         assert "? '_document_lifecycle_reindex'" in compact
         assert args[0] == "segment-a"
 
@@ -298,6 +309,72 @@ async def test_completed_status_atomically_activates_pending_restore() -> None:
     assert "archived = CASE WHEN" in compact
     assert args[0] == "completed"
     assert args[-1] == "document-a"
+    # PRD T1 unified contract (§885-886): the activation statement itself
+    # advances the dataset content revision the retrieval cache is keyed on,
+    # gated on the identical pending-marker predicate as the CASE, so a
+    # result cached while the document was hidden cannot survive activation.
+    assert "WITH pending_restore AS" in compact
+    assert "revision_bump AS" in compact
+    assert "UPDATE datasets AS ds" in compact
+    assert "content_revision = COALESCE(content_revision, 0) + 1" in compact
+    assert "ds.is_deleted = FALSE" in compact
+    assert "EXISTS (SELECT 1 FROM pending_restore)" in compact
+    assert compact.index("UPDATE datasets AS ds") > compact.index(
+        "WITH pending_restore AS"
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_completed_status_writes_carry_no_revision_bump() -> None:
+    database, connection, _pool = make_database()
+
+    await database.update_document_status(
+        "document-a",
+        status="error",
+        error="boom",
+    )
+    await database.update_document_status("document-a", status="parsing", progress=5)
+
+    for query, _args in connection.execute_calls:
+        compact = normalized(query)
+        # An error-terminal restore stays hidden and must not invalidate the
+        # retrieval cache; stage writes never change visible content either.
+        assert "UPDATE datasets" not in compact
+        assert "revision_bump" not in compact
+
+
+@pytest.mark.asyncio
+async def test_bump_dataset_content_revision_contract() -> None:
+    database, connection, _pool = make_database()
+    connection.fetchrow_behaviors = [
+        {"dataset_id": "dataset-a"},
+        {"dataset_id": "dataset-a"},
+    ]
+
+    assert await database.bump_dataset_content_revision("dataset-a") is True
+
+    query, args = connection.fetchrow_calls[0]
+    compact = normalized(query)
+    assert "UPDATE datasets" in compact
+    assert "content_revision = COALESCE(content_revision, 0) + 1" in compact
+    assert "is_deleted = FALSE" in compact
+    assert args == ("dataset-a",)
+
+    # Works on a supplied lifecycle-lease connection without touching the pool.
+    assert (
+        await database.bump_dataset_content_revision(
+            "dataset-a",
+            connection=connection,
+        )
+        is True
+    )
+    assert connection.fetchrow_calls[1][1] == ("dataset-a",)
+
+    with pytest.raises(ValueError):
+        await database.bump_dataset_content_revision("  ")
+    # A missing or soft-deleted dataset reports False rather than raising.
+    connection.fetchrow_behaviors = [None]
+    assert await database.bump_dataset_content_revision("dataset-gone") is False
 
 
 @pytest.mark.asyncio
@@ -357,13 +434,24 @@ async def test_document_enqueue_claim_uses_dataset_then_document_lock_and_active
     assert connection.fetchval_calls[1][1][0] == "knowledge-document-index:dataset-a:document-a"
     update_query, update_args = connection.fetchrow_calls[1]
     compact = normalized(update_query)
-    assert "SET status = 'queued'" in compact
-    assert "status IN ('uploaded', 'completed', 'failed')" in compact
+    assert "SET status = 'waiting'" in compact
+    assert "status IN ('waiting', 'completed', 'error')" in compact
     assert "COALESCE(enabled, TRUE) = TRUE" in compact
     assert "COALESCE(archived, FALSE) = FALSE" in compact
     assert "desired_enabled' = 'true'" in compact
     assert "desired_archived' = 'false'" in compact
-    assert update_args == ("document-a", "dataset-a")
+    # Dual-verb contract: the claim binds a third metadata-patch parameter;
+    # for the default ingest it is NULL, which strips any stale verb markers.
+    # The fourth parameter carries the requested verb (empty string for the
+    # default ingest) so a waiting row already queued under a verb can only
+    # be re-claimed by an identical verb.
+    assert update_args == ("document-a", "dataset-a", None, "")
+    assert "WHEN $3::jsonb IS NULL THEN" in compact
+    assert f"- '{DOCUMENT_INGEST_ACTION_KEY}'" in compact
+    assert f"- '{DOCUMENT_RECOVER_STAGE_KEY}'" in compact
+    assert f"- '{DOCUMENT_PIPELINE_EXECUTION_KEY}'" in compact
+    assert "status <> 'waiting'" in compact
+    assert "= $4" in compact
     assert "pg_advisory_unlock" in lock_queries[-2]
     assert "pg_advisory_unlock_shared" in lock_queries[-1]
 
@@ -391,8 +479,9 @@ async def test_consumer_claim_rechecks_active_or_exact_restore_marker() -> None:
     )
 
     compact = normalized(connection.fetchrow_calls[1][0])
-    assert "status = 'queued'" in compact
-    assert "SET status = 'processing'" in compact
+    assert "status = 'waiting'" in compact
+    assert "SET status = 'parsing'" in compact
+    assert "parsing_started_at = COALESCE(parsing_started_at, NOW())" in compact
     assert "? '_document_lifecycle_reindex'" in compact
     assert "desired_enabled' = 'true'" in compact
     assert "desired_archived' = 'false'" in compact
@@ -406,20 +495,21 @@ async def test_recovery_claim_is_queued_skip_locked_and_lease_aware_for_default_
             {
                 "document_id": "document-a",
                 "dataset_id": "dataset-a",
-                "status": "queued",
-                "old_status": "processing",
+                "status": "waiting",
+                "old_status": "indexing",
             }
         ]
     ]
 
     rows = await database.claim_stuck_documents(15, limit=7)
 
-    assert rows[0]["old_status"] == "processing"
+    assert rows[0]["old_status"] == "indexing"
     query, args = connection.fetch_calls[0]
     compact = normalized(query)
     assert "FOR UPDATE OF d SKIP LOCKED" in compact
-    assert "SET status = 'queued'" in compact
-    assert "d.status NOT IN ('completed', 'failed')" in compact
+    assert "SET status = CASE" in compact
+    assert "ELSE 'waiting'" in compact
+    assert "d.status NOT IN ('completed', 'error')" in compact
     assert "COALESCE(d.enabled, TRUE) = TRUE" in compact
     assert "COALESCE(d.archived, FALSE) = FALSE" in compact
     assert "pg_try_advisory_xact_lock_shared" in compact
@@ -544,7 +634,7 @@ async def test_document_upload_insert_is_not_upsert_and_finalize_is_exact_cas() 
     connection.fetchrow_behaviors = [dataset_row, {"document_id": "document-a"}]
     finalized = {
         **document,
-        "status": "uploaded",
+        "status": "waiting",
         "metadata": {
             DOCUMENT_UPLOAD_GENERATION_KEY: "generation-a",
             "original_file_key": "knowledge/documents/tenant-a/document-a/original/a.pdf",
@@ -559,7 +649,7 @@ async def test_document_upload_insert_is_not_upsert_and_finalize_is_exact_cas() 
     compact = normalized(finalize_query)
     assert "UPDATE documents" in compact
     assert "INSERT INTO" not in compact
-    assert "status IN ( 'uploading', 'uploaded'" in compact
+    assert "status IN ( 'uploading', 'waiting', 'uploading_images'" in compact
     assert "metadata ->> $15 = $16" in compact
     assert finalize_args[-1] == "generation-a"
     assert DOCUMENT_UPLOAD_GENERATION_KEY not in json.loads(finalize_args[11])
@@ -661,7 +751,80 @@ async def test_confluence_owner_supersession_requires_stale_ttl_and_exact_abort(
     )
     abort_query, abort_args = connection.fetchrow_calls[1]
     compact_abort = normalized(abort_query)
-    assert "status = 'failed'" in compact_abort
+    assert "status = 'error'" in compact_abort
     assert f"- '{CONFLUENCE_SYNC_GENERATION_KEY}'" in compact_abort
     assert "->> 'generation' = $3" in compact_abort
     assert abort_args[:3] == ("document-a", "dataset-a", "generation-a")
+
+
+# ---------------------------------------------------------------------------
+# D1/D4 (frontend handoff): the list page must carry the fields the UI
+# derives badges and stage durations from, and pagination needs a companion
+# count that shares the page's filter.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_documents_select_carries_badge_and_stage_columns() -> None:
+    database, connection, _pool = make_database()
+    connection.fetch_behaviors = [[]]
+
+    await database.list_documents("dataset-a")
+
+    query, args = connection.fetch_calls[0]
+    compact = normalized(query)
+    for column in (
+        "enabled",
+        "archived",
+        "archived_reason",
+        "archived_at",
+        "parsing_started_at",
+        "splitting_started_at",
+        "indexing_started_at",
+    ):
+        assert column in compact, f"list page SELECT is missing {column}"
+    assert args[:1] == ("dataset-a",)
+
+
+@pytest.mark.asyncio
+async def test_list_documents_pagination_params_bind_after_filters() -> None:
+    database, connection, _pool = make_database()
+    connection.fetch_behaviors = [[]]
+
+    await database.list_documents("dataset-a", status="completed", limit=25, offset=50)
+
+    query, args = connection.fetch_calls[0]
+    compact = normalized(query)
+    assert "AND d.status = $2" in compact
+    assert compact.endswith("LIMIT $3 OFFSET $4")
+    assert args == ("dataset-a", "completed", 25, 50)
+
+
+@pytest.mark.asyncio
+async def test_count_documents_counts_dataset_rows() -> None:
+    database, connection, _pool = make_database()
+    connection.fetchval_behaviors = [7]
+
+    assert await database.count_documents("dataset-a") == 7
+    query, args = connection.fetchval_calls[0]
+    assert normalized(query) == "SELECT COUNT(*) FROM documents WHERE dataset_id = $1"
+    assert args == ("dataset-a",)
+
+
+@pytest.mark.asyncio
+async def test_count_segments_mirrors_list_segment_filters() -> None:
+    database, connection, _pool = make_database()
+    connection.fetchval_behaviors = [3]
+
+    assert (
+        await database.count_segments(
+            "dataset-a", document_id="document-a", query_text="合规"
+        )
+        == 3
+    )
+    query, args = connection.fetchval_calls[0]
+    compact = normalized(query)
+    assert "SELECT COUNT(*) FROM segments WHERE dataset_id = $1" in compact
+    assert "AND document_id = $2" in compact
+    assert "AND text ILIKE $3" in compact
+    assert args == ("dataset-a", "document-a", "%合规%")

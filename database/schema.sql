@@ -4,6 +4,10 @@
 -- 版本：2.0.0
 -- ============================================================
 
+-- This file is the stable bootstrap baseline, not the final runtime shape.
+-- A fresh installation must apply the canonical central migration ledger
+-- immediately afterwards; baseline + recorded migrations is authoritative.
+
 SET client_encoding TO 'UTF8';
 
 -- 可选扩展（需要足够权限）

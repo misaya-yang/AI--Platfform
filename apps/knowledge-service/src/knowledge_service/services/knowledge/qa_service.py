@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -19,6 +18,7 @@ from typing import Any
 
 import httpx
 
+from ...config import get_settings
 from ...core.observability.logging import get_logger
 from .knowledge_service import KnowledgeService, RetrieveResult
 
@@ -49,7 +49,7 @@ class LLMConfig:
     def __post_init__(self):
         # Use environment variable for model if not set
         if not self.model:
-            self.model = os.getenv("LLM_MODEL", "gemini-2.0-flash")
+            self.model = get_settings().llm_model
 
     # System prompt for QA
     system_prompt: str = """You are a helpful assistant that answers questions based on the provided context.
@@ -101,7 +101,7 @@ Context will be provided in the user message."""
             return self.base_url.rstrip("/")
 
         # Try environment variable first
-        env_url = os.getenv("LLM_BASE_URL")
+        env_url = get_settings().llm_base_url
         if env_url:
             return env_url.rstrip("/")
 
@@ -113,28 +113,18 @@ Context will be provided in the user message."""
         return defaults.get(self.provider, "https://api.deepseek.com/v1")
 
     def get_api_key(self) -> str | None:
-        """Get API key from config or environment."""
+        """Get API key from config or environment.
+
+        Env fallback order (first truthy wins, resolved via
+        ``Settings.qa_llm_api_key``): generic ``LLM_API_KEY`` first, then
+        provider-specific keys (deepseek: ``DEEPSEEK_API_KEY`` →
+        ``DEEPSEEK_KEY``; gemini: ``GEMINI_API_KEY`` → ``GOOGLE_API_KEY``;
+        dashscope: ``DASHSCOPE_API_KEY`` → ``ALIYUN_KEY``/``Aliyun_KEY``).
+        """
         if self.api_key:
             return self.api_key
 
-        # Try generic LLM_API_KEY first
-        key = os.getenv("LLM_API_KEY")
-        if key:
-            return key
-
-        # Then try provider-specific keys
-        env_keys = {
-            LLMProvider.DEEPSEEK: ["DEEPSEEK_API_KEY", "DEEPSEEK_KEY"],
-            LLMProvider.GEMINI: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-            LLMProvider.DASHSCOPE: ["DASHSCOPE_API_KEY", "ALIYUN_KEY", "Aliyun_KEY"],
-        }
-
-        for env_var in env_keys.get(self.provider, []):
-            key = os.getenv(env_var)
-            if key:
-                return key
-
-        return None
+        return get_settings().qa_llm_api_key(self.provider.value)
 
 
 @dataclass
@@ -154,6 +144,8 @@ class QAResult:
     # LLM metadata
     model: str
     tokens_used: int | None = None
+    trace_id: str | None = None
+    query_fingerprint: str | None = None
 
     # Optional evaluation
     relevance_score: float | None = None
@@ -171,6 +163,8 @@ class QAResult:
             },
             "model": self.model,
             "tokens_used": self.tokens_used,
+            "trace_id": self.trace_id,
+            "query_fingerprint": self.query_fingerprint,
             "relevance_score": self.relevance_score,
         }
 
@@ -466,6 +460,7 @@ Please answer the question based on the context provided above."""
             document_id=document_id,
             rerank=rerank,
             mmr=mmr,
+            telemetry_source="qa",
             **retrieval_kwargs,
         )
 
@@ -514,6 +509,8 @@ Please answer the question based on the context provided above."""
             total_time_ms=total_time,
             model=config.model,
             tokens_used=tokens,
+            trace_id=str(meta.get("trace_id") or "") or None,
+            query_fingerprint=str(meta.get("query_fingerprint") or "") or None,
         )
 
     async def query_stream(
@@ -550,6 +547,7 @@ Please answer the question based on the context provided above."""
             document_id=document_id,
             rerank=rerank,
             mmr=mmr,
+            telemetry_source="qa",
             **retrieval_kwargs,
         )
         retrieval_time = int((time.time() - retrieval_start) * 1000)
@@ -571,6 +569,8 @@ Please answer the question based on the context provided above."""
                 "query": query,
                 "context_segments": context_segments,
                 "retrieval_metadata": meta,
+                "trace_id": meta.get("trace_id"),
+                "query_fingerprint": meta.get("query_fingerprint"),
                 "timing": {"retrieval_ms": retrieval_time},
             },
         }
@@ -611,6 +611,8 @@ Please answer the question based on the context provided above."""
             total_time_ms=total_time,
             model=config.model,
             tokens_used=tokens_used,
+            trace_id=str(meta.get("trace_id") or "") or None,
+            query_fingerprint=str(meta.get("query_fingerprint") or "") or None,
         )
 
         yield {"event": "done", "data": {"result": result.to_dict()}}

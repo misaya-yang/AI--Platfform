@@ -150,10 +150,11 @@ class HierarchicalIndexer:
         self,
         vector_store: Any,
         database: Any,
-        embedder: Any,
+        embedder: Any = None,
         summary_generator: Any | None = None,
         levels: list[int] = None,
         knowledge_settings: Any | None = None,
+        embedding_resolver: Any | None = None,
     ):
         """
         Initialize the hierarchical indexer.
@@ -161,13 +162,22 @@ class HierarchicalIndexer:
         Args:
             vector_store: Qdrant vector store
             database: Database for segment storage
-            embedder: Embedding service
+            embedder: Embedding service. Optional when ``embedding_resolver``
+                is given; an explicit embedder always wins (single-model
+                deployments and tests).
             summary_generator: Optional LLM for generating summaries
             levels: Which levels to index [1, 2, 3]. Default: all
+            embedding_resolver: ``async (dataset_id) -> embedder`` used to
+                bind the dataset-scoped embedder per generation. Embedding
+                provider/model/dimension are dataset-level facts; a global
+                embedder would embed with the wrong model on custom datasets
+                (PRD T9-1 injection-path fix).
         """
         self.vector_store = vector_store
         self.db = database
         self.embedder = embedder
+        self._embedding_resolver = embedding_resolver
+        self._embedders_by_dataset: dict[str, Any] = {}
         self.summary_generator = summary_generator
         self.levels = levels or [1, 2, 3]
         ks = knowledge_settings or {}
@@ -179,6 +189,32 @@ class HierarchicalIndexer:
         self.l3_chunk_overlap = getattr(
             ks, "hierarchical_l3_chunk_overlap", self.DEFAULT_L3_CHUNK_OVERLAP
         )
+
+    async def _embedder_for(self, dataset_id: str) -> Any:
+        """Resolve the dataset-scoped embedder for this generation.
+
+        An explicitly constructed embedder wins; otherwise the resolver is
+        consulted once per dataset and cached (embedder identity is stable
+        for a given dataset config, and a config change re-processes through
+        reembed/reprocess which rebuilds the worker-bound indexer anyway).
+        """
+        if self.embedder is not None:
+            return self.embedder
+        normalized = str(dataset_id or "").strip()
+        if not normalized:
+            raise ValueError("hierarchical indexing requires a dataset_id to resolve its embedder")
+        cached = self._embedders_by_dataset.get(normalized)
+        if cached is not None:
+            return cached
+        if not callable(self._embedding_resolver):
+            raise RuntimeError(
+                "HierarchicalIndexer was built without an embedder or embedding_resolver"
+            )
+        embedder = await self._embedding_resolver(normalized)
+        if embedder is None:
+            raise ValueError(f"hierarchical indexing: embedding resolution failed for {normalized}")
+        self._embedders_by_dataset[normalized] = embedder
+        return embedder
 
     async def index_document(
         self,
@@ -224,7 +260,7 @@ class HierarchicalIndexer:
 
             # Provider, collection, embedding, and persistence calls are only
             # allowed after the complete hierarchy has passed its aggregate cap.
-            vector_dim = await self._get_vector_dimension()
+            vector_dim = await self._get_vector_dimension(dataset_id)
             base_collection = await self._resolve_base_collection(dataset_id, vector_dim)
 
             # L3: Paragraph-level chunks
@@ -470,7 +506,7 @@ class HierarchicalIndexer:
 
         # Generate embeddings
         texts = [s.text for s in segments]
-        vectors = await self._embed_texts(texts)
+        vectors = await self._embed_texts(texts, dataset_id=dataset_id)
 
         if not vectors or len(vectors) != len(segments):
             raise ValueError("Embedding count mismatch")
@@ -585,7 +621,7 @@ class HierarchicalIndexer:
 
         # Use summary for embedding if available, otherwise full text
         texts = [s.summary or s.text[:2000] for s in segments]
-        vectors = await self._embed_texts(texts)
+        vectors = await self._embed_texts(texts, dataset_id=dataset_id)
 
         if not vectors:
             return
@@ -680,7 +716,9 @@ class HierarchicalIndexer:
         tenant_id = await self._dataset_tenant_id(dataset_id)
 
         # Embed the summary
-        vectors = await self._embed_texts([segment.summary or segment.text])
+        vectors = await self._embed_texts(
+            [segment.summary or segment.text], dataset_id=dataset_id
+        )
 
         if not vectors or not vectors[0]:
             logger.warning(f"No embedding generated for document summary: {segment.document_id}")
@@ -752,19 +790,24 @@ class HierarchicalIndexer:
         self,
         texts: list[str],
         max_retries: int = 3,
+        *,
+        dataset_id: str = "",
     ) -> list[list[float] | None]:
         """Generate embeddings for texts with retry.
 
         Args:
             texts: List of texts to embed
             max_retries: Maximum retry attempts
+            dataset_id: Dataset whose embedder must be used (required unless
+                an explicit embedder was constructed)
 
         Returns:
             List of embedding vectors (None for failed texts)
         """
+        embedder = await self._embedder_for(dataset_id)
         for attempt in range(max_retries):
             try:
-                vectors = await self.embedder.embed_documents(texts)
+                vectors = await embedder.embed_documents(texts)
 
                 # Validate return result
                 if len(vectors) != len(texts):
@@ -788,10 +831,11 @@ class HierarchicalIndexer:
                 )
                 await asyncio.sleep(wait_time)
 
-    async def _get_vector_dimension(self) -> int:
-        """Get embedding dimension from embedder."""
+    async def _get_vector_dimension(self, dataset_id: str = "") -> int:
+        """Get embedding dimension from the dataset-scoped embedder."""
         try:
-            return self.embedder.dimension
+            embedder = await self._embedder_for(dataset_id)
+            return embedder.dimension
         except AttributeError:
             return 1024  # Default for most models
 
@@ -815,11 +859,6 @@ class HierarchicalIndexer:
                 )
         if not tenant_id:
             raise ValueError("hierarchical indexing requires dataset tenant_id")
-        if lexical_config.reads_bm25_v2:
-            raise ValueError(
-                "bm25_v2 active mode is read-only; roll back to lexical_v1 shadow "
-                "before hierarchical indexing"
-            )
         make_collection_name = getattr(self.vector_store, "make_collection_name", None)
         if callable(make_collection_name):
             target_collection = make_collection_name(
@@ -905,7 +944,7 @@ class HierarchicalIndexer:
 
         base_collection = str((dataset or {}).get("collection_name") or "").strip()
         if not base_collection:
-            vector_dim = await self._get_vector_dimension()
+            vector_dim = await self._get_vector_dimension(dataset_id)
             make_collection_name = getattr(self.vector_store, "make_collection_name", None)
             base_collection = (
                 make_collection_name(dataset_id, vector_dim, None)

@@ -236,7 +236,14 @@ def _get_repository(request: Request) -> Any:
     database = getattr(request.app.state, "database", None)
     if database is None:
         _raise_agent_error(request, 503, "AGENT_STORAGE_UNAVAILABLE", "Agent storage unavailable")
-    repository = DatabaseAgentRepository(database)
+    repository = DatabaseAgentRepository(
+        database,
+        knowledge_resolver=getattr(
+            request.app.state,
+            "agent_runtime_knowledge_resolver",
+            None,
+        ),
+    )
     request.app.state.agent_repository = repository
     return repository
 

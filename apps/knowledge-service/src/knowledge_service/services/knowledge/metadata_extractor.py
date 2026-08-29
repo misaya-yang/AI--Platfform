@@ -11,13 +11,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 from ai_gateway_core.config import resolve_dashscope
+
+from ...config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +86,7 @@ class MetadataExtractor:
     ):
         self.provider = provider
         if provider == "gemini":
-            self.api_key = api_key or os.getenv("GOOGLE_API_KEY", "")
+            self.api_key = api_key or get_settings().google_api_key
             self.model = model if model != DEFAULT_MODEL else "gemini-2.0-flash"
             self.base_url = base_url or DASHSCOPE_BASE_URL
         else:
@@ -143,7 +144,7 @@ class MetadataExtractor:
 
         batch_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for br, actual_len in zip(batch_results, batch_lengths):
+        for br, actual_len in zip(batch_results, batch_lengths, strict=True):
             if isinstance(br, Exception):
                 logger.warning(f"Batch extraction failed: {br}")
                 results.extend([ExtractionResult() for _ in range(actual_len)])

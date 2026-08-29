@@ -1787,9 +1787,10 @@ class ConfluenceSyncService:
             isinstance(source_receipt, dict)
             and source_receipt.get("complete") is True
             and source_receipt.get("sync_generation") == sync_generation
-            and existing_status in {"queued", "processing", "completed"}
+            and existing_status
+            in {"waiting", "parsing", "splitting", "indexing", "completed"}
         ):
-            if existing_status == "queued":
+            if existing_status == "waiting":
                 enqueue_claimed = getattr(self.worker, "enqueue_claimed", None)
                 if not callable(enqueue_claimed):
                     raise ConfluenceSyncError(
@@ -3876,12 +3877,7 @@ class ConfluenceSyncService:
             raise ConfluenceSyncError(
                 "dataset index deletion is pending; Confluence synchronization is unavailable"
             )
-        lexical = LexicalConfig.from_index_config(dataset.get("index_config") or {})
-        if lexical.reads_bm25_v2:
-            raise ConfluenceSyncError(
-                "bm25_v2 active mode is read-only; roll back to lexical_v1 shadow "
-                "before Confluence synchronization"
-            )
+        LexicalConfig.from_index_config(dataset.get("index_config") or {})
 
     async def _require_dataset_index_writable(self, dataset_id: str) -> None:
         dataset = await self.db.get_dataset(dataset_id)

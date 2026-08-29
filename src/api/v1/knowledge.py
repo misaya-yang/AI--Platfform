@@ -3,10 +3,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.responses import Response
-from ..deps import get_rate_limiter, get_user_context
+
 from ...core.auth.user_resolver import UserContext
 from ...core.gateway.multi_dimension_rate_limiter import MultiDimensionRateLimiter, RateLimitContext
-from ._proxy_utils import proxy_to_kb_service
+from ..deps import get_rate_limiter, get_user_context
+from ._proxy_utils import enforce_knowledge_scope, proxy_to_kb_service
 
 router = APIRouter(prefix="/knowledge", tags=["Knowledge Base"])
 
@@ -17,6 +18,7 @@ async def proxy_knowledge(
     user: UserContext = Depends(get_user_context),
     rate_limiter: MultiDimensionRateLimiter | None = Depends(get_rate_limiter),
 ) -> Response:
+    enforce_knowledge_scope(request, path=path)
     if rate_limiter is not None:
         ctx = RateLimitContext.from_user_context(user)
         result = await rate_limiter.check(ctx)
