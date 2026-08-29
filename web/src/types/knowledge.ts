@@ -92,6 +92,29 @@ export interface Dataset {
 export interface IndexConfig {
   chunking?: ChunkingConfig;
   retrieval?: RetrievalConfig;
+  document_metadata_registry?: DocumentMetadataRegistry;
+}
+
+export type DocumentMetadataFieldType = "string" | "number" | "datetime";
+
+export interface DocumentMetadataField {
+  name: string;
+  label: string;
+  type: DocumentMetadataFieldType;
+  description?: string;
+}
+
+export interface DocumentMetadataRegistry {
+  version: 1;
+  revision: number;
+  fields: DocumentMetadataField[];
+}
+
+export interface OffsetPage<T> {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 // ============================================================
@@ -134,6 +157,45 @@ export interface Document {
   parsing_started_at?: string;
   splitting_started_at?: string;
   indexing_started_at?: string;
+}
+
+/**
+ * Reserved backend marker for an enable/unarchive transition that has been
+ * durably queued but has not completed its vector rebuild yet. During this
+ * phase the backend deliberately keeps the old enabled/archived fields.
+ */
+export const DOCUMENT_LIFECYCLE_MARKER_KEY = "_document_lifecycle_reindex";
+
+export interface DocumentLifecycleInput extends DocumentDisplayStatusInput {
+  metadata?: Record<string, unknown> | null;
+}
+
+const DOCUMENT_POLLING_STATUSES = new Set([
+  "pending",
+  "queued",
+  "waiting",
+  "detecting",
+  "processing",
+  "uploading",
+  "parsing",
+  "segmenting",
+  "splitting",
+  "embedding",
+  "embedding_images",
+  "uploading_images",
+  "indexing",
+  "syncing",
+]);
+
+/** Return true while an enable/unarchive rebuild still owns the document. */
+export function hasPendingDocumentActivation(
+  input: Pick<DocumentLifecycleInput, "metadata"> | null | undefined
+): boolean {
+  const marker = input?.metadata?.[DOCUMENT_LIFECYCLE_MARKER_KEY];
+  if (!marker || typeof marker !== "object" || Array.isArray(marker)) {
+    return false;
+  }
+  return String((marker as Record<string, unknown>).status ?? "").toLowerCase() === "pending";
 }
 
 // ============================================================
@@ -198,19 +260,26 @@ export interface ChunkingConfig {
   mode: ChunkingMode;
   chunk_size: number;
   chunk_overlap: number;
+  overlap?: number;
   max_chunk_size?: number;
   min_chunk_size?: number;
   strict_section_traceability?: boolean;
-  
+
   // Token-based
   use_token_count?: boolean;
   token_limit?: number;
-  
+  max_tokens?: number;
+  min_chunk_tokens?: number;
+  max_chunk_tokens?: number;
+  parent_token_limit?: number;
+  child_token_limit?: number;
+
   // Separators (for separator mode)
   separators?: string[];
+  separator?: string;
   primary_separator?: string;
   keep_separator?: boolean;
-  
+
   // Regex mode
   regex_pattern?: string;
   
@@ -225,10 +294,12 @@ export interface ChunkingConfig {
   // Hierarchical mode
   parent_chunk_size?: number;
   parent_overlap?: number;
+  parent_chunk_overlap?: number;
   child_chunk_size?: number;
   child_overlap?: number;
+  child_chunk_overlap?: number;
   parent_mode?: "full_doc" | "paragraph" | "section";
-  
+
   // QA mode
   question_prefix?: string;
   answer_prefix?: string;
@@ -242,6 +313,12 @@ export interface ChunkingConfig {
   // Metadata extraction
   extract_metadata?: boolean;
   metadata_fields?: string[];
+  page_marker?: string;
+
+  // Parser/image compatibility fields accepted by the runtime contract.
+  preserve_images?: boolean;
+  image_context_chars?: number;
+  segmentation?: { max_tokens: number };
 }
 
 // ============================================================
@@ -365,6 +442,8 @@ export interface RetrieveHit {
 
 export interface RetrieveResponse {
   results: RetrieveHit[];
+  trace_id?: string;
+  query_fingerprint?: string;
   metadata: {
     mode?: string;
     top_k?: number;
@@ -379,6 +458,77 @@ export interface RetrieveResponse {
     error?: string;
     [key: string]: unknown;
   };
+}
+
+export interface QueryHistoryItem {
+  id: string;
+  dataset_id: string;
+  content: string;
+  source: string;
+  source_app_id?: string | null;
+  created_by_role?: string | null;
+  created_by?: string | null;
+  metadata: Record<string, unknown>;
+  trace_id?: string | null;
+  query_fingerprint?: string | null;
+  mode?: string | null;
+  top_k?: number | null;
+  hit_count?: number | null;
+  stage_timings: Record<string, number>;
+  created_at: string;
+}
+
+export interface QueryHistoryPage {
+  queries: QueryHistoryItem[];
+  next_cursor?: string | null;
+  has_more: boolean;
+}
+
+export type QueryFeedbackTarget = "retrieval_hit" | "qa_answer";
+export type QueryFeedbackRating = "positive" | "negative";
+export type QueryFeedbackReason =
+  | "relevant"
+  | "helpful"
+  | "well_cited"
+  | "irrelevant"
+  | "incorrect"
+  | "missing_context"
+  | "bad_citation"
+  | "stale"
+  | "unsafe"
+  | "other";
+
+export interface QueryFeedbackInput {
+  trace_id: string;
+  query_fingerprint: string;
+  target_type: QueryFeedbackTarget;
+  segment_id?: string;
+  rating: QueryFeedbackRating;
+  reason_code: QueryFeedbackReason;
+  comment?: string;
+}
+
+export interface QueryFeedback {
+  feedback_id: string;
+  tenant_id: string;
+  dataset_id: string;
+  trace_id: string;
+  query_fingerprint: string;
+  target_type: QueryFeedbackTarget;
+  target_id: string;
+  rating: QueryFeedbackRating;
+  reason_code: QueryFeedbackReason;
+  comment?: string | null;
+  created_by: string;
+  query_content?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface QueryFeedbackPage {
+  feedback: QueryFeedback[];
+  next_cursor?: string | null;
+  has_more: boolean;
 }
 
 // ============================================================
@@ -427,6 +577,8 @@ export interface QAResponse {
   };
   model: string;
   tokens_used?: number;
+  trace_id?: string;
+  query_fingerprint?: string;
 }
 
 export type QAStreamEvent =
@@ -436,6 +588,8 @@ export type QAStreamEvent =
         query: string;
         context_segments: QAContextSegment[];
         retrieval_metadata: Record<string, unknown>;
+        trace_id?: string;
+        query_fingerprint?: string;
         timing: {
           retrieval_ms: number;
         };
@@ -660,19 +814,24 @@ export const DEFAULT_RETRIEVAL_CONFIG = {
 // replaced wholesale. The settings page therefore round-trips stored configs
 // through this allow-list when saving. Mirrors
 // knowledge_service/api/schemas/knowledge.py::ChunkingConfigSchema.
-// regex_pattern is deliberately absent: the backend disables regex chunking
-// ("custom regex chunking is disabled"). D6 tracks the runtime-only fields
-// (extract_metadata, metadata_fields, ...) that this schema cannot express.
+// regex_pattern is deliberately absent: the backend disables custom regex
+// chunking. Every other runtime-safe field is carried so a one-field edit
+// cannot erase parser or metadata-extraction settings (D6).
 export const CHUNKING_CONFIG_API_FIELDS = [
   "mode",
   "chunk_size",
   "chunk_overlap",
+  "overlap",
+  "max_chunk_size",
+  "min_chunk_size",
   "use_token_count",
   "token_limit",
+  "max_tokens",
   "min_chunk_tokens",
   "max_chunk_tokens",
   "parent_token_limit",
   "child_token_limit",
+  "separators",
   "separator",
   "primary_separator",
   "keep_separator",
@@ -682,12 +841,24 @@ export const CHUNKING_CONFIG_API_FIELDS = [
   "merge_short_paragraphs",
   "parent_mode",
   "parent_chunk_size",
+  "parent_overlap",
+  "parent_chunk_overlap",
   "child_chunk_size",
   "child_overlap",
+  "child_chunk_overlap",
   "question_prefix",
   "answer_prefix",
   "remove_extra_spaces",
   "remove_urls_emails",
+  "normalize_whitespace",
+  "strip_html",
+  "extract_metadata",
+  "metadata_fields",
+  "page_marker",
+  "strict_section_traceability",
+  "preserve_images",
+  "image_context_chars",
+  "segmentation",
 ] as const;
 
 // The only heading_patterns the backend accepts (its
@@ -811,4 +982,23 @@ export function resolveDisplayStatus(
     return stamped as DocumentDisplayStatus;
   }
   return deriveDisplayStatus(doc);
+}
+
+/**
+ * Decide whether the document list must keep polling.
+ *
+ * Activation is intentionally two-stage: enable/unarchive first returns a
+ * durable `waiting` row with the old enabled/archived value and a pending
+ * marker. Checking only the display status would therefore mistake an
+ * archived restore for a terminal row and stop before the worker flips it.
+ */
+export function documentNeedsLifecyclePolling(
+  doc: DocumentLifecycleInput | null | undefined
+): boolean {
+  const rawStatus = String(doc?.status ?? "").trim().toLowerCase();
+  if (DOCUMENT_POLLING_STATUSES.has(rawStatus) || hasPendingDocumentActivation(doc)) {
+    return true;
+  }
+  const displayStatus = resolveDisplayStatus(doc);
+  return displayStatus === "queuing" || displayStatus === "indexing";
 }

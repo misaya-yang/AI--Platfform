@@ -637,6 +637,12 @@ export async function updateEvalExample(
   return response.data;
 }
 
+export async function deleteEvalExample(datasetId: string, exampleId: string): Promise<void> {
+  await api.delete(
+    `/api/v1/eval/datasets/${encodeURIComponent(datasetId)}/examples/${encodeURIComponent(exampleId)}`
+  );
+}
+
 export async function importEvalExamples(
   datasetId: string,
   examples: EvalExampleImportItem[],

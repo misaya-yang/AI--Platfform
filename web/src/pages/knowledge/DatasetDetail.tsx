@@ -26,9 +26,10 @@ import {
   Users,
   Cloud,
   FlaskConical,
+  Activity,
 } from "lucide-react";
 
-import { useDataset, useDocuments } from "@/hooks/useKnowledge";
+import { useDataset, useDatasetSources, useDocuments } from "@/hooks/useKnowledge";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -48,6 +49,7 @@ import { QATab } from "@/pages/knowledge/detail/QATab";
 import { SettingsTab } from "@/pages/knowledge/detail/SettingsTab";
 import { PermissionsTab } from "@/pages/knowledge/detail/PermissionsTab";
 import { RetrievalEvalWorkbench } from "@/pages/knowledge/detail/RetrievalEvalWorkbench";
+import { QueryObservabilityTab } from "@/pages/knowledge/detail/QueryObservabilityTab";
 import {
   CreateTextDocumentDialog,
   CreateUrlDocumentDialog,
@@ -61,6 +63,7 @@ type DatasetMainTab =
   | "retrieval"
   | "eval"
   | "qa"
+  | "queries"
   | "sources"
   | "settings"
   | "permissions";
@@ -70,6 +73,7 @@ const DATASET_MAIN_TABS: DatasetMainTab[] = [
   "retrieval",
   "eval",
   "qa",
+  "queries",
   "sources",
   "settings",
   "permissions",
@@ -97,8 +101,15 @@ export function KnowledgeDatasetDetailPage() {
     handleFilesSelected,
     dialog: uploadDialog,
   } = useDatasetUploadDialog({ datasetId, dataset });
-  const docsQuery = useDocuments(datasetId);
-  const docs = useMemo(() => docsQuery.data ?? [], [docsQuery.data]);
+  const [documentOffset, setDocumentOffset] = useState(0);
+  const documentLimit = 50;
+  const docsQuery = useDocuments(datasetId, {
+    limit: documentLimit,
+    offset: documentOffset,
+  });
+  const docs = useMemo(() => docsQuery.data?.items ?? [], [docsQuery.data?.items]);
+  const documentTotal = docsQuery.data?.total ?? 0;
+  const sourcesQuery = useDatasetSources(datasetId);
 
   const [searchParams, setSearchParams] = useSearchParams();
   const [mainTab, setMainTab] = useState<DatasetMainTab>(() =>
@@ -140,6 +151,7 @@ export function KnowledgeDatasetDetailPage() {
     documents: "border-primary text-primary bg-primary/10",
     retrieval: "border-primary text-primary bg-primary/10",
     qa: "border-primary text-primary bg-primary/10",
+    queries: "border-primary text-primary bg-primary/10",
     sources: "border-primary text-primary bg-primary/10",
     settings: "border-primary text-primary bg-primary/10",
     eval: "border-primary text-primary bg-primary/10",
@@ -150,6 +162,7 @@ export function KnowledgeDatasetDetailPage() {
     documents: "text-primary",
     retrieval: "text-primary",
     qa: "text-primary",
+    queries: "text-primary",
     eval: "text-primary",
     sources: "text-primary",
     settings: "text-primary",
@@ -229,6 +242,7 @@ export function KnowledgeDatasetDetailPage() {
               { key: "retrieval", label: t("knowledge.detail.tabRetrieval"), icon: Search },
               { key: "eval", label: t("knowledge.detail.tabEval"), icon: FlaskConical },
               { key: "qa", label: t("knowledge.detail.tabQA"), icon: MessageSquare },
+              { key: "queries", label: t("knowledge.detail.tabQueries"), icon: Activity },
               { key: "sources", label: t("knowledge.detail.tabSources"), icon: Cloud },
               { key: "settings", label: t("knowledge.detail.tabSettings"), icon: Sliders },
               { key: "permissions", label: t("knowledge.detail.tabPermissions"), icon: Lock },
@@ -279,6 +293,11 @@ export function KnowledgeDatasetDetailPage() {
             datasetId={datasetId}
             docs={docs}
             docsQuery={docsQuery}
+            totalDocuments={documentTotal}
+            documentLimit={documentLimit}
+            documentOffset={documentOffset}
+            onDocumentOffsetChange={setDocumentOffset}
+            permission={dataset?.my_permission}
             fileInputRef={fileInputRef}
             uploading={uploading}
             openFilePicker={openFilePicker}
@@ -303,6 +322,8 @@ export function KnowledgeDatasetDetailPage() {
           <QATab datasetId={datasetId} hitTest={hitTest} />
         </div>
 
+        {mainTab === "queries" && <QueryObservabilityTab datasetId={datasetId} />}
+
         {/* 数据来源 Tab（自包含组件，保持原条件挂载） */}
         {mainTab === "sources" && datasetId && (
           <SourcesTab
@@ -310,10 +331,13 @@ export function KnowledgeDatasetDetailPage() {
             onUploadClick={openFilePicker}
             onUrlClick={() => setUrlDialogOpen(true)}
             documentStats={{
-              total: docs.length,
-              uploaded: docs.filter(d => !d.source_type || d.source_type === 'upload').length,
-              fromUrl: docs.filter(d => d.source_type === 'url').length,
-              fromConfluence: docs.filter(d => d.source_type === 'confluence').length,
+              total: sourcesQuery.data?.total_documents ?? documentTotal,
+              uploaded: sourcesQuery.data?.file_uploads.count ?? 0,
+              fromUrl: sourcesQuery.data?.url_imports.count ?? 0,
+              fromConfluence: (sourcesQuery.data?.confluence_bindings ?? []).reduce(
+                (total, binding) => total + binding.page_count,
+                0
+              ),
             }}
           />
         )}
@@ -323,6 +347,7 @@ export function KnowledgeDatasetDetailPage() {
           <SettingsTab
             datasetId={datasetId}
             active={mainTab === "settings"}
+            permission={dataset?.my_permission}
             onDatasetRefetch={() => void dsQuery.refetch()}
           />
         </div>

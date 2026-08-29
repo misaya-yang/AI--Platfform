@@ -101,6 +101,14 @@ export function StatusBadge({ status, error, progress, metadata }: StatusBadgePr
     },
   };
 
+  // Migration 101 forward lifecycle aliases. Keep the visual vocabulary
+  // stable while the wire format moves from queued/segmenting/embedding/
+  // failed to waiting/splitting/indexing/error.
+  configs.waiting = configs.queued;
+  configs.splitting = configs.segmenting;
+  configs.indexing = configs.embedding;
+  configs.error = configs.failed;
+
   const config = configs[s] || {
     icon: <File className="h-3 w-3" />,
     label: t("knowledge.status.uploaded"),
@@ -117,7 +125,7 @@ export function StatusBadge({ status, error, progress, metadata }: StatusBadgePr
     </Badge>
   );
 
-  if (s === "failed" && error) {
+  if ((s === "failed" || s === "error") && error) {
     return (
       <TooltipProvider>
         <Tooltip>

@@ -4,15 +4,22 @@ import { useTranslation } from "react-i18next";
 
 import type { RetrieveHit } from "@/types/knowledge";
 import { Badge } from "@/components/ui/badge";
+import { KnowledgeFeedbackControl } from "@/pages/knowledge/detail/KnowledgeFeedbackControl";
 
 export function RetrievalResultCard({
   hit,
   index,
   highlightTerms = [],
+  datasetId,
+  traceId,
+  queryFingerprint,
 }: {
   hit: RetrieveHit;
   index: number;
   highlightTerms?: string[];
+  datasetId?: string;
+  traceId?: string;
+  queryFingerprint?: string;
 }) {
   const { t } = useTranslation();
   const [isExpanded, setIsExpanded] = useState(false);
@@ -241,6 +248,16 @@ export function RetrievalResultCard({
             </div>
           )}
         </div>
+      )}
+
+      {datasetId && traceId && queryFingerprint && (
+        <KnowledgeFeedbackControl
+          datasetId={datasetId}
+          traceId={traceId}
+          queryFingerprint={queryFingerprint}
+          targetType="retrieval_hit"
+          segmentId={hit.segment_id}
+        />
       )}
     </div>
   );

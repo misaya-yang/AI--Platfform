@@ -1,4 +1,8 @@
+// The browser app type gate intentionally omits Node globals; these imports
+// are supplied by the `node --test` runtime used for this file.
+// @ts-expect-error -- node built-in types are outside tsconfig.app.json.
 import assert from "node:assert/strict";
+// @ts-expect-error -- node built-in types are outside tsconfig.app.json.
 import { test } from "node:test";
 
 import {

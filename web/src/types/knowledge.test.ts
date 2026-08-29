@@ -1,4 +1,8 @@
+// The browser app type gate intentionally omits Node globals; these imports
+// are supplied by the `node --test` runtime used for this file.
+// @ts-expect-error -- node built-in types are outside tsconfig.app.json.
 import assert from "node:assert/strict";
+// @ts-expect-error -- node built-in types are outside tsconfig.app.json.
 import { test } from "node:test";
 
 import {
@@ -6,8 +10,11 @@ import {
   DEFAULT_CHUNKING_CONFIG,
   DEFAULT_RETRIEVAL_CONFIG,
   DOCUMENT_DISPLAY_STATUS_VOCABULARY,
+  DOCUMENT_LIFECYCLE_MARKER_KEY,
   SAFE_CHUNK_HEADING_PATTERNS,
   deriveDisplayStatus,
+  documentNeedsLifecyclePolling,
+  hasPendingDocumentActivation,
   isSafeHeadingPatterns,
   parseSegmentKeywords,
   resolveDisplayStatus,
@@ -124,6 +131,63 @@ test("DOCUMENT_DISPLAY_STATUS_VOCABULARY: fixed 7-value contract", () => {
   assert.deepEqual([...DOCUMENT_DISPLAY_STATUS_VOCABULARY], [...expected]);
 });
 
+test("activation polling: raw waiting wins over an old archived display state", () => {
+  const pendingRestore = {
+    status: "waiting",
+    display_status: "archived" as const,
+    enabled: true,
+    archived: true,
+    metadata: {
+      [DOCUMENT_LIFECYCLE_MARKER_KEY]: {
+        status: "pending",
+        desired_enabled: true,
+        desired_archived: false,
+      },
+    },
+  };
+
+  assert.equal(resolveDisplayStatus(pendingRestore), "archived");
+  assert.equal(hasPendingDocumentActivation(pendingRestore), true);
+  assert.equal(documentNeedsLifecyclePolling(pendingRestore), true);
+});
+
+test("activation polling: enabled stays false until a queued rebuild completes", () => {
+  const pendingEnable = {
+    status: "waiting",
+    enabled: false,
+    archived: false,
+    metadata: {
+      [DOCUMENT_LIFECYCLE_MARKER_KEY]: { status: "pending" },
+    },
+  };
+  assert.equal(documentNeedsLifecyclePolling(pendingEnable), true);
+
+  const completedEnable = {
+    ...pendingEnable,
+    status: "completed",
+    enabled: true,
+    metadata: {},
+  };
+  assert.equal(hasPendingDocumentActivation(completedEnable), false);
+  assert.equal(documentNeedsLifecyclePolling(completedEnable), false);
+});
+
+test("activation polling: malformed or deactivating markers are not worker-owned", () => {
+  assert.equal(hasPendingDocumentActivation({ metadata: null }), false);
+  assert.equal(
+    hasPendingDocumentActivation({
+      metadata: { [DOCUMENT_LIFECYCLE_MARKER_KEY]: [] },
+    }),
+    false
+  );
+  assert.equal(
+    hasPendingDocumentActivation({
+      metadata: { [DOCUMENT_LIFECYCLE_MARKER_KEY]: { status: "deactivating" } },
+    }),
+    false
+  );
+});
+
 test("default configs: product baseline values stay frozen", () => {
   // Baseline-first discipline: these are the majority values the running UI
   // already uses. Changing them is a tuning decision that waits for T0
@@ -158,8 +222,12 @@ test("chunking API allow-list: mirrors schema, excludes regex_pattern", () => {
   assert.ok(fields.includes("separator"));
   assert.ok(fields.includes("heading_patterns"));
   assert.ok(!fields.includes("regex_pattern"));
-  assert.ok(!fields.includes("extract_metadata"));
-  assert.ok(!fields.includes("metadata_fields"));
+  assert.ok(fields.includes("extract_metadata"));
+  assert.ok(fields.includes("metadata_fields"));
+  assert.ok(fields.includes("normalize_whitespace"));
+  assert.ok(fields.includes("strip_html"));
+  assert.ok(fields.includes("page_marker"));
+  assert.ok(fields.includes("segmentation"));
 });
 
 test("parseSegmentKeywords: splits on ASCII/full-width commas and CJK enumeration comma", () => {

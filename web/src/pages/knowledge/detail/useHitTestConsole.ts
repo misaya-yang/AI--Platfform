@@ -94,6 +94,8 @@ export function useHitTestConsole(datasetId?: string) {
   const [ragasResults, setRagasResults] = useState<KbRagasScoreRetrievalResult[]>([]);
   const [ragasJudgeModel, setRagasJudgeModel] = useState<string | null>(null);
   const [hitMeta, setHitMeta] = useState<Record<string, unknown>>({});
+  const [hitTraceId, setHitTraceId] = useState("");
+  const [hitQueryFingerprint, setHitQueryFingerprint] = useState("");
 
   function invalidateHitTestResults() {
     hitTestControllerRef.current?.abort();
@@ -103,6 +105,8 @@ export function useHitTestConsole(datasetId?: string) {
     setRagasLoading(false);
     setHitResults([]);
     setHitMeta({});
+    setHitTraceId("");
+    setHitQueryFingerprint("");
     setRagasResults([]);
     setRagasJudgeModel(null);
   }
@@ -148,6 +152,8 @@ export function useHitTestConsole(datasetId?: string) {
     setRagasLoading(false);
     setHitResults([]);
     setHitMeta({});
+    setHitTraceId("");
+    setHitQueryFingerprint("");
     setRagasResults([]);
     setRagasJudgeModel(null);
     return () => hitTestControllerRef.current?.abort();
@@ -231,6 +237,8 @@ export function useHitTestConsole(datasetId?: string) {
       if (activeDatasetIdRef.current !== requestDatasetId || controller.signal.aborted) return;
       setHitResults(res.results || []);
       setHitMeta(res.metadata || {});
+      setHitTraceId(res.trace_id || "");
+      setHitQueryFingerprint(res.query_fingerprint || "");
     } catch (err: unknown) {
       const candidate = err as { code?: string; name?: string };
       if (
@@ -284,6 +292,8 @@ export function useHitTestConsole(datasetId?: string) {
     ragasResults,
     ragasJudgeModel,
     hitMeta,
+    hitTraceId,
+    hitQueryFingerprint,
     invalidateHitTestResults,
     runHitTest,
     runRagasScore,

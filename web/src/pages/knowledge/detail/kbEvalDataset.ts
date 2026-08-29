@@ -8,6 +8,7 @@
 
 import {
   createEvalDataset,
+  getAgentTraceDetail,
   importEvalExamples,
   listEvalDatasets,
   type EvalDataset,
@@ -47,25 +48,43 @@ export async function resolveKbEvalDataset(kbDatasetId: string): Promise<EvalDat
  * hit-test console and QA tab share the id space: for one query the first
  * send wins and later sends report as skipped.
  *
- * `createEvalExampleFromTrace` is deliberately not used: KB hit-test/QA
- * responses do not expose a trace_id yet, so there is nothing to link. Switch
- * to the trace-derived path once the backend surfaces it.
+ * The deterministic import path remains the idempotency authority. When the
+ * gateway has already ingested the backend-generated RAG trace, the same row
+ * carries source_trace_id; a short ingest race falls back to the unlinked case
+ * instead of failing the user's golden-set action.
  */
 export async function sendRetrievalCaseToEvalDataset(params: {
   kbDatasetId: string;
   query: string;
   relevantSegmentIds: string[];
   source?: string;
+  sourceTraceId?: string;
 }): Promise<{ imported: number; skipped: number }> {
   const query = params.query.trim();
   if (!query) throw new Error("Cannot send an empty query to the eval set");
   const evalDataset = await resolveKbEvalDataset(params.kbDatasetId);
+  let confirmedTraceId: string | undefined;
+  if (params.sourceTraceId) {
+    for (const delayMs of [0, 100, 300]) {
+      if (delayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+      try {
+        await getAgentTraceDetail(params.sourceTraceId, "rag");
+        confirmedTraceId = params.sourceTraceId;
+        break;
+      } catch {
+        // Trace ingest is best-effort and asynchronous; keep the golden case.
+      }
+    }
+  }
   const item = evalCaseToImportItem({
     caseId: hitTestEvalCaseId(params.kbDatasetId, query),
     kbDatasetId: params.kbDatasetId,
     query,
     relevantSegmentIds: params.relevantSegmentIds,
     source: params.source ?? HIT_TEST_EVAL_SOURCE,
+    sourceTraceId: confirmedTraceId,
   });
   const response = await importEvalExamples(evalDataset.dataset_id, [item], {
     mode: "skip_duplicates",

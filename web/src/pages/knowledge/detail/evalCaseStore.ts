@@ -13,8 +13,8 @@
  * The store's `skip_duplicates` import dedupes on `metadata.case_id` alone
  * (verified against the backend repository), so edited cases must go through
  * PATCH while new cases go through import — `diffEvalCases` computes that
- * split. There is no delete endpoint (dependency D7), so cases removed from
- * the workbench stay in the eval dataset; callers report that honestly.
+ * split. Persisted cases explicitly removed from the workbench go through the
+ * tenant-scoped DELETE endpoint.
  */
 
 import type { EvalDataset, EvalExample, EvalExampleImportItem } from "@/api/eval";
@@ -81,6 +81,7 @@ export function evalCaseToImportItem(params: {
   query: string;
   relevantSegmentIds: string[];
   source?: string;
+  sourceTraceId?: string;
 }): EvalExampleImportItem {
   return {
     case_id: params.caseId,
@@ -89,6 +90,7 @@ export function evalCaseToImportItem(params: {
     expected_output: { relevant_segment_ids: [...params.relevantSegmentIds] },
     expected_trajectory: {},
     assertions: [],
+    source_trace_id: params.sourceTraceId || null,
     metadata: {
       source: params.source ?? KB_EVAL_DATASET_SOURCE,
       kb_dataset_id: params.kbDatasetId,
@@ -107,8 +109,8 @@ export interface EvalCaseDiff {
     relevantSegmentIds: string[];
   }>;
   unchangedCount: number;
-  /** Saved cases no longer present in the workbench (no delete endpoint — D7). */
-  removedFromWorkbenchCount: number;
+  /** Persisted examples the user explicitly removed from the workbench. */
+  toDelete: Array<{ exampleId: string; caseId: string }>;
 }
 
 function caseContentKey(query: string, relevantSegmentIds: string[]): string {
@@ -119,6 +121,11 @@ export function diffEvalCases(params: {
   localCases: Array<{ id: string; query: string; relevantSegmentIds: string[] }>;
   serverCases: PersistedEvalCase[];
   kbDatasetId: string;
+  /**
+   * When supplied, only these explicit removals may be deleted. This prevents
+   * a stale workbench from deleting cases another client added concurrently.
+   */
+  removedExampleIds?: string[];
 }): EvalCaseDiff {
   const serverByCaseId = new Map(params.serverCases.map((entry) => [entry.caseId, entry]));
   const localCaseIds = new Set<string>();
@@ -126,7 +133,7 @@ export function diffEvalCases(params: {
     toImport: [],
     toUpdate: [],
     unchangedCount: 0,
-    removedFromWorkbenchCount: 0,
+    toDelete: [],
   };
 
   for (const localCase of params.localCases) {
@@ -159,8 +166,19 @@ export function diffEvalCases(params: {
     });
   }
 
+  const explicitlyRemoved = params.removedExampleIds
+    ? new Set(params.removedExampleIds)
+    : null;
   for (const serverCase of params.serverCases) {
-    if (!localCaseIds.has(serverCase.caseId)) diff.removedFromWorkbenchCount += 1;
+    const shouldDelete = explicitlyRemoved
+      ? explicitlyRemoved.has(serverCase.exampleId)
+      : !localCaseIds.has(serverCase.caseId);
+    if (shouldDelete) {
+      diff.toDelete.push({
+        exampleId: serverCase.exampleId,
+        caseId: serverCase.caseId,
+      });
+    }
   }
   return diff;
 }

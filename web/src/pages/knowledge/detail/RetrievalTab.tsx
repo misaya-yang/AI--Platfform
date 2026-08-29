@@ -76,6 +76,8 @@ export function RetrievalTab({ datasetId, hitTest }: RetrievalTabProps) {
     ragasResults,
     ragasJudgeModel,
     hitMeta,
+    hitTraceId,
+    hitQueryFingerprint,
     invalidateHitTestResults,
     runHitTest,
     runRagasScore,
@@ -93,6 +95,7 @@ export function RetrievalTab({ datasetId, hitTest }: RetrievalTabProps) {
         kbDatasetId: datasetId,
         query,
         relevantSegmentIds: hitResults.map((hit) => hit.segment_id),
+        sourceTraceId: hitTraceId || undefined,
       });
       toast.success(
         t("knowledge.detail.sentToEvalTitle"),
@@ -537,6 +540,9 @@ export function RetrievalTab({ datasetId, hitTest }: RetrievalTabProps) {
                 hit={hit}
                 index={i}
                 highlightTerms={query.trim().split(/\s+/).filter(t => t.length > 0)}
+                datasetId={datasetId}
+                traceId={hitTraceId || undefined}
+                queryFingerprint={hitQueryFingerprint || undefined}
               />
             ))}
             {hitResults.length === 0 && !hitLoading && (

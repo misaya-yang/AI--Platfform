@@ -3,11 +3,12 @@ import { useQuery } from "@tanstack/react-query";
 
 import {
   getDataset,
+  getDatasetSources,
   listDatasets,
   listDocuments,
   listSegments,
 } from "@/api/knowledge";
-import { resolveDisplayStatus } from "@/types/knowledge";
+import { documentNeedsLifecyclePolling } from "@/types/knowledge";
 
 /**
  * Returns `value` once it has been stable for `delayMs`. Search inputs feed
@@ -69,33 +70,52 @@ export function useDataset(datasetId?: string) {
   });
 }
 
-export function useDocuments(datasetId?: string) {
+export function useDatasetSources(datasetId?: string) {
   return useQuery({
-    queryKey: ["kb-documents", datasetId],
-    queryFn: () => withConflictRetry(() => listDocuments(datasetId!)),
+    queryKey: ["kb-dataset-sources", datasetId],
+    queryFn: () => getDatasetSources(datasetId!),
+    enabled: !!datasetId,
+    staleTime: 5000,
+  });
+}
+
+export function useDocuments(
+  datasetId?: string,
+  page: { limit: number; offset: number } = { limit: 50, offset: 0 }
+) {
+  return useQuery({
+    queryKey: ["kb-documents", datasetId, page.limit, page.offset],
+    queryFn: () => withConflictRetry(() => listDocuments(datasetId!, page)),
     enabled: !!datasetId,
     staleTime: 1000, // 1秒内使用缓存，配合轮询
-    // Poll only while at least one row is still in flight (queuing or
-    // indexing); an idle dataset costs zero requests (PRD §5-#4; the old
-    // unconditional 2s poll ran forever). Unknown states fail closed to
-    // "indexing" (resolveDisplayStatus), so they keep polling until the
-    // backend clears them.
+    placeholderData: (previousData) => previousData,
+    // Poll only while at least one row is still in flight; an idle dataset
+    // costs zero requests (PRD §5-#4). This checks both the raw worker state
+    // and the durable activation marker because enable/unarchive keep the old
+    // enabled/archived fields until their queued rebuild completes.
     refetchInterval: (query) => {
-      const active = (query.state.data ?? []).some((doc) => {
-        const display = resolveDisplayStatus(doc);
-        return display === "queuing" || display === "indexing";
-      });
+      const active = (query.state.data?.items ?? []).some(documentNeedsLifecyclePolling);
       return active ? 2000 : false;
     },
   });
 }
 
-export function useSegments(datasetId?: string, documentId?: string, q?: string) {
+export function useSegments(
+  datasetId?: string,
+  documentId?: string,
+  q?: string,
+  page: { limit: number; offset: number } = { limit: 100, offset: 0 }
+) {
   return useQuery({
-    queryKey: ["kb-segments", datasetId, documentId, q],
-    queryFn: () => withConflictRetry(() => listSegments(datasetId!, { documentId, q })),
+    queryKey: ["kb-segments", datasetId, documentId, q, page.limit, page.offset],
+    queryFn: () => withConflictRetry(() => listSegments(datasetId!, {
+      documentId,
+      q,
+      ...page,
+    })),
     enabled: !!datasetId,
     staleTime: 2000, // 2秒内使用缓存；重新打开面板时过期即重新拉取
+    placeholderData: (previousData) => previousData,
     // On-demand only (C4): the standing 5s poll is gone — the panel fetches
     // when opened (staleTime above) and segment mutations invalidate.
   });

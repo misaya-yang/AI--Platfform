@@ -62,14 +62,22 @@ import {
 } from "@/components/ui/select";
 import { toast } from "@/hooks/use-toast";
 import { DATASET_EMBEDDING_MODELS as EMBEDDING_MODELS } from "@/pages/knowledge/detail/useDatasetUploadController";
+import { EmbeddingMigrationPanel } from "@/pages/knowledge/detail/EmbeddingMigrationPanel";
+import { MetadataRegistryCard } from "@/pages/knowledge/detail/MetadataRegistryCard";
 
 interface SettingsTabProps {
   datasetId?: string;
   active: boolean;
+  permission?: string;
   onDatasetRefetch: () => void;
 }
 
-export function SettingsTab({ datasetId, active, onDatasetRefetch }: SettingsTabProps) {
+export function SettingsTab({
+  datasetId,
+  active,
+  permission,
+  onDatasetRefetch,
+}: SettingsTabProps) {
   const { t } = useTranslation();
 
   // Config
@@ -171,6 +179,11 @@ export function SettingsTab({ datasetId, active, onDatasetRefetch }: SettingsTab
     }
   }, [datasetId]);
 
+  const handleMigrationChange = useCallback(() => {
+    onDatasetRefetch();
+    void loadConfig();
+  }, [loadConfig, onDatasetRefetch]);
+
   useEffect(() => {
     if (active && datasetId && !datasetConfig) {
       void loadConfig();
@@ -270,6 +283,14 @@ export function SettingsTab({ datasetId, active, onDatasetRefetch }: SettingsTab
 
   async function handleSaveEmbeddingConfig() {
     if (!datasetId || !editEmbeddingModel) return;
+    if (datasetConfig?.statistics?.document_count !== 0) {
+      setEmbeddingEditing(false);
+      toast.error(
+        t("knowledge.detail.embeddingMigration.directEditBlocked"),
+        t("knowledge.detail.embeddingMigration.directEditBlockedHint")
+      );
+      return;
+    }
     setEmbeddingSaving(true);
     try {
       const [provider, model] = editEmbeddingModel.split(":");
@@ -316,8 +337,17 @@ export function SettingsTab({ datasetId, active, onDatasetRefetch }: SettingsTab
     }
   }
 
+  const canEditEmbeddingDirectly = datasetConfig?.statistics?.document_count === 0;
+
   return (
     <div className="grid grid-cols-2 gap-6">
+      <div className="col-span-2">
+        <MetadataRegistryCard
+          datasetId={datasetId}
+          active={active}
+          permission={permission}
+        />
+      </div>
       {/* 分块配置 */}
       <Card className="p-5">
         <div className="flex items-center justify-between mb-4">
@@ -826,7 +856,7 @@ export function SettingsTab({ datasetId, active, onDatasetRefetch }: SettingsTab
             <Sparkles className="h-5 w-5 text-primary" />
             {t("knowledge.detail.embeddingConfig")}
           </h3>
-          {!embeddingEditing ? (
+          {!embeddingEditing && canEditEmbeddingDirectly ? (
             <Button
               variant="ghost"
               size="sm"
@@ -841,7 +871,13 @@ export function SettingsTab({ datasetId, active, onDatasetRefetch }: SettingsTab
               <Edit3 className="h-3.5 w-3.5 mr-1" />
               {t("knowledge.detail.modify")}
             </Button>
-          ) : (
+          ) : null}
+          {!embeddingEditing && !canEditEmbeddingDirectly ? (
+            <Badge variant="outline" className="border-primary/30 text-primary">
+              {t("knowledge.detail.embeddingMigration.blueGreenOnly")}
+            </Badge>
+          ) : null}
+          {embeddingEditing ? (
             <div className="flex items-center gap-1.5">
               <Button
                 variant="ghost"
@@ -862,7 +898,7 @@ export function SettingsTab({ datasetId, active, onDatasetRefetch }: SettingsTab
                 {t("knowledge.detail.save")}
               </Button>
             </div>
-          )}
+          ) : null}
         </div>
 
         {datasetConfig && !embeddingEditing && (
@@ -961,6 +997,14 @@ export function SettingsTab({ datasetId, active, onDatasetRefetch }: SettingsTab
           </div>
         )}
       </Card>
+
+      {datasetId ? (
+        <EmbeddingMigrationPanel
+          datasetId={datasetId}
+          active={active}
+          onMigrationChange={handleMigrationChange}
+        />
+      ) : null}
 
       {/* 统计信息 */}
       <Card className="p-5">

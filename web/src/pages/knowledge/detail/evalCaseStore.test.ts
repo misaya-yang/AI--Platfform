@@ -1,4 +1,8 @@
+// The browser app type gate intentionally omits Node globals; these imports
+// are supplied by the `node --test` runtime used for this file.
+// @ts-expect-error -- node built-in types are outside tsconfig.app.json.
 import assert from "node:assert/strict";
+// @ts-expect-error -- node built-in types are outside tsconfig.app.json.
 import { test } from "node:test";
 import type { EvalExample } from "@/api/eval";
 import {
@@ -100,6 +104,17 @@ test("evalCaseToImportItem honours a custom source", () => {
   assert.equal(item.metadata?.source, "kb-hit-test");
 });
 
+test("evalCaseToImportItem links a confirmed backend RAG trace", () => {
+  const item = evalCaseToImportItem({
+    caseId: "case_trace",
+    kbDatasetId: "kb-1",
+    query: "q",
+    relevantSegmentIds: ["seg-1"],
+    sourceTraceId: "b3ccb99e-51a0-44f9-80a9-f2dce7b75c28",
+  });
+  assert.equal(item.source_trace_id, "b3ccb99e-51a0-44f9-80a9-f2dce7b75c28");
+});
+
 test("diffEvalCases splits new / changed / unchanged / removed", () => {
   const serverCases = [
     { caseId: "case_keep", exampleId: "ex-keep", query: "保持不变的用例", relevantSegmentIds: ["seg-1"] },
@@ -127,7 +142,25 @@ test("diffEvalCases splits new / changed / unchanged / removed", () => {
   });
 
   assert.equal(diff.unchangedCount, 1);
-  assert.equal(diff.removedFromWorkbenchCount, 1);
+  assert.deepEqual(diff.toDelete, [{ exampleId: "ex-gone", caseId: "case_gone" }]);
+});
+
+test("diffEvalCases deletes only explicit removals when the server changed concurrently", () => {
+  const serverCases = [
+    { caseId: "case_removed", exampleId: "ex-removed", query: "已删除", relevantSegmentIds: [] },
+    { caseId: "case_remote", exampleId: "ex-remote", query: "其他客户端新增", relevantSegmentIds: [] },
+  ];
+
+  const diff = diffEvalCases({
+    localCases: [],
+    serverCases,
+    kbDatasetId: "kb-1",
+    removedExampleIds: ["ex-removed"],
+  });
+
+  assert.deepEqual(diff.toDelete, [
+    { exampleId: "ex-removed", caseId: "case_removed" },
+  ]);
 });
 
 test("diffEvalCases treats reordered segment ids and surrounding whitespace as unchanged", () => {

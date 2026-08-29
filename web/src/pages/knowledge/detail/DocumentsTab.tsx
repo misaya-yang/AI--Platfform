@@ -11,7 +11,7 @@
  * it with `hidden`) so all state survives tab switches exactly as before.
  */
 
-import { useMemo, useState, type RefObject } from "react";
+import { useEffect, useMemo, useState, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -36,13 +36,19 @@ import {
   ImageIcon,
   Archive,
   ArchiveRestore,
+  ChevronLeft,
+  ChevronRight,
+  Tags,
 } from "lucide-react";
 
 import { useDebouncedValue, useDocuments, useSegments } from "@/hooks/useKnowledge";
 import {
   deleteDocument,
   deleteSegment,
-  reindexDocument,
+  reembedDocument,
+  reprocessDocument,
+  recoverDocument,
+  retryDocument,
   updateSegment,
   batchReindexDocuments,
   batchDeleteDocuments,
@@ -51,14 +57,22 @@ import {
   setDocumentEnabled,
   setDocumentArchived,
   DOCUMENT_BATCH_REINDEX_LIMIT,
+  DOCUMENT_BATCH_DELETE_LIMIT,
   DOCUMENT_ARCHIVE_REASON_LIMIT,
+  waitForDocumentBatchOperation,
+  batchUpdateDocumentMetadata,
+  getDocumentMetadataRegistry,
+  updateDocumentMetadata,
+  type DocumentPipelineAction,
 } from "@/api/knowledge";
+import { partitionIds, summarizeDocumentBatches } from "./batchOperations";
 import {
   DOCUMENT_DISPLAY_STATUS_VOCABULARY,
   parseSegmentKeywords,
   resolveDisplayStatus,
   type Document,
   type DocumentDisplayStatus,
+  type DocumentMetadataRegistry,
 } from "@/types/knowledge";
 
 import { Button } from "@/components/ui/button";
@@ -102,6 +116,7 @@ import {
 import { toast } from "@/hooks/use-toast";
 import { DocumentRow } from "@/pages/knowledge/detail/DocumentRow";
 import { SegmentList } from "@/pages/knowledge/detail/SegmentList";
+import { DocumentMetadataDialog } from "@/pages/knowledge/detail/DocumentMetadataDialog";
 
 const FILE_TYPE_CATEGORIES: Record<string, string[]> = {
   document: ["pdf", "doc", "docx", "txt", "md", "html", "rtf"],
@@ -115,11 +130,32 @@ const FILE_TYPE_CATEGORIES: Record<string, string[]> = {
 const SEGMENT_KEYWORDS_LIMIT = 100;
 const SEGMENT_KEYWORD_MAX_LENGTH = 256;
 const SEGMENT_BATCH_LIMIT = 500;
+const DOCUMENT_METADATA_BATCH_LIMIT = 500;
+const EMPTY_METADATA_REGISTRY: DocumentMetadataRegistry = {
+  version: 1,
+  revision: 0,
+  fields: [],
+};
+
+const DOCUMENT_PIPELINE_REQUESTS: Record<
+  DocumentPipelineAction,
+  (datasetId: string, documentId: string) => Promise<unknown>
+> = {
+  reembed: reembedDocument,
+  reprocess: reprocessDocument,
+  recover: recoverDocument,
+  retry: retryDocument,
+};
 
 interface DocumentsTabProps {
   datasetId?: string;
   docs: Document[];
   docsQuery: ReturnType<typeof useDocuments>;
+  totalDocuments: number;
+  documentLimit: number;
+  documentOffset: number;
+  onDocumentOffsetChange: (offset: number) => void;
+  permission?: string;
   fileInputRef: RefObject<HTMLInputElement | null>;
   uploading: boolean;
   openFilePicker: () => void;
@@ -132,6 +168,11 @@ export function DocumentsTab({
   datasetId,
   docs,
   docsQuery,
+  totalDocuments,
+  documentLimit,
+  documentOffset,
+  onDocumentOffsetChange,
+  permission,
   fileInputRef,
   uploading,
   openFilePicker,
@@ -153,8 +194,28 @@ export function DocumentsTab({
   // queries. The debounced value keys the query, so every manual
   // invalidation below must use the same variable.
   const debouncedSegmentSearch = useDebouncedValue(segmentSearch);
-  const segmentsQuery = useSegments(datasetId, selectedDocId, debouncedSegmentSearch);
-  const segments = segmentsQuery.data || [];
+  const [segmentOffset, setSegmentOffset] = useState(0);
+  const segmentLimit = 100;
+  const segmentsQuery = useSegments(
+    datasetId,
+    selectedDocId,
+    debouncedSegmentSearch,
+    { limit: segmentLimit, offset: segmentOffset }
+  );
+  const segments = segmentsQuery.data?.items ?? [];
+  const segmentTotal = segmentsQuery.data?.total ?? 0;
+
+  useEffect(() => {
+    setSegmentOffset(0);
+  }, [selectedDocId, debouncedSegmentSearch]);
+
+  useEffect(() => {
+    if (totalDocuments > 0 && documentOffset >= totalDocuments) {
+      onDocumentOffsetChange(
+        Math.floor((totalDocuments - 1) / documentLimit) * documentLimit
+      );
+    }
+  }, [documentLimit, documentOffset, onDocumentOffsetChange, totalDocuments]);
 
   // Segment edit dialog — full-field edit: text + answer + keywords are
   // loaded from the segment and saved together (PRD §5-#13).
@@ -177,6 +238,7 @@ export function DocumentsTab({
   const [batchMode, setBatchMode] = useState(false);
   const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set());
   const [batchReindexOpen, setBatchReindexOpen] = useState(false);
+  const [batchReindexAll, setBatchReindexAll] = useState(false);
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
   const [batchLoading, setBatchLoading] = useState(false);
   // Ids the batch-reindex endpoint reported as skipped (409 all-skipped
@@ -191,6 +253,14 @@ export function DocumentsTab({
   const [archiveReason, setArchiveReason] = useState("");
   const [archiveSaving, setArchiveSaving] = useState(false);
   const [unarchiveDocId, setUnarchiveDocId] = useState<string | null>(null);
+  const [metadataRegistry, setMetadataRegistry] = useState<DocumentMetadataRegistry>(
+    EMPTY_METADATA_REGISTRY
+  );
+  const [metadataDocuments, setMetadataDocuments] = useState<Document[]>([]);
+  const [metadataOpen, setMetadataOpen] = useState(false);
+  const [metadataSaving, setMetadataSaving] = useState(false);
+  const canEditMetadata = permission === "owner" || permission === "editor";
+
   // Status filtering runs on the display vocabulary, through the same
   // resolver the row badges use, so a filter always matches what users see.
   const [statusFilter, setStatusFilter] = useState<"all" | DocumentDisplayStatus>("all");
@@ -258,25 +328,24 @@ export function DocumentsTab({
 
   // Don't auto-select first document - only show segments when user clicks "查看切片"
 
-  async function handleReindex(doc: Document) {
+  async function handleDocumentPipelineAction(
+    doc: Document,
+    action: DocumentPipelineAction
+  ) {
     if (!datasetId) return;
 
     try {
-      await reindexDocument(datasetId, doc.document_id);
+      await DOCUMENT_PIPELINE_REQUESTS[action](datasetId, doc.document_id);
+      const actionLabel = t(`knowledge.documentRow.${action}Title`);
       toast.success(
-        t("knowledge.detail.reindexSuccess"),
-        t("knowledge.detail.reindexSuccessDesc", { title: doc.title })
+        t("knowledge.detail.documentActionQueuedTitle", { action: actionLabel }),
+        t("knowledge.detail.documentActionQueuedDesc", { title: doc.title })
       );
       await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
-      // 触发一次刷新
-      setTimeout(() => {
-        qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
-      }, 1000);
     } catch (e) {
-      // 409 = the document already belongs to a queue generation (or the
-      // claim was rejected): that is "already queued", not a failure
-      // (PRD §5-#6). Keep the row state and tell the user instead of
-      // surfacing a raw error.
+      // Every pipeline verb uses the same durable single-owner queue. A 409
+      // means this document already has a generation owner, not that the
+      // user's earlier submission was lost.
       const status = (e as { response?: { status?: number } } | null)?.response?.status;
       if (status === 409) {
         toast.warning(
@@ -286,8 +355,13 @@ export function DocumentsTab({
         await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
         return;
       }
-      console.error("Reindex failed:", e);
-      toast.error(t("knowledge.detail.reindexFailed"), e instanceof Error ? e.message : String(e));
+      console.error(`Document ${action} failed:`, e);
+      toast.error(
+        t("knowledge.detail.documentActionFailed", {
+          action: t(`knowledge.documentRow.${action}Title`),
+        }),
+        e instanceof Error ? e.message : String(e)
+      );
     }
   }
 
@@ -324,10 +398,10 @@ export function DocumentsTab({
       mergeDocumentIntoCache(updated);
       toast.success(
         enabled
-          ? t("knowledge.detail.documentEnabled")
+          ? t("knowledge.detail.documentEnableQueued")
           : t("knowledge.detail.documentDisabled"),
         enabled
-          ? t("knowledge.detail.documentEnabledDesc")
+          ? t("knowledge.detail.documentEnableQueuedDesc")
           : t("knowledge.detail.documentDisabledDesc")
       );
       await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
@@ -395,8 +469,8 @@ export function DocumentsTab({
       mergeDocumentIntoCache(updated);
       setUnarchiveDocId(null);
       toast.success(
-        t("knowledge.detail.unarchiveSuccess"),
-        t("knowledge.detail.unarchiveSuccessDesc", { title: doc?.title ?? "" })
+        t("knowledge.detail.unarchiveQueued"),
+        t("knowledge.detail.unarchiveQueuedDesc", { title: doc?.title ?? "" })
       );
       await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
     } catch (e) {
@@ -438,13 +512,16 @@ export function DocumentsTab({
   }
 
   function toggleSelectAll() {
-    if (selectedDocIds.size === filteredDocs.length) {
-      // Deselect all
-      setSelectedDocIds(new Set());
-    } else {
-      // Select all filtered docs
-      setSelectedDocIds(new Set(filteredDocs.map((d) => d.document_id)));
-    }
+    const pageIds = filteredDocs.map((document) => document.document_id);
+    const allSelected = pageIds.length > 0 && pageIds.every((id) => selectedDocIds.has(id));
+    setSelectedDocIds((previous) => {
+      const next = new Set(previous);
+      for (const id of pageIds) {
+        if (allSelected) next.delete(id);
+        else next.add(id);
+      }
+      return next;
+    });
   }
 
   function selectByStatus(status: string) {
@@ -466,68 +543,134 @@ export function DocumentsTab({
     setSelectedDocIds(new Set(docsWithStatus.map((d) => d.document_id)));
   }
 
-  async function handleBatchReindex() {
-    if (!datasetId || selectedDocIds.size === 0) return;
-    // BatchReindexSchema caps a call at 100 ids and answers 422 beyond it;
-    // guard client-side with a readable hint instead of the raw 422.
-    if (selectedDocIds.size > DOCUMENT_BATCH_REINDEX_LIMIT) {
+  async function openMetadataEditor(documentIds: Iterable<string>) {
+    if (!datasetId) return;
+    try {
+      setMetadataRegistry(await getDocumentMetadataRegistry(datasetId));
+    } catch (error) {
       toast.error(
-        t("knowledge.detail.batchReindexLimitTitle"),
-        t("knowledge.detail.batchReindexLimitText", { limit: DOCUMENT_BATCH_REINDEX_LIMIT })
+        t("knowledge.metadata.loadFailed"),
+        error instanceof Error ? error.message : String(error)
       );
       return;
     }
+    const targets = Array.from(documentIds).map(
+      (documentId) =>
+        docs.find((document) => document.document_id === documentId) ?? {
+          document_id: documentId,
+          dataset_id: datasetId ?? "",
+          title: documentId,
+          status: "completed" as const,
+        }
+    );
+    setMetadataDocuments(targets);
+    setMetadataOpen(true);
+  }
+
+  async function saveMetadata(
+    metadataPatch: Record<string, unknown>,
+    metadataRemove: string[]
+  ) {
+    if (!datasetId || metadataDocuments.length === 0) return;
+    setMetadataSaving(true);
+    try {
+      if (metadataDocuments.length === 1) {
+        await updateDocumentMetadata(
+          datasetId,
+          metadataDocuments[0].document_id,
+          {
+            metadataPatch,
+            metadataRemove,
+            metadataSchemaRevision: metadataRegistry.revision,
+          }
+        );
+      } else {
+        for (const ids of partitionIds(
+          metadataDocuments.map((document) => document.document_id),
+          DOCUMENT_METADATA_BATCH_LIMIT
+        )) {
+          await batchUpdateDocumentMetadata(datasetId, ids, {
+            metadataPatch,
+            metadataRemove,
+            metadataSchemaRevision: metadataRegistry.revision,
+          });
+        }
+      }
+      await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
+      setMetadataOpen(false);
+      toast.success(t("knowledge.metadata.saved"));
+    } catch (error) {
+      const status = (error as { response?: { status?: number } } | null)?.response?.status;
+      if (status === 409) {
+        const latest = await getDocumentMetadataRegistry(datasetId);
+        setMetadataRegistry(latest);
+        toast.warning(
+          t("knowledge.metadata.schemaChanged"),
+          t("knowledge.metadata.schemaChangedHint")
+        );
+      } else {
+        toast.error(
+          t("knowledge.metadata.saveFailed"),
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+    } finally {
+      setMetadataSaving(false);
+    }
+  }
+
+  async function handleBatchReindex() {
+    if (!datasetId || (!batchReindexAll && selectedDocIds.size === 0)) return;
     setBatchLoading(true);
     try {
-      const result = await batchReindexDocuments(datasetId, Array.from(selectedDocIds));
+      const submitted = batchReindexAll
+        ? [await batchReindexDocuments(datasetId, [], true)]
+        : await Promise.all(
+            partitionIds(selectedDocIds, DOCUMENT_BATCH_REINDEX_LIMIT).map((ids) =>
+              batchReindexDocuments(datasetId, ids)
+            )
+          );
+      const completed = await Promise.all(
+        submitted.map((operation) =>
+          waitForDocumentBatchOperation(datasetId, operation.operation_id)
+        )
+      );
+      const summary = summarizeDocumentBatches(completed);
       await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
-      setBatchReindexOpen(false);
-      setBatchReindexSkipped(null);
-      setSelectedDocIds(new Set());
-      // The endpoint reports queued vs skipped ids — surface the split instead
-      // of assuming every selection entered a new generation.
-      if (result.skipped_document_ids.length > 0) {
+      const skippedIds = completed.flatMap((operation) =>
+        operation.problem_items
+          .filter((item) => item.status === "skipped")
+          .map((item) => item.document_id)
+      );
+      if (summary.skipped > 0 || summary.failed > 0) {
+        setBatchReindexSkipped(skippedIds);
+        if (summary.succeeded === 0) {
+          toast.warning(
+            t("knowledge.detail.batchReindexAllSkippedTitle"),
+            t("knowledge.detail.batchReindexAllSkippedText")
+          );
+          return;
+        }
         toast.warning(
           t("knowledge.detail.batchReindexDone"),
           t("knowledge.detail.batchReindexPartial", {
-            queued: result.document_count,
-            skipped: result.skipped_document_ids.length,
+            queued: summary.succeeded,
+            skipped: summary.skipped + summary.failed,
           })
         );
       } else {
         toast.success(
           t("knowledge.detail.batchReindexDone"),
-          t("knowledge.detail.batchReindexSuccess", { count: result.document_count })
+          t("knowledge.detail.batchReindexSuccess", { count: summary.succeeded })
         );
       }
+      setBatchReindexOpen(false);
+      setBatchReindexSkipped(null);
+      setBatchReindexAll(false);
+      setSelectedDocIds(new Set());
     } catch (e) {
-      const response = (e as {
-        response?: { status?: number; data?: { detail?: unknown } };
-      } | null)?.response;
-      if (response?.status === 409) {
-        // All-skipped contract: 409 with detail {message, skipped_document_ids}.
-        // Keep the dialog open and list the skipped documents so the user can
-        // deselect them and retry.
-        const detail = response.data?.detail as
-          | { skipped_document_ids?: unknown }
-          | undefined;
-        const skipped = Array.isArray(detail?.skipped_document_ids)
-          ? (detail?.skipped_document_ids as string[])
-          : [];
-        setBatchReindexSkipped(skipped);
-        toast.warning(
-          t("knowledge.detail.batchReindexAllSkippedTitle"),
-          t("knowledge.detail.batchReindexAllSkippedText")
-        );
-      } else if (response?.status === 422) {
-        toast.error(
-          t("knowledge.detail.batchReindexLimitTitle"),
-          t("knowledge.detail.batchReindexLimitText", { limit: DOCUMENT_BATCH_REINDEX_LIMIT })
-        );
-      } else {
-        console.error("Batch reindex failed:", e);
-        toast.error(t("knowledge.detail.batchReindexFailed"), e instanceof Error ? e.message : String(e));
-      }
+      console.error("Batch reindex failed:", e);
+      toast.error(t("knowledge.detail.batchReindexFailed"), e instanceof Error ? e.message : String(e));
     } finally {
       setBatchLoading(false);
     }
@@ -537,7 +680,17 @@ export function DocumentsTab({
     if (!datasetId || selectedDocIds.size === 0) return;
     setBatchLoading(true);
     try {
-      const result = await batchDeleteDocuments(datasetId, Array.from(selectedDocIds));
+      const submitted = await Promise.all(
+        partitionIds(selectedDocIds, DOCUMENT_BATCH_DELETE_LIMIT).map((ids) =>
+          batchDeleteDocuments(datasetId, ids)
+        )
+      );
+      const completed = await Promise.all(
+        submitted.map((operation) =>
+          waitForDocumentBatchOperation(datasetId, operation.operation_id)
+        )
+      );
+      const result = summarizeDocumentBatches(completed);
       await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
       setBatchDeleteOpen(false);
       setSelectedDocIds(new Set());
@@ -546,10 +699,16 @@ export function DocumentsTab({
         setSelectedDocId(undefined);
       }
       // Show result
-      if (result.failed_count > 0) {
-        toast.warning(t("knowledge.detail.batchDeleteDone"), `${result.success_count} / ${result.failed_count}`);
+      if (result.failed > 0 || result.skipped > 0) {
+        toast.warning(
+          t("knowledge.detail.batchDeleteDone"),
+          `${result.succeeded} / ${result.failed + result.skipped}`
+        );
       } else {
-        toast.success(t("knowledge.detail.batchDeleteDone"), t("knowledge.detail.batchDeleteSuccess", { count: result.success_count }));
+        toast.success(
+          t("knowledge.detail.batchDeleteDone"),
+          t("knowledge.detail.batchDeleteSuccess", { count: result.succeeded })
+        );
       }
     } catch (e) {
       console.error("Batch delete failed:", e);
@@ -563,6 +722,7 @@ export function DocumentsTab({
   // batch state: it belongs to the previously open document's segment list.
   function selectDocument(docId: string | undefined) {
     setSelectedDocId(docId);
+    setSegmentOffset(0);
     setSelectedSegmentIds(new Set());
     setSegmentBatchMode(false);
   }
@@ -674,22 +834,20 @@ export function DocumentsTab({
   }
 
   function toggleSelectAllSegments() {
-    setSelectedSegmentIds((prev) =>
-      prev.size === segments.length
-        ? new Set()
-        : new Set(segments.map((s) => s.segment_id))
-    );
+    const pageIds = segments.map((segment) => segment.segment_id);
+    const allSelected = pageIds.length > 0 && pageIds.every((id) => selectedSegmentIds.has(id));
+    setSelectedSegmentIds((previous) => {
+      const next = new Set(previous);
+      for (const id of pageIds) {
+        if (allSelected) next.delete(id);
+        else next.add(id);
+      }
+      return next;
+    });
   }
 
   async function handleSegmentBatchEnable(enabled: boolean) {
     if (!datasetId || selectedSegmentIds.size === 0) return;
-    if (selectedSegmentIds.size > SEGMENT_BATCH_LIMIT) {
-      toast.error(
-        t("knowledge.segment.batchLimitTitle"),
-        t("knowledge.segment.batchLimitText", { limit: SEGMENT_BATCH_LIMIT })
-      );
-      return;
-    }
     const ids = Array.from(selectedSegmentIds);
     setSegmentBatchLoading(true);
     setPendingSegmentIds((prev) => {
@@ -698,7 +856,17 @@ export function DocumentsTab({
       return next;
     });
     try {
-      const result = await batchSetSegmentsEnabled(datasetId, ids, enabled);
+      const results = [];
+      for (const chunk of partitionIds(ids, SEGMENT_BATCH_LIMIT)) {
+        results.push(await batchSetSegmentsEnabled(datasetId, chunk, enabled));
+      }
+      const result = results.reduce(
+        (summary, item) => ({
+          updated: summary.updated + item.updated,
+          total: summary.total + item.total,
+        }),
+        { updated: 0, total: 0 }
+      );
       await qc.invalidateQueries({
         queryKey: ["kb-segments", datasetId, selectedDocId, debouncedSegmentSearch],
       });
@@ -860,7 +1028,7 @@ export function DocumentsTab({
                 <>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem onClick={toggleSelectAll}>
-                    {selectedDocIds.size === filteredDocs.length ? (
+                    {filteredDocs.length > 0 && filteredDocs.every((doc) => selectedDocIds.has(doc.document_id)) ? (
                       <>
                         <Square className="h-4 w-4 mr-2" />
                         {t("knowledge.detail.deselectAll")}
@@ -882,8 +1050,19 @@ export function DocumentsTab({
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
+                    onClick={() => void openMetadataEditor(selectedDocIds)}
+                    disabled={
+                      !canEditMetadata ||
+                      selectedDocIds.size === 0
+                    }
+                  >
+                    <Tags className="h-4 w-4 mr-2" />
+                    {t("knowledge.metadata.editBatch", { count: selectedDocIds.size })}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
                     onClick={() => {
                       setBatchReindexSkipped(null);
+                      setBatchReindexAll(false);
                       setBatchReindexOpen(true);
                     }}
                     disabled={selectedDocIds.size === 0}
@@ -891,6 +1070,18 @@ export function DocumentsTab({
                   >
                     <Zap className="h-4 w-4 mr-2" />
                     {t("knowledge.detail.batchReindex", { count: selectedDocIds.size })}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={() => {
+                      setBatchReindexSkipped(null);
+                      setBatchReindexAll(true);
+                      setBatchReindexOpen(true);
+                    }}
+                    disabled={totalDocuments === 0}
+                    className="text-primary"
+                  >
+                    <Zap className="h-4 w-4 mr-2" />
+                    {t("knowledge.detail.batchReindexAll", { count: totalDocuments })}
                   </DropdownMenuItem>
                   <DropdownMenuItem
                     onClick={() => setBatchDeleteOpen(true)}
@@ -951,7 +1142,10 @@ export function DocumentsTab({
           {batchMode && (
             <div className="mr-3 flex items-center">
               <Checkbox
-                checked={filteredDocs.length > 0 && selectedDocIds.size === filteredDocs.length}
+                checked={
+                  filteredDocs.length > 0 &&
+                  filteredDocs.every((doc) => selectedDocIds.has(doc.document_id))
+                }
                 onCheckedChange={toggleSelectAll}
               />
             </div>
@@ -976,11 +1170,19 @@ export function DocumentsTab({
               showCheckbox={batchMode}
               onSelect={() => selectDocument(doc.document_id)}
               onCheck={() => toggleDocSelection(doc.document_id)}
-              onReindex={() => handleReindex(doc)}
+              onReembed={() => handleDocumentPipelineAction(doc, "reembed")}
+              onReprocess={() => handleDocumentPipelineAction(doc, "reprocess")}
+              onRecover={() => handleDocumentPipelineAction(doc, "recover")}
+              onRetry={() => handleDocumentPipelineAction(doc, "retry")}
               onDelete={() => handleDeleteDoc(doc)}
               onToggleEnabled={(enabled) => handleToggleDocEnabled(doc, enabled)}
               onArchive={() => openArchiveDialog(doc)}
               onUnarchive={() => setUnarchiveDocId(doc.document_id)}
+              onEditMetadata={
+                canEditMetadata
+                  ? () => void openMetadataEditor([doc.document_id])
+                  : undefined
+              }
               busyLifecycle={pendingDocIds.has(doc.document_id)}
               onVersionRestored={() => qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] })}
             />
@@ -994,6 +1196,39 @@ export function DocumentsTab({
           )}
         </div>
       </Card>
+
+      <div
+        data-testid="document-pagination"
+        className="flex items-center justify-between text-sm text-muted-foreground"
+      >
+        <span>
+          {t("knowledge.detail.paginationShowing", {
+            start: totalDocuments === 0 ? 0 : documentOffset + 1,
+            end: Math.min(documentOffset + docs.length, totalDocuments),
+            total: totalDocuments,
+          })}
+        </span>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={documentOffset === 0 || docsQuery.isFetching}
+            onClick={() => onDocumentOffsetChange(Math.max(0, documentOffset - documentLimit))}
+          >
+            <ChevronLeft className="mr-1 h-4 w-4" />
+            {t("knowledge.detail.previousPage")}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={documentOffset + documentLimit >= totalDocuments || docsQuery.isFetching}
+            onClick={() => onDocumentOffsetChange(documentOffset + documentLimit)}
+          >
+            {t("knowledge.detail.nextPage")}
+            <ChevronRight className="ml-1 h-4 w-4" />
+          </Button>
+        </div>
+      </div>
 
       {/* 切片列表 */}
       {selectedDoc && (
@@ -1018,7 +1253,7 @@ export function DocumentsTab({
                   <p className="text-xs text-muted-foreground">{selectedDoc.title}</p>
                 </div>
               </div>
-              <Badge className="bg-primary/10 text-primary/90 border-primary/20">{t("knowledge.detail.segmentCount", { count: segments.length })}</Badge>
+              <Badge className="bg-primary/10 text-primary/90 border-primary/20">{t("knowledge.detail.segmentCount", { count: segmentTotal })}</Badge>
             </div>
             <div className="flex items-center gap-3">
               <div className="relative">
@@ -1053,7 +1288,10 @@ export function DocumentsTab({
             >
               <div className="flex items-center gap-2">
                 <Checkbox
-                  checked={segments.length > 0 && selectedSegmentIds.size === segments.length}
+                  checked={
+                    segments.length > 0 &&
+                    segments.every((segment) => selectedSegmentIds.has(segment.segment_id))
+                  }
                   onCheckedChange={toggleSelectAllSegments}
                   aria-label={t("knowledge.detail.selectAll")}
                 />
@@ -1091,11 +1329,6 @@ export function DocumentsTab({
                   {t("knowledge.segment.disable")}
                 </Button>
               </div>
-              {selectedSegmentIds.size > SEGMENT_BATCH_LIMIT && (
-                <p className="w-full text-xs text-amber-600 dark:text-amber-400">
-                  {t("knowledge.segment.batchLimitText", { limit: SEGMENT_BATCH_LIMIT })}
-                </p>
-              )}
             </div>
           )}
 
@@ -1112,6 +1345,7 @@ export function DocumentsTab({
             ) : (
               <SegmentList
                 segments={segments}
+                partialPage={segmentTotal > segments.length}
                 onEdit={(id) => openEdit(id)}
                 onDelete={(id) => handleDeleteSegment(id)}
                 onToggleEnabled={(id, enabled) => handleToggleSegmentEnabled(id, enabled)}
@@ -1121,6 +1355,38 @@ export function DocumentsTab({
                 onToggleSelect={toggleSegmentSelect}
               />
             )}
+          </div>
+          <div
+            data-testid="segment-pagination"
+            className="flex items-center justify-between border-t border-border px-5 py-3 text-sm text-muted-foreground"
+          >
+            <span>
+              {t("knowledge.detail.paginationShowing", {
+                start: segmentTotal === 0 ? 0 : segmentOffset + 1,
+                end: Math.min(segmentOffset + segments.length, segmentTotal),
+                total: segmentTotal,
+              })}
+            </span>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={segmentOffset === 0 || segmentsQuery.isFetching}
+                onClick={() => setSegmentOffset(Math.max(0, segmentOffset - segmentLimit))}
+              >
+                <ChevronLeft className="mr-1 h-4 w-4" />
+                {t("knowledge.detail.previousPage")}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={segmentOffset + segmentLimit >= segmentTotal || segmentsQuery.isFetching}
+                onClick={() => setSegmentOffset(segmentOffset + segmentLimit)}
+              >
+                {t("knowledge.detail.nextPage")}
+                <ChevronRight className="ml-1 h-4 w-4" />
+              </Button>
+            </div>
           </div>
         </Card>
       )}
@@ -1177,12 +1443,24 @@ export function DocumentsTab({
         </DialogContent>
       </Dialog>
 
+      <DocumentMetadataDialog
+        open={metadataOpen}
+        onOpenChange={setMetadataOpen}
+        documents={metadataDocuments}
+        registry={metadataRegistry}
+        saving={metadataSaving}
+        onSave={saveMetadata}
+      />
+
       {/* 批量重建索引确认对话框 */}
       <Dialog
         open={batchReindexOpen}
         onOpenChange={(open) => {
           setBatchReindexOpen(open);
-          if (!open) setBatchReindexSkipped(null);
+          if (!open) {
+            setBatchReindexSkipped(null);
+            setBatchReindexAll(false);
+          }
         }}
       >
         <DialogContent className="max-w-md">
@@ -1194,7 +1472,9 @@ export function DocumentsTab({
           </DialogHeader>
           <div className="space-y-3">
             <p className="text-sm text-muted-foreground">
-              {t("knowledge.detail.batchReindexText", { count: selectedDocIds.size })}
+              {batchReindexAll
+                ? t("knowledge.detail.batchReindexAllText", { count: totalDocuments })
+                : t("knowledge.detail.batchReindexText", { count: selectedDocIds.size })}
             </p>
             <div className="bg-muted/50 rounded-lg p-3 text-xs text-muted-foreground space-y-1">
               <p>• {t("knowledge.detail.batchReindexHint1")}</p>
@@ -1223,7 +1503,7 @@ export function DocumentsTab({
               </div>
             )}
             {/* 选中的文档列表预览 */}
-            <div className="max-h-32 overflow-auto border border-border rounded-lg">
+            {!batchReindexAll && <div className="max-h-32 overflow-auto border border-border rounded-lg">
               {Array.from(selectedDocIds).slice(0, 10).map((docId) => {
                 const doc = docs.find((d) => d.document_id === docId);
                 return doc ? (
@@ -1237,7 +1517,7 @@ export function DocumentsTab({
                   {t("knowledge.detail.moreDocuments", { count: selectedDocIds.size - 10 })}
                 </div>
               )}
-            </div>
+            </div>}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setBatchReindexOpen(false)} disabled={batchLoading}>
@@ -1250,7 +1530,9 @@ export function DocumentsTab({
                   {t("knowledge.detail.processing")}
                 </>
               ) : (
-                t("knowledge.detail.confirmReindex", { count: selectedDocIds.size })
+                t("knowledge.detail.confirmReindex", {
+                  count: batchReindexAll ? totalDocuments : selectedDocIds.size,
+                })
               )}
             </Button>
           </DialogFooter>

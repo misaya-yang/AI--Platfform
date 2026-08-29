@@ -160,11 +160,20 @@ export function useDatasetUploadController({
         break;
     }
 
-    // NOTE (D6): the dialog exposes metadata-extraction toggles, but the
-    // backend ChunkingConfigSchema (extra="forbid") cannot carry
-    // extract_metadata/metadata_fields yet — sending them 422s the entire
-    // config update. The payload omits them until the backend schema grows
-    // the fields; handleConfirmUpload warns the user when the toggles are on.
+    if (uploadMetadataEnabled) {
+      const metadataFields = [
+        uploadExtractTitle && "title",
+        uploadExtractSummary && "summary",
+        uploadExtractKeywords && "keywords",
+        uploadExtractEntities && "entities",
+        uploadDetectLanguage && "language",
+      ].filter((field): field is string => Boolean(field));
+      baseConfig.extract_metadata = metadataFields.length > 0;
+      baseConfig.metadata_fields = metadataFields;
+    } else {
+      baseConfig.extract_metadata = false;
+      baseConfig.metadata_fields = [];
+    }
 
     return baseConfig;
   }
@@ -221,10 +230,6 @@ export function useDatasetUploadController({
       // upload.
       const embeddingChanged =
         !datasetEmbedding || datasetEmbedding !== uploadEmbeddingModel;
-
-      if (uploadMetadataEnabled) {
-        toast.warning(t("knowledge.detail.metadataNotPersistable"));
-      }
 
       try {
         const configPatch: Parameters<typeof updateDatasetConfig>[1] = {

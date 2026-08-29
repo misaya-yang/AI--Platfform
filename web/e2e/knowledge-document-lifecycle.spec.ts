@@ -30,6 +30,8 @@ interface MockDoc {
   enabled: boolean;
   archived: boolean;
   archived_reason?: string | null;
+  error?: string;
+  metadata?: Record<string, unknown>;
   word_count: number;
   char_count: number;
   size_bytes: number;
@@ -77,14 +79,59 @@ function makeDocs(): MockDoc[] {
       enabled: true,
       archived: false,
     },
+    {
+      ...base,
+      document_id: "doc-disabled",
+      title: "待启用制度",
+      status: "completed",
+      display_status: "disabled",
+      enabled: false,
+      archived: false,
+    },
+    {
+      ...base,
+      document_id: "doc-error",
+      title: "失败文档",
+      status: "error",
+      display_status: "error",
+      enabled: true,
+      archived: false,
+      error: "worker interrupted",
+    },
   ];
 }
 
 function restamp(doc: MockDoc) {
   if (doc.archived) doc.display_status = "archived";
+  else if (doc.status === "error" || doc.status === "failed") doc.display_status = "error";
   else if (doc.status === "completed")
     doc.display_status = doc.enabled ? "available" : "disabled";
   else if (doc.status === "waiting") doc.display_status = "queuing";
+}
+
+function queueActivation(doc: MockDoc, requestedAction: "enable" | "unarchive") {
+  doc.status = "waiting";
+  doc.metadata = {
+    ...(doc.metadata ?? {}),
+    _document_lifecycle_reindex: {
+      status: "pending",
+      desired_enabled: true,
+      desired_archived: false,
+      requested_action: requestedAction,
+    },
+  };
+  restamp(doc);
+}
+
+function completeActivation(doc: MockDoc) {
+  doc.enabled = true;
+  doc.archived = false;
+  doc.archived_reason = null;
+  doc.status = "completed";
+  const metadata = { ...(doc.metadata ?? {}) };
+  delete metadata._document_lifecycle_reindex;
+  doc.metadata = metadata;
+  restamp(doc);
 }
 
 function jsonResponse(body: unknown, status = 200) {
@@ -116,11 +163,17 @@ function watchClientErrors(page: Page, allowedConsoleErrors: RegExp[] = []) {
 
 async function installLifecycleHarness(page: Page) {
   const docs = makeDocs();
+  const batchReceipts = new Map<string, Record<string, unknown>>();
   const captured = {
     statusUpdates: [] as Array<{ documentId: string; body: Record<string, unknown> }>,
     archiveUpdates: [] as Array<{ documentId: string; body: Record<string, unknown> }>,
-    reindexes: [] as string[],
+    pipelineActions: [] as Array<{ documentId: string; action: string }>,
     batches: [] as Array<Record<string, unknown>>,
+    completeActivation(documentId: string) {
+      const doc = docs.find((item) => item.document_id === documentId);
+      if (!doc) throw new Error(`Unknown mock document: ${documentId}`);
+      completeActivation(doc);
+    },
   };
 
   await installClientAuth(page, {
@@ -144,7 +197,7 @@ async function installLifecycleHarness(page: Page) {
           embedding_provider: "local",
           embedding_model: "hash-384",
           embedding_dimension: 384,
-          statistics: { document_count: 3, segment_count: 9, token_count: 180 },
+          statistics: { document_count: 5, segment_count: 15, token_count: 300 },
         })
       );
       return;
@@ -167,21 +220,6 @@ async function installLifecycleHarness(page: Page) {
         (id) => docs.find((d) => d.document_id === id)?.status !== "waiting"
       );
       const skippedIds = ids.filter((id) => !queuedIds.includes(id));
-      if (queuedIds.length === 0) {
-        // All-skipped contract: 409 carrying the skipped ids.
-        await route.fulfill(
-          jsonResponse(
-            {
-              detail: {
-                message: "No document entered a new ingestion generation",
-                skipped_document_ids: skippedIds,
-              },
-            },
-            409
-          )
-        );
-        return;
-      }
       queuedIds.forEach((id) => {
         const doc = docs.find((d) => d.document_id === id);
         if (doc) {
@@ -189,14 +227,36 @@ async function installLifecycleHarness(page: Page) {
           restamp(doc);
         }
       });
+      const operationId = `batch-${batchReceipts.size + 1}`;
+      const receipt = {
+        operation_id: operationId,
+        tenant_id: "tenant-a",
+        dataset_id: DATASET_ID,
+        operation: "reembed",
+        status: skippedIds.length > 0 ? "partial" : "completed",
+        total_count: ids.length,
+        queued_count: queuedIds.length,
+        skipped_count: skippedIds.length,
+        failed_count: 0,
+        problem_items: skippedIds.map((documentId) => ({
+          document_id: documentId,
+          status: "skipped",
+          error_code: "already_queued_or_ineligible",
+        })),
+        problem_items_truncated: false,
+      };
+      batchReceipts.set(operationId, receipt);
       await route.fulfill(
-        jsonResponse({
-          status: skippedIds.length > 0 ? "partial" : "queuing",
-          document_count: queuedIds.length,
-          queued_document_ids: queuedIds,
-          skipped_document_ids: skippedIds,
-        })
+        jsonResponse(receipt, 202)
       );
+      return;
+    }
+
+    const batchMatch = pathname.match(
+      /^\/api\/v1\/knowledge\/[^/]+\/document-batches\/([^/]+)$/
+    );
+    if (method === "GET" && batchMatch) {
+      await route.fulfill(jsonResponse(batchReceipts.get(batchMatch[1]) ?? {}, 200));
       return;
     }
 
@@ -209,8 +269,15 @@ async function installLifecycleHarness(page: Page) {
       captured.statusUpdates.push({ documentId, body });
       const doc = docs.find((d) => d.document_id === documentId);
       if (doc && typeof body.enabled === "boolean") {
-        doc.enabled = body.enabled;
-        restamp(doc);
+        if (body.enabled && !doc.enabled) {
+          // Activation is a real two-stage backend transition: the response
+          // is waiting while the old enabled=false value stays authoritative.
+          queueActivation(doc, "enable");
+        } else {
+          doc.enabled = body.enabled;
+          doc.status = "completed";
+          restamp(doc);
+        }
       }
       await route.fulfill(jsonResponse(doc ?? {}));
       return;
@@ -225,22 +292,30 @@ async function installLifecycleHarness(page: Page) {
       captured.archiveUpdates.push({ documentId, body });
       const doc = docs.find((d) => d.document_id === documentId);
       if (doc && typeof body.archived === "boolean") {
-        doc.archived = body.archived;
-        doc.archived_reason = body.archived ? body.reason ?? null : null;
-        restamp(doc);
+        if (!body.archived && doc.archived) {
+          // Unarchive also keeps archived=true until the queued rebuild wins.
+          queueActivation(doc, "unarchive");
+        } else {
+          doc.archived = body.archived;
+          doc.archived_reason = body.archived ? body.reason ?? null : null;
+          doc.status = "completed";
+          restamp(doc);
+        }
       }
       await route.fulfill(jsonResponse(doc ?? {}));
       return;
     }
 
-    const reindexMatch = pathname.match(
-      /^\/api\/v1\/knowledge\/[^/]+\/documents\/([^/]+)\/reindex$/
+    const pipelineMatch = pathname.match(
+      /^\/api\/v1\/knowledge\/[^/]+\/documents\/([^/]+)\/(reindex|reprocess|recover|retry)$/
     );
-    if (method === "POST" && reindexMatch) {
-      const documentId = reindexMatch[1];
-      captured.reindexes.push(documentId);
+    if (method === "POST" && pipelineMatch) {
+      const documentId = pipelineMatch[1];
+      const endpoint = pipelineMatch[2];
+      const action = endpoint === "reindex" ? "reembed" : endpoint;
+      captured.pipelineActions.push({ documentId, action });
       const doc = docs.find((d) => d.document_id === documentId);
-      if (!doc || doc.status === "waiting") {
+      if (!doc || doc.status === "waiting" || documentId === "doc-policy") {
         await route.fulfill(
           jsonResponse(
             { detail: "Document is already queued; the durable queue owns this generation" },
@@ -251,7 +326,9 @@ async function installLifecycleHarness(page: Page) {
       }
       doc.status = "waiting";
       restamp(doc);
-      await route.fulfill(jsonResponse({ status: "queuing", document_id: documentId }));
+      await route.fulfill(
+        jsonResponse({ status: "queuing", document_id: documentId, action })
+      );
       return;
     }
 
@@ -291,6 +368,44 @@ test.describe("@mock KB document lifecycle", () => {
     assertNoClientErrors();
   });
 
+  test("enable stays queued across reload until the worker flips the durable state", async ({
+    page,
+  }) => {
+    const assertNoClientErrors = watchClientErrors(page);
+    const captured = await installLifecycleHarness(page);
+    await openDocumentsTab(page);
+
+    const toggle = page.getByTestId("doc-switch-doc-disabled");
+    await expect(toggle).not.toBeChecked();
+    await toggle.click();
+
+    await expect.poll(() => captured.statusUpdates.length).toBe(1);
+    expect(captured.statusUpdates[0]).toEqual({
+      documentId: "doc-disabled",
+      body: { enabled: true },
+    });
+    await expect(page.getByText("启用已排队", { exact: true })).toBeVisible();
+    await expect(toggle).not.toBeChecked();
+    await expect(toggle).toBeDisabled();
+    await expect(page.getByTestId("doc-row-doc-disabled")).toContainText("等待处理");
+
+    // The pending marker and old enabled=false value are server state, not an
+    // optimistic client patch, so a full reload must preserve both.
+    await page.reload();
+    const reloadedToggle = page.getByTestId("doc-switch-doc-disabled");
+    await expect(reloadedToggle).not.toBeChecked();
+    await expect(reloadedToggle).toBeDisabled();
+    await expect(page.getByTestId("doc-row-doc-disabled")).toContainText("等待处理");
+
+    // Completing the mock worker transition is observed by conditional poll;
+    // no manual refresh is needed after this point.
+    captured.completeActivation("doc-disabled");
+    await expect(reloadedToggle).toBeChecked({ timeout: 5_000 });
+    await expect(reloadedToggle).toBeEnabled();
+    await expect(page.getByTestId("doc-disabled-badge-doc-disabled")).toHaveCount(0);
+    assertNoClientErrors();
+  });
+
   test("archives with a reason, then unarchives through the confirm dialog", async ({
     page,
   }) => {
@@ -324,12 +439,110 @@ test.describe("@mock KB document lifecycle", () => {
       documentId: "doc-handbook",
       body: { archived: false },
     });
-    await expect(page.getByTestId("doc-archived-badge-doc-handbook")).toHaveCount(0);
-    await expect(page.getByText("文档已恢复", { exact: true })).toBeVisible();
+    // The activation response is waiting and deliberately preserves
+    // archived=true until the worker has restored the vectors.
+    await expect(page.getByTestId("doc-archived-badge-doc-handbook")).toBeVisible();
+    await expect(page.getByText("恢复已排队", { exact: true })).toBeVisible();
+    await expect(page.getByTestId("doc-unarchive-doc-handbook")).toBeDisabled();
+    await expect(page.getByTestId("doc-row-doc-handbook")).toContainText("等待处理");
+
+    await page.reload();
+    await expect(page.getByTestId("doc-archived-badge-doc-handbook")).toBeVisible();
+    await expect(page.getByTestId("doc-unarchive-doc-handbook")).toBeDisabled();
+    captured.completeActivation("doc-handbook");
+    await expect(page.getByTestId("doc-archived-badge-doc-handbook")).toHaveCount(0, {
+      timeout: 5_000,
+    });
+    await expect(page.getByTestId("doc-switch-doc-handbook")).toBeChecked();
     assertNoClientErrors();
   });
 
-  test("single reindex 409 is reported as already queued, not an error", async ({
+  test("reembed is explicitly vector-only and calls the legacy reindex route", async ({
+    page,
+  }) => {
+    const assertNoClientErrors = watchClientErrors(page);
+    const captured = await installLifecycleHarness(page);
+    await openDocumentsTab(page);
+
+    await page.getByTestId("doc-index-actions-doc-handbook").click();
+    await page.getByTestId("doc-reembed-doc-handbook").click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toContainText("确认仅重嵌文档向量？");
+    await expect(dialog).toContainText("不会重新解析源文件，也不会改变切片边界");
+    await dialog.getByRole("button", { name: "加入重嵌队列" }).click();
+
+    await expect.poll(() => captured.pipelineActions).toContainEqual({
+      documentId: "doc-handbook",
+      action: "reembed",
+    });
+    await expect(page.getByText("仅重嵌向量已排队", { exact: true })).toBeVisible();
+    assertNoClientErrors();
+  });
+
+  test("reprocess has a separate full-pipeline confirmation and endpoint", async ({ page }) => {
+    const assertNoClientErrors = watchClientErrors(page);
+    const captured = await installLifecycleHarness(page);
+    await openDocumentsTab(page);
+
+    await page.getByTestId("doc-index-actions-doc-handbook").click();
+    await page.getByTestId("doc-reprocess-doc-handbook").click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toContainText("确认重新处理文档？");
+    await expect(dialog).toContainText("重新解析、切分并重嵌");
+    await dialog.getByRole("button", { name: "加入重处理队列" }).click();
+
+    await expect.poll(() => captured.pipelineActions).toContainEqual({
+      documentId: "doc-handbook",
+      action: "reprocess",
+    });
+    assertNoClientErrors();
+  });
+
+  test("errored documents expose recover and full retry as distinct choices", async ({
+    page,
+  }) => {
+    const assertNoClientErrors = watchClientErrors(page);
+    const captured = await installLifecycleHarness(page);
+    await openDocumentsTab(page);
+
+    await page.getByTestId("doc-index-actions-doc-error").click();
+    await expect(page.getByTestId("doc-recover-doc-error")).toBeVisible();
+    await expect(page.getByTestId("doc-retry-doc-error")).toBeVisible();
+    await page.getByTestId("doc-recover-doc-error").click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toContainText("确认续跑失败世代？");
+    await expect(dialog).toContainText("最远的持久化处理阶段");
+    await dialog.getByRole("button", { name: "加入续跑队列" }).click();
+
+    await expect.poll(() => captured.pipelineActions).toContainEqual({
+      documentId: "doc-error",
+      action: "recover",
+    });
+    assertNoClientErrors();
+  });
+
+  test("full retry promises atomic replacement without clearing the serving generation", async ({ page }) => {
+    const assertNoClientErrors = watchClientErrors(page);
+    const captured = await installLifecycleHarness(page);
+    await openDocumentsTab(page);
+
+    await page.getByTestId("doc-index-actions-doc-error").click();
+    await page.getByTestId("doc-retry-doc-error").click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toContainText("确认完整重试？");
+    await expect(dialog).toContainText("旧世代持续可读");
+    await expect(dialog).toContainText("失败或取消会恢复旧世代");
+    await expect(dialog).not.toContainText("丢弃");
+    await dialog.getByRole("button", { name: "加入完整重试队列" }).click();
+
+    await expect.poll(() => captured.pipelineActions).toContainEqual({
+      documentId: "doc-error",
+      action: "retry",
+    });
+    assertNoClientErrors();
+  });
+
+  test("single reembed 409 is reported as already queued, not an error", async ({
     page,
   }) => {
     // The 409 is the contract under test; the browser logs the non-2xx
@@ -340,14 +553,18 @@ test.describe("@mock KB document lifecycle", () => {
     const captured = await installLifecycleHarness(page);
     await openDocumentsTab(page);
 
-    await page.getByTestId("doc-reindex-doc-legacy").click();
-    await expect(page.getByRole("alertdialog")).toContainText("确认重新构建索引？");
-    await page.getByRole("alertdialog").getByRole("button", { name: "确认重建" }).click();
+    await page.getByTestId("doc-index-actions-doc-policy").click();
+    await page.getByTestId("doc-reembed-doc-policy").click();
+    await expect(page.getByRole("alertdialog")).toContainText("确认仅重嵌文档向量？");
+    await page.getByRole("alertdialog").getByRole("button", { name: "加入重嵌队列" }).click();
 
-    await expect.poll(() => captured.reindexes).toContain("doc-legacy");
+    await expect.poll(() => captured.pipelineActions).toContainEqual({
+      documentId: "doc-policy",
+      action: "reembed",
+    });
     await expect(page.getByText("已在队列", { exact: true })).toBeVisible();
     // The failure path must not fire alongside.
-    await expect(page.getByText("重建索引失败")).toHaveCount(0);
+    await expect(page.getByText("仅重嵌向量失败")).toHaveCount(0);
     assertNoClientErrors();
   });
 
@@ -362,12 +579,12 @@ test.describe("@mock KB document lifecycle", () => {
     await page.getByTestId("doc-select-doc-legacy").click();
 
     await page.getByRole("button", { name: /批量操作/ }).first().click();
-    await page.getByRole("menuitem", { name: /^批量重建索引 \(2\)/ }).click();
+    await page.getByRole("menuitem", { name: /^批量重嵌向量 \(2\)/ }).click();
 
     const batchRequest = page.waitForRequest((request) =>
       request.url().includes(`/api/v1/knowledge/${DATASET_ID}/documents/batch-reindex`)
     );
-    await page.getByRole("button", { name: /^确认重建 \(2\)/ }).click();
+    await page.getByRole("button", { name: /^确认重嵌 \(2\)/ }).click();
 
     const body = (await batchRequest).postDataJSON() as Record<string, unknown>;
     expect(body.document_ids).toEqual(["doc-handbook", "doc-legacy"]);
@@ -394,8 +611,8 @@ test.describe("@mock KB document lifecycle", () => {
     await page.getByTestId("doc-select-doc-legacy").click();
 
     await page.getByRole("button", { name: /批量操作/ }).first().click();
-    await page.getByRole("menuitem", { name: /^批量重建索引 \(1\)/ }).click();
-    await page.getByRole("button", { name: /^确认重建 \(1\)/ }).click();
+    await page.getByRole("menuitem", { name: /^批量重嵌向量 \(1\)/ }).click();
+    await page.getByRole("button", { name: /^确认重嵌 \(1\)/ }).click();
 
     await expect.poll(() => captured.batches.length).toBeGreaterThan(0);
     await expect(page.getByText("没有文档进入新的处理轮次", { exact: true })).toBeVisible();

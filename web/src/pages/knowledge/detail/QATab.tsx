@@ -48,6 +48,7 @@ import {
 } from "@/components/ui/select";
 import { StreamOutput } from "@/components/StreamOutput";
 import type { HitTestConsole } from "@/pages/knowledge/detail/useHitTestConsole";
+import { KnowledgeFeedbackControl } from "@/pages/knowledge/detail/KnowledgeFeedbackControl";
 
 type QAChatMessage = {
   id: string;
@@ -120,6 +121,7 @@ export function QATab({ datasetId, hitTest }: QATabProps) {
         kbDatasetId: datasetId,
         query: queryText,
         relevantSegmentIds: segmentIds,
+        sourceTraceId: message.response.trace_id || undefined,
       });
       toast.success(
         t("knowledge.detail.sentToEvalTitle"),
@@ -664,6 +666,16 @@ export function QATab({ datasetId, hitTest }: QATabProps) {
                                   {t("knowledge.detail.sendToEval")}
                                 </Button>
                               </div>
+
+                              {datasetId && msg.response.trace_id && msg.response.query_fingerprint && (
+                                <KnowledgeFeedbackControl
+                                  compact
+                                  datasetId={datasetId}
+                                  traceId={msg.response.trace_id}
+                                  queryFingerprint={msg.response.query_fingerprint}
+                                  targetType="qa_answer"
+                                />
+                              )}
 
                               {qaShowSources && msg.response.context_segments.length > 0 && (
                                 <details className="rounded-lg border border-border bg-muted/40">

@@ -11,9 +11,11 @@ import { installClientAuth, seedClientPrefs } from "./support/helpers";
  *      examples:import (mode=skip_duplicates, which dedupes on
  *      metadata.case_id), edited cases go through PATCH — and PATCH keeps
  *      metadata.case_id so later imports still recognise the example;
- *   3. JSONL import reuses the eval page's parse/validate/batch pipeline and
+ *   3. explicitly removed persisted cases go through DELETE and stay absent
+ *      after a full page reload;
+ *   4. JSONL import reuses the eval page's parse/validate/batch pipeline and
  *      lands in the same linked eval dataset;
- *   4. hit-test "send to eval set" persists the query + hit segments under a
+ *   5. hit-test "send to eval set" persists the query + hit segments under a
  *      deterministic case_id (kb-hit-<dataset>-<hash>), so a repeated send
  *      reports as skipped instead of duplicating.
  *
@@ -177,6 +179,7 @@ async function installEvalCasesHarness(
     createdDatasets: [] as Array<Record<string, unknown>>,
     imports: [] as Array<{ mode?: string; examples: Array<Record<string, unknown>> }>,
     patches: [] as Array<{ exampleId: string; body: Record<string, unknown> }>,
+    deletes: [] as string[],
   };
 
   await installClientAuth(page, {
@@ -367,6 +370,18 @@ async function installEvalCasesHarness(
       await route.fulfill(jsonResponse(updated));
       return;
     }
+    if (method === "DELETE" && patchMatch) {
+      const exampleId = patchMatch[1];
+      const index = examples.findIndex((entry) => entry.example_id === exampleId);
+      if (index < 0) {
+        await route.fulfill(jsonResponse({ detail: "Example not found" }, 404));
+        return;
+      }
+      examples.splice(index, 1);
+      captured.deletes.push(exampleId);
+      await route.fulfill({ status: 204 });
+      return;
+    }
 
     await route.fulfill(jsonResponse({}));
   });
@@ -455,6 +470,39 @@ test.describe("@mock KB eval case persistence", () => {
 
     // exact: Radix renders an aria-live twin of every toast.
     await expect(page.getByText("评测用例已保存", { exact: true })).toBeVisible();
+    assertNoClientErrors();
+  });
+
+  test("deletes a persisted case and keeps it deleted after reload", async ({ page }) => {
+    const assertNoClientErrors = watchClientErrors(page);
+    const captured = await installEvalCasesHarness(page);
+    await page.goto(`/knowledge/${DATASET_ID}?tab=eval`);
+
+    await expect(page.getByText("年假怎么申请？")).toBeVisible();
+    await page.getByRole("button", { name: "删除测试用例" }).click();
+    await expect(page.getByText("年假怎么申请？")).toHaveCount(0);
+    // The last persisted case can still be saved even though the local list is empty.
+    await expect(page.getByTestId("save-eval-cases")).toBeEnabled();
+
+    const deleteRequest = page.waitForRequest(
+      (request) =>
+        request.url().includes(
+          `/api/v1/eval/datasets/${EVAL_DATASET_ID}/examples/ex-saved-1`
+        ) && request.method() === "DELETE"
+    );
+    await page.getByTestId("save-eval-cases").click();
+    await deleteRequest;
+
+    await expect.poll(() => captured.deletes).toEqual(["ex-saved-1"]);
+    await expect(page.getByText("评测用例已保存", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("新增 0 个，更新 0 个，删除 1 个，未变 0 个", { exact: true })
+    ).toBeVisible();
+
+    await page.reload();
+    await expect(page.getByTestId("retrieval-eval-workbench")).toBeVisible();
+    await expect(page.getByText("年假怎么申请？")).toHaveCount(0);
+    expect(captured.deletes).toEqual(["ex-saved-1"]);
     assertNoClientErrors();
   });
 

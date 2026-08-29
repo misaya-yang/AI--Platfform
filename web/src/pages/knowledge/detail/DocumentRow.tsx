@@ -1,8 +1,12 @@
 import { useState } from "react";
-import { Archive, ArchiveRestore, Flame, History, RefreshCcw, Trash2 } from "lucide-react";
+import { Archive, ArchiveRestore, Flame, History, RefreshCcw, Tags, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { resolveDisplayStatus, type Document } from "@/types/knowledge";
+import {
+  documentNeedsLifecyclePolling,
+  resolveDisplayStatus,
+  type Document,
+} from "@/types/knowledge";
 import { StatusBadge } from "@/pages/knowledge/detail/StatusBadge";
 import {
   buildStageTimings,
@@ -13,6 +17,13 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -31,6 +42,8 @@ const STAGE_LABEL_KEYS: Record<DocumentStage, string> = {
   indexing: "knowledge.documentRow.stageIndexing",
 };
 
+type DocumentPipelineAction = "reembed" | "reprocess" | "recover" | "retry";
+
 export function DocumentRow({
   doc,
   datasetId,
@@ -38,11 +51,15 @@ export function DocumentRow({
   checked,
   onSelect,
   onCheck,
-  onReindex,
+  onReembed,
+  onReprocess,
+  onRecover,
+  onRetry,
   onDelete,
   onToggleEnabled,
   onArchive,
   onUnarchive,
+  onEditMetadata,
   busyLifecycle = false,
   onVersionRestored,
   showCheckbox = false,
@@ -53,11 +70,15 @@ export function DocumentRow({
   checked?: boolean;
   onSelect: () => void;
   onCheck?: (checked: boolean) => void;
-  onReindex: () => Promise<void>;
+  onReembed: () => Promise<void>;
+  onReprocess: () => Promise<void>;
+  onRecover: () => Promise<void>;
+  onRetry: () => Promise<void>;
   onDelete: () => Promise<void>;
   onToggleEnabled?: (enabled: boolean) => void;
   onArchive?: () => void;
   onUnarchive?: () => void;
+  onEditMetadata?: () => void;
   /** Document has an in-flight enable/disable/archive mutation. */
   busyLifecycle?: boolean;
   onVersionRestored?: () => void;
@@ -65,7 +86,7 @@ export function DocumentRow({
 }) {
   const { t, i18n } = useTranslation();
   const [loading, setLoading] = useState(false);
-  const [reindexOpen, setReindexOpen] = useState(false);
+  const [pipelineAction, setPipelineAction] = useState<DocumentPipelineAction | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [versionHistoryOpen, setVersionHistoryOpen] = useState(false);
 
@@ -76,6 +97,10 @@ export function DocumentRow({
   const isArchived = display === "archived";
   const isDisabled = display === "disabled";
   const inactive = isArchived || isDisabled;
+  const documentBusy = busyLifecycle || documentNeedsLifecyclePolling(doc);
+  const pipelineActionsDisabled =
+    loading || documentBusy || doc.enabled === false || doc.archived === true;
+  const canRecover = display === "error";
 
   // Per-stage durations (migration 101 forward contract, PRD A10): rendered
   // only for actively-processing rows whose payloads carry stage timestamps;
@@ -95,6 +120,22 @@ export function DocumentRow({
       })
       .join(" · ");
   })();
+
+  const pipelineCallbacks: Record<DocumentPipelineAction, () => Promise<void>> = {
+    reembed: onReembed,
+    reprocess: onReprocess,
+    recover: onRecover,
+    retry: onRetry,
+  };
+  const pipelineDialog = pipelineAction
+    ? {
+        title: t(`knowledge.documentRow.${pipelineAction}DialogTitle`),
+        description: t(`knowledge.documentRow.${pipelineAction}Desc`, { title: doc.title }),
+        hint: t(`knowledge.documentRow.${pipelineAction}Hint`),
+        confirm: t(`knowledge.documentRow.${pipelineAction}Confirm`),
+        run: pipelineCallbacks[pipelineAction],
+      }
+    : null;
 
   const handleAction = async (action: () => Promise<void>) => {
     if (loading) return;
@@ -146,6 +187,7 @@ export function DocumentRow({
   return (
     <>
       <div
+        data-testid={`doc-row-${doc.document_id}`}
         className={`
           flex flex-wrap items-center gap-y-3 px-4 py-3 border-b border-border/60 last:border-b-0 hover:bg-muted/40 transition-colors
           sm:flex-nowrap sm:gap-y-0 sm:px-5
@@ -263,7 +305,7 @@ export function DocumentRow({
             <Switch
               data-testid={`doc-switch-${doc.document_id}`}
               checked={doc.enabled !== false}
-              disabled={loading || busyLifecycle || isArchived}
+              disabled={loading || documentBusy || isArchived}
               onCheckedChange={(checked) => onToggleEnabled(checked)}
               title={
                 isArchived
@@ -291,7 +333,7 @@ export function DocumentRow({
                 e.stopPropagation();
                 (isArchived ? onUnarchive : onArchive)?.();
               }}
-              disabled={loading || busyLifecycle}
+              disabled={loading || documentBusy}
               title={
                 isArchived
                   ? t("knowledge.documentRow.unarchiveTitle")
@@ -311,6 +353,19 @@ export function DocumentRow({
             </button>
           )}
           <button
+            data-testid={`doc-metadata-${doc.document_id}`}
+            className="inline-flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 sm:h-7 sm:w-7"
+            onClick={(event) => {
+              event.stopPropagation();
+              onEditMetadata?.();
+            }}
+            disabled={loading || !onEditMetadata}
+            title={t("knowledge.metadata.editAction")}
+            aria-label={t("knowledge.metadata.editAction")}
+          >
+            <Tags className="h-3.5 w-3.5" />
+          </button>
+          <button
             className="inline-flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 sm:h-7 sm:w-7"
             onClick={(e) => {
               e.stopPropagation();
@@ -322,19 +377,83 @@ export function DocumentRow({
           >
             <History className="h-3.5 w-3.5" />
           </button>
-          <button
-            data-testid={`doc-reindex-${doc.document_id}`}
-            className="inline-flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 sm:h-7 sm:w-7"
-            onClick={(e) => {
-              e.stopPropagation();
-              setReindexOpen(true);
-            }}
-            disabled={loading}
-            title={t("knowledge.documentRow.reindexTitle")}
-            aria-label={t("knowledge.documentRow.reindexTitle")}
-          >
-            <RefreshCcw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
-          </button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                data-testid={`doc-index-actions-${doc.document_id}`}
+                className="inline-flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 sm:h-7 sm:w-7"
+                onClick={(event) => event.stopPropagation()}
+                disabled={pipelineActionsDisabled}
+                title={t("knowledge.documentRow.pipelineActionsTitle")}
+                aria-label={t("knowledge.documentRow.pipelineActionsTitle")}
+              >
+                <RefreshCcw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-72">
+              <DropdownMenuItem
+                data-testid={`doc-reembed-${doc.document_id}`}
+                onSelect={() => setPipelineAction("reembed")}
+                className="items-start"
+              >
+                <span>
+                  <span className="block font-medium">
+                    {t("knowledge.documentRow.reembedTitle")}
+                  </span>
+                  <span className="block text-xs text-muted-foreground">
+                    {t("knowledge.documentRow.reembedMenuHint")}
+                  </span>
+                </span>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                data-testid={`doc-reprocess-${doc.document_id}`}
+                onSelect={() => setPipelineAction("reprocess")}
+                className="items-start"
+              >
+                <span>
+                  <span className="block font-medium">
+                    {t("knowledge.documentRow.reprocessTitle")}
+                  </span>
+                  <span className="block text-xs text-muted-foreground">
+                    {t("knowledge.documentRow.reprocessMenuHint")}
+                  </span>
+                </span>
+              </DropdownMenuItem>
+              {canRecover && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    data-testid={`doc-recover-${doc.document_id}`}
+                    onSelect={() => setPipelineAction("recover")}
+                    className="items-start"
+                  >
+                    <span>
+                      <span className="block font-medium">
+                        {t("knowledge.documentRow.recoverTitle")}
+                      </span>
+                      <span className="block text-xs text-muted-foreground">
+                        {t("knowledge.documentRow.recoverMenuHint")}
+                      </span>
+                    </span>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    data-testid={`doc-retry-${doc.document_id}`}
+                    onSelect={() => setPipelineAction("retry")}
+                    className="items-start text-amber-700 focus:text-amber-800 dark:text-amber-400"
+                  >
+                    <span>
+                      <span className="block font-medium">
+                        {t("knowledge.documentRow.retryTitle")}
+                      </span>
+                      <span className="block text-xs opacity-80">
+                        {t("knowledge.documentRow.retryMenuHint")}
+                      </span>
+                    </span>
+                  </DropdownMenuItem>
+                </>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
           <button
             data-testid={`doc-delete-${doc.document_id}`}
             className="inline-flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-50 sm:h-7 sm:w-7"
@@ -351,16 +470,19 @@ export function DocumentRow({
         </div>
       </div>
 
-      <AlertDialog open={reindexOpen} onOpenChange={setReindexOpen}>
+      <AlertDialog
+        open={pipelineDialog !== null}
+        onOpenChange={(open) => {
+          if (!open) setPipelineAction(null);
+        }}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{t("knowledge.documentRow.confirmReindex")}</AlertDialogTitle>
+            <AlertDialogTitle>{pipelineDialog?.title}</AlertDialogTitle>
             <AlertDialogDescription className="space-y-2">
-              <span className="block">
-                {t("knowledge.documentRow.reindexDesc", { title: doc.title })}
-              </span>
+              <span className="block">{pipelineDialog?.description}</span>
               <span className="block text-xs text-muted-foreground">
-                {t("knowledge.documentRow.reindexHint")}
+                {pipelineDialog?.hint}
               </span>
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -368,11 +490,12 @@ export function DocumentRow({
             <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
-                setReindexOpen(false);
-                handleAction(onReindex);
+                const run = pipelineDialog?.run;
+                setPipelineAction(null);
+                if (run) handleAction(run);
               }}
             >
-              {t("knowledge.documentRow.confirmRebuild")}
+              {pipelineDialog?.confirm}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

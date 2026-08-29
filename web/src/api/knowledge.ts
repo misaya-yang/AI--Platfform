@@ -28,6 +28,15 @@ import type {
   DatasetCreateRequest,
   DocumentCreateTextRequest,
   BatchOperationResult,
+  DocumentMetadataField,
+  DocumentMetadataRegistry,
+  OffsetPage,
+  QueryFeedback,
+  QueryFeedbackInput,
+  QueryFeedbackPage,
+  QueryFeedbackRating,
+  QueryFeedbackTarget,
+  QueryHistoryPage,
 } from "@/types/knowledge";
 
 // ============================================================
@@ -67,12 +76,298 @@ export async function deleteDataset(datasetId: string, payload: DeleteDatasetPay
 }
 
 // ============================================================
+// Embedding blue-green migration operator APIs
+// ============================================================
+
+export type EmbeddingMigrationState =
+  | "shadow_build"
+  | "backfilling"
+  | "verified"
+  | "gating"
+  | "gate_failed"
+  | "ready"
+  | "completed"
+  | "rolled_back"
+  | "failed"
+  | "abandoned";
+
+export interface EmbeddingCollectionBinding {
+  binding_id: string;
+  dataset_id: string;
+  tenant_id: string;
+  collection_name: string;
+  embedding_provider: string;
+  embedding_model: string;
+  embedding_model_version: string;
+  embedding_dimension: number;
+  capabilities: string[];
+  state: "serving" | "shadow" | "retained" | "retired";
+  created_at?: string | null;
+  activated_at?: string | null;
+  retired_at?: string | null;
+  retained_until?: string | null;
+}
+
+export interface EmbeddingMigrationJob {
+  migration_id: string;
+  dataset_id: string;
+  source_binding_id?: string | null;
+  target_binding_id: string;
+  state: EmbeddingMigrationState;
+  checkpoint: Record<string, unknown>;
+  totals: Record<string, unknown>;
+  gate?: Record<string, unknown> | null;
+  error?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export type EmbeddingMigrationAction = "backfill" | "verify" | "gate";
+export type EmbeddingMigrationActionJobState =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
+
+export interface EmbeddingMigrationActionJob {
+  job_id: string;
+  migration_id: string;
+  dataset_id: string;
+  action: EmbeddingMigrationAction;
+  state: EmbeddingMigrationActionJobState;
+  payload: Record<string, unknown>;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  attempt_count: number;
+  request_hash?: string;
+  reused?: boolean;
+  poll_after_ms?: number;
+  requested_by?: string;
+  available_at?: string | null;
+  lease_expires_at?: string | null;
+  last_heartbeat_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+/**
+ * A server-witnessed collection receipt. Older deployments omit this field;
+ * callers must render that as unknown rather than inferring a healthy Qdrant
+ * collection from a PostgreSQL binding row.
+ */
+export interface EmbeddingCollectionScopeEvidence {
+  authority_kind?: string;
+  dataset_id?: string;
+  tenant_id?: string;
+  serving_collection_name?: string;
+  content_revision?: string | number;
+  point_count?: number;
+  point_ids_sha256?: string;
+  source_text_sha256?: string;
+  [key: string]: unknown;
+}
+
+export interface EmbeddingCollectionHealthReceipt {
+  status: "healthy" | "drifted" | "unknown";
+  checked_live: boolean;
+  collection_name: string | null;
+  pending_chunks: number | null;
+  authority: EmbeddingCollectionScopeEvidence | null;
+  target_scope: EmbeddingCollectionScopeEvidence | null;
+  verified_authority: EmbeddingCollectionScopeEvidence | null;
+  verified_target_scope: EmbeddingCollectionScopeEvidence | null;
+  gate_report: Record<string, unknown> | null;
+  reason: string | null;
+}
+
+export interface EmbeddingMigrationDescription {
+  dataset_id: string;
+  serving_binding: EmbeddingCollectionBinding | null;
+  live_migration: EmbeddingMigrationJob | null;
+  /** Newer servers retain the latest terminal job so reload can restore rollback controls. */
+  latest_migration?: EmbeddingMigrationJob | null;
+  /** Newest-first operator history, bounded by the server. */
+  recent_migrations?: EmbeddingMigrationJob[];
+  /** Server authority for refresh/new-session recovery. */
+  active_action_job?: EmbeddingMigrationActionJob | null;
+  /** Newest-first terminal action jobs for status/error receipts. */
+  recent_action_jobs?: EmbeddingMigrationActionJob[];
+  source_binding?: EmbeddingCollectionBinding | null;
+  target_binding?: EmbeddingCollectionBinding | null;
+  collection_health?: EmbeddingCollectionHealthReceipt | null;
+  pending_chunks: number | null;
+  enabled_chunks: number;
+}
+
+export interface StartEmbeddingMigrationRequest {
+  embedding_provider: string;
+  embedding_model: string;
+  embedding_model_version?: string;
+  embedding_dimension: number;
+  /** Omit to inherit serving capabilities; [] is an explicit empty set. */
+  capabilities?: string[];
+}
+
+export interface EmbeddingMigrationGateRequest {
+  sample_size?: number;
+  top_k?: number;
+  tolerance?: number;
+  floor?: number;
+}
+
+export interface EmbeddingMigrationActionResult {
+  migration?: EmbeddingMigrationJob;
+  migration_id?: string;
+  state?: EmbeddingMigrationState;
+  passed?: boolean;
+  verdict?: Record<string, unknown>;
+  embedded?: number;
+  pending?: number;
+  enabled_chunks?: number;
+  points?: number | null;
+  rounds?: number;
+  [key: string]: unknown;
+}
+
+const embeddingMigrationPath = (datasetId: string) =>
+  `/api/v1/knowledge/datasets/${datasetId}/embedding-migration`;
+
+export async function describeEmbeddingMigration(
+  datasetId: string
+): Promise<EmbeddingMigrationDescription> {
+  const { data } = await api.get<EmbeddingMigrationDescription>(
+    embeddingMigrationPath(datasetId)
+  );
+  return data;
+}
+
+export async function startEmbeddingMigration(
+  datasetId: string,
+  request: StartEmbeddingMigrationRequest
+): Promise<EmbeddingMigrationActionResult> {
+  const { data } = await api.post<EmbeddingMigrationActionResult>(
+    `${embeddingMigrationPath(datasetId)}/start`,
+    request
+  );
+  return data;
+}
+
+async function postEmbeddingMigrationAction<T = EmbeddingMigrationActionResult>(
+  datasetId: string,
+  migrationId: string,
+  action: "backfill" | "verify" | "gate" | "cutover" | "rollback" | "abort",
+  body?: Record<string, unknown>
+): Promise<T> {
+  const { data } = await api.post<T>(
+    `${embeddingMigrationPath(datasetId)}/${migrationId}/${action}`,
+    body
+  );
+  return data;
+}
+
+export function backfillEmbeddingMigration(
+  datasetId: string,
+  migrationId: string
+): Promise<EmbeddingMigrationActionJob> {
+  return postEmbeddingMigrationAction<EmbeddingMigrationActionJob>(
+    datasetId,
+    migrationId,
+    "backfill"
+  );
+}
+
+export function verifyEmbeddingMigration(
+  datasetId: string,
+  migrationId: string
+): Promise<EmbeddingMigrationActionJob> {
+  return postEmbeddingMigrationAction<EmbeddingMigrationActionJob>(
+    datasetId,
+    migrationId,
+    "verify"
+  );
+}
+
+export function gateEmbeddingMigration(
+  datasetId: string,
+  migrationId: string,
+  request: EmbeddingMigrationGateRequest = {}
+): Promise<EmbeddingMigrationActionJob> {
+  return postEmbeddingMigrationAction<EmbeddingMigrationActionJob>(
+    datasetId,
+    migrationId,
+    "gate",
+    { ...request }
+  );
+}
+
+export async function getEmbeddingMigrationActionJob(
+  datasetId: string,
+  migrationId: string,
+  jobId: string
+): Promise<EmbeddingMigrationActionJob> {
+  const { data } = await api.get<EmbeddingMigrationActionJob>(
+    `${embeddingMigrationPath(datasetId)}/${migrationId}/jobs/${jobId}`
+  );
+  return data;
+}
+
+export function cutoverEmbeddingMigration(
+  datasetId: string,
+  migrationId: string,
+  retentionSeconds?: number
+): Promise<EmbeddingMigrationActionResult> {
+  const body = retentionSeconds === undefined ? {} : { retention_seconds: retentionSeconds };
+  return postEmbeddingMigrationAction(datasetId, migrationId, "cutover", body);
+}
+
+export function rollbackEmbeddingMigration(
+  datasetId: string,
+  migrationId: string,
+  keepShadow = true
+): Promise<EmbeddingMigrationActionResult> {
+  return postEmbeddingMigrationAction(datasetId, migrationId, "rollback", {
+    keep_shadow: keepShadow,
+  });
+}
+
+export function abortEmbeddingMigration(
+  datasetId: string,
+  migrationId: string,
+  options: { reason?: string; purgeShadow?: boolean } = {}
+): Promise<EmbeddingMigrationActionResult> {
+  return postEmbeddingMigrationAction(datasetId, migrationId, "abort", {
+    reason: options.reason || "aborted from web console",
+    purge_shadow: options.purgeShadow ?? true,
+  });
+}
+
+// ============================================================
 // Document APIs
 // ============================================================
 
-export async function listDocuments(datasetId: string) {
-  const { data } = await api.get<Document[]>(`/api/v1/knowledge/${datasetId}/documents`);
-  return data;
+function parsePageTotal(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+export async function listDocuments(
+  datasetId: string,
+  params: { limit?: number; offset?: number } = {}
+): Promise<OffsetPage<Document>> {
+  const limit = params.limit ?? 50;
+  const offset = params.offset ?? 0;
+  const response = await api.get<Document[]>(`/api/v1/knowledge/${datasetId}/documents`, {
+    params: { limit, offset },
+  });
+  return {
+    items: response.data,
+    total: parsePageTotal(response.headers["x-total-count"], response.data.length),
+    limit,
+    offset,
+  };
 }
 
 
@@ -169,23 +464,60 @@ export async function deleteDocument(datasetId: string, documentId: string) {
   return data;
 }
 
-/**
- * Single-document reindex is the reembed verb. Success returns queuing; a
- * 409 means the document already belongs to a queue generation or the claim
- * was rejected (PRD §5-#6) — callers must treat that as "already queued",
- * not as a failure.
- */
-export interface ReindexResult {
-  status: string;
+export type DocumentPipelineAction = "reembed" | "reprocess" | "recover" | "retry";
+
+export interface DocumentPipelineResult {
+  status: "queuing";
   document_id: string;
-  action?: string;
+  action?: DocumentPipelineAction;
+  recover_stage?: "parsing" | "splitting" | "indexing";
 }
 
-export async function reindexDocument(datasetId: string, documentId: string) {
-  const { data } = await api.post<ReindexResult>(
-    `/api/v1/knowledge/${datasetId}/documents/${documentId}/reindex`
+async function requestDocumentPipelineAction(
+  datasetId: string,
+  documentId: string,
+  endpoint: "reindex" | "reprocess" | "recover" | "retry"
+): Promise<DocumentPipelineResult> {
+  const { data } = await api.post<DocumentPipelineResult>(
+    `/api/v1/knowledge/${datasetId}/documents/${documentId}/${endpoint}`
   );
   return data;
+}
+
+/**
+ * Repair vectors from persisted segments. The backend route retains its
+ * legacy `/reindex` spelling, but its contract is reembed-only: it never
+ * re-parses the source or changes chunk boundaries.
+ */
+export function reembedDocument(
+  datasetId: string,
+  documentId: string
+): Promise<DocumentPipelineResult> {
+  return requestDocumentPipelineAction(datasetId, documentId, "reindex");
+}
+
+/** Re-run parsing, splitting, and embedding from the captured rule snapshot. */
+export function reprocessDocument(
+  datasetId: string,
+  documentId: string
+): Promise<DocumentPipelineResult> {
+  return requestDocumentPipelineAction(datasetId, documentId, "reprocess");
+}
+
+/** Resume an errored generation from its furthest durable stage. */
+export function recoverDocument(
+  datasetId: string,
+  documentId: string
+): Promise<DocumentPipelineResult> {
+  return requestDocumentPipelineAction(datasetId, documentId, "recover");
+}
+
+/** Rerun the pinned full pipeline and atomically replace the serving generation. */
+export function retryDocument(
+  datasetId: string,
+  documentId: string
+): Promise<DocumentPipelineResult> {
+  return requestDocumentPipelineAction(datasetId, documentId, "retry");
 }
 
 /**
@@ -226,19 +558,90 @@ export async function setDocumentArchived(
   return data;
 }
 
+export async function getDocumentMetadataRegistry(
+  datasetId: string
+): Promise<DocumentMetadataRegistry> {
+  const { data } = await api.get<DocumentMetadataRegistry>(
+    `/api/v1/knowledge/${datasetId}/metadata-schema`
+  );
+  return data;
+}
+
+export async function updateDocumentMetadataRegistry(
+  datasetId: string,
+  expectedRevision: number,
+  fields: DocumentMetadataField[]
+): Promise<DocumentMetadataRegistry> {
+  const { data } = await api.put<DocumentMetadataRegistry>(
+    `/api/v1/knowledge/${datasetId}/metadata-schema`,
+    { expected_revision: expectedRevision, fields }
+  );
+  return data;
+}
+
+export interface DocumentMetadataPatch {
+  metadataPatch?: Record<string, unknown>;
+  metadataRemove?: string[];
+  metadataSchemaRevision: number;
+}
+
+export async function updateDocumentMetadata(
+  datasetId: string,
+  documentId: string,
+  patch: DocumentMetadataPatch
+): Promise<Document> {
+  const { data } = await api.patch<Document>(
+    `/api/v1/knowledge/${datasetId}/documents/${documentId}`,
+    {
+      metadata_patch: patch.metadataPatch ?? {},
+      metadata_remove: patch.metadataRemove ?? [],
+      metadata_schema_revision: patch.metadataSchemaRevision,
+    }
+  );
+  return data;
+}
+
+export async function batchUpdateDocumentMetadata(
+  datasetId: string,
+  documentIds: string[],
+  patch: DocumentMetadataPatch
+): Promise<BatchOperationResult & { metadata_schema_revision: number }> {
+  const { data } = await api.patch<
+    BatchOperationResult & { metadata_schema_revision: number }
+  >(`/api/v1/knowledge/${datasetId}/documents/metadata/batch`, {
+    document_ids: documentIds,
+    metadata_patch: patch.metadataPatch ?? {},
+    metadata_remove: patch.metadataRemove ?? [],
+    metadata_schema_revision: patch.metadataSchemaRevision,
+  });
+  return data;
+}
+
 
 // ============================================================
 // Segment APIs
 // ============================================================
 
-export async function listSegments(datasetId: string, params?: { documentId?: string; q?: string }) {
-  const { data } = await api.get<Segment[]>(`/api/v1/knowledge/${datasetId}/segments`, {
+export async function listSegments(
+  datasetId: string,
+  params: { documentId?: string; q?: string; limit?: number; offset?: number } = {}
+): Promise<OffsetPage<Segment>> {
+  const limit = params.limit ?? 100;
+  const offset = params.offset ?? 0;
+  const response = await api.get<Segment[]>(`/api/v1/knowledge/${datasetId}/segments`, {
     params: {
-      document_id: params?.documentId,
-      q: params?.q,
+      document_id: params.documentId,
+      q: params.q,
+      limit,
+      offset,
     },
   });
-  return data;
+  return {
+    items: response.data,
+    total: parsePageTotal(response.headers["x-total-count"], response.data.length),
+    limit,
+    offset,
+  };
 }
 
 
@@ -341,6 +744,64 @@ export async function hitTest(
     {
       signal: options.signal,
       timeout: options.timeoutMs,
+    }
+  );
+  return data;
+}
+
+export async function listDatasetQueries(
+  datasetId: string,
+  params: {
+    limit?: number;
+    zeroResults?: boolean;
+    mode?: string;
+    cursor?: string;
+  } = {}
+) {
+  const { data } = await api.get<QueryHistoryPage>(
+    `/api/v1/knowledge/${datasetId}/queries`,
+    {
+      params: {
+        limit: params.limit,
+        zero_results: params.zeroResults,
+        mode: params.mode,
+        cursor: params.cursor,
+      },
+    }
+  );
+  return data;
+}
+
+export async function putQueryFeedback(datasetId: string, input: QueryFeedbackInput) {
+  const { data } = await api.put<QueryFeedback>(
+    `/api/v1/knowledge/${datasetId}/feedback`,
+    input
+  );
+  return data;
+}
+
+export async function listQueryFeedback(
+  datasetId: string,
+  params: {
+    limit?: number;
+    rating?: QueryFeedbackRating;
+    reasonCode?: string;
+    targetType?: QueryFeedbackTarget;
+    traceId?: string;
+    cursor?: string;
+  } = {}
+) {
+  const { data } = await api.get<QueryFeedbackPage>(
+    `/api/v1/knowledge/${datasetId}/feedback`,
+    {
+      params: {
+        limit: params.limit,
+        rating: params.rating,
+        reason_code: params.reasonCode,
+        target_type: params.targetType,
+        trace_id: params.traceId,
+        cursor: params.cursor,
+      },
     }
   );
   return data;
@@ -785,47 +1246,105 @@ export interface DatasetSources {
   total_documents: number;
 }
 
+export async function getDatasetSources(datasetId: string): Promise<DatasetSources> {
+  const { data } = await api.get<DatasetSources>(
+    `/api/v1/knowledge/${datasetId}/sources`
+  );
+  return data;
+}
+
 
 // ============================================================
 // Batch Operations APIs
 // ============================================================
 
-/** BatchReindexSchema caps a single call at 100 ids (422 beyond that). */
+/** UI request chunk. The server accepts larger durable batches; keeping
+ * request chunks bounded makes partial progress and retries reviewable. */
 export const DOCUMENT_BATCH_REINDEX_LIMIT = 100;
+export const DOCUMENT_BATCH_DELETE_LIMIT = 100;
 
-/**
- * Batch reindex contract (knowledge-service batch_reindex_documents):
- * - success returns queued vs skipped ids — per-document claims can fail
- *   (already queued/processing), which the UI must surface, not swallow;
- * - when NO document entered a new generation the endpoint answers 409 with
- *   detail `{message, skipped_document_ids}` instead of a 200 body.
- */
-export interface BatchReindexResult {
-  status: "queuing" | "partial";
-  document_count: number;
-  queued_document_ids: string[];
-  skipped_document_ids: string[];
+export type DocumentBatchStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "partial"
+  | "failed";
+
+export interface DocumentBatchProblemItem {
+  document_id: string;
+  status: "skipped" | "failed";
+  error_code?: string | null;
+  error?: string | null;
 }
 
-export interface BatchReindexConflictDetail {
-  message: string;
-  skipped_document_ids: string[];
+export interface DocumentBatchOperation {
+  operation_id: string;
+  tenant_id: string;
+  dataset_id: string;
+  operation: "reembed" | "delete";
+  status: DocumentBatchStatus;
+  total_count: number;
+  queued_count: number;
+  skipped_count: number;
+  failed_count: number;
+  problem_items: DocumentBatchProblemItem[];
+  problem_items_truncated: boolean;
+  created_at?: string;
+  updated_at?: string;
+  completed_at?: string | null;
 }
 
-export async function batchReindexDocuments(datasetId: string, documentIds: string[]) {
-  const { data } = await api.post<BatchReindexResult>(`/api/v1/knowledge/${datasetId}/documents/batch-reindex`, {
-    document_ids: documentIds,
-  });
+export function isDocumentBatchTerminal(status: DocumentBatchStatus): boolean {
+  return status === "completed" || status === "partial" || status === "failed";
+}
+
+export async function batchReindexDocuments(
+  datasetId: string,
+  documentIds: string[] = [],
+  allDocuments = false
+): Promise<DocumentBatchOperation> {
+  const { data } = await api.post<DocumentBatchOperation>(
+    `/api/v1/knowledge/${datasetId}/documents/batch-reindex`,
+    { document_ids: documentIds, all_documents: allDocuments }
+  );
   return data;
 }
 
-export async function batchDeleteDocuments(datasetId: string, documentIds: string[]) {
-  const { data } = await api.post<BatchOperationResult>(`/api/v1/knowledge/${datasetId}/documents/batch-delete`, {
-    document_ids: documentIds,
-  });
+export async function batchDeleteDocuments(
+  datasetId: string,
+  documentIds: string[]
+): Promise<DocumentBatchOperation> {
+  const { data } = await api.post<DocumentBatchOperation>(
+    `/api/v1/knowledge/${datasetId}/documents/batch-delete`,
+    { document_ids: documentIds }
+  );
   return data;
 }
 
+export async function getDocumentBatchOperation(
+  datasetId: string,
+  operationId: string
+): Promise<DocumentBatchOperation> {
+  const { data } = await api.get<DocumentBatchOperation>(
+    `/api/v1/knowledge/${datasetId}/document-batches/${operationId}`
+  );
+  return data;
+}
+
+export async function waitForDocumentBatchOperation(
+  datasetId: string,
+  operationId: string,
+  options: { timeoutMs?: number; pollMs?: number } = {}
+): Promise<DocumentBatchOperation> {
+  const deadline = Date.now() + (options.timeoutMs ?? 120_000);
+  const pollMs = options.pollMs ?? 500;
+  while (true) {
+    const operation = await getDocumentBatchOperation(datasetId, operationId);
+    if (isDocumentBatchTerminal(operation.status)) return operation;
+    if (Date.now() >= deadline) throw new Error("document batch operation timed out");
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+}
 
 
 // ============================================================

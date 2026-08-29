@@ -45,6 +45,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/hooks/use-toast";
 import {
+  deleteEvalExample,
   importEvalExamples,
   listEvalDatasets,
   listEvalExamples,
@@ -223,6 +224,7 @@ export function RetrievalEvalWorkbench({ datasetId }: { datasetId: string }) {
   const [casesError, setCasesError] = useState<string | null>(null);
   const [casesReloadKey, setCasesReloadKey] = useState(0);
   const [savingCases, setSavingCases] = useState(false);
+  const [removedExampleIds, setRemovedExampleIds] = useState<string[]>([]);
   const [jsonlImportOpen, setJsonlImportOpen] = useState(false);
   const [jsonlText, setJsonlText] = useState("");
   const [jsonlSkipDuplicates, setJsonlSkipDuplicates] = useState(true);
@@ -300,6 +302,7 @@ export function RetrievalEvalWorkbench({ datasetId }: { datasetId: string }) {
     }
     candidateControllersRef.current.clear();
     setCases([]);
+    setRemovedExampleIds([]);
     setNewQuery("");
     setResult(null);
     setError(null);
@@ -320,6 +323,7 @@ export function RetrievalEvalWorkbench({ datasetId }: { datasetId: string }) {
         const evalDataset = findKbEvalDataset(listed.datasets, datasetId);
         if (!evalDataset) {
           setCases([]);
+          setRemovedExampleIds([]);
           setCasesStatus("ready");
           return;
         }
@@ -338,6 +342,7 @@ export function RetrievalEvalWorkbench({ datasetId }: { datasetId: string }) {
             relevantSegmentInput: persisted.relevantSegmentIds.join(", "),
           }));
         setCases(loaded);
+        setRemovedExampleIds([]);
         setCasesStatus("ready");
       } catch (loadError: unknown) {
         if (cancelled) return;
@@ -392,6 +397,14 @@ export function RetrievalEvalWorkbench({ datasetId }: { datasetId: string }) {
   function removeCase(id: string) {
     candidateControllersRef.current.get(id)?.abort();
     candidateControllersRef.current.delete(id);
+    const persistedExampleId = cases.find((testCase) => testCase.id === id)?.exampleId;
+    if (persistedExampleId) {
+      setRemovedExampleIds((previous) =>
+        previous.includes(persistedExampleId)
+          ? previous
+          : [...previous, persistedExampleId]
+      );
+    }
     setCases((previous) => previous.filter((testCase) => testCase.id !== id));
   }
 
@@ -399,12 +412,18 @@ export function RetrievalEvalWorkbench({ datasetId }: { datasetId: string }) {
    * Persist the workbench into the linked eval dataset. The store's
    * skip_duplicates import dedupes on metadata.case_id alone, so new cases go
    * through import while edited cases go through PATCH (`diffEvalCases`
-   * computes the split). Cases removed from the workbench stay in the eval
-   * dataset — there is no delete endpoint yet (dependency D7) — and the
-   * success toast reports that count honestly.
+   * computes the split). Persisted cases explicitly removed in this browser
+   * are deleted last, after imports and updates succeed. Keeping deletion last
+   * makes a retry deterministic if an earlier write fails.
    */
   async function saveCases() {
-    if (savingCases || casesStatus !== "ready" || cases.length === 0) return;
+    if (
+      savingCases ||
+      casesStatus !== "ready" ||
+      (cases.length === 0 && removedExampleIds.length === 0)
+    ) {
+      return;
+    }
     setSavingCases(true);
     try {
       const evalDataset = await resolveKbEvalDataset(datasetId);
@@ -422,6 +441,7 @@ export function RetrievalEvalWorkbench({ datasetId }: { datasetId: string }) {
         })),
         serverCases,
         kbDatasetId: datasetId,
+        removedExampleIds,
       });
 
       let imported = 0;
@@ -462,22 +482,24 @@ export function RetrievalEvalWorkbench({ datasetId }: { datasetId: string }) {
         updated += 1;
       }
 
-      const removedNote =
-        diff.removedFromWorkbenchCount > 0
-          ? t("knowledge.eval.casesRemovedNote", {
-              defaultValue: "；另有 {{count}} 个已保存用例不在工作台中（评测集暂无删除入口）",
-              count: diff.removedFromWorkbenchCount,
-            })
-          : "";
+      let deleted = 0;
+      for (const entry of diff.toDelete) {
+        await deleteEvalExample(evalDataset.dataset_id, entry.exampleId);
+        deleted += 1;
+      }
+
       toast.success(
         t("knowledge.eval.casesSavedTitle", "评测用例已保存"),
         t("knowledge.eval.casesSavedText", {
-          defaultValue: "新增 {{imported}} 个，更新 {{updated}} 个，未变 {{unchanged}} 个",
+          defaultValue:
+            "新增 {{imported}} 个，更新 {{updated}} 个，删除 {{deleted}} 个，未变 {{unchanged}} 个",
           imported,
           updated,
+          deleted,
           unchanged: diff.unchangedCount,
-        }) + removedNote
+        })
       );
+      setRemovedExampleIds([]);
       setCasesReloadKey((key) => key + 1);
     } catch (saveError: unknown) {
       toast.error(
@@ -542,7 +564,10 @@ export function RetrievalEvalWorkbench({ datasetId }: { datasetId: string }) {
     }
   }
 
-  const canSaveCases = casesStatus === "ready" && cases.length > 0 && !savingCases;
+  const canSaveCases =
+    casesStatus === "ready" &&
+    (cases.length > 0 || removedExampleIds.length > 0) &&
+    !savingCases;
   const canImportJsonl =
     jsonlPreview?.ok === true &&
     jsonlPreview.validation.valid &&

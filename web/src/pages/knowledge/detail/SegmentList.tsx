@@ -8,7 +8,7 @@
  * - Support for both hierarchical and flat modes
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { 
   FileText, 
@@ -36,6 +36,8 @@ interface Chunk {
 
 interface SegmentListProps {
   segments: Segment[];
+  /** A partial offset page cannot safely reconstruct parent/child trees. */
+  partialPage?: boolean;
   onEdit?: (segmentId: string) => void;
   onDelete?: (segmentId: string) => void;
   onToggleEnabled?: (segmentId: string, enabled: boolean) => void;
@@ -148,6 +150,7 @@ function calculateStats(chunks: Chunk[]) {
 
 export function SegmentList({
   segments,
+  partialPage = false,
   onEdit,
   onDelete,
   onToggleEnabled,
@@ -158,6 +161,10 @@ export function SegmentList({
 }: SegmentListProps) {
   const { t } = useTranslation();
   const [viewMode, setViewMode] = useState<"hierarchical" | "flat">("hierarchical");
+
+  useEffect(() => {
+    if (partialPage) setViewMode("flat");
+  }, [partialPage]);
   
   // Build hierarchy
   const hierarchicalChunks = useMemo(() => buildHierarchy(segments), [segments]);
@@ -177,7 +184,7 @@ export function SegmentList({
         children: []
       }));
   }, [segments]);
-  const displayChunks = viewMode === "flat" ? flatChunks : hierarchicalChunks;
+  const displayChunks = partialPage || viewMode === "flat" ? flatChunks : hierarchicalChunks;
   
   // Calculate stats
   const stats = useMemo(() => calculateStats(hierarchicalChunks), [hierarchicalChunks]);
@@ -193,6 +200,11 @@ export function SegmentList({
   
   return (
     <div className="space-y-4">
+      {partialPage && (
+        <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+          {t("knowledge.segment.partialPageFlatHint")}
+        </p>
+      )}
       {/* Statistics Header */}
       <div className="flex flex-wrap items-center gap-3 p-3 rounded-xl bg-slate-50 dark:bg-slate-950/50 border border-border">
         <div className="flex items-center gap-2">
@@ -225,7 +237,7 @@ export function SegmentList({
           )}
         </div>
         
-        {stats.isHierarchical && (
+        {stats.isHierarchical && !partialPage && (
           <div className="ml-auto flex items-center gap-1 bg-white dark:bg-slate-900 rounded-lg p-0.5 border border-border">
             <button
               onClick={() => setViewMode("hierarchical")}
