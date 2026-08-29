@@ -41,7 +41,12 @@ import {
   Tags,
 } from "lucide-react";
 
-import { useDebouncedValue, useDocuments, useSegments } from "@/hooks/useKnowledge";
+import {
+  useDebouncedValue,
+  useDocumentProgressStream,
+  useDocuments,
+  useSegments,
+} from "@/hooks/useKnowledge";
 import {
   deleteDocument,
   deleteSegment,
@@ -68,6 +73,7 @@ import {
 import { partitionIds, summarizeDocumentBatches } from "./batchOperations";
 import {
   DOCUMENT_DISPLAY_STATUS_VOCABULARY,
+  documentNeedsLifecyclePolling,
   parseSegmentKeywords,
   resolveDisplayStatus,
   type Document,
@@ -182,6 +188,10 @@ export function DocumentsTab({
 }: DocumentsTabProps) {
   const { t } = useTranslation();
   const qc = useQueryClient();
+  useDocumentProgressStream(
+    datasetId,
+    docs.some(documentNeedsLifecyclePolling),
+  );
 
   const [selectedDocId, setSelectedDocId] = useState<string | undefined>(undefined);
   const selectedDoc = useMemo(

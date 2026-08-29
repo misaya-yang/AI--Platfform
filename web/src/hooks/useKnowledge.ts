@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   getDataset,
@@ -7,8 +7,28 @@ import {
   listDatasets,
   listDocuments,
   listSegments,
+  streamDocumentProgress,
 } from "@/api/knowledge";
 import { documentNeedsLifecyclePolling } from "@/types/knowledge";
+import {
+  documentProgressReconnectDelay,
+  shouldApplyDocumentProgressEvent,
+} from "@/pages/knowledge/detail/documentProgress";
+
+function waitForStreamReconnect(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    signal.addEventListener("abort", finish, { once: true });
+  });
+}
 
 /**
  * Returns `value` once it has been stable for `delayMs`. Search inputs feed
@@ -98,6 +118,76 @@ export function useDocuments(
       return active ? 2000 : false;
     },
   });
+}
+
+/**
+ * Push document lifecycle changes through the durable SSE ledger. The list's
+ * existing active-row interval remains enabled as a bounded fallback whenever
+ * the stream is down, so a reconnect cannot make progress disappear.
+ */
+export function useDocumentProgressStream(
+  datasetId: string | undefined,
+  enabled = false,
+): void {
+  const queryClient = useQueryClient();
+  const cursorRef = useRef<{ datasetId: string; eventId?: string }>({
+    datasetId: "",
+  });
+
+  useEffect(() => {
+    if (cursorRef.current.datasetId !== datasetId) {
+      cursorRef.current = { datasetId: datasetId ?? "" };
+    }
+    if (!datasetId || !enabled) return;
+    const streamDatasetId = datasetId;
+
+    const controller = new AbortController();
+    let stopped = false;
+    let reconnectAttempt = 0;
+
+    async function consume() {
+      while (!stopped) {
+        try {
+          for await (const event of streamDocumentProgress(streamDatasetId, {
+            signal: controller.signal,
+            lastEventId: cursorRef.current.eventId,
+          })) {
+            if (stopped) return;
+            if (
+              !event.id ||
+              !shouldApplyDocumentProgressEvent(
+                streamDatasetId,
+                cursorRef.current.eventId,
+                event.id,
+              )
+            ) {
+              continue;
+            }
+            cursorRef.current.eventId = event.id;
+            reconnectAttempt = 0;
+            if (["progress", "terminal", "deleted"].includes(event.event)) {
+              void queryClient.invalidateQueries({
+                queryKey: ["kb-documents", streamDatasetId],
+              });
+            }
+          }
+          if (stopped || controller.signal.aborted) return;
+          throw new Error("document progress stream ended");
+        } catch {
+          if (stopped || controller.signal.aborted) return;
+          const delay = documentProgressReconnectDelay(reconnectAttempt);
+          reconnectAttempt += 1;
+          await waitForStreamReconnect(delay, controller.signal);
+        }
+      }
+    }
+
+    void consume();
+    return () => {
+      stopped = true;
+      controller.abort();
+    };
+  }, [datasetId, enabled, queryClient]);
 }
 
 export function useSegments(

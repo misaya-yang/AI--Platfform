@@ -18,11 +18,11 @@ from dotenv import dotenv_values
 from database import cli
 
 ROOT = Path(__file__).resolve().parents[2]
-RAG_VERSIONS = tuple(f"{version:03d}" for version in range(100, 111))
+RAG_VERSIONS = tuple(f"{version:03d}" for version in range(100, 112))
 RAG_FILENAMES = {
     path.name
     for path in (ROOT / "database" / "migrations").glob("*.sql")
-    if path.name.split("_", 1)[0].isdigit() and 100 <= int(path.name.split("_", 1)[0]) <= 110
+    if path.name.split("_", 1)[0].isdigit() and 100 <= int(path.name.split("_", 1)[0]) <= 111
     if not path.name.endswith("_rollback.sql")
 }
 
@@ -46,6 +46,8 @@ KB_106_TO_110_TABLES = (
     "kb_document_batch_items",
     "embedding_migration_action_jobs",
 )
+
+KB_111_TABLES = ("kb_document_progress_events",)
 
 _LEGACY_SEGMENT_IDENTITY = re.compile(
     r"UNIQUE\s*\(\s*document_id\s*,\s*position\s*\)",
@@ -183,7 +185,7 @@ async def test_fresh_schema_replays_current_upgrade_forward_chain(
 
 
 @pytest.mark.asyncio
-async def test_100_to_110_full_chain_uses_one_idempotent_public_ledger(
+async def test_100_to_111_full_chain_uses_one_idempotent_public_ledger(
     migration_database: tuple[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -278,6 +280,20 @@ async def test_100_to_110_full_chain_uses_one_idempotent_public_ledger(
             assert relation is not None, table
             assert relation["namespace"] == "knowledge", (layout, table)
             assert relation["owner"] == canonical_owner, (layout, table)
+        for table in KB_111_TABLES:
+            relation = await conn.fetchrow(
+                """
+                SELECT n.nspname AS namespace,
+                       pg_get_userbyid(c.relowner) AS owner
+                FROM pg_class AS c
+                JOIN pg_namespace AS n ON n.oid = c.relnamespace
+                WHERE c.oid = to_regclass($1)
+                """,
+                f"knowledge.{table}",
+            )
+            assert relation is not None, table
+            assert relation["namespace"] == "knowledge", (layout, table)
+            assert relation["owner"] == canonical_owner, (layout, table)
 
         duplicate_central_tables = await conn.fetchval(
             """
@@ -288,7 +304,7 @@ async def test_100_to_110_full_chain_uses_one_idempotent_public_ledger(
               AND c.relname = ANY($1::text[])
               AND n.nspname <> 'knowledge'
             """,
-            list(KB_106_TO_110_TABLES),
+            list(KB_106_TO_110_TABLES) + list(KB_111_TABLES),
         )
         assert duplicate_central_tables == 0, layout
 

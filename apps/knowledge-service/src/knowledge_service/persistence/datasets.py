@@ -1032,6 +1032,59 @@ class DatasetPersistenceMixin:
         return row is not None
 
     # ------------------------------------------------------------------
+    # Document progress events (migration 111 / H1 #4).  The event ledger is
+    # append-only and read-only from this API; the database trigger records all
+    # progress writes so API and worker processes share one replay cursor.
+    # ------------------------------------------------------------------
+
+    async def list_document_progress_events(
+        self,
+        dataset_id: str,
+        *,
+        after_sequence: int = 0,
+        document_ids: list[str] | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Return dataset-scoped progress events after a durable cursor."""
+
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        normalized_dataset = str(dataset_id or "").strip()
+        if not normalized_dataset:
+            raise ValueError("dataset_id is required")
+        try:
+            cursor = max(int(after_sequence), 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("after_sequence must be a non-negative integer") from exc
+        bounded_limit = min(max(int(limit), 1), 500)
+        normalized_documents = sorted(
+            {
+                str(document_id or "").strip()
+                for document_id in (document_ids or [])
+                if str(document_id or "").strip()
+            }
+        ) or None
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT event_sequence, dataset_id, document_id, event_type,
+                       payload, created_at
+                FROM kb_document_progress_events
+                WHERE dataset_id = $1
+                  AND event_sequence > $2
+                  AND ($3::varchar[] IS NULL OR document_id = ANY($3::varchar[]))
+                ORDER BY event_sequence ASC
+                LIMIT $4
+                """,
+                normalized_dataset,
+                cursor,
+                normalized_documents,
+                bounded_limit,
+            )
+        return [self._row_to_dict(row) for row in rows]
+
+    # ------------------------------------------------------------------
     # Per-document pipeline executions (migration 101). One row per queued
     # generation: the immutable input snapshot reprocess/recover replay
     # (addendum §1-T1.3 — in-flight documents must not drift to a config

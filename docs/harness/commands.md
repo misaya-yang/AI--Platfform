@@ -161,7 +161,7 @@ Run the gate that matches what you touched. These are the same commands CI runs.
 | Service boundaries, Agent API surface | `make test-isolation` |
 | Agent compatibility OpenAPI | `make test-isolation` |
 | Knowledge service (real KB suite, imports `knowledge_service`) | `make kb-unit-gate` |
-| KB migrations 100–110 + public/main-N-1/split full-chain ledger replay, 097 late-table handoff, 101 dump/restore boundary, and durable embedding-action jobs (needs Postgres with temporary-database privilege plus `pg_dump`/`pg_restore`) | `make kb-migration-gate` |
+| KB migrations 100–111 + public/main-N-1/split full-chain ledger replay, 097 late-table handoff, 101 dump/restore boundary, and durable embedding-action jobs (needs Postgres with temporary-database privilege plus `pg_dump`/`pg_restore`) | `make kb-migration-gate` |
 | KB development fixture structure / manifest hashes / seed drift (`tests/fixtures/eval/rag/golden/**`; not a release claim) | `make kb-golden-gate` |
 | KB T0 release evidence (200–400 reviewed cases, source mix, manifest/pointer/reviewed real-corpus baseline binding) | `make kb-release-evidence-gate` |
 | Project a golden JSONL into the versioned Postgres store (PRD T0-#2; `--dry-run` first) | `uv run --all-packages python scripts/import_kb_eval_golden.py <jsonl> --dry-run` |
@@ -207,4 +207,4 @@ central-chain entrypoints are `make migrate` and
 always refuses single-file execution before reading credentials. The separate
 `database/migrate_per_service.py` image runner remains limited to the legal
 schema-split/per-service track and must not receive central RAG migrations
-100–110.
+100–111.

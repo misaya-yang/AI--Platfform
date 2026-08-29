@@ -6,7 +6,7 @@
  */
 
 import { api } from "@/lib/api";
-import { sseFetch } from "@/lib/sse";
+import { sseFetch, sseFetchEvents, type SSEEvent } from "@/lib/sse";
 import type {
   Dataset,
   Document,
@@ -471,6 +471,37 @@ export interface DocumentPipelineResult {
   document_id: string;
   action?: DocumentPipelineAction;
   recover_stage?: "parsing" | "splitting" | "indexing";
+}
+
+export interface DocumentProgressPayload {
+  document_id: string;
+  progress: {
+    percent: number;
+    stage: string;
+    state: string;
+  };
+  terminal?: boolean;
+  error?: string | null;
+}
+
+/** Read-only durable document progress; callers own reconnect/cursor policy. */
+export async function* streamDocumentProgress(
+  datasetId: string,
+  options: { signal?: AbortSignal; lastEventId?: string } = {},
+): AsyncGenerator<SSEEvent<DocumentProgressPayload>, void, void> {
+  const headers = new Headers({ Accept: "text/event-stream" });
+  if (options.lastEventId) headers.set("Last-Event-ID", options.lastEventId);
+  for await (const event of sseFetchEvents<DocumentProgressPayload>(
+    `/api/v1/knowledge/${datasetId}/documents/progress`,
+    {
+      method: "GET",
+      headers,
+      signal: options.signal,
+      timeoutMs: 0,
+    },
+  )) {
+    yield event;
+  }
 }
 
 async function requestDocumentPipelineAction(

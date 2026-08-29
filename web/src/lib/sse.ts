@@ -1,8 +1,9 @@
 export type SSEMessage<T = unknown> = { data: T };
-export type SSEEvent<T = unknown> = { event: string; data: T };
+export type SSEEvent<T = unknown> = { event: string; data: T; id?: string };
 
 import { isSseDebugEnabled } from "@/config/runtime";
 import { getAuthToken } from "@/lib/api";
+import { parseSseEventPart } from "./sseEventParser";
 
 export interface SSEFetchOptions extends RequestInit {
   signal?: AbortSignal;
@@ -350,30 +351,6 @@ export async function* sseFetchEvents<T>(
   };
   signal.addEventListener("abort", abortReader, { once: true });
 
-  const parsePart = (part: string): SSEEvent<T> | null => {
-    const lines = part.split("\n");
-    let event = "";
-    const dataLines: string[] = [];
-
-    for (const line of lines) {
-      if (line.startsWith("event:")) {
-        event = line.slice(6).trim();
-      } else if (line.startsWith("data:")) {
-        dataLines.push(line.slice(5).trim());
-      }
-    }
-
-    const dataStr = dataLines.join("\n");
-    if (!dataStr || dataStr === "[DONE]") return null;
-
-    try {
-      const parsed = JSON.parse(dataStr) as T;
-      return { event, data: parsed };
-    } catch {
-      return { event, data: dataStr as unknown as T };
-    }
-  };
-
   try {
     while (true) {
       if (aborted || signal.aborted) {
@@ -394,7 +371,7 @@ export async function* sseFetchEvents<T>(
         }
 
         if (buffer.trim()) {
-          const evt = parsePart(buffer);
+          const evt = parseSseEventPart<T>(buffer);
           if (evt) {
             yieldedCount++;
             yield evt;
@@ -412,7 +389,7 @@ export async function* sseFetchEvents<T>(
       buffer = lastPart;
 
       for (const part of parts) {
-        const evt = parsePart(part);
+        const evt = parseSseEventPart<T>(part);
         if (!evt) continue;
         yieldedCount++;
         if (debug && (yieldedCount <= 3 || yieldedCount % 50 === 0)) {

@@ -95,6 +95,9 @@ _REPLAY_SNAPSHOT_UNAVAILABLE_DETAIL = (
 )
 _PDF_MAX_PAGES_HARD_LIMIT = 2_000
 _PDF_SPLIT_MAX_OUTPUT_BYTES_HARD_LIMIT = 96 * 1024 * 1024
+DOCUMENT_PROGRESS_STREAM_POLL_SECONDS = 1.0
+DOCUMENT_PROGRESS_STREAM_HEARTBEAT_SECONDS = 15.0
+DOCUMENT_PROGRESS_STREAM_BATCH_LIMIT = 200
 
 _UNRELEASED_MULTIMODAL_TYPES = frozenset({"image", "page_image", "mixed", "multimodal", "vision"})
 _UNRELEASED_IMAGE_METADATA_KEYS = frozenset(
@@ -520,6 +523,52 @@ def _latest_stage_reached(document: Mapping[str, Any]) -> str | None:
         if best_value is None or value > best_value:
             best_stage, best_value = stage, value
     return best_stage
+
+
+def _parse_document_progress_cursor(dataset_id: str, raw_value: str | None) -> int:
+    """Parse the dataset-bound ``task:sequence`` SSE cursor."""
+
+    raw = str(raw_value or "").strip()
+    if not raw:
+        return 0
+    task, separator, sequence_text = raw.rpartition(":")
+    if not separator or task != dataset_id:
+        raise HTTPException(status_code=400, detail="Invalid document progress event cursor")
+    try:
+        sequence = int(sequence_text)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid document progress event cursor") from exc
+    if sequence < 0:
+        raise HTTPException(status_code=400, detail="Invalid document progress event cursor")
+    return sequence
+
+
+def _format_document_progress_event(dataset_id: str, event: Mapping[str, Any]) -> str:
+    """Format one durable event without exposing database internals."""
+
+    try:
+        sequence = int(event.get("event_sequence") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("document progress event has an invalid sequence") from exc
+    if sequence <= 0:
+        raise ValueError("document progress event has an invalid sequence")
+    event_type = str(event.get("event_type") or "progress").strip().lower()
+    if event_type not in {"progress", "terminal", "deleted"}:
+        event_type = "progress"
+    payload = event.get("payload")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+    if not isinstance(payload, Mapping):
+        payload = {}
+    serialized = json.dumps(dict(payload), ensure_ascii=False, separators=(",", ":"))
+    return (
+        f"id: {dataset_id}:{sequence}\n"
+        f"event: {event_type}\n"
+        f"data: {serialized}\n\n"
+    )
 
 
 async def _get_route_document_or_404(
@@ -1428,6 +1477,111 @@ async def get_image_segment(
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/knowledge/{dataset_id}/documents/progress")
+async def stream_document_progress(
+    dataset_id: str,
+    request: Request,
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """Stream durable document progress with ``Last-Event-ID`` replay.
+
+    The authorization and event-store checks happen before returning the
+    streaming response so callers receive a real 403/404/503 status rather
+    than an error after SSE headers have already been sent.  The generator
+    only reads the append-only ledger; client disconnects release the request
+    without holding a database connection or performing a write.
+    """
+
+    cursor = _parse_document_progress_cursor(
+        dataset_id,
+        request.headers.get("last-event-id"),
+    )
+    try:
+        await svc.require_dataset_access(user, dataset_id, required="viewer")
+        list_events = getattr(getattr(svc, "db", None), "list_document_progress_events", None)
+        if not callable(list_events):
+            raise RuntimeError("document progress event store is unavailable")
+        # Preflight also verifies that migration 111 is present before the
+        # StreamingResponse commits headers to the client.
+        await list_events(dataset_id, after_sequence=cursor, limit=1)
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "Document progress stream preflight failed",
+            extra={"dataset_id": dataset_id},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Document progress stream is unavailable",
+        ) from exc
+
+    async def event_generator():
+        sequence = cursor
+        last_heartbeat = asyncio.get_running_loop().time()
+        yield ": connected\nretry: 2000\n\n"
+        try:
+            while not await request.is_disconnected():
+                events = await list_events(
+                    dataset_id,
+                    after_sequence=sequence,
+                    limit=DOCUMENT_PROGRESS_STREAM_BATCH_LIMIT,
+                )
+                emitted = False
+                for event in events:
+                    try:
+                        event_sequence = int(event.get("event_sequence") or 0)
+                    except (TypeError, ValueError):
+                        logger.warning(
+                            "Ignoring malformed document progress event",
+                            extra={"dataset_id": dataset_id},
+                        )
+                        continue
+                    if event_sequence <= sequence:
+                        continue
+                    sequence = event_sequence
+                    yield _format_document_progress_event(dataset_id, event)
+                    emitted = True
+                if emitted:
+                    continue
+
+                now = asyncio.get_running_loop().time()
+                if now - last_heartbeat >= DOCUMENT_PROGRESS_STREAM_HEARTBEAT_SECONDS:
+                    yield ": keep-alive\n\n"
+                    last_heartbeat = now
+                await asyncio.sleep(DOCUMENT_PROGRESS_STREAM_POLL_SECONDS)
+        except asyncio.CancelledError:
+            # Starlette cancels the generator when the client disconnects.
+            # No connection is held across iterations, so cancellation is the
+            # complete cleanup path.
+            raise
+        except Exception:
+            # Headers are already committed; let the client reconnect using
+            # the last emitted ID.  Never turn a transient read failure into a
+            # synthetic terminal event.
+            logger.warning(
+                "Document progress stream ended after a read failure",
+                extra={"dataset_id": dataset_id},
+                exc_info=True,
+            )
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/knowledge/{dataset_id}/documents/{document_id}")
