@@ -1,10 +1,12 @@
 import { useState } from "react";
-import { History, RefreshCcw, Trash2 } from "lucide-react";
+import { Archive, ArchiveRestore, History, RefreshCcw, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import type { Document } from "@/types/knowledge";
+import { resolveDisplayStatus, type Document } from "@/types/knowledge";
 import { StatusBadge } from "@/pages/knowledge/detail/StatusBadge";
+import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -26,6 +28,10 @@ export function DocumentRow({
   onCheck,
   onReindex,
   onDelete,
+  onToggleEnabled,
+  onArchive,
+  onUnarchive,
+  busyLifecycle = false,
   onVersionRestored,
   showCheckbox = false,
 }: {
@@ -37,6 +43,11 @@ export function DocumentRow({
   onCheck?: (checked: boolean) => void;
   onReindex: () => Promise<void>;
   onDelete: () => Promise<void>;
+  onToggleEnabled?: (enabled: boolean) => void;
+  onArchive?: () => void;
+  onUnarchive?: () => void;
+  /** Document has an in-flight enable/disable/archive mutation. */
+  busyLifecycle?: boolean;
   onVersionRestored?: () => void;
   showCheckbox?: boolean;
 }) {
@@ -45,6 +56,14 @@ export function DocumentRow({
   const [reindexOpen, setReindexOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [versionHistoryOpen, setVersionHistoryOpen] = useState(false);
+
+  // Lifecycle badges are driven by the resolved display status, so they stay
+  // correct whether the payload carries a backend stamp (post-D1 lists and
+  // every mutation response) or only raw fields.
+  const display = resolveDisplayStatus(doc);
+  const isArchived = display === "archived";
+  const isDisabled = display === "disabled";
+  const inactive = isArchived || isDisabled;
 
   const handleAction = async (action: () => Promise<void>) => {
     if (loading) return;
@@ -100,14 +119,17 @@ export function DocumentRow({
           flex flex-wrap items-center gap-y-3 px-4 py-3 border-b border-border/60 last:border-b-0 hover:bg-muted/40 transition-colors
           sm:flex-nowrap sm:gap-y-0 sm:px-5
           ${selected ? "bg-primary/5" : ""} ${checked ? "bg-primary/10" : ""}
+          ${inactive && !selected && !checked ? "bg-muted/30" : ""}
         `}
       >
         {showCheckbox && (
           <div className="mr-3 flex items-center">
             <Checkbox
+              data-testid={`doc-select-${doc.document_id}`}
               checked={checked}
               onCheckedChange={(val) => onCheck?.(val === true)}
               onClick={(e) => e.stopPropagation()}
+              aria-label={t("knowledge.documentRow.selectDoc")}
             />
           </div>
         )}
@@ -115,7 +137,11 @@ export function DocumentRow({
           {getFileIcon()}
           <button
             type="button"
-            className="min-w-0 truncate text-left text-sm font-medium text-primary hover:text-primary/90"
+            className={`min-w-0 truncate text-left text-sm font-medium ${
+              inactive
+                ? "text-muted-foreground hover:text-foreground"
+                : "text-primary hover:text-primary/90"
+            }`}
             onClick={onSelect}
           >
             {doc.title}
@@ -126,13 +152,31 @@ export function DocumentRow({
           {formatFileSize(doc.size_bytes)}
         </div>
 
-        <div className="order-2 flex w-auto justify-start sm:order-none sm:w-28 sm:justify-center">
-          <StatusBadge 
-            status={doc.status} 
-            error={doc.error} 
-            progress={doc.progress} 
+        <div className="order-2 flex w-auto flex-wrap items-center justify-start gap-1 sm:order-none sm:w-28 sm:justify-center">
+          <StatusBadge
+            status={doc.status}
+            error={doc.error}
+            progress={doc.progress}
             metadata={doc.metadata}
           />
+          {isArchived && (
+            <Badge
+              variant="outline"
+              data-testid={`doc-archived-badge-${doc.document_id}`}
+              className="text-xs font-medium bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30"
+            >
+              {t("knowledge.status.archived")}
+            </Badge>
+          )}
+          {isDisabled && (
+            <Badge
+              variant="outline"
+              data-testid={`doc-disabled-badge-${doc.document_id}`}
+              className="text-xs font-medium bg-slate-500/15 text-slate-700 dark:text-slate-400 border-slate-500/30"
+            >
+              {t("knowledge.status.disabled")}
+            </Badge>
+          )}
         </div>
 
         <div className="hidden w-28 text-sm text-muted-foreground text-center sm:block">{t("knowledge.documentRow.defaultCategory")}</div>
@@ -149,7 +193,7 @@ export function DocumentRow({
             : "-"}
         </div>
 
-        <div className="order-3 ml-auto flex w-auto flex-wrap justify-end gap-1 text-sm sm:order-none sm:ml-0 sm:w-48 sm:gap-2">
+        <div className="order-3 ml-auto flex w-auto flex-wrap items-center justify-end gap-1 text-sm sm:order-none sm:ml-0 sm:w-64 sm:gap-2">
           <button
             className="min-h-10 px-1 text-primary hover:text-primary/90 disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-0 sm:px-0"
             onClick={(e) => {
@@ -160,6 +204,57 @@ export function DocumentRow({
           >
             {t("knowledge.documentRow.segments")}
           </button>
+          {onToggleEnabled && (
+            <Switch
+              data-testid={`doc-switch-${doc.document_id}`}
+              checked={doc.enabled !== false}
+              disabled={loading || busyLifecycle || isArchived}
+              onCheckedChange={(checked) => onToggleEnabled(checked)}
+              title={
+                isArchived
+                  ? t("knowledge.documentRow.switchArchivedHint")
+                  : doc.enabled !== false
+                    ? t("knowledge.documentRow.disableDoc")
+                    : t("knowledge.documentRow.enableDoc")
+              }
+              aria-label={
+                doc.enabled !== false
+                  ? t("knowledge.documentRow.disableDoc")
+                  : t("knowledge.documentRow.enableDoc")
+              }
+            />
+          )}
+          {(isArchived ? onUnarchive : onArchive) && (
+            <button
+              data-testid={
+                isArchived
+                  ? `doc-unarchive-${doc.document_id}`
+                  : `doc-archive-${doc.document_id}`
+              }
+              className="inline-flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 sm:h-7 sm:w-7"
+              onClick={(e) => {
+                e.stopPropagation();
+                (isArchived ? onUnarchive : onArchive)?.();
+              }}
+              disabled={loading || busyLifecycle}
+              title={
+                isArchived
+                  ? t("knowledge.documentRow.unarchiveTitle")
+                  : t("knowledge.documentRow.archiveTitle")
+              }
+              aria-label={
+                isArchived
+                  ? t("knowledge.documentRow.unarchiveTitle")
+                  : t("knowledge.documentRow.archiveTitle")
+              }
+            >
+              {isArchived ? (
+                <ArchiveRestore className="h-3.5 w-3.5" />
+              ) : (
+                <Archive className="h-3.5 w-3.5" />
+              )}
+            </button>
+          )}
           <button
             className="inline-flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 sm:h-7 sm:w-7"
             onClick={(e) => {
@@ -173,6 +268,7 @@ export function DocumentRow({
             <History className="h-3.5 w-3.5" />
           </button>
           <button
+            data-testid={`doc-reindex-${doc.document_id}`}
             className="inline-flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 sm:h-7 sm:w-7"
             onClick={(e) => {
               e.stopPropagation();
@@ -185,6 +281,7 @@ export function DocumentRow({
             <RefreshCcw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
           </button>
           <button
+            data-testid={`doc-delete-${doc.document_id}`}
             className="inline-flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-50 sm:h-7 sm:w-7"
             onClick={(e) => {
               e.stopPropagation();

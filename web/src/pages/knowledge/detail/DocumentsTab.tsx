@@ -34,6 +34,8 @@ import {
   LayoutList,
   Table2,
   ImageIcon,
+  Archive,
+  ArchiveRestore,
 } from "lucide-react";
 
 import { useDebouncedValue, useDocuments, useSegments } from "@/hooks/useKnowledge";
@@ -46,6 +48,10 @@ import {
   batchDeleteDocuments,
   setSegmentEnabled,
   batchSetSegmentsEnabled,
+  setDocumentEnabled,
+  setDocumentArchived,
+  DOCUMENT_BATCH_REINDEX_LIMIT,
+  DOCUMENT_ARCHIVE_REASON_LIMIT,
 } from "@/api/knowledge";
 import { parseSegmentKeywords, type Document } from "@/types/knowledge";
 
@@ -63,6 +69,16 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import {
   Select,
   SelectContent,
@@ -157,6 +173,18 @@ export function DocumentsTab({
   const [batchReindexOpen, setBatchReindexOpen] = useState(false);
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
   const [batchLoading, setBatchLoading] = useState(false);
+  // Ids the batch-reindex endpoint reported as skipped (409 all-skipped
+  // contract): rendered inside the dialog so users can deselect and retry.
+  const [batchReindexSkipped, setBatchReindexSkipped] = useState<string[] | null>(null);
+
+  // Document lifecycle (enable/disable, archive): rows with an in-flight
+  // mutation render their controls disabled until it settles.
+  const [pendingDocIds, setPendingDocIds] = useState<Set<string>>(new Set());
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archiveDocId, setArchiveDocId] = useState<string | null>(null);
+  const [archiveReason, setArchiveReason] = useState("");
+  const [archiveSaving, setArchiveSaving] = useState(false);
+  const [unarchiveDocId, setUnarchiveDocId] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<"all" | "completed" | "uploaded" | "processing" | "failed">("all");
   const [contentTypeFilter, setContentTypeFilter] = useState<"all" | "document" | "data" | "image">("all");
 
@@ -252,6 +280,19 @@ export function DocumentsTab({
         qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
       }, 1000);
     } catch (e) {
+      // 409 = the document already belongs to a queue generation (or the
+      // claim was rejected): that is "already queued", not a failure
+      // (PRD §5-#6). Keep the row state and tell the user instead of
+      // surfacing a raw error.
+      const status = (e as { response?: { status?: number } } | null)?.response?.status;
+      if (status === 409) {
+        toast.warning(
+          t("knowledge.detail.reindexQueuedTitle"),
+          t("knowledge.detail.reindexQueuedText", { title: doc.title })
+        );
+        await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
+        return;
+      }
       console.error("Reindex failed:", e);
       toast.error(t("knowledge.detail.reindexFailed"), e instanceof Error ? e.message : String(e));
     }
@@ -262,6 +303,122 @@ export function DocumentsTab({
     await deleteDocument(datasetId, doc.document_id);
     await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
     if (selectedDocId === doc.document_id) setSelectedDocId(undefined);
+  }
+
+  // ---- Document lifecycle (enable/disable, archive) ----
+
+  /**
+   * Mutation responses carry the full document (every column + a fresh
+   * display_status stamp), so merge them straight into the cached list: the
+   * row reflects the new state immediately even before the refetch lands
+   * (dependency D1: the list SELECT does not return enabled/archived yet, so
+   * the refetch alone would not).
+   */
+  function mergeDocumentIntoCache(updated: Document) {
+    if (!datasetId) return;
+    qc.setQueryData<Document[]>(["kb-documents", datasetId], (old) =>
+      old?.map((d) =>
+        d.document_id === updated.document_id ? { ...d, ...updated } : d
+      )
+    );
+  }
+
+  async function handleToggleDocEnabled(doc: Document, enabled: boolean) {
+    if (!datasetId) return;
+    setPendingDocIds((prev) => new Set(prev).add(doc.document_id));
+    try {
+      const updated = await setDocumentEnabled(datasetId, doc.document_id, enabled);
+      mergeDocumentIntoCache(updated);
+      toast.success(
+        enabled
+          ? t("knowledge.detail.documentEnabled")
+          : t("knowledge.detail.documentDisabled"),
+        enabled
+          ? t("knowledge.detail.documentEnabledDesc")
+          : t("knowledge.detail.documentDisabledDesc")
+      );
+      await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
+    } catch (e) {
+      console.error("Document status update failed:", e);
+      toast.error(
+        t("knowledge.detail.documentStatusFailed"),
+        e instanceof Error ? e.message : String(e)
+      );
+    } finally {
+      setPendingDocIds((prev) => {
+        const next = new Set(prev);
+        next.delete(doc.document_id);
+        return next;
+      });
+    }
+  }
+
+  function openArchiveDialog(doc: Document) {
+    setArchiveDocId(doc.document_id);
+    setArchiveReason("");
+    setArchiveOpen(true);
+  }
+
+  async function confirmArchive() {
+    if (!datasetId || !archiveDocId) return;
+    const reason = archiveReason.trim();
+    if (reason.length > DOCUMENT_ARCHIVE_REASON_LIMIT) {
+      toast.error(t("knowledge.detail.archiveReasonTooLong"));
+      return;
+    }
+    const doc = docs.find((d) => d.document_id === archiveDocId);
+    setArchiveSaving(true);
+    try {
+      const updated = await setDocumentArchived(
+        datasetId,
+        archiveDocId,
+        true,
+        reason || undefined
+      );
+      mergeDocumentIntoCache(updated);
+      setArchiveOpen(false);
+      toast.success(
+        t("knowledge.detail.archiveSuccess"),
+        t("knowledge.detail.archiveSuccessDesc", { title: doc?.title ?? "" })
+      );
+      await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
+    } catch (e) {
+      console.error("Archive failed:", e);
+      toast.error(
+        t("knowledge.detail.archiveFailed"),
+        e instanceof Error ? e.message : String(e)
+      );
+    } finally {
+      setArchiveSaving(false);
+    }
+  }
+
+  async function confirmUnarchive() {
+    if (!datasetId || !unarchiveDocId) return;
+    const doc = docs.find((d) => d.document_id === unarchiveDocId);
+    setPendingDocIds((prev) => new Set(prev).add(unarchiveDocId));
+    try {
+      const updated = await setDocumentArchived(datasetId, unarchiveDocId, false);
+      mergeDocumentIntoCache(updated);
+      setUnarchiveDocId(null);
+      toast.success(
+        t("knowledge.detail.unarchiveSuccess"),
+        t("knowledge.detail.unarchiveSuccessDesc", { title: doc?.title ?? "" })
+      );
+      await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
+    } catch (e) {
+      console.error("Unarchive failed:", e);
+      toast.error(
+        t("knowledge.detail.unarchiveFailed"),
+        e instanceof Error ? e.message : String(e)
+      );
+    } finally {
+      setPendingDocIds((prev) => {
+        const next = new Set(prev);
+        if (unarchiveDocId) next.delete(unarchiveDocId);
+        return next;
+      });
+    }
   }
 
   // Batch operations
@@ -318,21 +475,66 @@ export function DocumentsTab({
 
   async function handleBatchReindex() {
     if (!datasetId || selectedDocIds.size === 0) return;
+    // BatchReindexSchema caps a call at 100 ids and answers 422 beyond it;
+    // guard client-side with a readable hint instead of the raw 422.
+    if (selectedDocIds.size > DOCUMENT_BATCH_REINDEX_LIMIT) {
+      toast.error(
+        t("knowledge.detail.batchReindexLimitTitle"),
+        t("knowledge.detail.batchReindexLimitText", { limit: DOCUMENT_BATCH_REINDEX_LIMIT })
+      );
+      return;
+    }
     setBatchLoading(true);
     try {
       const result = await batchReindexDocuments(datasetId, Array.from(selectedDocIds));
       await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
       setBatchReindexOpen(false);
+      setBatchReindexSkipped(null);
       setSelectedDocIds(new Set());
-      // Show result
-      if (result.failed_count > 0) {
-        toast.warning(t("knowledge.detail.batchReindexDone"), `${result.success_count} / ${result.failed_count}`);
+      // The endpoint reports queued vs skipped ids — surface the split instead
+      // of assuming every selection entered a new generation.
+      if (result.skipped_document_ids.length > 0) {
+        toast.warning(
+          t("knowledge.detail.batchReindexDone"),
+          t("knowledge.detail.batchReindexPartial", {
+            queued: result.document_count,
+            skipped: result.skipped_document_ids.length,
+          })
+        );
       } else {
-        toast.success(t("knowledge.detail.batchReindexDone"), t("knowledge.detail.batchReindexSuccess", { count: result.success_count }));
+        toast.success(
+          t("knowledge.detail.batchReindexDone"),
+          t("knowledge.detail.batchReindexSuccess", { count: result.document_count })
+        );
       }
     } catch (e) {
-      console.error("Batch reindex failed:", e);
-      toast.error(t("knowledge.detail.batchReindexFailed"), e instanceof Error ? e.message : String(e));
+      const response = (e as {
+        response?: { status?: number; data?: { detail?: unknown } };
+      } | null)?.response;
+      if (response?.status === 409) {
+        // All-skipped contract: 409 with detail {message, skipped_document_ids}.
+        // Keep the dialog open and list the skipped documents so the user can
+        // deselect them and retry.
+        const detail = response.data?.detail as
+          | { skipped_document_ids?: unknown }
+          | undefined;
+        const skipped = Array.isArray(detail?.skipped_document_ids)
+          ? (detail?.skipped_document_ids as string[])
+          : [];
+        setBatchReindexSkipped(skipped);
+        toast.warning(
+          t("knowledge.detail.batchReindexAllSkippedTitle"),
+          t("knowledge.detail.batchReindexAllSkippedText")
+        );
+      } else if (response?.status === 422) {
+        toast.error(
+          t("knowledge.detail.batchReindexLimitTitle"),
+          t("knowledge.detail.batchReindexLimitText", { limit: DOCUMENT_BATCH_REINDEX_LIMIT })
+        );
+      } else {
+        console.error("Batch reindex failed:", e);
+        toast.error(t("knowledge.detail.batchReindexFailed"), e instanceof Error ? e.message : String(e));
+      }
     } finally {
       setBatchLoading(false);
     }
@@ -686,7 +888,10 @@ export function DocumentsTab({
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
-                    onClick={() => setBatchReindexOpen(true)}
+                    onClick={() => {
+                      setBatchReindexSkipped(null);
+                      setBatchReindexOpen(true);
+                    }}
                     disabled={selectedDocIds.size === 0}
                     className="text-primary"
                   >
@@ -762,7 +967,7 @@ export function DocumentsTab({
           <div className="w-28 text-center">{t("knowledge.detail.headerStatus")}</div>
           <div className="w-28 text-center">{t("knowledge.detail.headerCategory")}</div>
           <div className="w-40 text-center">{t("knowledge.detail.headerUploadTime")}</div>
-          <div className="w-48 text-center">{t("knowledge.detail.headerActions")}</div>
+          <div className="w-64 text-center">{t("knowledge.detail.headerActions")}</div>
         </div>
 
         {/* 文档列表 */}
@@ -779,6 +984,10 @@ export function DocumentsTab({
               onCheck={() => toggleDocSelection(doc.document_id)}
               onReindex={() => handleReindex(doc)}
               onDelete={() => handleDeleteDoc(doc)}
+              onToggleEnabled={(enabled) => handleToggleDocEnabled(doc, enabled)}
+              onArchive={() => openArchiveDialog(doc)}
+              onUnarchive={() => setUnarchiveDocId(doc.document_id)}
+              busyLifecycle={pendingDocIds.has(doc.document_id)}
               onVersionRestored={() => qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] })}
             />
           ))}
@@ -975,7 +1184,13 @@ export function DocumentsTab({
       </Dialog>
 
       {/* 批量重建索引确认对话框 */}
-      <Dialog open={batchReindexOpen} onOpenChange={setBatchReindexOpen}>
+      <Dialog
+        open={batchReindexOpen}
+        onOpenChange={(open) => {
+          setBatchReindexOpen(open);
+          if (!open) setBatchReindexSkipped(null);
+        }}
+      >
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
@@ -992,6 +1207,27 @@ export function DocumentsTab({
               <p>• {t("knowledge.detail.batchReindexHint2")}</p>
               <p>• {t("knowledge.detail.batchReindexHint3")}</p>
             </div>
+            {/* 全部被跳过（409）时展示跳过清单，供用户取消选择后重试 */}
+            {batchReindexSkipped !== null && (
+              <div
+                data-testid="batch-reindex-skipped"
+                className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 space-y-2"
+              >
+                <p className="text-xs font-medium text-amber-700 dark:text-amber-400">
+                  {t("knowledge.detail.batchReindexSkippedLabel", { count: batchReindexSkipped.length })}
+                </p>
+                <div className="max-h-32 overflow-auto">
+                  {batchReindexSkipped.map((docId) => {
+                    const doc = docs.find((d) => d.document_id === docId);
+                    return (
+                      <div key={docId} className="px-1 py-0.5 text-xs text-amber-700/90 dark:text-amber-400/90 truncate">
+                        {doc?.title ?? docId}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             {/* 选中的文档列表预览 */}
             <div className="max-h-32 overflow-auto border border-border rounded-lg">
               {Array.from(selectedDocIds).slice(0, 10).map((docId) => {
@@ -1078,6 +1314,95 @@ export function DocumentsTab({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* 归档确认对话框（原因可选，≤255 字符——后端列宽，依赖 D2） */}
+      <Dialog open={archiveOpen} onOpenChange={setArchiveOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Archive className="h-5 w-5 text-muted-foreground" />
+              {t("knowledge.detail.archiveDocTitle")}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              {t("knowledge.detail.archiveDocDesc", {
+                title: docs.find((d) => d.document_id === archiveDocId)?.title ?? "",
+              })}
+            </p>
+            <div className="space-y-1.5">
+              <Label className="text-sm font-medium">
+                {t("knowledge.detail.archiveReasonLabel")}
+              </Label>
+              <Textarea
+                data-testid="archive-reason-input"
+                value={archiveReason}
+                onChange={(e) => setArchiveReason(e.target.value)}
+                rows={3}
+                maxLength={DOCUMENT_ARCHIVE_REASON_LIMIT}
+                placeholder={t("knowledge.detail.archiveReasonPlaceholder")}
+              />
+              <div className="flex items-center justify-between text-xs text-muted-foreground">
+                <span>{t("knowledge.detail.archiveReasonHint")}</span>
+                <span data-testid="archive-reason-count">
+                  {archiveReason.length}/{DOCUMENT_ARCHIVE_REASON_LIMIT}
+                </span>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setArchiveOpen(false)} disabled={archiveSaving}>
+              {t("knowledge.detail.cancel")}
+            </Button>
+            <Button
+              data-testid="archive-confirm"
+              onClick={confirmArchive}
+              disabled={archiveSaving}
+              className="bg-primary hover:bg-primary/90"
+            >
+              {archiveSaving ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  {t("knowledge.detail.processing")}
+                </>
+              ) : (
+                t("knowledge.detail.archiveConfirm")
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 解除归档确认 */}
+      <AlertDialog
+        open={unarchiveDocId !== null}
+        onOpenChange={(open) => {
+          if (!open) setUnarchiveDocId(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <ArchiveRestore className="h-5 w-5 text-muted-foreground" />
+              {t("knowledge.detail.unarchiveDocTitle")}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("knowledge.detail.unarchiveDocDesc", {
+                title: docs.find((d) => d.document_id === unarchiveDocId)?.title ?? "",
+              })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("knowledge.detail.cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              data-testid="unarchive-confirm"
+              onClick={() => confirmUnarchive()}
+            >
+              {t("knowledge.detail.unarchiveConfirm")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

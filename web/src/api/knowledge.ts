@@ -169,8 +169,60 @@ export async function deleteDocument(datasetId: string, documentId: string) {
   return data;
 }
 
+/**
+ * Single-document reindex is the reembed verb. Success returns queuing; a
+ * 409 means the document already belongs to a queue generation or the claim
+ * was rejected (PRD §5-#6) — callers must treat that as "already queued",
+ * not as a failure.
+ */
+export interface ReindexResult {
+  status: string;
+  document_id: string;
+  action?: string;
+}
+
 export async function reindexDocument(datasetId: string, documentId: string) {
-  const { data } = await api.post(`/api/v1/knowledge/${datasetId}/documents/${documentId}/reindex`);
+  const { data } = await api.post<ReindexResult>(
+    `/api/v1/knowledge/${datasetId}/documents/${documentId}/reindex`
+  );
+  return data;
+}
+
+/**
+ * Document enable/disable (canonical PATCH status route; the POST /enable
+ * sibling is compat-only). Returns the full document with a fresh
+ * display_status stamp.
+ */
+export async function setDocumentEnabled(
+  datasetId: string,
+  documentId: string,
+  enabled: boolean
+) {
+  const { data } = await api.patch<Document>(
+    `/api/v1/knowledge/${datasetId}/documents/${documentId}/status`,
+    { enabled }
+  );
+  return data;
+}
+
+/**
+ * The column behind archived_reason is VARCHAR(255) even though the request
+ * schema advertises 2000 (backend dependency D2); the client caps input at
+ * the column's truth so saves never truncate server-side.
+ */
+export const DOCUMENT_ARCHIVE_REASON_LIMIT = 255;
+
+/** Archive or unarchive a document. The reason is stored only when archiving. */
+export async function setDocumentArchived(
+  datasetId: string,
+  documentId: string,
+  archived: boolean,
+  reason?: string
+) {
+  const { data } = await api.patch<Document>(
+    `/api/v1/knowledge/${datasetId}/documents/${documentId}/archive`,
+    archived ? { archived, reason: reason ?? null } : { archived }
+  );
   return data;
 }
 
@@ -738,8 +790,30 @@ export interface DatasetSources {
 // Batch Operations APIs
 // ============================================================
 
+/** BatchReindexSchema caps a single call at 100 ids (422 beyond that). */
+export const DOCUMENT_BATCH_REINDEX_LIMIT = 100;
+
+/**
+ * Batch reindex contract (knowledge-service batch_reindex_documents):
+ * - success returns queued vs skipped ids — per-document claims can fail
+ *   (already queued/processing), which the UI must surface, not swallow;
+ * - when NO document entered a new generation the endpoint answers 409 with
+ *   detail `{message, skipped_document_ids}` instead of a 200 body.
+ */
+export interface BatchReindexResult {
+  status: "queuing" | "partial";
+  document_count: number;
+  queued_document_ids: string[];
+  skipped_document_ids: string[];
+}
+
+export interface BatchReindexConflictDetail {
+  message: string;
+  skipped_document_ids: string[];
+}
+
 export async function batchReindexDocuments(datasetId: string, documentIds: string[]) {
-  const { data } = await api.post<BatchOperationResult>(`/api/v1/knowledge/${datasetId}/documents/batch-reindex`, {
+  const { data } = await api.post<BatchReindexResult>(`/api/v1/knowledge/${datasetId}/documents/batch-reindex`, {
     document_ids: documentIds,
   });
   return data;

@@ -48,7 +48,7 @@
       "DatasetUploadDialog 卡片 transition-all（既有；motion 静态扫描挂账，随设计轮收敛）"
     ]
   },
-  "active_phase": "C6 文档归档+启用禁用开关+409 队列语义+mock e2e",
+  "active_phase": "C7 评测用例持久化+JSONL 导入+一键送黄金集+e2e",
   "iterations": [
     {
       "phase": "C1",
@@ -120,6 +120,21 @@
         "testid 合同（e2e 稳定锚点）：segment-switch-{id}/segment-select-{id}/segment-edit-{id}/segment-delete-{id}/segment-batch-toggle/segment-batch-bar/segment-batch-count/segment-disabled-count；segment-edit 用 testid 是因为页头另有\"编辑\"菜单，getByRole 会误中",
         "切换文档/返回列表时清空段落选择与批量模式（selectDocument 收口）；新控件用合法 outline/default 变体（不碰 outline-solid 挂账）；Switch 默认尺寸即 24px 触控门槛",
         "i18n: knowledge.segment 新增 27 键双语，全部进 i18n:check"
+      ]
+    },
+    {
+      "phase": "C6",
+      "date": "2026-08-29",
+      "scope": "文档生命周期面：启用/禁用开关（PATCH /status）+归档/恢复（PATCH /archive，原因≤255）+单文档重嵌 409\"已在队列\"+批量重建真实合同（上限 100/部分成功/全跳过 409 清单）",
+      "result": "done",
+      "evidence": "新增 e2e/knowledge-document-lifecycle.spec.ts 6/6 + 既有 @mock 8/8（--grep @mock 共 14/14）；node --test 50/50；lint/build(oversizedRoutes=[])/i18n:check 绿；真实 tsc 98=存量基线，KB 切片零新增（仍只 outline-solid + 2 个 node:* 测试导入）",
+      "changes": [
+        "api/knowledge.ts: +reindexDocument（POST /reindex → {status, document_id}）；+setDocumentEnabled（PATCH /documents/{id}/status，正式端点，返回全文档）；+setDocumentArchived（PATCH /archive，{archived, reason?}，恢复时清 reason）；DOCUMENT_ARCHIVE_REASON_LIMIT=255（D2：DB 列 VARCHAR(255) vs schema 声称 2000，前端按列宽限流）；batchReindexDocuments 改型为真实合同 BatchReindexResult{status, document_count, queued_document_ids, skipped_document_ids}+DOCUMENT_BATCH_REINDEX_LIMIT=100（此前误型为 success_count/failed_count，运行时为 undefined）",
+        "DocumentRow: Switch（checked=enabled!==false；归档时禁用+switchArchivedHint；busyLifecycle 互斥）+归档/恢复图标按钮+已归档琥珀/已禁用 slate 徽章——徽章全部由 resolveDisplayStatus 驱动，对变更响应（带后端戳）与 D1 后的列表同样正确；停用行 bg-muted/30+标题降饱和；操作列 w-48→w-64 容纳开关+归档钮",
+        "DocumentsTab: handleToggleDocEnabled/confirmArchive/confirmUnarchive 用 pendingDocIds 互斥 + mergeDocumentIntoCache 把变更响应的全文档并进列表缓存（D1 前列接口缺 enabled/archived，响应先行点亮）；归档原因对话框（Textarea maxLength=255+计数器 archive-reason-count，超长走客户端 toast 不打后端）；恢复走 AlertDialog；单文档重嵌 409 → toast.warning 已在队列（不触发失败分支）；批量重建：客户端 >100 拦截（不发请求）+部分成功 toast.warning 已入队 N 个/跳过 M 个+全跳过 409 保持对话框打开并展示 batch-reindex-skipped 清单（可取消勾选重试）+422 转上限提示",
+        "testid 合同：doc-switch-{id}/doc-archive-{id}/doc-unarchive-{id}/doc-select-{id}/doc-reindex-{id}/doc-delete-{id}/doc-archived-badge-{id}/doc-disabled-badge-{id}/archive-reason-input/archive-reason-count/archive-confirm/unarchive-confirm/batch-reindex-skipped",
+        "D1 未落地纪律：列表行徽章在 D1 前仅对刚操作过的行准确（响应合并），mock e2e 模拟 D1 后的列表（fixture 带 enabled/archived/display_status），spec 头注释明示该依赖；409 测试把浏览器对预期非 2xx 的资源日志列入 allowedConsoleErrors",
+        "i18n: knowledge.detail/documentRow/status 新增 37 键双语，全部进 i18n:check"
       ]
     }
   ],
