@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -9,7 +9,7 @@ import {
   type ProcessingMode,
 } from "@/api/knowledge";
 import { toast } from "@/hooks/use-toast";
-import { DEFAULT_CHUNKING_CONFIG, DEFAULT_RETRIEVAL_CONFIG } from "@/types/knowledge";
+import { DEFAULT_CHUNKING_CONFIG, DEFAULT_RETRIEVAL_CONFIG, type Dataset } from "@/types/knowledge";
 
 export const DATASET_EMBEDDING_MODELS = [
   {
@@ -53,6 +53,7 @@ export const DATASET_EMBEDDING_MODELS = [
 
 interface DatasetUploadControllerOptions {
   datasetId?: string;
+  dataset?: Dataset;
   pendingFiles: File[];
   onOpenChange: (open: boolean) => void;
   onPendingFilesChange: (files: File[]) => void;
@@ -61,6 +62,7 @@ interface DatasetUploadControllerOptions {
 
 export function useDatasetUploadController({
   datasetId,
+  dataset,
   pendingFiles,
   onOpenChange,
   onPendingFilesChange,
@@ -103,6 +105,17 @@ export function useDatasetUploadController({
   const [rerankEnabled, setRerankEnabled] = useState(true);
   const [rerankModel, setRerankModel] = useState(DEFAULT_RETRIEVAL_CONFIG.rerank.model);
   const uploadProcessingMode: ProcessingMode = "text_only";
+
+  // Adopt the dataset's current embedding as the dialog selection once it is
+  // known — confirming an upload used to silently swap the dataset's model
+  // for the hard-coded default below.
+  const datasetEmbedding =
+    dataset?.embedding_provider && dataset?.embedding_model
+      ? `${dataset.embedding_provider}:${dataset.embedding_model}`
+      : null;
+  useEffect(() => {
+    if (datasetEmbedding) setUploadEmbeddingModel(datasetEmbedding);
+  }, [datasetEmbedding]);
 
   function buildChunkingConfig() {
     const baseConfig: Record<string, unknown> = { mode: uploadChunkMode };
@@ -147,23 +160,52 @@ export function useDatasetUploadController({
         break;
     }
 
-    if (uploadMetadataEnabled) {
-      baseConfig.extract_metadata = true;
-      const fields: string[] = [];
-      if (uploadExtractTitle) fields.push("title");
-      if (uploadExtractKeywords) fields.push("keywords");
-      if (uploadDetectLanguage) fields.push("language");
-      if (uploadExtractSummary) fields.push("summary");
-      if (uploadExtractEntities) fields.push("entities");
-      fields.push("date", "word_count", "char_count");
-      baseConfig.metadata_fields = fields;
-    }
+    // NOTE (D6): the dialog exposes metadata-extraction toggles, but the
+    // backend ChunkingConfigSchema (extra="forbid") cannot carry
+    // extract_metadata/metadata_fields yet — sending them 422s the entire
+    // config update. The payload omits them until the backend schema grows
+    // the fields; handleConfirmUpload warns the user when the toggles are on.
 
     return baseConfig;
   }
 
+  /**
+   * Mirror the ChunkingConfigSchema validators so a doomed config update is
+   * blocked before the upload starts. Modes that omit chunk_size/
+   * chunk_overlap fall back to the schema defaults (2000 / 300) for the
+   * check.
+   */
+  function chunkingValidationError(): string | null {
+    if (uploadChunkMode === "regex") {
+      return t("knowledge.detail.chunkRegexDisabled");
+    }
+    const sendsSize =
+      uploadChunkMode === "fixed_size" ||
+      uploadChunkMode === "paragraph" ||
+      uploadChunkMode === "heading" ||
+      uploadChunkMode === "separator" ||
+      uploadChunkMode === "recursive";
+    const sendsOverlap =
+      uploadChunkMode === "fixed_size" || uploadChunkMode === "recursive";
+    const effectiveSize = sendsSize ? uploadChunkSize : 2000;
+    const effectiveOverlap = sendsOverlap ? uploadChunkOverlap : 300;
+    if (effectiveOverlap >= effectiveSize) {
+      return t("knowledge.detail.chunkOverlapTooLarge");
+    }
+    if (uploadChunkMode === "hierarchical" && uploadChildOverlap >= uploadChildChunkSize) {
+      return t("knowledge.detail.childOverlapTooLarge");
+    }
+    return null;
+  }
+
   async function handleConfirmUpload() {
     if (!datasetId || pendingFiles.length === 0) return;
+
+    const validationError = chunkingValidationError();
+    if (validationError) {
+      toast.error(t("knowledge.detail.uploadConfigInvalid"), validationError);
+      return;
+    }
 
     const filesToUpload = [...pendingFiles];
     onUploadingChange(true);
@@ -174,15 +216,27 @@ export function useDatasetUploadController({
       const selectedModel = DATASET_EMBEDDING_MODELS.find(
         (model) => model.provider === embeddingProvider && model.model === embeddingModel
       );
+      // Only touch the dataset's embedding when the selection actually
+      // differs — the PUT would otherwise re-set (or swap) it on every
+      // upload.
+      const embeddingChanged =
+        !datasetEmbedding || datasetEmbedding !== uploadEmbeddingModel;
+
+      if (uploadMetadataEnabled) {
+        toast.warning(t("knowledge.detail.metadataNotPersistable"));
+      }
 
       try {
-        await updateDatasetConfig(datasetId, {
-          chunking_config: chunkingConfig as typeof chunkingConfig & { mode: "automatic" },
+        const configPatch: Parameters<typeof updateDatasetConfig>[1] = {
+          chunking_config: chunkingConfig,
           retrieval_config: { rerank: { enabled: rerankEnabled, model: rerankModel } },
-          embedding_provider: embeddingProvider,
-          embedding_model: embeddingModel,
-          embedding_dimension: selectedModel?.dimension || 1024,
-        });
+        };
+        if (embeddingChanged) {
+          configPatch.embedding_provider = embeddingProvider;
+          configPatch.embedding_model = embeddingModel;
+          configPatch.embedding_dimension = selectedModel?.dimension || 1024;
+        }
+        await updateDatasetConfig(datasetId, configPatch);
         await new Promise((resolve) => setTimeout(resolve, 200));
       } catch (configError) {
         console.warn("Config update failed (non-blocking):", configError);

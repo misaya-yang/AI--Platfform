@@ -19,7 +19,12 @@ import type {
   DatasetConfig,
   DatasetDebugInfo,
   ChunkingConfig,
-  RetrievalConfig,
+  RetrieveMode,
+  VectorRetrievalConfig,
+  KeywordRetrievalConfig,
+  FusionConfig,
+  RerankConfig,
+  MMRConfig,
   DatasetCreateRequest,
   DocumentCreateTextRequest,
   BatchOperationResult,
@@ -615,11 +620,36 @@ export async function getDatasetConfig(datasetId: string) {
   return data;
 }
 
+/**
+ * PUT /knowledge/{id}/config semantics (knowledge_service route
+ * update_dataset_config, PRD T1):
+ * - chunking_config REPLACES the stored chunking object wholesale — always
+ *   send a complete object (fields omitted here are reset). It is validated
+ *   by ChunkingConfigSchema (extra="forbid"), which accepts more fields than
+ *   the local ChunkingConfig interface types, so the payload is an open
+ *   record; callers must restrict keys to CHUNKING_CONFIG_API_FIELDS.
+ * - retrieval_config is a recursive PATCH — only explicitly supplied fields
+ *   (including nested fusion/rerank/mmr keys) overwrite stored values, so
+ *   omitting a field preserves it. Hence the deep-partial type below.
+ * - Flat legacy retrieval fields (fusion_strategy/alpha/rerank_*...) pass the
+ *   schema but are ignored at retrieval time; send the nested objects.
+ */
+export interface RetrievalConfigPatch {
+  mode?: RetrieveMode;
+  top_k?: number;
+  score_threshold?: number;
+  vector?: Partial<VectorRetrievalConfig>;
+  keyword?: Partial<KeywordRetrievalConfig>;
+  fusion?: Partial<FusionConfig>;
+  rerank?: Partial<RerankConfig>;
+  mmr?: Partial<MMRConfig>;
+}
+
 export async function updateDatasetConfig(
   datasetId: string,
   config: {
-    chunking_config?: Partial<ChunkingConfig>;
-    retrieval_config?: Partial<RetrievalConfig>;
+    chunking_config?: Record<string, unknown>;
+    retrieval_config?: RetrievalConfigPatch;
     embedding_provider?: string;
     embedding_model?: string;
     embedding_dimension?: number;

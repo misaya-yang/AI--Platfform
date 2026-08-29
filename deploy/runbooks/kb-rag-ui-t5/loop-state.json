@@ -25,7 +25,8 @@
     "D2": "archived_reason 列 VARCHAR(255) vs schema 2000",
     "D3": "反馈表+端点（§5-#25 前提）",
     "D4": "文档/段落列表分页参数",
-    "D5": "迁移 100 遥测读端点（§5-#26 前提）"
+    "D5": "迁移 100 遥测读端点（§5-#26 前提）",
+    "D6": "ChunkingConfigSchema（extra=forbid）字段集 < chunking.py 运行时字段集（extract_metadata、metadata_fields、normalize_whitespace、strip_html、page_marker、segmentation 等）——PUT /config 无法往返运行时字段，元数据抽取设置无法持久化；前端已按 allow-list 降级（C3），待 schema 扩宽"
   },
   "notes": {
     "unit_tests": "node --test 'web/src/**/*.test.ts'（package.json 无 test script，Node>=22.18 原生 strip-types）",
@@ -47,7 +48,7 @@
       "DatasetUploadDialog 卡片 transition-all（既有；motion 静态扫描挂账，随设计轮收敛）"
     ]
   },
-  "active_phase": "C3 配置保存修复",
+  "active_phase": "C4 轮询条件化+防抖+409 处理",
   "iterations": [
     {
       "phase": "C1",
@@ -73,6 +74,22 @@
         "documents/retrieval/qa/settings/permissions 常驻挂载+hidden 切换（保留状态），eval/sources 维持条件挂载",
         "修 C1 回归（因 type-check 门损坏漏网，e2e 捕获）：useDatasetUploadController 缺 DEFAULT_RETRIEVAL_CONFIG 导入（错误边界 ReferenceError）；satisfies 常量字面量泄漏进 useState（\"automatic\"/false 态破坏 setter/switch）——常量泄漏字段显式加宽 + 调用点窄化回 ChunkingMode",
         "既有类型债（真实 tsc 首查暴露，均 type-level 零行为变化）：FILE_TYPE_CATEGORIES as-const、QA_MODEL_OPTIONS provider、RetrievalEvalWorkbench datasetId ?? \"\""
+      ]
+    },
+    {
+      "phase": "C3",
+      "date": "2026-08-29",
+      "scope": "配置有损保存修复（分块 REPLACE→allow-list 全量往返 / 检索深补丁 / 向导补 fusion / 上传对话框合同对齐）",
+      "result": "done",
+      "evidence": "e2e:opensource 48/48；node --test 48/48（+2 新）；lint/build(oversizedRoutes=[])/i18n:check 绿；真实 tsc 98=存量基线，KB 切片零新增",
+      "changes": [
+        "api/knowledge.ts: updateDatasetConfig 按 PUT 语义定型——chunking_config=Record（schema extra=forbid 且字段超出本地类型），retrieval_config=RetrievalConfigPatch 深 partial；注释固化 replace vs patch 语义",
+        "types/knowledge.ts: +CHUNKING_CONFIG_API_FIELDS（后端 ChunkingConfigSchema allow-list 镜像，排除 regex_pattern）+SAFE_CHUNK_HEADING_PATTERNS+isSafeHeadingPatterns；单测锁定（负向探针含 regex_pattern/extract_metadata/metadata_fields）",
+        "SettingsTab 分块保存：预校验（regex 拦截/overlap<size 拦截）+ 存储配置经 allow-list 过滤往返再叠加编辑值（修 REPLACE 语义把运行时字段打回 schema 默认；regex_pattern 与非安全三元 heading_patterns 永不往返）",
+        "SettingsTab 检索保存：去掉硬编码 rrf_k:60（深合并保留存储值）+ 删恒等 modeMap",
+        "DatasetCreate 向导：index_config.retrieval 补 fusion（创建即整体存储，缺省会落 schema 默认）",
+        "上传对话框：开始上传前预校验（正则禁用/重叠规则镜像 ChunkingConfigSchema，不发字段的模式按 schema 默认 2000/300 计，hierarchical 子块规则）；元数据抽取改为只警告不可持久化（D6）不再进 config 载荷（此前会 422 整个配置更新）；嵌入选择同步数据集现值、仅变化时下发（修每次上传静默换模型）",
+        "决策：上传对话框 rerank 默认 ON 保持（用户可见控件，冻结基线纪律；patch 语义下不污染其他字段）"
       ]
     }
   ],

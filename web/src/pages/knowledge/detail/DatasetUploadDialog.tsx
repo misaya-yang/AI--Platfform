@@ -110,6 +110,7 @@ export function DatasetUploadDialog({
     handleConfirmUpload,
   } = useDatasetUploadController({
     datasetId,
+    dataset,
     pendingFiles,
     onOpenChange,
     onPendingFilesChange,

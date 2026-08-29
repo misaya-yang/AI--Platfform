@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  CHUNKING_CONFIG_API_FIELDS,
   DEFAULT_CHUNKING_CONFIG,
   DEFAULT_RETRIEVAL_CONFIG,
   DOCUMENT_DISPLAY_STATUS_VOCABULARY,
+  SAFE_CHUNK_HEADING_PATTERNS,
   deriveDisplayStatus,
+  isSafeHeadingPatterns,
   resolveDisplayStatus,
 } from "./knowledge.ts";
 import type { DocumentDisplayStatus } from "./knowledge.ts";
@@ -138,4 +141,35 @@ test("default configs: product baseline values stay frozen", () => {
   assert.equal(DEFAULT_RETRIEVAL_CONFIG.rerank.model, "gte-rerank");
   assert.equal(DEFAULT_RETRIEVAL_CONFIG.mmr.enabled, false);
   assert.equal(DEFAULT_RETRIEVAL_CONFIG.mmr.lambda, 0.5);
+});
+
+// CHUNKING_CONFIG_API_FIELDS mirrors the backend ChunkingConfigSchema field
+// set (extra="forbid"). regex_pattern must stay out: the schema validator
+// rejects it even when mode is not "regex".
+test("chunking API allow-list: mirrors schema, excludes regex_pattern", () => {
+  // Widen the literal tuple: the negative probes below check strings that
+  // are deliberately NOT members.
+  const fields = CHUNKING_CONFIG_API_FIELDS as readonly string[];
+  assert.ok(fields.includes("mode"));
+  assert.ok(fields.includes("chunk_size"));
+  assert.ok(fields.includes("chunk_overlap"));
+  assert.ok(fields.includes("use_token_count"));
+  assert.ok(fields.includes("separator"));
+  assert.ok(fields.includes("heading_patterns"));
+  assert.ok(!fields.includes("regex_pattern"));
+  assert.ok(!fields.includes("extract_metadata"));
+  assert.ok(!fields.includes("metadata_fields"));
+});
+
+test("isSafeHeadingPatterns: only the exact backend triple passes", () => {
+  assert.equal(isSafeHeadingPatterns([...SAFE_CHUNK_HEADING_PATTERNS]), true);
+  assert.equal(isSafeHeadingPatterns([]), false);
+  assert.equal(isSafeHeadingPatterns(SAFE_CHUNK_HEADING_PATTERNS.slice(0, 2)), false);
+  assert.equal(isSafeHeadingPatterns([...SAFE_CHUNK_HEADING_PATTERNS, "^extra$"]), false);
+  assert.equal(
+    isSafeHeadingPatterns(["^hacked$", SAFE_CHUNK_HEADING_PATTERNS[1], SAFE_CHUNK_HEADING_PATTERNS[2]]),
+    false
+  );
+  assert.equal(isSafeHeadingPatterns("not-an-array"), false);
+  assert.equal(isSafeHeadingPatterns(undefined), false);
 });

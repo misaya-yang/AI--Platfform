@@ -40,7 +40,12 @@ import {
   type ChunkPreviewItem,
 } from "@/api/knowledge";
 import type { ChunkingMode, DatasetConfig, DatasetDebugInfo } from "@/types/knowledge";
-import { DEFAULT_CHUNKING_CONFIG, DEFAULT_RETRIEVAL_CONFIG } from "@/types/knowledge";
+import {
+  CHUNKING_CONFIG_API_FIELDS,
+  DEFAULT_CHUNKING_CONFIG,
+  DEFAULT_RETRIEVAL_CONFIG,
+  isSafeHeadingPatterns,
+} from "@/types/knowledge";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -172,16 +177,46 @@ export function SettingsTab({ datasetId, active, onDatasetRefetch }: SettingsTab
     }
   }, [datasetConfig, datasetId, loadConfig, active]);
 
+  /**
+   * Chunking is REPLACED wholesale server-side, so build a complete object:
+   * round-trip the stored config through the backend schema's field set
+   * (ChunkingConfigSchema is extra="forbid" — anything else 422s), then
+   * overlay the fields being edited. regex_pattern never round-trips (regex
+   * chunking is disabled server-side), and heading_patterns survives only as
+   * the exact safe triple. D6 tracks the runtime-only fields the schema
+   * cannot carry yet.
+   */
+  function buildChunkingSavePayload(): Record<string, unknown> {
+    const stored = (datasetConfig?.chunking ?? {}) as Record<string, unknown>;
+    const payload: Record<string, unknown> = {};
+    for (const key of CHUNKING_CONFIG_API_FIELDS) {
+      const value = stored[key];
+      if (value === undefined) continue;
+      if (key === "heading_patterns" && !isSafeHeadingPatterns(value)) continue;
+      payload[key] = value;
+    }
+    payload.mode = editChunkingMode;
+    payload.chunk_size = editChunkSize;
+    payload.chunk_overlap = editChunkOverlap;
+    return payload;
+  }
+
   async function handleSaveConfig() {
     if (!datasetId) return;
+    // Mirror the ChunkingConfigSchema validators so failures surface as
+    // readable errors instead of a raw 422.
+    if (editChunkingMode === "regex") {
+      toast.error(t("knowledge.detail.chunkRegexDisabled"), t("knowledge.detail.chunkRegexDisabledHint"));
+      return;
+    }
+    if (editChunkOverlap >= editChunkSize) {
+      toast.error(t("knowledge.detail.chunkOverlapTooLarge"));
+      return;
+    }
     setConfigSaving(true);
     try {
       await updateDatasetConfig(datasetId, {
-        chunking_config: {
-          mode: editChunkingMode as "automatic" | "fixed_size" | "paragraph" | "heading" | "regex" | "separator" | "recursive" | "hierarchical" | "qa" | "page",
-          chunk_size: editChunkSize,
-          chunk_overlap: editChunkOverlap,
-        },
+        chunking_config: buildChunkingSavePayload(),
       });
       setConfigEditing(false);
       // Reload config
@@ -199,21 +234,17 @@ export function SettingsTab({ datasetId, active, onDatasetRefetch }: SettingsTab
     if (!datasetId) return;
     setConfigSaving(true);
     try {
-      // Map UI mode to API mode
-      const modeMap: Record<string, "vector" | "keyword" | "hybrid"> = {
-        vector: "vector",
-        keyword: "keyword",
-        hybrid: "hybrid"
-      };
+      // retrieval_config is a recursive PATCH server-side: only the keys
+      // below overwrite stored values, so fields without a control here
+      // (e.g. fusion.rrf_k) keep their stored value.
       await updateDatasetConfig(datasetId, {
         retrieval_config: {
-          mode: modeMap[editRetrievalMode] || "hybrid",
+          mode: editRetrievalMode,
           top_k: editTopK,
           score_threshold: editScoreThreshold,
           fusion: {
             strategy: editFusionStrategy,
             alpha: editDenseWeight,
-            rrf_k: 60,
           },
           rerank: {
             enabled: editRerankEnabled,

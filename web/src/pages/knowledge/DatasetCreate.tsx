@@ -184,6 +184,9 @@ export default function DatasetCreatePage() {
               mode: DEFAULT_RETRIEVAL_CONFIG.mode,
               top_k: maxRecall,
               score_threshold: scoreThreshold,
+              // Creation stored retrieval wholesale; without fusion the
+              // dataset would fall back to schema defaults for hybrid mode.
+              fusion: { ...DEFAULT_RETRIEVAL_CONFIG.fusion },
               rerank: {
                 enabled: rerankModel !== "default",
                 provider: rerankProvider,

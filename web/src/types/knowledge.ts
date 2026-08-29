@@ -632,6 +632,63 @@ export const DEFAULT_RETRIEVAL_CONFIG = {
 } satisfies RetrievalConfig;
 
 // ============================================================
+// Config API contract mirrors (backend ChunkingConfigSchema)
+// ============================================================
+//
+// PUT /knowledge/{id}/config validates chunking_config with
+// ChunkingConfigSchema (extra="forbid"): unknown fields are rejected (422),
+// and fields omitted from a chunking save are reset because chunking is
+// replaced wholesale. The settings page therefore round-trips stored configs
+// through this allow-list when saving. Mirrors
+// knowledge_service/api/schemas/knowledge.py::ChunkingConfigSchema.
+// regex_pattern is deliberately absent: the backend disables regex chunking
+// ("custom regex chunking is disabled"). D6 tracks the runtime-only fields
+// (extract_metadata, metadata_fields, ...) that this schema cannot express.
+export const CHUNKING_CONFIG_API_FIELDS = [
+  "mode",
+  "chunk_size",
+  "chunk_overlap",
+  "use_token_count",
+  "token_limit",
+  "min_chunk_tokens",
+  "max_chunk_tokens",
+  "parent_token_limit",
+  "child_token_limit",
+  "separator",
+  "primary_separator",
+  "keep_separator",
+  "heading_level",
+  "heading_patterns",
+  "min_paragraph_length",
+  "merge_short_paragraphs",
+  "parent_mode",
+  "parent_chunk_size",
+  "child_chunk_size",
+  "child_overlap",
+  "question_prefix",
+  "answer_prefix",
+  "remove_extra_spaces",
+  "remove_urls_emails",
+] as const;
+
+// The only heading_patterns the backend accepts (its
+// _validate_safe_chunking_contract rejects any other tuple).
+export const SAFE_CHUNK_HEADING_PATTERNS = [
+  "^#{1,6}\\s+.+$",
+  "^第[一二三四五六七八九十\\d]+[章节条款]",
+  "^[A-Z][A-Z \\t]{4,}:?$",
+] as const;
+
+/** True when `value` is exactly the backend's safe heading-pattern triple. */
+export function isSafeHeadingPatterns(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.length === SAFE_CHUNK_HEADING_PATTERNS.length &&
+    SAFE_CHUNK_HEADING_PATTERNS.every((pattern, index) => value[index] === pattern)
+  );
+}
+
+// ============================================================
 // Helper Functions
 // ============================================================
 
