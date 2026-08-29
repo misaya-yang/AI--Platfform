@@ -5,9 +5,9 @@
 **最终结论：CONDITIONAL PASS**
 
 `worktree-kb-rag-upgrade` 已合入并复测 `origin/main@47b7a9b9`；此前受测代码提交为
-`966c9168`，本轮新增逻辑提交为 `73faefa7`。本轮没有发现仍未解决的 P0/P1 正确性、安全性或数据一致性
+`966c9168`，本轮新增逻辑提交为 `73faefa7`、`701b3b0f`。本轮没有发现仍未解决的 P0/P1 正确性、安全性或数据一致性
 缺陷；知识库核心 API、真实 PostgreSQL/Qdrant/Redis 链路、付费模型 QA、真实
-双嵌入模型回填、文档进度 SSE、批量部分成功和内置浏览器 UI 主链路均已通过。分支没有 push，
+双嵌入模型回填、文档进度 SSE、批量部分成功、DashScope Qwen-OCR 单页实机和内置浏览器 UI 主链路均已通过。分支没有 push，
 也没有反向合入根 `main`。
 
 不能给出 PASS，原因是以下强制发布证据尚未完成：
@@ -59,7 +59,7 @@
 | T1 摄入生命周期与增量 upsert | **PASS** | 状态机、稳定 ID、staging generation、recover/retry、公平认领、reprocess/reembed、禁用/启用/归档闭环均有回归；活栈旧向量持续可读，失败/竞争自动回队。 |
 | T2 检索质量 | **BLOCKED** | 中文 jieba lexical shadow 与 12-case 真实 qwen3-rerank bake-off 通过，遥测/阈值/预算/降级/缓存版本已实现；正式默认模型晋升仍受 T0 阻塞。 |
 | T3 嵌入蓝绿迁移 | **BLOCKED** | 版本元数据、绑定、持久 202/job、回填/恢复/冲突/取消/授权代码与测试通过；真实 v3→v4 回填成功，但未执行 gate/cutover/rollback。 |
-| T4 解析与无损 IR | **BLOCKED** | IR、页块/附件、解析器级联、缓存/并发和 PDF 内存上限有代码与回归；本轮真实 2 页 PDF 主链路通过，50–200 页真实形状与 TEDS/CDM/VLM 指标未完成。 |
+| T4 解析与无损 IR | **BLOCKED** | IR、页块/附件、解析器级联、缓存/并发和 PDF 内存上限有代码与回归；本轮新增真实可视 PDF 单页 Qwen-OCR 调用通过（`qwen-vl-ocr`/`document_parsing`），但 35 页候选文件渲染后为空白，批量尝试出现 `HTTP 400 InvalidParameter.DataInspection`，已排除为质量证据；50–200 页有效真实形状与 TEDS/CDM/VLM 指标仍未完成。 |
 | T5 前端优先管理面 | **BLOCKED** | 主管理、段落、评测、遥测、迁移面均已实现并通过 build/mock/内置浏览器；H1 #4 SSE 与 #7 批量部分成功本轮补齐，仍因 H1 #29 的 T0/cutover 前置条件保持阻塞。 |
 | T6 BM25 v2 生命周期 | **BLOCKED** | 排他锁、持久 lifecycle、并发、回滚、kill switch 和 UI 收据通过测试；用户已确认全局升级，但实际 backfill 后 gate/cutover/并发检索/rollback 仍受 T0 阻塞。 |
 | T7 可观测性与供给可靠性 | **BLOCKED** | `/metrics`、持久队列状态、锁定镜像、PDF offload、Redis 幂等和配置收敛通过；Helm/真实 Grafana 告警未在本轮环境验证。 |
@@ -154,6 +154,11 @@
 | `make migrate` + `make migrate-status` | PASS：迁移 111 已登记；status 显示无 pending migration。 |
 | `make hot-update ARGS="--all"` | PASS：源代码与前端产物更新到功能 worktree；未执行 pip install 或镜像重建；Node 24 对项目期望 Node 22 仅有 engine warning。 |
 | `make validate` + `make status` | PASS：PG/Redis/Qdrant/Knowledge/worker/Gateway/frontend/Agent Runtime 健康；仅本地默认密码 warning。 |
+| `docker compose config --quiet` + `docker compose up -d --no-build knowledge-service knowledge-worker` | PASS：先核对 Compose owner 指向功能 worktree；仅重建知识服务容器以应用 OCR 专用环境变量，没有删除 volume 或重建镜像。 |
+| `uv run ... pytest` 受影响 OCR/配置/worker/容器分发集合 | PASS：86 passed，1 个既有 Starlette warning；覆盖 Qwen 原生 payload、OCR 独立端点、启动配置、worker provenance 与 env 注入。 |
+| `bash -n scripts/new/init-env.sh` + `git diff --check` | PASS。 |
+| DashScope Qwen-OCR 真实单页 smoke（重建后） | PASS：真实可视 `/Users/yang/Downloads/PDF文档/导入备份文档.pdf` 第 1 页；运行时报告 `provider=dashscope`、`model=qwen-vl-ocr`、`task=document_parsing`、非空输出 34 字符。未输出正文或凭据。 |
+| 35 页候选扫描批量尝试 | **未验证/排除**：`Agent-工程核心模块教学白皮书.pdf` 的渲染页实际为空白；批量请求产生 `InvalidParameter.DataInspection`，且流式计数异常，未计入任何 PASS。 |
 | 活栈 API 回归脚本 | PASS：64 个请求断言；文本/PDF、检索、QA、反馈、遥测、生命周期、批量、迁移、409/404/403、刷新持久性和清理。 |
 | 实际网关文档进度 SSE（`Last-Event-ID=kb_35d11ebc320f:6`） | PASS：HTTP 200，续传 5 个事件（7–11），dataset-scoped、严格单调并包含 terminal。 |
 | 内置浏览器人工回归 | 核心 UI 主链路 PASS；详见 §9。 |
@@ -180,6 +185,12 @@ Compose 标签确认 `config_files`、`working_dir` 均指向本功能 worktree�
 避免无必要的依赖层重建；Knowledge、Gateway、Frontend 的宿主/容器文件 SHA
 逐项一致。上述镜像 ID 是构建基底，热更新后的容器文件校验才是“实际运行
 HEAD 代码”的证据。
+
+本轮 `701b3b0f` 未修改依赖锁、Dockerfile 或镜像构建输入，镜像 ID 保持不变；
+最后一次 `make hot-update ARGS="--all"` 后，Knowledge worker 内的
+`vlm_ocr_service.py` 与 `worker.py` SHA-256 均与功能 worktree 相同，运行时配置
+为 `dashscope/qwen-vl-ocr/document_parsing`。随后 `make validate`、`make status`
+和真实 Qwen 单页 smoke 均在该热更新栈上执行。
 
 迁移 100–105 在 fresh public layout、从 main schema 升级、已完成 per-service
 split 的旧库中执行；canonical CLI 与 shell 都设置 Knowledge-first
@@ -257,6 +268,7 @@ Completed；浏览器打开文档页期间网关日志记录了
 | P1 | >30s mock 在响应落地前断言，偶发失败 | 等待注入 503 后再断言；产品持续轮询语义不变 | `966c9168` |
 | P1 | 文档进度只支持条件轮询，缺少 PRD 要求的 SSE/`Last-Event-ID` | 迁移 111 追加事件账本与触发器；Knowledge SSE 端点完成 scope/单调 ID/续传/terminal/断开清理/403/404/503；后端 6 个定向回归、前端 4 个游标/解析回归和真实网关续传通过 | `73faefa7` |
 | P1 | 批量部分成功未做内置浏览器实机验证 | 真实禁用+活动文档批量操作得到 `1 queued, 1 skipped`；全跳过逐项提示、启用后重试、刷新持久性均通过；临时文档已清理 | `73faefa7` |
+| P1 | OCR 默认仍为 Gemini，DashScope 适配未使用 Qwen-OCR 原生任务/独立地域端点 | 默认切换为 `dashscope/qwen-vl-ocr`；原生 OCR `document_parsing`、像素边界、自动转正、`max_tokens`、独立 OCR key/base URL、资源关闭和文档 provenance；定向回归与真实单页调用通过 | `701b3b0f` |
 
 功能提交与验收提交保持可审查分组：
 
@@ -266,6 +278,7 @@ Completed；浏览器打开文档页期间网关日志记录了
 - `f8c91b05 Merge remote-tracking branch 'origin/main' into worktree-kb-rag-upgrade`
 - `966c9168 fix(kb): close live acceptance findings`
 - `73faefa7 feat(kb): add durable document progress SSE`
+- `701b3b0f feat(kb): use DashScope Qwen OCR for scanned PDFs`
 
 ## 11. 未验证项与执行前置条件
 
@@ -279,6 +292,10 @@ Completed；浏览器打开文档页期间网关日志记录了
 3. 在 T0 满足后按用户已确认的全局目标执行 `bm25_v2` backfill→gate→cutover→
    并发检索→rollback，并记录全局收据。
 4. 完成 T4 真实长 PDF 指标、T7 Helm/Grafana 告警验证和 T9 真实语料灰度。
+5. 补充可视且内容有效的 50–200 页扫描/双栏/表格/公式语料；当前
+   `/Users/yang/Downloads/PDF文档` 中没有可证明的有效大扫描样本，不能用空白页或
+   供应商失败响应替代 T4 质量证据。Qwen-OCR 已作为扫描页默认 OCR 接入，但专项
+   表格/公式/定位任务和备用解析器的质量门控仍需真实语料后执行。
 
 ## 12. 与 main 的集成方式
 
