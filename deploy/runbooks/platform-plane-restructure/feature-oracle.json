@@ -1,96 +1,96 @@
 {
   "schema_version": "prd-phase-harness/feature-oracle/v1",
   "program": "platform-plane-restructure",
-  "note": "Each item is a falsifiable acceptance oracle. 'measured_not_adopted' is a passing outcome where marked.",
+  "note": "Each assertion is falsifiable. A negative outcome passes only where marked, with the original owner retained and evidence recorded.",
   "items": [
     {
       "id": "O-01",
       "phase": "PPR-00",
-      "assert": "A 50ms injected local delay moves local_overhead_seconds by ~50ms and leaves ttft_seconds statistically unchanged.",
+      "assert": "local_overhead_seconds equals local_pre_provider_seconds plus local_projection_seconds, and those local components plus provider_wait_seconds reconcile with end-to-end ttft_seconds within a predeclared clock and transport tolerance.",
       "allows_negative_outcome": false
     },
     {
       "id": "O-02",
       "phase": "PPR-00",
-      "assert": "Provider IQR is reported at N>=30 so any later delta can be compared against noise.",
+      "assert": "Controlled delays move the corresponding local component and end-to-end TTFT, not provider_wait_seconds; local p95 uses high-sample replay and provider evidence preserves raw trials and confidence intervals.",
       "allows_negative_outcome": false
     },
     {
       "id": "O-03",
       "phase": "PPR-01",
-      "assert": "ai-gateway-agent-runtime image is <=150MB and passes its healthcheck and the live suite.",
+      "assert": "The approved agent-runtime image is at most 150 MB, healthy, non-root, certificate-capable, and passes the live product path.",
       "allows_negative_outcome": false
     },
     {
       "id": "O-04",
       "phase": "PPR-01",
-      "assert": "No image tag literal exists outside lock.json; editing a capability-worker file leaves the agent-runtime tag unchanged.",
+      "assert": "lock.json is the only editable image identity; changing capability-worker sources leaves the agent-runtime artifact identity unchanged.",
       "allows_negative_outcome": false
     },
     {
       "id": "O-05",
       "phase": "PPR-02",
-      "assert": "An injected control-plane import inside a data-plane turn path makes make plane-boundary-gate fail.",
+      "assert": "ADR-008 compares T0 through T3 from PPR-00 evidence, defines every selected handoff and failure contract, and the plane gate fails on an unmapped module or forbidden synchronous dependency.",
       "allows_negative_outcome": false
     },
     {
       "id": "O-06",
       "phase": "PPR-03",
-      "assert": "Under an N-worker admission fuzz the capacity budget is never oversold, and each rate-limit dimension is counted exactly once.",
-      "allows_negative_outcome": false
+      "assert": "Edge is adopted only when T0/T1 cannot satisfy the precommitted load and isolation gates; if adopted, multi-worker admission never oversells, rate dimensions count once, and authenticated handoff fails closed.",
+      "allows_negative_outcome": true
     },
     {
       "id": "O-07",
       "phase": "PPR-04",
-      "assert": "SSE fixture replay is byte-identical between Python and Rust model planes, including error and cancellation frames.",
+      "assert": "Python and Rust project one shared provider frame stream byte-identically across success, error, cancellation, usage, and omitted-usage cases, with exactly one provider request.",
       "allows_negative_outcome": false
     },
     {
       "id": "O-08",
       "phase": "PPR-04",
-      "assert": "Rust RSS at 50 concurrent streams is >=60% below Python, OR the phase closes as measured_not_adopted with the numbers recorded.",
+      "assert": "Rust reduces warmed incremental per-stream RSS by at least 60 percent and supports at least 1.5 times the streams in the same budget without CPU or local p99 regression, or remains measured-not-adopted.",
       "allows_negative_outcome": true
     },
     {
       "id": "O-09",
       "phase": "PPR-05",
-      "assert": "A heavy eval batch moves neither streaming p99 nor local_overhead_seconds.",
-      "allows_negative_outcome": false
+      "assert": "Governance is split only when reproducible Governance load harms Edge or Data and in-process bounded execution cannot meet the precommitted gate; otherwise it remains measured-not-adopted as a physical split.",
+      "allows_negative_outcome": true
     },
     {
       "id": "O-10",
       "phase": "PPR-06",
-      "assert": "A 200-page PDF ingest raises interactive retrieval p99 by <=10% while N>1 workers run without double-claiming.",
-      "allows_negative_outcome": false
+      "assert": "N greater than one knowledge workers never double-claim and a 200-page ingest raises interactive retrieval p99 by at most 10 percent, or scaling is not adopted because profiling shows another ceiling.",
+      "allows_negative_outcome": true
     },
     {
       "id": "O-11",
       "phase": "PPR-06",
-      "assert": "Native chunk kernels reproduce Python chunk boundaries byte-for-byte over the corpus, OR the kernel work is cancelled and recorded.",
+      "assert": "A native kernel ships only when CPU is the measured bottleneck, corpus boundaries are byte-identical, and throughput or CPU benefit clears the precommitted materiality gate.",
       "allows_negative_outcome": true
     },
     {
       "id": "O-12",
       "phase": "PPR-07",
-      "assert": "Legacy sessions render identical history through the public API after the store is unified, and session delete still tombstones without violating the runtime FK.",
-      "allows_negative_outcome": false
+      "assert": "Legacy sessions render identically and preserve tombstones, audit constraints, and rollback after an isolated-copy rehearsal, or the migration is deferred with the legacy path and bounded-growth evidence retained.",
+      "allows_negative_outcome": true
     },
     {
       "id": "O-13",
       "phase": "PPR-08",
-      "assert": "At least one configuration reaches TTFT p50 <=3.41s at N>=30 without losing the eight-scenario cohort, OR the ceiling is declared unreachable with an evidenced replacement.",
+      "assert": "Randomized interleaved provider trials support any claimed delta with confidence intervals, quality, cache, failure, and cost evidence; changing a default or product ceiling has explicit approval.",
       "allows_negative_outcome": true
     },
     {
       "id": "O-14",
       "phase": "PPR-09",
-      "assert": "current-to-frozen-to-current rollback preserves session and execution-ledger fingerprints exactly, and the recorded evidence names the shipped images.",
+      "assert": "The release matrix covers every actually adopted unit and current-to-frozen-to-current rollback preserves session and execution-ledger fingerprints using the shipped image digests.",
       "allows_negative_outcome": false
     },
     {
       "id": "O-15",
       "phase": "*",
-      "assert": "Every phase ends with the live suite at >=141 passed / 0 failed and the Python suite at 0 failed.",
+      "assert": "Required targeted, contract, Python, and live product checks have zero failures; skipped cases do not exceed the named allowlist; resulting-state receipts and required independent review are recorded.",
       "allows_negative_outcome": false
     }
   ]

@@ -18,7 +18,7 @@ Rust 该赢在另外三条轴上：**并发下的资源包络**（Rust 内核实
 
 **并发正确性不再是理由**——SPO-02/04 已经把准入、双限流、SSE 中间件、JWT 双解、collection 缓存全部修掉（§2.4 逐条复核）。
 
-因此目标形态不是「全 Rust」，而是业界 2026 已经收敛的那个形状：**编译型数据面 + 托管语言控制面 + Python 里调原生内核**。
+因此目标形态不是「全 Rust」，而是：**稳定机械的数据路径可以使用编译型实现，业务控制与治理保留 Python，CPU 内核优先通过 Python 调原生绑定获得收益**。这是一条语言与所有权原则，不预先承诺新增容器。
 
 ---
 
@@ -222,7 +222,7 @@ LiteLLM——本仓 SPO 文档里被当作 Python 网关参照物的那个项目
 | **先度量分离** | 本地 SLI 与供应商 SLI 混在一起，导致过去几轮性能工作得不出结论（§2.2）。不分开，后面每一波都无法验收 |
 | **再修工程化债** | 2.36 GB 镜像、4 处镜像 pin、整树 overlay 哈希（§2.5 A/B/C）。不修，之后每加一个 Rust 服务都乘以这个成本 |
 | **再冻结平面契约** | 边界先写成 ADR + 可执行门禁，再动代码。否则拆分过程中边界会漂 |
-| **再拆边缘** | 网关混住四类 SLO（§2.5 D）是当前最大的架构缺陷，且拆分不需要换语言 |
+| **再决定是否拆边缘/治理** | PPR-00 先证明容量或 noisy-neighbor 问题；PPR-02 比较保留现状、多副本/worker、只拆 Governance 与 Edge+Governance，不能从代码规模直接跳到新服务 |
 | **再评估模型面** | §2.5 F 是语言选择而非缺陷。**必须先有 PPR-00 的本地 SLI，否则无法证明收益** |
 | **索引面靠后** | 摄入/检索进程隔离**已经完成**（§2.4）。剩下的是 worker 水平扩展与 CPU 内核，收益要先测出来 |
 | **供应商侧单独一波** | §2.5 I 是唯一能真正移动 TTFT 的杠杆，与本地重构互不阻塞，可并行 |
@@ -238,47 +238,50 @@ LiteLLM——本仓 SPO 文档里被当作 Python 网关参照物的那个项目
 
 `gateway` 一个容器里同时住着：公共 HTTP 边缘（要求 p99 毫秒级、永不阻塞）、模型面（每 token 转发）、控制面（线程生命周期、能力目录）、Eval/Studio/计费（重业务、可容忍延迟）。**它们的 SLO 类别完全不同，却共享一个进程、一个内存上限、一个部署单元。**
 
-### 6.2 目标：按 plane 分层
+### 6.2 目标：先按逻辑 plane 分层，再按证据决定部署单元
 
 ```
 ┌─ Edge plane ──────────────────────────────── 无状态 · 水平扩 · 永不阻塞
 │  鉴权 · 准入 · 限流 · 路由 · 配额判定
 │  SLO: p99 额外延迟 < 10 ms
 ├─ Control plane (Python) ──────────────────── 业务多变 · 容忍延迟
-│  Agent/Thread 生命周期 · 能力目录与指纹 · 策略 · Studio · Eval · 计费
+│  Agent/Thread 生命周期 · 能力目录与指纹 · 策略 · Studio · 计费
 │  SLO: p95 < 200 ms，不在 token 路径上
-├─ Data plane (Rust) ───────────────────────── 热 · 契约稳定 · 内存有界
-│  Agent kernel · 模型面流式 · 能力执行
+├─ Data plane ──────────────────────────────── 热 · 契约稳定 · 内存有界
+│  Rust Agent kernel · 条件性模型面投影 · 能力执行
 │  SLO: 每 token 附加开销 < 1 ms；每流 RSS 有界
 ├─ Index plane ─────────────────────────────── 批量与交互严格分离
 │  ingest/chunk (CPU, 批) ⟂ retrieve (IO, 交互)
 │  SLO: 摄入不得抬高检索 p99 超过 10%
-└─ Storage plane ───────────────────────────── PG · Redis · Qdrant · 对象存储
+└─ Governance plane ────────────────────────── 异步 · 不阻塞请求路径
+   Eval · 审计 · trace 消费 · 质量门
+
+Shared infrastructure substrate: PG · Redis · Qdrant · 对象存储
 ```
 
 ### 6.3 由此推出的硬规则
 
-1. **数据面在 token 路径上不得同步调用控制面。** 今天一次 KB 对话是 `capability-worker → knowledge-service → gateway 鉴权`，三跳在 turn 内串行。能力所需的授权应在 turn 开始时随快照下发（ADR-007 已有快照机制，扩展它即可），而不是每次工具调用现问。
-2. **每个 plane 独立的内存预算、扩缩策略、SLO 类别。** 今天 `gateway 384m` 同时约束边缘和 Eval，两者都被迫委屈。
-3. **plane 之间只走既有版本化信封**（`agent-event/v2`、`ai-platform-capability-contract/v2`）。不新增自定义协议——`platform-architecture.md` L2 的直接推论。
-4. **治理面（审计、Eval、trace）不得与执行面同进程。** 2026 共识：控制面不能既是被治理者又是治理者。本仓 Eval 目前在 gateway 内，需要拆出。
+1. **数据面在 token 路径上不得同步调用控制或治理面。** 当前路径是 `capability-worker → knowledge-service` 两跳，知识侧本地验证 HMAC proof，不回调 gateway；这个性质必须保持。
+2. **每个逻辑 plane 有独立 SLO 和所有权。** 只有实际采用的独立部署单元才有独立内存预算和扩缩策略。
+3. **plane 之间只走版本化、认证、可回放的契约。** 优先复用现有信封；物理拆分若需要新的内部 handoff，必须由 ADR 冻结 schema、服务身份、重试/幂等、背压、错误映射和 SSE owner，禁止临时 header 或未版本化 RPC。
+4. **治理工作不得在用户请求路径同步执行。** 是否需要独立进程由 PPR-00 interference 证据决定，不把逻辑独立偷换成必拆服务。
 5. **新增服务必须写 ADR。** `architecture.md` §6 已有此规定；Wave 1/2 若产出新服务，ADR-008/009 是交付物的一部分。
 
-### 6.4 目标容器清单（Wave 3 之后）
+### 6.4 ADR-008 要评估的候选部署单元
 
 | 服务 | 语言 | plane | 说明 |
 | --- | --- | --- | --- |
-| `edge` | Rust 或 Python+Lua | Edge | 取决于 Wave 1 准入实测结论 |
-| `gateway-control` | Python | Control | 现 `src/` 去掉模型面与边缘后的剩余 |
+| `edge`（条件） | Python+Lua；语言另行决策 | Edge | 只有 T0/T1 无法满足采用门才拆 |
+| `gateway-control`（条件命名） | Python | Control | 只有相应边界被物理拆出时才由现 gateway 演化而来 |
 | `agent-runtime` | Rust | Data | 不变 |
 | `capability-worker` | Rust (+py 沙箱) | Data | 不变 |
-| `model-plane` | Rust | Data | Wave 1 新增 |
+| `model-plane`（条件） | Rust | Data | 单 provider request 下对拍并通过资源门才新增 |
 | `knowledge-retrieve` | Python (+原生内核) | Index | 只读，交互 |
 | `knowledge-ingest` | Python (+原生内核) | Index | 批量，CPU |
-| `eval`（可选） | Python | Control/治理 | 从 gateway 拆出 |
-| PG / Redis / Qdrant | — | Storage | 不变 |
+| `governance`（条件） | Python | Governance | noisy-neighbor 证据成立且 bounded in-place 失败才拆 |
+| PG / Redis / Qdrant | — | infrastructure substrate | 不变 |
 
-从 9 个容器到 10–11 个。**这不是「拆得更碎」，是把已经混在一起的四类 SLO 分开。** 若某一波实测收益不足，对应服务不拆——拓扑是目标，不是配额。
+容器数量不是目标。ADR-008 必须比较 T0 保留现状、T1 只拆 Governance、T2 拆 Edge+Governance，以及在其上条件性增加 Rust model plane 的 T3；若实测收益不足，对应服务不拆。
 
 ---
 
@@ -293,7 +296,7 @@ LiteLLM——本仓 SPO 文档里被当作 Python 网关参照物的那个项目
 | 平价预言机缺失 | 无法证明等价，只能靠人肉 | 每波必须先有 fixture 才能动手 | 无预言机 → 该项不迁 |
 | 双跑期成本 | 运维复杂度翻倍 | strangler-fig + 影子对比，Python 实现保留至门禁通过 | — |
 
-**统一规则：每一波都以「Python 实现保留 + Rust 影子运行 + 差分对比」开始，门禁通过才切流，切流后再删。** 不允许「先删后补」。
+**统一规则：现 owner 保留，候选实现或部署形态先影子/对照运行，门禁通过才切 owner，切换稳定后再删除旧默认路径。** 不允许「先删后补」。
 
 ---
 
@@ -304,7 +307,7 @@ LiteLLM——本仓 SPO 文档里被当作 Python 网关参照物的那个项目
 | 波次 | 门禁 |
 | --- | --- |
 | Wave 0 | runtime 镜像 ≤ 150 MB；单次 Rust 改动到容器可用 ≤ 15 min（一条命令） |
-| Wave 1 | SSE fixture 字节一致；50 并发流 RSS 降 ≥ 60%；多 worker 准入超卖 = 0；token 计数偏差 ≤ 2%；**TTFT p50 不劣化** |
+| Wave 1 | 单 provider request 下 SSE 字节一致；warmed 增量 RSS/stream 降 ≥60%、同预算流数 ≥1.5×；多 worker 准入超卖 = 0；本地 timing 不劣化 |
 | Wave 2 | 200 页 PDF 摄入期间检索 p99 抬升 ≤ 10%；切块边界逐字节一致；摄入吞吐 ≥ 基线 3× |
 | Wave 3 | 检索 p95 不劣化；RRF 输出在 fixture 上一致 |
 
@@ -312,17 +315,13 @@ LiteLLM——本仓 SPO 文档里被当作 Python 网关参照物的那个项目
 
 ---
 
-## 9. 排期依赖
+## 9. 执行依赖
 
-```
-FRC-06 关闭 ──► Wave 0（工程化债）──► Wave 1（数据面）──► Wave 2（索引面）──► Wave 3（观察后定）
-                                    ▲
-PCH-07 关闭 ────────────────────────┘（硬门）
-```
+本节只保留原则，执行权威是 `deploy/runbooks/platform-plane-restructure/loop-state.json`：PPR-00 度量、PPR-01 工程化、PPR-02 ADR/plane gate 是基础链；PPR-03～08 在基础链后按真实依赖独立执行，PPR-09 只对实际采用项收口。阶段编号不构成依赖。
 
-- **Wave 1 与 SPO 重叠的条目由 Wave 1 承接**，SPO 中对应项标记为「由 Rust 扩面计划执行」，不重复实施。
-- 每波结束写一份 `reports/` 证据，并按 `architecture.md` §6 判断是否需要新 ADR。
-- 本计划提升为 `deploy/runbooks/` 程序需要单独决定；在此之前它是计划，不是承诺。
+- PPR-03/04/05/06/07 的采用结论可以是 measured-not-adopted 或 deferred，但必须留下证据并保留原 owner。
+- 每阶段需要风险触发的独立 review；实现者不能自批。
+- 只有 `loop-state.json` 记录进度，本文不记录完成状态。
 
 ---
 
@@ -330,11 +329,11 @@ PCH-07 关闭 ──────────────────────
 
 | 问题 | 答案 |
 | --- | --- |
-| 什么该迁 Rust？ | 模型面流式、边缘准入（先验证 Lua 是否已够）、tokenizer、切块/解析内核 |
+| 什么该迁 Rust？ | 已有 Agent kernel；条件性模型投影；经 profiling 证明 CPU 受限且能字节对拍的 tokenizer/切块/解析内核 |
 | 什么不该迁？ | 鉴权/配额/计费/Eval/Studio/控制面/检索编排/BM25/嵌入客户端 |
-| 主要理由是延迟吗？ | **不是。** 是内存包络、尾延迟隔离、并发正确性、供应链确定性 |
+| 主要理由是延迟吗？ | **不是。** 是并发资源包络、故障/尾延迟隔离和供应链确定性 |
 | 优先形态是什么？ | **PyO3 原生内核 > 新 Rust 服务**。只有进程隔离本身是需求时才加服务 |
-| 微服务怎么布？ | 按 plane（edge / control / data / index / storage）切，不按语言和历史切 |
+| 微服务怎么布？ | 先按 Edge/Control/Data/Index/Governance 建立逻辑所有权；Storage 是基础设施底座，物理服务仅按证据拆 |
 | 第一件事做什么？ | **不是迁移**，是把 2.36 GB 的 Rust 镜像和四处镜像 pin 的改动成本修掉 |
 
 ---

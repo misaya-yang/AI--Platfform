@@ -1,50 +1,47 @@
-# Phase 06 - Give the index plane capacity
+# Phase 06 - Scale Index capacity without quality drift
 
 - PHASE_ID: PPR-06
 - FEATURE_ID: PPR-F007
-- DEPENDS_ON: PPR-05
+- DEPENDS_ON: PPR-02
 
 ## Outcome
 
-Ingestion throughput scales without touching interactive retrieval latency, and any CPU kernel that moves to Rust proves byte-identical output first.
-
-## Starting position (verified 2026-08-26)
-
-Ingestion and retrieval are **already process-separated**: `KNOWLEDGE_RUNTIME_ROLE` supports `all|api|worker`; `knowledge-service` runs as `api` with a `DurableEnqueueProxy` and `knowledge-worker` runs as `worker`. **Do not re-do this split.** What remains is capacity and CPU cost.
+Knowledge ingestion scales only after profiling identifies its binding resource; worker concurrency preserves claim safety and retrieval isolation, while native kernels ship only with byte-identical boundaries and material benefit.
 
 ## Scope
 
 In:
 
-- Horizontal scale for `knowledge-worker` (today `--workers 1`), with claim/lease safety under N workers.
-- An interactive retrieval profile: short recall for the agent tool path, wide recall plus rerank reserved for eval/accurate presets.
-- **Conditional:** native kernels (`chunk` / `tokenize` / `hash` / `dedupe`) as a Rust crate with PyO3 bindings — only if measurement shows CPU is the binding constraint.
+- Profile CPU, IO, queue wait, embedding/provider wait and database contention on the named PPR-00 workload.
+- Scale `knowledge-worker` beyond one only if worker concurrency addresses the measured ceiling.
+- Conditional Rust/PyO3 kernels for chunk, tokenize, hash or dedupe when CPU is the binding constraint.
+- Claim/lease fuzz, ingestion throughput and concurrent retrieval interference evidence.
 
 Out:
 
-- Retrieval quality changes: RRF weights, rerank policy, recall width defaults belong to `kb-rag-optimization-plan.md`.
-- Reimplementing BM25 or sparse retrieval (already native in PostgreSQL tsvector and Qdrant).
-- A separate ingestion service. The process split already exists.
+- Retrieval profiles, recall width, RRF weights, rerank policy or other quality tuning.
+- Reimplementing BM25/sparse retrieval or creating another ingestion service.
 
 ## Done when
 
-- [ ] `knowledge-worker` runs N > 1 without double-claiming a document; a concurrent claim fuzz proves it.
-- [ ] Ingesting a 200-page PDF raises interactive retrieval p99 by ≤ 10%.
-- [ ] Ingestion throughput is ≥ 3× the PPR-00 baseline, or the report states which resource is the real ceiling.
-- [ ] If native kernels ship: chunk boundaries are **byte-identical** to the Python implementation over the corpus; if they are not, the kernel work is cancelled and that is recorded.
-- [ ] Interactive retrieval profile is measurable and does not change eval-path recall.
-- [ ] Full regression passes.
+- [ ] Profiling names the binding resource and precommits material throughput/CPU gates before implementation.
+- [ ] If worker scaling is adopted, N greater than one never double-claims and a 200-page ingest raises retrieval p99 by at most 10%.
+- [ ] If a native kernel is adopted, corpus boundaries are byte-identical and measured throughput or CPU improvement clears the precommitted materiality gate.
+- [ ] If the ceiling is external IO/provider/database or benefit is immaterial, the corresponding change is measured-not-adopted.
+- [ ] Quality fixtures, rollback, independent review and shared regression gates pass.
 
 ## Verify
 
 | Check | Command or observation | Proves |
 | --- | --- | --- |
-| Claim safety | N-worker concurrent claim fuzz | No double processing |
-| Interference | 200-page ingest during retrieval load | p99 delta ≤ 10% |
-| Chunk equivalence | Corpus-wide boundary diff, Python vs Rust | Byte-identical or cancelled |
-| Quality unchanged | `make rag-eval-regression-gate` | Recall/quality untouched |
+| Profile | CPU/IO/queue/provider/database spans | Correct owner and bottleneck |
+| Claim safety | N-worker concurrent claim and crash/retry fuzz | No duplicate processing |
+| Interference | 200-page ingest during retrieval load | Retrieval p99 delta at most 10% |
+| Kernel parity | Corpus-wide Python/Rust boundary and digest diff | No forced re-embed |
+| Quality | `make rag-eval-regression-gate` | Retrieval behavior unchanged |
 
 ## Stop or confirm
 
-- **Cancel the kernel work rather than accept a chunk-boundary delta.** A drift forces a full re-embed of every dataset.
-- Stop if horizontal scale requires changing the durable queue's ownership semantics.
+- Stop rather than change claim ownership or chunk boundaries to make a benchmark pass.
+- Ask before Docker topology changes or any migration/re-embedding of real datasets.
+- Required review: independent data, claim/lease and retrieval review; native code adds security review.

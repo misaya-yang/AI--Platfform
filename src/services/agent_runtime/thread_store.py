@@ -75,7 +75,9 @@ class AgentThreadStore:
     def __init__(self, database: ThreadStoreDatabase) -> None:
         self.database = database
 
-    async def get(self, *, tenant_id: str, user_id: str, runtime_thread_id: str) -> RuntimeThread | None:
+    async def get(
+        self, *, tenant_id: str, user_id: str, runtime_thread_id: str
+    ) -> RuntimeThread | None:
         row = await self.database.fetchrow(
             """
             SELECT runtime_thread_id, tenant_id, user_id, session_id,
@@ -84,11 +86,15 @@ class AgentThreadStore:
              WHERE runtime_thread_id = $1 AND tenant_id = $2 AND user_id = $3
                AND deleted_at IS NULL
             """,
-            uuid.UUID(str(runtime_thread_id)), tenant_id, user_id,
+            uuid.UUID(str(runtime_thread_id)),
+            tenant_id,
+            user_id,
         )
         return _as_thread(row) if row else None
 
-    async def get_for_session(self, *, tenant_id: str, user_id: str, session_id: str) -> RuntimeThread | None:
+    async def get_for_session(
+        self, *, tenant_id: str, user_id: str, session_id: str
+    ) -> RuntimeThread | None:
         row = await self.database.fetchrow(
             """
             SELECT runtime_thread_id, tenant_id, user_id, session_id,
@@ -97,7 +103,9 @@ class AgentThreadStore:
              WHERE tenant_id = $1 AND user_id = $2 AND session_id = $3
                AND deleted_at IS NULL
             """,
-            tenant_id, user_id, session_id,
+            tenant_id,
+            user_id,
+            session_id,
         )
         return _as_thread(row) if row else None
 
@@ -107,13 +115,18 @@ class AgentThreadStore:
         thread_id = uuid.UUID(str(runtime_thread_id or uuid.uuid4()))
         await self.database.fetchrow(
             "SELECT ensure_assistant_runtime_thread($1, $2, $3, $4, 'native')",
-            thread_id, tenant_id, user_id, session_id,
+            thread_id,
+            tenant_id,
+            user_id,
+            session_id,
         )
         thread = await self.get_for_session(
             tenant_id=tenant_id, user_id=user_id, session_id=session_id
         )
         if thread is None:
-            raise ThreadStoreError("AI_PLATFORM_AGENT_RUNTIME_THREAD_CREATE_FAILED", status_code=503)
+            raise ThreadStoreError(
+                "AI_PLATFORM_AGENT_RUNTIME_THREAD_CREATE_FAILED", status_code=503
+            )
         return thread
 
     async def import_legacy(
@@ -125,15 +138,24 @@ class AgentThreadStore:
                 """
                 SELECT * FROM import_assistant_legacy_session($1, $2, $3, $4)
                 """,
-                thread_id, tenant_id, user_id, session_id,
+                thread_id,
+                tenant_id,
+                user_id,
+                session_id,
             )
         except Exception as exc:  # database exposes stable SQLSTATE message
             message = str(exc)
             if "IMPORT_IN_FLIGHT" in message:
-                raise ThreadStoreError("AI_PLATFORM_AGENT_RUNTIME_IMPORT_IN_FLIGHT", status_code=409) from exc
+                raise ThreadStoreError(
+                    "AI_PLATFORM_AGENT_RUNTIME_IMPORT_IN_FLIGHT", status_code=409
+                ) from exc
             if "SESSION_NOT_FOUND" in message or "SCOPE_MISMATCH" in message:
-                raise ThreadStoreError("AI_PLATFORM_AGENT_RUNTIME_SESSION_NOT_FOUND", status_code=404) from exc
-            raise ThreadStoreError("AI_PLATFORM_AGENT_RUNTIME_IMPORT_FAILED", status_code=503) from exc
+                raise ThreadStoreError(
+                    "AI_PLATFORM_AGENT_RUNTIME_SESSION_NOT_FOUND", status_code=404
+                ) from exc
+            raise ThreadStoreError(
+                "AI_PLATFORM_AGENT_RUNTIME_IMPORT_FAILED", status_code=503
+            ) from exc
         thread = await self.get_for_session(
             tenant_id=tenant_id, user_id=user_id, session_id=session_id
         )
@@ -142,7 +164,13 @@ class AgentThreadStore:
         return thread
 
     async def events(
-        self, *, tenant_id: str, user_id: str, runtime_thread_id: str, after_sequence: int, limit: int
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        runtime_thread_id: str,
+        after_sequence: int,
+        limit: int,
     ) -> list[dict[str, Any]]:
         rows = await self.database.fetch(
             """
@@ -153,8 +181,11 @@ class AgentThreadStore:
                AND sequence > $4
              ORDER BY sequence ASC LIMIT $5
             """,
-            uuid.UUID(str(runtime_thread_id)), tenant_id, user_id,
-            max(0, int(after_sequence)), max(1, min(int(limit), 1000)),
+            uuid.UUID(str(runtime_thread_id)),
+            tenant_id,
+            user_id,
+            max(0, int(after_sequence)),
+            max(1, min(int(limit), 1000)),
         )
         return [dict(row) for row in rows]
 
@@ -298,7 +329,11 @@ class AgentThreadStore:
                     UNION ALL
                     SELECT 'assistant'::text AS role,
                            string_agg(
-                               delta.payload #>> '{data,content}',
+                               CASE
+                                   WHEN delta.event_type = 'compat/v1/text_delta'
+                                   THEN COALESCE(delta.payload #>> '{data,content}', '')
+                                   ELSE ''
+                               END,
                                '' ORDER BY delta.sequence
                            ) AS content,
                            MAX(delta.sequence) AS sequence,
@@ -351,7 +386,11 @@ class AgentThreadStore:
                        AND started.event_type = 'compat/v1/run_started'
                      WHERE delta.runtime_thread_id = $1
                        AND delta.tenant_id = $2 AND delta.user_id = $3
-                       AND delta.event_type = 'compat/v1/text_delta'
+                       AND delta.event_type IN (
+                           'compat/v1/text_delta',
+                           'compat/v1/run_error',
+                           'compat/v1/cancelled'
+                       )
                        AND NOT EXISTS (
                            SELECT 1
                              FROM assistant_runtime_items AS completed
@@ -376,7 +415,17 @@ class AgentThreadStore:
                      GROUP BY delta.runtime_thread_id, delta.tenant_id,
                               delta.user_id, delta.turn_id, started.sequence
                    ) AS message
-             WHERE content IS NOT NULL AND content <> ''
+             WHERE content IS NOT NULL
+               AND (
+                   content <> ''
+                   OR EXISTS (
+                       SELECT 1
+                         FROM jsonb_array_elements(
+                             COALESCE(runtime_events, '[]'::jsonb)
+                         ) AS terminal_event
+                        WHERE terminal_event ->> 'event_type' IN ('run_error', 'cancelled')
+                   )
+               )
              ORDER BY created_at DESC, sequence DESC NULLS LAST LIMIT $4
             """,
             uuid.UUID(str(runtime_thread_id)),
@@ -388,10 +437,27 @@ class AgentThreadStore:
         for row in reversed(rows):
             role = row.get("role")
             text = row.get("content")
-            if role is None or not isinstance(text, str) or not text:
+            if role is None or not isinstance(text, str):
                 continue
             text = _visible_message_text(text)
-            if not text:
+            runtime_events_value = row.get("runtime_events")
+            if isinstance(runtime_events_value, str):
+                try:
+                    runtime_events_value = json.loads(runtime_events_value)
+                except json.JSONDecodeError:
+                    runtime_events_value = None
+            has_terminal_runtime_event = isinstance(runtime_events_value, list) and any(
+                isinstance(event, dict)
+                and (
+                    event.get("event_type") in {"run_error", "cancelled"}
+                    or (
+                        isinstance(event.get("data"), dict)
+                        and event["data"].get("status") == "cancelled"
+                    )
+                )
+                for event in runtime_events_value
+            )
+            if not text and not (role == "assistant" and has_terminal_runtime_event):
                 continue
             created_at = row.get("created_at")
             metadata = {"runtime_run_id": row.get("run_id")}
@@ -418,7 +484,10 @@ class AgentThreadStore:
                     data = data if isinstance(data, dict) else {}
                     if event_type == "plan_update" and isinstance(data.get("plan"), list):
                         for index, item in enumerate(data["plan"]):
-                            if not isinstance(item, dict) or not str(item.get("step") or "").strip():
+                            if (
+                                not isinstance(item, dict)
+                                or not str(item.get("step") or "").strip()
+                            ):
                                 continue
                             status = str(item.get("status") or "pending")
                             normalized_status = "pending"
@@ -576,8 +645,12 @@ class AgentThreadStore:
         item_id: str | None = None,
         status: str | None = None,
     ) -> int:
-        payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        event_id = uuid.uuid5(uuid.NAMESPACE_URL, f"ai-platform:{thread.runtime_thread_id}:{event_key}")
+        payload_json = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        event_id = uuid.uuid5(
+            uuid.NAMESPACE_URL, f"ai-platform:{thread.runtime_thread_id}:{event_key}"
+        )
         row = await self.database.fetchrow(
             """
             SELECT append_assistant_runtime_item(

@@ -55,6 +55,7 @@ import {
   type StreamTerminalOutcome,
 } from "@/features/chat/stream/terminalLatch";
 import { reduceSubAgentEvent } from "../subagentEventReducer";
+import { restoredMessageStatus } from "../restoredMessageStatus";
 import type {
   ChatMessage as ChatMessageType,
   RetrievedContext,
@@ -521,6 +522,7 @@ const restoreMessageMetadata = (msg: any, index: number, sessionId: string): Cha
         steps: Array.isArray(summary.steps) ? summary.steps as ProcessStepItem[] : [],
         tools: Array.isArray(summary.tools) ? summary.tools as ToolTimelineItem[] : [],
       };
+      baseMessage.status = restoredMessageStatus(status);
     }
 
   }

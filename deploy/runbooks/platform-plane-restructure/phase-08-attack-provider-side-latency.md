@@ -1,4 +1,4 @@
-# Phase 08 - Attack provider-side latency
+# Phase 08 - Evaluate provider-side latency without confounding
 
 - PHASE_ID: PPR-08
 - FEATURE_ID: PPR-F009
@@ -6,46 +6,42 @@
 
 ## Outcome
 
-The only lever that actually moves TTFT is exercised with real A/B evidence: either a model/variant/cache configuration reaches the 3.41 s ceiling, or the ceiling is declared unreachable and replaced with a number that has evidence behind it.
-
-## Why this is separate and parallel
-
-PPR-00 establishes that local overhead is 14–19 ms while TTFT p50 ranges 3.925–9.281 s across identical runs. **No local phase can move this metric.** This phase depends only on PPR-00's measurement work, so it can run in parallel with PPR-01…07.
+Model, variant, cache and thinking-policy alternatives are compared with randomized interleaved trials, uncertainty, quality, failure and cost evidence; any default or product-target change remains an explicit owner decision.
 
 ## Scope
 
 In:
 
-- A configurable model/variant canary with real A/B against live providers, at matched concurrency.
-- Prompt-cache hit rate as a first-class SLI, and a check on whether the stable-prefix/volatile-tail split is actually earning cache hits.
-- A thinking-budget policy evaluated against answer quality, not just latency.
-- A decision on the 3.41 s ceiling, with data.
+- Pilot runs estimate variance and determine a pre-reviewed sample plan.
+- Randomized interleaved blocks at matched concurrency, prompt/config digest and time window.
+- Median, IQR, confidence interval, failures, cached-input rate, cost and answer quality for every candidate.
+- At least 30 successful samples per candidate for exploration; any p95 or release claim requires at least 100 successful samples per candidate unless the reviewed precision plan requires more.
 
 Out:
 
-- Turning thinking off to win the number.
-- Hardcoded prompt-keyword routing.
-- Semantic caching on the default chat path.
+- Turning thinking off solely to win latency, keyword routing, semantic cache on default chat, or changing defaults without approval.
+- Calling end-to-end TTFT a provider-only measurement.
 
 ## Done when
 
-- [ ] At least three model/variant/cache configurations are measured at ≥ 30 trials each, reporting p50/p95/IQR.
-- [ ] Prompt-cache hit rate is reported per configuration.
-- [ ] Answer quality is measured alongside latency; a configuration that wins on latency and loses on the eight-scenario cohort is rejected.
-- [ ] Either a configuration reaches p50 ≤ 3.41 s, **or** the report states the ceiling is unreachable and proposes an evidenced replacement.
-- [ ] The local overhead SLI is unchanged by anything in this phase.
-- [ ] Full regression passes.
+- [ ] Raw assignment order and trials prove candidates were interleaved rather than compared across different days.
+- [ ] Claimed deltas exceed uncertainty and include quality, failure, cache and cost evidence.
+- [ ] Local timing components remain inside PPR-00 gates.
+- [ ] A candidate meets the existing target without quality loss, or the experiment records an evidenced negative conclusion and proposes—but does not silently apply—a new target.
+- [ ] Product/Eval review and shared regression gates pass.
 
 ## Verify
 
 | Check | Command or observation | Proves |
 | --- | --- | --- |
-| A/B | `scripts/assistant_ttft_benchmark.py` per configuration, ≥ 30 trials | Ranked with variance, not single points |
-| Cache | Prompt-cache hit rate per configuration | The prefix split is or is not earning hits |
-| Quality | `scripts/native_agent_parity_benchmark.py` eight-scenario cohort | No latency-for-quality trade slipped in |
-| Honesty | Provider IQR reported next to every delta | Claimed wins exceed noise |
+| Assignment | Seeded randomized block receipt | Time drift is not treatment assignment |
+| Statistics | Raw-trial bootstrap/precision report | Claims reflect uncertainty |
+| Cache/cost | Provider usage receipts, redacted | Win is economically explained |
+| Quality | Same representative cohort for every candidate | No latency-for-quality trade |
+| Local guard | PPR-00 timing components | Provider experiment did not regress local path |
 
 ## Stop or confirm
 
-- Confirm before changing the default production model or variant.
-- **"The 3.41 s ceiling is unreachable with available providers" is a valid, valuable outcome.** Record it rather than chasing it locally.
+- Ask before paid experiments, reading live credentials, changing a default model/variant/thinking policy or changing the product ceiling.
+- Stop if candidates cannot be randomized under comparable provider conditions.
+- Required review: independent product, Eval and performance-method review.
