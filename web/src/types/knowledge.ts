@@ -589,14 +589,19 @@ export interface BatchOperationResult {
 //
 // `satisfies` keeps the constants assignable to their config types while
 // preserving precise member types (callers can read `.fusion.alpha` etc.
-// without null assertions).
+// without null assertions). Fields whose config type is a literal union or a
+// boolean are widened explicitly: under `satisfies` those keep their literal
+// types, which leak through `useState(DEFAULT_*.field)` into
+// `SetStateAction<"automatic">`-style states and break setters/switches.
+// Exception: DEFAULT_RETRIEVAL_CONFIG.mode keeps its "hybrid" literal — the
+// hit-test/settings states declare narrower UI mode unions that accept it.
 
 export const DEFAULT_CHUNKING_CONFIG = {
-  mode: "automatic",
+  mode: "automatic" as ChunkingMode,
   chunk_size: 500,
   chunk_overlap: 50,
-  remove_extra_spaces: true,
-  remove_urls_emails: false,
+  remove_extra_spaces: true as boolean,
+  remove_urls_emails: false as boolean,
 } satisfies ChunkingConfig;
 
 export const DEFAULT_RETRIEVAL_CONFIG = {
@@ -617,11 +622,11 @@ export const DEFAULT_RETRIEVAL_CONFIG = {
     alpha: 0.7,
   },
   rerank: {
-    enabled: false,
+    enabled: false as boolean,
     model: "gte-rerank",
   },
   mmr: {
-    enabled: false,
+    enabled: false as boolean,
     lambda: 0.5,
   },
 } satisfies RetrievalConfig;

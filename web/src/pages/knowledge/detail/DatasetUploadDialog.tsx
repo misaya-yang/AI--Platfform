@@ -20,7 +20,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import type { Dataset } from "@/types/knowledge";
+import type { ChunkingMode, Dataset } from "@/types/knowledge";
 import {
   DATASET_EMBEDDING_MODELS,
   useDatasetUploadController,
@@ -267,7 +267,7 @@ export function DatasetUploadDialog({
                       ? "border-primary bg-primary/5 ring-1 ring-primary/50"
                       : "border-border hover:border-border"
                   }`}
-                  onClick={() => setUploadChunkMode(mode.id)}
+                  onClick={() => setUploadChunkMode(mode.id as ChunkingMode)}
                 >
                   <p className="text-sm font-medium text-foreground">{mode.name}</p>
                   <p className="text-xs text-muted-foreground mt-0.5">{mode.desc}</p>

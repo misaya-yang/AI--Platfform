@@ -29,14 +29,25 @@
   },
   "notes": {
     "unit_tests": "node --test 'web/src/**/*.test.ts'（package.json 无 test script，Node>=22.18 原生 strip-types）",
+    "type_check_gate_broken": [
+      "pnpm -C web type-check（tsc --noEmit 打 solution 式 tsconfig，files:[]）实际检查 0 个文件——main 上即已损坏，此前所有 type-check 绿均为空操作",
+      "真实命令：cd web && pnpm exec tsc --noEmit -p tsconfig.app.json --ignoreDeprecations 6.0（TS 6.0.3；baseUrl 弃用告警需此旗标）",
+      "真实 tsc 下全库存量 98 个类型错误（assistant/eval/dashboard/chat 等，非本计划范围）",
+      "本计划纪律：KB 切片文件以真实 tsc 为准，不新增错误；修脚本文案属共享基建，越界，交由用户裁决",
+      "src/**/*.test.ts 报 node:* 模块缺型（全库惯例，node --test 运行不经 tsc），不计"
+    ],
     "c1_findings": [
       "上传对话框 rerank 默认 enabled=true，与平台默认 false 不一致——行为保持不动，C3 决策",
       "e2e mockPreset 是服务端检索预设夹具（fast/balanced），非 UI 默认值复制，单一来源改造不涉及",
       "hit-test scoreThreshold 初始 0（0=不过滤）与 fusionMethod 初始 weighted 为工作台语义，刻意保留",
       "默认值按多数值收敛：wizard chunk 600→500、wizard threshold 0.2→0.3、hit-test denseWeight 0.5→0.7、types 死常量 alpha 0.75→0.7"
+    ],
+    "c2_debt": [
+      "DocumentsTab:462 variant=\"outline-solid\" 不在 Button 变体并集内（运行期 cva 忽略，渲染同 monolith）——需视觉判断+Button 属共享组件，留 C8 设计轮",
+      "DatasetUploadDialog 卡片 transition-all（既有；motion 静态扫描挂账，随设计轮收敛）"
     ]
   },
-  "active_phase": "C2 拆分 DatasetDetail.tsx",
+  "active_phase": "C3 配置保存修复",
   "iterations": [
     {
       "phase": "C1",
@@ -49,6 +60,19 @@
         "DEFAULT_CHUNKING/RETRIEVAL_CONFIG satisfies 化+基线值冻结（单测锁定）",
         "默认值单一来源接入：DatasetDetail（hit-test/设置编辑/配置载入回退/展示回退）、DatasetCreate 向导、useDatasetUploadController",
         "e2e mockPreset 不动（服务端预设夹具）"
+      ]
+    },
+    {
+      "phase": "C2",
+      "date": "2026-08-29",
+      "scope": "拆分 DatasetDetail.tsx（3934 行→349 行壳 + 7 个 detail/ 模块，纯搬运）",
+      "result": "done",
+      "evidence": "e2e:opensource 48/48（先修 C1 回归至绿）；node --test 46/46；lint/build(oversizedRoutes=[])/i18n:check 绿；真实 tsc 下 KB 切片零新增错误（存量仅剩 outline-solid 一项挂账）",
+      "changes": [
+        "壳只留：数据集加载、?tab= 路由、页头/错误带、对话框开关态、共享 hit-test 束（≤350 行预算达标）",
+        "documents/retrieval/qa/settings/permissions 常驻挂载+hidden 切换（保留状态），eval/sources 维持条件挂载",
+        "修 C1 回归（因 type-check 门损坏漏网，e2e 捕获）：useDatasetUploadController 缺 DEFAULT_RETRIEVAL_CONFIG 导入（错误边界 ReferenceError）；satisfies 常量字面量泄漏进 useState（\"automatic\"/false 态破坏 setter/switch）——常量泄漏字段显式加宽 + 调用点窄化回 ChunkingMode",
+        "既有类型债（真实 tsc 首查暴露，均 type-level 零行为变化）：FILE_TYPE_CATEGORIES as-const、QA_MODEL_OPTIONS provider、RetrievalEvalWorkbench datasetId ?? \"\""
       ]
     }
   ],

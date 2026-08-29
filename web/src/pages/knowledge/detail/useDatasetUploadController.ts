@@ -9,7 +9,7 @@ import {
   type ProcessingMode,
 } from "@/api/knowledge";
 import { toast } from "@/hooks/use-toast";
-import { DEFAULT_CHUNKING_CONFIG } from "@/types/knowledge";
+import { DEFAULT_CHUNKING_CONFIG, DEFAULT_RETRIEVAL_CONFIG } from "@/types/knowledge";
 
 export const DATASET_EMBEDDING_MODELS = [
   {
