@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -70,6 +72,38 @@ async def test_config_change_audit_event_redacts_nested_secrets():
     assert "new-secret" not in rendered
     assert "upstream-secret" not in rendered
     assert "fp-new" in rendered
+
+
+@pytest.mark.asyncio
+async def test_config_change_audit_event_normalizes_decimal_payloads():
+    db = _FakeDatabase()
+    request = _request(db)
+    auth = AuthContext(
+        user_id="admin-a",
+        tenant_id="tenant-a",
+        roles=["admin"],
+        permissions=[],
+        is_authenticated=True,
+    )
+
+    await record_config_change(
+        request=request,
+        auth=auth,
+        resource_type="model",
+        resource_id="qwen3.8-flash",
+        action="create",
+        before=None,
+        after={
+            "model_id": "qwen3.8-flash",
+            "input_price_per_1k": Decimal("0.001167"),
+            "output_price_per_1k": Decimal("0.003427"),
+        },
+    )
+
+    summary = db.events[0]["request_summary"]
+    assert summary["after"]["input_price_per_1k"] == 0.001167
+    assert summary["after"]["output_price_per_1k"] == 0.003427
+    json.dumps(summary)  # the real pool fallback must be able to serialize it
 
 
 def test_redaction_preserves_api_key_fingerprint():

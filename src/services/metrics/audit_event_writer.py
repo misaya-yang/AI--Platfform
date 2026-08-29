@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from fastapi import Request
+from fastapi.encoders import jsonable_encoder
 
 from ...api.deps import AuthContext
 from ...api.deps import _get_client_ip as get_client_ip
@@ -24,12 +25,18 @@ def _audit_payload(
     before: dict[str, Any] | None,
     after: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    return {
-        "trace_id": _trace_id(request),
-        "request_id": _request_id(request),
-        "before": redact_sensitive_data(before or {}),
-        "after": redact_sensitive_data(after or {}),
-    }
+    # Pydantic admin payloads can contain Decimal/datetime/UUID values.  The
+    # direct pool fallback serializes this object with json.dumps, so normalize
+    # only after redaction; otherwise a successful config write can surface as
+    # HTTP 500 while the database mutation has already committed.
+    return jsonable_encoder(
+        {
+            "trace_id": _trace_id(request),
+            "request_id": _request_id(request),
+            "before": redact_sensitive_data(before or {}),
+            "after": redact_sensitive_data(after or {}),
+        }
+    )
 
 
 async def record_config_change(
