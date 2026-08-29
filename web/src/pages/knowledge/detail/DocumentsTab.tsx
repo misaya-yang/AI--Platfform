@@ -36,7 +36,7 @@ import {
   ImageIcon,
 } from "lucide-react";
 
-import { useDocuments, useSegments } from "@/hooks/useKnowledge";
+import { useDebouncedValue, useDocuments, useSegments } from "@/hooks/useKnowledge";
 import {
   deleteDocument,
   deleteSegment,
@@ -117,7 +117,11 @@ export function DocumentsTab({
   );
 
   const [segmentSearch, setSegmentSearch] = useState("");
-  const segmentsQuery = useSegments(datasetId, selectedDocId, segmentSearch);
+  // Server-side segment search is debounced so keystrokes don't fan out
+  // queries. The debounced value keys the query, so every manual
+  // invalidation below must use the same variable.
+  const debouncedSegmentSearch = useDebouncedValue(segmentSearch);
+  const segmentsQuery = useSegments(datasetId, selectedDocId, debouncedSegmentSearch);
   const segments = segmentsQuery.data || [];
 
   // Segment edit dialog
@@ -138,6 +142,9 @@ export function DocumentsTab({
   // Search state
   const [searchField, setSearchField] = useState<"name" | "id">("name");
   const [searchTerm, setSearchTerm] = useState("");
+  // Debounce the client-side filter too: the input stays responsive while
+  // large lists re-filter at most every 300ms.
+  const debouncedSearchTerm = useDebouncedValue(searchTerm);
   const [formatFilter, setFormatFilter] = useState("all");
 
   // Filter documents by status, content type, format, and search term
@@ -145,8 +152,8 @@ export function DocumentsTab({
     let result = docs;
 
     // Filter by search term
-    if (searchTerm.trim()) {
-      const term = searchTerm.toLowerCase().trim();
+    if (debouncedSearchTerm.trim()) {
+      const term = debouncedSearchTerm.toLowerCase().trim();
       result = result.filter((d) => {
         if (searchField === "name") {
           return d.title?.toLowerCase().includes(term);
@@ -193,7 +200,7 @@ export function DocumentsTab({
     }
 
     return result;
-  }, [docs, searchTerm, searchField, statusFilter, formatFilter, contentTypeFilter]);
+  }, [docs, debouncedSearchTerm, searchField, statusFilter, formatFilter, contentTypeFilter]);
 
   // Count documents by content type for badges
   const contentTypeCounts = useMemo(() => {
@@ -348,7 +355,7 @@ export function DocumentsTab({
     try {
       await updateSegment(datasetId, editSegmentId, editText);
       await qc.invalidateQueries({
-        queryKey: ["kb-segments", datasetId, selectedDocId, segmentSearch],
+        queryKey: ["kb-segments", datasetId, selectedDocId, debouncedSegmentSearch],
       });
     } finally {
       setEditSaving(false);
@@ -360,7 +367,7 @@ export function DocumentsTab({
     if (!datasetId) return;
     await deleteSegment(datasetId, segmentId);
     await qc.invalidateQueries({
-      queryKey: ["kb-segments", datasetId, selectedDocId, segmentSearch],
+      queryKey: ["kb-segments", datasetId, selectedDocId, debouncedSegmentSearch],
     });
   }
 

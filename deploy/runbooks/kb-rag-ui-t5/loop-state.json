@@ -48,7 +48,7 @@
       "DatasetUploadDialog 卡片 transition-all（既有；motion 静态扫描挂账，随设计轮收敛）"
     ]
   },
-  "active_phase": "C4 轮询条件化+防抖+409 处理",
+  "active_phase": "C5 段落操作面（开关/批量/全字段编辑）+mock e2e",
   "iterations": [
     {
       "phase": "C1",
@@ -90,6 +90,19 @@
         "DatasetCreate 向导：index_config.retrieval 补 fusion（创建即整体存储，缺省会落 schema 默认）",
         "上传对话框：开始上传前预校验（正则禁用/重叠规则镜像 ChunkingConfigSchema，不发字段的模式按 schema 默认 2000/300 计，hierarchical 子块规则）；元数据抽取改为只警告不可持久化（D6）不再进 config 载荷（此前会 422 整个配置更新）；嵌入选择同步数据集现值、仅变化时下发（修每次上传静默换模型）",
         "决策：上传对话框 rerank 默认 ON 保持（用户可见控件，冻结基线纪律；patch 语义下不污染其他字段）"
+      ]
+    },
+    {
+      "phase": "C4",
+      "date": "2026-08-29",
+      "scope": "轮询条件化 + 300ms 防抖 + 409+Retry-After 列表读静默重试",
+      "result": "done",
+      "evidence": "e2e:opensource 48/48；node --test 48/48；lint/build(oversizedRoutes=[])/i18n:check 绿；真实 tsc 98=存量基线",
+      "changes": [
+        "useDocuments refetchInterval 条件化：仅当存在 display_status ∈ {queuing,indexing} 的行时 2s 轮询（resolveDisplayStatus 双保险，未知态 fail-closed 继续轮询直至后端澄清）；空闲数据集零请求",
+        "useSegments：移除常驻 5s 轮询，改按需（打开面板按 staleTime 过期重取 + 变更后 invalidate）",
+        "+useDebouncedValue（hooks/useKnowledge 导出，默认 300ms）：文档搜索（客户端过滤）与段落搜索（直连服务端）接入；防抖值同时是 query key，手动 invalidate 改用同一变量防 key 漂移",
+        "withConflictRetry：列表读遇 409 带 Retry-After 等待（封顶 5s、默认 1s）重试一次，不弹错误带（并发生成切换）"
       ]
     }
   ],
