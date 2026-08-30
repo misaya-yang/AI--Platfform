@@ -248,9 +248,9 @@ def test_public_responses_uses_agent_runtime_for_nonstream_and_stream(
     assert isinstance(control.calls[0]["resolved_agent_launch"], ResolvedAgentLaunchV1)
     assert control.calls[0]["resolved_agent_launch"].identity["entrypoint"] == "responses"
     assert control.calls[0]["developer_instructions"] == "Use the signed runtime contract."
-    assert control.calls[0]["enable_dynamic_tools"] is True
+    assert control.calls[0]["enable_dynamic_tools"] is False
     assert control.calls[0]["readonly_capabilities"] == {
-        "responses_tool_choice": "auto",
+        "responses_tool_choice": "none",
         "responses_parallel_tool_calls": True,
     }
     assert control.calls[0]["memory_mode"] == "off"

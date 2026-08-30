@@ -62,14 +62,17 @@ def _output_text(response: dict[str, Any]) -> str:
 def test_responses_nonstream_real_provider_completes() -> None:
     _require_live()
     marker = f"LIVE-RESPONSES-{time.time_ns()}"
-    with httpx.Client(timeout=240.0) as client:
+    with httpx.Client(timeout=240.0, trust_env=False) as client:
         token = _login(client)
         response = client.post(
             f"{API_BASE_URL}/v1/responses",
             headers=_headers(token),
             json={
                 "model": MODEL_ID,
-                "input": f"Reply with exactly this marker and nothing else: {marker}",
+                "input": (
+                    "Please include this diagnostic identifier in a one-sentence reply: "
+                    f"{marker}"
+                ),
                 "store": False,
                 "max_output_tokens": 128,
             },
@@ -88,7 +91,7 @@ def test_responses_stream_real_provider_has_monotonic_single_terminal() -> None:
     marker = f"LIVE-RESPONSES-STREAM-{time.time_ns()}"
     events: list[dict[str, Any]] = []
 
-    with httpx.Client(timeout=240.0) as client:
+    with httpx.Client(timeout=240.0, trust_env=False) as client:
         token = _login(client)
         with client.stream(
             "POST",
@@ -96,7 +99,10 @@ def test_responses_stream_real_provider_has_monotonic_single_terminal() -> None:
             headers=_headers(token),
             json={
                 "model": MODEL_ID,
-                "input": f"Reply with exactly this marker and nothing else: {marker}",
+                "input": (
+                    "Please include this diagnostic identifier in a one-sentence reply: "
+                    f"{marker}"
+                ),
                 "stream": True,
                 "store": False,
                 "max_output_tokens": 128,

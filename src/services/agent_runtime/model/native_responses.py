@@ -205,20 +205,22 @@ def _native_responses_body(
         # Responses serialization stage so a Thread resume cannot
         # accidentally drop a Provider capability from the outbound request.
         serialized_tools.append({"type": "web_search"})
+    raw_input = body.get("input")
+    has_tool_transcript = isinstance(raw_input, list) and any(
+        isinstance(item, Mapping) and item.get("type") in {"function_call", "function_call_output"}
+        for item in raw_input
+    )
+    if tool_choice == "none" and not has_tool_transcript:
+        serialized_tools = []
     function_tool_names = {
         str(tool["name"]) for tool in serialized_tools if tool.get("type") == "function"
     }
     if allowed_tool_names is not None and not function_tool_names.issubset(allowed_tool_names):
         raise AgentModelPlaneError("RUNTIME_TOOL_SCHEMA_SCOPE_MISMATCH", status_code=422)
-    raw_input = body.get("input")
     wire_input = _helpers._native_tool_transcript(
         raw_input,
         aliases=validated_tools.aliases,
         wire_aliases=validated_tools.wire_aliases,
-    )
-    has_tool_transcript = isinstance(raw_input, list) and any(
-        isinstance(item, Mapping) and item.get("type") in {"function_call", "function_call_output"}
-        for item in raw_input
     )
     transcript_prevalidated = False
     allow_function_transcript = bool(function_tool_names)

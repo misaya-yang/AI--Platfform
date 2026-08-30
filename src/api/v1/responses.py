@@ -56,7 +56,7 @@ def _responses_tool_config(payload: dict[str, Any]) -> dict[str, Any]:
 
     raw_tools = payload.get("tools")
     if raw_tools is None:
-        tool_names: list[str] | None = None
+        tool_names: list[str] = []
         public_tools: list[dict[str, Any]] = []
     else:
         if not isinstance(raw_tools, list) or len(raw_tools) > _MAX_RESPONSES_TOOLS:
@@ -669,11 +669,14 @@ async def create_response(
     try:
         requested_tools = tool_config["tool_names"]
         readonly_capabilities: dict[str, Any] = {
-            "responses_tool_choice": tool_config["tool_choice"],
+            "responses_tool_choice": (
+                tool_config["tool_choice"] if requested_tools else "none"
+            ),
             "responses_parallel_tool_calls": tool_config["parallel_tool_calls"],
         }
-        if requested_tools is not None:
+        if requested_tools:
             readonly_capabilities["responses_tool_names"] = requested_tools
+        enable_dynamic_tools = bool(requested_tools) and tool_config["tool_choice"] != "none"
         launch = await resolve_agent_launch(
             entrypoint="responses",
             tenant_id=user.tenant_id,
@@ -691,7 +694,7 @@ async def create_response(
             developer_instructions=instructions,
             memory_mode="off",
             memory_profile="off",
-            enable_dynamic_tools=tool_config["tool_choice"] != "none",
+            enable_dynamic_tools=enable_dynamic_tools,
         )
         turn = await control.start_turn(
             tenant_id=user.tenant_id,
@@ -707,9 +710,10 @@ async def create_response(
             resolved_agent_launch=launch,
             developer_instructions=instructions,
             memory_mode="off",
-            # The Rust Runtime owns discovery and execution.  A Responses
-            # request with tool_choice=none is the one explicit opt-out.
-            enable_dynamic_tools=tool_config["tool_choice"] != "none",
+            # Responses exposes no implicit platform tools. Every descriptor
+            # must be explicitly selected by the caller and resolved against
+            # the tenant catalog before the Runtime sees it.
+            enable_dynamic_tools=enable_dynamic_tools,
         )
     except HTTPException as exc:
         await _abort_idempotent_response(idempotency)
