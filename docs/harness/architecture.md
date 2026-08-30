@@ -8,17 +8,19 @@
 **Last verified:** 2026-08-29 against `main@47b7a9b` (before the RAG worktree is merged)
 
 The RAG branch changes Knowledge routes, worker behaviour, database migrations, Gateway KB access,
-Compose and harness files. ARC-00 of the queued architecture convergence must re-verify every fact
-here after that merge.
+Compose and harness files. ARC-00 of the now-active architecture convergence program
+(branch `platform-arch-convergence-2026-08`, post-RAG base `336851c1`) re-verifies every fact
+here; machine-readable post-RAG facts live in `docs/architecture/baselines/2026-08-post-rag/`.
 
 ---
 
 ## 1. Observed operational groups and deployment roles
 
-The current call/data topology suggests three provisional business contexts, one product surface,
-and shared infrastructure. Their observed process roles are current fact; formal bounded-context
-acceptance is queued for the successor ADR. A logical module or process role does not automatically
-deserve a new service.
+The current call/data topology suggests three business contexts, one product surface, and shared
+infrastructure. Their observed process roles are current fact; formal bounded-context acceptance
+was granted by [`ADR-008`](../architecture/ADR-008-bounded-contexts-no-new-services.md)
+(Accepted 2026-08-29). A logical module or process role does not automatically deserve a new
+service.
 
 | Context | Compose service / role | Language | Current responsibility | Exposure | Current scale truth |
 | --- | --- | --- | --- | --- | --- |
@@ -71,9 +73,9 @@ Allowed synchronous edges:
 | Gateway | Knowledge | Public management proxy and explicit authorization | Python import or direct KB-table ownership |
 
 Current exception: Gateway control plane fetches the capability catalog through its own
-`gateway:8080` internal route before that route calls Worker. The queued architecture program must
-replace only this Gateway→Gateway loopback with an in-process service while preserving tenant,
-RBAC, policy and Worker validation.
+`gateway:8080` internal route before that route calls Worker. The active architecture convergence
+program (ARC-02) replaces only this Gateway→Gateway loopback with an in-process service while
+preserving tenant, RBAC, policy and Worker validation.
 
 ## 3. Code dependency graph
 
@@ -104,8 +106,8 @@ Hard rules:
    do not hand-maintain divergent Python and Rust constants.
 
 The repository currently lacks a real static import-boundary gate. `make test-isolation` does not
-prove rules 2–4 and may pass with its live OpenAPI check skipped. ARC-00 must add an offline boundary
-and in-process OpenAPI gate before later refactors rely on it.
+prove rules 2–4 and may pass with its live OpenAPI check skipped. ARC-00B of the active convergence
+program adds an offline boundary and in-process OpenAPI gate before later refactors rely on it.
 
 ## 4. Data ownership
 
@@ -206,7 +208,9 @@ Current key decisions:
 - [ADR-005 — tenant-configurable model capability profiles](../architecture/ADR-005-model-capability-profiles.md)
 - [ADR-006 — Agent Runtime single target kernel](../architecture/ADR-006-agent-runtime-single-kernel.md)
 - [ADR-007 — Agent Runtime data boundaries](../architecture/ADR-007-agent-runtime-data-boundaries.md)
+- [ADR-008 — platform bounded contexts, deployment freeze, and conformance](../architecture/ADR-008-bounded-contexts-no-new-services.md)
 
-ADR-006/007 still contain Python-loop rollback and ownership language that no longer matches the
-completed Rust cutover. ARC-00 must write a successor/conformance ADR that preserves the single-
-kernel, lease/proof and append-only invariants while superseding those obsolete clauses.
+ADR-006/007 contained Python-loop rollback and ownership language that no longer matched the
+completed Rust cutover. [`ADR-008`](../architecture/ADR-008-bounded-contexts-no-new-services.md)
+(Accepted 2026-08-29) is the successor/conformance record: it preserves the single-kernel,
+lease/proof and append-only invariants while superseding those obsolete clauses item by item.
