@@ -31,11 +31,15 @@
     },
     "fresh-install": {
       "tier": "L3",
-      "required_env": ["AI_PLATFORM_RELEASE_LIVE_AUTHORIZED", "AI_PLATFORM_COMPATIBILITY_MANIFEST_PATH", "ENV_FILE", "COMPOSE_PROJECT_NAME"],
+      "required_env": ["AI_PLATFORM_RELEASE_LIVE_AUTHORIZED", "AI_PLATFORM_COMPATIBILITY_MANIFEST_PATH", "AI_PLATFORM_FRESH_DATABASE_ADMIN_DSN", "AI_PLATFORM_FRESH_DATABASE_MIGRATOR_DSN"],
+      "fresh_database": {
+        "admin_dsn_env": "AI_PLATFORM_FRESH_DATABASE_ADMIN_DSN",
+        "migrator_dsn_env": "AI_PLATFORM_FRESH_DATABASE_MIGRATOR_DSN"
+      },
       "steps": [
-        {"id": "quickstart", "command": ["make", "quickstart"]},
-        {"id": "validate", "command": ["make", "validate"]},
-        {"id": "status", "command": ["make", "status"]}
+        {"id": "authority-init-fresh", "command": ["uv", "run", "--extra", "database", "python", "-m", "database.authority", "init-fresh"]},
+        {"id": "authority-verify", "command": ["uv", "run", "--extra", "database", "python", "-m", "database.authority", "verify"]},
+        {"id": "authority-fingerprint", "command": ["uv", "run", "--extra", "database", "python", "-m", "database.authority", "fingerprint"]}
       ]
     },
     "rollback": {
@@ -49,7 +53,11 @@
     },
     "version-agreement": {
       "tier": "L3",
-      "required_env": ["AI_PLATFORM_COMPATIBILITY_MANIFEST_PATH", "AI_PLATFORM_VERSION_ENDPOINTS"],
+      "required_env": [
+        "AI_PLATFORM_COMPATIBILITY_MANIFEST_PATH",
+        "AI_PLATFORM_VERSION_ENDPOINTS",
+        "AI_PLATFORM_VERSION_CONTAINERS"
+      ],
       "steps": [
         {"id": "live-service-versions", "command": ["python3", "-m", "scripts.release.version_agreement_gate"]}
       ]
