@@ -261,7 +261,18 @@ BEGIN
             ('view', 'v_active_proxy_services', 'gateway'),
             ('view', 'v_user_billing_summary', 'gateway')
         ) AS mapping(kind, name, target_schema)
-        ORDER BY kind, name
+        -- PostgreSQL moves an owned serial/identity sequence together with
+        -- its table and rejects moving that sequence independently first.
+        -- Relocate tables/views before sequences; the later sequence row then
+        -- observes the already-correct target schema and remains a full
+        -- existence/uniqueness check rather than a skipped object.
+        ORDER BY CASE kind
+                     WHEN 'table' THEN 0
+                     WHEN 'view' THEN 1
+                     WHEN 'sequence' THEN 2
+                     ELSE 3
+                 END,
+                 name
     LOOP
         SELECT count(*), min(namespace.nspname), min(class.relkind::text)
         INTO matches, source_schema, source_relkind

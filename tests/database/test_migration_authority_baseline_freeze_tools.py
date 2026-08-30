@@ -83,6 +83,12 @@ def test_static_policy_and_sql_regenerate_exactly() -> None:
     assert len([item for item in objects if item.kind == "sequence"]) == 26
     assert len([item for item in objects if item.kind == "view"]) == 2
 
+    relocation = render_baseline_contract.render_relocation(objects)
+    table_order = relocation.index("WHEN 'table' THEN 0")
+    view_order = relocation.index("WHEN 'view' THEN 1")
+    sequence_order = relocation.index("WHEN 'sequence' THEN 2")
+    assert table_order < view_order < sequence_order
+
 
 def test_ownership_and_grant_inputs_fail_closed_on_drift() -> None:
     inventory = (BASELINE / "data-access-inventory.json").read_bytes()
