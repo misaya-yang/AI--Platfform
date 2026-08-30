@@ -1,0 +1,4496 @@
+{
+  "schema_version": "arc04-core-inventory/v1",
+  "generated_at": "2026-08-30T03:07:41Z",
+  "base_sha": "336851c107c659342ec79aa3aa298de77b1edc68",
+  "core_package_dir": "packages/ai-gateway-core/src/ai_gateway_core",
+  "modules": {
+    "ai_gateway_core": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/__init__.py",
+      "kind": "package",
+      "loc": 8,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.agent_plugin_mcp": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/agent_plugin_mcp.py",
+      "kind": "module",
+      "loc": 288,
+      "direct_imports": [
+        "__future__",
+        "dataclasses",
+        "ipaddress",
+        "json",
+        "pathlib",
+        "re",
+        "typing",
+        "urllib"
+      ],
+      "io_deps": [
+        "urllib"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.agent_plugins": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/agent_plugins.py",
+      "kind": "module",
+      "loc": 803,
+      "direct_imports": [
+        "__future__",
+        "collections",
+        "dataclasses",
+        "hashlib",
+        "json",
+        "pathlib",
+        "re",
+        "typing",
+        "yaml"
+      ],
+      "io_deps": [
+        "yaml"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "tests": [
+          "tests/services/assistant/test_agent_plugin_agents.py"
+        ],
+        "scripts": [
+          "scripts/validate_agent_plugin.py"
+        ]
+      }
+    },
+    "ai_gateway_core.agents": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/agents/__init__.py",
+      "kind": "package",
+      "loc": 66,
+      "direct_imports": [
+        "ai_gateway_core"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/v1/agent_public.py",
+          "src/api/v1/agent_runtime.py",
+          "src/api/v1/agents.py",
+          "src/main.py",
+          "src/services/agent_runtime/control_plane.py",
+          "src/services/agent_runtime/model_plane.py",
+          "src/services/agent_runtime/runtime_configuration.py",
+          "src/services/agent_runtime_cleanup.py"
+        ],
+        "tests": [
+          "tests/api/test_agent_publish_api.py",
+          "tests/api/test_agent_runtime_cutover.py",
+          "tests/api/test_agent_runtime_envelope.py",
+          "tests/api/test_codex_runtime_lease.py",
+          "tests/database/test_agent_studio_migrations.py",
+          "tests/packages/ai_gateway_core/test_agent_spec_compat.py",
+          "tests/services/agent_runtime/test_agent_runtime_cleanup.py",
+          "tests/services/agent_runtime/test_control_plane.py",
+          "tests/services/agent_runtime/test_model_plane.py",
+          "tests/services/agent_runtime/test_timing.py",
+          "tests/services/eval/test_agent_publish_gate.py",
+          "tests/services/eval/test_agent_version_candidate.py"
+        ],
+        "scripts": [
+          "scripts/harness/agent_runtime_text_gate.py"
+        ]
+      }
+    },
+    "ai_gateway_core.agents.aaas_protocol": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/agents/aaas_protocol.py",
+      "kind": "module",
+      "loc": 93,
+      "direct_imports": [
+        "__future__",
+        "dataclasses",
+        "datetime",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.agents.deletion": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/agents/deletion.py",
+      "kind": "module",
+      "loc": 498,
+      "direct_imports": [
+        "__future__",
+        "collections",
+        "datetime",
+        "hashlib",
+        "json",
+        "re",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.agents.runtime": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/agents/runtime.py",
+      "kind": "module",
+      "loc": 524,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "copy",
+        "dataclasses",
+        "hashlib",
+        "hmac",
+        "json",
+        "re",
+        "secrets",
+        "time",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.agents.runtime_lease": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/agents/runtime_lease.py",
+      "kind": "module",
+      "loc": 108,
+      "direct_imports": [
+        "__future__",
+        "dataclasses",
+        "hashlib",
+        "hmac",
+        "re",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.agents.spec": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/agents/spec.py",
+      "kind": "module",
+      "loc": 482,
+      "direct_imports": [
+        "__future__",
+        "copy",
+        "hashlib",
+        "json",
+        "re",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/v1/agent_runtime.py"
+        ],
+        "tests": [
+          "tests/packages/ai_gateway_core/test_agent_outcome_contract.py"
+        ]
+      }
+    },
+    "ai_gateway_core.agents.system_prompt": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/agents/system_prompt.py",
+      "kind": "module",
+      "loc": 54,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/services/agent_runtime/control_plane.py"
+        ]
+      }
+    },
+    "ai_gateway_core.auth": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/auth/__init__.py",
+      "kind": "package",
+      "loc": 59,
+      "direct_imports": [
+        "__future__",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/core/auth/user_resolver.py"
+        ]
+      }
+    },
+    "ai_gateway_core.auth._core": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/auth/_core.py",
+      "kind": "module",
+      "loc": 39,
+      "direct_imports": [
+        "__future__",
+        "dataclasses"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.auth.capability_proof": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/auth/capability_proof.py",
+      "kind": "module",
+      "loc": 290,
+      "direct_imports": [
+        "__future__",
+        "base64",
+        "collections",
+        "dataclasses",
+        "hashlib",
+        "hmac",
+        "json",
+        "time",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/internal/agent_capabilities.py",
+          "src/api/internal/attachment_capabilities.py",
+          "src/api/internal/confluence_capabilities.py",
+          "src/api/internal/image_capabilities.py",
+          "src/api/internal/office_artifacts.py",
+          "src/api/internal_mcp_broker.py",
+          "src/api/v1/agent_local_nodes.py"
+        ],
+        "knowledge": [
+          "apps/knowledge-service/src/knowledge_service/api/routes/capability_plane.py"
+        ],
+        "tests": [
+          "tests/api/test_confluence_capability_broker.py",
+          "tests/api/test_image_capability_broker.py",
+          "tests/api/test_internal_agent_capabilities.py",
+          "tests/api/test_internal_mcp_broker.py",
+          "tests/packages/ai_gateway_core/test_capability_proof.py",
+          "tests/services/knowledge/test_capability_plane.py"
+        ]
+      }
+    },
+    "ai_gateway_core.auth.gateway_secret": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/auth/gateway_secret.py",
+      "kind": "module",
+      "loc": 467,
+      "direct_imports": [
+        "__future__",
+        "collections",
+        "dataclasses",
+        "hashlib",
+        "hmac",
+        "logging",
+        "os",
+        "redis",
+        "secrets",
+        "threading",
+        "time",
+        "typing"
+      ],
+      "io_deps": [
+        "redis"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/v1/_proxy_utils.py",
+          "src/services/eval/kb_ragas_client.py",
+          "src/services/knowledge_authz.py"
+        ],
+        "knowledge": [
+          "apps/knowledge-service/src/knowledge_service/main.py"
+        ],
+        "tests": [
+          "tests/contract/test_gateway_secret.py",
+          "tests/packages/ai_gateway_core/test_gateway_secret_middleware.py",
+          "tests/packages/ai_gateway_core/test_internal_service_client.py",
+          "tests/services/knowledge/test_ragas_eval_route_security.py",
+          "tests/services/test_knowledge_authz.py"
+        ]
+      }
+    },
+    "ai_gateway_core.auth.gateway_secret_middleware": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/auth/gateway_secret_middleware.py",
+      "kind": "module",
+      "loc": 166,
+      "direct_imports": [
+        "__future__",
+        "fastapi",
+        "logging",
+        "starlette"
+      ],
+      "io_deps": [
+        "fastapi",
+        "starlette"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "knowledge": [
+          "apps/knowledge-service/src/knowledge_service/auth/gateway_secret_mw.py",
+          "apps/knowledge-service/src/knowledge_service/main.py"
+        ],
+        "tests": [
+          "tests/packages/ai_gateway_core/test_gateway_secret_middleware.py",
+          "tests/services/knowledge/test_ragas_eval_route_security.py"
+        ]
+      }
+    },
+    "ai_gateway_core.billing": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/billing/__init__.py",
+      "kind": "package",
+      "loc": 22,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.billing.pricing_catalog": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/billing/pricing_catalog.py",
+      "kind": "module",
+      "loc": 209,
+      "direct_imports": [
+        "__future__",
+        "decimal",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/services/billing/pricing_catalog.py",
+          "src/services/eval/eval_outbox_worker.py"
+        ],
+        "tests": [
+          "tests/core/test_spo05_billing_gates.py"
+        ]
+      }
+    },
+    "ai_gateway_core.comm": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/comm/__init__.py",
+      "kind": "package",
+      "loc": 26,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "knowledge": [
+          "apps/knowledge-service/src/knowledge_service/main.py"
+        ]
+      }
+    },
+    "ai_gateway_core.comm.client": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/comm/client.py",
+      "kind": "module",
+      "loc": 439,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "asyncio",
+        "dataclasses",
+        "httpx",
+        "json",
+        "logging",
+        "os",
+        "src",
+        "time",
+        "typing",
+        "uuid"
+      ],
+      "io_deps": [
+        "httpx"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/services/eval/kb_ragas_client.py",
+          "src/services/knowledge_authz.py"
+        ],
+        "tests": [
+          "tests/packages/ai_gateway_core/test_internal_service_client.py",
+          "tests/packages/ai_gateway_core/test_internal_service_client_metrics.py",
+          "tests/packages/ai_gateway_core/test_kb_proxy_client.py",
+          "tests/packages/ai_gateway_core/test_token_bucket_rate_limiter.py",
+          "tests/services/eval/test_kb_ragas_client.py",
+          "tests/services/test_knowledge_authz.py"
+        ]
+      }
+    },
+    "ai_gateway_core.comm.idempotency": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/comm/idempotency.py",
+      "kind": "module",
+      "loc": 434,
+      "direct_imports": [
+        "__future__",
+        "asyncio",
+        "contextlib",
+        "dataclasses",
+        "hashlib",
+        "json",
+        "time",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/v1/responses.py"
+        ],
+        "tests": [
+          "tests/packages/ai_gateway_core/test_idempotency_middleware.py"
+        ]
+      }
+    },
+    "ai_gateway_core.comm.retry": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/comm/retry.py",
+      "kind": "module",
+      "loc": 130,
+      "direct_imports": [
+        "__future__",
+        "dataclasses",
+        "httpx",
+        "random",
+        "threading"
+      ],
+      "io_deps": [
+        "httpx"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "tests": [
+          "tests/api/test_kb_proxy_body_limits.py",
+          "tests/packages/ai_gateway_core/test_internal_service_client.py",
+          "tests/packages/ai_gateway_core/test_retry_policy.py",
+          "tests/proxy/test_service_proxy.py"
+        ]
+      }
+    },
+    "ai_gateway_core.config": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/config/__init__.py",
+      "kind": "package",
+      "loc": 26,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/services/llm/startup_seeder.py"
+        ],
+        "knowledge": [
+          "apps/knowledge-service/src/knowledge_service/api/routes/knowledge.py",
+          "apps/knowledge-service/src/knowledge_service/services/knowledge/embedding_manager.py",
+          "apps/knowledge-service/src/knowledge_service/services/knowledge/metadata_extractor.py",
+          "apps/knowledge-service/src/knowledge_service/services/knowledge/tenant_provider.py"
+        ],
+        "tests": [
+          "tests/config/test_endpoints_resolver.py",
+          "tests/services/llm/test_startup_seeder.py"
+        ]
+      }
+    },
+    "ai_gateway_core.config.endpoints": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/config/endpoints.py",
+      "kind": "module",
+      "loc": 184,
+      "direct_imports": [
+        "__future__",
+        "os",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "knowledge": [
+          "apps/knowledge-service/src/knowledge_service/api/routes/eval.py",
+          "apps/knowledge-service/src/knowledge_service/main.py",
+          "apps/knowledge-service/src/knowledge_service/services/knowledge/vlm_ocr_service.py"
+        ],
+        "scripts": [
+          "scripts/harness/agent_runtime_text_gate.py"
+        ]
+      }
+    },
+    "ai_gateway_core.connectors": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/connectors/__init__.py",
+      "kind": "package",
+      "loc": 6,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/v1/connectors.py"
+        ]
+      }
+    },
+    "ai_gateway_core.connectors.confluence_format": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/connectors/confluence_format.py",
+      "kind": "module",
+      "loc": 128,
+      "direct_imports": [
+        "__future__",
+        "html",
+        "re"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/internal/confluence_capabilities.py"
+        ]
+      }
+    },
+    "ai_gateway_core.connectors.connector_mcp": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/connectors/connector_mcp.py",
+      "kind": "module",
+      "loc": 130,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "threading"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.enums": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/enums/__init__.py",
+      "kind": "package",
+      "loc": 44,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/adapters/comfyui.py",
+          "src/adapters/generic_rest.py",
+          "src/adapters/langgraph.py",
+          "src/adapters/openai.py",
+          "src/adapters/stable_diffusion.py",
+          "src/adapters/tts.py",
+          "src/adapters/whisper.py",
+          "src/api/schemas/request.py",
+          "src/api/schemas/response.py",
+          "src/api/v1/assistant.py",
+          "src/api/v1/health.py",
+          "src/api/v1/services.py",
+          "src/api/v1/setup.py",
+          "src/core/gateway/dispatcher.py",
+          "src/models/request.py",
+          "src/models/response.py",
+          "src/models/service.py",
+          "src/services/llm/startup_seeder.py",
+          "src/services/registry/database_storage.py",
+          "src/services/registry/service_registry.py",
+          "src/services/task/task_queue.py",
+          "src/transports/base.py"
+        ],
+        "tests": [
+          "tests/adapters/test_adapter_bulkhead.py",
+          "tests/adapters/test_langgraph.py",
+          "tests/adapters/test_whisper_security.py",
+          "tests/core/test_dispatcher_usage_recording.py",
+          "tests/services/test_langgraph_model_override_config.py",
+          "tests/services/test_registry.py",
+          "tests/transports/test_in_process_connector_security.py",
+          "tests/transports/test_message_queue_connector.py",
+          "tests/unit/test_phase2_task_queue_and_storage.py"
+        ]
+      }
+    },
+    "ai_gateway_core.enums._core": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/enums/_core.py",
+      "kind": "module",
+      "loc": 268,
+      "direct_imports": [
+        "enum"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.eval": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/eval/__init__.py",
+      "kind": "package",
+      "loc": 18,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/services/eval/eval_outbox_worker.py"
+        ]
+      }
+    },
+    "ai_gateway_core.eval.agent_version_candidate": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/eval/agent_version_candidate.py",
+      "kind": "module",
+      "loc": 671,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "datetime",
+        "hashlib",
+        "json",
+        "os",
+        "re",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/v1/agents.py"
+        ],
+        "tests": [
+          "tests/api/test_agent_publish_api.py",
+          "tests/database/test_agent_publication_atomicity.py",
+          "tests/services/eval/test_agent_publish_gate.py",
+          "tests/services/eval/test_agent_version_candidate.py"
+        ]
+      }
+    },
+    "ai_gateway_core.eval.evaluator_executor": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/eval/evaluator_executor.py",
+      "kind": "module",
+      "loc": 1992,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "collections",
+        "dataclasses",
+        "inspect",
+        "json",
+        "math",
+        "re",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/v1/eval.py",
+          "src/services/eval/eval_llm_client.py"
+        ],
+        "tests": [
+          "tests/api/test_eval_traces.py",
+          "tests/services/eval/test_candidate_runner.py",
+          "tests/services/eval/test_drive_shipped_entrypoints.py",
+          "tests/services/eval/test_eval_llm_client.py",
+          "tests/services/eval/test_evaluator_executor.py",
+          "tests/services/eval/test_outbox_worker.py"
+        ]
+      }
+    },
+    "ai_gateway_core.eval.kb_ragas_sample": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/eval/kb_ragas_sample.py",
+      "kind": "module",
+      "loc": 144,
+      "direct_imports": [
+        "__future__",
+        "dataclasses",
+        "re",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "tests": [
+          "tests/packages/ai_gateway_core/test_kb_ragas_sample.py"
+        ]
+      }
+    },
+    "ai_gateway_core.eval.online_sampling": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/eval/online_sampling.py",
+      "kind": "module",
+      "loc": 217,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "hashlib",
+        "math",
+        "typing",
+        "uuid"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "tests": [
+          "tests/services/eval/test_online_sampling.py"
+        ]
+      }
+    },
+    "ai_gateway_core.eval.outbox_worker": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/eval/outbox_worker.py",
+      "kind": "module",
+      "loc": 119,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "asyncio",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "tests": [
+          "tests/services/eval/test_outbox_worker.py"
+        ]
+      }
+    },
+    "ai_gateway_core.eval.runtime_contract": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/eval/runtime_contract.py",
+      "kind": "module",
+      "loc": 189,
+      "direct_imports": [
+        "__future__",
+        "collections",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/services/eval/eval_candidate_client.py"
+        ],
+        "scripts": [
+          "scripts/harness/agent_runtime_eval_contract.py"
+        ]
+      }
+    },
+    "ai_gateway_core.events": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/events/__init__.py",
+      "kind": "package",
+      "loc": 57,
+      "direct_imports": [
+        "__future__"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/main.py"
+        ],
+        "tests": [
+          "tests/events/test_bus_publish.py",
+          "tests/events/test_bus_publish_consume_e2e.py",
+          "tests/events/test_consumer_dlq.py",
+          "tests/events/test_consumer_idempotency.py",
+          "tests/events/test_envelope.py",
+          "tests/services/test_usage_recorder_event_publish.py"
+        ]
+      }
+    },
+    "ai_gateway_core.events.bus": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/events/bus.py",
+      "kind": "module",
+      "loc": 166,
+      "direct_imports": [
+        "__future__",
+        "asyncio",
+        "logging",
+        "redis",
+        "typing"
+      ],
+      "io_deps": [
+        "redis"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.events.consumer": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/events/consumer.py",
+      "kind": "module",
+      "loc": 481,
+      "direct_imports": [
+        "__future__",
+        "asyncio",
+        "collections",
+        "contextlib",
+        "logging",
+        "redis",
+        "typing"
+      ],
+      "io_deps": [
+        "redis"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.events.envelope": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/events/envelope.py",
+      "kind": "module",
+      "loc": 200,
+      "direct_imports": [
+        "__future__",
+        "datetime",
+        "pydantic",
+        "typing",
+        "uuid"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "tests": [
+          "tests/contract/test_event_schema_evolution.py"
+        ]
+      }
+    },
+    "ai_gateway_core.events.errors": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/events/errors.py",
+      "kind": "module",
+      "loc": 43,
+      "direct_imports": [
+        "__future__"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "tests": [
+          "tests/events/test_bus_publish.py"
+        ]
+      }
+    },
+    "ai_gateway_core.events.idempotency": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/events/idempotency.py",
+      "kind": "module",
+      "loc": 95,
+      "direct_imports": [
+        "__future__",
+        "redis",
+        "typing"
+      ],
+      "io_deps": [
+        "redis"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.events.registry": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/events/registry.py",
+      "kind": "module",
+      "loc": 71,
+      "direct_imports": [
+        "__future__"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/main.py"
+        ],
+        "tests": [
+          "tests/contract/test_event_schema_evolution.py"
+        ]
+      }
+    },
+    "ai_gateway_core.exceptions": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/exceptions/__init__.py",
+      "kind": "package",
+      "loc": 37,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/adapters/base.py",
+          "src/adapters/generic_rest.py",
+          "src/adapters/langgraph.py",
+          "src/adapters/openai.py",
+          "src/adapters/stable_diffusion.py",
+          "src/adapters/tts.py",
+          "src/adapters/whisper.py",
+          "src/api/deps.py",
+          "src/api/v1/agent_runtime.py",
+          "src/api/v1/assistant.py",
+          "src/api/v1/sessions.py",
+          "src/api/v1/stream.py",
+          "src/api/v1/tasks.py",
+          "src/api/v2/agent.py",
+          "src/core/auth/api_key.py",
+          "src/core/auth/jwt.py",
+          "src/core/auth/password.py",
+          "src/core/auth/permissions.py",
+          "src/core/auth/rbac.py",
+          "src/core/gateway/circuit_breaker.py",
+          "src/core/gateway/dispatcher.py",
+          "src/core/gateway/rate_limiter.py",
+          "src/core/gateway/validator.py",
+          "src/main.py",
+          "src/services/registry/service_registry.py",
+          "src/services/session/session_manager.py",
+          "src/services/task/database_task_storage.py",
+          "src/services/task/task_manager.py"
+        ],
+        "tests": [
+          "tests/adapters/test_adapter_bulkhead.py",
+          "tests/adapters/test_langgraph_callback_ssrf.py",
+          "tests/api/test_agent_runtime_api.py",
+          "tests/api/test_gateway_auth_context_contract.py",
+          "tests/api/test_permission_capabilities.py",
+          "tests/api/test_sessions_assistant_compat.py",
+          "tests/core/auth/test_api_key.py",
+          "tests/core/auth/test_jwt.py",
+          "tests/core/auth/test_permissions.py",
+          "tests/core/auth/test_rbac.py",
+          "tests/core/gateway/test_circuit_breaker.py",
+          "tests/core/gateway/test_validator.py",
+          "tests/integration/test_gateway.py",
+          "tests/integration/test_permissions.py",
+          "tests/proxy/test_rate_limit.py",
+          "tests/services/test_database_session_manager.py",
+          "tests/services/test_langgraph_model_override_config.py"
+        ]
+      }
+    },
+    "ai_gateway_core.exceptions._core": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/exceptions/_core.py",
+      "kind": "module",
+      "loc": 85,
+      "direct_imports": [
+        "__future__"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.image": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/image/__init__.py",
+      "kind": "package",
+      "loc": 88,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/services/images/service.py"
+        ],
+        "tests": [
+          "tests/services/assistant/test_image_signature_flow.py"
+        ]
+      }
+    },
+    "ai_gateway_core.image.callback": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/image/callback.py",
+      "kind": "module",
+      "loc": 149,
+      "direct_imports": [
+        "ai_gateway_core",
+        "asyncio",
+        "httpx",
+        "os",
+        "typing"
+      ],
+      "io_deps": [
+        "httpx"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.image.helpers": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/image/helpers.py",
+      "kind": "module",
+      "loc": 277,
+      "direct_imports": [
+        "__future__",
+        "asyncio",
+        "base64",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.image.image_state": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/image/image_state.py",
+      "kind": "module",
+      "loc": 870,
+      "direct_imports": [
+        "__future__",
+        "datetime",
+        "functools",
+        "hashlib",
+        "json",
+        "logging",
+        "typing",
+        "uuid"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/v1/agent_images.py",
+          "src/services/images/repository.py",
+          "src/services/images/service.py"
+        ],
+        "tests": [
+          "tests/packages/ai_gateway_core/test_image_task_reservation.py",
+          "tests/services/images/test_image_task_worker.py"
+        ]
+      }
+    },
+    "ai_gateway_core.image.thumbnail": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/image/thumbnail.py",
+      "kind": "module",
+      "loc": 49,
+      "direct_imports": [
+        "PIL",
+        "__future__",
+        "io",
+        "logging",
+        "typing"
+      ],
+      "io_deps": [
+        "PIL"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.image.watermark": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/image/watermark.py",
+      "kind": "module",
+      "loc": 191,
+      "direct_imports": [
+        "PIL",
+        "ai_gateway_core",
+        "base64",
+        "io",
+        "numpy",
+        "pathlib"
+      ],
+      "io_deps": [
+        "PIL",
+        "numpy"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.knowledge": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/knowledge/__init__.py",
+      "kind": "package",
+      "loc": 46,
+      "direct_imports": [
+        "__future__",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/v1/assistant.py",
+          "src/main.py",
+          "src/services/eval/kb_ragas_client.py",
+          "src/services/knowledge_authz.py"
+        ],
+        "knowledge": [
+          "apps/knowledge-service/src/knowledge_service/services/knowledge/confluence/sync_service.py",
+          "apps/knowledge-service/src/knowledge_service/services/knowledge/embedding.py"
+        ],
+        "tests": [
+          "tests/packages/ai_gateway_core/test_kb_proxy_client.py"
+        ]
+      }
+    },
+    "ai_gateway_core.knowledge.errors": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/knowledge/errors.py",
+      "kind": "module",
+      "loc": 19,
+      "direct_imports": [
+        "__future__"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.knowledge.proxy_client": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/knowledge/proxy_client.py",
+      "kind": "module",
+      "loc": 410,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "dataclasses",
+        "httpx",
+        "logging",
+        "os",
+        "threading",
+        "typing"
+      ],
+      "io_deps": [
+        "httpx"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "tests": [
+          "tests/packages/ai_gateway_core/test_kb_proxy_client.py"
+        ]
+      }
+    },
+    "ai_gateway_core.knowledge.utils": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/knowledge/utils.py",
+      "kind": "module",
+      "loc": 46,
+      "direct_imports": [
+        "__future__"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.local_node": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/local_node/__init__.py",
+      "kind": "package",
+      "loc": 28,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/v1/agent_local_nodes.py",
+          "src/services/local_node/repository.py"
+        ],
+        "tests": [
+          "packages/ai-gateway-core/tests/test_local_node_contracts.py",
+          "tests/services/local_node/test_repository_contract.py"
+        ]
+      }
+    },
+    "ai_gateway_core.local_node.contracts": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/local_node/contracts.py",
+      "kind": "module",
+      "loc": 160,
+      "direct_imports": [
+        "__future__",
+        "collections",
+        "dataclasses",
+        "enum",
+        "hashlib",
+        "json",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.logging": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/logging/__init__.py",
+      "kind": "package",
+      "loc": 30,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/adapters/registry.py",
+          "src/api/v1/agent_runtime.py",
+          "src/api/v1/assistant.py",
+          "src/api/v1/config.py",
+          "src/api/v1/connectors.py",
+          "src/api/v1/conversation_shares.py",
+          "src/api/v1/files.py",
+          "src/api/v1/health.py",
+          "src/api/v1/proxy.py",
+          "src/api/v1/tenant_policies.py",
+          "src/container.py",
+          "src/core/auth/service_access_resolver.py",
+          "src/core/file_cleanup.py",
+          "src/core/gateway/admission.py",
+          "src/core/gateway/rate_policy.py",
+          "src/core/middleware/_streaming/auth.py",
+          "src/core/middleware/_streaming/logging.py",
+          "src/core/middleware/_streaming/tracing.py",
+          "src/core/middleware/rate_limit_http.py",
+          "src/core/middleware/streaming.py",
+          "src/core/observability/__init__.py",
+          "src/core/observability/metrics.py",
+          "src/core/observability/tracing.py",
+          "src/main.py",
+          "src/proxy/billing_interceptor.py",
+          "src/proxy/billing_stream.py",
+          "src/proxy/config_loader.py",
+          "src/proxy/context_injector.py",
+          "src/proxy/langgraph_governance.py",
+          "src/proxy/langgraph_run_body.py",
+          "src/proxy/response_cache.py",
+          "src/proxy/transparent_proxy.py",
+          "src/services/auth/api_key_service.py",
+          "src/services/eval/eval_llm_client.py",
+          "src/services/eval/eval_outbox_worker.py",
+          "src/services/eval/kb_ragas_client.py",
+          "src/services/knowledge_authz.py",
+          "src/services/llm/gateway_model_meta.py",
+          "src/services/llm/model_catalog_sync.py",
+          "src/services/llm/model_service.py",
+          "src/services/llm/provider_service.py",
+          "src/services/session/guest_session_manager.py"
+        ],
+        "knowledge": [
+          "apps/knowledge-service/src/knowledge_service/main.py"
+        ],
+        "tests": [
+          "tests/core/test_observability.py",
+          "tests/packages/ai_gateway_core/test_logging_request_id_bridge.py"
+        ]
+      }
+    },
+    "ai_gateway_core.logging._core": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/logging/_core.py",
+      "kind": "module",
+      "loc": 565,
+      "direct_imports": [
+        "__future__",
+        "contextvars",
+        "dataclasses",
+        "datetime",
+        "json",
+        "logging",
+        "opentelemetry",
+        "os",
+        "pathlib",
+        "sys",
+        "typing"
+      ],
+      "io_deps": [
+        "opentelemetry"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.logging._exceptions": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/logging/_exceptions.py",
+      "kind": "module",
+      "loc": 521,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "builtins",
+        "collections",
+        "hashlib",
+        "logging",
+        "re",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.mcp": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/mcp/__init__.py",
+      "kind": "package",
+      "loc": 21,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.mcp.client": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/mcp/client.py",
+      "kind": "module",
+      "loc": 1272,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "asyncio",
+        "collections",
+        "dataclasses",
+        "httpx",
+        "ipaddress",
+        "json",
+        "logging",
+        "re",
+        "socket",
+        "time",
+        "typing",
+        "urllib",
+        "uuid"
+      ],
+      "io_deps": [
+        "httpx",
+        "urllib"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/services/agent_runtime/mcp_gateway_broker.py"
+        ]
+      }
+    },
+    "ai_gateway_core.mcp.outcomes": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/mcp/outcomes.py",
+      "kind": "module",
+      "loc": 61,
+      "direct_imports": [
+        "__future__",
+        "enum"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.mcp.resilience": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/mcp/resilience.py",
+      "kind": "module",
+      "loc": 566,
+      "direct_imports": [
+        "__future__",
+        "asyncio",
+        "collections",
+        "dataclasses",
+        "enum",
+        "hashlib",
+        "json",
+        "time",
+        "typing",
+        "uuid"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/services/agent_runtime/mcp_gateway_broker.py"
+        ]
+      }
+    },
+    "ai_gateway_core.media": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/media/__init__.py",
+      "kind": "package",
+      "loc": 13,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/main.py"
+        ]
+      }
+    },
+    "ai_gateway_core.media.image_generation": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/media/image_generation.py",
+      "kind": "module",
+      "loc": 565,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "asyncio",
+        "base64",
+        "binascii",
+        "collections",
+        "dataclasses",
+        "httpx",
+        "os",
+        "re",
+        "time",
+        "typing",
+        "urllib"
+      ],
+      "io_deps": [
+        "httpx",
+        "urllib"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/internal/image_capabilities.py",
+          "src/api/v1/agent_images.py",
+          "src/services/images/service.py"
+        ],
+        "tests": [
+          "packages/ai-gateway-core/tests/test_image_generation_provider.py"
+        ]
+      }
+    },
+    "ai_gateway_core.memory": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/memory/__init__.py",
+      "kind": "package",
+      "loc": 6,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/container.py",
+          "src/services/agent_runtime/control_plane.py"
+        ]
+      }
+    },
+    "ai_gateway_core.memory.service": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/memory/service.py",
+      "kind": "module",
+      "loc": 507,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "contextlib",
+        "datetime",
+        "json",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.metrics": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/metrics/__init__.py",
+      "kind": "package",
+      "loc": 69,
+      "direct_imports": [
+        "__future__",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/v1/assistant.py"
+        ]
+      }
+    },
+    "ai_gateway_core.metrics.context_metrics": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/metrics/context_metrics.py",
+      "kind": "module",
+      "loc": 620,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "collections",
+        "dataclasses",
+        "datetime",
+        "enum",
+        "time",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.metrics.observability": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/metrics/observability.py",
+      "kind": "module",
+      "loc": 301,
+      "direct_imports": [
+        "__future__",
+        "collections",
+        "random",
+        "re",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/services/metrics/observability.py"
+        ]
+      }
+    },
+    "ai_gateway_core.metrics.realtime_metrics": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/metrics/realtime_metrics.py",
+      "kind": "module",
+      "loc": 609,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "asyncio",
+        "collections",
+        "contextlib",
+        "dataclasses",
+        "datetime",
+        "logging",
+        "time",
+        "typing",
+        "uuid"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/services/metrics/realtime_metrics.py"
+        ],
+        "tests": [
+          "tests/services/metrics/test_realtime_metrics_tenant_scope.py"
+        ]
+      }
+    },
+    "ai_gateway_core.metrics.usage_recorder": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/metrics/usage_recorder.py",
+      "kind": "module",
+      "loc": 2261,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "asyncio",
+        "asyncpg",
+        "contextlib",
+        "dataclasses",
+        "datetime",
+        "decimal",
+        "json",
+        "logging",
+        "os",
+        "time",
+        "typing",
+        "uuid"
+      ],
+      "io_deps": [
+        "asyncpg"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/services/metrics/usage_recorder.py"
+        ],
+        "tests": [
+          "tests/core/test_spo05_billing_gates.py",
+          "tests/services/test_usage_recorder_event_publish.py"
+        ]
+      }
+    },
+    "ai_gateway_core.models": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/models/__init__.py",
+      "kind": "package",
+      "loc": 39,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/v1/models.py",
+          "src/services/agent_runtime/control_plane.py",
+          "src/services/agent_runtime/model_plane.py",
+          "src/services/llm/model_catalog_sync.py",
+          "src/services/llm/model_service.py",
+          "src/services/llm/provider_templates.py"
+        ],
+        "tests": [
+          "tests/packages/ai_gateway_core/test_model_capabilities.py",
+          "tests/services/agent_runtime/test_control_plane.py",
+          "tests/services/agent_runtime/test_model_plane.py",
+          "tests/services/agent_runtime/test_timing.py",
+          "tests/services/llm/test_model_service_capabilities.py"
+        ],
+        "scripts": [
+          "scripts/harness/agent_runtime_text_gate.py"
+        ]
+      }
+    },
+    "ai_gateway_core.models.capabilities": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/models/capabilities.py",
+      "kind": "module",
+      "loc": 598,
+      "direct_imports": [
+        "__future__",
+        "collections",
+        "copy",
+        "dataclasses",
+        "functools",
+        "importlib",
+        "json",
+        "re",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "tests": [
+          "tests/packages/ai_gateway_core/test_model_capabilities.py"
+        ]
+      }
+    },
+    "ai_gateway_core.models.chat_message": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/models/chat_message.py",
+      "kind": "module",
+      "loc": 56,
+      "direct_imports": [
+        "__future__",
+        "dataclasses",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.models.reasoning_wire": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/models/reasoning_wire.py",
+      "kind": "module",
+      "loc": 129,
+      "direct_imports": [
+        "__future__",
+        "collections",
+        "copy",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.persistence": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/persistence/__init__.py",
+      "kind": "package",
+      "loc": 36,
+      "direct_imports": [
+        "__future__",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/persistence/database.py",
+          "src/persistence/redis.py"
+        ]
+      }
+    },
+    "ai_gateway_core.persistence.database": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/persistence/database.py",
+      "kind": "module",
+      "loc": 4150,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "asyncio",
+        "asyncpg",
+        "contextlib",
+        "datetime",
+        "json",
+        "logging",
+        "os",
+        "pathlib",
+        "re",
+        "time",
+        "typing"
+      ],
+      "io_deps": [
+        "asyncpg"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/persistence/database.py"
+        ],
+        "tests": [
+          "tests/packages/ai_gateway_core/test_session_schema_contract.py",
+          "tests/persistence/test_database.py",
+          "tests/persistence/test_session_delete_tombstone.py",
+          "tests/services/test_database_session_manager.py",
+          "tests/unit/test_phase2_task_queue_and_storage.py"
+        ]
+      }
+    },
+    "ai_gateway_core.persistence.redis": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/persistence/redis.py",
+      "kind": "module",
+      "loc": 482,
+      "direct_imports": [
+        "__future__",
+        "datetime",
+        "enum",
+        "json",
+        "logging",
+        "redis",
+        "typing"
+      ],
+      "io_deps": [
+        "redis"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.persistence.repositories": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/__init__.py",
+      "kind": "package",
+      "loc": 30,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/persistence/repositories/__init__.py"
+        ],
+        "tests": [
+          "tests/packages/ai_gateway_core/test_agent_spec_compat.py"
+        ]
+      }
+    },
+    "ai_gateway_core.persistence.repositories.agent_repository": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/agent_repository.py",
+      "kind": "module",
+      "loc": 7255,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "base64",
+        "collections",
+        "contextlib",
+        "copy",
+        "datetime",
+        "hashlib",
+        "json",
+        "os",
+        "re",
+        "secrets",
+        "typing",
+        "uuid"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/schemas/agents.py",
+          "src/api/v1/agent_public.py",
+          "src/api/v1/agent_runtime.py",
+          "src/api/v1/agents.py"
+        ],
+        "tests": [
+          "tests/api/test_agent_observability.py",
+          "tests/api/test_agent_publish_api.py",
+          "tests/api/test_agent_runtime_api.py",
+          "tests/api/test_agents_api.py",
+          "tests/database/test_agent_channel_runtime.py",
+          "tests/database/test_agent_mcp_registry_migration.py",
+          "tests/database/test_agent_publication_atomicity.py",
+          "tests/database/test_agent_runtime_migration.py",
+          "tests/database/test_agent_skill_knowledge_migration.py",
+          "tests/database/test_agent_studio_migrations.py",
+          "tests/security/test_agent_channel_security.py",
+          "tests/services/test_knowledge_authz.py"
+        ]
+      }
+    },
+    "ai_gateway_core.persistence.repositories.agent_resource_resolver": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/agent_resource_resolver.py",
+      "kind": "module",
+      "loc": 71,
+      "direct_imports": [
+        "__future__",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "tests": [
+          "tests/services/test_knowledge_authz.py"
+        ]
+      }
+    },
+    "ai_gateway_core.persistence.repositories.agent_trace_repository": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/agent_trace_repository.py",
+      "kind": "module",
+      "loc": 3417,
+      "direct_imports": [
+        "__future__",
+        "datetime",
+        "hashlib",
+        "json",
+        "math",
+        "random",
+        "statistics",
+        "typing",
+        "uuid"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/v1/_eval_dataset_routes.py",
+          "src/api/v1/agents.py",
+          "src/api/v1/eval.py",
+          "src/services/eval/eval_outbox_worker.py",
+          "src/services/eval/kb_ragas_service.py",
+          "src/services/eval/trace_capture.py",
+          "src/services/eval/trace_retention_scheduler.py"
+        ],
+        "tests": [
+          "tests/api/test_eval_traces.py",
+          "tests/database/test_kb_migrations.py",
+          "tests/packages/ai_gateway_core/test_eval_score_idempotency.py",
+          "tests/packages/ai_gateway_core/test_import_examples_dedup.py",
+          "tests/packages/ai_gateway_core/test_trace_detail_batch.py",
+          "tests/services/eval/in_memory_trace_repository.py",
+          "tests/services/eval/test_drive_shipped_entrypoints.py",
+          "tests/services/eval/test_experiment_statistics.py",
+          "tests/services/eval/test_kb_ragas_service.py",
+          "tests/services/eval/test_outbox_worker.py"
+        ]
+      }
+    },
+    "ai_gateway_core.persistence.repositories.api_key_repository": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/api_key_repository.py",
+      "kind": "module",
+      "loc": 268,
+      "direct_imports": [
+        "__future__",
+        "abc",
+        "builtins",
+        "contextlib",
+        "datetime",
+        "hashlib",
+        "json",
+        "logging",
+        "secrets",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.persistence.repositories.base": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/base.py",
+      "kind": "module",
+      "loc": 58,
+      "direct_imports": [
+        "__future__",
+        "asyncpg",
+        "logging",
+        "typing"
+      ],
+      "io_deps": [
+        "asyncpg"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "tests": [
+          "tests/packages/ai_gateway_core/test_agent_spec_compat.py"
+        ]
+      }
+    },
+    "ai_gateway_core.persistence.repositories.mcp_repository": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/mcp_repository.py",
+      "kind": "module",
+      "loc": 1655,
+      "direct_imports": [
+        "__future__",
+        "datetime",
+        "hashlib",
+        "json",
+        "re",
+        "typing",
+        "uuid"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/internal/confluence_capabilities.py",
+          "src/api/v1/mcp.py",
+          "src/main.py",
+          "src/services/agent_runtime/mcp_gateway_broker.py"
+        ],
+        "tests": [
+          "tests/api/test_agent_connector_capability.py",
+          "tests/api/test_confluence_capability_broker.py",
+          "tests/api/test_mcp_registry_api.py",
+          "tests/database/test_agent_mcp_registry_migration.py",
+          "tests/unit/test_mcp_gateway_broker.py"
+        ]
+      }
+    },
+    "ai_gateway_core.persistence.repositories.service_repository": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/service_repository.py",
+      "kind": "module",
+      "loc": 269,
+      "direct_imports": [
+        "__future__",
+        "abc",
+        "builtins",
+        "datetime",
+        "json",
+        "logging",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.persistence.repositories.session_repository": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/session_repository.py",
+      "kind": "module",
+      "loc": 370,
+      "direct_imports": [
+        "__future__",
+        "abc",
+        "asyncpg",
+        "builtins",
+        "datetime",
+        "json",
+        "logging",
+        "typing"
+      ],
+      "io_deps": [
+        "asyncpg"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "tests": [
+          "tests/packages/ai_gateway_core/test_session_schema_contract.py"
+        ]
+      }
+    },
+    "ai_gateway_core.persistence.repositories.task_repository": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/task_repository.py",
+      "kind": "module",
+      "loc": 266,
+      "direct_imports": [
+        "__future__",
+        "abc",
+        "builtins",
+        "datetime",
+        "json",
+        "logging",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.persistence.repositories.user_repository": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/user_repository.py",
+      "kind": "module",
+      "loc": 358,
+      "direct_imports": [
+        "__future__",
+        "abc",
+        "builtins",
+        "datetime",
+        "json",
+        "logging",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.proxy": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/proxy/__init__.py",
+      "kind": "package",
+      "loc": 36,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/v1/_proxy_utils.py",
+          "src/main.py"
+        ],
+        "knowledge": [
+          "apps/knowledge-service/src/knowledge_service/main.py"
+        ],
+        "tests": [
+          "tests/api/test_kb_proxy_body_limits.py",
+          "tests/services/assistant/test_request_id_propagation.py",
+          "tests/services/knowledge/test_runtime_topology.py",
+          "tests/services/knowledge/test_startup_routes_fail_closed.py",
+          "tests/tracing/test_middleware.py"
+        ]
+      }
+    },
+    "ai_gateway_core.proxy.base": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/proxy/base.py",
+      "kind": "module",
+      "loc": 873,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "asyncio",
+        "collections",
+        "contextlib",
+        "dataclasses",
+        "enum",
+        "fastapi",
+        "httpx",
+        "logging",
+        "os",
+        "redis",
+        "starlette",
+        "threading",
+        "time",
+        "typing"
+      ],
+      "io_deps": [
+        "fastapi",
+        "httpx",
+        "redis",
+        "starlette"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "tests": [
+          "tests/packages/ai_gateway_core/test_internal_service_client.py",
+          "tests/proxy/test_per_endpoint_breaker.py",
+          "tests/proxy/test_service_proxy.py",
+          "tests/services/assistant/test_request_id_propagation.py",
+          "tests/tracing/test_proxy_propagation.py"
+        ]
+      }
+    },
+    "ai_gateway_core.proxy.drain": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/proxy/drain.py",
+      "kind": "module",
+      "loc": 278,
+      "direct_imports": [
+        "__future__",
+        "asyncio",
+        "collections",
+        "fastapi",
+        "logging",
+        "signal",
+        "starlette",
+        "sys"
+      ],
+      "io_deps": [
+        "fastapi",
+        "starlette"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/main.py"
+        ],
+        "knowledge": [
+          "apps/knowledge-service/src/knowledge_service/main.py"
+        ],
+        "tests": [
+          "tests/proxy/test_drain.py"
+        ]
+      }
+    },
+    "ai_gateway_core.proxy.request_id_middleware": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/proxy/request_id_middleware.py",
+      "kind": "module",
+      "loc": 76,
+      "direct_imports": [
+        "__future__",
+        "contextvars",
+        "starlette",
+        "uuid"
+      ],
+      "io_deps": [
+        "starlette"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "tests": [
+          "tests/packages/ai_gateway_core/test_internal_service_client.py",
+          "tests/packages/ai_gateway_core/test_kb_proxy_client.py",
+          "tests/packages/ai_gateway_core/test_logging_request_id_bridge.py"
+        ]
+      }
+    },
+    "ai_gateway_core.proxy.route_pattern": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/proxy/route_pattern.py",
+      "kind": "module",
+      "loc": 159,
+      "direct_imports": [
+        "__future__",
+        "re",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "tests": [
+          "tests/proxy/test_per_endpoint_breaker.py",
+          "tests/proxy/test_route_pattern.py"
+        ]
+      }
+    },
+    "ai_gateway_core.proxy.sse_heartbeat": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/proxy/sse_heartbeat.py",
+      "kind": "module",
+      "loc": 141,
+      "direct_imports": [
+        "__future__",
+        "asyncio",
+        "collections",
+        "contextlib",
+        "sys",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/v1/langgraph.py",
+          "src/api/v1/proxy.py"
+        ],
+        "tests": [
+          "tests/proxy/test_sse_heartbeat.py"
+        ]
+      }
+    },
+    "ai_gateway_core.proxy.version_middleware": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/proxy/version_middleware.py",
+      "kind": "module",
+      "loc": 66,
+      "direct_imports": [
+        "__future__",
+        "collections",
+        "re"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/main.py"
+        ],
+        "tests": [
+          "tests/packages/ai_gateway_core/test_api_version_middleware.py"
+        ]
+      }
+    },
+    "ai_gateway_core.quiz": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/quiz/__init__.py",
+      "kind": "package",
+      "loc": 10,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/v1/conversation_shares.py",
+          "src/api/v1/quiz.py"
+        ]
+      }
+    },
+    "ai_gateway_core.quiz.quiz_access_service": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/quiz/quiz_access_service.py",
+      "kind": "module",
+      "loc": 294,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "datetime",
+        "json",
+        "logging",
+        "typing",
+        "uuid"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.quiz.quiz_grader": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/quiz/quiz_grader.py",
+      "kind": "module",
+      "loc": 206,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "json",
+        "logging",
+        "re",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "tests": [
+          "tests/api/test_quiz_grading.py"
+        ]
+      }
+    },
+    "ai_gateway_core.security": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/security/__init__.py",
+      "kind": "package",
+      "loc": 32,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/adapters/langgraph.py",
+          "src/adapters/whisper.py",
+          "src/api/v1/agent_images.py",
+          "src/api/v1/connector_admin.py",
+          "src/api/v1/connectors.py",
+          "src/api/v1/mcp.py",
+          "src/core/crypto.py",
+          "src/services/eval/golden.py",
+          "src/services/images/service.py",
+          "src/services/task/task_manager.py"
+        ],
+        "knowledge": [
+          "apps/knowledge-service/src/knowledge_service/api/routes/knowledge.py",
+          "apps/knowledge-service/src/knowledge_service/services/knowledge/document_service.py",
+          "apps/knowledge-service/src/knowledge_service/services/knowledge/ingestion/document_image_extractor.py",
+          "apps/knowledge-service/src/knowledge_service/services/knowledge/tenant_provider.py"
+        ],
+        "tests": [
+          "tests/api/test_connector_admin.py",
+          "tests/api/test_connectors_oauth_state.py",
+          "tests/services/assistant/test_redaction.py",
+          "tests/services/knowledge/test_tenant_embedding_provider.py"
+        ]
+      }
+    },
+    "ai_gateway_core.security.redaction": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/security/redaction.py",
+      "kind": "module",
+      "loc": 83,
+      "direct_imports": [
+        "__future__",
+        "re",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/schemas/agents.py",
+          "src/api/v1/agents.py"
+        ]
+      }
+    },
+    "ai_gateway_core.security.safe_fetch": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/security/safe_fetch.py",
+      "kind": "module",
+      "loc": 511,
+      "direct_imports": [
+        "__future__",
+        "collections",
+        "dataclasses",
+        "httpx",
+        "ipaddress",
+        "logging",
+        "os",
+        "socket",
+        "ssl",
+        "typing",
+        "urllib"
+      ],
+      "io_deps": [
+        "httpx",
+        "urllib"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "tests": [
+          "tests/services/assistant/test_safe_fetch.py"
+        ]
+      }
+    },
+    "ai_gateway_core.security.secrets": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/security/secrets.py",
+      "kind": "module",
+      "loc": 81,
+      "direct_imports": [
+        "__future__",
+        "base64",
+        "cryptography",
+        "functools",
+        "hashlib",
+        "logging",
+        "os"
+      ],
+      "io_deps": [
+        "cryptography"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.session": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/session/__init__.py",
+      "kind": "package",
+      "loc": 37,
+      "direct_imports": [
+        "__future__",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/models/session.py",
+          "src/services/session/database_session_manager.py"
+        ]
+      }
+    },
+    "ai_gateway_core.session.database_manager": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/session/database_manager.py",
+      "kind": "module",
+      "loc": 572,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "collections",
+        "datetime",
+        "json",
+        "logging",
+        "time",
+        "typing",
+        "uuid"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "tests": [
+          "tests/services/test_database_session_manager.py"
+        ]
+      }
+    },
+    "ai_gateway_core.session.models": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/session/models.py",
+      "kind": "module",
+      "loc": 40,
+      "direct_imports": [
+        "__future__",
+        "dataclasses",
+        "datetime",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.sharing": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/sharing/__init__.py",
+      "kind": "package",
+      "loc": 5,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/v1/artifact_shares.py",
+          "src/api/v1/quiz.py"
+        ]
+      }
+    },
+    "ai_gateway_core.sharing.artifact_share_manager": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/sharing/artifact_share_manager.py",
+      "kind": "module",
+      "loc": 501,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "datetime",
+        "hashlib",
+        "html",
+        "json",
+        "logging",
+        "re",
+        "secrets",
+        "typing",
+        "uuid"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/v1/quiz.py"
+        ],
+        "tests": [
+          "tests/api/test_artifact_shares.py",
+          "tests/database/test_artifact_share_migration.py"
+        ]
+      }
+    },
+    "ai_gateway_core.skills": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/skills/__init__.py",
+      "kind": "package",
+      "loc": 57,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/v1/skills.py",
+          "src/main.py"
+        ],
+        "tests": [
+          "tests/api/test_skills_api.py",
+          "tests/database/test_agent_skill_knowledge_migration.py",
+          "tests/security/test_skill_entrypoint_policy.py",
+          "tests/security/test_skill_tenant_isolation.py"
+        ]
+      }
+    },
+    "ai_gateway_core.skills.artifact_repository": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/skills/artifact_repository.py",
+      "kind": "module",
+      "loc": 542,
+      "direct_imports": [
+        "__future__",
+        "dataclasses",
+        "hashlib",
+        "json",
+        "typing",
+        "uuid"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "tests": [
+          "tests/packages/core/test_skill_artifact_repository_schema.py"
+        ]
+      }
+    },
+    "ai_gateway_core.skills.builder": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/skills/builder.py",
+      "kind": "module",
+      "loc": 113,
+      "direct_imports": [
+        "__future__",
+        "dataclasses",
+        "datetime",
+        "json",
+        "typing",
+        "uuid"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.skills.builtin": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/skills/builtin/__init__.py",
+      "kind": "package",
+      "loc": 5,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.skills.builtin.skill_create": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/skills/builtin/skill_create.py",
+      "kind": "module",
+      "loc": 78,
+      "direct_imports": [
+        "__future__",
+        "logging",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/v1/skills.py"
+        ]
+      }
+    },
+    "ai_gateway_core.skills.executor": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/skills/executor.py",
+      "kind": "module",
+      "loc": 99,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "collections",
+        "logging",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/v1/skills.py"
+        ]
+      }
+    },
+    "ai_gateway_core.skills.models": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/skills/models.py",
+      "kind": "module",
+      "loc": 151,
+      "direct_imports": [
+        "__future__",
+        "dataclasses",
+        "datetime",
+        "enum",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.skills.parser": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/skills/parser.py",
+      "kind": "module",
+      "loc": 254,
+      "direct_imports": [
+        "__future__",
+        "dataclasses",
+        "logging",
+        "re",
+        "typing",
+        "yaml"
+      ],
+      "io_deps": [
+        "yaml"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.skills.registry": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/skills/registry.py",
+      "kind": "module",
+      "loc": 291,
+      "direct_imports": [
+        "__future__",
+        "dataclasses",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.storage": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/storage/__init__.py",
+      "kind": "package",
+      "loc": 166,
+      "direct_imports": [
+        "__future__",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/internal/agent_capabilities.py",
+          "src/api/internal/attachment_capabilities.py",
+          "src/api/internal/image_capabilities.py",
+          "src/api/internal/office_artifacts.py",
+          "src/api/v1/agent_images.py",
+          "src/api/v1/agent_runtime.py",
+          "src/api/v1/agents.py",
+          "src/api/v1/assistant.py",
+          "src/api/v1/files.py",
+          "src/main.py",
+          "src/services/images/service.py"
+        ]
+      }
+    },
+    "ai_gateway_core.storage.artifact_storage": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/storage/artifact_storage.py",
+      "kind": "module",
+      "loc": 986,
+      "direct_imports": [
+        "__future__",
+        "asyncpg",
+        "dataclasses",
+        "datetime",
+        "hashlib",
+        "json",
+        "logging",
+        "re",
+        "src",
+        "typing",
+        "uuid"
+      ],
+      "io_deps": [
+        "asyncpg"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/services/storage/__init__.py",
+          "src/services/storage/artifact_storage.py"
+        ],
+        "tests": [
+          "tests/packages/ai_gateway_core/test_artifact_storage_owner_scope.py",
+          "tests/packages/ai_gateway_core/test_artifact_storage_schema.py"
+        ]
+      }
+    },
+    "ai_gateway_core.storage.file_storage": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/storage/file_storage.py",
+      "kind": "module",
+      "loc": 690,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "asyncio",
+        "collections",
+        "dataclasses",
+        "datetime",
+        "hashlib",
+        "json",
+        "os",
+        "pathlib",
+        "uuid"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/services/storage/__init__.py",
+          "src/services/storage/file_storage.py"
+        ],
+        "tests": [
+          "tests/services/assistant/test_uao04_storage_backend_log_privacy.py"
+        ]
+      }
+    },
+    "ai_gateway_core.storage.image_storage": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/storage/image_storage.py",
+      "kind": "module",
+      "loc": 1637,
+      "direct_imports": [
+        "__future__",
+        "abc",
+        "ai_gateway_core",
+        "aioboto3",
+        "aiofiles",
+        "asyncio",
+        "dataclasses",
+        "enum",
+        "hashlib",
+        "hmac",
+        "json",
+        "logging",
+        "os",
+        "oss2",
+        "pathlib",
+        "shutil",
+        "time",
+        "typing",
+        "unicodedata",
+        "urllib"
+      ],
+      "io_deps": [
+        "aioboto3",
+        "aiofiles",
+        "oss2",
+        "urllib"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/main.py",
+          "src/services/storage/image_storage.py"
+        ],
+        "knowledge": [
+          "apps/knowledge-service/src/knowledge_service/main.py"
+        ],
+        "tests": [
+          "tests/packages/ai_gateway_core/test_artifact_storage_owner_scope.py",
+          "tests/services/assistant/test_uao04_storage_backend_log_privacy.py",
+          "tests/services/knowledge/test_document_asset_storage_scope.py"
+        ]
+      }
+    },
+    "ai_gateway_core.style_presets": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/style_presets.py",
+      "kind": "module",
+      "loc": 207,
+      "direct_imports": [
+        "__future__",
+        "dataclasses"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/api/schemas/assistant.py",
+          "src/api/v1/assistant.py"
+        ]
+      }
+    },
+    "ai_gateway_core.tasks": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/tasks/__init__.py",
+      "kind": "package",
+      "loc": 20,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/main.py"
+        ]
+      }
+    },
+    "ai_gateway_core.tasks.task_manager": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/tasks/task_manager.py",
+      "kind": "module",
+      "loc": 716,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "asyncio",
+        "collections",
+        "contextlib",
+        "dataclasses",
+        "datetime",
+        "hashlib",
+        "typing",
+        "uuid"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.tasks.task_types": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/tasks/task_types.py",
+      "kind": "module",
+      "loc": 55,
+      "direct_imports": [
+        "__future__",
+        "ai_gateway_core",
+        "logging",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.tracing": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/tracing/__init__.py",
+      "kind": "package",
+      "loc": 31,
+      "direct_imports": [],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "gateway": [
+          "src/main.py"
+        ],
+        "knowledge": [
+          "apps/knowledge-service/src/knowledge_service/main.py"
+        ],
+        "tests": [
+          "tests/services/knowledge/test_runtime_topology.py",
+          "tests/services/knowledge/test_startup_routes_fail_closed.py",
+          "tests/tracing/test_middleware.py",
+          "tests/tracing/test_proxy_propagation.py"
+        ]
+      }
+    },
+    "ai_gateway_core.tracing.httpx_hooks": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/tracing/httpx_hooks.py",
+      "kind": "module",
+      "loc": 72,
+      "direct_imports": [
+        "__future__",
+        "logging",
+        "opentelemetry",
+        "typing"
+      ],
+      "io_deps": [
+        "opentelemetry"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.tracing.init": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/tracing/init.py",
+      "kind": "module",
+      "loc": 223,
+      "direct_imports": [
+        "__future__",
+        "logging",
+        "opentelemetry",
+        "os",
+        "threading",
+        "typing"
+      ],
+      "io_deps": [
+        "opentelemetry"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {
+        "tests": [
+          "tests/tracing/test_init.py",
+          "tests/tracing/test_middleware.py",
+          "tests/tracing/test_proxy_propagation.py"
+        ]
+      }
+    },
+    "ai_gateway_core.tracing.middleware": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/tracing/middleware.py",
+      "kind": "module",
+      "loc": 160,
+      "direct_imports": [
+        "__future__",
+        "opentelemetry",
+        "starlette"
+      ],
+      "io_deps": [
+        "opentelemetry",
+        "starlette"
+      ],
+      "io_free": false,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    },
+    "ai_gateway_core.working_memory": {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/working_memory.py",
+      "kind": "module",
+      "loc": 572,
+      "direct_imports": [
+        "__future__",
+        "dataclasses",
+        "datetime",
+        "enum",
+        "json",
+        "typing"
+      ],
+      "io_deps": [],
+      "io_free": true,
+      "contracts_shim": false,
+      "consumer_owners": {}
+    }
+  },
+  "consumption": {
+    "gateway": {
+      "ai_gateway_core.agents": {
+        "files": [
+          "src/api/v1/agent_public.py",
+          "src/api/v1/agent_runtime.py",
+          "src/api/v1/agents.py",
+          "src/main.py",
+          "src/services/agent_runtime/control_plane.py",
+          "src/services/agent_runtime/model_plane.py",
+          "src/services/agent_runtime/runtime_configuration.py",
+          "src/services/agent_runtime_cleanup.py"
+        ],
+        "count": 8
+      },
+      "ai_gateway_core.agents.spec": {
+        "files": [
+          "src/api/v1/agent_runtime.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.agents.system_prompt": {
+        "files": [
+          "src/services/agent_runtime/control_plane.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.auth": {
+        "files": [
+          "src/core/auth/user_resolver.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.auth.capability_proof": {
+        "files": [
+          "src/api/internal/agent_capabilities.py",
+          "src/api/internal/attachment_capabilities.py",
+          "src/api/internal/confluence_capabilities.py",
+          "src/api/internal/image_capabilities.py",
+          "src/api/internal/office_artifacts.py",
+          "src/api/internal_mcp_broker.py",
+          "src/api/v1/agent_local_nodes.py"
+        ],
+        "count": 7
+      },
+      "ai_gateway_core.auth.gateway_secret": {
+        "files": [
+          "src/api/v1/_proxy_utils.py",
+          "src/services/eval/kb_ragas_client.py",
+          "src/services/knowledge_authz.py"
+        ],
+        "count": 3
+      },
+      "ai_gateway_core.billing.pricing_catalog": {
+        "files": [
+          "src/services/billing/pricing_catalog.py",
+          "src/services/eval/eval_outbox_worker.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.comm.client": {
+        "files": [
+          "src/services/eval/kb_ragas_client.py",
+          "src/services/knowledge_authz.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.comm.idempotency": {
+        "files": [
+          "src/api/v1/responses.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.config": {
+        "files": [
+          "src/services/llm/startup_seeder.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.connectors": {
+        "files": [
+          "src/api/v1/connectors.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.connectors.confluence_format": {
+        "files": [
+          "src/api/internal/confluence_capabilities.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.enums": {
+        "files": [
+          "src/adapters/comfyui.py",
+          "src/adapters/generic_rest.py",
+          "src/adapters/langgraph.py",
+          "src/adapters/openai.py",
+          "src/adapters/stable_diffusion.py",
+          "src/adapters/tts.py",
+          "src/adapters/whisper.py",
+          "src/api/schemas/request.py",
+          "src/api/schemas/response.py",
+          "src/api/v1/assistant.py",
+          "src/api/v1/health.py",
+          "src/api/v1/services.py",
+          "src/api/v1/setup.py",
+          "src/core/gateway/dispatcher.py",
+          "src/models/request.py",
+          "src/models/response.py",
+          "src/models/service.py",
+          "src/services/llm/startup_seeder.py",
+          "src/services/registry/database_storage.py",
+          "src/services/registry/service_registry.py",
+          "src/services/task/task_queue.py",
+          "src/transports/base.py"
+        ],
+        "count": 22
+      },
+      "ai_gateway_core.eval": {
+        "files": [
+          "src/services/eval/eval_outbox_worker.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.eval.agent_version_candidate": {
+        "files": [
+          "src/api/v1/agents.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.eval.evaluator_executor": {
+        "files": [
+          "src/api/v1/eval.py",
+          "src/services/eval/eval_llm_client.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.eval.runtime_contract": {
+        "files": [
+          "src/services/eval/eval_candidate_client.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.events": {
+        "files": [
+          "src/main.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.events.registry": {
+        "files": [
+          "src/main.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.exceptions": {
+        "files": [
+          "src/adapters/base.py",
+          "src/adapters/generic_rest.py",
+          "src/adapters/langgraph.py",
+          "src/adapters/openai.py",
+          "src/adapters/stable_diffusion.py",
+          "src/adapters/tts.py",
+          "src/adapters/whisper.py",
+          "src/api/deps.py",
+          "src/api/v1/agent_runtime.py",
+          "src/api/v1/assistant.py",
+          "src/api/v1/sessions.py",
+          "src/api/v1/stream.py",
+          "src/api/v1/tasks.py",
+          "src/api/v2/agent.py",
+          "src/core/auth/api_key.py",
+          "src/core/auth/jwt.py",
+          "src/core/auth/password.py",
+          "src/core/auth/permissions.py",
+          "src/core/auth/rbac.py",
+          "src/core/gateway/circuit_breaker.py",
+          "src/core/gateway/dispatcher.py",
+          "src/core/gateway/rate_limiter.py",
+          "src/core/gateway/validator.py",
+          "src/main.py",
+          "src/services/registry/service_registry.py",
+          "src/services/session/session_manager.py",
+          "src/services/task/database_task_storage.py",
+          "src/services/task/task_manager.py"
+        ],
+        "count": 28
+      },
+      "ai_gateway_core.image": {
+        "files": [
+          "src/services/images/service.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.image.image_state": {
+        "files": [
+          "src/api/v1/agent_images.py",
+          "src/services/images/repository.py",
+          "src/services/images/service.py"
+        ],
+        "count": 3
+      },
+      "ai_gateway_core.knowledge": {
+        "files": [
+          "src/api/v1/assistant.py",
+          "src/main.py",
+          "src/services/eval/kb_ragas_client.py",
+          "src/services/knowledge_authz.py"
+        ],
+        "count": 4
+      },
+      "ai_gateway_core.local_node": {
+        "files": [
+          "src/api/v1/agent_local_nodes.py",
+          "src/services/local_node/repository.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.logging": {
+        "files": [
+          "src/adapters/registry.py",
+          "src/api/v1/agent_runtime.py",
+          "src/api/v1/assistant.py",
+          "src/api/v1/config.py",
+          "src/api/v1/connectors.py",
+          "src/api/v1/conversation_shares.py",
+          "src/api/v1/files.py",
+          "src/api/v1/health.py",
+          "src/api/v1/proxy.py",
+          "src/api/v1/tenant_policies.py",
+          "src/container.py",
+          "src/core/auth/service_access_resolver.py",
+          "src/core/file_cleanup.py",
+          "src/core/gateway/admission.py",
+          "src/core/gateway/rate_policy.py",
+          "src/core/middleware/_streaming/auth.py",
+          "src/core/middleware/_streaming/logging.py",
+          "src/core/middleware/_streaming/tracing.py",
+          "src/core/middleware/rate_limit_http.py",
+          "src/core/middleware/streaming.py",
+          "src/core/observability/__init__.py",
+          "src/core/observability/metrics.py",
+          "src/core/observability/tracing.py",
+          "src/main.py",
+          "src/proxy/billing_interceptor.py",
+          "src/proxy/billing_stream.py",
+          "src/proxy/config_loader.py",
+          "src/proxy/context_injector.py",
+          "src/proxy/langgraph_governance.py",
+          "src/proxy/langgraph_run_body.py",
+          "src/proxy/response_cache.py",
+          "src/proxy/transparent_proxy.py",
+          "src/services/auth/api_key_service.py",
+          "src/services/eval/eval_llm_client.py",
+          "src/services/eval/eval_outbox_worker.py",
+          "src/services/eval/kb_ragas_client.py",
+          "src/services/knowledge_authz.py",
+          "src/services/llm/gateway_model_meta.py",
+          "src/services/llm/model_catalog_sync.py",
+          "src/services/llm/model_service.py",
+          "src/services/llm/provider_service.py",
+          "src/services/session/guest_session_manager.py"
+        ],
+        "count": 42
+      },
+      "ai_gateway_core.mcp.client": {
+        "files": [
+          "src/services/agent_runtime/mcp_gateway_broker.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.mcp.resilience": {
+        "files": [
+          "src/services/agent_runtime/mcp_gateway_broker.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.media": {
+        "files": [
+          "src/main.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.media.image_generation": {
+        "files": [
+          "src/api/internal/image_capabilities.py",
+          "src/api/v1/agent_images.py",
+          "src/services/images/service.py"
+        ],
+        "count": 3
+      },
+      "ai_gateway_core.memory": {
+        "files": [
+          "src/container.py",
+          "src/services/agent_runtime/control_plane.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.metrics": {
+        "files": [
+          "src/api/v1/assistant.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.metrics.observability": {
+        "files": [
+          "src/services/metrics/observability.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.metrics.realtime_metrics": {
+        "files": [
+          "src/services/metrics/realtime_metrics.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.metrics.usage_recorder": {
+        "files": [
+          "src/services/metrics/usage_recorder.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.models": {
+        "files": [
+          "src/api/v1/models.py",
+          "src/services/agent_runtime/control_plane.py",
+          "src/services/agent_runtime/model_plane.py",
+          "src/services/llm/model_catalog_sync.py",
+          "src/services/llm/model_service.py",
+          "src/services/llm/provider_templates.py"
+        ],
+        "count": 6
+      },
+      "ai_gateway_core.persistence": {
+        "files": [
+          "src/persistence/database.py",
+          "src/persistence/redis.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.persistence.database": {
+        "files": [
+          "src/persistence/database.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.persistence.repositories": {
+        "files": [
+          "src/persistence/repositories/__init__.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.persistence.repositories.agent_repository": {
+        "files": [
+          "src/api/schemas/agents.py",
+          "src/api/v1/agent_public.py",
+          "src/api/v1/agent_runtime.py",
+          "src/api/v1/agents.py"
+        ],
+        "count": 4
+      },
+      "ai_gateway_core.persistence.repositories.agent_trace_repository": {
+        "files": [
+          "src/api/v1/_eval_dataset_routes.py",
+          "src/api/v1/agents.py",
+          "src/api/v1/eval.py",
+          "src/services/eval/eval_outbox_worker.py",
+          "src/services/eval/kb_ragas_service.py",
+          "src/services/eval/trace_capture.py",
+          "src/services/eval/trace_retention_scheduler.py"
+        ],
+        "count": 7
+      },
+      "ai_gateway_core.persistence.repositories.mcp_repository": {
+        "files": [
+          "src/api/internal/confluence_capabilities.py",
+          "src/api/v1/mcp.py",
+          "src/main.py",
+          "src/services/agent_runtime/mcp_gateway_broker.py"
+        ],
+        "count": 4
+      },
+      "ai_gateway_core.proxy": {
+        "files": [
+          "src/api/v1/_proxy_utils.py",
+          "src/main.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.proxy.drain": {
+        "files": [
+          "src/main.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.proxy.sse_heartbeat": {
+        "files": [
+          "src/api/v1/langgraph.py",
+          "src/api/v1/proxy.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.proxy.version_middleware": {
+        "files": [
+          "src/main.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.quiz": {
+        "files": [
+          "src/api/v1/conversation_shares.py",
+          "src/api/v1/quiz.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.security": {
+        "files": [
+          "src/adapters/langgraph.py",
+          "src/adapters/whisper.py",
+          "src/api/v1/agent_images.py",
+          "src/api/v1/connector_admin.py",
+          "src/api/v1/connectors.py",
+          "src/api/v1/mcp.py",
+          "src/core/crypto.py",
+          "src/services/eval/golden.py",
+          "src/services/images/service.py",
+          "src/services/task/task_manager.py"
+        ],
+        "count": 10
+      },
+      "ai_gateway_core.security.redaction": {
+        "files": [
+          "src/api/schemas/agents.py",
+          "src/api/v1/agents.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.session": {
+        "files": [
+          "src/models/session.py",
+          "src/services/session/database_session_manager.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.sharing": {
+        "files": [
+          "src/api/v1/artifact_shares.py",
+          "src/api/v1/quiz.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.sharing.artifact_share_manager": {
+        "files": [
+          "src/api/v1/quiz.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.skills": {
+        "files": [
+          "src/api/v1/skills.py",
+          "src/main.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.skills.builtin.skill_create": {
+        "files": [
+          "src/api/v1/skills.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.skills.executor": {
+        "files": [
+          "src/api/v1/skills.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.storage": {
+        "files": [
+          "src/api/internal/agent_capabilities.py",
+          "src/api/internal/attachment_capabilities.py",
+          "src/api/internal/image_capabilities.py",
+          "src/api/internal/office_artifacts.py",
+          "src/api/v1/agent_images.py",
+          "src/api/v1/agent_runtime.py",
+          "src/api/v1/agents.py",
+          "src/api/v1/assistant.py",
+          "src/api/v1/files.py",
+          "src/main.py",
+          "src/services/images/service.py"
+        ],
+        "count": 11
+      },
+      "ai_gateway_core.storage.artifact_storage": {
+        "files": [
+          "src/services/storage/__init__.py",
+          "src/services/storage/artifact_storage.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.storage.file_storage": {
+        "files": [
+          "src/services/storage/__init__.py",
+          "src/services/storage/file_storage.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.storage.image_storage": {
+        "files": [
+          "src/main.py",
+          "src/services/storage/image_storage.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.style_presets": {
+        "files": [
+          "src/api/schemas/assistant.py",
+          "src/api/v1/assistant.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.tasks": {
+        "files": [
+          "src/main.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.tracing": {
+        "files": [
+          "src/main.py"
+        ],
+        "count": 1
+      }
+    },
+    "knowledge": {
+      "ai_gateway_core.auth.capability_proof": {
+        "files": [
+          "apps/knowledge-service/src/knowledge_service/api/routes/capability_plane.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.auth.gateway_secret": {
+        "files": [
+          "apps/knowledge-service/src/knowledge_service/main.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.auth.gateway_secret_middleware": {
+        "files": [
+          "apps/knowledge-service/src/knowledge_service/auth/gateway_secret_mw.py",
+          "apps/knowledge-service/src/knowledge_service/main.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.comm": {
+        "files": [
+          "apps/knowledge-service/src/knowledge_service/main.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.config": {
+        "files": [
+          "apps/knowledge-service/src/knowledge_service/api/routes/knowledge.py",
+          "apps/knowledge-service/src/knowledge_service/services/knowledge/embedding_manager.py",
+          "apps/knowledge-service/src/knowledge_service/services/knowledge/metadata_extractor.py",
+          "apps/knowledge-service/src/knowledge_service/services/knowledge/tenant_provider.py"
+        ],
+        "count": 4
+      },
+      "ai_gateway_core.config.endpoints": {
+        "files": [
+          "apps/knowledge-service/src/knowledge_service/api/routes/eval.py",
+          "apps/knowledge-service/src/knowledge_service/main.py",
+          "apps/knowledge-service/src/knowledge_service/services/knowledge/vlm_ocr_service.py"
+        ],
+        "count": 3
+      },
+      "ai_gateway_core.knowledge": {
+        "files": [
+          "apps/knowledge-service/src/knowledge_service/services/knowledge/confluence/sync_service.py",
+          "apps/knowledge-service/src/knowledge_service/services/knowledge/embedding.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.logging": {
+        "files": [
+          "apps/knowledge-service/src/knowledge_service/main.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.proxy": {
+        "files": [
+          "apps/knowledge-service/src/knowledge_service/main.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.proxy.drain": {
+        "files": [
+          "apps/knowledge-service/src/knowledge_service/main.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.security": {
+        "files": [
+          "apps/knowledge-service/src/knowledge_service/api/routes/knowledge.py",
+          "apps/knowledge-service/src/knowledge_service/services/knowledge/document_service.py",
+          "apps/knowledge-service/src/knowledge_service/services/knowledge/ingestion/document_image_extractor.py",
+          "apps/knowledge-service/src/knowledge_service/services/knowledge/tenant_provider.py"
+        ],
+        "count": 4
+      },
+      "ai_gateway_core.storage.image_storage": {
+        "files": [
+          "apps/knowledge-service/src/knowledge_service/main.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.tracing": {
+        "files": [
+          "apps/knowledge-service/src/knowledge_service/main.py"
+        ],
+        "count": 1
+      }
+    },
+    "tests": {
+      "ai_gateway_core.agent_plugins": {
+        "files": [
+          "tests/services/assistant/test_agent_plugin_agents.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.agents": {
+        "files": [
+          "tests/api/test_agent_publish_api.py",
+          "tests/api/test_agent_runtime_cutover.py",
+          "tests/api/test_agent_runtime_envelope.py",
+          "tests/api/test_codex_runtime_lease.py",
+          "tests/database/test_agent_studio_migrations.py",
+          "tests/packages/ai_gateway_core/test_agent_spec_compat.py",
+          "tests/services/agent_runtime/test_agent_runtime_cleanup.py",
+          "tests/services/agent_runtime/test_control_plane.py",
+          "tests/services/agent_runtime/test_model_plane.py",
+          "tests/services/agent_runtime/test_timing.py",
+          "tests/services/eval/test_agent_publish_gate.py",
+          "tests/services/eval/test_agent_version_candidate.py"
+        ],
+        "count": 12
+      },
+      "ai_gateway_core.agents.spec": {
+        "files": [
+          "tests/packages/ai_gateway_core/test_agent_outcome_contract.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.auth.capability_proof": {
+        "files": [
+          "tests/api/test_confluence_capability_broker.py",
+          "tests/api/test_image_capability_broker.py",
+          "tests/api/test_internal_agent_capabilities.py",
+          "tests/api/test_internal_mcp_broker.py",
+          "tests/packages/ai_gateway_core/test_capability_proof.py",
+          "tests/services/knowledge/test_capability_plane.py"
+        ],
+        "count": 6
+      },
+      "ai_gateway_core.auth.gateway_secret": {
+        "files": [
+          "tests/contract/test_gateway_secret.py",
+          "tests/packages/ai_gateway_core/test_gateway_secret_middleware.py",
+          "tests/packages/ai_gateway_core/test_internal_service_client.py",
+          "tests/services/knowledge/test_ragas_eval_route_security.py",
+          "tests/services/test_knowledge_authz.py"
+        ],
+        "count": 5
+      },
+      "ai_gateway_core.auth.gateway_secret_middleware": {
+        "files": [
+          "tests/packages/ai_gateway_core/test_gateway_secret_middleware.py",
+          "tests/services/knowledge/test_ragas_eval_route_security.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.billing.pricing_catalog": {
+        "files": [
+          "tests/core/test_spo05_billing_gates.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.comm.client": {
+        "files": [
+          "tests/packages/ai_gateway_core/test_internal_service_client.py",
+          "tests/packages/ai_gateway_core/test_internal_service_client_metrics.py",
+          "tests/packages/ai_gateway_core/test_kb_proxy_client.py",
+          "tests/packages/ai_gateway_core/test_token_bucket_rate_limiter.py",
+          "tests/services/eval/test_kb_ragas_client.py",
+          "tests/services/test_knowledge_authz.py"
+        ],
+        "count": 6
+      },
+      "ai_gateway_core.comm.idempotency": {
+        "files": [
+          "tests/packages/ai_gateway_core/test_idempotency_middleware.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.comm.retry": {
+        "files": [
+          "tests/api/test_kb_proxy_body_limits.py",
+          "tests/packages/ai_gateway_core/test_internal_service_client.py",
+          "tests/packages/ai_gateway_core/test_retry_policy.py",
+          "tests/proxy/test_service_proxy.py"
+        ],
+        "count": 4
+      },
+      "ai_gateway_core.config": {
+        "files": [
+          "tests/config/test_endpoints_resolver.py",
+          "tests/services/llm/test_startup_seeder.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.enums": {
+        "files": [
+          "tests/adapters/test_adapter_bulkhead.py",
+          "tests/adapters/test_langgraph.py",
+          "tests/adapters/test_whisper_security.py",
+          "tests/core/test_dispatcher_usage_recording.py",
+          "tests/services/test_langgraph_model_override_config.py",
+          "tests/services/test_registry.py",
+          "tests/transports/test_in_process_connector_security.py",
+          "tests/transports/test_message_queue_connector.py",
+          "tests/unit/test_phase2_task_queue_and_storage.py"
+        ],
+        "count": 9
+      },
+      "ai_gateway_core.eval.agent_version_candidate": {
+        "files": [
+          "tests/api/test_agent_publish_api.py",
+          "tests/database/test_agent_publication_atomicity.py",
+          "tests/services/eval/test_agent_publish_gate.py",
+          "tests/services/eval/test_agent_version_candidate.py"
+        ],
+        "count": 4
+      },
+      "ai_gateway_core.eval.evaluator_executor": {
+        "files": [
+          "tests/api/test_eval_traces.py",
+          "tests/services/eval/test_candidate_runner.py",
+          "tests/services/eval/test_drive_shipped_entrypoints.py",
+          "tests/services/eval/test_eval_llm_client.py",
+          "tests/services/eval/test_evaluator_executor.py",
+          "tests/services/eval/test_outbox_worker.py"
+        ],
+        "count": 6
+      },
+      "ai_gateway_core.eval.kb_ragas_sample": {
+        "files": [
+          "tests/packages/ai_gateway_core/test_kb_ragas_sample.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.eval.online_sampling": {
+        "files": [
+          "tests/services/eval/test_online_sampling.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.eval.outbox_worker": {
+        "files": [
+          "tests/services/eval/test_outbox_worker.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.events": {
+        "files": [
+          "tests/events/test_bus_publish.py",
+          "tests/events/test_bus_publish_consume_e2e.py",
+          "tests/events/test_consumer_dlq.py",
+          "tests/events/test_consumer_idempotency.py",
+          "tests/events/test_envelope.py",
+          "tests/services/test_usage_recorder_event_publish.py"
+        ],
+        "count": 6
+      },
+      "ai_gateway_core.events.envelope": {
+        "files": [
+          "tests/contract/test_event_schema_evolution.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.events.errors": {
+        "files": [
+          "tests/events/test_bus_publish.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.events.registry": {
+        "files": [
+          "tests/contract/test_event_schema_evolution.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.exceptions": {
+        "files": [
+          "tests/adapters/test_adapter_bulkhead.py",
+          "tests/adapters/test_langgraph_callback_ssrf.py",
+          "tests/api/test_agent_runtime_api.py",
+          "tests/api/test_gateway_auth_context_contract.py",
+          "tests/api/test_permission_capabilities.py",
+          "tests/api/test_sessions_assistant_compat.py",
+          "tests/core/auth/test_api_key.py",
+          "tests/core/auth/test_jwt.py",
+          "tests/core/auth/test_permissions.py",
+          "tests/core/auth/test_rbac.py",
+          "tests/core/gateway/test_circuit_breaker.py",
+          "tests/core/gateway/test_validator.py",
+          "tests/integration/test_gateway.py",
+          "tests/integration/test_permissions.py",
+          "tests/proxy/test_rate_limit.py",
+          "tests/services/test_database_session_manager.py",
+          "tests/services/test_langgraph_model_override_config.py"
+        ],
+        "count": 17
+      },
+      "ai_gateway_core.image": {
+        "files": [
+          "tests/services/assistant/test_image_signature_flow.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.image.image_state": {
+        "files": [
+          "tests/packages/ai_gateway_core/test_image_task_reservation.py",
+          "tests/services/images/test_image_task_worker.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.knowledge": {
+        "files": [
+          "tests/packages/ai_gateway_core/test_kb_proxy_client.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.knowledge.proxy_client": {
+        "files": [
+          "tests/packages/ai_gateway_core/test_kb_proxy_client.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.local_node": {
+        "files": [
+          "tests/services/local_node/test_repository_contract.py",
+          "packages/ai-gateway-core/tests/test_local_node_contracts.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.logging": {
+        "files": [
+          "tests/core/test_observability.py",
+          "tests/packages/ai_gateway_core/test_logging_request_id_bridge.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.media.image_generation": {
+        "files": [
+          "packages/ai-gateway-core/tests/test_image_generation_provider.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.metrics.realtime_metrics": {
+        "files": [
+          "tests/services/metrics/test_realtime_metrics_tenant_scope.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.metrics.usage_recorder": {
+        "files": [
+          "tests/core/test_spo05_billing_gates.py",
+          "tests/services/test_usage_recorder_event_publish.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.models": {
+        "files": [
+          "tests/packages/ai_gateway_core/test_model_capabilities.py",
+          "tests/services/agent_runtime/test_control_plane.py",
+          "tests/services/agent_runtime/test_model_plane.py",
+          "tests/services/agent_runtime/test_timing.py",
+          "tests/services/llm/test_model_service_capabilities.py"
+        ],
+        "count": 5
+      },
+      "ai_gateway_core.models.capabilities": {
+        "files": [
+          "tests/packages/ai_gateway_core/test_model_capabilities.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.persistence.database": {
+        "files": [
+          "tests/packages/ai_gateway_core/test_session_schema_contract.py",
+          "tests/persistence/test_database.py",
+          "tests/persistence/test_session_delete_tombstone.py",
+          "tests/services/test_database_session_manager.py",
+          "tests/unit/test_phase2_task_queue_and_storage.py"
+        ],
+        "count": 5
+      },
+      "ai_gateway_core.persistence.repositories": {
+        "files": [
+          "tests/packages/ai_gateway_core/test_agent_spec_compat.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.persistence.repositories.agent_repository": {
+        "files": [
+          "tests/api/test_agent_observability.py",
+          "tests/api/test_agent_publish_api.py",
+          "tests/api/test_agent_runtime_api.py",
+          "tests/api/test_agents_api.py",
+          "tests/database/test_agent_channel_runtime.py",
+          "tests/database/test_agent_mcp_registry_migration.py",
+          "tests/database/test_agent_publication_atomicity.py",
+          "tests/database/test_agent_runtime_migration.py",
+          "tests/database/test_agent_skill_knowledge_migration.py",
+          "tests/database/test_agent_studio_migrations.py",
+          "tests/security/test_agent_channel_security.py",
+          "tests/services/test_knowledge_authz.py"
+        ],
+        "count": 12
+      },
+      "ai_gateway_core.persistence.repositories.agent_resource_resolver": {
+        "files": [
+          "tests/services/test_knowledge_authz.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.persistence.repositories.agent_trace_repository": {
+        "files": [
+          "tests/api/test_eval_traces.py",
+          "tests/database/test_kb_migrations.py",
+          "tests/packages/ai_gateway_core/test_eval_score_idempotency.py",
+          "tests/packages/ai_gateway_core/test_import_examples_dedup.py",
+          "tests/packages/ai_gateway_core/test_trace_detail_batch.py",
+          "tests/services/eval/in_memory_trace_repository.py",
+          "tests/services/eval/test_drive_shipped_entrypoints.py",
+          "tests/services/eval/test_experiment_statistics.py",
+          "tests/services/eval/test_kb_ragas_service.py",
+          "tests/services/eval/test_outbox_worker.py"
+        ],
+        "count": 10
+      },
+      "ai_gateway_core.persistence.repositories.base": {
+        "files": [
+          "tests/packages/ai_gateway_core/test_agent_spec_compat.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.persistence.repositories.mcp_repository": {
+        "files": [
+          "tests/api/test_agent_connector_capability.py",
+          "tests/api/test_confluence_capability_broker.py",
+          "tests/api/test_mcp_registry_api.py",
+          "tests/database/test_agent_mcp_registry_migration.py",
+          "tests/unit/test_mcp_gateway_broker.py"
+        ],
+        "count": 5
+      },
+      "ai_gateway_core.persistence.repositories.session_repository": {
+        "files": [
+          "tests/packages/ai_gateway_core/test_session_schema_contract.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.proxy": {
+        "files": [
+          "tests/api/test_kb_proxy_body_limits.py",
+          "tests/services/assistant/test_request_id_propagation.py",
+          "tests/services/knowledge/test_runtime_topology.py",
+          "tests/services/knowledge/test_startup_routes_fail_closed.py",
+          "tests/tracing/test_middleware.py"
+        ],
+        "count": 5
+      },
+      "ai_gateway_core.proxy.base": {
+        "files": [
+          "tests/packages/ai_gateway_core/test_internal_service_client.py",
+          "tests/proxy/test_per_endpoint_breaker.py",
+          "tests/proxy/test_service_proxy.py",
+          "tests/services/assistant/test_request_id_propagation.py",
+          "tests/tracing/test_proxy_propagation.py"
+        ],
+        "count": 5
+      },
+      "ai_gateway_core.proxy.drain": {
+        "files": [
+          "tests/proxy/test_drain.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.proxy.request_id_middleware": {
+        "files": [
+          "tests/packages/ai_gateway_core/test_internal_service_client.py",
+          "tests/packages/ai_gateway_core/test_kb_proxy_client.py",
+          "tests/packages/ai_gateway_core/test_logging_request_id_bridge.py"
+        ],
+        "count": 3
+      },
+      "ai_gateway_core.proxy.route_pattern": {
+        "files": [
+          "tests/proxy/test_per_endpoint_breaker.py",
+          "tests/proxy/test_route_pattern.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.proxy.sse_heartbeat": {
+        "files": [
+          "tests/proxy/test_sse_heartbeat.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.proxy.version_middleware": {
+        "files": [
+          "tests/packages/ai_gateway_core/test_api_version_middleware.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.quiz.quiz_grader": {
+        "files": [
+          "tests/api/test_quiz_grading.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.security": {
+        "files": [
+          "tests/api/test_connector_admin.py",
+          "tests/api/test_connectors_oauth_state.py",
+          "tests/services/assistant/test_redaction.py",
+          "tests/services/knowledge/test_tenant_embedding_provider.py"
+        ],
+        "count": 4
+      },
+      "ai_gateway_core.security.safe_fetch": {
+        "files": [
+          "tests/services/assistant/test_safe_fetch.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.session.database_manager": {
+        "files": [
+          "tests/services/test_database_session_manager.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.sharing.artifact_share_manager": {
+        "files": [
+          "tests/api/test_artifact_shares.py",
+          "tests/database/test_artifact_share_migration.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.skills": {
+        "files": [
+          "tests/api/test_skills_api.py",
+          "tests/database/test_agent_skill_knowledge_migration.py",
+          "tests/security/test_skill_entrypoint_policy.py",
+          "tests/security/test_skill_tenant_isolation.py"
+        ],
+        "count": 4
+      },
+      "ai_gateway_core.skills.artifact_repository": {
+        "files": [
+          "tests/packages/core/test_skill_artifact_repository_schema.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.storage.artifact_storage": {
+        "files": [
+          "tests/packages/ai_gateway_core/test_artifact_storage_owner_scope.py",
+          "tests/packages/ai_gateway_core/test_artifact_storage_schema.py"
+        ],
+        "count": 2
+      },
+      "ai_gateway_core.storage.file_storage": {
+        "files": [
+          "tests/services/assistant/test_uao04_storage_backend_log_privacy.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.storage.image_storage": {
+        "files": [
+          "tests/packages/ai_gateway_core/test_artifact_storage_owner_scope.py",
+          "tests/services/assistant/test_uao04_storage_backend_log_privacy.py",
+          "tests/services/knowledge/test_document_asset_storage_scope.py"
+        ],
+        "count": 3
+      },
+      "ai_gateway_core.tracing": {
+        "files": [
+          "tests/services/knowledge/test_runtime_topology.py",
+          "tests/services/knowledge/test_startup_routes_fail_closed.py",
+          "tests/tracing/test_middleware.py",
+          "tests/tracing/test_proxy_propagation.py"
+        ],
+        "count": 4
+      },
+      "ai_gateway_core.tracing.init": {
+        "files": [
+          "tests/tracing/test_init.py",
+          "tests/tracing/test_middleware.py",
+          "tests/tracing/test_proxy_propagation.py"
+        ],
+        "count": 3
+      }
+    },
+    "scripts": {
+      "ai_gateway_core.agent_plugins": {
+        "files": [
+          "scripts/validate_agent_plugin.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.agents": {
+        "files": [
+          "scripts/harness/agent_runtime_text_gate.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.config.endpoints": {
+        "files": [
+          "scripts/harness/agent_runtime_text_gate.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.eval.runtime_contract": {
+        "files": [
+          "scripts/harness/agent_runtime_eval_contract.py"
+        ],
+        "count": 1
+      },
+      "ai_gateway_core.models": {
+        "files": [
+          "scripts/harness/agent_runtime_text_gate.py"
+        ],
+        "count": 1
+      }
+    },
+    "sdk": {},
+    "other": {}
+  },
+  "knowledge_core_modules": [
+    "ai_gateway_core.auth.capability_proof",
+    "ai_gateway_core.auth.gateway_secret",
+    "ai_gateway_core.auth.gateway_secret_middleware",
+    "ai_gateway_core.comm",
+    "ai_gateway_core.config",
+    "ai_gateway_core.config.endpoints",
+    "ai_gateway_core.knowledge",
+    "ai_gateway_core.logging",
+    "ai_gateway_core.proxy",
+    "ai_gateway_core.proxy.drain",
+    "ai_gateway_core.security",
+    "ai_gateway_core.storage.image_storage",
+    "ai_gateway_core.tracing"
+  ],
+  "knowledge_core_module_count": 13,
+  "gateway_core_module_count": 61,
+  "cross_boundary_protocol_candidates": [
+    {
+      "module": "ai_gateway_core.auth.capability_proof",
+      "service_owners": [
+        "gateway",
+        "knowledge"
+      ],
+      "rust_marker": "ai-platform-capability-proof/v1",
+      "rust_files": [
+        "rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/attachment_capabilities.rs",
+        "rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/confluence_write_broker.rs",
+        "rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/image_write_broker.rs",
+        "rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/office_artifact_broker.rs",
+        "rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/read_capabilities.rs"
+      ]
+    }
+  ],
+  "shared_infra_packages": [
+    "ai_gateway_core.config",
+    "ai_gateway_core.knowledge",
+    "ai_gateway_core.logging",
+    "ai_gateway_core.proxy",
+    "ai_gateway_core.security",
+    "ai_gateway_core.tracing"
+  ],
+  "rust_markers": {
+    "ai-platform-capability-proof/v1": [
+      "rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/attachment_capabilities.rs",
+      "rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/confluence_write_broker.rs",
+      "rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/image_write_broker.rs",
+      "rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/office_artifact_broker.rs",
+      "rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/read_capabilities.rs"
+    ],
+    "agent-runtime-model-lease/v1": [],
+    "agent-runtime/v1": [],
+    "agent-runtime-envelope/v1": [],
+    "usage.recorded.v1": []
+  },
+  "table_access": {
+    "ai_gateway_core.persistence.database": {
+      "write": [
+        "a",
+        "api_keys",
+        "assistant.sessions",
+        "audit_logs",
+        "auth_config",
+        "langgraph_threads",
+        "login_audit",
+        "rate_limit_config",
+        "rbac_roles",
+        "role_permissions",
+        "security_event_daily_aggregates",
+        "semantic_cache",
+        "service_health_records",
+        "services",
+        "session_memory",
+        "tasks",
+        "tenants",
+        "usage",
+        "usage_statistics",
+        "user_memory",
+        "user_permissions",
+        "user_roles",
+        "users"
+      ],
+      "read": [
+        "api_keys",
+        "audit_logs",
+        "auth_config",
+        "langgraph_threads",
+        "permissions",
+        "pg_tables",
+        "rate_limit_config",
+        "rbac_roles",
+        "role_permissions",
+        "security_event_daily_aggregates",
+        "semantic_cache",
+        "service_health_records",
+        "services",
+        "session_memory",
+        "tasks",
+        "tenants",
+        "usage_statistics",
+        "user_memory",
+        "user_permissions",
+        "user_roles",
+        "users"
+      ]
+    },
+    "ai_gateway_core.persistence.repositories.agent_repository": {
+      "write": [
+        "agent_api_tokens",
+        "agent_data_deletion_requests",
+        "agent_draft_knowledge_bindings",
+        "agent_draft_skill_bindings",
+        "agent_drafts",
+        "agent_governance_policies",
+        "agent_members",
+        "agent_publications",
+        "agent_publish_events",
+        "agent_release_evaluation_events",
+        "agent_release_evaluations",
+        "agent_release_requests",
+        "agent_runtime_attachments",
+        "agent_runtime_feedback",
+        "agent_runtime_idempotency",
+        "agent_traces",
+        "agent_version_capabilities",
+        "agent_version_knowledge_bindings",
+        "agent_version_skill_bindings",
+        "agent_versions",
+        "agents",
+        "assistant.sessions",
+        "assistant_memory_reflections",
+        "assistant_run_checkpoints",
+        "assistant_runs",
+        "audit_logs",
+        "connector_credential_principals",
+        "mcp_channel_grants",
+        "mcp_connections",
+        "of",
+        "semantic_cache",
+        "session_memory",
+        "user_memory"
+      ],
+      "read": [
+        "agent_api_tokens",
+        "agent_data_deletion_requests",
+        "agent_draft_knowledge_bindings",
+        "agent_draft_skill_bindings",
+        "agent_drafts",
+        "agent_governance_policies",
+        "agent_members",
+        "agent_publications",
+        "agent_publish_events",
+        "agent_release_evaluation_events",
+        "agent_release_evaluations",
+        "agent_release_requests",
+        "agent_runtime_attachments",
+        "agent_runtime_idempotency",
+        "agent_trace_spans",
+        "agent_traces",
+        "agent_version_capabilities",
+        "agent_version_knowledge_bindings",
+        "agent_version_revocations",
+        "agent_version_skill_bindings",
+        "agent_versions",
+        "agents",
+        "assistant_memory_reflections",
+        "assistant_run_checkpoints",
+        "assistant_runs",
+        "assistant_skill_version_revocations",
+        "assistant_skill_versions",
+        "assistant_skills",
+        "audit_logs",
+        "doomed",
+        "eval_datasets",
+        "eval_examples",
+        "llm_models",
+        "llm_providers",
+        "pg_class",
+        "pg_namespace",
+        "semantic_cache",
+        "session_memory",
+        "user_memory",
+        "users"
+      ]
+    },
+    "ai_gateway_core.persistence.repositories.agent_trace_repository": {
+      "write": [
+        "agent_trace_events",
+        "agent_trace_outbox",
+        "agent_trace_scores",
+        "agent_trace_spans",
+        "agent_traces",
+        "eval_baseline_promotions",
+        "eval_datasets",
+        "eval_evaluators",
+        "eval_examples",
+        "eval_experiment_run_cases",
+        "eval_experiment_runs",
+        "eval_experiments",
+        "skip"
+      ],
+      "read": [
+        "agent_data_deletion_requests",
+        "agent_governance_policies",
+        "agent_runtime_feedback",
+        "agent_trace_events",
+        "agent_trace_outbox",
+        "agent_trace_scores",
+        "agent_trace_spans",
+        "agent_traces",
+        "agents",
+        "classified_spans",
+        "eval_datasets",
+        "eval_evaluators",
+        "eval_examples",
+        "eval_experiment_run_cases",
+        "eval_experiment_runs",
+        "eval_experiments",
+        "feedback_metrics",
+        "filtered_traces",
+        "in_window_traces",
+        "latest_scores",
+        "paged_cases",
+        "picked",
+        "ranked_scores",
+        "span_metrics",
+        "trace_metrics",
+        "updated_job"
+      ]
+    },
+    "ai_gateway_core.persistence.repositories.api_key_repository": {
+      "write": [
+        "api",
+        "api_keys"
+      ],
+      "read": [
+        "api_keys"
+      ]
+    },
+    "ai_gateway_core.persistence.repositories.mcp_repository": {
+      "write": [
+        "connector_credential_principals",
+        "mcp_channel_grants",
+        "mcp_connections",
+        "mcp_schema_diffs",
+        "mcp_servers",
+        "mcp_tool_snapshots",
+        "mcp_tools",
+        "of"
+      ],
+      "read": [
+        "connector_configs",
+        "connector_credential_principals",
+        "mcp_channel_grants",
+        "mcp_connections",
+        "mcp_servers",
+        "mcp_tool_snapshots",
+        "mcp_tools",
+        "user_connectors"
+      ]
+    },
+    "ai_gateway_core.persistence.repositories.service_repository": {
+      "write": [
+        "services"
+      ],
+      "read": [
+        "services"
+      ]
+    },
+    "ai_gateway_core.persistence.repositories.session_repository": {
+      "write": [
+        "assistant.sessions"
+      ],
+      "read": []
+    },
+    "ai_gateway_core.persistence.repositories.task_repository": {
+      "write": [
+        "tasks"
+      ],
+      "read": [
+        "tasks"
+      ]
+    },
+    "ai_gateway_core.persistence.repositories.user_repository": {
+      "write": [
+        "user_roles",
+        "users"
+      ],
+      "read": [
+        "user_roles",
+        "users"
+      ]
+    },
+    "ai_gateway_core.session.database_manager": {
+      "write": [
+        "assistant.sessions"
+      ],
+      "read": []
+    }
+  },
+  "shim_consumers": {},
+  "core_import_paths_seen": [
+    "ai_gateway_core.agent_plugins",
+    "ai_gateway_core.agents",
+    "ai_gateway_core.agents.spec",
+    "ai_gateway_core.agents.system_prompt",
+    "ai_gateway_core.auth",
+    "ai_gateway_core.auth.capability_proof",
+    "ai_gateway_core.auth.gateway_secret",
+    "ai_gateway_core.auth.gateway_secret_middleware",
+    "ai_gateway_core.billing.pricing_catalog",
+    "ai_gateway_core.comm",
+    "ai_gateway_core.comm.client",
+    "ai_gateway_core.comm.idempotency",
+    "ai_gateway_core.comm.retry",
+    "ai_gateway_core.config",
+    "ai_gateway_core.config.endpoints",
+    "ai_gateway_core.connectors",
+    "ai_gateway_core.connectors.confluence_format",
+    "ai_gateway_core.enums",
+    "ai_gateway_core.eval",
+    "ai_gateway_core.eval.agent_version_candidate",
+    "ai_gateway_core.eval.evaluator_executor",
+    "ai_gateway_core.eval.kb_ragas_sample",
+    "ai_gateway_core.eval.online_sampling",
+    "ai_gateway_core.eval.outbox_worker",
+    "ai_gateway_core.eval.runtime_contract",
+    "ai_gateway_core.events",
+    "ai_gateway_core.events.envelope",
+    "ai_gateway_core.events.errors",
+    "ai_gateway_core.events.registry",
+    "ai_gateway_core.exceptions",
+    "ai_gateway_core.image",
+    "ai_gateway_core.image.image_state",
+    "ai_gateway_core.knowledge",
+    "ai_gateway_core.knowledge.proxy_client",
+    "ai_gateway_core.local_node",
+    "ai_gateway_core.logging",
+    "ai_gateway_core.mcp.client",
+    "ai_gateway_core.mcp.resilience",
+    "ai_gateway_core.media",
+    "ai_gateway_core.media.image_generation",
+    "ai_gateway_core.memory",
+    "ai_gateway_core.metrics",
+    "ai_gateway_core.metrics.observability",
+    "ai_gateway_core.metrics.realtime_metrics",
+    "ai_gateway_core.metrics.usage_recorder",
+    "ai_gateway_core.models",
+    "ai_gateway_core.models.capabilities",
+    "ai_gateway_core.persistence",
+    "ai_gateway_core.persistence.database",
+    "ai_gateway_core.persistence.repositories",
+    "ai_gateway_core.persistence.repositories.agent_repository",
+    "ai_gateway_core.persistence.repositories.agent_resource_resolver",
+    "ai_gateway_core.persistence.repositories.agent_trace_repository",
+    "ai_gateway_core.persistence.repositories.base",
+    "ai_gateway_core.persistence.repositories.mcp_repository",
+    "ai_gateway_core.persistence.repositories.session_repository",
+    "ai_gateway_core.proxy",
+    "ai_gateway_core.proxy.base",
+    "ai_gateway_core.proxy.drain",
+    "ai_gateway_core.proxy.request_id_middleware",
+    "ai_gateway_core.proxy.route_pattern",
+    "ai_gateway_core.proxy.sse_heartbeat",
+    "ai_gateway_core.proxy.version_middleware",
+    "ai_gateway_core.quiz",
+    "ai_gateway_core.quiz.quiz_grader",
+    "ai_gateway_core.security",
+    "ai_gateway_core.security.redaction",
+    "ai_gateway_core.security.safe_fetch",
+    "ai_gateway_core.session",
+    "ai_gateway_core.session.database_manager",
+    "ai_gateway_core.sharing",
+    "ai_gateway_core.sharing.artifact_share_manager",
+    "ai_gateway_core.skills",
+    "ai_gateway_core.skills.artifact_repository",
+    "ai_gateway_core.skills.builtin.skill_create",
+    "ai_gateway_core.skills.executor",
+    "ai_gateway_core.storage",
+    "ai_gateway_core.storage.artifact_storage",
+    "ai_gateway_core.storage.file_storage",
+    "ai_gateway_core.storage.image_storage",
+    "ai_gateway_core.style_presets",
+    "ai_gateway_core.tasks",
+    "ai_gateway_core.tracing",
+    "ai_gateway_core.tracing.init"
+  ]
+}
