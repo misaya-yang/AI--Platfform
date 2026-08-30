@@ -99,6 +99,7 @@ def test_source_build_overlay_owns_every_compose_build_context() -> None:
         section = _service_section(overlay, service)
         assert "    build:\n" in section
         assert f"dockerfile: {dockerfile}" in section
+        assert 'VCS_REF: "${VCS_REF:-unknown}"' in section
     assert "\n  mcp-docgen-server:" not in overlay
 
 

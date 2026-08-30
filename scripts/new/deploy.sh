@@ -133,6 +133,9 @@ fi
 if [ "$BUILD" = true ]; then
     log_step "Building Docker images"
     BUILD_ARGS=()
+    if [ -z "${VCS_REF:-}" ] && git rev-parse --verify HEAD >/dev/null 2>&1; then
+        export VCS_REF="$(git rev-parse HEAD)"
+    fi
     if [ "$PULL" = true ]; then
         BUILD_ARGS+=(--pull)
     fi

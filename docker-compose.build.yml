@@ -14,6 +14,7 @@ services:
       dockerfile: docker/migrate/Dockerfile
       args:
         PYTHON_BASE_IMAGE: "${PYTHON_BASE_IMAGE:-python:3.12-slim-bookworm}"
+        VCS_REF: "${VCS_REF:-unknown}"
         PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}"
         PIP_TRUSTED_HOST: "${PIP_TRUSTED_HOST:-}"
 
@@ -23,6 +24,7 @@ services:
       dockerfile: Dockerfile
       args:
         PYTHON_BASE_IMAGE: "${PYTHON_BASE_IMAGE:-python:3.12-slim-bookworm}"
+        VCS_REF: "${VCS_REF:-unknown}"
         DEBIAN_MIRROR: "${DEBIAN_MIRROR:-https://deb.debian.org}"
         PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}"
         PIP_TRUSTED_HOST: "${PIP_TRUSTED_HOST:-}"
@@ -34,6 +36,7 @@ services:
       args:
         NODE_BASE_IMAGE: "${NODE_BASE_IMAGE:-node:22-alpine3.21}"
         NGINX_BASE_IMAGE: "${NGINX_BASE_IMAGE:-nginx:1.27-alpine}"
+        VCS_REF: "${VCS_REF:-unknown}"
         NPM_REGISTRY: "${NPM_REGISTRY:-https://registry.npmjs.org}"
         VITE_API_URL: ""
         VITE_API_BASE_URL: ""
@@ -46,6 +49,7 @@ services:
       dockerfile: apps/knowledge-service/Dockerfile
       args:
         PYTHON_BASE_IMAGE: "${PYTHON_BASE_IMAGE:-python:3.12-slim-bookworm}"
+        VCS_REF: "${VCS_REF:-unknown}"
         DEBIAN_MIRROR: "${DEBIAN_MIRROR:-https://deb.debian.org}"
         PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}"
         PIP_TRUSTED_HOST: "${PIP_TRUSTED_HOST:-}"
