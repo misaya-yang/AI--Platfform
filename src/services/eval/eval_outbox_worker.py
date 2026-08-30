@@ -121,6 +121,13 @@ def _build_candidate_runner(repository: AgentTraceRepository):
                 config=execution_config,
             )
             trace_id = result.trace_id
+            if result.trace_payload is not None:
+                await repository.ingest_trace(
+                    tenant_id=tenant_id,
+                    created_by=EVAL_CANDIDATE_USER_ID,
+                    payload={"trace": result.trace_payload, "enqueue": False},
+                    enqueue=False,
+                )
             for delay in (0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 3.2):
                 detail = await repository.get_trace_detail(
                     tenant_id=tenant_id,

@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 from ai_gateway_core.eval.runtime_contract import assert_runtime_observation
+
+from .assistant_trace_capture import build_assistant_runtime_trace
 
 V2_THREADS_PATH = "/api/v2/agent/threads"
 EVAL_CANDIDATE_USER_ID = "eval-candidate"
@@ -71,6 +74,7 @@ class EvalCandidateResult:
     usage: dict[str, Any] = field(default_factory=dict)
     fingerprint: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    trace_payload: dict[str, Any] | None = None
 
 
 class EvalCandidateClient:
@@ -131,8 +135,16 @@ class EvalCandidateClient:
         terminal_error: str | None = None
         terminal_events: list[str] = []
         observed_events: list[dict[str, Any]] = []
+        event_counts: dict[str, int] = {}
+        started_at = time.time()
+        first_token_at: float | None = None
+        terminal_status = "failed"
         timeout = httpx.Timeout(connect=5.0, read=300.0, write=30.0, pool=10.0)
-        async with httpx.AsyncClient(base_url=self.base_url, timeout=timeout) as client:
+        async with httpx.AsyncClient(
+            base_url=self.base_url,
+            timeout=timeout,
+            trust_env=False,
+        ) as client:
             thread_response = await client.post(
                 V2_THREADS_PATH, headers=headers, json=thread_body
             )
@@ -208,6 +220,8 @@ class EvalCandidateClient:
                         continue
                     event_type = str(raw.get("event_type") or "")
                     data = raw.get("data")
+                    if event_type:
+                        event_counts[event_type] = event_counts.get(event_type, 0) + 1
                     if event_type == "run_started" and isinstance(data, dict):
                         trace_id = str(data.get("run_id") or trace_id or turn_id)
                         if data.get("kernel_revision") is not None:
@@ -217,6 +231,8 @@ class EvalCandidateClient:
                     elif event_type == "context_budget" and isinstance(data, dict):
                         fingerprint = candidate_fingerprint_from_context(data)
                     elif event_type == "text_delta":
+                        if first_token_at is None:
+                            first_token_at = time.time()
                         if isinstance(data, str):
                             output_parts.append(data)
                         elif isinstance(data, dict):
@@ -225,6 +241,19 @@ class EvalCandidateClient:
                         usage = dict(data)
                     elif event_type in {"run_finished", "run_error", "cancelled"}:
                         terminal_events.append(event_type)
+                        raw_status = (
+                            str(data.get("status") or "").lower()
+                            if isinstance(data, dict)
+                            else ""
+                        )
+                        terminal_status = (
+                            "succeeded"
+                            if event_type == "run_finished"
+                            and raw_status in {"", "completed", "succeeded"}
+                            else "cancelled"
+                            if event_type == "cancelled" or raw_status == "cancelled"
+                            else "failed"
+                        )
                         if isinstance(data, dict) and isinstance(data.get("usage"), dict):
                             usage = dict(data["usage"])
                     if event_type in {"error", "run_error", "cancelled"}:
@@ -245,12 +274,45 @@ class EvalCandidateClient:
             raise RuntimeError(f"Agent Runtime observation contract failed: {exc}") from exc
         if not trace_id:
             raise RuntimeError(terminal_error or "Agent Runtime event stream returned no run_id")
+        trace_payload: dict[str, Any] | None = None
+        try:
+            trace_payload = build_assistant_runtime_trace(
+                run_id=trace_id,
+                request_id=run_case_id,
+                tenant_id=tenant_id,
+                user_id=EVAL_CANDIDATE_USER_ID,
+                session_id=run_case_id,
+                message=message,
+                snapshot={
+                    "model": {
+                        "id": model_id or fingerprint.get("model_id"),
+                        "provider": fingerprint.get("provider"),
+                    },
+                    "publication": {"channel": "builtin"},
+                },
+                status=terminal_status,
+                started_at=started_at,
+                ended_at=time.time(),
+                first_token_latency_ms=(
+                    int((first_token_at - started_at) * 1000) if first_token_at else 0
+                ),
+                output="".join(output_parts),
+                event_counts=event_counts,
+                usage=usage,
+                error_type="runtime_error" if terminal_error else None,
+            )
+        except (TypeError, ValueError):
+            # Public Runtime turn ids are UUIDs. Tests and third-party mock
+            # servers may use placeholders; keep the protocol result usable
+            # while refusing to persist a malformed trace identity.
+            trace_payload = None
         return EvalCandidateResult(
             trace_id=trace_id,
             output="".join(output_parts),
             usage=usage,
             fingerprint=fingerprint,
             error=terminal_error or None,
+            trace_payload=trace_payload,
         )
 
     def _auth_headers(self) -> dict[str, str]:

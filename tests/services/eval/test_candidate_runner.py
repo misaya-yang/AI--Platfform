@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -98,6 +99,71 @@ async def test_candidate_runner_links_trace_only_after_persistence(
     )
 
     assert result["contract_result"]["passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_candidate_runner_persists_v2_trace_before_loading_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trace_id = str(uuid.uuid4())
+
+    class Repository:
+        def __init__(self) -> None:
+            self.detail: dict[str, Any] | None = None
+            self.ingested: list[dict[str, Any]] = []
+
+        async def list_traces(self, **_kwargs: Any):
+            return [], 0
+
+        async def get_trace_detail(self, **_kwargs: Any) -> dict[str, Any] | None:
+            return self.detail
+
+        async def ingest_trace(self, **kwargs: Any) -> dict[str, Any]:
+            self.ingested.append(kwargs)
+            self.detail = {
+                "trace": {
+                    "trace_id": trace_id,
+                    "trace_family": "assistant",
+                    "status": "succeeded",
+                    "output_preview": "EVAL-V2-OK",
+                    "total_latency_ms": 12,
+                    "model_id": "qwen3.7-plus",
+                    "metadata": {},
+                },
+                "spans": [],
+                "events": [],
+            }
+            return {"trace_id": trace_id, "status": "stored"}
+
+    class Candidate:
+        async def run(self, **_kwargs: Any) -> EvalCandidateResult:
+            return EvalCandidateResult(
+                trace_id=trace_id,
+                output="EVAL-V2-OK",
+                usage={"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+                trace_payload={"trace_id": trace_id, "trace_family": "assistant"},
+            )
+
+    repository = Repository()
+    monkeypatch.setattr(outbox_module, "_eval_candidate_client", Candidate())
+    result = await outbox_module._build_candidate_runner(repository)(
+        tenant_id="tenant-a",
+        run_case={
+            "run_case_id": "run-case-v2",
+            "case_id": "case-v2",
+            "input": {"message": "return marker"},
+            "expected_output": {"contains": ["EVAL-V2-OK"]},
+            "expected_trajectory": {},
+            "assertions": [],
+            "metadata": {},
+        },
+        execution_config={},
+    )
+
+    assert result["trace_id"] == trace_id
+    assert len(repository.ingested) == 1
+    assert repository.ingested[0]["created_by"] == "eval-candidate"
+    assert repository.ingested[0]["enqueue"] is False
 
 
 class _LiveRepository:

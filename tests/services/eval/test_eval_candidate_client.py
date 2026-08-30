@@ -141,6 +141,48 @@ async def test_candidate_client_uses_v2_thread_turn_events_and_runtime_owner(
 
 
 @pytest.mark.asyncio
+async def test_candidate_client_does_not_inherit_host_proxy_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, Any]] = []
+    client_options: dict[str, Any] = {}
+    responses = [
+        _FakeResponse(
+            {
+                "thread": {
+                    "thread_id": "thread-1",
+                    "runtime": {"owner": "agent_runtime"},
+                }
+            }
+        ),
+        _FakeResponse({"turn": {"id": "turn-1", "events_url": "/events"}}),
+        _FakeResponse(
+            lines=[
+                _v2_event("run_started", {"run_id": "turn-1"}, 1),
+                _v2_event("text_delta", {"content": "answer"}, 2),
+                _v2_event("run_finished", {"status": "succeeded"}, 3),
+            ]
+        ),
+    ]
+
+    def factory(**kwargs: Any) -> _FakeClient:
+        client_options.update(kwargs)
+        return _FakeClient(responses, captured)
+
+    monkeypatch.setattr(candidate_module.httpx, "AsyncClient", factory)
+    monkeypatch.setenv("AGENT_EVAL_AUTH_TOKEN", "test-token")
+
+    await EvalCandidateClient().run(
+        tenant_id="tenant-a",
+        run_case_id="run-case-proxy",
+        message="hello",
+        config={},
+    )
+
+    assert client_options["trust_env"] is False
+
+
+@pytest.mark.asyncio
 async def test_candidate_client_rejects_non_runtime_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: list[dict[str, Any]] = []
     _install_fake_client(
