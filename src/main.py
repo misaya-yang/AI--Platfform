@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 
 # Load environment variables from .env file BEFORE importing other modules
 # This ensures env vars are available for module-level configurations
@@ -24,6 +25,7 @@ load_dotenv(_env_file, override=False)
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.routing import APIRoute
 
 from .api.deps import AuthContext, get_auth_context, require_gateway_capability
 from .adapters.registry import auto_register_builtin_adapters
@@ -142,6 +144,21 @@ OPENAPI_TAGS = [
 ]
 
 
+def _stable_openapi_operation_id(route: APIRoute) -> str:
+    """Match FastAPI's IDs while making multi-method routes deterministic.
+
+    FastAPI's default generator selects the first item from ``route.methods``,
+    which is a set.  Catch-all proxy routes therefore changed operation IDs
+    across interpreter hash seeds.  Sorting preserves the published ``delete``
+    suffix for those routes and leaves single-method IDs unchanged.
+    """
+    operation_id = re.sub(r"\W", "_", f"{route.name}{route.path_format}")
+    methods = sorted(route.methods or ())
+    if not methods:
+        raise ValueError(f"route {route.path_format!r} declares no HTTP methods")
+    return f"{operation_id}_{methods[0].lower()}"
+
+
 def create_app() -> FastAPI:
     """
     创建 FastAPI 应用
@@ -189,6 +206,7 @@ def create_app() -> FastAPI:
             "require `Authorization: Bearer <token>`."
         ),
         openapi_tags=OPENAPI_TAGS,
+        generate_unique_id_function=_stable_openapi_operation_id,
         contact={"name": "AI Gateway Maintainers", "email": "maintainers@example.com"},
         license_info={"name": "MIT"},
     )

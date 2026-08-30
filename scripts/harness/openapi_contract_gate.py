@@ -30,12 +30,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BASELINE = ROOT / "sdk" / "openapi.json"
 DEFAULT_EVIDENCE = ROOT / "tmp" / "gate-evidence" / "verify-openapi-contract.json"
+HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
 
 
 def _resolve_ref(spec: dict, ref: str) -> dict:
@@ -119,8 +123,8 @@ def compare_specs(baseline: dict, current: dict) -> list[str]:
                 violations.append(
                     f"required request field lost: {method.upper()} {path} field '{field}'"
                 )
-            base_codes = set(((op.get("responses") or {}).keys()))
-            cur_codes = set(((cur_op.get("responses") or {}).keys()))
+            base_codes = set((op.get("responses") or {}).keys())
+            cur_codes = set((cur_op.get("responses") or {}).keys())
             for code in sorted(base_codes - cur_codes):
                 violations.append(
                     f"response status lost: {method.upper()} {path} status '{code}'"
@@ -140,9 +144,62 @@ def _spec_stats(spec: dict) -> dict:
         1
         for methods in paths.values()
         for method in (methods or {})
-        if method in {"get", "post", "put", "patch", "delete", "head", "options"}
+        if method in HTTP_METHODS
     )
     return {"paths": len(paths), "operations": operations}
+
+
+def _operation_id_map(spec: dict) -> dict[str, str | None]:
+    """Return the public method/path -> operationId mapping."""
+    result: dict[str, str | None] = {}
+    for path, methods in (spec.get("paths") or {}).items():
+        for method, operation in (methods or {}).items():
+            if method not in HTTP_METHODS or not isinstance(operation, dict):
+                continue
+            result[f"{method.upper()} {path}"] = operation.get("operationId")
+    return result
+
+
+def _operation_id_drift(
+    expected: dict[str, str | None], observed: dict[str, str | None]
+) -> list[str]:
+    drift: list[str] = []
+    for key in sorted(set(expected) | set(observed)):
+        if expected.get(key) != observed.get(key):
+            drift.append(
+                f"operationId is process-dependent: {key} "
+                f"'{expected.get(key)}' -> '{observed.get(key)}'"
+            )
+    return drift
+
+
+def _subprocess_openapi(seed: str) -> dict:
+    """Export the real app in a fresh interpreter with a fixed hash seed."""
+    script = (
+        "import json, pathlib, sys; "
+        "from src.main import create_app; "
+        "pathlib.Path(sys.argv[1]).write_text("
+        "json.dumps(create_app().openapi(), sort_keys=True), encoding='utf-8')"
+    )
+    env = os.environ.copy()
+    env["PYTHONHASHSEED"] = seed
+    with tempfile.TemporaryDirectory(prefix="openapi-determinism-") as tmp:
+        output = Path(tmp) / "openapi.json"
+        process = subprocess.run(
+            [sys.executable, "-c", script, str(output)],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+        if process.returncode != 0 or not output.is_file():
+            detail = (process.stderr or process.stdout).strip()[-1000:]
+            raise RuntimeError(
+                f"OpenAPI export failed under PYTHONHASHSEED={seed}: {detail or 'no output'}"
+            )
+        return json.loads(output.read_text(encoding="utf-8"))
 
 
 def run_real_gate(baseline_path: Path, evidence_path: Path) -> int:
@@ -168,6 +225,16 @@ def run_real_gate(baseline_path: Path, evidence_path: Path) -> int:
         return 2
 
     violations = compare_specs(baseline, current)
+    current_ids = _operation_id_map(current)
+    determinism_violations: list[str] = []
+    try:
+        for seed in ("1", "2"):
+            seeded_ids = _operation_id_map(_subprocess_openapi(seed))
+            determinism_violations.extend(_operation_id_drift(current_ids, seeded_ids))
+    except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        print(f"GATE ERROR: cannot verify OpenAPI determinism: {exc}", file=sys.stderr)
+        return 2
+    violations.extend(sorted(set(determinism_violations)))
     base_stats = _spec_stats(baseline)
     cur_stats = _spec_stats(current)
     evidence = {
@@ -176,6 +243,8 @@ def run_real_gate(baseline_path: Path, evidence_path: Path) -> int:
         "baseline": str(baseline_path.relative_to(ROOT)),
         "baseline_stats": base_stats,
         "current_stats": cur_stats,
+        "determinism_hash_seeds": [1, 2],
+        "operation_ids_checked": len(current_ids),
         "violations": violations,
         "result": "pass" if not violations else "fail",
     }
@@ -241,7 +310,7 @@ def _selftest() -> int:
         mutate(cur)
         cases.append((name, cur, expect_violation))
 
-    variant("unchanged spec passes", False, lambda cur: None)
+    variant("unchanged spec passes", False, lambda _cur: None)
 
     def drop_path(cur: dict) -> None:
         del cur["paths"]["/things/{id}"]
@@ -280,6 +349,11 @@ def _selftest() -> int:
 
     variant("compatible growth passes", False, compatible_growth)
 
+    stable_ids = _operation_id_map(baseline)
+    changed_ids = dict(stable_ids)
+    changed_ids["POST /things"] = "hash_seed_dependent_id"
+    id_drift = _operation_id_drift(stable_ids, changed_ids)
+
     failures = 0
     for name, current, expect_violation in cases:
         violations = compare_specs(baseline, current)
@@ -291,6 +365,12 @@ def _selftest() -> int:
         print(f"[{status}] {name} (expected {expect}, got {len(violations)} violation(s))")
         for violation in violations:
             print(f"        - {violation}")
+
+    if len(id_drift) != 1 or "POST /things" not in id_drift[0]:
+        failures += 1
+        print("[FAIL] process-dependent operationId drift was not detected")
+    else:
+        print("[ok] process-dependent operationId drift is detected")
 
     if failures:
         print(f"SELFTEST FAILED: {failures} case(s) misclassified", file=sys.stderr)
