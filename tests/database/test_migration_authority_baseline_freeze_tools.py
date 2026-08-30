@@ -130,6 +130,7 @@ def test_pg_dump_normalization_rejects_acl_and_ledger_bypass() -> None:
     assert "CREATE SCHEMA" not in normalized
     assert "CREATE EXTENSION" not in normalized
     assert "CREATE TABLE gateway.widgets" in normalized
+    assert "SET LOCAL check_function_bodies = false;" in normalized
 
     for forbidden in (
         "CREATE TABLE gateway.widgets (id integer);\nGRANT SELECT ON gateway.widgets TO x;\n",
