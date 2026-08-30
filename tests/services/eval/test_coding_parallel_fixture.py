@@ -469,6 +469,7 @@ def test_offline_contract_checks_overlap_but_cannot_promote_it_to_live_evidence(
     assert offline["passed"] is False
 
 
+@pytest.mark.integration
 def test_reference_patch_runs_real_tests_only_in_restricted_container(
     tmp_path: Path,
 ) -> None:
@@ -487,6 +488,7 @@ def test_reference_patch_runs_real_tests_only_in_restricted_container(
     assert all(receipt["passed"] for receipt in receipts)
 
 
+@pytest.mark.integration
 def test_unsolved_patch_cannot_pass_from_candidate_claims(tmp_path: Path) -> None:
     _require_pinned_sandbox_image()
     replacements = {
@@ -600,6 +602,7 @@ def test_final_receipt_uses_independent_host_test_hmac_contract(
     assert strength == "hmac-sha256"
 
 
+@pytest.mark.integration
 def test_live_three_trial_verifier_runner_merge_and_judge_preflight_chain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

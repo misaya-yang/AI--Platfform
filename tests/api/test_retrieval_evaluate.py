@@ -411,6 +411,7 @@ class FakeHierarchicalKnowledgeService:
 
     def __init__(self):
         self.access_calls: list[tuple] = []
+        self.observation_calls: list[dict] = []
         self.db = self.Database()
         self.multimodal = False
 
@@ -432,6 +433,14 @@ class FakeHierarchicalKnowledgeService:
 
     def _resolve_embedding_config(self, **_kwargs):
         return SimpleNamespace(provider="local", model="hash-384", extra={})
+
+    def record_external_retrieval_observation(self, **kwargs):
+        self.observation_calls.append(kwargs)
+        return {
+            **kwargs["meta"],
+            "trace_id": "trace-test",
+            "query_fingerprint": "fingerprint-test",
+        }
 
 
 async def test_eval_executes_hierarchical_pipeline_after_viewer_check(monkeypatch):
@@ -522,6 +531,7 @@ async def test_eval_executes_hierarchical_pipeline_after_viewer_check(monkeypatc
         "nested": {},
     }
     assert public_response["metadata"]["strategy"] == "cascade"
+    assert svc.observation_calls[0]["source"] == "hierarchical"
     assert svc.db.segment_filter_calls == 0
 
 
