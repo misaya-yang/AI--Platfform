@@ -47,12 +47,15 @@ impl ContextContributor for ReadonlyContextContributor {
                 return Vec::new();
             };
             vec![PromptFragment::new(
-                codex_extension_api::PromptSlot::ContextualUser,
+                codex_extension_api::PromptSlot::ContextWindow,
                 AdditionalContextUserFragment::new(
                     "ai_platform_readonly".to_string(),
                     context.0.clone(),
                 )
                 .render(),
+                codex_extension_api::ContentItemKind(
+                    "ai_platform.readonly_context".to_string(),
+                ),
             )]
         })
     }
@@ -82,7 +85,7 @@ impl ToolContributor for ReadonlyToolContributor {
         &self,
         _session_store: &ExtensionData,
         _thread_store: &ExtensionData,
-    ) -> Vec<Arc<dyn ToolExecutor<ToolCall>>> {
+    ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
         // Tool schemas are supplied only after platform metadata authorization;
         // no write-capable or keyword-routed tool is registered here.
         Vec::new()

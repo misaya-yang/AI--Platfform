@@ -46,7 +46,6 @@ pub use tool_lifecycle::McpToolContext;
 pub use tool_lifecycle::McpToolResultInput;
 pub use tool_lifecycle::McpToolSource;
 pub use tool_lifecycle::ToolCallOutcome;
-pub use tool_lifecycle::ToolCallSource;
 pub use tool_lifecycle::ToolDispatchError;
 pub use tool_lifecycle::ToolDispatchFuture;
 pub use tool_lifecycle::ToolEffect;
