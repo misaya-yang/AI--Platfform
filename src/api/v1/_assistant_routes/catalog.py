@@ -72,8 +72,10 @@ async def list_models(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ) -> ModelsListResponse:
-    """List the tenant-scoped model catalogue owned by Gateway."""
+    """Gateway-owned model catalogue used by the Agent Runtime."""
 
+    # The implementation additionally filters by tenant and access level; keep
+    # that implementation note out of the published operation description.
     return ModelsListResponse(models=await load_visible_assistant_models(request, user))
 
 
@@ -82,8 +84,9 @@ async def list_datasets(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ) -> DatasetsListResponse:
-    """List datasets through the Gateway-owned Knowledge proxy."""
+    """Gateway knowledge catalogue resolved for Agent Runtime turns."""
 
+    # The read is implemented through the Gateway-owned Knowledge proxy.
     kb_proxy = getattr(request.app.state, "kb_proxy", None)
     if kb_proxy is None or not callable(getattr(kb_proxy, "list_datasets", None)):
         raise HTTPException(status_code=503, detail="Knowledge service is unavailable")
@@ -124,8 +127,10 @@ async def get_config(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ) -> AssistantConfigResponse:
-    """Return configuration projected from Gateway-owned control-plane state."""
+    """Gateway-owned provider configuration."""
 
+    # This is a projection of Gateway-owned control-plane state, not a second
+    # configuration authority.
     visible_models = await load_visible_assistant_models(request, user)
     settings = getattr(request.app.state, "settings", None)
     requested_default = str(getattr(settings, "default_model", "") or "").strip()
@@ -163,8 +168,9 @@ async def list_tools(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ) -> ToolsListResponse:
-    """List the Gateway-owned, tenant-authorized declarative catalog."""
+    """Gateway-owned tool registry exposed to the Agent Runtime."""
 
+    # Authorization and tenant policy still filter the declarative catalogue.
     if not user.is_authenticated:
         raise HTTPException(status_code=401, detail="authentication required")
     try:
@@ -186,8 +192,9 @@ async def get_policies(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ) -> AssistantPoliciesResponse:
-    """Return the Gateway-owned, tenant-scoped policy snapshot."""
+    """Gateway policy snapshot used by the Agent Runtime."""
 
+    # The snapshot is resolved for the authenticated tenant below.
     if not user.is_authenticated:
         raise HTTPException(status_code=401, detail="authentication required")
     try:

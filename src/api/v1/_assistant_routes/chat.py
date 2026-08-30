@@ -123,14 +123,14 @@ async def chat(
     user: UserContext = Depends(get_user_context),
 ) -> AssistantChatResponse:
     """
-    Non-streaming chat completion through the Agent Runtime control plane.
+    Non-streaming chat completion through the Gateway-owned Agent Runtime.
 
-    Gateway responsibilities (defence-in-depth, mirror of /chat/stream):
+    Gateway responsibilities:
       - per-user rate limit
-      - model-permission check (users can only call their allowed models)
-      - session-ownership check (users can only resume their own sessions)
+      - model-permission check
+      - session-ownership check
 
-    Model routing, tool execution and persistence remain Runtime-owned.
+    Model routing, tool execution, and persistence remain Runtime-owned.
     """
     # ``get_user_context`` is a *scoping* dependency: with no credentials it
     # mints an anonymous guest on tenant ``public`` rather than rejecting the
@@ -208,15 +208,14 @@ async def chat_stream(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ) -> StreamingResponse:
-    """Streaming chat completion (SSE) through the Agent Runtime.
+    """Streaming chat completion (SSE) through the Gateway-owned Agent Runtime.
 
     Gateway responsibilities:
-      - JWT auth via ``get_user_context``
-      - Per-user rate limiting (``operation="assistant_chat"``)
-      - Model-permission check (users can only call models they're allowed to)
-      - Session-ownership check (users can only resume their own sessions)
+      - JWT authentication
+      - per-user rate limiting
+      - model-permission and session-ownership checks
 
-    Runtime failures remain explicit and the public SSE shape is preserved.
+    Model routing, tool execution, persistence, and SSE event projection remain Runtime-owned.
     """
     # ``get_user_context`` is a *scoping* dependency: with no credentials it
     # mints an anonymous guest on tenant ``public`` rather than rejecting the

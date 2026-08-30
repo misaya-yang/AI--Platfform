@@ -253,10 +253,10 @@ async def get_session_history(
     Get session message history.
 
     Returns the conversation messages for resuming a chat.
-    Messages are returned in chronological order.  Runtime turns are read
-    from the Agent Runtime thread projection — this route never writes turn
-    state back into the session store.
+    Messages are returned in chronological order.
     """
+    # Runtime turns are read from the Agent Runtime thread projection; this
+    # route never writes turn state back into the session store.
     session_manager = get_session_manager(request)
 
     try:

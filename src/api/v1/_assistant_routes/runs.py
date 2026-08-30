@@ -43,7 +43,9 @@ async def approve_tool_call(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ) -> ApprovalResponse:
-    """Project approval state through the Gateway Agent Runtime control plane."""
+    """Gateway-owned approval decision for a Runtime tool call. Approval state is tenant- and session-scoped."""
+    # The handler projects that decision through the Agent Runtime control
+    # plane while retaining the public Gateway-owned approval contract.
     database = getattr(request.app.state, "database", None)
     if database is not None:
         run = await fetch_approval_run_owner(
