@@ -1,5 +1,5 @@
 {
-  "inventory_sha256": "bb30d601178990e554033d28efaff6979bb859b611d851adf8cf80de58fa893c",
+  "inventory_sha256": "069c734bf7658c78c799050146b60426a99f83f785e01beab2301c36efe729aa",
   "objects": [
     {
       "access": [],
@@ -7920,6 +7920,6 @@
     }
   ],
   "schema_version": "arc03-grants-policy/v1",
-  "source_git_sha": "ad56735b89d4b248b831ec7b358539b653eea81b",
+  "source_git_sha": "386344c6c15e92547cabe32b07fad304afbf4a98",
   "state": "source-commit-bound-pending-live-acl"
 }
