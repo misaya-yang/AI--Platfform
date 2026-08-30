@@ -88,7 +88,6 @@ def test_extensions_have_one_explicit_owner_controlled_target_schema() -> None:
 
     for extension in ('"uuid-ossp"', "pgcrypto", "pg_trgm"):
         assert f"CREATE EXTENSION IF NOT EXISTS {extension} WITH SCHEMA public;" in sql
-    assert "REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA public FROM PUBLIC;" in sql
 
 
 @pytest.mark.parametrize(

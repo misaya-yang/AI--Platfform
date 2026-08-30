@@ -142,6 +142,11 @@ SELECT EXISTS (
        ) AS create_roles
 """
 
+_FRESH_EXTENSION_ACL_HARDENING_SQL = """
+/* arc03-fresh-extension-acl-hardening */
+REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA public FROM PUBLIC
+"""
+
 
 def render_role_sql(role_sql: str, role_prefix: str) -> str:
     """Substitute the configurable LOGIN/NOLOGIN role prefix.
@@ -528,6 +533,10 @@ async def fresh_install(
         # Objects created for the baseline are owned by the NOLOGIN owner; the
         # extension helper resets role on return, so borrow it again here.
         await conn.execute(f'SET LOCAL ROLE "{owner_role}"')
+        # Extension scripts can grant PUBLIC explicitly even when the owner's
+        # default routine ACL is closed. Legacy cutover handles old extension
+        # owners separately; this owner-only revoke is safe for a fresh DB.
+        await conn.execute(_FRESH_EXTENSION_ACL_HARDENING_SQL)
         for file_name in ("init.sql", "reference_data.sql"):
             await run_baseline_sql_file(conn, baseline_dir / file_name)
         await run_baseline_sql_file(

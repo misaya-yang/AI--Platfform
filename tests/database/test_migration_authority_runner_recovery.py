@@ -306,6 +306,10 @@ async def test_fresh_install_rolls_back_partial_init_and_is_reentrant(
     assert any(query == ledger.LEDGER_DDL for query, _args, _depth in conn.executed)
     assert any(query == ledger.INSERT_BASELINE_MARKER for query, _args, _depth in conn.executed)
     assert not any(query == ledger.INSERT_ATTEMPT for query, _args, _depth in conn.executed)
+    assert any(
+        "arc03-fresh-extension-acl-hardening" in query
+        for query, _args, _depth in conn.executed
+    )
     assert all(depth > 0 for _query, _args, depth in conn.executed)
     statements = [query for query, _args, _depth in conn.executed]
     extension_index = next(index for index, query in enumerate(statements) if "EXTENSIONS" in query)
