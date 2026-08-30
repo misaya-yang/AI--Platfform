@@ -20,6 +20,7 @@ source "$(dirname "$0")/common.sh"
 
 AUTHORITY_COMMAND="migrate"
 EXPLICIT_ENV_FILE=false
+AUTO_MODE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -32,6 +33,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --auto)
+            AUTO_MODE=true
             shift
             ;;
         --env)
@@ -70,7 +72,7 @@ fi
 # bootstrap credential at this compatibility boundary. Managed deployments
 # set AI_GATEWAY_DATABASE_MIGRATOR_DSN directly and never enter this branch.
 if [ -z "${AI_GATEWAY_DATABASE_MIGRATOR_DSN:-}" ] && [ -n "${POSTGRES_PASSWORD:-}" ]; then
-    AI_GATEWAY_DATABASE_MIGRATOR_DSN="$({
+    local_authority_dsn="$({
         python3 - "${POSTGRES_HOST:-127.0.0.1}" "${POSTGRES_PORT:-5432}" \
             "${POSTGRES_USER:-postgres}" "$POSTGRES_PASSWORD" \
             "${POSTGRES_DB:-gateway}" <<'PY'
@@ -84,8 +86,32 @@ print(
 )
 PY
     })"
+    AI_GATEWAY_DATABASE_MIGRATOR_DSN="$local_authority_dsn"
     export AI_GATEWAY_DATABASE_MIGRATOR_DSN
+    if [ -z "${AI_GATEWAY_DATABASE_ADMIN_DSN:-}" ]; then
+        AI_GATEWAY_DATABASE_ADMIN_DSN="$local_authority_dsn"
+        export AI_GATEWAY_DATABASE_ADMIN_DSN
+    fi
 fi
 
 log_step "Database authority: ${AUTHORITY_COMMAND}"
+
+# Local deploy owns the explicit admin bootstrap phase required by ARC-03.
+# First complete the immutable legacy chain without adoption, then transfer
+# legacy ownership and let the normal migrator verify fingerprints + mark the
+# frozen baseline. Empty/already-adopted databases finish in the first step.
+if [ "$AUTO_MODE" = true ] && [ "$AUTHORITY_COMMAND" = "migrate" ] \
+    && [ -n "${AI_GATEWAY_DATABASE_ADMIN_DSN:-}" ]; then
+    uv run --extra database python -m database.authority provision-roles
+    uv run --extra database python -m database.authority migrate --no-adoption
+    authority_status="$(uv run --extra database python -m database.authority status)"
+    if grep -qx 'baseline: none adopted' <<<"$authority_status"; then
+        uv run --extra database python -m database.authority \
+            prepare-cutover-ownership \
+            --expected-database "${POSTGRES_DB:-gateway}"
+        exec uv run --extra database python -m database.authority migrate
+    fi
+    exit 0
+fi
+
 exec uv run --extra database python -m database.authority "$AUTHORITY_COMMAND"
