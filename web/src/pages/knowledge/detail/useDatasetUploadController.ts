@@ -10,7 +10,10 @@ import {
 } from "@/api/knowledge";
 import { toast } from "@/hooks/use-toast";
 import { getSourceUploadError } from "@/pages/knowledge/create/datasetCreateModel";
-import { uploadDatasetFiles } from "@/pages/knowledge/detail/datasetUploadModel";
+import {
+  buildDatasetUploadConfigPatch,
+  uploadDatasetFiles,
+} from "@/pages/knowledge/detail/datasetUploadModel";
 import { DEFAULT_CHUNKING_CONFIG, DEFAULT_RETRIEVAL_CONFIG, type Dataset } from "@/types/knowledge";
 
 export const DATASET_EMBEDDING_MODELS = [
@@ -230,18 +233,18 @@ export function useDatasetUploadController({
       // Only touch the dataset's embedding when the selection actually
       // differs — the PUT would otherwise re-set (or swap) it on every
       // upload.
-      const embeddingChanged =
-        !datasetEmbedding || datasetEmbedding !== uploadEmbeddingModel;
-
-      const configPatch: Parameters<typeof updateDatasetConfig>[1] = {
-        chunking_config: chunkingConfig,
-        retrieval_config: { rerank: { enabled: rerankEnabled, model: rerankModel } },
-      };
-      if (embeddingChanged) {
-        configPatch.embedding_provider = embeddingProvider;
-        configPatch.embedding_model = embeddingModel;
-        configPatch.embedding_dimension = selectedModel?.dimension || 1024;
-      }
+      const configPatch: Parameters<typeof updateDatasetConfig>[1] =
+        buildDatasetUploadConfigPatch({
+          documentCount: dataset?.statistics?.document_count,
+          chunkingConfig,
+          rerank: { enabled: rerankEnabled, model: rerankModel },
+          embedding: {
+            changed: !datasetEmbedding || datasetEmbedding !== uploadEmbeddingModel,
+            provider: embeddingProvider,
+            model: embeddingModel,
+            dimension: selectedModel?.dimension || 1024,
+          },
+        });
       await updateDatasetConfig(datasetId, configPatch);
 
       const describeError = (error: unknown) =>

@@ -1,11 +1,54 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { uploadDatasetFiles } from "./datasetUploadModel.ts";
+import {
+  buildDatasetUploadConfigPatch,
+  uploadDatasetFiles,
+} from "./datasetUploadModel.ts";
 
 interface TestFile {
   name: string;
 }
+
+test("existing documents keep immutable ingestion identity during upload", () => {
+  assert.deepEqual(
+    buildDatasetUploadConfigPatch({
+      documentCount: 3,
+      chunkingConfig: { mode: "automatic" },
+      rerank: { enabled: true, model: "gte-rerank" },
+      embedding: {
+        changed: true,
+        provider: "dashscope",
+        model: "text-embedding-v4",
+        dimension: 1024,
+      },
+    }),
+    { retrieval_config: { rerank: { enabled: true, model: "gte-rerank" } } }
+  );
+});
+
+test("empty datasets may establish chunking and embedding identity", () => {
+  assert.deepEqual(
+    buildDatasetUploadConfigPatch({
+      documentCount: 0,
+      chunkingConfig: { mode: "heading" },
+      rerank: { enabled: false, model: "gte-rerank" },
+      embedding: {
+        changed: true,
+        provider: "dashscope",
+        model: "text-embedding-v4",
+        dimension: 1024,
+      },
+    }),
+    {
+      chunking_config: { mode: "heading" },
+      retrieval_config: { rerank: { enabled: false, model: "gte-rerank" } },
+      embedding_provider: "dashscope",
+      embedding_model: "text-embedding-v4",
+      embedding_dimension: 1024,
+    }
+  );
+});
 
 test("single uploads retain only failed files for retry", async () => {
   const files: TestFile[] = [{ name: "accepted.pdf" }, { name: "retry.pdf" }];

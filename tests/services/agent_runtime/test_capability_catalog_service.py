@@ -100,7 +100,7 @@ def _descriptor(record: dict[str, Any] | None = None) -> dict[str, Any]:
         "approval_policy": record["approval"],
         "execution_mode": "inline",
         "timeout_ms": record["timeout_ms"],
-        "tags": ["kind:knowledge", "category:retrieval"],
+        "tags": [f"kind:{record['kind']}", f"category:{record['category']}"],
         "protocol": record["protocol"],
     }
 
@@ -155,6 +155,51 @@ async def test_local_service_validates_v2_and_projects_once_without_gateway_http
     assert result["tools"][0]["schema"] == _record()["input_schema"]
     assert result["mcp"] == []
     assert result["deferred"] == []
+
+
+@pytest.mark.asyncio
+async def test_default_web_catalog_hides_internal_todo_approval_loop() -> None:
+    todo = {
+        **_record(),
+        "id": "todo_write",
+        "name": "todo_write",
+        "description": "Replace the session task list.",
+        "effect": "write",
+        "approval": "always",
+        "kind": "tool",
+        "category": "utility",
+    }
+    worker = _WorkerClient(
+        _Response(
+            {
+                "schema_version": "capability-catalog/v2",
+                "capability_revision": 7,
+                "capabilities": [_descriptor(), _descriptor(todo)],
+            }
+        )
+    )
+    service = CapabilityCatalogService(
+        database=_Database(),
+        worker_url="http://worker.test:8095",
+        internal_token="internal-token",
+        worker_client=worker,
+        catalog_loader=lambda: (1, (_record(), todo)),
+    )
+
+    default_catalog = await service.resolve(_query())
+    explicit_catalog = await service.resolve(
+        CapabilityCatalogQuery.create(
+            tenant_id="tenant-a",
+            user_id="user-a",
+            session_id="session-a",
+            model_id="qwen3.7-plus",
+            capability_revision=7,
+            capability_allowlist=[{"id": "todo_write"}],
+        )
+    )
+
+    assert default_catalog["deferred"] == []
+    assert [item["id"] for item in explicit_catalog["deferred"]] == ["todo_write"]
 
 
 @pytest.mark.asyncio

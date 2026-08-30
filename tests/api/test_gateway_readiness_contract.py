@@ -38,6 +38,7 @@ def _settings(*, jwt_secret: str = "unit-test-jwt-secret") -> SimpleNamespace:
     return SimpleNamespace(
         database=SimpleNamespace(enabled=True),
         redis=SimpleNamespace(enabled=True),
+        knowledge=SimpleNamespace(qdrant=SimpleNamespace(enabled=False, url="")),
         authentication=SimpleNamespace(
             jwt=SimpleNamespace(enabled=True, secret=jwt_secret, algorithms=["HS256"]),
             api_key=SimpleNamespace(enabled=False, keys=[]),
@@ -91,6 +92,10 @@ def _transport(
                     "core_ready": capability_worker_status == 200,
                 },
             )
+        if request.url.host == "knowledge-worker.test":
+            return httpx.Response(200, request=request, json={"status": "ready"})
+        if request.url.host == "qdrant.test":
+            return httpx.Response(200, request=request, text="healthz check passed")
         raise AssertionError(f"unexpected health probe: {request.url}")
 
     return httpx.MockTransport(handler)
@@ -118,6 +123,8 @@ async def test_optional_knowledge_failure_degrades_without_unreadying_core(
     assert snapshot["degraded"] is True
     assert snapshot["capabilities"] == {
         "knowledge_service": "status_503",
+        "knowledge_worker": "not_configured",
+        "qdrant": "not_configured",
         "capability_worker": "not_configured",
         "image_worker": "healthy",
     }
@@ -174,6 +181,31 @@ async def test_optional_capability_worker_failure_degrades_only_its_capability(
     assert snapshot["core_ready"] is True
     assert snapshot["degraded"] is True
     assert snapshot["capabilities"]["capability_worker"] == "status_503"
+
+
+@pytest.mark.asyncio
+async def test_full_topology_reports_worker_and_qdrant_from_live_probes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.main import _gateway_readiness_snapshot
+
+    monkeypatch.setenv("AI_PLATFORM_TOPOLOGY_MODE", "full")
+    monkeypatch.setenv("KB_WORKER_URL", "http://knowledge-worker.test")
+    settings = _settings()
+    settings.knowledge.qdrant = SimpleNamespace(
+        enabled=True,
+        url="http://qdrant.test",
+    )
+    async with httpx.AsyncClient(transport=_transport()) as client:
+        snapshot = await _gateway_readiness_snapshot(
+            _app(),
+            settings,
+            SimpleNamespace(database=_Database(), redis=_Redis()),
+            http_client=client,
+        )
+
+    assert snapshot["capabilities"]["knowledge_worker"] == "healthy"
+    assert snapshot["capabilities"]["qdrant"] == "healthy"
 
 
 @pytest.mark.asyncio

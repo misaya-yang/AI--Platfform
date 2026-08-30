@@ -30,6 +30,7 @@ from .capability_leases import (
 RUNTIME_CATALOG_SCHEMA_VERSION = "agent-capability-catalog/v1"
 MAX_CATALOG_BYTES = 4 * 1024 * 1024
 MAX_CATALOG_ENTRIES = 256
+_DEFAULT_HIDDEN_CAPABILITIES = frozenset({"todo_read", "todo_write"})
 
 _DESCRIPTOR_KEYS = frozenset(
     {
@@ -652,6 +653,15 @@ class CapabilityCatalogService:
                     "CAPABILITY_CATALOG_INVALID", "capability catalog is invalid"
                 )
             seen.add(name)
+            # The generic Web Assistant has no durable task-list UI. Exposing
+            # the internal planner there makes ordinary answers stop for an
+            # approval on every progress update. Signed AgentSpecs can still
+            # opt into these capabilities through an explicit allowlist.
+            if (
+                query.capability_allowlist is None
+                and name in _DEFAULT_HIDDEN_CAPABILITIES
+            ):
+                continue
             if name == "search_web" and not self.web_search_configured:
                 continue
             if not user_has_permissions(

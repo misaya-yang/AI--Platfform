@@ -8,4 +8,4 @@ def test_skill_artifact_queries_use_authoritative_assistant_schema() -> None:
 
     assert "FROM assistant.assistant_skill_versions AS version" in query
     assert "JOIN assistant.assistant_skills AS skill" in query
-    assert "FROM public.assistant_skill_version_revocations revoked" in query
+    assert "FROM assistant.assistant_skill_version_revocations revoked" in query

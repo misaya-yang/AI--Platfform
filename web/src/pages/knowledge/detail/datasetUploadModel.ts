@@ -19,6 +19,38 @@ export interface DatasetUploadOutcome<TFile> {
   failures: Array<{ file: TFile; error: string }>;
 }
 
+export interface DatasetUploadConfigInput {
+  documentCount?: number;
+  chunkingConfig: Record<string, unknown>;
+  rerank: { enabled: boolean; model: string };
+  embedding: {
+    changed: boolean;
+    provider: string;
+    model: string;
+    dimension: number;
+  };
+}
+
+/** Existing documents pin chunking and embedding identity; uploads only tune retrieval. */
+export function buildDatasetUploadConfigPatch(input: DatasetUploadConfigInput) {
+  const patch: {
+    chunking_config?: Record<string, unknown>;
+    retrieval_config: { rerank: { enabled: boolean; model: string } };
+    embedding_provider?: string;
+    embedding_model?: string;
+    embedding_dimension?: number;
+  } = { retrieval_config: { rerank: input.rerank } };
+
+  if (input.documentCount !== 0) return patch;
+  patch.chunking_config = input.chunkingConfig;
+  if (input.embedding.changed) {
+    patch.embedding_provider = input.embedding.provider;
+    patch.embedding_model = input.embedding.model;
+    patch.embedding_dimension = input.embedding.dimension;
+  }
+  return patch;
+}
+
 /** Upload once, retaining every rejected source so the same dialog can retry it. */
 export async function uploadDatasetFiles<TFile extends { name: string }>(
   files: TFile[],

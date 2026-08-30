@@ -22,6 +22,7 @@ from ....services.assistant_entry.launch_resolution import (
     resolve_agent_launch,
 )
 from ....services.assistant_entry.model_access import assistant_model_service
+from ....services.eval.assistant_trace_capture import capture_assistant_runtime_stream
 from .core import (
     _raise_runtime_error,
     _session_manager,
@@ -328,13 +329,27 @@ async def _start_runtime_stream(
                 detail={"code": exc.code, "message": "Agent Runtime rejected the turn"},
             ) from None
         raise
-    return StreamingResponse(
+    stream = capture_assistant_runtime_stream(
         control.stream_events(
             turn=turn,
             tenant_id=user.tenant_id,
             user_id=user.user_id,
             session_id=str(body["session_id"]),
         ),
+        database=getattr(request.app.state, "database", None),
+        run_id=str(turn.run_id),
+        request_id=str(
+            getattr(request.state, "request_id", "")
+            or getattr(request.state, "trace_id", "")
+        ),
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        session_id=str(body["session_id"]),
+        message=str(body["message"]),
+        snapshot=snapshot,
+    )
+    return StreamingResponse(
+        stream,
         media_type="text/event-stream",
         headers={
             "cache-control": "no-cache",

@@ -165,7 +165,7 @@ class DatabaseSkillArtifactRepository:
                    version.content_hash, version.status,
                    version.artifact_type, version.created_at,
                    EXISTS (
-                       SELECT 1 FROM public.assistant_skill_version_revocations revoked
+                       SELECT 1 FROM assistant.assistant_skill_version_revocations revoked
                        WHERE revoked.tenant_id = version.tenant_id
                          AND revoked.version_id = version.version_id
                    ) AS revoked

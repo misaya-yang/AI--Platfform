@@ -131,6 +131,23 @@ def _model_plane_is_ready(app: Any) -> bool:
     return client is None or getattr(client, "is_closed", False) is False
 
 
+def _qdrant_url(settings: Any) -> str | None:
+    knowledge = getattr(settings, "knowledge", None)
+    qdrant = getattr(knowledge, "qdrant", None)
+    if qdrant is None or getattr(qdrant, "enabled", True) is False:
+        return None
+    return str(getattr(qdrant, "url", "") or "").strip() or None
+
+
+def _knowledge_worker_url() -> str | None:
+    configured = os.environ.get("KB_WORKER_URL", "").strip()
+    if configured:
+        return configured
+    if os.environ.get("AI_PLATFORM_TOPOLOGY_MODE", "").strip() in {"full", "scale"}:
+        return "http://knowledge-worker:8092"
+    return None
+
+
 async def gateway_readiness_snapshot(
     app: Any,
     settings: Any,
@@ -151,6 +168,8 @@ async def gateway_readiness_snapshot(
     }
     capabilities: dict[str, str] = {
         "knowledge_service": "not_configured",
+        "knowledge_worker": "not_configured",
+        "qdrant": "not_configured",
         "capability_worker": "not_configured",
         "image_worker": _background_task_status(
             getattr(app.state, "image_task_worker", None), "_loop_task"
@@ -163,6 +182,8 @@ async def gateway_readiness_snapshot(
     runtime_url = getattr(control, "runtime_url", None) if control is not None else None
     runtime_checks: dict[str, str] = {}
     knowledge_checks: dict[str, str] = {}
+    knowledge_worker_checks: dict[str, str] = {}
+    qdrant_checks: dict[str, str] = {}
     capability_worker_checks: dict[str, str] = {}
     catalog_service = getattr(app.state, "agent_capability_catalog_service", None)
     capability_worker_url = (
@@ -175,8 +196,10 @@ async def gateway_readiness_snapshot(
         database_ready,
         redis_ready,
         _runtime_ready,
-        _knowledge_ready,
         _capability_worker_ready,
+        _knowledge_worker_ready,
+        _qdrant_ready,
+        _knowledge_ready,
     ) = await asyncio.gather(
         gateway_database_is_ready(container.database)
         if database_enabled
@@ -204,6 +227,21 @@ async def gateway_readiness_snapshot(
             client=http_client,
         ),
         probe_http_service(
+            "knowledge_worker",
+            _knowledge_worker_url(),
+            knowledge_worker_checks,
+            path="/health/ready",
+            expected_status="ready",
+            client=http_client,
+        ),
+        probe_http_service(
+            "qdrant",
+            _qdrant_url(settings),
+            qdrant_checks,
+            path="/healthz",
+            client=http_client,
+        ),
+        probe_http_service(
             "knowledge_service",
             os.environ.get("KB_SERVICE_URL"),
             knowledge_checks,
@@ -222,6 +260,10 @@ async def gateway_readiness_snapshot(
     capabilities["knowledge_service"] = knowledge_checks.get(
         "knowledge_service", "not_configured"
     )
+    capabilities["knowledge_worker"] = knowledge_worker_checks.get(
+        "knowledge_worker", "not_configured"
+    )
+    capabilities["qdrant"] = qdrant_checks.get("qdrant", "not_configured")
     capabilities["capability_worker"] = capability_worker_checks.get(
         "capability_worker", "not_configured"
     )
