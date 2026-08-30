@@ -4,12 +4,14 @@
 Fail-closed checks:
   Python (test_*.py under tests/, sdk/, apps/, packages/):
     - empty test bodies (only pass/Ellipsis/docstring)
+    - self-proving assertion-only tests
+    - syntax errors (collection would fail, so the hygiene gate must fail too)
     - @pytest.mark.skip without a reason= (skipif is fine: the condition is the reason)
     - pytest.skip() calls with no message
   TypeScript (web/src, web/e2e, sdk *.test.* / *.spec.*):
-    - .only(  — a focused test left behind makes CI run a subset silently
-    - .fixme( — a disabled test masquerading as coverage
-    - test("...") callbacks with an empty body
+    - .only(  — including multiline forms; a focused test makes CI run a subset silently
+    - .fixme( — including multiline forms; a disabled test masquerades as coverage
+    - test("...") callbacks with an empty or comment-only placeholder body
 
 Informational (warning only, listed in the evidence so the bar can tighten):
   - Python test functions without an assertion token. Many legitimate tests
@@ -74,15 +76,23 @@ def _iter_files(roots: tuple[str, ...], base: Path, suffixes: tuple[str, ...]):
                     yield entry
 
 
-def _py_test_functions(path: Path):
+def _parse_python_test_file(path: Path) -> tuple[ast.Module | None, str, dict | None]:
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    except (SyntaxError, UnicodeDecodeError, OSError):
-        return  # unparseable files are not this gate's job
-    source = path.read_text(encoding="utf-8")
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
-            yield node, source
+        source = path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as exc:
+        return None, "", {
+            "line": 1,
+            "test": "<module>",
+            "issue": f"python source unreadable: {type(exc).__name__}",
+        }
+    try:
+        return ast.parse(source, filename=str(path)), source, None
+    except SyntaxError as exc:
+        return None, source, {
+            "line": int(exc.lineno or 1),
+            "test": "<module>",
+            "issue": "python syntax error",
+        }
 
 
 def _empty_body(node: ast.AST) -> bool:
@@ -96,6 +106,81 @@ def _empty_body(node: ast.AST) -> bool:
     return all(
         isinstance(stmt, ast.Pass) or (isinstance(stmt, ast.Expr) and stmt.value is Ellipsis)
         for stmt in body
+    )
+
+
+def _self_proving_assert(node: ast.Assert) -> bool:
+    expression = node.test
+    if isinstance(expression, ast.Constant):
+        return bool(expression.value)
+    if (
+        isinstance(expression, ast.UnaryOp)
+        and isinstance(expression.op, ast.Not)
+        and isinstance(expression.operand, ast.Constant)
+    ):
+        return not bool(expression.operand.value)
+    if not isinstance(expression, ast.Compare):
+        return False
+    operands = [expression.left, *expression.comparators]
+    if all(
+        isinstance(operator, ast.Is)
+        and ast.dump(operands[index]) == ast.dump(operands[index + 1])
+        and (
+            isinstance(operands[index], ast.Name)
+            or (
+                isinstance(operands[index], ast.Constant)
+                and (
+                    operands[index].value is None
+                    or operands[index].value is True
+                    or operands[index].value is False
+                )
+            )
+        )
+        for index, operator in enumerate(expression.ops)
+    ):
+        return True
+    try:
+        values = [ast.literal_eval(operand) for operand in operands]
+    except (ValueError, TypeError):
+        return False
+    for index, operator in enumerate(expression.ops):
+        left = values[index]
+        right = values[index + 1]
+        try:
+            result = (
+                left == right
+                if isinstance(operator, ast.Eq)
+                else left != right
+                if isinstance(operator, ast.NotEq)
+                else left < right
+                if isinstance(operator, ast.Lt)
+                else left <= right
+                if isinstance(operator, ast.LtE)
+                else left > right
+                if isinstance(operator, ast.Gt)
+                else left >= right
+                if isinstance(operator, ast.GtE)
+                else left in right
+                if isinstance(operator, ast.In)
+                else left not in right
+                if isinstance(operator, ast.NotIn)
+                else False
+            )
+        except (TypeError, ValueError):
+            return False
+        if not result:
+            return False
+    return True
+
+
+def _self_proving_body(node: ast.AST) -> bool:
+    body = [
+        stmt
+        for stmt in node.body
+        if not (isinstance(stmt, ast.Expr) and isinstance(getattr(stmt, "value", None), ast.Constant))
+    ]
+    return bool(body) and all(
+        isinstance(stmt, ast.Assert) and _self_proving_assert(stmt) for stmt in body
     )
 
 
@@ -119,12 +204,33 @@ def scan_python(base: Path) -> tuple[list[dict], list[dict]]:
         if not path.name.startswith("test_"):
             continue
         rel = str(path.relative_to(base))
-        for node, source in _py_test_functions(path):
+        tree, source, parse_failure = _parse_python_test_file(path)
+        if parse_failure is not None:
+            failures.append({"file": rel, **parse_failure})
+            continue
+        assert tree is not None
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name.startswith("test")
+            ):
+                continue
             if _empty_body(node):
                 failures.append({"file": rel, "line": node.lineno, "test": node.name, "issue": "empty test body"})
                 continue
             if _skip_decorator_without_reason(node):
                 failures.append({"file": rel, "line": node.lineno, "test": node.name, "issue": "@pytest.mark.skip without reason"})
+                continue
+            if _self_proving_body(node):
+                failures.append(
+                    {
+                        "file": rel,
+                        "line": node.lineno,
+                        "test": node.name,
+                        "issue": "self-proving assertion-only test",
+                    }
+                )
+                continue
             segment = ast.get_source_segment(source, node) or ""
             if re.search(r"pytest\.skip\(\s*\)", segment):
                 failures.append({"file": rel, "line": node.lineno, "test": node.name, "issue": "pytest.skip() without a message"})
@@ -133,10 +239,15 @@ def scan_python(base: Path) -> tuple[list[dict], list[dict]]:
     return failures, warnings
 
 
-JS_ONLY = re.compile(r"\b(?:test|it|describe)\.only\s*\(")
-JS_FIXME = re.compile(r"\b(?:test|it|describe)\.fixme\s*\(")
+JS_ONLY = re.compile(r"\b(?:test|it|describe)\s*\.\s*only\s*\(")
+JS_FIXME = re.compile(r"\b(?:test|it|describe)\s*\.\s*fixme\s*\(")
 JS_EMPTY_BODY = re.compile(
-    r"\b(?:test|it)\s*\(\s*[\"'`][^\"'`]*[\"'`]\s*,\s*(?:async\s*)?(?:\(\s*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{\s*\}"
+    r"\b(?:test|it)\s*\(\s*(?P<title>[\"'`][^\"'`]*[\"'`])\s*,\s*"
+    r"(?:(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>|"
+    r"(?:async\s+)?function(?:\s+[A-Za-z_$][\w$]*)?\s*\([^)]*\))\s*\{"
+    r"(?P<body>(?:\s|;|//[^\n]*(?:\n|$)|/\*.*?\*/)*)"
+    r"\}\s*(?:,\s*(?:[0-9_]+\s*)?)?\)",
+    re.DOTALL,
 )
 
 
@@ -150,13 +261,27 @@ def scan_js(base: Path) -> list[dict]:
             text = path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             continue
-        for lineno, line in enumerate(text.splitlines(), start=1):
-            if JS_ONLY.search(line):
-                failures.append({"file": rel, "line": lineno, "issue": ".only( focused test"})
-            elif JS_FIXME.search(line):
-                failures.append({"file": rel, "line": lineno, "issue": ".fixme( disabled test"})
-            elif JS_EMPTY_BODY.search(line):
-                failures.append({"file": rel, "line": lineno, "issue": "empty test body"})
+        for pattern, issue in (
+            (JS_ONLY, ".only( focused test"),
+            (JS_FIXME, ".fixme( disabled test"),
+        ):
+            for match in pattern.finditer(text):
+                failures.append(
+                    {
+                        "file": rel,
+                        "line": text.count("\n", 0, match.start()) + 1,
+                        "issue": issue,
+                    }
+                )
+        for match in JS_EMPTY_BODY.finditer(text):
+            failures.append(
+                {
+                    "file": rel,
+                    "line": text.count("\n", 0, match.start()) + 1,
+                    "test": match.group("title")[1:-1],
+                    "issue": "empty test body",
+                }
+            )
     return failures
 
 
@@ -264,6 +389,8 @@ def _selftest() -> int:
     layout = {
         "tests/test_bad_empty.py": "def test_nothing():\n    pass\n",
         "tests/test_bad_docstring_only.py": "def test_nothing():\n    \"\"\"only docs.\"\"\"\n",
+        "tests/test_bad_syntax.py": "def test_broken(:\n    pass\n",
+        "tests/test_bad_self_proving.py": "def test_trivial():\n    assert 1 == 1\n",
         "tests/test_bad_skip_no_reason.py": (
             "import pytest\n\n@pytest.mark.skip\ndef test_skipped():\n    assert True\n"
         ),
@@ -273,17 +400,17 @@ def _selftest() -> int:
         "tests/test_good.py": (
             "import pytest\n\n"
             "@pytest.mark.skip(reason='needs live stack')\n"
-            "def test_live():\n    assert True\n\n"
+            "def test_live(value):\n    assert value == 2\n\n"
             "@pytest.mark.skipif(True, reason='conditional')\n"
-            "def test_cond():\n    assert True\n\n"
-            "def test_real():\n    assert 1 + 1 == 2\n\n"
+            "def test_cond(value):\n    assert value == 2\n\n"
+            "def test_real(value):\n    assert value == 2\n\n"
             "def helper():\n    pass\n"
         ),
         "web/src/example.test.ts": (
             'test("focused", async () => { expect(1).toBe(1); });\n'
-            'test.only("left behind", () => {});\n'
-            'test.fixme("disabled", () => {});\n'
-            'test("empty body", () => {});\n'
+            'test\n  .only("left behind", () => { expect(1).toBe(1); });\n'
+            'test\n  .fixme("disabled", () => { expect(1).toBe(1); });\n'
+            'test(\n  "empty body",\n  async () => {\n    // TODO: implement\n  },\n);\n'
         ),
         "web/src/example.good.spec.ts": 'test("ok", () => { expect(1).toBe(1); });\n',
     }
@@ -302,6 +429,8 @@ def _selftest() -> int:
     expected = [
         "tests/test_bad_empty.py:empty test body",
         "tests/test_bad_docstring_only.py:empty test body",
+        "tests/test_bad_syntax.py:python syntax error",
+        "tests/test_bad_self_proving.py:self-proving assertion-only test",
         "tests/test_bad_skip_no_reason.py:@pytest.mark.skip without reason",
         "tests/test_bad_skip_no_message.py:pytest.skip() without a message",
         "web/src/example.test.ts:.only( focused test",
