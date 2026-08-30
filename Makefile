@@ -175,6 +175,17 @@ sdk-sse-contract:           ## 验证四端 SSE 合同；发布 CI 要求 Maven/
 		echo "SKIP Dart SDK SSE contract: dart not installed"; \
 	fi
 
+independent-cli-gate:       ## 验证独立 CLI 配置、provider adapter、launcher 和发布 bundle
+	@npm --prefix sdk/cli run typecheck
+	@npm --prefix sdk/cli test
+	@npm --prefix sdk/cli run build
+	@node --check sdk/cli/scripts/verify-native-package.mjs
+	@bash -n scripts/harness/build_agent_runtime_cli_package.sh
+
+agent-runtime-cli-build-local: ## 在 Docker 内从固定 composed source 构建独立 native CLI
+	@AI_PLATFORM_AGENT_RUNTIME_SOURCE="$(AI_PLATFORM_AGENT_RUNTIME_SOURCE)" \
+		bash scripts/harness/build_agent_runtime_cli_package.sh
+
 snapshot-gateway-openapi:  ## 从实际 FastAPI app 生成 Gateway OpenAPI 快照
 	@uv run --all-packages --extra test python scripts/snapshot_gateway_openapi.py
 

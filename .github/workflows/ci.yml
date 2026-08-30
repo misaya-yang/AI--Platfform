@@ -367,6 +367,35 @@ jobs:
           path: tmp/gate-evidence/sdk-sse-contract.log
           if-no-files-found: warn
 
+  independent-cli:
+    name: Independent Agent CLI
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sdk/cli/package-lock.json
+
+      - name: Install CLI dependencies
+        run: npm --prefix sdk/cli ci
+
+      - name: Run independent CLI gate
+        run: |
+          mkdir -p tmp/gate-evidence
+          make independent-cli-gate 2>&1 | tee tmp/gate-evidence/independent-cli-gate.log
+
+      - name: Upload independent CLI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: independent-cli-gate-evidence
+          path: tmp/gate-evidence/independent-cli-gate.log
+          if-no-files-found: error
+
   architecture-gates:
     name: Architecture Contract Gates
     runs-on: ubuntu-latest
@@ -540,6 +569,7 @@ jobs:
       - kb-migration-gate
       - agent-runtime-contracts
       - sdk-sse
+      - independent-cli
       - architecture-gates
       - gateway-units
       - rust-changed-crate
@@ -595,6 +625,7 @@ jobs:
       - kb-migration-gate
       - agent-runtime-contracts
       - sdk-sse
+      - independent-cli
       - architecture-gates
       - gateway-units
       - rust-changed-crate

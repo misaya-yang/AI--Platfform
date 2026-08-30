@@ -24,6 +24,7 @@ import {
 import { loadProjectMemory } from "./project-memory.js";
 import { listAgentsSummary, getAgent } from "./agents.js";
 import { writeFileSync } from "node:fs";
+import { CLI_VERSION } from "./version.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -74,8 +75,6 @@ interface ConfirmState {
   toolName: string;
   resolve: (approved: boolean) => void;
 }
-
-const CLI_VERSION = "1.4.0";
 
 // ─── Main App ────────────────────────────────────────────────────────
 

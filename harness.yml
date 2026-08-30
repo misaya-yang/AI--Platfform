@@ -142,6 +142,12 @@ commands:
   sdk_sse_contract:
     make: sdk-sse-contract
     purpose: Verify the shared Python, CLI, Java, and Dart SSE envelope contract.
+  independent_cli_gate:
+    make: independent-cli-gate
+    purpose: Verify the standalone local-Runtime CLI provider config, Responses-to-Chat adapter, launcher, secret isolation, and bundle.
+  agent_runtime_cli_build_local:
+    make: agent-runtime-cli-build-local
+    purpose: Build the lock-pinned composed native Agent CLI inside Docker; never invoke host Cargo.
   affected_gates:
     make: affected-gates
     purpose: Map a BASE_SHA diff onto required gates; unmatched changed paths fail closed.
@@ -549,6 +555,16 @@ gates:
     timeout: 30
     evidence: tmp/gate-evidence/sdk-sse-contract.log
     ci_job: sdk-sse
+  independent_cli:
+    make: independent-cli-gate
+    triggers: ["sdk/cli/**", "deploy/agent-runtime-source/Dockerfile.cli", "scripts/harness/build_agent_runtime_cli_package.sh"]
+    tier: L1
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 15
+    evidence: tmp/gate-evidence/independent-cli-gate.log
+    ci_job: independent-cli
   hygiene:
     make: hygiene-check
     purpose: Empty/self-proving tests, .only/.fixme scan (negative self-test included).

@@ -11,6 +11,7 @@ export interface CLIConfig {
   default_model: string;
   kb_dataset_ids?: string[];
   timeout: number;
+  stream_idle_timeout: number;
   max_retries: number;
 }
 
@@ -27,5 +28,6 @@ export const DEFAULT_CONFIG: CLIConfig = {
   tenant_id: "",
   default_model: "",
   timeout: 30,
+  stream_idle_timeout: 300,
   max_retries: 3,
 };

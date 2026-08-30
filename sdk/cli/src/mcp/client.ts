@@ -7,6 +7,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
+import { CLI_VERSION } from "../version.js";
 
 export interface MCPTool {
   name: string;
@@ -32,14 +33,14 @@ export class MCPClient {
   tools: MCPTool[] = [];
 
   static PROTOCOL_VERSION = "2025-11-25";
-  static CLIENT_INFO = { name: "ai-gateway-cli", version: "1.0.0" };
+  static CLIENT_INFO = { name: "ai-gateway-cli", version: CLI_VERSION };
 
   constructor(config: MCPServerConfig) {
     this.config = config;
   }
 
   async connect(): Promise<MCPTool[]> {
-    const env = { ...process.env, ...this.config.env };
+    const env = buildMCPEnvironment(this.config.env);
 
     this.process = spawn(this.config.command, this.config.args, {
       stdio: ["pipe", "pipe", "pipe"],
@@ -193,4 +194,42 @@ export class MCPClient {
     }
     this.pending.clear();
   }
+}
+
+const MCP_AMBIENT_ENV_ALLOWLIST = [
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "SYSTEMROOT",
+  "WINDIR",
+] as const;
+
+/**
+ * Build the environment for an operator-requested local MCP child.
+ *
+ * Ambient provider, Gateway, and internal service credentials are deliberately
+ * excluded. A value is added outside the code-owned allowlist only when the
+ * operator explicitly configured it for this MCP server.
+ */
+export function buildMCPEnvironment(
+  explicit: Record<string, string> = {},
+  ambient: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const name of MCP_AMBIENT_ENV_ALLOWLIST) {
+    const value = ambient[name];
+    if (value) env[name] = value;
+  }
+  for (const [name, value] of Object.entries(explicit)) {
+    if (value !== "") env[name] = value;
+  }
+  return env;
 }
