@@ -535,7 +535,7 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
         FROM pg_class AS c
         JOIN pg_namespace AS n ON n.oid = c.relnamespace
         CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl, acldefault(
-            CASE c.relkind WHEN 'S' THEN 's' ELSE 'r' END, c.relowner))) AS a
+            (CASE c.relkind WHEN 'S' THEN 's' ELSE 'r' END)::"char", c.relowner))) AS a
         WHERE c.relkind <> ALL(ARRAY['i', 'I', 't', 'c'])
         {_SCHEMA_FILTER}
         {_EXCLUDED_RELATION_FILTER}

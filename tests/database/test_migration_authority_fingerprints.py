@@ -236,6 +236,11 @@ async def test_acl_covers_all_owner_acl_classes_and_default_privileges() -> None
 
     lines = await acl_lines(conn, role_prefix="ai_platform_")
 
+    relation_acl_query = next(
+        query for query, _args in conn.queries if "aclexplode(COALESCE(c.relacl" in query
+    )
+    assert 'END)::"char"' in relation_acl_query
+
     assert "owner:public.widgets:owner" in lines
     assert "schema_owner:public:owner" in lines
     assert "function_owner:public.run_widget(uuid):owner" in lines
