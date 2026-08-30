@@ -212,7 +212,7 @@ pub struct LocalPythonSandboxConfig {
 impl Default for LocalPythonSandboxConfig {
     fn default() -> Self {
         Self {
-            python_binary: PathBuf::from("/usr/bin/python3"),
+            python_binary: PathBuf::from("/usr/local/bin/python3"),
             workspace_root: PathBuf::from("/workspace"),
             require_network_isolation: true,
         }
@@ -491,7 +491,7 @@ fn run_python_process(
                 .map_err(|_| CodeExecutionError::ProcessStart)?;
         }
 
-        let mut command = Command::new(&config.python_binary);
+        let mut command = python_command(config);
         command
             .arg("-I")
             .arg("-S")
@@ -666,11 +666,9 @@ fn collect_output_files(
 fn configure_child(
     command: &mut Command,
     limits: &PythonSandboxLimits,
-    require_network_isolation: bool,
+    _require_network_isolation: bool,
 ) -> Result<(), CodeExecutionError> {
     use std::os::unix::process::CommandExt;
-    #[cfg(not(target_os = "linux"))]
-    let _ = require_network_isolation;
     let cpu_seconds = u64::from(limits.cpu_millis).div_ceil(1000).max(1);
     let memory = limits.memory_bytes;
     let pids = u64::from(limits.pids);
@@ -723,14 +721,26 @@ fn configure_child(
                 if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                     return Err(io::Error::last_os_error());
                 }
-                if require_network_isolation && libc::unshare(libc::CLONE_NEWNET) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
             }
             Ok(())
         });
     }
     Ok(())
+}
+
+fn python_command(config: &LocalPythonSandboxConfig) -> Command {
+    #[cfg(target_os = "linux")]
+    if config.require_network_isolation {
+        let mut command = Command::new("/usr/bin/unshare");
+        command
+            .arg("--user")
+            .arg("--map-root-user")
+            .arg("--net")
+            .arg("--")
+            .arg(&config.python_binary);
+        return command;
+    }
+    Command::new(&config.python_binary)
 }
 
 #[cfg(not(unix))]
@@ -777,5 +787,28 @@ mod tests {
         let limits: PythonSandboxLimits = serde_json::from_value(json!({})).unwrap();
         assert_eq!(limits, PythonSandboxLimits::default());
         assert!(limits.validate().is_ok());
+    }
+
+    #[test]
+    fn linux_network_isolation_uses_an_unprivileged_namespace_wrapper() {
+        let command = python_command(&LocalPythonSandboxConfig::default());
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(command.get_program(), "/usr/bin/unshare");
+            let arguments = command
+                .get_args()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                arguments,
+                [
+                    "--user",
+                    "--map-root-user",
+                    "--net",
+                    "--",
+                    "/usr/local/bin/python3",
+                ]
+            );
+        }
     }
 }
