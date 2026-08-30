@@ -6,14 +6,14 @@
 
 ## Outcome
 
-All platform extension seams compile against the selected upstream API without changing Gateway, ThreadStore, Capability Worker, approval, or public API ownership.
+All platform extension seams compile against the selected upstream API without changing Gateway, ThreadStore, Capability Worker, approval, Agent configuration/Eval, or public API ownership.
 
 ## Scope
 
 In:
 
 - Runtime core/app-server/platform crates under `rust/agent-runtime-overlay/kernel-rs/`.
-- Gateway and web adapters only when an actual platform contract changed.
+- Gateway, web, Agent configuration, and Agent Eval adapters only when an actual platform contract changed.
 
 Out:
 
@@ -22,6 +22,7 @@ Out:
 ## Done when
 
 - [ ] Cross-module APIs and platform extension seams are internally consistent with no public contract drift.
+- [ ] Agent preview, versioned configuration, candidate trace persistence, evaluation, publish, and rollback retain their existing platform ownership.
 - [ ] Existing affected behavior still passes its smallest relevant regression check.
 
 ## Verify

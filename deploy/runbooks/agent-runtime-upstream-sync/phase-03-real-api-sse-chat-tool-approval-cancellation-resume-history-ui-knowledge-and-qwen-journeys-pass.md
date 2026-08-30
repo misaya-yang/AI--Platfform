@@ -6,13 +6,13 @@
 
 ## Outcome
 
-The compiled candidate completes every real API, SSE, browser, Knowledge, negative, and DashScope/Qwen journey in the PRD matrix.
+The compiled candidate completes every real API, SSE, browser, Agent configuration/Eval, Knowledge, negative, CLI, and DashScope/Qwen journey in the PRD matrix.
 
 ## Scope
 
 In:
 
-- Existing backend/runtime regression commands, live HTTP/SSE probes, and `web/e2e/` acceptance.
+- Existing backend/runtime regression commands, live HTTP/SSE probes, Agent Studio/Eval flows, CLI acceptance, `web/e2e/`, and the final in-app-browser click pass.
 - The ignored persistent E2E identity and runtime provider configuration, read only at execution time.
 
 Out:
@@ -21,7 +21,7 @@ Out:
 
 ## Done when
 
-- [ ] Backend API/SSE, tool approval allow/deny/failure/idempotency, cancellation/resume/history, negative tenant/auth, Knowledge, UI clicks, and Qwen streaming/tool journeys pass against the candidate.
+- [ ] Backend API/SSE, tool approval allow/deny/failure/idempotency, cancellation/resume/history, Agent preview/Eval/version rollback, negative tenant/auth, Knowledge, UI clicks, CLI, and Qwen streaming/tool journeys pass against the candidate.
 - [ ] Browser console/network state has no blocking failure.
 - [ ] Existing affected behavior still passes its smallest relevant regression check.
 
