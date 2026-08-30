@@ -784,7 +784,7 @@ export function ServiceConfigDialog({
       session_enabled: basicForm.session_enabled,
     };
 
-    if (isLangGraphService && serviceDetail) {
+    if (isLangGraphService) {
       const graphId = String(basicForm.graph_id || "").trim();
       if (!graphId) {
         setBasicError(t("services.configDialog.basic.graphIdRequired"));
@@ -807,7 +807,7 @@ export function ServiceConfigDialog({
       );
 
       patch.connector_config = {
-        ...(serviceDetail.connector_config || {}),
+        ...(serviceDetail?.connector_config || {}),
         base_url: primaryUrl,
         upstream_url: primaryUrl,
         upstream_urls: upstreamUrls,
@@ -829,7 +829,7 @@ export function ServiceConfigDialog({
         },
       };
       patch.metadata = {
-        ...((serviceDetail.metadata || {}) as Record<string, unknown>),
+        ...((serviceDetail?.metadata || {}) as Record<string, unknown>),
         adapter_type: "langgraph",
         proxy_mode: "transparent",
       };
