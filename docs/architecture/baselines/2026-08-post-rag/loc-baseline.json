@@ -1,39 +1,39 @@
 {
-  "base_git_sha": "d7f9dbb8c6e8557d7c1f4d0d1197120c5990380a",
+  "base_git_sha": "1d25e67937dd387a572e8006607d859d0991f977",
   "baseline_id": "2026-08-post-rag",
   "generator": "scripts/inventory/generate_baselines.py",
   "methodology": [
-    "wc-style line counts over the pruned tree at the pinned Git revision.",
+    "Line counts are read from Git blobs at base_git_sha, never working-tree files.",
     "Test files are classified by path (tests/, e2e/, *.test.ts, *.spec.ts, test_*.py).",
     "Re-running this generator at the same SHA must yield byte-identical output."
   ],
   "oversized_python": {
     "by_unit": {
       "ai-gateway-core": 12,
-      "gateway": 26,
+      "gateway": 23,
       "knowledge-service": 29,
       "local-node": 2,
-      "scripts": 9,
-      "tests": 41
+      "scripts": 11,
+      "tests": 44
     },
-    "count": 119,
+    "count": 121,
     "files": [
       {
         "file": "apps/knowledge-service/src/knowledge_service/persistence/database.py",
         "is_test": false,
-        "lines": 9046,
+        "lines": 8996,
         "unit": "knowledge-service"
       },
       {
         "file": "packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/agent_repository.py",
         "is_test": false,
-        "lines": 7255,
+        "lines": 7256,
         "unit": "ai-gateway-core"
       },
       {
         "file": "apps/knowledge-service/src/knowledge_service/api/routes/knowledge.py",
         "is_test": false,
-        "lines": 4659,
+        "lines": 4739,
         "unit": "knowledge-service"
       },
       {
@@ -45,7 +45,7 @@
       {
         "file": "packages/ai-gateway-core/src/ai_gateway_core/persistence/database.py",
         "is_test": false,
-        "lines": 4150,
+        "lines": 4142,
         "unit": "ai-gateway-core"
       },
       {
@@ -109,12 +109,6 @@
         "unit": "knowledge-service"
       },
       {
-        "file": "src/services/agent_runtime/control_plane.py",
-        "is_test": false,
-        "lines": 2361,
-        "unit": "gateway"
-      },
-      {
         "file": "tests/services/knowledge/test_bm25_v2_shadow.py",
         "is_test": true,
         "lines": 2284,
@@ -151,15 +145,15 @@
         "unit": "knowledge-service"
       },
       {
-        "file": "apps/knowledge-service/src/knowledge_service/services/knowledge/document_service.py",
+        "file": "apps/knowledge-service/src/knowledge_service/persistence/embedding_version_store.py",
         "is_test": false,
-        "lines": 2117,
+        "lines": 2134,
         "unit": "knowledge-service"
       },
       {
-        "file": "apps/knowledge-service/src/knowledge_service/persistence/embedding_version_store.py",
+        "file": "apps/knowledge-service/src/knowledge_service/services/knowledge/document_service.py",
         "is_test": false,
-        "lines": 2078,
+        "lines": 2117,
         "unit": "knowledge-service"
       },
       {
@@ -175,12 +169,6 @@
         "unit": "ai-gateway-core"
       },
       {
-        "file": "src/services/agent_runtime/model_plane.py",
-        "is_test": false,
-        "lines": 1955,
-        "unit": "gateway"
-      },
-      {
         "file": "tests/services/eval/test_evaluator_executor.py",
         "is_test": true,
         "lines": 1955,
@@ -193,15 +181,15 @@
         "unit": "scripts"
       },
       {
-        "file": "src/api/v1/agent_runtime.py",
-        "is_test": false,
-        "lines": 1924,
-        "unit": "gateway"
-      },
-      {
         "file": "tests/database/test_agent_publication_atomicity.py",
         "is_test": true,
         "lines": 1858,
+        "unit": "tests"
+      },
+      {
+        "file": "tests/scripts/test_validate_env_quickstart.py",
+        "is_test": true,
+        "lines": 1841,
         "unit": "tests"
       },
       {
@@ -209,12 +197,6 @@
         "is_test": false,
         "lines": 1817,
         "unit": "gateway"
-      },
-      {
-        "file": "tests/scripts/test_validate_env_quickstart.py",
-        "is_test": true,
-        "lines": 1805,
-        "unit": "tests"
       },
       {
         "file": "src/adapters/langgraph_proxy.py",
@@ -225,7 +207,7 @@
       {
         "file": "tests/services/knowledge/test_dataset_create_security.py",
         "is_test": true,
-        "lines": 1684,
+        "lines": 1685,
         "unit": "tests"
       },
       {
@@ -283,22 +265,34 @@
         "unit": "tests"
       },
       {
+        "file": "apps/knowledge-service/src/knowledge_service/services/knowledge/embedding_migration.py",
+        "is_test": false,
+        "lines": 1442,
+        "unit": "knowledge-service"
+      },
+      {
         "file": "apps/knowledge-service/src/knowledge_service/api/schemas/knowledge.py",
         "is_test": false,
         "lines": 1428,
         "unit": "knowledge-service"
       },
       {
-        "file": "apps/knowledge-service/src/knowledge_service/services/knowledge/embedding_migration.py",
-        "is_test": false,
-        "lines": 1427,
-        "unit": "knowledge-service"
+        "file": "tests/services/knowledge/test_active_read_routes.py",
+        "is_test": true,
+        "lines": 1404,
+        "unit": "tests"
       },
       {
         "file": "src/api/internal/confluence_capabilities.py",
         "is_test": false,
         "lines": 1389,
         "unit": "gateway"
+      },
+      {
+        "file": "tests/services/agent_runtime/test_control_plane.py",
+        "is_test": true,
+        "lines": 1388,
+        "unit": "tests"
       },
       {
         "file": "apps/knowledge-service/src/knowledge_service/services/knowledge/langgraph_tools.py",
@@ -309,26 +303,14 @@
       {
         "file": "src/main.py",
         "is_test": false,
-        "lines": 1382,
+        "lines": 1336,
         "unit": "gateway"
-      },
-      {
-        "file": "tests/services/knowledge/test_active_read_routes.py",
-        "is_test": true,
-        "lines": 1347,
-        "unit": "tests"
       },
       {
         "file": "apps/knowledge-service/src/knowledge_service/services/knowledge/ingestion/document_image_extractor.py",
         "is_test": false,
         "lines": 1328,
         "unit": "knowledge-service"
-      },
-      {
-        "file": "tests/services/agent_runtime/test_control_plane.py",
-        "is_test": true,
-        "lines": 1312,
-        "unit": "tests"
       },
       {
         "file": "tests/services/knowledge/test_retrieve_batch.py",
@@ -387,7 +369,7 @@
       {
         "file": "tests/services/agent_runtime/test_model_plane.py",
         "is_test": true,
-        "lines": 1209,
+        "lines": 1212,
         "unit": "tests"
       },
       {
@@ -421,16 +403,16 @@
         "unit": "gateway"
       },
       {
+        "file": "tests/api/test_agent_runtime_api.py",
+        "is_test": true,
+        "lines": 1137,
+        "unit": "tests"
+      },
+      {
         "file": "apps/knowledge-service/src/knowledge_service/services/knowledge/document_processor.py",
         "is_test": false,
         "lines": 1134,
         "unit": "knowledge-service"
-      },
-      {
-        "file": "tests/api/test_agent_runtime_api.py",
-        "is_test": true,
-        "lines": 1129,
-        "unit": "tests"
       },
       {
         "file": "apps/local-node/src/local_node/transport.py",
@@ -443,6 +425,12 @@
         "is_test": true,
         "lines": 1108,
         "unit": "tests"
+      },
+      {
+        "file": "scripts/core_boundary/inventory_core_consumption.py",
+        "is_test": false,
+        "lines": 1106,
+        "unit": "scripts"
       },
       {
         "file": "src/api/v1/eval.py",
@@ -467,6 +455,12 @@
         "is_test": true,
         "lines": 1050,
         "unit": "tests"
+      },
+      {
+        "file": "src/api/v1/responses.py",
+        "is_test": false,
+        "lines": 1047,
+        "unit": "gateway"
       },
       {
         "file": "tests/services/knowledge/test_ingestion_identity_fence.py",
@@ -517,12 +511,6 @@
         "unit": "scripts"
       },
       {
-        "file": "src/api/v1/responses.py",
-        "is_test": false,
-        "lines": 1011,
-        "unit": "gateway"
-      },
-      {
         "file": "apps/knowledge-service/src/knowledge_service/services/knowledge/bm25_v2_lifecycle.py",
         "is_test": false,
         "lines": 998,
@@ -553,16 +541,16 @@
         "unit": "ai-gateway-core"
       },
       {
-        "file": "apps/knowledge-service/src/knowledge_service/main.py",
-        "is_test": false,
-        "lines": 968,
-        "unit": "knowledge-service"
-      },
-      {
         "file": "tests/services/eval/test_golden_regression_gate.py",
         "is_test": true,
         "lines": 959,
         "unit": "tests"
+      },
+      {
+        "file": "apps/knowledge-service/src/knowledge_service/main.py",
+        "is_test": false,
+        "lines": 956,
+        "unit": "knowledge-service"
       },
       {
         "file": "apps/local-node/scripts/local_live_acceptance.py",
@@ -619,6 +607,12 @@
         "unit": "gateway"
       },
       {
+        "file": "tests/database/test_migration_authority_runner_recovery.py",
+        "is_test": true,
+        "lines": 890,
+        "unit": "tests"
+      },
+      {
         "file": "src/api/v1/quota.py",
         "is_test": false,
         "lines": 883,
@@ -649,28 +643,22 @@
         "unit": "ai-gateway-core"
       },
       {
+        "file": "src/container.py",
+        "is_test": false,
+        "lines": 868,
+        "unit": "gateway"
+      },
+      {
         "file": "scripts/collect_cra_compliance_research.py",
         "is_test": false,
         "lines": 867,
         "unit": "scripts"
       },
       {
-        "file": "src/container.py",
-        "is_test": false,
-        "lines": 863,
-        "unit": "gateway"
-      },
-      {
         "file": "scripts/harness/agent_runtime_text_gate.py",
         "is_test": false,
-        "lines": 855,
+        "lines": 867,
         "unit": "scripts"
-      },
-      {
-        "file": "src/api/deps.py",
-        "is_test": false,
-        "lines": 855,
-        "unit": "gateway"
       },
       {
         "file": "apps/knowledge-service/src/knowledge_service/services/knowledge/confluence/image_processor.py",
@@ -685,10 +673,22 @@
         "unit": "tests"
       },
       {
+        "file": "src/api/deps.py",
+        "is_test": false,
+        "lines": 850,
+        "unit": "gateway"
+      },
+      {
         "file": "apps/knowledge-service/src/knowledge_service/services/knowledge/qa_service.py",
         "is_test": false,
         "lines": 839,
         "unit": "knowledge-service"
+      },
+      {
+        "file": "tests/database/test_migration_authority_manifest_legacy.py",
+        "is_test": true,
+        "lines": 837,
+        "unit": "tests"
       },
       {
         "file": "src/api/v1/langgraph.py",
@@ -715,9 +715,21 @@
         "unit": "tests"
       },
       {
+        "file": "scripts/rust/resource_lock.py",
+        "is_test": false,
+        "lines": 827,
+        "unit": "scripts"
+      },
+      {
         "file": "tests/services/knowledge/test_ingestion_incremental_upsert.py",
         "is_test": true,
         "lines": 826,
+        "unit": "tests"
+      },
+      {
+        "file": "tests/services/knowledge/test_embedding_migration_routes.py",
+        "is_test": true,
+        "lines": 824,
         "unit": "tests"
       },
       {
@@ -733,7 +745,7 @@
         "unit": "ai-gateway-core"
       }
     ],
-    "production_count": 78,
+    "production_count": 77,
     "threshold_lines": 800
   },
   "oversized_typescript": {
@@ -925,7 +937,7 @@
       {
         "file": "web/src/pages/Services.tsx",
         "is_test": false,
-        "lines": 723,
+        "lines": 741,
         "unit": "other"
       },
       {
@@ -1083,7 +1095,7 @@
     "threshold_lines": 500
   },
   "rust_large_informational": {
-    "count": 6,
+    "count": 4,
     "files": [
       {
         "file": "rust/agent-runtime-overlay/kernel-rs/app-server/src/request_processors/thread_processor.rs",
@@ -1108,18 +1120,6 @@
         "is_test": false,
         "lines": 2066,
         "unit": "other"
-      },
-      {
-        "file": "rust/agent-runtime-overlay/kernel-rs/ai-platform-agent-runtime/src/http_service.rs",
-        "is_test": false,
-        "lines": 2057,
-        "unit": "other"
-      },
-      {
-        "file": "rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/read_capabilities.rs",
-        "is_test": false,
-        "lines": 2029,
-        "unit": "other"
       }
     ],
     "note": "Pinned upstream Rust is not churned for LOC targets (PRD ARC-07E); listed only so reviewers know the shape of the overlay.",
@@ -1133,24 +1133,24 @@
   },
   "totals": {
     "python": {
-      "files": 1166,
-      "lines": 411086
+      "files": 1260,
+      "lines": 437961
     },
     "python_production": {
-      "files": 651,
-      "lines": 259069
+      "files": 709,
+      "lines": 276073
     },
     "rust_overlay": {
-      "files": 70,
-      "lines": 54198
+      "files": 88,
+      "lines": 55305
     },
     "typescript": {
-      "files": 365,
-      "lines": 104237
+      "files": 369,
+      "lines": 104478
     },
     "typescript_production": {
-      "files": 307,
-      "lines": 88688
+      "files": 310,
+      "lines": 88907
     }
   }
 }

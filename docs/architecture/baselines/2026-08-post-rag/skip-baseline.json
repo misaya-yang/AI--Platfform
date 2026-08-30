@@ -1,5 +1,5 @@
 {
-  "base_git_sha": "d7f9dbb8c6e8557d7c1f4d0d1197120c5990380a",
+  "base_git_sha": "1d25e67937dd387a572e8006607d859d0991f977",
   "baseline_id": "2026-08-post-rag",
   "generator": "scripts/inventory/generate_baselines.py",
   "known_gap_context": "The frontend type-check gate historically checked zero files (kb-rag-ui-t5 loop-state notes); its green results were no-ops. That is an ARC-00B fix target, recorded here so the skip baseline and the false-green gate list stay in one place.",
@@ -7,10 +7,10 @@
   "python": {
     "classification": {
       "conditional_live_or_env_gated": 18,
-      "unconditional_or_static": 32
+      "unconditional_or_static": 34
     },
-    "file_count": 19,
-    "marker_count": 50,
+    "file_count": 21,
+    "marker_count": 52,
     "markers": [
       {
         "file": "apps/local-node/tests/test_macos_native_backend.py",
@@ -52,6 +52,13 @@
         "kind": "pytest.skip (runtime)",
         "line": 74,
         "reason": "set ARTIFACT_SHARE_TEST_DATABASE_URL or ARTIFACT_SHARE_TEST_ENABLED=1 for the PostgreSQL migration gate",
+        "target": "<runtime>"
+      },
+      {
+        "file": "tests/database/test_migration_authority_roles_grants.py",
+        "kind": "pytest.skip (runtime)",
+        "line": 550,
+        "reason": "ARC03_SCRATCH_DATABASE_URL is not configured",
         "target": "<runtime>"
       },
       {
@@ -235,6 +242,13 @@
         "line": 36,
         "reason": "docker CLI is required to verify rendered Compose config",
         "target": "<runtime>"
+      },
+      {
+        "file": "tests/scripts/test_rust_resource_lock.py",
+        "kind": "pytest.mark.skipif",
+        "line": 591,
+        "reason": "process-group cleanup is POSIX-only",
+        "target": "test_heartbeat_failure_kills_descendant_process_group"
       },
       {
         "file": "tests/services/assistant/local_os_acceptance/test_runtime_fail_closed.py",

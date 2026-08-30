@@ -1,5 +1,5 @@
 {
-  "base_git_sha": "d7f9dbb8c6e8557d7c1f4d0d1197120c5990380a",
+  "base_git_sha": "1d25e67937dd387a572e8006607d859d0991f977",
   "baseline_id": "2026-08-post-rag",
   "frozen": {
     "capability_v2": {
@@ -56,27 +56,27 @@
       "note": "The Rust contract crate (CapabilityDescriptorV2) is the single authority; Python CapabilityDescriptor in src/services/agent_runtime/readonly_capabilities.py is the read-only projection used by the Runtime adapter."
     },
     "compose_resolution": {
-      "canonical_sha256": "b7940d9ba98cde9cf638e773de99914a70e98f7de15720d718d75a761b6e24b0",
+      "canonical_sha256": "52402ea105194637b8e61be826531f48079137ca3801fd36ac887597dda918d1",
       "note": "Parsed structurally from the committed Compose files (offline). `docker compose config` additionally resolves ${VAR} interpolation against .env; run `make validate-config` for the rendered form.",
       "services": {
         "docker-compose.build.yml": {
           "frontend": {
-            "build": true,
+            "build": null,
             "container_name": null,
             "image": null
           },
           "gateway": {
-            "build": true,
+            "build": null,
             "container_name": null,
             "image": null
           },
           "knowledge-service": {
-            "build": true,
+            "build": null,
             "container_name": null,
             "image": null
           },
           "migrate": {
-            "build": true,
+            "build": null,
             "container_name": null,
             "image": null
           }
@@ -84,98 +84,98 @@
         "docker-compose.capability.yml": {},
         "docker-compose.dev.yml": {
           "gateway": {
-            "build": false,
+            "build": null,
             "container_name": null,
             "image": null
           },
           "knowledge-service": {
-            "build": false,
+            "build": null,
             "container_name": null,
             "image": null
           },
           "knowledge-worker": {
-            "build": false,
+            "build": null,
             "container_name": null,
             "image": null
           }
         },
         "docker-compose.kbms.yml": {
           "postgres": {
-            "build": false,
+            "build": null,
             "container_name": "ai-gateway-kbms-postgres",
-            "image": "postgres:16-alpine"
+            "image": null
           },
           "qdrant": {
-            "build": false,
+            "build": null,
             "container_name": "ai-gateway-kbms-qdrant",
-            "image": "qdrant/qdrant:v1.18.2"
+            "image": null
           },
           "redis": {
-            "build": false,
+            "build": null,
             "container_name": "ai-gateway-kbms-redis",
-            "image": "redis:7-alpine"
+            "image": null
           }
         },
         "docker-compose.yml": {
           "agent-capability-worker": {
-            "build": false,
-            "container_name": "ai-gateway-agent-capability-worker",
-            "image": "${AGENT_CAPABILITY_WORKER_IMAGE:-ai-gateway-agent-capability-worker:local-93c54bca3899-c2f4e4c2ef8e}"
+            "build": null,
+            "container_name": null,
+            "image": null
           },
           "agent-runtime": {
-            "build": false,
+            "build": null,
             "container_name": "ai-gateway-agent-runtime",
-            "image": "${AI_PLATFORM_AGENT_RUNTIME_IMAGE:-ai-gateway-agent-runtime:local-93c54bca3899-c2f4e4c2ef8e}"
+            "image": null
           },
           "frontend": {
-            "build": false,
+            "build": null,
             "container_name": "ai-gateway-frontend",
-            "image": "${FRONTEND_IMAGE:-ghcr.io/misaya-yang/ai-gateway-web:2.0.0}"
+            "image": null
           },
           "gateway": {
-            "build": false,
+            "build": null,
             "container_name": "ai-gateway-backend",
-            "image": "${GATEWAY_IMAGE:-ghcr.io/misaya-yang/ai-gateway:2.0.0}"
+            "image": null
           },
           "gateway-init": {
-            "build": false,
+            "build": null,
             "container_name": "ai-gateway-init",
-            "image": "${POSTGRES_IMAGE:-postgres:16-alpine}"
+            "image": null
           },
           "knowledge-service": {
-            "build": false,
+            "build": null,
             "container_name": "ai-gateway-knowledge-service",
-            "image": "${KNOWLEDGE_IMAGE:-ghcr.io/misaya-yang/ai-gateway-knowledge-service:2.0.0}"
+            "image": null
           },
           "knowledge-worker": {
-            "build": false,
-            "container_name": "ai-gateway-knowledge-worker",
-            "image": "${KNOWLEDGE_IMAGE:-ghcr.io/misaya-yang/ai-gateway-knowledge-service:2.0.0}"
+            "build": null,
+            "container_name": null,
+            "image": null
           },
           "migrate": {
-            "build": false,
+            "build": null,
             "container_name": "ai-gateway-migrate",
-            "image": "${MIGRATE_IMAGE:-ghcr.io/misaya-yang/ai-gateway-migrate:2.0.0}"
+            "image": null
           },
           "postgres": {
-            "build": false,
+            "build": null,
             "container_name": "ai-gateway-pg",
-            "image": "${POSTGRES_IMAGE:-postgres:16-alpine}"
+            "image": null
           },
           "qdrant": {
-            "build": false,
+            "build": null,
             "container_name": "ai-gateway-qdrant",
-            "image": "${QDRANT_IMAGE:-qdrant/qdrant:v1.18.2}"
+            "image": null
           },
           "redis": {
-            "build": false,
+            "build": null,
             "container_name": "ai-gateway-redis",
-            "image": "${REDIS_IMAGE:-redis:7-alpine}"
+            "image": null
           },
           "tempo": {
-            "build": false,
+            "build": null,
             "container_name": "ai-gateway-tempo",
-            "image": "${TEMPO_IMAGE:-grafana/tempo:2.5.0}"
+            "image": null
           }
         }
       }
@@ -240,9 +240,9 @@
       "runtime_worker_local_tags": "docker-compose.yml pins local-<upstream_sha12>-<overlay_sha12> tags by default; versioned multi-arch images are an ARC-00C/ARC-08 deliverable.",
       "rust_overlay_identity": {
         "cargo_lock_sha256": "dbdd065635faf9c54d7d67da5cc0c1bf40f0d83dd56a461cba3a8e825fa95b79",
-        "file_count": 85,
+        "file_count": 103,
         "schema_version": "ai-platform/agent-runtime-overlay/v1",
-        "sha256": "c2f4e4c2ef8e27893b51f6ca758fd97fd25a21a25f256f3c267460777676410c",
+        "sha256": "566aa9e17b93730f6d8aeed243dd3d8c49b3f70379b60b7b3948dceac631dd61",
         "source_revision": "c84c011f403a18be3db3e6c0f2cb603ee7ea1cdd",
         "upstream_sha": "93c54bca38996b56d344a2ca65f01627b1953b27"
       }
@@ -286,14 +286,14 @@
     "rust_overlay_manifest": {
       "contents": {
         "cargo_lock_sha256": "dbdd065635faf9c54d7d67da5cc0c1bf40f0d83dd56a461cba3a8e825fa95b79",
-        "file_count": 85,
+        "file_count": 103,
         "schema_version": "ai-platform/agent-runtime-overlay/v1",
-        "sha256": "c2f4e4c2ef8e27893b51f6ca758fd97fd25a21a25f256f3c267460777676410c",
+        "sha256": "566aa9e17b93730f6d8aeed243dd3d8c49b3f70379b60b7b3948dceac631dd61",
         "source_revision": "c84c011f403a18be3db3e6c0f2cb603ee7ea1cdd",
         "upstream_sha": "93c54bca38996b56d344a2ca65f01627b1953b27"
       },
       "path": "rust/agent-runtime-overlay/manifest.json",
-      "sha256": "28a8d151b8ab2c0d33dba327304d4ae2b606505f68ba9d5d4a7bde5243b9a3e4"
+      "sha256": "33ecf954162954cceb5696a57d5843abb2e043b08568c698087406a1ce33c98c"
     },
     "sse_fixture": {
       "bytes": 1868,

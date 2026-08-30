@@ -1,5 +1,5 @@
 {
-  "base_git_sha": "d7f9dbb8c6e8557d7c1f4d0d1197120c5990380a",
+  "base_git_sha": "1d25e67937dd387a572e8006607d859d0991f977",
   "baseline_id": "2026-08-post-rag",
   "declared_dependencies": {
     "ai-gateway-contracts": {
@@ -75,6 +75,7 @@
     },
     "knowledge-service": {
       "dependencies": [
+        "ai-gateway-contracts",
         "ai-gateway-core",
         "aioboto3>=14.0.0",
         "asyncpg>=0.31.0",
@@ -103,6 +104,7 @@
       "found": true,
       "pyproject": "apps/knowledge-service/pyproject.toml",
       "workspace_source_deps": [
+        "ai-gateway-contracts",
         "ai-gateway-core"
       ]
     },
@@ -129,8 +131,13 @@
         "from_unit": "ai-gateway-contracts",
         "imported_modules": [
           "ai_gateway_core.agents",
-          "ai_gateway_core.auth.gateway_secret",
-          "ai_gateway_core.events"
+          "ai_gateway_core.agents.runtime",
+          "ai_gateway_core.agents.runtime_lease",
+          "ai_gateway_core.auth",
+          "ai_gateway_core.auth.capability_proof",
+          "ai_gateway_core.events",
+          "ai_gateway_core.events.envelope",
+          "ai_gateway_core.events.errors"
         ],
         "importing_file_count": 1,
         "importing_files": [
@@ -149,14 +156,19 @@
           "ai_gateway_contracts.event_errors",
           "ai_gateway_contracts.replay"
         ],
-        "importing_file_count": 6,
+        "importing_file_count": 11,
         "importing_files": [
           "packages/ai-gateway-core/src/ai_gateway_core/agents/runtime.py",
           "packages/ai-gateway-core/src/ai_gateway_core/agents/runtime_lease.py",
           "packages/ai-gateway-core/src/ai_gateway_core/auth/capability_proof.py",
           "packages/ai-gateway-core/src/ai_gateway_core/auth/gateway_secret.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/eval/agent_version_candidate.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/events/bus.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/events/consumer.py",
           "packages/ai-gateway-core/src/ai_gateway_core/events/envelope.py",
-          "packages/ai-gateway-core/src/ai_gateway_core/events/errors.py"
+          "packages/ai-gateway-core/src/ai_gateway_core/events/errors.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/metrics/usage_recorder.py",
+          "packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/agent_repository.py"
         ],
         "to_unit": "ai-gateway-contracts"
       },
@@ -178,12 +190,50 @@
         "allowed_by_agents_md": true,
         "from_unit": "gateway",
         "imported_modules": [
+          "ai_gateway_contracts.agent_launch",
+          "ai_gateway_contracts.agent_runtime",
+          "ai_gateway_contracts.agent_runtime_lease",
+          "ai_gateway_contracts.capability_proof",
+          "ai_gateway_contracts.event_envelope"
+        ],
+        "importing_file_count": 24,
+        "importing_files": [
+          "src/api/internal/agent_capabilities.py",
+          "src/api/internal/attachment_capabilities.py",
+          "src/api/internal/confluence_capabilities.py",
+          "src/api/internal/image_capabilities.py",
+          "src/api/internal/office_artifacts.py",
+          "src/api/internal_mcp_broker.py",
+          "src/api/v1/_agent_runtime_routes/preview.py",
+          "src/api/v1/_agent_runtime_routes/published.py",
+          "src/api/v1/_agent_runtime_routes/snapshot.py",
+          "src/api/v1/_agent_runtime_routes/streaming.py",
+          "src/api/v1/agent_local_nodes.py",
+          "src/api/v1/agent_public.py",
+          "src/api/v1/agent_runtime.py",
+          "src/api/v1/agents.py",
+          "src/main.py",
+          "src/services/agent_runtime/control/memory_context.py",
+          "src/services/agent_runtime/control/snapshot_builder.py",
+          "src/services/agent_runtime/control/thread_lifecycle.py",
+          "src/services/agent_runtime/control/turn_start.py",
+          "src/services/agent_runtime/control_plane.py",
+          "src/services/agent_runtime/model/authorization.py",
+          "src/services/agent_runtime/model_plane.py",
+          "src/services/agent_runtime/runtime_configuration.py",
+          "src/services/assistant_entry/launch_resolution.py"
+        ],
+        "to_unit": "ai-gateway-contracts"
+      },
+      {
+        "allowed_by_agents_md": true,
+        "from_unit": "gateway",
+        "imported_modules": [
           "ai_gateway_core",
-          "ai_gateway_core.agents",
+          "ai_gateway_core.agents.deletion",
           "ai_gateway_core.agents.spec",
           "ai_gateway_core.agents.system_prompt",
-          "ai_gateway_core.auth",
-          "ai_gateway_core.auth.capability_proof",
+          "ai_gateway_core.auth._core",
           "ai_gateway_core.auth.gateway_secret",
           "ai_gateway_core.billing.pricing_catalog",
           "ai_gateway_core.comm.client",
@@ -196,7 +246,7 @@
           "ai_gateway_core.eval.agent_version_candidate",
           "ai_gateway_core.eval.evaluator_executor",
           "ai_gateway_core.eval.runtime_contract",
-          "ai_gateway_core.events",
+          "ai_gateway_core.events.consumer",
           "ai_gateway_core.events.registry",
           "ai_gateway_core.exceptions",
           "ai_gateway_core.image",
@@ -225,6 +275,7 @@
           "ai_gateway_core.proxy.sse_heartbeat",
           "ai_gateway_core.proxy.version_middleware",
           "ai_gateway_core.quiz",
+          "ai_gateway_core.release_manifest",
           "ai_gateway_core.security",
           "ai_gateway_core.security.redaction",
           "ai_gateway_core.session",
@@ -241,7 +292,7 @@
           "ai_gateway_core.tasks",
           "ai_gateway_core.tracing"
         ],
-        "importing_file_count": 138,
+        "importing_file_count": 150,
         "importing_files": [
           "src/adapters/base.py",
           "src/adapters/comfyui.py",
@@ -258,12 +309,17 @@
           "src/api/internal/confluence_capabilities.py",
           "src/api/internal/image_capabilities.py",
           "src/api/internal/office_artifacts.py",
-          "src/api/internal_mcp_broker.py",
           "src/api/schemas/agents.py",
           "src/api/schemas/assistant.py",
           "src/api/schemas/request.py",
           "src/api/schemas/response.py",
           "src/api/v1/_agent_runtime_routes/attachments.py",
+          "src/api/v1/_agent_runtime_routes/core.py",
+          "src/api/v1/_agent_runtime_routes/preview.py",
+          "src/api/v1/_agent_runtime_routes/published.py",
+          "src/api/v1/_agent_runtime_routes/rate_limit.py",
+          "src/api/v1/_agent_runtime_routes/snapshot.py",
+          "src/api/v1/_agent_runtime_routes/streaming.py",
           "src/api/v1/_assistant_routes/artifacts.py",
           "src/api/v1/_assistant_routes/catalog.py",
           "src/api/v1/_assistant_routes/metrics.py",
@@ -298,6 +354,7 @@
           "src/api/v1/tasks.py",
           "src/api/v1/tenant_policies.py",
           "src/api/v2/agent.py",
+          "src/api/version.py",
           "src/container.py",
           "src/core/auth/api_key.py",
           "src/core/auth/jwt.py",
@@ -338,11 +395,17 @@
           "src/proxy/langgraph_run_body.py",
           "src/proxy/response_cache.py",
           "src/proxy/transparent_proxy.py",
+          "src/services/agent_runtime/capability_catalog.py",
+          "src/services/agent_runtime/control/http_headers.py",
+          "src/services/agent_runtime/control/turn_start.py",
+          "src/services/agent_runtime/control/types.py",
           "src/services/agent_runtime/control_plane.py",
           "src/services/agent_runtime/mcp_gateway_broker.py",
+          "src/services/agent_runtime/model/chat_completions.py",
+          "src/services/agent_runtime/model/native_responses.py",
           "src/services/agent_runtime/model_plane.py",
-          "src/services/agent_runtime/runtime_configuration.py",
           "src/services/agent_runtime_cleanup.py",
+          "src/services/assistant_entry/launch_resolution.py",
           "src/services/assistant_entry/model_access.py",
           "src/services/assistant_entry/session_binding.py",
           "src/services/auth/api_key_service.py",
@@ -402,7 +465,20 @@
         "allowed_by_agents_md": true,
         "from_unit": "knowledge-service",
         "imported_modules": [
-          "ai_gateway_core.auth.capability_proof",
+          "ai_gateway_contracts.capability_proof",
+          "ai_gateway_contracts.replay"
+        ],
+        "importing_file_count": 2,
+        "importing_files": [
+          "apps/knowledge-service/src/knowledge_service/api/routes/capability_plane.py",
+          "apps/knowledge-service/src/knowledge_service/main.py"
+        ],
+        "to_unit": "ai-gateway-contracts"
+      },
+      {
+        "allowed_by_agents_md": true,
+        "from_unit": "knowledge-service",
+        "imported_modules": [
           "ai_gateway_core.auth.gateway_secret",
           "ai_gateway_core.auth.gateway_secret_middleware",
           "ai_gateway_core.comm",
@@ -412,15 +488,16 @@
           "ai_gateway_core.logging",
           "ai_gateway_core.proxy",
           "ai_gateway_core.proxy.drain",
+          "ai_gateway_core.release_manifest",
           "ai_gateway_core.security",
           "ai_gateway_core.storage.image_storage",
           "ai_gateway_core.tracing"
         ],
         "importing_file_count": 13,
         "importing_files": [
-          "apps/knowledge-service/src/knowledge_service/api/routes/capability_plane.py",
           "apps/knowledge-service/src/knowledge_service/api/routes/eval.py",
           "apps/knowledge-service/src/knowledge_service/api/routes/knowledge.py",
+          "apps/knowledge-service/src/knowledge_service/api/version.py",
           "apps/knowledge-service/src/knowledge_service/auth/gateway_secret_mw.py",
           "apps/knowledge-service/src/knowledge_service/main.py",
           "apps/knowledge-service/src/knowledge_service/services/knowledge/confluence/sync_service.py",
@@ -442,8 +519,13 @@
         "from_unit": "ai-gateway-contracts",
         "imported_modules": [
           "ai_gateway_core.agents",
-          "ai_gateway_core.auth.gateway_secret",
-          "ai_gateway_core.events"
+          "ai_gateway_core.agents.runtime",
+          "ai_gateway_core.agents.runtime_lease",
+          "ai_gateway_core.auth",
+          "ai_gateway_core.auth.capability_proof",
+          "ai_gateway_core.events",
+          "ai_gateway_core.events.envelope",
+          "ai_gateway_core.events.errors"
         ],
         "importing_file_count": 1,
         "importing_files": [
