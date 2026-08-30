@@ -37,6 +37,7 @@ import render_baseline_contract  # noqa: E402
 
 from database.authority.bootstrap import (  # noqa: E402
     fresh_install,
+    provision_extensions_admin,
     provision_roles_admin,
     verify_baseline_sql_file,
 )
@@ -563,6 +564,10 @@ async def freeze(args: argparse.Namespace) -> None:
             admin,
             AuthorityPaths(REPO_ROOT / "database"),
             DEFAULT_ROLE_PREFIX,
+        )
+        await provision_extensions_admin(
+            admin,
+            AuthorityPaths(REPO_ROOT / "database"),
         )
         with tempfile.TemporaryDirectory(prefix="arc03-verify-sql-") as temporary:
             verify_path = Path(temporary) / "verify.sql"

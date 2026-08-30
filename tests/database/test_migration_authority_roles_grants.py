@@ -119,6 +119,15 @@ class FakeRoleBootstrapConnection:
         self.public_database_create = public_database_create
         self.executed: list[str] = []
 
+    def transaction(self) -> FakeRoleBootstrapConnection:
+        return self
+
+    async def __aenter__(self) -> FakeRoleBootstrapConnection:
+        return self
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
     async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
         if "arc03-role-bootstrap-state" in query:
             if not self.ready:
@@ -181,7 +190,7 @@ class FakeRoleBootstrapConnection:
         raise AssertionError(f"unexpected query: {query}")
 
     async def fetchval(self, query: str, *_args: Any) -> bool:
-        if "arc03-role-bootstrap-admin" in query:
+        if "arc03-role-bootstrap-admin" in query or "arc03-extension-bootstrap-admin" in query:
             return self.superuser
         raise AssertionError(f"unexpected query: {query}")
 
@@ -264,6 +273,25 @@ async def test_explicit_admin_role_provisioning_verifies_its_postcondition() -> 
     assert "ADMIN-ONLY" in conn.executed[0]
     assert set(LOGICAL_PRINCIPALS) == set(ROLE_SUFFIXES)
     assert set(PLATFORM_SCHEMAS) == {"public", "gateway", "assistant", "knowledge"}
+
+
+async def test_explicit_admin_extension_provisioning_closes_public_routines(
+    tmp_path: Path,
+) -> None:
+    paths = AuthorityPaths(tmp_path / "database")
+    paths.bootstrap_dir.mkdir(parents=True)
+    (paths.bootstrap_dir / "extensions.sql").write_text(
+        "-- EXTENSION BOOTSTRAP\n", encoding="utf-8"
+    )
+    conn = FakeRoleBootstrapConnection(ready=True, superuser=True)
+
+    await bootstrap.provision_extensions_admin(conn, paths)
+
+    assert any("EXTENSION BOOTSTRAP" in statement for statement in conn.executed)
+    assert any(
+        "REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA" in statement
+        for statement in conn.executed
+    )
 
 
 def _assert_cutover_contract(sql: str) -> None:

@@ -142,7 +142,7 @@ SELECT EXISTS (
        ) AS create_roles
 """
 
-_FRESH_EXTENSION_ACL_HARDENING_SQL = """
+_ROUTINE_ACL_HARDENING_SQL = """
 /* arc03-fresh-extension-acl-hardening */
 REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA public, gateway, assistant, knowledge FROM PUBLIC
 """
@@ -306,6 +306,32 @@ async def bootstrap_extensions(
         await conn.execute(f'SET LOCAL ROLE "{owner_role}"')
         await conn.execute(extensions_sql)
         await conn.execute("RESET ROLE")
+
+
+async def provision_extensions_admin(
+    conn: Any,
+    paths: AuthorityPaths,
+) -> None:
+    """Preinstall trusted extensions and close their bootstrap-superuser ACLs.
+
+    PostgreSQL trusted extension member routines remain owned by the bootstrap
+    superuser even when CREATE EXTENSION runs after SET ROLE.  A fresh baseline
+    therefore needs this explicit admin phase before the migrator transaction.
+    """
+    is_superuser = bool(
+        await conn.fetchval(
+            "/* arc03-extension-bootstrap-admin */ "
+            "SELECT current_setting('is_superuser', true) = 'on'"
+        )
+    )
+    if not is_superuser:
+        raise AuthorityError(
+            "extension provisioning requires a separate PostgreSQL superuser/admin connection"
+        )
+    extensions_sql = (paths.bootstrap_dir / "extensions.sql").read_text(encoding="utf-8")
+    async with conn.transaction():
+        await conn.execute(extensions_sql)
+        await conn.execute(_ROUTINE_ACL_HARDENING_SQL)
 
 
 async def run_baseline_sql_file(
@@ -538,7 +564,7 @@ async def fresh_install(
         # Extension scripts and restored routines can retain built-in PUBLIC
         # EXECUTE independently of the owner's default ACL. Fresh objects are
         # owner-controlled, so close all four schemas before exact grants.
-        await conn.execute(_FRESH_EXTENSION_ACL_HARDENING_SQL)
+        await conn.execute(_ROUTINE_ACL_HARDENING_SQL)
         await run_baseline_sql_file(
             conn,
             baseline_dir / "grants.sql",
