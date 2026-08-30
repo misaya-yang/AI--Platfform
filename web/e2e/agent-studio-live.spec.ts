@@ -80,6 +80,11 @@ test.describe("Agent Studio live stack", () => {
       await expect(assistantResponse).not.toHaveText(/Generating|completed without a text response/);
       await expect(assistantResponse).not.toHaveText("Agent E2E stub response");
       await expect(page.locator(".agent-preview-error")).toHaveCount(0);
+      await expect(page.getByTestId("agent-preview-panel")).toHaveAttribute(
+        "aria-busy",
+        "false",
+        { timeout: 90_000 },
+      );
       await page.screenshot({
         path: path.join(evidenceDir, "studio-desktop.png"),
         fullPage: true,

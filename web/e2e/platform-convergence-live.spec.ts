@@ -97,6 +97,20 @@ async function openAssistantWithQwen(page: Page): Promise<LiveModel> {
   ).toBeTruthy();
 
   const model = qwen as LiveModel;
+  await expect.poll(async () => {
+    if (await page.getByRole("button", { name: "Select model", exact: true }).isVisible()) {
+      return true;
+    }
+    for (const candidateModel of models) {
+      if (await page.getByRole("button", {
+        name: candidateModel.name,
+        exact: true,
+      }).first().isVisible().catch(() => false)) {
+        return true;
+      }
+    }
+    return false;
+  }, { timeout: 30_000 }).toBe(true);
   let modelTrigger = page.getByRole("button", { name: "Select model", exact: true });
   for (const candidateModel of models) {
     const candidate = page.getByRole("button", {

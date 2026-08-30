@@ -287,7 +287,12 @@ export function AgentPreviewPanel({
   };
 
   return (
-    <section className="agent-preview" aria-labelledby="agent-preview-title" data-testid="agent-preview-panel">
+    <section
+      className="agent-preview"
+      aria-labelledby="agent-preview-title"
+      aria-busy={sending}
+      data-testid="agent-preview-panel"
+    >
       <header className="agent-preview-header">
         <div>
           <Title id="agent-preview-title" level={3}>{t("agents.common.preview")}</Title>
