@@ -26,6 +26,9 @@ from database.authority.commands import (  # noqa: E402
     command_status,
     default_paths,
 )
+from database.authority.constants import (  # noqa: E402
+    MIGRATION_ADVISORY_LOCK_NAMESPACE as MIGRATION_ADVISORY_LOCK_NAMESPACE,
+)
 from database.authority.discovery import HISTORICAL_FILENAME_DUPLICATES  # noqa: E402
 from database.authority.runner import (  # noqa: E402
     MigrationAuthority,

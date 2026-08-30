@@ -105,7 +105,7 @@ SELECT desired.nspname, desired.objtype::text,
            WHERE privilege.grantee = 0
        ) OR EXISTS (
            SELECT 1
-           FROM aclexplode(COALESCE(schema_acl.defaclacl, '{}'::aclitem[])) AS privilege
+           FROM aclexplode(schema_acl.defaclacl) AS privilege
            WHERE privilege.grantee = 0
        ) AS public_has_privilege
 FROM desired
