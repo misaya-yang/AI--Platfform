@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
-from scripts.harness.hygiene_check import apply_allowlist, run, scan_js, scan_python
+from scripts.harness.hygiene_check import (
+    apply_allowlist,
+    compare_skip_baseline,
+    run,
+    scan_js,
+    scan_python,
+    scan_skip_markers,
+)
 
 
 def _write(root: Path, relative: str, content: str) -> None:
@@ -106,6 +114,65 @@ def test_typescript_full_file_scan_catches_multiline_and_placeholders(tmp_path: 
     assert [item.get("test") for item in failures[-2:]] == [
         "comment placeholder",
         "function placeholder",
+    ]
+
+
+def test_skip_baseline_allows_removal_but_rejects_new_or_reclassified_skip(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "tests/test_markers.py",
+        "import pytest\n\n"
+        "@pytest.mark.skipif(True, reason='known platform condition')\n"
+        "def test_known():\n    assert value\n\n"
+        "def test_new():\n    pytest.skip('new environment gap')\n",
+    )
+    _write(
+        tmp_path,
+        "web/src/marker.spec.ts",
+        'test.skip("known", () => { expect(value).toBe(1); });\n',
+    )
+    baseline = tmp_path / "skip-baseline.json"
+    baseline.write_text(
+        json.dumps(
+            {
+                "schema": "ai-gateway/baseline/skip-baseline/v1",
+                "python": {
+                    "marker_count": 1,
+                    "markers": [
+                        {
+                            "file": "tests/test_markers.py",
+                            "line": 3,
+                            "kind": "pytest.mark.skipif",
+                            "target": "test_known",
+                            "reason": "known platform condition",
+                        }
+                    ],
+                },
+                "typescript": {
+                    "marker_count": 1,
+                    "markers": [
+                        {"file": "web/src/marker.spec.ts", "line": 1, "kind": "skip"}
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = compare_skip_baseline(scan_skip_markers(tmp_path), baseline)
+
+    assert result["retired"] == 0
+    assert result["unexpected"] == [
+        {
+            "language": "python",
+            "file": "tests/test_markers.py",
+            "line": 8,
+            "kind": "pytest.skip (runtime)",
+            "target": "<runtime>",
+            "reason": "new environment gap",
+        }
     ]
 
 

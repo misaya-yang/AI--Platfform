@@ -10,7 +10,7 @@
   "durable_roots": ["reports/evidence"],
   "reference_globs": ["deploy/runbooks/**/feature-oracle.json"],
   "forbidden_path_parts": [".env", ".playwright", "auth", "storage-state"],
-  "restricted_suffixes": [".har", ".trace", ".webm", ".mp4"],
+  "restricted_suffixes": [".har", ".trace", ".zip", ".webm", ".mp4", ".log", ".jsonl"],
   "cleanup": {
     "default": "dry-run",
     "apply_requires_authorization_manifest": true,

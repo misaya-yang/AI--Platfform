@@ -70,6 +70,10 @@ def _code_references(symbol: str, excluded: set[str]) -> list[str]:
                 (isinstance(node, ast.Name) and node.id == symbol)
                 or (isinstance(node, ast.Attribute) and node.attr == symbol)
                 or (
+                    isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name == symbol
+                )
+                or (
                     isinstance(node, (ast.Import, ast.ImportFrom))
                     and any(alias.name == symbol or alias.asname == symbol for alias in node.names)
                 )
@@ -77,8 +81,8 @@ def _code_references(symbol: str, excluded: set[str]) -> list[str]:
             )
             if referenced:
                 hits.append(rel)
-        except (OSError, UnicodeDecodeError, SyntaxError):
-            continue
+        except (OSError, UnicodeDecodeError, SyntaxError) as exc:
+            raise CandidateError(f"cannot inspect tracked Python source {rel}: {exc}") from exc
     return hits
 
 

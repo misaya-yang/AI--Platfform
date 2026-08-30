@@ -41,11 +41,15 @@ import re
 import stat
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ALLOWLIST = Path(__file__).resolve().parent / "hygiene_allowlist.json"
 DEFAULT_EVIDENCE = ROOT / "tmp" / "gate-evidence" / "hygiene-check.json"
+DEFAULT_SKIP_BASELINE = (
+    ROOT / "docs" / "architecture" / "baselines" / "2026-08-post-rag" / "skip-baseline.json"
+)
 
 PY_SCAN_ROOTS = ("tests", "sdk", "apps", "packages")
 JS_SCAN_ROOTS = ("web", "sdk")
@@ -273,6 +277,145 @@ JS_EMPTY_BODY = re.compile(
     r"\}\s*(?:,\s*(?:[0-9_]+\s*)?)?\)",
     re.DOTALL,
 )
+JS_SKIP_MARKER = re.compile(r"\b(?:test|it|describe|suite)\s*\.\s*(skip|fixme|only)\b")
+
+
+def _decorator_name(decorator: ast.expr) -> str | None:
+    parts: list[str] = []
+    node = decorator.func if isinstance(decorator, ast.Call) else decorator
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    return ".".join(reversed(parts)) if parts else None
+
+
+def _skip_reason(call: ast.Call) -> str | None:
+    for keyword in call.keywords:
+        if keyword.arg == "reason" and isinstance(keyword.value, ast.Constant):
+            return str(keyword.value.value)
+    if call.args and isinstance(call.args[0], ast.Constant) and isinstance(
+        call.args[0].value, str
+    ):
+        return call.args[0].value
+    return None
+
+
+def scan_skip_markers(base: Path) -> dict[str, list[dict]]:
+    """Inventory current skip/xfail markers without trusting test collection."""
+
+    python_rows: list[dict] = []
+    for path in _iter_files(PY_SCAN_ROOTS, base, (".py",)):
+        if not path.name.startswith("test_"):
+            continue
+        rel = path.relative_to(base).as_posix()
+        tree, _source, parse_failure = _parse_python_test_file(path)
+        if parse_failure is not None or tree is None:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)):
+                for decorator in getattr(node, "decorator_list", []):
+                    name = _decorator_name(decorator)
+                    marker = name.rsplit(".", 1)[-1] if name else ""
+                    if not name or not name.startswith("pytest.mark.") or marker not in {
+                        "skip",
+                        "skipif",
+                        "xfail",
+                    }:
+                        continue
+                    python_rows.append(
+                        {
+                            "file": rel,
+                            "line": decorator.lineno,
+                            "kind": f"pytest.mark.{marker}",
+                            "target": getattr(node, "name", "<module>"),
+                            "reason": _skip_reason(decorator)
+                            if isinstance(decorator, ast.Call)
+                            else None,
+                        }
+                    )
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "skip"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "pytest"
+            ):
+                python_rows.append(
+                    {
+                        "file": rel,
+                        "line": node.lineno,
+                        "kind": "pytest.skip (runtime)",
+                        "target": "<runtime>",
+                        "reason": _skip_reason(node),
+                    }
+                )
+
+    typescript_rows: list[dict] = []
+    for path in _iter_files(JS_SCAN_ROOTS, base, (".ts", ".tsx")):
+        if not re.search(r"\.(test|spec)\.tsx?$", path.name):
+            continue
+        rel = path.relative_to(base).as_posix()
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for match in JS_SKIP_MARKER.finditer(text):
+            typescript_rows.append(
+                {
+                    "file": rel,
+                    "line": text.count("\n", 0, match.start()) + 1,
+                    "kind": match.group(1),
+                }
+            )
+    python_rows.sort(key=lambda row: (row["file"], row["line"]))
+    typescript_rows.sort(key=lambda row: (row["file"], row["line"]))
+    return {"python": python_rows, "typescript": typescript_rows}
+
+
+def compare_skip_baseline(
+    current: dict[str, list[dict]], baseline_path: Path
+) -> dict[str, object]:
+    """Allow skip removal, but reject every new/reclassified skip or xfail."""
+
+    try:
+        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HygieneScanError(f"skip baseline unreadable: {baseline_path}: {exc}") from exc
+    if baseline.get("schema") != "ai-gateway/baseline/skip-baseline/v1":
+        raise HygieneScanError("unsupported skip baseline schema")
+
+    unexpected: list[dict] = []
+    retired = 0
+    counts: dict[str, dict[str, int]] = {}
+    for language in ("python", "typescript"):
+        section = baseline.get(language)
+        rows = section.get("markers") if isinstance(section, dict) else None
+        if not isinstance(rows, list) or section.get("marker_count") != len(rows):
+            raise HygieneScanError(f"malformed {language} skip baseline")
+
+        remaining = Counter(_skip_marker_key(row, language) for row in rows)
+        for row in current[language]:
+            marker = _skip_marker_key(row, language)
+            if remaining[marker]:
+                remaining[marker] -= 1
+            else:
+                unexpected.append({"language": language, **row})
+        retired += sum(remaining.values())
+        counts[language] = {"baseline": len(rows), "current": len(current[language])}
+    return {"counts": counts, "unexpected": unexpected, "retired": retired}
+
+
+def _skip_marker_key(row: dict, language: str) -> tuple:
+    if language == "python":
+        return (
+            row.get("file"),
+            row.get("kind"),
+            row.get("target"),
+            row.get("reason"),
+        )
+    return (row.get("file"), row.get("kind"))
 
 
 def scan_js(
@@ -379,6 +522,11 @@ def run(base: Path, evidence_path: Path, allowlist_path: Path) -> int:
     try:
         py_failures, py_warnings = scan_python(base, scan_counts=scan_counts)
         js_failures = scan_js(base, scan_counts=scan_counts)
+        skip_result = (
+            compare_skip_baseline(scan_skip_markers(base), DEFAULT_SKIP_BASELINE)
+            if base == ROOT
+            else {"counts": {}, "unexpected": [], "retired": 0}
+        )
     except HygieneScanError as exc:
         result = {
             "gate": "hygiene-check",
@@ -432,7 +580,10 @@ def run(base: Path, evidence_path: Path, allowlist_path: Path) -> int:
         "expired_entries": expired,
         "stale_entries": stale,
         "no_assertion_warnings": py_warnings,
-        "result": "pass" if not (enforced or expired or stale) else "fail",
+        "skip_baseline": skip_result,
+        "result": "pass"
+        if not (enforced or expired or stale or skip_result["unexpected"])
+        else "fail",
     }
     if base == ROOT:
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
@@ -441,6 +592,7 @@ def run(base: Path, evidence_path: Path, allowlist_path: Path) -> int:
     print(
         f"hygiene failures: {len(enforced)}; allowlisted: {len(allowlisted)}; "
         f"expired entries: {len(expired)}; stale entries: {len(stale)}; "
+        f"unexpected skips: {len(skip_result['unexpected'])}; "
         f"no-assertion warnings: {len(py_warnings)}"
     )
     for item in enforced:
@@ -459,11 +611,16 @@ def run(base: Path, evidence_path: Path, allowlist_path: Path) -> int:
         )
     for entry in stale:
         print(f"  STALE allowlist entry matches nothing: {entry['file']} {entry['test']}")
+    for item in skip_result["unexpected"]:
+        print(
+            f"  NEW SKIP {item['file']}:{item['line']} {item['kind']}: "
+            f"{item.get('reason') or '(no static reason)'}"
+        )
     for item in py_warnings[:20]:
         print(f"  WARN {item['file']}:{item['line']} {item['test']}: {item['issue']}")
     if len(py_warnings) > 20:
         print(f"  ... and {len(py_warnings) - 20} more no-assertion warnings (see evidence)")
-    if enforced or expired or stale:
+    if enforced or expired or stale or skip_result["unexpected"]:
         return 1
     print(f"OK: test hygiene intact (evidence: {evidence_path.relative_to(base) if base == ROOT else 'selftest'})")
     return 0
@@ -521,6 +678,36 @@ def _selftest() -> int:
         "web/src/example.test.ts:.fixme( disabled test",
         "web/src/example.test.ts:empty test body",
     ]
+    with tempfile.TemporaryDirectory() as tmp:
+        baseline = Path(tmp) / "skip-baseline.json"
+        baseline.write_text(
+            json.dumps(
+                {
+                    "schema": "ai-gateway/baseline/skip-baseline/v1",
+                    "python": {"marker_count": 0, "markers": []},
+                    "typescript": {"marker_count": 0, "markers": []},
+                }
+            ),
+            encoding="utf-8",
+        )
+        skip_probe = compare_skip_baseline(
+            {
+                "python": [
+                    {
+                        "file": "tests/test_new.py",
+                        "line": 1,
+                        "kind": "pytest.mark.skip",
+                        "target": "test_new",
+                        "reason": "new skip",
+                    }
+                ],
+                "typescript": [],
+            },
+            baseline,
+        )
+        if len(skip_probe["unexpected"]) != 1:
+            print("SELFTEST FAILED: new skip marker was not rejected", file=sys.stderr)
+            return 1
     missing = [e for e in expected if e not in failures_seen]
     extra = [f for f in failures_seen if f not in expected]
     if missing or extra:

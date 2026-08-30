@@ -4,8 +4,8 @@
 > and keeping browser evidence useful without turning the repository into an artifact dump.
 
 **Schema:** `harness/repository-quality/v1`
-**Status:** policy active; mechanical hygiene enforcement queued for ARC-00. Fact snapshot based on
-`main@47b7a9b` on 2026-08-29 (pre-RAG merge)
+**Status:** policy and mechanical hygiene/evidence/LOC/shim enforcement active. Fact baseline is
+the post-RAG inventory rooted at `1d25e679`; historical 2026-08-13 counts remain leads only.
 
 ---
 
@@ -183,9 +183,15 @@ consumer count reaches zero or the support policy ends, a removal package delete
 compatibility test and adds an absence test. Public removal also follows semver/support policy; a
 date alone is not authorization. Unbounded shims are dead architecture.
 
-## 7. Quality gate target
+## 7. Quality gates
 
-The queued architecture program must implement a lightweight `hygiene-check` that covers:
+`make hygiene-check`, `make loc-no-growth-gate`, `make core-boundary-gate`, and
+`make harness-check` are the executable L0 checks. The hygiene gate rejects new skip/xfail markers
+relative to the immutable post-RAG inventory; removing an inherited skip is allowed. The evidence
+gate binds durable artifacts to the checked policy, an ancestor source commit, a clean committed
+artifact or portable sealed URI, and rejects feature-oracle references to scratch output.
+
+Together the quality gates cover:
 
 - empty/self-proving tests and forbidden `only/fixme` markers;
 - real TypeScript project coverage;

@@ -15,6 +15,7 @@ import subprocess
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_POLICY = ROOT / "deploy/evidence/policy.json"
@@ -24,6 +25,8 @@ AUTH_SCHEMA = "ai-platform/evidence-cleanup-authorization/v1"
 HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 GLOB_META = re.compile(r"[*?\[\]{}]")
+REQUIRED_FORBIDDEN_PARTS = {".env", ".playwright", "auth", "storage-state"}
+REQUIRED_RESTRICTED_SUFFIXES = {".har", ".trace", ".zip", ".webm", ".mp4", ".log"}
 
 
 class EvidenceError(RuntimeError):
@@ -87,6 +90,14 @@ def _repo_identity(root: Path) -> tuple[Path, Path, list[Path]]:
 
 
 def validate_policy(root: Path, policy_path: Path) -> dict[str, Any]:
+    try:
+        policy_mode = policy_path.lstat().st_mode
+        resolved_policy = policy_path.resolve(strict=True)
+        policy_rel = resolved_policy.relative_to(root.resolve()).as_posix()
+    except (OSError, ValueError) as exc:
+        raise EvidenceError(f"evidence policy must be a real repository file: {policy_path}") from exc
+    if stat.S_ISLNK(policy_mode) or not stat.S_ISREG(policy_mode):
+        raise EvidenceError(f"evidence policy must be a real repository file: {policy_path}")
     policy = _load(policy_path, "evidence policy")
     if policy.get("schema_version") != POLICY_SCHEMA:
         raise EvidenceError("unsupported evidence policy schema")
@@ -110,9 +121,27 @@ def validate_policy(root: Path, policy_path: Path) -> dict[str, Any]:
         if rel in seen or rel in {".", ".git", "reports"}:
             raise EvidenceError(f"unsafe/duplicate durable root: {rel}")
         seen.add(rel)
+    forbidden = policy.get("forbidden_path_parts")
+    if not isinstance(forbidden, list) or not REQUIRED_FORBIDDEN_PARTS.issubset(
+        {str(value).lower() for value in forbidden}
+    ):
+        raise EvidenceError("policy weakens the required auth/environment path protections")
+    restricted = policy.get("restricted_suffixes")
+    if not isinstance(restricted, list) or not REQUIRED_RESTRICTED_SUFFIXES.issubset(
+        {str(value).lower() for value in restricted}
+    ):
+        raise EvidenceError("policy weakens the required restricted-raw suffix protections")
+    cleanup = policy.get("cleanup")
+    if not isinstance(cleanup, dict) or cleanup != {
+        "default": "dry-run",
+        "apply_requires_authorization_manifest": True,
+        "apply_requires_external_quarantine": True,
+    }:
+        raise EvidenceError("cleanup policy must remain dry-run and fail closed")
     manifest = _safe_rel(policy.get("manifest"), "manifest")
     if not (root / manifest).is_file():
         raise EvidenceError(f"evidence manifest is missing: {manifest}")
+    policy["_validated_policy_path"] = policy_rel
     return policy
 
 
@@ -148,6 +177,8 @@ def validate_manifest(root: Path, policy: dict[str, Any]) -> dict[str, Any]:
     manifest = _load(path, "evidence manifest")
     if manifest.get("schema_version") != MANIFEST_SCHEMA:
         raise EvidenceError("unsupported evidence manifest schema")
+    if manifest.get("policy") != policy.get("_validated_policy_path"):
+        raise EvidenceError("evidence manifest is not bound to the validated policy")
     entries = manifest.get("entries")
     if not isinstance(entries, list):
         raise EvidenceError("evidence manifest entries must be a list")
@@ -158,9 +189,14 @@ def validate_manifest(root: Path, policy: dict[str, Any]) -> dict[str, Any]:
         "retention", "source_git_sha", "command", "scenario", "sha256",
         "viewport", "redaction_reviewer", "access_policy",
     }
+    allowed = required | {"repository_path", "uri"}
     for entry in entries:
         if not isinstance(entry, dict) or not required.issubset(entry):
             raise EvidenceError("durable evidence entry is missing required fields")
+        if set(entry) - allowed:
+            raise EvidenceError(
+                f"durable evidence entry has unknown fields: {sorted(set(entry) - allowed)}"
+            )
         evidence_id = entry["id"]
         if not isinstance(evidence_id, str) or not evidence_id or evidence_id in ids:
             raise EvidenceError(f"invalid/duplicate evidence id: {evidence_id!r}")
@@ -203,6 +239,8 @@ def validate_manifest(root: Path, policy: dict[str, Any]) -> dict[str, Any]:
         resolved_source = _git(root, "rev-parse", f"{source}^{{commit}}", check=False)
         if resolved_source.returncode != 0 or resolved_source.stdout.strip() != source:
             raise EvidenceError(f"evidence source Git object is unavailable: {evidence_id}")
+        if _git(root, "merge-base", "--is-ancestor", source, "HEAD", check=False).returncode != 0:
+            raise EvidenceError(f"evidence source Git object is not an ancestor of HEAD: {evidence_id}")
         repository_path = entry.get("repository_path")
         uri = entry.get("uri")
         if bool(repository_path) == bool(uri):
@@ -220,9 +258,73 @@ def validate_manifest(root: Path, policy: dict[str, Any]) -> dict[str, Any]:
                 raise EvidenceError(
                     f"durable repository evidence is not committed and clean: {rel}"
                 )
-        elif not isinstance(uri, str) or not uri.startswith("sealed://"):
-            raise EvidenceError(f"external evidence URI must use sealed://: {evidence_id}")
+            if str(entry["media_type"]).startswith("image/") and viewport is None:
+                raise EvidenceError(f"image evidence requires a viewport: {evidence_id}")
+            if entry["access_policy"] != "repository":
+                raise EvidenceError(f"repository evidence access policy must be repository: {evidence_id}")
+        else:
+            parsed = urlsplit(uri) if isinstance(uri, str) else None
+            if (
+                parsed is None
+                or parsed.scheme != "sealed"
+                or not parsed.netloc
+                or parsed.path in {"", "/"}
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise EvidenceError(
+                    f"external evidence URI must be a portable sealed://bundle/artifact URI: {evidence_id}"
+                )
+            if entry["access_policy"] == "repository":
+                raise EvidenceError(f"sealed evidence cannot use repository access policy: {evidence_id}")
+
+    controlled_references = _controlled_oracle_references(root, policy)
+    scratch_prefixes = tuple(f"{item['path']}/" for item in policy["scratch_roots"])
+    durable_paths = {
+        str(entry["repository_path"])
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("repository_path")
+    }
+    for source_path, reference in controlled_references:
+        if reference.startswith(scratch_prefixes):
+            raise EvidenceError(
+                f"feature oracle references non-portable scratch evidence: {source_path}: {reference}"
+            )
+        if reference.startswith(durable_roots) and reference not in durable_paths:
+            raise EvidenceError(
+                f"feature oracle durable evidence is missing from manifest: {source_path}: {reference}"
+            )
     return {"entries": len(entries), "manifest_sha256": _sha(path)}
+
+
+def _controlled_oracle_references(
+    root: Path, policy: dict[str, Any]
+) -> list[tuple[str, str]]:
+    """Return policy-controlled artifact paths named by machine feature oracles."""
+
+    prefixes = [
+        *(f"{item['path']}/" for item in policy["scratch_roots"]),
+        *(f"{item}/" for item in policy["durable_roots"]),
+    ]
+    references: set[tuple[str, str]] = set()
+    for pattern in policy.get("reference_globs", []):
+        if not isinstance(pattern, str):
+            raise EvidenceError("reference_globs entries must be strings")
+        for raw in glob.glob(str(root / pattern), recursive=True):
+            source = Path(raw)
+            if not source.is_file() or source.is_symlink():
+                continue
+            try:
+                payload = json.loads(source.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise EvidenceError(f"feature oracle is unreadable: {source}: {exc}") from exc
+            text = json.dumps(payload, sort_keys=True)
+            for prefix in prefixes:
+                for match in re.finditer(rf"{re.escape(prefix)}[^\s\"';,\]]+", text):
+                    references.add((source.relative_to(root).as_posix(), match.group(0)))
+    return sorted(references)
 
 
 def _forbidden_content(rel: str, policy: dict[str, Any]) -> str | None:
