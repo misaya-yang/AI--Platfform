@@ -3,11 +3,11 @@
   "baseline_id": "2026_08_post_kb_v1",
   "extensions_sha256": null,
   "files_sha256": {
-    "cutover_convergence.sql": "ecb76410721726dd444f41eb078a9a398844ee814f87e5dc5f7df358cd6dc337",
+    "cutover_convergence.sql": "430185b4337b5dfe5484fe39e5634401582b5711e629f54016bce9c090eb5b4b",
     "grants.sql": "2e92ac72d056f5e2d30624b4d32b94386c567ebeec7d98908f54e46035f577fd",
     "init.sql": "894f0ec2b1da6079a71557a069ef14709dfb47082aa181d4d2d6d47e8b6570d5",
     "reference_data.sql": "e9246aed3cab8f8f18884ead0dc274daf76048def89cc60ab36c710944683d6f",
-    "verify.sql": "a0605273763988608dd79606a1f2b25fd756266f62afdaf8f623933ec8e2f842"
+    "verify.sql": "19e806da96353774c5fe9cc0f1ecba06a334412d3757d51173eca0cb6688431b"
   },
   "generated_at": null,
   "generator": "scripts/database/freeze_baseline.py",

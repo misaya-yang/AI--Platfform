@@ -88,6 +88,12 @@ def test_static_policy_and_sql_regenerate_exactly() -> None:
     view_order = relocation.index("WHEN 'view' THEN 1")
     sequence_order = relocation.index("WHEN 'sequence' THEN 2")
     assert table_order < view_order < sequence_order
+    assert "oidvectortypes(procedure.proargtypes)" in relocation
+    assert "pg_get_function_identity_arguments" not in relocation
+
+    rendered_verify = render_baseline_contract.render_verify(objects, matrix)
+    assert "oidvectortypes(procedure.proargtypes)" in rendered_verify
+    assert "pg_get_function_identity_arguments" not in rendered_verify
 
 
 def test_ownership_and_grant_inputs_fail_closed_on_drift() -> None:

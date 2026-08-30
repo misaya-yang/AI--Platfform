@@ -368,7 +368,10 @@ BEGIN
         JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace
         WHERE namespace.nspname IN ('public', 'gateway', 'assistant', 'knowledge')
           AND procedure.proname = desired.name
-          AND pg_get_function_identity_arguments(procedure.oid) = desired.identity_arguments
+          -- Policy identities are type-only signatures suitable for ALTER /
+          -- GRANT syntax. The catalog identity formatter includes input names
+          -- when declared, so compare the canonical input type vector instead.
+          AND oidvectortypes(procedure.proargtypes) = desired.identity_arguments
           AND procedure.prokind = 'f'
           AND NOT EXISTS (
               SELECT 1 FROM pg_depend AS dependency

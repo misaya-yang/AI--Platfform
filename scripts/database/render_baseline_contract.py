@@ -331,7 +331,10 @@ BEGIN
         JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace
         WHERE namespace.nspname IN ('public', 'gateway', 'assistant', 'knowledge')
           AND procedure.proname = desired.name
-          AND pg_get_function_identity_arguments(procedure.oid) = desired.identity_arguments
+          -- Policy identities are type-only signatures suitable for ALTER /
+          -- GRANT syntax. The catalog identity formatter includes input names
+          -- when declared, so compare the canonical input type vector instead.
+          AND oidvectortypes(procedure.proargtypes) = desired.identity_arguments
           AND procedure.prokind = 'f'
           AND NOT EXISTS (
               SELECT 1 FROM pg_depend AS dependency
@@ -410,7 +413,7 @@ def _location_check(item: ObjectPolicy) -> str:
             "SELECT count(*) = 1 FROM pg_proc AS procedure "
             "JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace "
             f"WHERE namespace.nspname = {schema} AND procedure.proname = {name} "
-            f"AND pg_get_function_identity_arguments(procedure.oid) = {arguments}"
+            f"AND oidvectortypes(procedure.proargtypes) = {arguments}"
         )
     else:
         expression = (
@@ -464,7 +467,7 @@ def _grant_matrix_check(
               AND role.rolname IN ({roles})
             UNION ALL
             SELECT 'function', namespace.nspname, procedure.proname,
-                   pg_get_function_identity_arguments(procedure.oid), role.rolname,
+                   oidvectortypes(procedure.proargtypes), role.rolname,
                    acl.privilege_type || CASE WHEN acl.is_grantable THEN ':GRANT' ELSE '' END
             FROM pg_proc AS procedure
             JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace
