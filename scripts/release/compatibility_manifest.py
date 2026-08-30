@@ -12,6 +12,21 @@ import sys
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+try:
+    from scripts.release.release_evidence import (
+        ReleaseEvidenceError,
+        validate_integration_receipt,
+        validate_release_matrix,
+        validate_retirement_manifest,
+    )
+except ModuleNotFoundError:  # direct ``python scripts/release/...`` Make target
+    from release_evidence import (  # type: ignore[no-redef]
+        ReleaseEvidenceError,
+        validate_integration_receipt,
+        validate_release_matrix,
+        validate_retirement_manifest,
+    )
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MANIFEST = ROOT / "deploy/release/compatibility-manifest.json"
 SCHEMA = "ai-platform/compatibility-manifest/v1"
@@ -110,6 +125,24 @@ def _compose_revision(root: Path, files: tuple[str, ...]) -> str:
     return _canonical_sha({name: _sha(root / name) for name in files})
 
 
+def _release_evidence(root: Path) -> dict[str, Any]:
+    files = {
+        "matrix": "deploy/release/release-rollback-matrix.json",
+        "retirement_manifest": "deploy/release/historical-plan-retirement.json",
+        "matrix_schema": "deploy/release/schemas/release-rollback-matrix-v1.schema.json",
+        "receipt_schema": "deploy/release/schemas/integration-gate-receipt-v1.schema.json",
+        "retirement_schema": "deploy/release/schemas/historical-plan-retirement-v1.schema.json",
+        "closeout_template": "deploy/release/FINAL-CLOSEOUT-TEMPLATE.md",
+    }
+    return {
+        f"{name}_path": path
+        for name, path in files.items()
+    } | {
+        f"{name}_sha256": _sha(root / path)
+        for name, path in files.items()
+    }
+
+
 def build_offline(root: Path) -> dict[str, Any]:
     runtime = _lock(root)
     source = runtime.get("source") if isinstance(runtime.get("source"), dict) else {}
@@ -166,6 +199,7 @@ def build_offline(root: Path) -> dict[str, Any]:
             "node_major": "22",
             "rust": rust_match.group(1) if rust_match else None,
         },
+        "release_evidence": _release_evidence(root),
         "vector_contract": {
             "bm25_revision": bm25_match.group(1) if bm25_match else None,
         },
@@ -203,7 +237,9 @@ def missing_candidate_fields(root: Path, manifest: dict[str, Any]) -> list[str]:
         if not receipts.get(receipt):
             missing.append(f"receipts.{receipt}")
     expected = build_offline(root)
-    for section in ("runtime_overlay", "database", "contracts", "topology", "toolchains"):
+    for section in (
+        "runtime_overlay", "database", "contracts", "topology", "toolchains", "release_evidence"
+    ):
         actual = manifest.get(section) if isinstance(manifest.get(section), dict) else {}
         for field, current in expected[section].items():
             if current in (None, "") or actual.get(field) in (None, ""):
@@ -215,7 +251,9 @@ def missing_candidate_fields(root: Path, manifest: dict[str, Any]) -> list[str]:
 
 
 def _compare_offline(manifest: dict[str, Any], expected: dict[str, Any]) -> None:
-    for section in ("runtime_overlay", "database", "contracts", "topology", "toolchains"):
+    for section in (
+        "runtime_overlay", "database", "contracts", "topology", "toolchains", "release_evidence"
+    ):
         actual = manifest.get(section)
         if not isinstance(actual, dict):
             raise ManifestError(f"manifest section missing: {section}")
@@ -255,28 +293,16 @@ def _verify_receipts(root: Path, manifest: dict[str, Any]) -> None:
             raise ManifestError(f"receipt path missing: {name}")
         path = _receipt_path(root, raw, name)
         receipt = _load(path, f"{name} receipt")
-        if (
-            receipt.get("schema_version") != "ai-platform/integration-gate-receipt/v1"
-            or receipt.get("gate") != RECEIPT_GATES[name]
-            or receipt.get("result") != "pass"
-            or receipt.get("unexpected_skips") != 0
-        ):
-            raise ManifestError(f"receipt is not a zero-skip pass: {name}")
-        if receipt.get("release_id") != release_id or receipt.get("source_git_sha") != source_sha:
-            raise ManifestError(f"receipt release/source identity drift: {name}")
-        steps = receipt.get("steps")
-        if not isinstance(steps, list) or not steps:
-            raise ManifestError(f"receipt has no executable steps: {name}")
-        for step in steps:
-            if (
-                not isinstance(step, dict)
-                or not isinstance(step.get("command"), list)
-                or not step["command"]
-                or step.get("exit_code") != 0
-                or step.get("skip_markers") != 0
-                or HEX_64.fullmatch(str(step.get("output_sha256"))) is None
-            ):
-                raise ManifestError(f"receipt step is not a zero-skip execution: {name}")
+        try:
+            validate_integration_receipt(
+                receipt,
+                expected_gate=RECEIPT_GATES[name],
+                release_id=release_id,
+                source_git_sha=source_sha,
+                require_pass=True,
+            )
+        except ReleaseEvidenceError as exc:
+            raise ManifestError(f"receipt is not a zero-skip pass: {name}: {exc}") from exc
 
 
 def validate(root: Path, manifest: dict[str, Any], *, level: str) -> dict[str, Any]:
@@ -288,9 +314,30 @@ def validate(root: Path, manifest: dict[str, Any], *, level: str) -> dict[str, A
         raise ManifestError("compatibility manifest service/receipt set drift")
     _compare_offline(manifest, build_offline(root))
     missing = missing_candidate_fields(root, manifest)
+    if level == "candidate" and (
+        manifest.get("status") not in {"release_candidate", "released"} or missing
+    ):
+        raise ManifestError(f"candidate manifest is incomplete: {missing}")
+    try:
+        matrix = _load(
+            root / "deploy/release/release-rollback-matrix.json", "release/rollback matrix"
+        )
+        retirement = _load(
+            root / "deploy/release/historical-plan-retirement.json",
+            "historical-plan retirement manifest",
+        )
+        validate_retirement_manifest(root, retirement)
+        source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+        validate_release_matrix(
+            root,
+            matrix,
+            level=level,
+            release_id=manifest.get("release_id") if level == "candidate" else None,
+            source_git_sha=source.get("git_sha") if level == "candidate" else None,
+        )
+    except ReleaseEvidenceError as exc:
+        raise ManifestError(f"release evidence invalid: {exc}") from exc
     if level == "candidate":
-        if manifest.get("status") not in {"release_candidate", "released"} or missing:
-            raise ManifestError(f"candidate manifest is incomplete: {missing}")
         if RELEASE_ID.fullmatch(manifest["release_id"]) is None:
             raise ManifestError("release_id is invalid")
         source = manifest["source"]
@@ -350,6 +397,7 @@ def generate_candidate(root: Path, source_rev: str, inputs: dict[str, Any]) -> d
         "contracts": offline["contracts"],
         "topology": offline["topology"],
         "toolchains": offline["toolchains"],
+        "release_evidence": offline["release_evidence"],
         "vectors": {**vectors, **offline["vector_contract"]},
         "receipts": receipts,
     }

@@ -37,6 +37,7 @@ def test_offline_projection_covers_every_required_revision_family() -> None:
         "contracts",
         "topology",
         "toolchains",
+        "release_evidence",
         "vector_contract",
     }
     assert offline["runtime_overlay"]["upstream_sha"]
@@ -51,6 +52,9 @@ def test_complete_candidate_requires_zero_skip_release_bound_receipts(
 ) -> None:
     root = tmp_path / "repo"
     root.mkdir()
+    (root / "deploy/release").mkdir(parents=True)
+    (root / "deploy/release/release-rollback-matrix.json").write_text("{}")
+    (root / "deploy/release/historical-plan-retirement.json").write_text("{}")
     _git(root, "init", "-q")
     _git(root, "config", "user.email", "release@example.invalid")
     _git(root, "config", "user.name", "Release Test")
@@ -106,9 +110,20 @@ def test_complete_candidate_requires_zero_skip_release_bound_receipts(
         "contracts": {"openapi_sha256": "3" * 64},
         "topology": {"service_topology_revision": "4" * 64},
         "toolchains": {"python_major": "3", "node_major": "22", "rust": "1.95.0"},
+        "release_evidence": {"matrix_sha256": "6" * 64},
         "vector_contract": {"bm25_revision": "bm25-v2"},
     }
     monkeypatch.setattr(compatibility, "build_offline", lambda _root: offline)
+    monkeypatch.setattr(
+        compatibility,
+        "validate_release_matrix",
+        lambda *_args, **_kwargs: {"status": "PASS"},
+    )
+    monkeypatch.setattr(
+        compatibility,
+        "validate_retirement_manifest",
+        lambda *_args, **_kwargs: {"entries": 1},
+    )
     manifest = {
         "schema_version": compatibility.SCHEMA,
         "status": "release_candidate",
@@ -120,6 +135,7 @@ def test_complete_candidate_requires_zero_skip_release_bound_receipts(
         "contracts": offline["contracts"],
         "topology": offline["topology"],
         "toolchains": offline["toolchains"],
+        "release_evidence": offline["release_evidence"],
         "vectors": {
             "qdrant_dataset_revision": "dataset-v1",
             "memory_namespace_revision": "memory-v1",

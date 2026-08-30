@@ -40,6 +40,20 @@
     "evidence_policy_revision": null
   },
   "toolchains": {"python_major": "3", "node_major": "22", "rust": null},
+  "release_evidence": {
+    "matrix_path": "deploy/release/release-rollback-matrix.json",
+    "retirement_manifest_path": "deploy/release/historical-plan-retirement.json",
+    "matrix_schema_path": "deploy/release/schemas/release-rollback-matrix-v1.schema.json",
+    "receipt_schema_path": "deploy/release/schemas/integration-gate-receipt-v1.schema.json",
+    "retirement_schema_path": "deploy/release/schemas/historical-plan-retirement-v1.schema.json",
+    "closeout_template_path": "deploy/release/FINAL-CLOSEOUT-TEMPLATE.md",
+    "matrix_sha256": "c0fc002a224faa9f5e7b488608b07265fcb46d7d136422ca1317886690cf46ab",
+    "retirement_manifest_sha256": "25f294b6fc95317415729b9699172a386c0eea625dd2750e4369cf742c19f0f2",
+    "matrix_schema_sha256": "f19cec5ad32b3f84df869ef88b08e070b6459754a81df7a05b90f46a266720af",
+    "receipt_schema_sha256": "ce99c9d1ae8add61c5bce20ff52bf497ff91360e91aab0ca6f7e55b88954fec0",
+    "retirement_schema_sha256": "0169db8988017bd94cc776d6911ad23fc5d389f5d5c2235a48551dc446221976",
+    "closeout_template_sha256": "07eea6c8ed59b36ae2153a640bcb0cd925e41d5dc07f7c6090559894bd8dc379"
+  },
   "vectors": {
     "qdrant_dataset_revision": null,
     "memory_namespace_revision": null,

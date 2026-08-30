@@ -1,6 +1,8 @@
 # AI Assistant 升级计划
 
-> **已被取代**。后续按 `docs/plans/assistant-harness-lighten-plan-2026-08.md` 实施。本文仍保留实测数据；「默认关思考当主药」的写法已过时。
+> **状态:** superseded — 本文及其旧 successor 均不再是执行入口；当前架构实现只由
+> `docs/plans/platform-architecture-convergence-prd-2026-08.md` 管理。本文仅保留 2026-08-13
+> 实测数据；「默认关思考当主药」的写法已过时。
 
 - **日期**: 2026-08-13
 - **范围**: 当前运行时 `ai-gateway-assistant-service`（本仓库 compose，镜像 `review-current`）
