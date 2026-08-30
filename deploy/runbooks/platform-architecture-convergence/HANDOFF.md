@@ -1,10 +1,29 @@
 # HANDOFF — platform-architecture-convergence → Codex
 
-**Date:** 2026-08-30 · **Branch:** `platform-arch-convergence-2026-08` @ `9fc5095f` ·
+**Date:** 2026-08-30 · **Branch:** `platform-arch-convergence-2026-08` @ `a518dd0a` ·
 **Working tree:** clean · **Single worktree** (main checkout only) · **Program dir:** this directory
 
+**Active phase:** ARC-00B
+
+**Active feature:** trustworthy gate/CI closure
+
+**Status:** in_progress
+
+**Completed:** Codex verified the branch topology (`0 behind / 17 ahead`), preserved all four WIP
+checkpoints, reproduced the seven missing-CI-job harness failures, and ran the new gate self-tests.
+**Evidence:** `make harness-check` → exit 2 with seven missing CI jobs; `make
+architecture-boundary-gate`, `make verify-openapi-contract`, and `make hygiene-check` → exit 0;
+`make loc-no-growth-gate` → exit 2 with two real violations.
+**Next action:** finish the ARC-00B CI jobs and required-result enforcement, then rerun every ARC-00B
+direct gate including Web semantics and LOC.
+**Blockers:** current Compose containers belong to deleted checkout
+`.claude/worktrees/kb-rag-upgrade`; they are invalid as branch evidence until ownership is switched.
+**Confirmation:** none; the user authorized safe local ownership repair with volume preservation.
+**Decision:** continue
+
 Claude Code ran Wave 1 of the PRD with 7 parallel agents in the shared working tree and was
-directed by the user to stop here. **All remaining work is owned by Codex.** This document is the
+directed by the user to stop here. Commit `a518dd0a` recorded that handoff. **All remaining work is
+owned by Codex.** This document is the
 authoritative entry point; `loop-state.json` and `work-packages.yml` in this directory carry the
 machine state.
 
@@ -20,9 +39,9 @@ machine state.
 - RAG is already accepted and merged: **do not re-accept RAG, do not change RAG algorithms**.
 - Code facts outrank docs; fix doc errors in the same change.
 
-## 2. Commit list on this branch (16 commits ahead of main)
+## 2. Commit list on this branch (17 commits ahead of main)
 
-Verified work (scoped tests ran and passed):
+Implementation checkpoints with scoped tests reported at handoff (independent review still pending):
 
 | SHA | Theme |
 | --- | --- |
@@ -47,14 +66,15 @@ WIP checkpoints (agents interrupted mid-work; syntax-checked, **not reviewed, no
 | `ec487d80` | wip(database): ARC-03 authority skeleton (`database/{authority,baselines,bootstrap,migrations/2026_08_post_kb_v1}`) |
 | `023b06a2` | wip(rust): ARC-02B/00C http_service splits, mid-refactor |
 | `9fc5095f` | wip(planes): ARC-02 `control/` 8 modules drafted; facades **not** rewired |
+| `a518dd0a` | docs(runbooks): handoff to Codex; no implementation verified by this commit |
 
 ## 3. Package status (truthful)
 
 | Package | State | What exists | What Codex must still do |
 | --- | --- | --- | --- |
-| ARC-00A | done, review pending | 6 baselines + contract freeze, ADR-008, program runbook, ledger closures | Regenerate baselines at settled tree (`python3 scripts/inventory/generate_baselines.py --verify`); finish receipt `receipts/ARC-00A.yml` |
-| ARC-01/01B | done, review pending | Facades + `_assistant_routes/` (7), `_agent_runtime_routes/` (9), `assistant_entry/` (3); zero route-surface drift (evidence in `reports/contracts/arc-01/`) | Cross-review; ARC-08 import-scan gate before deleting re-export shims |
-| ARC-04 | done, review pending | `ai-gateway-contracts` (no-I/O), 5 compat shims, boundary gate + negative self-test, inventories | Cross-review; re-run `scripts/core_boundary/check_core_boundary.py` after later merges |
+| ARC-00A | implementation present, review pending | 6 baselines + contract freeze, ADR-008, program runbook, ledger closures | Independently review generator/manifest authority; regenerate baselines at settled tree; finish receipt `receipts/ARC-00A.yml` |
+| ARC-01/01B | implementation present, review pending | Facades + `_assistant_routes/` (7), `_agent_runtime_routes/` (9), `assistant_entry/` (3); route-surface evidence exists in `reports/contracts/arc-01/` | Independently re-prove OpenAPI/SSE/error/seam parity; ARC-08 import-scan gate before deleting re-export shims |
+| ARC-04 | implementation present, review pending | `ai-gateway-contracts`, 5 compat shims, boundary gate + negative self-test, inventories | Independently prove no-I/O/identity/consumer claims; re-run `scripts/core_boundary/check_core_boundary.py` after later merges |
 | ARC-00B | WIP checkpoint | Sub-items 1–3 self-reported green (type-check file counts, offline+live OpenAPI gates, import boundary gate); gates scripts present | Verify sub-items 1–3 actually pass; finish 4–8 (gate schema/selector/CI final job, gate renames/evidence levels, CI real gates, structural-vs-semantic harness-check, hygiene+LOC). Review the ~35 `web/src` files are **type-fix-only** |
 | ARC-03 | WIP checkpoint | `database/authority/` runner package, bootstrap SQL, epoch dir skeleton | Legacy dual-recognition runner → move legacy files; baseline init.sql generation; ledger tables; 4 fingerprints + adoption; roles/grants; bypass shutdown (compose/cli/auto-init); live PG matrix (scratch DB pattern below); Migration-101 assessment |
 | ARC-02 | WIP checkpoint | `src/services/agent_runtime/control/` 8 modules drafted (nothing imports them yet) | Rewire `control_plane.py` facade; `model/` split; in-process CapabilityCatalogService (kill Gateway→Gateway loop); ResolvedAgentLaunchV1 + policy resolvers; Capability V2 convergence; scoped tests + self-HTTP regression test |
@@ -67,7 +87,13 @@ WIP checkpoints (agents interrupted mid-work; syntax-checked, **not reviewed, no
   `test_responses_ingress.py`, `test_agent_runtime_envelope.py` — **passed** post-split (ARC-01/01B agent).
 - `pytest packages/ai-gateway-core packages/ai-gateway-contracts` — **passed** (ARC-04 agent).
 - `scripts/core_boundary/check_core_boundary.py` (+ `--self-test`) — **passed**.
-- `make harness-check` — passed at ARC-00A completion (before later WIP).
+- `make harness-check` — passed at ARC-00A completion (before later WIP); at `a518dd0a` it fails
+  exactly seven semantic checks because the declared `gate-enforcement`, `gateway-units`, and
+  `rust-changed-crate` CI jobs do not exist.
+- At `a518dd0a`, `make architecture-boundary-gate`, `make verify-openapi-contract`, and `make
+  hygiene-check` pass including their negative self-tests. `make loc-no-growth-gate` fails on
+  `control/thread_lifecycle.py` (>800 new-file limit) and a 5-line growth in
+  `tests/api/test_agent_runtime_envelope.py`; these are not waived.
 - `python3 -m compileall` on all WIP Python — passed (syntax only).
 - Route-surface contract: before/after/now snapshots identical (OpenAPI view authoritative).
 - **Not run / deferred (must NOT be marked PASS):** full test suite; web `pnpm lint/build/type-check`
@@ -77,10 +103,11 @@ WIP checkpoints (agents interrupted mid-work; syntax-checked, **not reviewed, no
 
 ## 5. Environment facts
 
-- Docker engine running; containers up: `ai-gateway-pg` (main stack postgres, healthy) and
-  `ai-gateway-arc03-scratch-pg` (ARC-03 scratch DB, safe to stop/reuse). Stop only via normal
-  `docker stop`; never prune/`down -v` without user confirmation. No `build`/`up --build` for
-  routine verification; `make hot-update` + `make status` instead.
+- Docker engine is running, but `make doctor` at `a518dd0a` proves the existing `ai-gateway-*`
+  containers are owned by deleted checkout `.claude/worktrees/kb-rag-upgrade`. They are invalid
+  evidence until the primary session safely switches ownership while preserving volumes.
+  `ai-gateway-arc03-scratch-pg` remains the only authorized scratch target for ARC-03. Never prune
+  or use `down -v`.
 - 16 GB machine: `COMPOSE_PARALLEL_LIMIT=1`, serial Docker, `CARGO_BUILD_JOBS=1`.
 - Python: `uv run --all-packages --extra test pytest -q --no-cov <paths>`; lint
   `uv run --all-packages --extra dev ruff check <paths>`. Frontend: pnpm 10.33.0, Node 22/24.
@@ -120,8 +147,8 @@ WIP checkpoints (agents interrupted mid-work; syntax-checked, **not reviewed, no
 
 ## 7. Recommended order for Codex
 
-1. Read PRD + this file + `work-packages.yml`; rerun the "done" packages' scoped tests to confirm
-   the verified state reproduces at `9fc5095f`.
+1. Read PRD + this file + `work-packages.yml`; rerun the implemented packages' scoped tests and
+   independent reviews at `a518dd0a`; none is promoted merely from the handoff label.
 2. Finish ARC-00B (gates WIP) — smallest remaining surface; its CI/gate machinery de-risks everything else.
 3. Finish ARC-03 (live PG matrix needs the scratch container; idempotency + fingerprints are the core).
 4. Finish ARC-02 planes (rewire facade onto existing `control/` drafts), then rust ARC-02B/00C.

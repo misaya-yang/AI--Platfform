@@ -1,11 +1,11 @@
-# DRAFT receipt — ARC-00A is in_progress; §7 requires this record at
+# DRAFT receipt — ARC-00A is in review; §7 requires a final receipt only at
 # direct_verified or later. Fields below are provisional and will be
 # completed by the primary session when the final gate set has been re-run
 # at the settled tree.
 package_id: ARC-00A
-state: in_progress
+state: review
 base_sha: 336851c1
-head_sha: d7f9dbb8
+head_sha: a518dd0a
 changed_paths:
   - scripts/inventory/_common.py
   - scripts/inventory/data_access.py
@@ -24,7 +24,11 @@ changed_paths:
   - deploy/runbooks/platform-plane-restructure/loop-state.json
   - deploy/runbooks/platform-architecture-convergence/**
   - docs/harness/work-packages.md (registration section)
-commits: []                      # commits are performed by the primary session
+commits:
+  - 30f426ad
+  - 8f42d655
+  - 2d6fe909
+  - eb4dc048
 contracts_compared:
   - docs/architecture/baselines/2026-08-post-rag/contract-freeze.json (frozen digests)
 commands: []                     # filled at final verification
@@ -32,7 +36,7 @@ direct_verdict: PENDING
 integration_verdict: NOT_REQUIRED
 live_verdict: NOT_REQUIRED       # offline package; live proofs listed in contract-freeze.json live_stack_required
 deferred_live_scenarios: []
-review_findings: {blocker: 0, high: 0, medium: 0}   # pending Wave 1 cross-review
+review_findings: {status: pending}   # no zero claim before independent review runs
 rollback_class: old-binary-compatible
 remaining_risks:
   - baselines must be regenerated once parallel agents' tree churn settles
