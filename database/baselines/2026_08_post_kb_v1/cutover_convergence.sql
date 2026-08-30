@@ -29,6 +29,13 @@ BEGIN
         JOIN pg_namespace AS n ON n.oid = c.relnamespace
         WHERE n.nspname IN ('public', 'gateway', 'assistant', 'knowledge')
           AND c.relkind IN ('r', 'p', 'm', 'S', 'v', 'f')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM pg_depend AS dependency
+              WHERE dependency.classid = 'pg_class'::regclass
+                AND dependency.objid = c.oid
+                AND dependency.deptype = 'e'
+          )
         GROUP BY c.relname
         HAVING count(DISTINCT n.nspname) > 1
     ) AS ambiguous
@@ -46,6 +53,8 @@ $$;
 CREATE SCHEMA IF NOT EXISTS gateway;
 CREATE SCHEMA IF NOT EXISTS assistant;
 CREATE SCHEMA IF NOT EXISTS knowledge;
+-- Close the name-hijack window before inspecting or hardening any routine.
+REVOKE CREATE ON SCHEMA public, gateway, assistant, knowledge FROM PUBLIC;
 
 -- 2. Object ownership convergence -------------------------------------------
 -- Every relation (table, view, materialized view, sequence, foreign table)
@@ -69,6 +78,13 @@ BEGIN
         JOIN pg_namespace AS n ON n.oid = c.relnamespace
         WHERE n.nspname IN ('public', 'gateway', 'assistant', 'knowledge')
           AND c.relkind IN ('r', 'p', 'm', 'S', 'v', 'f')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM pg_depend AS dependency
+              WHERE dependency.classid = 'pg_class'::regclass
+                AND dependency.objid = c.oid
+                AND dependency.deptype = 'e'
+          )
         ORDER BY n.nspname, c.relname
     LOOP
         IF r.current_owner <> target THEN
@@ -86,17 +102,33 @@ BEGIN
         END IF;
     END LOOP;
 
-    -- Functions and types follow the same rule.
+    -- Extension-owned objects are excluded: their owner/version are governed
+    -- by the separate extension fingerprint and cannot be altered piecemeal.
+    -- User functions, procedures and aggregates follow the platform owner.
     FOR r IN
         SELECT p.oid::regprocedure AS signature,
-               pg_get_userbyid(p.proowner) AS current_owner
+               pg_get_userbyid(p.proowner) AS current_owner,
+               CASE p.prokind
+                   WHEN 'p' THEN 'PROCEDURE'
+                   WHEN 'a' THEN 'AGGREGATE'
+                   ELSE 'FUNCTION'
+               END AS object_kind
         FROM pg_proc AS p
         JOIN pg_namespace AS n ON n.oid = p.pronamespace
         WHERE n.nspname IN ('public', 'gateway', 'assistant', 'knowledge')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM pg_depend AS dependency
+              WHERE dependency.classid = 'pg_proc'::regclass
+                AND dependency.objid = p.oid
+                AND dependency.deptype = 'e'
+          )
         ORDER BY p.oid::regprocedure::text
     LOOP
         IF r.current_owner <> target THEN
-            EXECUTE format('ALTER FUNCTION %s OWNER TO %I', r.signature, target);
+            EXECUTE format(
+                'ALTER %s %s OWNER TO %I', r.object_kind, r.signature, target
+            );
         END IF;
     END LOOP;
 
@@ -105,8 +137,19 @@ BEGIN
                pg_get_userbyid(t.typowner) AS current_owner
         FROM pg_type AS t
         JOIN pg_namespace AS n ON n.oid = t.typnamespace
-        WHERE n.nspname IN ('gateway', 'assistant', 'knowledge')
-          AND t.typtype IN ('e', 'd', 'c')
+        LEFT JOIN pg_class AS type_relation ON type_relation.oid = t.typrelid
+        WHERE n.nspname IN ('public', 'gateway', 'assistant', 'knowledge')
+          AND (
+              t.typtype IN ('e', 'd', 'r', 'm')
+              OR (t.typtype = 'c' AND type_relation.relkind = 'c')
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM pg_depend AS dependency
+              WHERE dependency.classid = 'pg_type'::regclass
+                AND dependency.objid = t.oid
+                AND dependency.deptype = 'e'
+          )
         ORDER BY n.nspname, t.typname
     LOOP
         IF r.current_owner <> target THEN
@@ -119,7 +162,7 @@ BEGIN
     FOR r IN
         SELECT nspname AS schema, pg_get_userbyid(nspowner) AS current_owner
         FROM pg_namespace
-        WHERE nspname IN ('gateway', 'assistant', 'knowledge')
+        WHERE nspname IN ('public', 'gateway', 'assistant', 'knowledge')
     LOOP
         IF r.current_owner <> target THEN
             EXECUTE format('ALTER SCHEMA %I OWNER TO %I', r.schema, target);
@@ -129,23 +172,40 @@ END
 $$;
 
 -- 3. SECURITY DEFINER hardening ---------------------------------------------
--- Every SECURITY DEFINER function is owned by the NOLOGIN owner and pinned
--- to pg_catalog so unqualified names inside the body cannot be hijacked.
+-- Every SECURITY DEFINER routine is owned by the NOLOGIN owner and pinned to
+-- pg_catalog plus its owner-controlled home schema.  public is safe here only
+-- because schema ownership is already converged and PUBLIC CREATE is revoked.
 DO $$
 DECLARE
     target CONSTANT TEXT := 'ai_gateway_owner';
     f RECORD;
 BEGIN
     FOR f IN
-        SELECT p.oid::regprocedure AS signature
+        SELECT p.oid::regprocedure AS signature,
+               n.nspname AS schema,
+               CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_kind
         FROM pg_proc AS p
         JOIN pg_namespace AS n ON n.oid = p.pronamespace
         WHERE n.nspname IN ('public', 'gateway', 'assistant', 'knowledge')
           AND p.prosecdef
+          AND p.prokind IN ('f', 'p', 'w')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM pg_depend AS dependency
+              WHERE dependency.classid = 'pg_proc'::regclass
+                AND dependency.objid = p.oid
+                AND dependency.deptype = 'e'
+          )
         ORDER BY p.oid::regprocedure::text
     LOOP
-        EXECUTE format('ALTER FUNCTION %s OWNER TO %I', f.signature, target);
-        EXECUTE format('ALTER FUNCTION %s SET search_path = pg_catalog', f.signature);
+        EXECUTE format(
+            'ALTER %s %s OWNER TO %I', f.object_kind, f.signature, target
+        );
+        EXECUTE format(
+            'ALTER %s %s SET search_path = pg_catalog, %I',
+            f.object_kind, f.signature, f.schema
+        );
+        EXECUTE format('REVOKE EXECUTE ON %s %s FROM PUBLIC', f.object_kind, f.signature);
     END LOOP;
 END
 $$;
@@ -160,12 +220,34 @@ REVOKE ALL ON SCHEMA knowledge FROM PUBLIC;
 DO $$
 DECLARE
     s TEXT;
+    platform_type RECORD;
 BEGIN
     FOREACH s IN ARRAY ARRAY['public', 'gateway', 'assistant', 'knowledge']
     LOOP
         EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA %I FROM PUBLIC', s);
         EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA %I FROM PUBLIC', s);
-        EXECUTE format('REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA %I FROM PUBLIC', s);
+        EXECUTE format('REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA %I FROM PUBLIC', s);
+        FOR platform_type IN
+            SELECT t.typname
+            FROM pg_type AS t
+            LEFT JOIN pg_class AS type_relation ON type_relation.oid = t.typrelid
+            WHERE t.typnamespace = to_regnamespace(s)
+              AND (
+                  t.typtype IN ('e', 'd', 'r', 'm')
+                  OR (t.typtype = 'c' AND type_relation.relkind = 'c')
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM pg_depend AS dependency
+                  WHERE dependency.classid = 'pg_type'::regclass
+                    AND dependency.objid = t.oid
+                    AND dependency.deptype = 'e'
+              )
+        LOOP
+            EXECUTE format(
+                'REVOKE USAGE ON TYPE %I.%I FROM PUBLIC', s, platform_type.typname
+            );
+        END LOOP;
     END LOOP;
 END
 $$;
@@ -176,22 +258,30 @@ ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner IN SCHEMA public
 ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner IN SCHEMA public
     REVOKE ALL ON SEQUENCES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner IN SCHEMA public
-    REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+    REVOKE EXECUTE ON ROUTINES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner IN SCHEMA public
+    REVOKE USAGE ON TYPES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner IN SCHEMA gateway
     REVOKE ALL ON TABLES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner IN SCHEMA gateway
     REVOKE ALL ON SEQUENCES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner IN SCHEMA gateway
-    REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+    REVOKE EXECUTE ON ROUTINES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner IN SCHEMA gateway
+    REVOKE USAGE ON TYPES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner IN SCHEMA assistant
     REVOKE ALL ON TABLES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner IN SCHEMA assistant
     REVOKE ALL ON SEQUENCES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner IN SCHEMA assistant
-    REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+    REVOKE EXECUTE ON ROUTINES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner IN SCHEMA assistant
+    REVOKE USAGE ON TYPES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner IN SCHEMA knowledge
     REVOKE ALL ON TABLES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner IN SCHEMA knowledge
     REVOKE ALL ON SEQUENCES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner IN SCHEMA knowledge
-    REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+    REVOKE EXECUTE ON ROUTINES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner IN SCHEMA knowledge
+    REVOKE USAGE ON TYPES FROM PUBLIC;

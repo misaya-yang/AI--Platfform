@@ -158,18 +158,62 @@ class BootstrapConnection:
         self.transaction_depth = 0
         self.fail_reference_once = False
         self.baseline_marker: dict[str, str] | None = None
+        # Cluster roles are provisioned by a separate admin before schema init.
+        self.roles_ready = True
 
     def transaction(self) -> FakeTransaction:
         return FakeTransaction(self)
 
     async def fetchval(self, query: str, *args: Any) -> int:
+        if "arc03-role-bootstrap-admin" in query:
+            return 1
         if "to_regclass($1)" in query:
             return int(str(args[0]).removeprefix("public.") in self.objects)
         if "SELECT sum(object_count)" in query:
             return len(self.objects)
         raise AssertionError(f"unexpected bootstrap fetchval: {query}")
 
-    async def fetch(self, query: str, *_args: Any) -> list[dict[str, str]]:
+    async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+        if "arc03-role-bootstrap-state" in query:
+            if not self.roles_ready:
+                return []
+            names = list(args[0])
+            owner = next(name for name in names if name.endswith("owner"))
+            return [
+                {
+                    "rolname": name,
+                    "rolcanlogin": not name.endswith("owner"),
+                    "rolinherit": False,
+                    "rolsuper": False,
+                    "rolcreatedb": False,
+                    "rolcreaterole": False,
+                    "rolreplication": False,
+                    "rolbypassrls": False,
+                    "rolconfig": ["search_path=pg_catalog, gateway, assistant, knowledge, public"],
+                    "memberships": [owner] if name.endswith("migrator") else [],
+                }
+                for name in names
+            ]
+        if "arc03-schema-bootstrap-state" in query:
+            if not self.roles_ready:
+                return []
+            names = list(args[1])
+            owner = next(name for name in names if name.endswith("owner"))
+            return [
+                {"nspname": schema, "owner": owner, "create_roles": [owner]} for schema in args[0]
+            ]
+        if "arc03-default-acl-bootstrap-state" in query:
+            if not self.roles_ready:
+                return []
+            return [
+                {
+                    "nspname": schema,
+                    "objtype": object_type,
+                    "public_has_privilege": False,
+                }
+                for schema in args[1]
+                for object_type in ("r", "S", "f", "T")
+            ]
         if query == ledger.SELECT_BASELINE:
             return [self.baseline_marker] if self.baseline_marker is not None else []
         raise AssertionError(f"unexpected bootstrap fetch: {query}")
@@ -401,9 +445,7 @@ async def test_transactional_ddl_and_success_ledger_share_one_transaction(
     spec, epoch_dir = _write_change(tmp_path, sql, mode=TransactionMode.TRANSACTIONAL)
     conn = RunnerConnection()
 
-    await _authority(tmp_path).apply_change_transactional(
-        conn, "baseline", spec, epoch_dir
-    )
+    await _authority(tmp_path).apply_change_transactional(conn, "baseline", spec, epoch_dir)
 
     ddl = next(item for item in conn.executed if item[0] == sql)
     success = next(item for item in conn.executed if item[0] == ledger.INSERT_CHANGE_SUCCESS)
@@ -417,9 +459,7 @@ def test_checkpoint_parser_rejects_duplicate_reserved_and_empty_segments() -> No
             "SELECT 1;\n-- @checkpoint same\nSELECT 2;\n-- @checkpoint same\nSELECT 3;"
         )
     with pytest.raises(AuthorityError, match="duplicate/reserved"):
-        runner.MigrationAuthority._split_checkpoints(
-            "-- @checkpoint __preamble__\nSELECT 1;"
-        )
+        runner.MigrationAuthority._split_checkpoints("-- @checkpoint __preamble__\nSELECT 1;")
     with pytest.raises(AuthorityError, match="has no SQL segment"):
         runner.MigrationAuthority._split_checkpoints("-- @checkpoint final\n")
 
@@ -467,15 +507,15 @@ async def test_active_nontransactional_attempt_cannot_be_stolen(tmp_path: Path) 
         resume_handler="resume",
     )
     conn = RunnerConnection(
-        latest_attempt=_attempt(spec, state=ledger.ATTEMPT_STATE_RUNNING, checkpoint="", expired=False)
+        latest_attempt=_attempt(
+            spec, state=ledger.ATTEMPT_STATE_RUNNING, checkpoint="", expired=False
+        )
     )
 
     with pytest.raises(AuthorityBlockedError, match="active lease"):
         await _authority(
             tmp_path, handlers={"resume": _noop_recovery_handler}
-        ).apply_change_non_transactional(
-            conn, "baseline", spec, epoch_dir
-        )
+        ).apply_change_non_transactional(conn, "baseline", spec, epoch_dir)
 
     select_query = conn.fetches[0][0]
     assert "ORDER BY started_at DESC, attempt_id DESC" in select_query
@@ -542,7 +582,9 @@ async def test_expired_attempt_calls_resume_handler_and_starts_after_checkpoint(
     assert "RESET lock_timeout" in executed_sql
     assert not any("SEGMENT_ONE" in query for query in executed_sql)
     assert any("SEGMENT_TWO" in query for query in executed_sql)
-    transition = next(args for query, args in conn.fetches if query == runner._TRANSITION_EXPIRED_ATTEMPT)
+    transition = next(
+        args for query, args in conn.fetches if query == runner._TRANSITION_EXPIRED_ATTEMPT
+    )
     assert transition[3] == ledger.ATTEMPT_STATE_RESUMABLE
     assert any(query == ledger.INSERT_CHANGE_SUCCESS for query in executed_sql)
 
@@ -577,9 +619,7 @@ async def test_expired_attempt_without_resume_handler_transitions_failed_and_rep
 
     assert calls == [ledger.ATTEMPT_STATE_FAILED]
     transition = next(
-        args
-        for query, args in conn.fetches
-        if query == runner._TRANSITION_EXPIRED_ATTEMPT
+        args for query, args in conn.fetches if query == runner._TRANSITION_EXPIRED_ATTEMPT
     )
     assert transition[3] == ledger.ATTEMPT_STATE_FAILED
 
@@ -603,9 +643,7 @@ async def test_unknown_checkpoint_fails_before_claim_or_sql(tmp_path: Path) -> N
     with pytest.raises(AuthorityBlockedError, match="unknown checkpoint"):
         await _authority(
             tmp_path, handlers={"resume": _noop_recovery_handler}
-        ).apply_change_non_transactional(
-            conn, "baseline", spec, epoch_dir
-        )
+        ).apply_change_non_transactional(conn, "baseline", spec, epoch_dir)
 
     assert conn.executed == []
     assert not any(query == runner._CLAIM_ATTEMPT for query, _args in conn.fetches)
@@ -627,15 +665,11 @@ async def test_nontransactional_success_waits_for_all_postconditions(
     with pytest.raises(AuthorityError, match="postcondition"):
         await _authority(
             tmp_path, handlers={"repair": _noop_recovery_handler}
-        ).apply_change_non_transactional(
-            conn, "baseline", spec, epoch_dir
-        )
+        ).apply_change_non_transactional(conn, "baseline", spec, epoch_dir)
 
     assert not any(query == ledger.INSERT_CHANGE_SUCCESS for query, _args, _depth in conn.executed)
     terminal_args = [
-        args
-        for query, args in conn.fetches
-        if query == runner._UPDATE_ATTEMPT_TERMINAL_FENCED
+        args for query, args in conn.fetches if query == runner._UPDATE_ATTEMPT_TERMINAL_FENCED
     ]
     assert terminal_args[-1][3] == ledger.ATTEMPT_STATE_FAILED
     executed_sql = [query for query, _args, _depth in conn.executed]
@@ -662,6 +696,6 @@ async def test_lost_fence_blocks_resume(tmp_path: Path) -> None:
     conn.lose_fence_for = "claim"
 
     with pytest.raises(AuthorityBlockedError, match="lost its lease/fence"):
-        await _authority(tmp_path, handlers={"repair": repair_handler}).apply_change_non_transactional(
-            conn, "baseline", spec, epoch_dir
-        )
+        await _authority(
+            tmp_path, handlers={"repair": repair_handler}
+        ).apply_change_non_transactional(conn, "baseline", spec, epoch_dir)

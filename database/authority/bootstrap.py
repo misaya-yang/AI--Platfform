@@ -2,9 +2,9 @@
 
 Fresh install order (PRD ARC-03 §3B.7):
 
-    empty preflight -> bootstrap/roles.sql -> bootstrap/extensions.sql ->
-    baselines/<id>/init.sql -> reference_data.sql -> grants.sql ->
-    fingerprint verification -> adoption marker
+    separate admin bootstrap/roles.sql -> empty preflight -> read-only role
+    verification -> bootstrap/extensions.sql -> baselines/<id>/init.sql ->
+    reference_data.sql -> grants.sql -> fingerprint verification -> marker
 
 An existing, non-empty database NEVER receives init.sql; it can only go
 through reconciliation/adoption.  Application startup performs a read-only
@@ -21,7 +21,12 @@ from typing import Any
 
 from . import ledger
 from .adoption import validate_existing_adoption_marker
-from .constants import DEFAULT_ROLE_PREFIX, LEDGER_TABLES
+from .constants import (
+    DEFAULT_ROLE_PREFIX,
+    LEDGER_TABLES,
+    LOGICAL_PRINCIPALS,
+    PLATFORM_SCHEMAS,
+)
 from .fingerprint import compute_fingerprints
 from .manifest import BaselineManifest
 from .runner import AuthorityError, AuthorityPaths
@@ -40,6 +45,66 @@ _SUPPORTED_BASELINE_REVISIONS_QUERY = f"""
 SELECT baseline_id FROM public.{ledger.BASELINES_TABLE}
 """
 
+_ROLE_BOOTSTRAP_STATE_SQL = """
+/* arc03-role-bootstrap-state */
+SELECT role.rolname, role.rolcanlogin, role.rolinherit, role.rolsuper,
+       role.rolcreatedb, role.rolcreaterole, role.rolreplication,
+       role.rolbypassrls, role.rolconfig,
+       ARRAY(
+           SELECT granted.rolname
+           FROM pg_auth_members AS membership
+           JOIN pg_roles AS granted ON granted.oid = membership.roleid
+           WHERE membership.member = role.oid
+           ORDER BY granted.rolname
+       ) AS memberships
+FROM pg_roles AS role
+WHERE role.rolname = ANY($1::text[])
+ORDER BY role.rolname
+"""
+
+_SCHEMA_BOOTSTRAP_STATE_SQL = """
+/* arc03-schema-bootstrap-state */
+SELECT namespace.nspname,
+       pg_get_userbyid(namespace.nspowner) AS owner,
+       ARRAY(
+           SELECT principal
+           FROM unnest($2::text[]) AS principal
+           WHERE has_schema_privilege(principal, namespace.nspname, 'CREATE')
+           ORDER BY principal
+       ) AS create_roles
+FROM pg_namespace AS namespace
+WHERE namespace.nspname = ANY($1::text[])
+ORDER BY namespace.nspname
+"""
+
+_DEFAULT_ACL_BOOTSTRAP_STATE_SQL = """
+/* arc03-default-acl-bootstrap-state */
+WITH owner_role AS (
+    SELECT oid FROM pg_roles WHERE rolname = $1
+), desired(nspname, objtype) AS (
+    SELECT schema_name, object_type
+    FROM unnest($2::text[]) AS schema_name
+    CROSS JOIN (VALUES ('r'::"char"), ('S'::"char"), ('f'::"char"), ('T'::"char"))
+        AS object_types(object_type)
+)
+SELECT desired.nspname, desired.objtype::text,
+       EXISTS (
+           SELECT 1
+           FROM aclexplode(
+               COALESCE(default_acl.defaclacl, acldefault(desired.objtype, owner_role.oid))
+           ) AS privilege
+           WHERE privilege.grantee = 0
+       ) AS public_has_privilege
+FROM desired
+CROSS JOIN owner_role
+JOIN pg_namespace AS namespace ON namespace.nspname = desired.nspname
+LEFT JOIN pg_default_acl AS default_acl
+  ON default_acl.defaclrole = owner_role.oid
+ AND default_acl.defaclnamespace = namespace.oid
+ AND default_acl.defaclobjtype = desired.objtype
+ORDER BY desired.nspname, desired.objtype
+"""
+
 
 def render_role_sql(role_sql: str, role_prefix: str) -> str:
     """Substitute the configurable LOGIN/NOLOGIN role prefix.
@@ -52,9 +117,124 @@ def render_role_sql(role_sql: str, role_prefix: str) -> str:
     return role_sql.replace("ai_gateway_", role_prefix)
 
 
+async def role_bootstrap_issues(conn: Any, role_prefix: str) -> list[str]:
+    """Read-only proof that the separate admin bootstrap is complete."""
+    render_role_sql("", role_prefix)  # validates the configurable identifier prefix
+    names = [f"{role_prefix}{principal}" for principal in LOGICAL_PRINCIPALS]
+    rows = await conn.fetch(_ROLE_BOOTSTRAP_STATE_SQL, names)
+    by_name = {str(row["rolname"]): row for row in rows}
+    issues: list[str] = []
+    missing = sorted(set(names) - set(by_name))
+    if missing:
+        issues.extend(f"missing role {name}" for name in missing)
+        return issues
+
+    owner = f"{role_prefix}owner"
+    migrator = f"{role_prefix}migrator"
+    for principal in LOGICAL_PRINCIPALS:
+        name = f"{role_prefix}{principal}"
+        row = by_name[name]
+        expected_login = principal != "owner"
+        if bool(row["rolcanlogin"]) is not expected_login:
+            issues.append(f"{name} LOGIN/NOLOGIN attribute is incorrect")
+        for field in (
+            "rolinherit",
+            "rolsuper",
+            "rolcreatedb",
+            "rolcreaterole",
+            "rolreplication",
+            "rolbypassrls",
+        ):
+            if bool(row[field]):
+                issues.append(f"{name} must force {field}=false")
+        expected_memberships = [owner] if name == migrator else []
+        memberships = sorted(str(value) for value in (row["memberships"] or []))
+        if memberships != expected_memberships:
+            issues.append(f"{name} memberships are {memberships}, expected {expected_memberships}")
+        configurations = [str(value) for value in (row["rolconfig"] or [])]
+        search_path = next(
+            (
+                value.removeprefix("search_path=")
+                for value in configurations
+                if value.startswith("search_path=")
+            ),
+            None,
+        )
+        if search_path is None:
+            issues.append(f"{name} has no role-level search_path")
+        else:
+            schemas = [value.strip() for value in search_path.split(",")]
+            if not schemas or schemas[0] != "pg_catalog" or schemas[-1] != "public":
+                issues.append(f"{name} search_path must start pg_catalog and end public")
+
+    schema_rows = await conn.fetch(
+        _SCHEMA_BOOTSTRAP_STATE_SQL,
+        list(PLATFORM_SCHEMAS),
+        names,
+    )
+    by_schema = {str(row["nspname"]): row for row in schema_rows}
+    missing_schemas = sorted(set(PLATFORM_SCHEMAS) - set(by_schema))
+    issues.extend(f"missing platform schema {schema}" for schema in missing_schemas)
+    for schema in sorted(set(PLATFORM_SCHEMAS) & set(by_schema)):
+        row = by_schema[schema]
+        if str(row["owner"]) != owner:
+            issues.append(f"schema {schema} owner is {row['owner']!r}, expected {owner!r}")
+        create_roles = sorted(str(value) for value in (row["create_roles"] or []))
+        if create_roles != [owner]:
+            issues.append(f"schema {schema} CREATE roles are {create_roles}, expected [{owner!r}]")
+    default_acl_rows = await conn.fetch(
+        _DEFAULT_ACL_BOOTSTRAP_STATE_SQL,
+        owner,
+        list(PLATFORM_SCHEMAS),
+    )
+    expected_default_acl_rows = len(PLATFORM_SCHEMAS) * 4
+    if len(default_acl_rows) != expected_default_acl_rows:
+        issues.append(
+            "owner default ACL matrix is incomplete: "
+            f"got {len(default_acl_rows)} rows, expected {expected_default_acl_rows}"
+        )
+    for row in default_acl_rows:
+        if bool(row["public_has_privilege"]):
+            issues.append(
+                "PUBLIC retains default privilege for "
+                f"{row['nspname']} object type {row['objtype']}"
+            )
+    return sorted(issues)
+
+
 async def bootstrap_roles(conn: Any, paths: AuthorityPaths, role_prefix: str) -> None:
+    """Verify the separately provisioned role model; never execute role DDL."""
+    issues = await role_bootstrap_issues(conn, role_prefix)
+    if issues:
+        raise AuthorityError(
+            "role bootstrap is ADMIN-ONLY and is incomplete; provision "
+            "database/bootstrap/roles.sql with a separate admin connection. "
+            "Unresolved: " + "; ".join(issues)
+        )
+
+
+async def provision_roles_admin(conn: Any, paths: AuthorityPaths, role_prefix: str) -> None:
+    """Explicit cluster-admin interface; schema migration never calls this."""
+    issues = await role_bootstrap_issues(conn, role_prefix)
+    if not issues:
+        return
+    is_superuser = bool(
+        await conn.fetchval(
+            "/* arc03-role-bootstrap-admin */ SELECT current_setting('is_superuser', true) = 'on'"
+        )
+    )
+    if not is_superuser:
+        raise AuthorityError(
+            "role provisioning requires a separate PostgreSQL superuser/admin connection"
+        )
     roles_sql = (paths.bootstrap_dir / "roles.sql").read_text(encoding="utf-8")
     await conn.execute(render_role_sql(roles_sql, role_prefix))
+    remaining = await role_bootstrap_issues(conn, role_prefix)
+    if remaining:
+        raise AuthorityError(
+            "admin role bootstrap completed without satisfying its contract: "
+            + "; ".join(remaining)
+        )
 
 
 async def bootstrap_extensions(conn: Any, paths: AuthorityPaths) -> None:
@@ -62,9 +242,7 @@ async def bootstrap_extensions(conn: Any, paths: AuthorityPaths) -> None:
     await conn.execute(extensions_sql)
 
 
-async def run_baseline_sql_file(
-    conn: Any, path: Path, *, role_prefix: str | None = None
-) -> None:
+async def run_baseline_sql_file(conn: Any, path: Path, *, role_prefix: str | None = None) -> None:
     """Execute one baseline SQL file in a runner-owned transaction.
 
     Files that name platform roles (cutover, grants) are rendered with the
@@ -80,7 +258,9 @@ async def run_baseline_sql_file(
         await conn.execute(sql)
 
 
-async def database_empty(conn: Any) -> bool:
+async def database_empty(
+    conn: Any, *, allowed_empty_schemas: tuple[str, ...] = ()
+) -> bool:
     """True when the database has no user-created schema objects.
 
     Relations alone are insufficient: an enum, function, custom schema or
@@ -121,19 +301,23 @@ async def database_empty(conn: Any) -> bool:
             WHERE n.nspname NOT IN ('public', 'pg_catalog', 'information_schema', 'pg_toast')
               AND n.nspname NOT LIKE 'pg_temp%'
               AND n.nspname NOT LIKE 'pg_toast_temp%'
+              AND NOT (n.nspname = ANY($1::text[]))
             UNION ALL
             SELECT count(*)
             FROM pg_extension
             WHERE extname <> 'plpgsql'
         ) AS user_objects
-        """
+        """,
+        list(allowed_empty_schemas),
     )
     return not count
 
 
-async def preflight_database_empty(conn: Any) -> None:
+async def preflight_database_empty(
+    conn: Any, *, allowed_empty_schemas: tuple[str, ...] = ()
+) -> None:
     """Fresh installs require a truly empty database."""
-    if not await database_empty(conn):
+    if not await database_empty(conn, allowed_empty_schemas=allowed_empty_schemas):
         raise AuthorityError(
             "database is not empty; init.sql must never run against a "
             "non-empty database — use reconciliation/adoption"
@@ -150,30 +334,24 @@ async def fresh_install(
 ) -> dict[str, str]:
     """Bootstrap one empty database atomically onto the frozen baseline.
 
-    Roles, extensions, schema, reference rows, grants, fingerprints, ledger and
-    marker share one outer transaction.  The per-file transactions below are
-    savepoints when used with asyncpg.  Any failure therefore leaves no partial
-    init that would make the next empty-database preflight permanently fail.
+    Cluster roles are preprovisioned on a separate admin connection. Extensions,
+    schema, reference rows, grants, fingerprints, ledger and marker share one
+    outer transaction.  The per-file transactions below are savepoints when
+    used with asyncpg.  Any failure therefore leaves no partial init that would
+    make the next empty-database preflight permanently fail.
     Fresh install deliberately has no durable attempt row: rollback means
     "not started", while the atomic baseline marker means "complete".
     """
     ledger_presence = {
-        table: bool(
-            await conn.fetchval(
-                "SELECT to_regclass($1) IS NOT NULL", f"public.{table}"
-            )
-        )
+        table: bool(await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", f"public.{table}"))
         for table in LEDGER_TABLES
     }
     ledger_present = ledger_presence[ledger.BASELINES_TABLE]
     if ledger_present:
-        missing_ledger = sorted(
-            table for table, present in ledger_presence.items() if not present
-        )
+        missing_ledger = sorted(table for table, present in ledger_presence.items() if not present)
         if missing_ledger:
             raise AuthorityError(
-                "fresh-install marker ledger is incomplete; missing tables "
-                f"{missing_ledger}"
+                f"fresh-install marker ledger is incomplete; missing tables {missing_ledger}"
             )
         existing = await conn.fetch(ledger.SELECT_BASELINE)
         if not existing:
@@ -181,9 +359,7 @@ async def fresh_install(
                 "fresh-install ledger exists without an adoption marker; "
                 "refusing to guess whether a partial or foreign schema is safe"
             )
-        validate_existing_adoption_marker(
-            existing, baseline, manifest_sha256=manifest_sha256
-        )
+        validate_existing_adoption_marker(existing, baseline, manifest_sha256=manifest_sha256)
         computed = await compute_fingerprints(
             conn, role_prefix=role_prefix, reference_sets=baseline.reference_data
         )
@@ -194,14 +370,20 @@ async def fresh_install(
         ]
         if drift:
             raise AuthorityError(
-                "fresh-install marker exists but live fingerprints drifted: "
-                + "; ".join(drift)
+                "fresh-install marker exists but live fingerprints drifted: " + "; ".join(drift)
             )
         return computed
 
-    await preflight_database_empty(conn)
+    # Cluster roles and empty owner-controlled schemas are provisioned by a
+    # separate admin connection before the schema migrator starts. Verify that
+    # contract first, then ignore only those empty schema shells. Any object in
+    # them is still counted above and blocks init.sql.
+    await bootstrap_roles(conn, paths, role_prefix)
+    await preflight_database_empty(
+        conn,
+        allowed_empty_schemas=tuple(PLATFORM_SCHEMAS),
+    )
     async with conn.transaction():
-        await bootstrap_roles(conn, paths, role_prefix)
         await bootstrap_extensions(conn, paths)
 
         baseline_dir = paths.baseline_dir(baseline.baseline_id)
@@ -214,9 +396,7 @@ async def fresh_install(
                 await run_baseline_sql_file(conn, baseline_dir / file_name)
         finally:
             await conn.execute("RESET ROLE")
-        await run_baseline_sql_file(
-            conn, baseline_dir / "grants.sql", role_prefix=role_prefix
-        )
+        await run_baseline_sql_file(conn, baseline_dir / "grants.sql", role_prefix=role_prefix)
 
         computed = await compute_fingerprints(
             conn, role_prefix=role_prefix, reference_sets=baseline.reference_data
@@ -244,9 +424,7 @@ async def fresh_install(
             baseline.source_git_sha,
         )
         inserted = await conn.fetch(ledger.SELECT_BASELINE)
-        validate_existing_adoption_marker(
-            inserted, baseline, manifest_sha256=manifest_sha256
-        )
+        validate_existing_adoption_marker(inserted, baseline, manifest_sha256=manifest_sha256)
     return computed
 
 
