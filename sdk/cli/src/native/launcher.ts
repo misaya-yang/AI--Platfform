@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 
 import {
   LOCAL_PROXY_TOKEN_ENV,
@@ -44,6 +44,8 @@ interface LauncherDependencies {
   platform?: NodeJS.Platform;
   arch?: string;
   moduleUrl?: string;
+  hasExecutable?: (name: string, env: NodeJS.ProcessEnv) => boolean;
+  signalSource?: Pick<NodeJS.Process, "on" | "off">;
 }
 
 export async function runIndependentCli(
@@ -83,6 +85,16 @@ export async function runIndependentCli(
   let proxy: ChatCompatibilityProxy | undefined;
   const childEnv = nativeChildEnvironment(env, runtimeDir);
   try {
+    const platform = dependencies.platform ?? process.platform;
+    if (
+      platform === "linux" &&
+      forwardedArgs.includes("--approve-for-me") &&
+      !(dependencies.hasExecutable ?? executableOnPath)("bwrap", childEnv)
+    ) {
+      throw new Error(
+        "--approve-for-me on Linux requires bubblewrap (bwrap); install it or use an explicit sandbox/approval mode.",
+      );
+    }
     if (provider.wire_api === "chat_completions") {
       proxy = await (dependencies.startProxy ?? startChatCompatibilityProxy)(provider, env);
       childEnv[LOCAL_PROXY_TOKEN_ENV] = proxy.token;
@@ -104,6 +116,7 @@ export async function runIndependentCli(
       binary,
       forwardedArgs,
       childEnv,
+      dependencies.signalSource ?? process,
     );
   } catch (error) {
     stderr.write(`Independent Agent CLI failed: ${message(error)}\n`);
@@ -259,6 +272,13 @@ function providerEnvironmentNames(provider: ProviderProfile): Set<string> {
   ]);
 }
 
+function executableOnPath(name: string, env: NodeJS.ProcessEnv): boolean {
+  return (env.PATH ?? "")
+    .split(delimiter)
+    .filter(Boolean)
+    .some((directory) => existsSync(join(directory, name)));
+}
+
 function nativeChildEnvironment(source: NodeJS.ProcessEnv, codexHome: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { CODEX_HOME: codexHome };
   for (const name of NATIVE_CHILD_ENV_ALLOWLIST) {
@@ -309,6 +329,7 @@ function spawnAndWait(
   binary: string,
   argv: string[],
   env: NodeJS.ProcessEnv,
+  signalSource: Pick<NodeJS.Process, "on" | "off">,
 ): Promise<number> {
   return new Promise((resolvePromise, reject) => {
     const child = spawnProcess(binary, argv, {
@@ -316,8 +337,23 @@ function spawnAndWait(
       env,
       windowsHide: false,
     });
-    child.once("error", reject);
+    const forwardSignal = (signal: NodeJS.Signals) => {
+      if (child.exitCode === null && child.signalCode === null) child.kill(signal);
+    };
+    const onSigint = () => forwardSignal("SIGINT");
+    const onSigterm = () => forwardSignal("SIGTERM");
+    const cleanup = () => {
+      signalSource.off("SIGINT", onSigint);
+      signalSource.off("SIGTERM", onSigterm);
+    };
+    signalSource.on("SIGINT", onSigint);
+    signalSource.on("SIGTERM", onSigterm);
+    child.once("error", (error) => {
+      cleanup();
+      reject(error);
+    });
     child.once("exit", (code, signal) => {
+      cleanup();
       if (typeof code === "number") resolvePromise(code);
       else resolvePromise(signal ? 128 + signalNumber(signal) : 1);
     });

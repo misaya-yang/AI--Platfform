@@ -173,6 +173,8 @@ reads `~/.ai-gateway-cli/providers.json`.
   disagree. The launcher re-checks receipt target/name and binary SHA-256.
 - Pointing at an arbitrary binary or system `codex` requires explicit unsafe
   development opt-ins and is never release evidence.
+- Linux `--approve-for-me` requires `bubblewrap` (`bwrap`). The launcher fails
+  before spawning when it is absent, avoiding an unsafe escalation fallback.
 
 ## Development checks
 

@@ -91,15 +91,16 @@ trap cleanup EXIT
 git -C "$source_root" archive "$upstream_sha" | tar -x -C "$build_context"
 cp -R "$overlay_root/kernel-rs/." "$build_context/codex-rs/"
 
-image_tag="ai-gateway-independent-cli:local-${upstream_sha:0:12}-${overlay_sha:0:12}"
+image_tag="ai-gateway-independent-cli-builder:local-${upstream_sha:0:12}-${overlay_sha:0:12}"
 docker build \
     --file "$dockerfile" \
+    --target builder \
     --build-arg "CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-1}" \
     --build-arg "AI_PLATFORM_AGENT_RUNTIME_UPSTREAM_SHA=$upstream_sha" \
     --build-arg "AI_PLATFORM_AGENT_RUNTIME_OVERLAY_SHA256=$overlay_sha" \
     --tag "$image_tag" \
     "$build_context"
-docker run --rm --network none "$image_tag" --version
+docker run --rm --network none "$image_tag" /tmp/codex --version
 docker_arch="$(docker version --format '{{.Server.Arch}}')"
 case "$docker_arch" in
     amd64|x86_64) node_arch="x64" ;;
@@ -146,4 +147,4 @@ vendor.mkdir(parents=True, exist_ok=True)
 PY
 
 echo "Independent Agent CLI built at $output_dir/codex"
-echo "Docker image: $image_tag"
+echo "Docker builder image: $image_tag"

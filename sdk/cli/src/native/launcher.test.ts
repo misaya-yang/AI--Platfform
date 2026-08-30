@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -171,6 +172,58 @@ describe("independent native Runtime launcher", () => {
       PROVIDER_A_KEY: "synthetic-secret",
     }, { stderr: stderr.stream })).toBe(2);
     expect(stderr.value()).toContain("--cli-provider requires a provider id");
+  });
+
+  it("fails before spawning Linux auto-review when bubblewrap is unavailable", async () => {
+    const root = home();
+    saveProductConfig(config(), productConfigPath(root));
+    const stderr = capture();
+    const exit = await runIndependentCli(["exec", "--approve-for-me", "write a file"], {
+      AI_GATEWAY_CLI_HOME: root,
+      PROVIDER_A_KEY: "synthetic-secret",
+      PATH: "/usr/bin",
+    }, {
+      platform: "linux",
+      hasExecutable: () => false,
+      stderr: stderr.stream,
+    });
+    expect(exit).toBe(1);
+    expect(stderr.value()).toContain("requires bubblewrap");
+  });
+
+  it("forwards launcher SIGINT to the native child", async () => {
+    const root = home();
+    saveProductConfig(config(), productConfigPath(root));
+    const signals = new EventEmitter();
+    let forwarded: NodeJS.Signals | undefined;
+    const spawnProcess = (() => {
+      const child = new EventEmitter() as any;
+      child.exitCode = null;
+      child.signalCode = null;
+      child.kill = (signal: NodeJS.Signals) => {
+        forwarded = signal;
+        child.signalCode = signal;
+        queueMicrotask(() => child.emit("exit", null, signal));
+        return true;
+      };
+      queueMicrotask(() => signals.emit("SIGINT"));
+      return child;
+    }) as typeof import("node:child_process").spawn;
+
+    const exit = await runIndependentCli(["exec", "hello"], {
+      AI_GATEWAY_CLI_HOME: root,
+      AI_GATEWAY_AGENT_RUNTIME_BIN: process.execPath,
+      AI_GATEWAY_UNSAFE_DEV_RUNTIME: "1",
+      PROVIDER_A_KEY: "synthetic-secret",
+    }, {
+      spawnProcess,
+      signalSource: signals as any,
+    });
+
+    expect(forwarded).toBe("SIGINT");
+    expect(exit).toBe(130);
+    expect(signals.listenerCount("SIGINT")).toBe(0);
+    expect(signals.listenerCount("SIGTERM")).toBe(0);
   });
 
   it("rejects unknown and duplicate provider-add flags", async () => {
