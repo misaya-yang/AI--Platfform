@@ -215,7 +215,12 @@ class Container:
         auto_init = getattr(self.settings.database, "auto_init", False)
         bootstrap_admin_password_hash = None
         bootstrap_admin_password = os.environ.get("DEFAULT_USER_PASSWORD", "")
-        if auto_init and bootstrap_admin_password:
+        if auto_init:
+            raise RuntimeError(
+                "GATEWAY_DATABASE__AUTO_INIT is retired; run "
+                "`python -m database.authority migrate` before Gateway startup"
+            )
+        if bootstrap_admin_password:
             # Hash in the application process so the plaintext bootstrap
             # password never crosses the database connection or appears in SQL.
             from .core.auth.password import hash_password
@@ -225,7 +230,7 @@ class Container:
         return DatabaseStorage(
             dsn=self.settings.database.dsn,
             enabled=self.settings.database.enabled,
-            auto_init=auto_init,
+            auto_init=False,
             bootstrap_admin_password_hash=bootstrap_admin_password_hash,
             permission_cache_ttl_seconds=getattr(
                 self.settings.database, "permission_cache_ttl_seconds", 60

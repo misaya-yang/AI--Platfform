@@ -1330,7 +1330,8 @@ def test_collection_identity_migration_is_additive_and_nonempty_only() -> None:
     migrate_dockerfile = (root / "docker" / "migrate" / "Dockerfile").read_text(
         encoding="utf-8"
     )
-    assert "COPY database/migrations/per_service " in migrate_dockerfile
+    assert "COPY database /app/database" in migrate_dockerfile
+    assert 'ENTRYPOINT ["python", "-m", "database.authority"]' in migrate_dockerfile
 
 
 @pytest.mark.asyncio

@@ -6,10 +6,15 @@ metadata:
   labels:
     {{- include "ai-gateway.labels" . | nindent 4 }}
     app.kubernetes.io/component: migration
+  {{- if .Release.IsUpgrade }}
   annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
+    # On install this is a normal Job so the chart-owned Secret/PostgreSQL
+    # already exist; application initContainers wait on startup-check. During
+    # upgrades the existing database is available and this hook blocks rollout.
+    "helm.sh/hook": pre-upgrade
     "helm.sh/hook-weight": "0"
     "helm.sh/hook-delete-policy": before-hook-creation
+  {{- end }}
 spec:
   backoffLimit: {{ .Values.migration.backoffLimit }}
   template:
@@ -24,20 +29,9 @@ spec:
           image: "{{ .Values.global.imageRegistry }}/{{ .Values.gateway.image.repository }}:{{ .Values.gateway.image.tag }}"
           command:
             - python
-            - -c
-            - |
-              import sys, os
-              sys.path.insert(0, '/app')
-              os.environ.setdefault('GATEWAY_DATABASE__ENABLED', 'true')
-              os.environ.setdefault('GATEWAY_DATABASE__AUTO_INIT', 'true')
-              from src.config.settings import get_settings
-              settings = get_settings()
-              if settings.database.enabled and settings.database.auto_init:
-                  from src.services.database import init_database
-                  init_database(settings.database.dsn)
-                  print("Database migration completed successfully")
-              else:
-                  print("Database not enabled or auto_init disabled, skipping migration")
+            - -m
+            - database.authority
+            - migrate
           env:
             - name: POSTGRES_USER
               valueFrom:
@@ -50,8 +44,6 @@ spec:
                   name: {{ include "ai-gateway.fullname" . }}-secret
                   key: POSTGRES_PASSWORD
             - name: GATEWAY_DATABASE__ENABLED
-              value: "true"
-            - name: GATEWAY_DATABASE__AUTO_INIT
               value: "true"
             - name: GATEWAY_DATABASE__DSN
               value: {{ include "ai-gateway.postgresDSN" . | quote }}

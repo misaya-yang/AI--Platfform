@@ -3,7 +3,7 @@
 Only the canonical full-chain runners may mutate schema:
 
     make migrate
-    python database/cli.py migrate
+    python -m database.authority migrate
 
 Executing one SQL file bypasses ordered discovery, the canonical ledger,
 schema ownership, and restore-required checks, so this module always fails
@@ -16,7 +16,7 @@ import sys
 
 RETIREMENT_MESSAGE = (
     "database/run_migration.py is retired and cannot execute SQL; "
-    "use `make migrate` or `python database/cli.py migrate`"
+    "use `make migrate` or `python -m database.authority migrate`"
 )
 
 

@@ -46,14 +46,14 @@ def test_legacy_runner_cli_fails_closed_for_every_argument(tmp_path):
     assert "pg_sleep" not in result.stdout + result.stderr
 
 
-def test_per_service_runner_fails_closed_without_a_configured_dsn(monkeypatch):
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.delenv("GATEWAY_DATABASE__DSN", raising=False)
+def test_per_service_runner_uses_authority_dsn_resolver(monkeypatch):
+    monkeypatch.setattr(
+        migrate_per_service,
+        "get_dsn",
+        lambda: "postgresql://authority.example/gateway",
+    )
 
-    with pytest.raises(SystemExit) as exc_info:
-        migrate_per_service._dsn()
-
-    assert exc_info.value.code == 2
+    assert migrate_per_service._dsn() == "postgresql://authority.example/gateway"
 
 
 def test_cli_get_dsn_prefers_database_url(monkeypatch):

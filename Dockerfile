@@ -51,6 +51,9 @@ RUN --mount=type=cache,id=ai-gateway-pip,target=/root/.cache/pip,sharing=locked 
 
 # Copy source code
 COPY src/ ./src/
+# The installed ai-gateway-db entrypoint delegates to database.authority; keep
+# the full immutable migration carrier in the wheel as well as the runtime.
+COPY database/ ./database/
 # The wheel force-includes the single catalog owned by the Rust worker. Keep
 # the canonical source available to Hatch without checking in a Python copy.
 COPY rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/platform_catalog_v1.json \

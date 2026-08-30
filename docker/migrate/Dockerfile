@@ -1,12 +1,10 @@
 # syntax=docker/dockerfile:1.7
 # =============================================================================
-# Migration runner — Phase 6 microservice schema split.
+# Migration runner — the single PostgreSQL schema authority.
 # =============================================================================
-# A tiny one-shot container. Compose runs it once on `docker compose up`,
-# blocking gateway/AS/KS until it exits success. Used to:
-#   1. Create per-service schemas (gateway/assistant/knowledge).
-#   2. Move tables out of public into their owning schema.
-#   3. Run any future per-service migration SQL files.
+# A one-shot container. Compose runs it before every application service. It
+# carries the complete immutable history, frozen baseline and authority code;
+# no second runner or ledger implementation exists in this image.
 #
 # Why a separate service:
 #   - Removes the "service startup auto-migrates" antipattern (race conditions
@@ -14,8 +12,6 @@
 #   - One pod / one job runs migrations; service replicas wait. No more
 #     migration_already_applied conditional logic in service code.
 #
-# This is NOT Alembic — Phase 6 keeps the existing custom migration runner
-# style for minimum disruption. Alembic upgrade is a Phase-7 follow-up.
 # =============================================================================
 
 ARG PYTHON_BASE_IMAGE=python:3.12-slim-bookworm
@@ -34,13 +30,14 @@ LABEL org.opencontainers.image.title="AI Gateway Migration Runner" \
 WORKDIR /app
 
 RUN --mount=type=cache,id=ai-gateway-pip,target=/root/.cache/pip,sharing=locked \
-    pip install 'asyncpg==0.31.0' \
+    pip install 'asyncpg==0.31.0' 'PyYAML==6.0.3' \
     --index-url ${PIP_INDEX_URL} \
     ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
 
-# Copy only what the migrator needs — keep the image tight.
-COPY database/migrate_per_service.py /app/database/migrate_per_service.py
-COPY database/migrations/per_service /app/database/migrations/per_service
+# Namespace-package import works from /app; copying the complete database tree
+# is intentional because the authority verifies manifests against every frozen
+# SQL input before it connects or writes.
+COPY database /app/database
 
 # Same DATABASE_URL fallback chain as the runner expects.
 ENV PYTHONUNBUFFERED=1
@@ -48,4 +45,5 @@ ENV PYTHONUNBUFFERED=1
 RUN useradd --uid 1000 --create-home migrator && chown -R migrator:migrator /app
 USER migrator
 
-ENTRYPOINT ["python", "/app/database/migrate_per_service.py"]
+ENTRYPOINT ["python", "-m", "database.authority"]
+CMD ["migrate"]

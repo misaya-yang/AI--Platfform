@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -233,29 +234,22 @@ fi
     assert 'elif [ "$project" != "ai-gateway" ]; then' in doctor
 
 
-def test_migrate_shell_guards_legacy_version_tracking_duplicate_prefixes():
+def test_migrate_shell_has_no_legacy_ledger_or_sql_writer():
     script = _read("scripts/new/migrate.sh")
 
-    assert "assert_unique_forward_migration_versions()" in script
-    assert "guard_legacy_version_tracking()" in script
-    assert "Duplicate migration version prefix" in script
-    assert "treating as historical duplicate" not in script
-    assert "legacy_tracking_has_dirty()" in script
-    assert "INSERT INTO public.schema_migrations (version) VALUES" in script
-    assert "table_schema = 'public'" in script
-    assert "table_schema = current_schema()" not in script
-    assert "to_regclass('gateway.services')" in script
-    assert "to_regclass('knowledge.datasets')" in script
-    assert script.count("guard_legacy_version_tracking") >= 3
+    assert "python -m database.authority" in script
+    assert "INSERT INTO public.schema_migrations" not in script
+    assert "CREATE TABLE IF NOT EXISTS" not in script
+    assert "run_sql" not in script
+    assert not re.search(r"^\s*psql\b", script, re.MULTILINE)
 
 
-def test_migrate_filename_tracking_uses_exact_legacy_aliases() -> None:
+def test_migrate_shell_does_not_reimplement_legacy_aliases() -> None:
     script = _read("scripts/new/migrate.sh")
 
-    assert "legacy_filename_alias()" in script
-    assert "089_codex_runtime_thread_store.sql" in script
-    assert "094_codex_runtime_legacy_import_normalization.sql" in script
-    assert "LIKE '${prefix}\\_%'" not in script
+    assert "legacy_filename_alias" not in script
+    assert "089_codex_runtime_thread_store.sql" not in script
+    assert "094_codex_runtime_legacy_import_normalization.sql" not in script
 
 
 def test_deploy_builds_and_pins_the_agent_runtime_image() -> None:

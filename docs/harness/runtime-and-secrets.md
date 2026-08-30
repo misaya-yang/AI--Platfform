@@ -81,11 +81,12 @@ memory ceiling. The complete low-memory profile needs roughly 4 GiB available to
 - If `.env` is missing or Compose interpolation fails, fix the project init/env workflow.
   Do not force Compose with ad-hoc inline environment variables.
 - Keep secret values redacted in logs, reports, and final answers.
-- Do not hardcode DSN passwords or bootstrap admin passwords in source. `database/cli.py`
-  fails closed when no DSN is configured. The legacy single-file entrypoint
+- Do not hardcode DSN passwords or bootstrap admin passwords in source. The
+  authority fails closed when no DSN is configured. The legacy single-file entrypoint
   `database/run_migration.py` is retired and fails closed unconditionally,
   before reading a DSN or executing SQL; use `make migrate` or
-  `python database/cli.py migrate`.
+  `python -m database.authority migrate`. Application `AUTO_INIT` is disabled;
+  Compose and Helm run the same one-shot authority before service startup.
   `DEFAULT_USER_PASSWORD` is a runtime env value only; the local documented bootstrap
   default is accepted by `validate-env.sh` with a warning, never as a Python fallback.
 - Local Compose and `setup-dev.sh` publish host ports on `127.0.0.1`. The optional

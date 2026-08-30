@@ -102,7 +102,7 @@ if [ -z "${AI_PLATFORM_AGENT_RUNTIME_IMAGE:-}" ]; then
 fi
 
 INFRA_SERVICES="postgres redis qdrant"
-FULL_APP_SERVICES="gateway frontend knowledge-service knowledge-worker agent-runtime agent-capability-worker"
+FULL_APP_SERVICES="migrate gateway frontend knowledge-service knowledge-worker agent-runtime agent-capability-worker"
 
 assert_compose_owner
 
@@ -159,7 +159,7 @@ if [ "$INFRA_ONLY" != true ]; then
     assert_agent_runtime_image_locked "${AI_PLATFORM_AGENT_RUNTIME_IMAGE:-$(agent_runtime_image_tag)}"
 fi
 
-# The shell migration runner is the schema owner. Stop app services first so a
+# The authority wrapper is the schema owner. Stop app services first so a
 # previous run cannot race migrations during startup.
 if [ "$INFRA_ONLY" != true ]; then
     log_step "Stopping application services before migrations"

@@ -178,11 +178,13 @@ ai-gateway-db = "database.cli:main"
 packages = ["src"]
 
 [tool.hatch.build.targets.wheel.force-include]
+"database" = "database"
 "rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/platform_catalog_v1.json" = "src/core/data/platform_catalog_v1.json"
 
 [tool.hatch.build.targets.sdist]
 include = [
     "/src",
+    "/database",
     "/tests",
     "/rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/platform_catalog_v1.json",
     "/README.md",

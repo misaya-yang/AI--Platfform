@@ -31,6 +31,11 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+SCHEMA_AUTHORITY_MESSAGE = (
+    "application database auto-init is retired; run "
+    "`python -m database.authority migrate` before starting services"
+)
+
 # Keep the original module-level import surface while implementation lives in
 # the dataset-focused mixin module.
 DatasetPersistenceMixin = _datasets.DatasetPersistenceMixin
@@ -167,7 +172,7 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
         self,
         dsn: str | None = None,
         enabled: bool = False,
-        auto_init: bool = True,
+        auto_init: bool = False,
         schema_path: str | None = None,
         permission_cache_ttl_seconds: int = 60,
         pool_min_size: int = 2,
@@ -358,6 +363,8 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
             return
         if not HAS_ASYNCPG:
             raise RuntimeError("asyncpg is not installed. Run: pip install asyncpg")
+        if self.auto_init:
+            raise RuntimeError(SCHEMA_AUTHORITY_MESSAGE)
         self._pool = await asyncpg.create_pool(
             self.dsn,
             min_size=self._pool_min_size,
@@ -372,22 +379,6 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
             and self._api_key_usage_task is None
         ):
             self._api_key_usage_task = asyncio.create_task(self._run_api_key_usage_flusher())
-        if self.auto_init:
-            await self._auto_initialize_schema()
-            await self._auto_apply_account_permission_migration()
-            await self._auto_apply_user_extra_permissions_migration()
-            await self._auto_apply_api_keys_migration()
-            await self._auto_apply_assistant_memory_migration()
-            await self._auto_apply_fts_migration()
-            await self._auto_apply_source_metadata_migration()
-            await self._auto_apply_openai_embedding_migration()
-            await self._auto_apply_observability_governance_migration()
-            await self._auto_apply_assistant_gateway_migration()
-            await self._auto_apply_assistant_memory_sot_migration()
-            await self._auto_apply_assistant_queue_lane_migration()
-            await self._auto_apply_assistant_skills_migration()
-            await self._auto_apply_assistant_scheduler_audit_migration()
-            await self._auto_apply_assistant_context_metrics_migration()
 
     async def close(self) -> None:
         """关闭连接池"""
@@ -438,13 +429,8 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
             await conn.executemany(query, args_list)
 
     async def execute_schema(self, schema_path: str) -> None:
-        """执行 SQL 建表脚本"""
-        if not self._pool:
-            return
-        with open(schema_path, encoding="utf-8") as f:
-            sql = f.read()
-        async with self._pool.acquire() as conn:
-            await conn.execute(sql)
+        """Retired DDL bypass retained only to fail old callers closed."""
+        raise RuntimeError(f"{SCHEMA_AUTHORITY_MESSAGE}; refused file {schema_path!r}")
 
     async def _schema_is_missing(self) -> bool:
         """Detect whether core tables are missing (e.g., first run)."""
@@ -679,44 +665,8 @@ class DatabaseStorage(KnowledgeArtifactPersistenceMixin, DatasetPersistenceMixin
                 logger.error(f"Failed to apply migration 028: {e}")
 
     async def _auto_apply_source_metadata_migration(self) -> None:
-        """Add source traceability columns to segments table."""
-        if not self._pool:
-            return
-        try:
-            async with self._pool.acquire() as conn:
-                # Check if source_type column exists
-                exists = await conn.fetchval("""
-                    SELECT EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_name = 'segments' AND column_name = 'source_type'
-                    )
-                """)
-                if exists:
-                    return  # Already migrated
-
-                async with conn.transaction():
-                    await conn.execute("""
-                        ALTER TABLE segments
-                            ADD COLUMN IF NOT EXISTS source_type VARCHAR(50) DEFAULT 'unknown',
-                            ADD COLUMN IF NOT EXISTS source_reference JSONB NOT NULL DEFAULT '{}'::jsonb,
-                            ADD COLUMN IF NOT EXISTS citation_text VARCHAR(500) DEFAULT '',
-                            ADD COLUMN IF NOT EXISTS page_number INTEGER,
-                            ADD COLUMN IF NOT EXISTS section_header VARCHAR(500) DEFAULT '',
-                            ADD COLUMN IF NOT EXISTS language VARCHAR(10) DEFAULT 'en',
-                            ADD COLUMN IF NOT EXISTS contextual_prefix TEXT DEFAULT '';
-                    """)
-                    await conn.execute("""
-                        CREATE INDEX IF NOT EXISTS idx_segments_source_type ON segments(source_type);
-                        CREATE INDEX IF NOT EXISTS idx_segments_language ON segments(language);
-                    """)
-                logger.info(
-                    "Applied source metadata migration: added source_type, source_reference, citation_text, etc."
-                )
-        except Exception as e:
-            if "already exists" in str(e).lower():
-                logger.info("Source metadata migration already applied")
-            else:
-                logger.error(f"Failed to apply source metadata migration: {e}")
+        """Retired inline DDL path retained only to fail old callers closed."""
+        raise RuntimeError(SCHEMA_AUTHORITY_MESSAGE)
 
     async def _openai_embedding_needs_migration(self) -> bool:
         """Check whether OpenAI embedding migration is needed."""

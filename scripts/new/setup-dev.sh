@@ -188,25 +188,8 @@ wait_all_healthy() {
 
 init_db() {
     log_step "Database setup"
-
-    if [ -f "${PROJECT_ROOT}/database/schema.sql" ]; then
-        log_info "Applying schema.sql..."
-        local schema_output
-        if ! schema_output="$(
-            docker exec -i "$DEV_PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" \
-                < "${PROJECT_ROOT}/database/schema.sql" 2>&1
-        )"; then
-            printf '%s\n' "$schema_output" | grep -E "^(CREATE|INSERT|ALTER|NOTICE|ERROR)" | head -30 || true
-            return 1
-        fi
-        printf '%s\n' "$schema_output" | grep -E "^(CREATE|INSERT|ALTER|NOTICE|ERROR)" | head -30 || true
-    fi
-
-    # Run migrations with tracking
-    log_info "Running migrations..."
-    # Pass dev container name via environment so migrate.sh's common.sh picks it up
-    POSTGRES_CONTAINER="$DEV_PG_CONTAINER" ENV_FILE="$ENV_FILE" "$(dirname "$0")/migrate.sh" --auto 2>/dev/null \
-        || POSTGRES_CONTAINER="$DEV_PG_CONTAINER" ENV_FILE="$ENV_FILE" "$(dirname "$0")/migrate.sh"
+    log_info "Running the single database authority..."
+    ENV_FILE="$ENV_FILE" "$(dirname "$0")/migrate.sh" --auto
 }
 
 show_status() {

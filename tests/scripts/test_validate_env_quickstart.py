@@ -1073,7 +1073,7 @@ def test_knowledge_worker_is_first_class_in_runtime_scripts() -> None:
     )
 
 
-def test_migrate_auto_stops_on_failed_pending_migration(tmp_path: Path) -> None:
+def test_migrate_auto_propagates_authority_failure(tmp_path: Path) -> None:
     script_dir = tmp_path / "scripts" / "new"
     script_dir.mkdir(parents=True)
     (tmp_path / "database" / "migrations").mkdir(parents=True)
@@ -1108,23 +1108,35 @@ def test_migrate_auto_stops_on_failed_pending_migration(tmp_path: Path) -> None:
     )
     (tmp_path / "database" / "migrations" / "001_bad.sql").write_text("SELECT broken;\n")
 
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    uv_log = tmp_path / "uv.log"
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text('#!/bin/bash\nprintf \'%s\\n\' "$*" > "$UV_LOG"\nexit 7\n')
+    fake_uv.chmod(0o755)
+
     result = subprocess.run(
         ["bash", str(migrate_script), "--auto"],
         text=True,
         capture_output=True,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "UV_LOG": str(uv_log),
+        },
         check=False,
     )
 
     output = result.stdout + result.stderr
-    assert result.returncode == 1, output
-    assert "Applying: 001_bad.sql" in output
-    assert "Migration failed: 001_bad.sql" in output
-    assert "Stopping automatic migration run" in output
-    assert "Continuing in auto mode" not in output
-    assert "Database is up to date" not in output
+    assert result.returncode == 7, output
+    assert (
+        uv_log.read_text().strip()
+        == "run --extra database python -m database.authority migrate"
+    )
+    assert "schema_migrations" not in output
 
 
-def test_migrate_auto_initializes_base_schema_before_pending_migrations(
+def test_migrate_status_delegates_without_running_schema_files(
     tmp_path: Path,
 ) -> None:
     script_dir = tmp_path / "scripts" / "new"
@@ -1161,25 +1173,36 @@ def test_migrate_auto_initializes_base_schema_before_pending_migrations(
         "}\n"
     )
 
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    uv_log = tmp_path / "uv.log"
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text('#!/bin/bash\nprintf \'%s\\n\' "$*" > "$UV_LOG"\n')
+    fake_uv.chmod(0o755)
+
     result = subprocess.run(
-        ["bash", str(migrate_script), "--auto"],
+        ["bash", str(migrate_script), "--status"],
         text=True,
         capture_output=True,
-        env={**os.environ, "RUN_SQL_FILE_LOG": str(run_sql_file_log)},
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "UV_LOG": str(uv_log),
+            "RUN_SQL_FILE_LOG": str(run_sql_file_log),
+        },
         check=False,
     )
 
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert "Base schema missing; applying schema.sql" in output
-    assert "Applying: 002_next.sql" in output
-    assert run_sql_file_log.read_text().splitlines() == [
-        "database/schema.sql",
-        "database/migrations/002_next.sql",
-    ]
+    assert (
+        uv_log.read_text().strip()
+        == "run --extra database python -m database.authority status"
+    )
+    assert not run_sql_file_log.exists()
 
 
-def test_migrate_init_handles_long_schema_output_without_pipefail_sigpipe(
+def test_migrate_init_delegates_to_frozen_baseline_initializer(
     tmp_path: Path,
 ) -> None:
     script_dir = tmp_path / "scripts" / "new"
@@ -1220,20 +1243,32 @@ def test_migrate_init_handles_long_schema_output_without_pipefail_sigpipe(
         "}\n"
     )
 
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    uv_log = tmp_path / "uv.log"
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text('#!/bin/bash\nprintf \'%s\\n\' "$*" > "$UV_LOG"\n')
+    fake_uv.chmod(0o755)
+
     result = subprocess.run(
         ["bash", str(migrate_script), "--init"],
         text=True,
         capture_output=True,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "UV_LOG": str(uv_log),
+        },
         check=False,
     )
 
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert "CREATE TABLE t_30" in output
-    assert "CREATE TABLE t_31" not in output
-    assert "Schema initialized" in output
-    assert "Applying: 100_after_init.sql" in output
-    assert "Applied 1 new migration" in output
+    assert (
+        uv_log.read_text().strip()
+        == "run --extra database python -m database.authority init-fresh"
+    )
+    assert "CREATE TABLE" not in output
 
 
 def test_migration_sql_file_execution_stops_on_first_psql_error() -> None:
@@ -1478,11 +1513,12 @@ def test_migrate_script_accepts_env_file() -> None:
     assert "--env FILE   Use a specific env file instead of .env" in script
     assert "--env)" in script
     assert 'log_error "--env requires a file path"' in script
-    assert 'ENV_FILE="$2"; shift 2 ;;' in script
-    assert script.index('ENV_FILE="$2"; shift 2 ;;') < script.index("load_env")
-    assert "ensure_base_schema" in script
-    for table in ["services", "datasets", "documents", "segments"]:
-        assert f"to_regclass('public.{table}')" in script
+    assert 'ENV_FILE="$2"' in script
+    assert script.index('ENV_FILE="$2"') < script.index("load_env")
+    assert "python -m database.authority" in script
+    assert "ensure_base_schema" not in script
+    assert "run_sql" not in script
+    assert "schema_migrations" not in script
 
 
 def test_migrate_rejects_unknown_or_missing_env_option_before_db_access() -> None:

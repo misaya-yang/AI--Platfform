@@ -29,6 +29,11 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+SCHEMA_AUTHORITY_MESSAGE = (
+    "application database auto-init is retired; run "
+    "`python -m database.authority migrate` before starting services"
+)
+
 
 def _resolve_schema_root() -> Path:
     """Locate the repo's ``database/`` directory containing schema.sql + migrations.
@@ -140,7 +145,7 @@ class DatabaseStorage:
         self,
         dsn: str | None = None,
         enabled: bool = False,
-        auto_init: bool = True,
+        auto_init: bool = False,
         schema_path: str | None = None,
         permission_cache_ttl_seconds: int = 60,
         pool_min_size: int = int(os.environ.get("DB_POOL_MIN_SIZE", "2")),
@@ -344,6 +349,10 @@ class DatabaseStorage:
             return
         if not HAS_ASYNCPG:
             raise RuntimeError("asyncpg is not installed. Run: pip install asyncpg")
+        if self.auto_init:
+            # Fail before opening a pool: application identities must never
+            # acquire a connection with the intent to execute schema DDL.
+            raise RuntimeError(SCHEMA_AUTHORITY_MESSAGE)
         self._pool = await asyncpg.create_pool(
             self.dsn,
             min_size=self._pool_min_size,
@@ -359,22 +368,10 @@ class DatabaseStorage:
             and self._api_key_usage_task is None
         ):
             self._api_key_usage_task = asyncio.create_task(self._run_api_key_usage_flusher())
-        if self.auto_init:
-            await self._auto_initialize_schema()
-            await self._auto_apply_account_permission_migration()
-            await self._auto_apply_platform_admin_migration()
-            await self._auto_apply_user_extra_permissions_migration()
-            await self._auto_apply_api_keys_migration()
-            await self._auto_apply_assistant_memory_migration()
-            await self._auto_apply_observability_governance_migration()
-            await self._auto_apply_assistant_gateway_migration()
-            await self._auto_apply_assistant_memory_sot_migration()
-            await self._auto_apply_assistant_queue_lane_migration()
-            await self._auto_apply_assistant_skills_migration()
-            await self._auto_apply_assistant_scheduler_audit_migration()
-            await self._auto_apply_assistant_context_metrics_migration()
-            await self._auto_apply_tenant_isolation_migration()
-            await self._auto_apply_conversation_shares_migration()
+        # Password bootstrap is application data, not schema DDL. It is an
+        # update-only, fill-if-empty operation and remains separate from the
+        # retired auto-migration surface.
+        if getattr(self, "_bootstrap_admin_password_hash", None):
             await self._ensure_bootstrap_admin_password_hash()
 
     async def close(self) -> None:
@@ -419,13 +416,8 @@ class DatabaseStorage:
             await conn.executemany(query, args_list)
 
     async def execute_schema(self, schema_path: str) -> None:
-        """执行 SQL 建表脚本"""
-        if not self._pool:
-            return
-        with open(schema_path, encoding="utf-8") as f:
-            sql = f.read()
-        async with self._pool.acquire() as conn:
-            await conn.execute(sql)
+        """Retired DDL bypass retained only to fail old callers closed."""
+        raise RuntimeError(f"{SCHEMA_AUTHORITY_MESSAGE}; refused file {schema_path!r}")
 
     async def _schema_is_missing(self) -> bool:
         """Detect whether core tables are missing (e.g., first run).

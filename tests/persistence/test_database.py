@@ -274,7 +274,7 @@ class TestBootstrapAdminPassword:
 
 
 @pytest.mark.asyncio
-async def test_connect_orders_platform_admin_after_bootstrap_account(monkeypatch):
+async def test_connect_rejects_retired_auto_init_before_opening_pool(monkeypatch):
     db = DatabaseStorage.__new__(DatabaseStorage)
     db.enabled = True
     db.dsn = "postgresql://unused"
@@ -289,36 +289,39 @@ async def test_connect_orders_platform_admin_after_bootstrap_account(monkeypatch
     fake_pool = AsyncMock()
     monkeypatch.setattr(database_module.asyncpg, "create_pool", AsyncMock(return_value=fake_pool))
 
-    ordered_methods = [
-        "_auto_initialize_schema",
-        "_auto_apply_account_permission_migration",
-        "_auto_apply_platform_admin_migration",
-    ]
-    remaining_methods = [
-        "_auto_apply_user_extra_permissions_migration",
-        "_auto_apply_api_keys_migration",
-        "_auto_apply_assistant_memory_migration",
-        "_auto_apply_observability_governance_migration",
-        "_auto_apply_assistant_gateway_migration",
-        "_auto_apply_assistant_memory_sot_migration",
-        "_auto_apply_assistant_queue_lane_migration",
-        "_auto_apply_assistant_skills_migration",
-        "_auto_apply_assistant_scheduler_audit_migration",
-        "_auto_apply_assistant_context_metrics_migration",
-        "_auto_apply_tenant_isolation_migration",
-        "_auto_apply_conversation_shares_migration",
-        "_ensure_bootstrap_admin_password_hash",
-    ]
-    calls: list[str] = []
+    with pytest.raises(RuntimeError, match="database.authority migrate"):
+        await db.connect()
 
-    for name in ordered_methods:
-        setattr(db, name, AsyncMock(side_effect=lambda name=name: calls.append(name)))
-    for name in remaining_methods:
-        setattr(db, name, AsyncMock())
+    database_module.asyncpg.create_pool.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_connect_keeps_update_only_password_bootstrap_separate_from_schema(
+    monkeypatch,
+):
+    db = DatabaseStorage.__new__(DatabaseStorage)
+    db.enabled = True
+    db.dsn = "postgresql://unused"
+    db._pool_min_size = 1
+    db._pool_max_size = 1
+    db._command_timeout_s = 30
+    db._api_key_usage_flush_interval_seconds = 0
+    db._api_key_usage_flush_batch_size = 0
+    db._api_key_usage_task = None
+    db.auto_init = False
+    db._bootstrap_admin_password_hash = "already-hashed"
+    db._ensure_bootstrap_admin_password_hash = AsyncMock()
+
+    fake_pool = AsyncMock()
+    monkeypatch.setattr(
+        database_module.asyncpg,
+        "create_pool",
+        AsyncMock(return_value=fake_pool),
+    )
 
     await db.connect()
 
-    assert calls == ordered_methods
+    db._ensure_bootstrap_admin_password_hash.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

@@ -41,9 +41,9 @@ services:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pg-data:/var/lib/postgresql/data
-      # Note: Database schema is auto-initialized by gateway service (AUTO_INIT=true)
-      # Uncomment below if you have a custom schema.sql
-      # - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      # Schema bootstrap is owned exclusively by the one-shot migrate service.
+      # Never mount schema.sql into docker-entrypoint-initdb.d: that bypasses
+      # the authority ledger, fingerprints, roles and recovery contract.
     networks:
       - ai-gateway-net
     healthcheck:
@@ -106,33 +106,24 @@ services:
     mem_limit: "${QDRANT_MEMORY_LIMIT:-352m}"
 
   # ===========================================================================
-  # Migration Job (Phase 6) — opt-in
+  # Migration Job — single schema authority
   # ===========================================================================
-  # Phase-6 per-service schema split + future per-service migrations.
-  # NOT in the default startup sequence: gateway's auto_init still handles
-  # fresh installs the legacy way, and the schema split is a one-time
-  # operator action against an existing prod DB. Run with:
-  #
-  #     docker compose run --rm migrate
-  #
-  # The job is idempotent (each SQL file recorded in
-  # public.schema_migrations_meta) so repeated runs are safe no-ops.
-  # When all data has been migrated and code uses fully-qualified table
-  # names, gateway's GATEWAY_DATABASE__AUTO_INIT can be set to false and
-  # this job becomes the only schema authority.
+  # Every application service waits for this one-shot job. The command is
+  # explicit so a stale image that lacks database.authority fails instead of
+  # silently falling back to a historical per-service writer.
   migrate:
     image: "${MIGRATE_IMAGE:-ghcr.io/misaya-yang/ai-gateway-migrate:2.0.0}"
     container_name: ai-gateway-migrate
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-gateway}"
+    entrypoint: ["python", "-m", "database.authority"]
+    command: ["migrate"]
     depends_on:
       postgres:
         condition: service_healthy
     networks:
       - ai-gateway-net
     restart: "no"
-    profiles:
-      - migrate  # opt-in via `docker compose run --rm migrate`
 
   # ===========================================================================
   # Tracing Backend (Phase 6, local dev only)
@@ -198,10 +189,8 @@ services:
       # Database
       GATEWAY_DATABASE__ENABLED: "true"
       GATEWAY_DATABASE__DSN: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-gateway}?options=-csearch_path%3Dgateway%2Cassistant%2Cknowledge%2Cpublic"
-      # Fresh installs still bootstrap through the legacy initializer. After
-      # the per-service migration job has run, set this to false so Gateway
-      # cannot recreate Assistant/Knowledge tables in the gateway schema.
-      GATEWAY_DATABASE__AUTO_INIT: "${GATEWAY_DATABASE_AUTO_INIT:-true}"
+      # Application processes never execute DDL; migrate owns schema changes.
+      GATEWAY_DATABASE__AUTO_INIT: "false"
 
       # Redis
       GATEWAY_REDIS__ENABLED: "true"
@@ -360,6 +349,8 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       qdrant:
@@ -518,6 +509,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       qdrant:
@@ -548,6 +541,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       qdrant:
@@ -595,6 +590,8 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       knowledge-service:
         condition: service_healthy
     healthcheck:
@@ -641,6 +638,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       agent-capability-worker:
         condition: service_healthy
     healthcheck:

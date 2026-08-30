@@ -71,21 +71,20 @@ Every target above accepts `ENV_FILE=/path/to/.env` when the real env file lives
 | Show applied vs pending | `make migrate-status` |
 | Back up / restore / list backups | `make backup` / `make restore` / `make backup-list` (external `AI_PLATFORM_BACKUP_DIR`, otherwise the XDG/HOME state directory; repository paths are rejected) |
 
-`make migrate` is the canonical deployment runner. Both it and
-`database/cli.py` use `public.schema_migrations`; new databases use exact
-forward filenames, while legacy numeric ledgers are read compatibly and fail
-closed when a duplicate numeric revision is ambiguous. Rollback SQL files are
-never auto-discovered. The runner resolves KB tables in either the root
-`public` layout or the legal `knowledge` schema split.
+`python -m database.authority migrate` is the only schema writer; `make migrate`,
+`scripts/new/migrate.sh`, `database/cli.py`, and
+`database/migrate_per_service.py` are compatibility delegates to that command.
+The authority recognizes historical filename, numeric, and per-service ledgers
+only as adoption input, then freezes them after the baseline marker. Ambiguous
+duplicate numeric revisions fail closed with a reconciliation receipt.
 
-Both central runners acquire the same PostgreSQL session advisory lock before
-bootstrap, discovery, or DDL. A concurrent runner waits, then reloads the
-canonical ledger and exits as a no-op; connection loss releases the lock.
+The authority acquires one PostgreSQL session advisory lock before bootstrap,
+discovery, or DDL. A concurrent runner waits, then reloads the authoritative
+ledger and exits as a no-op; connection loss releases the lock.
 
-`database/schema.sql` is the stable bootstrap baseline, not a selective copy
-of recent migrations. `make migrate-init` applies that baseline and then
-continues through every pending canonical migration in the same invocation;
-rerunning it is ledger-idempotent.
+`make migrate-init` maps to the authority's `init-fresh` command and therefore
+requires a truly empty database plus a complete frozen baseline. It never
+falls back to directly piping `database/schema.sql`.
 
 Restoring over shared data requires a current backup and explicit approval.
 
@@ -221,8 +220,7 @@ Starting an old image against the post-101 database is not a rollback path.
 works before 101, fails after 101, and works again only after a real
 `pg_dump`/`pg_restore` round trip into a new temporary database. The supported
 central-chain entrypoints are `make migrate` and
-`python database/cli.py migrate`; `database/run_migration.py` is retired and
-always refuses single-file execution before reading credentials. The separate
-`database/migrate_per_service.py` image runner remains limited to the legal
-schema-split/per-service track and must not receive central RAG migrations
-100–112.
+`python -m database.authority migrate`; `database/run_migration.py` is retired
+and always refuses single-file execution before reading credentials. The
+historical `database/cli.py` and `database/migrate_per_service.py` names are
+thin complete-plan delegates and cannot select a version or service.

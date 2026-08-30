@@ -48,15 +48,18 @@ def test_repository_chain_only_grandfathers_exact_filename_ledger_duplicates() -
         )
 
 
-def test_python_and_shell_use_the_same_public_filename_ledger() -> None:
+def test_compatibility_entrypoints_have_no_independent_ledger_writer() -> None:
     python_runner = Path("database/cli.py").read_text(encoding="utf-8")
+    per_service_runner = Path("database/migrate_per_service.py").read_text(encoding="utf-8")
     shell_runner = Path("scripts/new/migrate.sh").read_text(encoding="utf-8")
 
-    for source in (python_runner, shell_runner):
-        assert "public.schema_migrations" in source
-        assert "filename" in source
-        assert "_rollback.sql" in source
-        assert "Duplicate migration version" in source or "duplicate migration version" in source
+    for source in (python_runner, per_service_runner, shell_runner):
+        assert "INSERT INTO public.schema_migrations" not in source
+        assert "CREATE TABLE IF NOT EXISTS public.schema_migrations" not in source
+        assert "asyncpg.connect" not in source
+    assert "command_migrate" in python_runner
+    assert "command_migrate" in per_service_runner
+    assert "python -m database.authority" in shell_runner
 
 
 def test_100_to_110_and_both_canonical_runners_are_knowledge_first() -> None:
@@ -77,10 +80,14 @@ def test_100_to_110_and_both_canonical_runners_are_knowledge_first() -> None:
         assert statements.count("BEGIN;") == 1, path.name
         assert statements.count("COMMIT;") == 1, path.name
 
-    python_runner = Path("database/cli.py").read_text(encoding="utf-8")
-    shell_runner = Path("scripts/new/migrate.sh").read_text(encoding="utf-8")
-    assert "SET search_path TO knowledge, gateway, assistant, public" in python_runner
-    assert 'echo "knowledge,gateway,assistant,public"' in shell_runner
+    for wrapper in (
+        Path("database/cli.py"),
+        Path("database/migrate_per_service.py"),
+        Path("scripts/new/migrate.sh"),
+    ):
+        source = wrapper.read_text(encoding="utf-8")
+        assert "SET search_path TO knowledge, gateway, assistant, public" not in source
+        assert 'echo "knowledge,gateway,assistant,public"' not in source
 
 
 def test_retired_single_file_runner_has_no_database_execution_surface() -> None:
@@ -92,29 +99,19 @@ def test_retired_single_file_runner_has_no_database_execution_surface() -> None:
     assert ".execute(" not in legacy_runner
 
 
-def test_python_and_shell_serialize_the_complete_chain_with_one_lock_key() -> None:
+def test_only_authority_owns_the_migration_lock() -> None:
     python_runner = Path("database/cli.py").read_text(encoding="utf-8")
     per_service_runner = Path("database/migrate_per_service.py").read_text(encoding="utf-8")
     shell_runner = Path("scripts/new/migrate.sh").read_text(encoding="utf-8")
-    shell_common = Path("scripts/new/common.sh").read_text(encoding="utf-8")
+    authority_runner = Path("database/authority/runner.py").read_text(encoding="utf-8")
 
-    assert "MIGRATION_ADVISORY_LOCK_NAMESPACE = 1_095_781_959" in python_runner
-    assert "MIGRATION_ADVISORY_LOCK_NAMESPACE = 1_095_781_959" in per_service_runner
-    assert "MIGRATION_ADVISORY_LOCK_NAMESPACE=1095781959" in shell_common
-    assert "MIGRATION_ADVISORY_LOCK_ID = 1" in python_runner
-    assert "MIGRATION_ADVISORY_LOCK_ID = 1" in per_service_runner
-    assert "MIGRATION_ADVISORY_LOCK_ID=1" in shell_common
-    assert "SELECT pg_advisory_lock" in python_runner
-    assert "SELECT pg_advisory_lock" in per_service_runner
-    assert "SELECT pg_advisory_lock" in shell_common
-    assert "JOIN pg_stat_activity" in shell_common
-    assert "release_migration_advisory_lock" in shell_common
-    assert "mkfifo" in shell_common
-    assert "pg_advisory_unlock" in shell_common
-    assert "pg_terminate_backend" not in shell_common
-    assert shell_runner.index("acquire_migration_advisory_lock") < shell_runner.rindex(
-        "ensure_base_schema"
-    )
+    assert "MIGRATION_ADVISORY_LOCK_NAMESPACE" in authority_runner
+    assert "MIGRATION_ADVISORY_LOCK_ID" in authority_runner
+    assert "SELECT pg_advisory_lock" in authority_runner
+    assert "SELECT pg_advisory_unlock" in authority_runner
+    for wrapper in (python_runner, per_service_runner, shell_runner):
+        assert "SELECT pg_advisory_lock" not in wrapper
+        assert "SELECT pg_advisory_unlock" not in wrapper
 
 
 def test_102_and_103_are_single_transaction_migrations() -> None:
