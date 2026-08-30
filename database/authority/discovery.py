@@ -21,16 +21,32 @@ from .constants import DEFAULT_BASELINE_ID, LEGACY_DIR_NAME
 
 MIGRATION_PATTERN = re.compile(r"^(\d{3})_(.+)\.sql$")
 ROLLBACK_SUFFIX = "_rollback.sql"
+LEGACY_MANIFEST_NAME = "legacy-manifest.yml"
 
 # These duplicate numeric prefixes pre-date both legacy ledgers.  A filename
 # ledger can distinguish them; a numeric ledger cannot.  Never extend this
 # list: new duplicate prefixes are always an error.
 HISTORICAL_FILENAME_DUPLICATES = {
-    "016": frozenset(
-        {"016_confluence_multi_root_pages.sql", "016_usage_hourly_aggregates.sql"}
+    "016": frozenset({"016_confluence_multi_root_pages.sql", "016_usage_hourly_aggregates.sql"}),
+    "031": frozenset({"031_align_model_prices_20260211.sql", "031_hierarchical_segments.sql"}),
+}
+
+# Ordered identities needed to interpret legacy numeric-ledger rows. Version
+# 030 has only one current forward file, but the pre-62587dc9 Python runner
+# auto-discovered its rollback file and could overwrite the same numeric row.
+# This is reconciliation evidence, never an execution order for new SQL.
+HISTORICAL_NUMERIC_IDENTITIES = {
+    "016": (
+        "016_confluence_multi_root_pages.sql",
+        "016_usage_hourly_aggregates.sql",
     ),
-    "031": frozenset(
-        {"031_align_model_prices_20260211.sql", "031_hierarchical_segments.sql"}
+    "030": (
+        "030_fix_timestamp_and_security_constraint.sql",
+        "030_fix_timestamp_and_security_constraint_rollback.sql",
+    ),
+    "031": (
+        "031_align_model_prices_20260211.sql",
+        "031_hierarchical_segments.sql",
     ),
 }
 
@@ -155,7 +171,5 @@ def default_migrations_root(database_dir: Path) -> Path:
     return database_dir / "migrations"
 
 
-def baseline_epoch_dir(
-    migrations_root: Path, baseline_id: str = DEFAULT_BASELINE_ID
-) -> Path:
+def baseline_epoch_dir(migrations_root: Path, baseline_id: str = DEFAULT_BASELINE_ID) -> Path:
     return migrations_root / baseline_id

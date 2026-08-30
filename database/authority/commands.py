@@ -25,6 +25,8 @@ Databases that already carry the marker only receive pending epoch changes
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +35,6 @@ from .adoption import (
     adopt_baseline,
     detect_legacy_state,
     legacy_missing_files,
-    reconcile_numeric_duplicates,
 )
 from .bootstrap import (
     baseline_manifest_sha256,
@@ -45,11 +46,17 @@ from .bootstrap import (
     startup_schema_check,
 )
 from .constants import DEFAULT_BASELINE_ID, EPOCH_MANIFEST_NAME
-from .discovery import discover_legacy_migrations
+from .discovery import LEGACY_MANIFEST_NAME, discover_legacy_migrations
 from .manifest import (
     BaselineManifest,
     load_baseline_manifest,
     load_epoch_manifest,
+    load_legacy_manifest,
+)
+from .numeric_reconciliation import (
+    NumericReconciliationBlocked,
+    NumericReconciliationReceipt,
+    reconcile_numeric_legacy_history,
 )
 from .runner import AuthorityBlockedError, AuthorityError, AuthorityPaths, MigrationAuthority
 
@@ -57,6 +64,36 @@ SUPPORTED_BASELINES = frozenset({DEFAULT_BASELINE_ID})
 # Applications built against the frozen baseline support epoch revisions up
 # to this sequence number.  Bump together with the compatibility manifest.
 MAX_SUPPORTED_EPOCH_SEQUENCE = 0
+
+
+@dataclass(frozen=True)
+class MigrationCommandResult:
+    """Programmatic migrate result; CLI callers consume ``exit_code``."""
+
+    exit_code: int
+    reconciliation_receipt: NumericReconciliationReceipt | None = None
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {
+                "exit_code": self.exit_code,
+                "numeric_reconciliation": (
+                    self.reconciliation_receipt.as_dict()
+                    if self.reconciliation_receipt is not None
+                    else {"verdict": "not_applicable"}
+                ),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+
+
+def _write_migration_evidence(result: MigrationCommandResult, evidence_out: Path | None) -> None:
+    """Write evidence only when the operator explicitly names an output path."""
+    if evidence_out is None:
+        return
+    evidence_out.parent.mkdir(parents=True, exist_ok=True)
+    evidence_out.write_text(result.to_json() + "\n", encoding="utf-8")
 
 
 def default_paths() -> AuthorityPaths:
@@ -100,8 +137,7 @@ def _validate_adoption_marker(
     ]
     if drift:
         raise AuthorityError(
-            "adopted baseline marker does not match the frozen manifest; "
-            + "; ".join(drift)
+            "adopted baseline marker does not match the frozen manifest; " + "; ".join(drift)
         )
 
 
@@ -128,8 +164,9 @@ async def command_migrate(
     *,
     baseline_id: str = DEFAULT_BASELINE_ID,
     allow_adoption: bool = True,
+    reconciliation_evidence_out: Path | None = None,
     log: Any = print,
-) -> int:
+) -> MigrationCommandResult:
     """Bring one database to the current schema revision.
 
     * baseline adopted  -> apply pending epoch changes only;
@@ -137,6 +174,9 @@ async def command_migrate(
       over ownership/grants, adopt the baseline;
     * no baseline, baseline files not ready -> compatibility mode: apply the
       legacy chain only (pre-freeze transition behaviour).
+
+    The structured result carries any numeric reconciliation receipt. JSON is
+    written only when ``reconciliation_evidence_out`` is explicitly supplied.
     """
     paths = authority.paths
 
@@ -150,6 +190,7 @@ async def command_migrate(
             "(legacy chain only, no adoption)"
         )
 
+    reconciliation_receipt: NumericReconciliationReceipt | None = None
     lock_conn = await authority.connect()
     await authority.acquire_lock(lock_conn)
     try:
@@ -159,12 +200,41 @@ async def command_migrate(
 
             if adopted is None:
                 await _guard_known_database(conn)
-                await legacy.apply_legacy_chain(conn, paths, log=log)
+                try:
+                    _, _, reconciliation_receipt = await legacy.apply_legacy_chain(
+                        conn, paths, log=log
+                    )
+                except NumericReconciliationBlocked as exc:
+                    log("authority: numeric reconciliation BLOCKED:\n" + exc.receipt.to_json())
+                    _write_migration_evidence(
+                        MigrationCommandResult(1, exc.receipt),
+                        reconciliation_evidence_out,
+                    )
+                    raise
                 await legacy.apply_per_service_chain(conn, paths, log=log)
                 if baseline is None or not allow_adoption:
-                    return 0
-                await _cutover_and_adopt(conn, authority, baseline, manifest_sha, log=log)
-                return 0
+                    result = MigrationCommandResult(0, reconciliation_receipt)
+                    _write_migration_evidence(result, reconciliation_evidence_out)
+                    return result
+                try:
+                    await _cutover_and_adopt(
+                        conn,
+                        authority,
+                        baseline,
+                        manifest_sha,
+                        reconciliation_receipt=reconciliation_receipt,
+                        log=log,
+                    )
+                except NumericReconciliationBlocked as exc:
+                    log("authority: numeric reconciliation BLOCKED:\n" + exc.receipt.to_json())
+                    _write_migration_evidence(
+                        MigrationCommandResult(1, exc.receipt),
+                        reconciliation_evidence_out,
+                    )
+                    raise
+                result = MigrationCommandResult(0, reconciliation_receipt)
+                _write_migration_evidence(result, reconciliation_evidence_out)
+                return result
 
             # Phase 2: epoch changes under the frozen baseline.
             if baseline is None:
@@ -187,7 +257,9 @@ async def command_migrate(
             await conn.close()
     finally:
         await authority.release_lock(lock_conn)
-    return 0
+    result = MigrationCommandResult(0, reconciliation_receipt)
+    _write_migration_evidence(result, reconciliation_evidence_out)
+    return result
 
 
 async def _cutover_and_adopt(
@@ -196,6 +268,7 @@ async def _cutover_and_adopt(
     baseline: BaselineManifest,
     manifest_sha: str,
     *,
+    reconciliation_receipt: NumericReconciliationReceipt | None = None,
     log: Any = print,
 ) -> None:
     """Cut a completed legacy database over to the baseline, then adopt.
@@ -232,11 +305,16 @@ async def _cutover_and_adopt(
         )
 
     if state.numeric_ledger and not state.filename_ledger:
-        receipt = await reconcile_numeric_duplicates(conn)
+        receipt = reconciliation_receipt
+        if receipt is None:
+            receipt = await reconcile_numeric_legacy_history(
+                conn,
+                load_legacy_manifest(paths.migrations_root / LEGACY_MANIFEST_NAME),
+            )
         if receipt.verdict != "proven":
-            raise AuthorityBlockedError(
-                "numeric ledger reconciliation BLOCKED; receipt:\n"
-                + receipt.to_json()
+            raise NumericReconciliationBlocked(
+                "numeric ledger reconciliation BLOCKED; receipt:",
+                receipt,
             )
         log("authority: numeric-ledger reconciliation receipt proven")
 
@@ -353,9 +431,11 @@ async def command_status(authority: MigrationAuthority, *, log: Any = print) -> 
             log(f"legacy numeric ledger rows: {len(state.applied_versions)}")
         if state.per_service_ledger:
             log(f"per-service ledger rows: {len(state.per_service_keys)}")
-        pending_legacy = legacy_missing_files(
-            state, authority.discover_legacy()
-        ) if state.has_any else authority.discover_legacy()
+        pending_legacy = (
+            legacy_missing_files(state, authority.discover_legacy())
+            if state.has_any
+            else authority.discover_legacy()
+        )
         log(f"legacy chain pending files: {len(pending_legacy)}")
     finally:
         await conn.close()

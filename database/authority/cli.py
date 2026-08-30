@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import os
 import sys
+from pathlib import Path
 
 from .commands import (
     command_init_fresh,
@@ -88,6 +89,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="migrate only the legacy chain; never write the adoption marker",
     )
+    parser.add_argument(
+        "--reconciliation-evidence-out",
+        type=Path,
+        default=None,
+        help=(
+            "explicit path for numeric-ledger reconciliation JSON; "
+            "no evidence file is written by default"
+        ),
+    )
     args = parser.parse_args(argv)
 
     dsn = get_dsn()
@@ -95,13 +105,15 @@ def main(argv: list[str] | None = None) -> int:
     authority = MigrationAuthority(dsn, paths, role_prefix=role_prefix_from_env())
 
     if args.command == "migrate":
-        return asyncio.run(
+        result = asyncio.run(
             command_migrate(
                 authority,
                 baseline_id=args.baseline,
                 allow_adoption=not args.no_adoption,
+                reconciliation_evidence_out=args.reconciliation_evidence_out,
             )
         )
+        return result.exit_code
     if args.command == "init-fresh":
         return asyncio.run(command_init_fresh(authority, baseline_id=args.baseline))
     if args.command == "status":

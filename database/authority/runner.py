@@ -20,7 +20,9 @@ import re
 import socket
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +59,54 @@ _NON_TRANSACTIONAL_MARKER_RE = re.compile(
 _DOLLAR_QUOTED_RE = re.compile(r"\$(?P<tag>[A-Za-z_][A-Za-z0-9_]*)?\$.*?\$(?P=tag)\$", re.DOTALL)
 _SINGLE_QUOTED_RE = re.compile(r"'(?:[^']|'')*'")
 _LINE_COMMENT_RE = re.compile(r"--[^\n]*")
+
+ATTEMPT_LEASE_TIMEOUT = timedelta(minutes=15)
+_PREAMBLE_CHECKPOINT = "__preamble__"
+_RESERVED_CHECKPOINTS = frozenset({_PREAMBLE_CHECKPOINT})
+
+_SELECT_LATEST_ATTEMPT = f"""
+SELECT attempt_id, baseline_id, sequence, checksum_sha256, runner_digest,
+       phase, checkpoint, lease_owner, fence_generation, state, started_at
+FROM public.{ledger.ATTEMPTS_TABLE}
+WHERE baseline_id = $1 AND sequence = $2
+ORDER BY started_at DESC, attempt_id DESC
+LIMIT 1
+"""
+
+_CLAIM_ATTEMPT = f"""
+UPDATE public.{ledger.ATTEMPTS_TABLE}
+SET lease_owner = $2, fence_generation = fence_generation + 1,
+    state = '{ledger.ATTEMPT_STATE_RUNNING}', phase = $4,
+    started_at = now(), finished_at = NULL, error_code = NULL
+WHERE attempt_id = $1 AND fence_generation = $3
+  AND state IN ('{ledger.ATTEMPT_STATE_RESUMABLE}', '{ledger.ATTEMPT_STATE_FAILED}')
+RETURNING fence_generation
+"""
+
+_TRANSITION_EXPIRED_ATTEMPT = f"""
+UPDATE public.{ledger.ATTEMPTS_TABLE}
+SET state = $4, finished_at = now(), error_code = $5
+WHERE attempt_id = $1 AND lease_owner = $2 AND fence_generation = $3
+  AND state = '{ledger.ATTEMPT_STATE_RUNNING}'
+RETURNING fence_generation
+"""
+
+_UPDATE_ATTEMPT_CHECKPOINT_FENCED = f"""
+UPDATE public.{ledger.ATTEMPTS_TABLE}
+SET checkpoint = $4, fence_generation = fence_generation + 1, started_at = now()
+WHERE attempt_id = $1 AND lease_owner = $2 AND fence_generation = $3
+  AND state = '{ledger.ATTEMPT_STATE_RUNNING}'
+RETURNING fence_generation
+"""
+
+_UPDATE_ATTEMPT_TERMINAL_FENCED = f"""
+UPDATE public.{ledger.ATTEMPTS_TABLE}
+SET state = $4, finished_at = now(), error_code = $5,
+    fence_generation = fence_generation + 1
+WHERE attempt_id = $1 AND lease_owner = $2 AND fence_generation = $3
+  AND state = '{ledger.ATTEMPT_STATE_RUNNING}'
+RETURNING fence_generation
+"""
 
 
 def strip_sql_bodies(sql: str) -> str:
@@ -104,6 +154,19 @@ class AuthorityPaths:
         return self.migrations_root / baseline_id
 
 
+@dataclass(frozen=True)
+class RecoveryContext:
+    baseline_id: str
+    spec: ChangeSpec
+    attempt_id: str
+    checkpoint: str
+    fence_generation: int
+    prior_state: str
+
+
+RecoveryHandler = Callable[[Any, RecoveryContext], Awaitable[None]]
+
+
 def role_prefix_from_env(environ: dict[str, str] | None = None) -> str:
     import os
 
@@ -127,6 +190,7 @@ class MigrationAuthority:
         *,
         role_prefix: str = DEFAULT_ROLE_PREFIX,
         asyncpg_module: Any = None,
+        recovery_handlers: dict[str, RecoveryHandler] | None = None,
     ) -> None:
         if asyncpg_module is None:
             import asyncpg
@@ -136,6 +200,7 @@ class MigrationAuthority:
         self.dsn = dsn
         self.paths = paths
         self.role_prefix = role_prefix
+        self._recovery_handlers = dict(recovery_handlers or {})
 
     # ------------------------------------------------------------------
     # connections
@@ -215,19 +280,71 @@ class MigrationAuthority:
 
     @staticmethod
     def _split_checkpoints(sql: str) -> list[tuple[str, str]]:
-        """Split non-transactional SQL into (checkpoint, segment) pairs.
-
-        The leading segment before any marker runs under checkpoint ''.
-        """
+        """Split SQL into segments named by their durable completion checkpoint."""
         segments: list[tuple[str, str]] = []
-        current_name = ""
+        current_name = _PREAMBLE_CHECKPOINT
         last_end = 0
+        seen: set[str] = set()
         for match in _NON_TRANSACTIONAL_MARKER_RE.finditer(sql):
-            segments.append((current_name, sql[last_end : match.start()]))
+            part = sql[last_end : match.start()]
+            if part.strip():
+                segments.append((current_name, part))
             current_name = match.group("name")
+            if current_name in _RESERVED_CHECKPOINTS or current_name in seen:
+                raise AuthorityError(
+                    f"non-transactional SQL has duplicate/reserved checkpoint {current_name!r}"
+                )
+            seen.add(current_name)
             last_end = match.end()
-        segments.append((current_name, sql[last_end:]))
-        return [(name, part) for name, part in segments if part.strip()]
+        final_part = sql[last_end:]
+        if final_part.strip():
+            segments.append((current_name, final_part))
+        elif seen:
+            raise AuthorityError(
+                f"non-transactional checkpoint {current_name!r} has no SQL segment"
+            )
+        if not segments:
+            raise AuthorityError("non-transactional change contains no executable SQL")
+        return segments
+
+    @staticmethod
+    def _attempt_expired(attempt: dict[str, Any], *, now: datetime | None = None) -> bool:
+        started_at = attempt.get("started_at")
+        if not isinstance(started_at, datetime):
+            raise AuthorityError("open migration attempt has no valid started_at timestamp")
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+        current = now or datetime.now(timezone.utc)
+        return current - started_at.astimezone(timezone.utc) >= ATTEMPT_LEASE_TIMEOUT
+
+    async def _run_recovery_handler(
+        self,
+        name: str | None,
+        conn: Any,
+        context: RecoveryContext,
+        *,
+        kind: str,
+    ) -> None:
+        if not name:
+            raise AuthorityBlockedError(
+                f"change {context.spec.sequence} needs a declared {kind}_handler "
+                f"for attempt state {context.prior_state!r}"
+            )
+        handler = self._recovery_handlers.get(name)
+        if handler is None:
+            raise AuthorityBlockedError(
+                f"change {context.spec.sequence} declares {kind}_handler {name!r}, "
+                "but this runner has no registered implementation"
+            )
+        await handler(conn, context)
+
+    @staticmethod
+    def _require_fence(value: Any, *, action: str, attempt_id: str) -> int:
+        if value is None:
+            raise AuthorityBlockedError(
+                f"attempt {attempt_id} lost its lease/fence while trying to {action}"
+            )
+        return int(value)
 
     async def _evaluate_conditions(
         self, conn: Any, conditions: tuple[str, ...], *, change_name: str, phase: str
@@ -304,65 +421,195 @@ class MigrationAuthority:
                 f"change {spec.sequence} ({spec.file}) checksum mismatch: "
                 f"manifest declares {spec.sha256}, file is {actual_sha}"
             )
+        self._reject_embedded_transactions(sql, spec.name)
 
-        attempt_id = f"{spec.sequence:03d}-{uuid.uuid4().hex}"
-        lease_owner = f"{RUNNER_DIGEST}:{socket.gethostname()}:{uuid.uuid4().hex[:8]}"
-        open_attempts = await conn.fetch(
-            ledger.SELECT_OPEN_ATTEMPTS, baseline_id, spec.sequence
-        )
-        resume_checkpoint = ""
-        for attempt in open_attempts:
-            if attempt["checksum_sha256"] != spec.sha256:
-                raise AuthorityError(
-                    f"change {spec.sequence} has an open attempt with a different "
-                    "checksum; refusing to proceed until an operator reconciles"
-                )
-            resume_checkpoint = attempt["checkpoint"]
+        declared_handlers = {
+            name for name in (spec.resume_handler, spec.repair_handler) if name
+        }
+        if not declared_handlers:
+            raise AuthorityBlockedError(
+                f"non-transactional change {spec.sequence} has no declared "
+                "resume_handler or repair_handler"
+            )
+        missing_handlers = sorted(declared_handlers - self._recovery_handlers.keys())
+        if missing_handlers:
+            raise AuthorityBlockedError(
+                f"non-transactional change {spec.sequence} has no registered "
+                f"recovery implementation for {missing_handlers}"
+            )
 
-        await conn.execute(
-            ledger.INSERT_ATTEMPT,
-            attempt_id,
-            baseline_id,
-            spec.sequence,
-            spec.sha256,
-            RUNNER_DIGEST,
-            "apply",
-            resume_checkpoint,
-            lease_owner,
-            0,
-        )
-
-        await self._evaluate_conditions(
-            conn, spec.preconditions, change_name=spec.name, phase="pre"
-        )
         segments = self._split_checkpoints(sql)
-        reached = resume_checkpoint
+        known_checkpoints = {name for name, _segment in segments}
+        lease_owner = f"{RUNNER_DIGEST}:{socket.gethostname()}:{uuid.uuid4().hex[:8]}"
+        rows = await conn.fetch(_SELECT_LATEST_ATTEMPT, baseline_id, spec.sequence)
+        latest = dict(rows[0]) if rows else None
+        recovery_kind: str | None = None
+        handler_name: str | None = None
+        prior_state = "new"
+
+        if latest is None:
+            attempt_id = f"{spec.sequence:03d}-{uuid.uuid4().hex}"
+            checkpoint = ""
+            fence_generation = 0
+            await conn.execute(
+                ledger.INSERT_ATTEMPT,
+                attempt_id,
+                baseline_id,
+                spec.sequence,
+                spec.sha256,
+                RUNNER_DIGEST,
+                "apply",
+                checkpoint,
+                lease_owner,
+                fence_generation,
+            )
+        else:
+            attempt_id = str(latest["attempt_id"])
+            if str(latest["checksum_sha256"]) != spec.sha256:
+                raise AuthorityBlockedError(
+                    f"change {spec.sequence} latest attempt has checksum "
+                    f"{latest['checksum_sha256']}, expected {spec.sha256}"
+                )
+            if str(latest["runner_digest"]) != RUNNER_DIGEST:
+                raise AuthorityBlockedError(
+                    f"change {spec.sequence} latest attempt was created by runner "
+                    f"{latest['runner_digest']}, current runner is {RUNNER_DIGEST}"
+                )
+            checkpoint = str(latest.get("checkpoint") or "")
+            if checkpoint and checkpoint not in known_checkpoints:
+                raise AuthorityBlockedError(
+                    f"change {spec.sequence} attempt {attempt_id} has unknown "
+                    f"checkpoint {checkpoint!r}; known={sorted(known_checkpoints)}"
+                )
+            prior_state = str(latest["state"])
+            fence_generation = int(latest["fence_generation"])
+
+            if prior_state == ledger.ATTEMPT_STATE_RUNNING:
+                if not self._attempt_expired(latest):
+                    raise AuthorityBlockedError(
+                        f"change {spec.sequence} attempt {attempt_id} still has an active lease"
+                    )
+                expired_state = (
+                    ledger.ATTEMPT_STATE_RESUMABLE
+                    if spec.resume_handler
+                    else ledger.ATTEMPT_STATE_FAILED
+                )
+                transitioned = await conn.fetchval(
+                    _TRANSITION_EXPIRED_ATTEMPT,
+                    attempt_id,
+                    str(latest["lease_owner"]),
+                    fence_generation,
+                    expired_state,
+                    "lease_expired",
+                )
+                self._require_fence(
+                    transitioned, action="expire stale lease", attempt_id=attempt_id
+                )
+                prior_state = expired_state
+
+            if prior_state == ledger.ATTEMPT_STATE_RESUMABLE:
+                recovery_kind = "resume"
+                handler_name = spec.resume_handler
+            elif prior_state == ledger.ATTEMPT_STATE_FAILED:
+                recovery_kind = "repair"
+                handler_name = spec.repair_handler
+            else:
+                raise AuthorityBlockedError(
+                    f"change {spec.sequence} attempt {attempt_id} has unsupported "
+                    f"state {prior_state!r}"
+                )
+
+            claimed = await conn.fetchval(
+                _CLAIM_ATTEMPT,
+                attempt_id,
+                lease_owner,
+                fence_generation,
+                recovery_kind,
+            )
+            fence_generation = self._require_fence(
+                claimed, action="claim recovery lease", attempt_id=attempt_id
+            )
+
+        start_index = 0
+        if checkpoint:
+            start_index = next(
+                index + 1
+                for index, (name, _segment) in enumerate(segments)
+                if name == checkpoint
+            )
         start = time.monotonic()
+        await conn.execute(
+            f"SET statement_timeout = {int(spec.timeout_seconds) * 1000}"
+        )
+        await conn.execute(
+            f"SET lock_timeout = {int(spec.lock_budget_seconds) * 1000}"
+        )
         try:
-            for checkpoint_name, segment in segments:
-                if reached:
-                    if checkpoint_name == reached:
-                        reached = ""  # resume from the NEXT segment
-                    continue
-                await conn.execute(segment)
-                await conn.execute(
-                    ledger.UPDATE_ATTEMPT_CHECKPOINT,
+            if recovery_kind is not None:
+                context = RecoveryContext(
+                    baseline_id=baseline_id,
+                    spec=spec,
+                    attempt_id=attempt_id,
+                    checkpoint=checkpoint,
+                    fence_generation=fence_generation,
+                    prior_state=prior_state,
+                )
+                await self._run_recovery_handler(
+                    handler_name,
+                    conn,
+                    context,
+                    kind=recovery_kind,
+                )
+
+            await self._evaluate_conditions(
+                conn, spec.preconditions, change_name=spec.name, phase="pre"
+            )
+            for checkpoint_name, segment in segments[start_index:]:
+                if spec.owner == "owner":
+                    owner_role = f"{self.role_prefix}owner"
+                    await conn.execute(f'SET ROLE "{owner_role}"')
+                try:
+                    await conn.execute(segment)
+                finally:
+                    if spec.owner == "owner":
+                        await conn.execute("RESET ROLE")
+                updated = await conn.fetchval(
+                    _UPDATE_ATTEMPT_CHECKPOINT_FENCED,
                     attempt_id,
                     lease_owner,
+                    fence_generation,
                     checkpoint_name,
+                )
+                fence_generation = self._require_fence(
+                    updated, action="record checkpoint", attempt_id=attempt_id
                 )
             await self._evaluate_conditions(
                 conn, spec.postconditions, change_name=spec.name, phase="post"
             )
         except Exception as exc:  # noqa: BLE001 - attempt must record the failure
-            await conn.execute(
-                ledger.UPDATE_ATTEMPT_TERMINAL,
+            failed_state = (
+                ledger.ATTEMPT_STATE_RESUMABLE
+                if spec.resume_handler
+                else ledger.ATTEMPT_STATE_FAILED
+            )
+            terminal = await conn.fetchval(
+                _UPDATE_ATTEMPT_TERMINAL_FENCED,
                 attempt_id,
                 lease_owner,
-                ledger.ATTEMPT_STATE_FAILED,
+                fence_generation,
+                failed_state,
                 type(exc).__name__,
             )
+            self._require_fence(
+                terminal, action="record failed attempt", attempt_id=attempt_id
+            )
             raise
+        finally:
+            # Non-transactional changes use session-scoped settings. Always
+            # restore them before this connection can be reused by ledger or
+            # status work, including recovery-handler and postcheck failures.
+            await conn.execute("RESET statement_timeout")
+            await conn.execute("RESET lock_timeout")
         duration_ms = int((time.monotonic() - start) * 1000)
         async with conn.transaction():
             await conn.execute(
@@ -374,12 +621,16 @@ class MigrationAuthority:
                 duration_ms,
                 RUNNER_DIGEST,
             )
-            await conn.execute(
-                ledger.UPDATE_ATTEMPT_TERMINAL,
+            terminal = await conn.fetchval(
+                _UPDATE_ATTEMPT_TERMINAL_FENCED,
                 attempt_id,
                 lease_owner,
+                fence_generation,
                 ledger.ATTEMPT_STATE_SUCCEEDED,
                 None,
+            )
+            self._require_fence(
+                terminal, action="record successful attempt", attempt_id=attempt_id
             )
         return duration_ms
 
@@ -440,7 +691,7 @@ class MigrationAuthority:
         return alias in applied if alias else False
 
     async def pending_legacy(
-        self, conn: Any, tracking_mode: str, applied: set[str]
+        self, _conn: Any, tracking_mode: str, applied: set[str]
     ) -> list[LegacyMigration]:
         migrations = self.discover_legacy()
         if tracking_mode == "version":

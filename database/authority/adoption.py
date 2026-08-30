@@ -18,19 +18,15 @@ Existing installations are never deleted, rewritten or faked.  The authority:
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from . import ledger
 from .constants import DEFAULT_ROLE_PREFIX
-from .discovery import (
-    HISTORICAL_FILENAME_DUPLICATES,
-    LEGACY_FILENAME_ALIASES,
-    LegacyMigration,
-)
+from .discovery import LEGACY_FILENAME_ALIASES, LegacyMigration
 from .fingerprint import compute_fingerprints
 from .manifest import BaselineManifest
+from .numeric_reconciliation import NumericReconciliationReceipt
 from .runner import AuthorityBlockedError, AuthorityError
 
 
@@ -51,67 +47,44 @@ class LedgerState:
         return self.filename_ledger or self.numeric_ledger or self.per_service_ledger
 
 
-@dataclass
-class ReconciliationReceipt:
-    """Machine evidence for ambiguous legacy ledger history."""
+# Compatibility name for consumers that imported the receipt from adoption.
+ReconciliationReceipt = NumericReconciliationReceipt
 
-    ledger_kind: str
-    duplicates: dict[str, dict[str, Any]] = field(default_factory=dict)
-    verdict: str = "proven"  # proven | blocked
-    notes: list[str] = field(default_factory=list)
 
-    def to_json(self) -> str:
-        return json.dumps(
-            {
-                "ledger_kind": self.ledger_kind,
-                "verdict": self.verdict,
-                "duplicates": self.duplicates,
-                "notes": self.notes,
-            },
-            indent=2,
-            sort_keys=True,
+def validate_existing_adoption_marker(
+    existing: list[Any],
+    baseline: BaselineManifest,
+    *,
+    manifest_sha256: str,
+) -> str | None:
+    """Validate the one immutable marker row; return its baseline id if present."""
+    if not existing:
+        return None
+    if len(existing) != 1:
+        raise AuthorityError(
+            f"database contains {len(existing)} adoption markers; exactly one is allowed"
         )
-
-
-# Object/constraint evidence per ambiguous historical filename.  Files without
-# structural evidence (pure data updates) can never be proven from a numeric
-# ledger and must stay unprovable — guessing is forbidden.
-DUPLICATE_EVIDENCE: dict[str, tuple[tuple[str, str], ...]] = {
-    "016_confluence_multi_root_pages.sql": (
-        (
-            "confluence_space_bindings.root_page_ids exists",
-            "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
-            "WHERE table_schema = 'public' AND table_name = 'confluence_space_bindings' "
-            "AND column_name = 'root_page_ids')",
-        ),
-        (
-            "confluence_space_bindings.sync_images exists",
-            "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
-            "WHERE table_schema = 'public' AND table_name = 'confluence_space_bindings' "
-            "AND column_name = 'sync_images')",
-        ),
-    ),
-    "016_usage_hourly_aggregates.sql": (
-        (
-            "usage_hourly_aggregates table exists",
-            "SELECT to_regclass('public.usage_hourly_aggregates') IS NOT NULL",
-        ),
-    ),
-    "031_hierarchical_segments.sql": (
-        (
-            "segments.level exists",
-            "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
-            "WHERE table_schema = 'public' AND table_name = 'segments' "
-            "AND column_name = 'level')",
-        ),
-        (
-            "document_summaries table exists",
-            "SELECT to_regclass('public.document_summaries') IS NOT NULL",
-        ),
-    ),
-    # Data-only UPDATEs leave no structural trace: unprovable by design.
-    "031_align_model_prices_20260211.sql": (),
-}
+    marker = dict(existing[0])
+    expected = {
+        "baseline_id": baseline.baseline_id,
+        "manifest_sha256": manifest_sha256,
+        "structural_sha256": baseline.structural_sha256,
+        "acl_sha256": baseline.acl_sha256,
+        "extensions_sha256": baseline.extensions_sha256,
+        "reference_data_sha256": baseline.reference_data_sha256,
+        "source_git_sha": baseline.source_git_sha,
+    }
+    drift = [
+        f"{field}: marker={marker.get(field)!r}, manifest={value!r}"
+        for field, value in expected.items()
+        if str(marker.get(field, "")) != str(value)
+    ]
+    if drift:
+        raise AuthorityError(
+            "existing adoption marker does not match the frozen baseline; "
+            + "; ".join(drift)
+        )
+    return baseline.baseline_id
 
 
 async def detect_legacy_state(conn: Any) -> LedgerState:
@@ -160,32 +133,6 @@ async def detect_legacy_state(conn: Any) -> LedgerState:
     )
 
 
-async def reconcile_numeric_duplicates(conn: Any) -> ReconciliationReceipt:
-    """Prove or block each ambiguous duplicate version with object evidence."""
-    receipt = ReconciliationReceipt(ledger_kind="numeric")
-    for version, candidates in sorted(HISTORICAL_FILENAME_DUPLICATES.items()):
-        version_entry: dict[str, Any] = {}
-        for filename in sorted(candidates):
-            checks = DUPLICATE_EVIDENCE.get(filename)
-            if checks is None:
-                raise AuthorityError(
-                    f"no evidence registry entry for duplicate file {filename}"
-                )
-            results = []
-            for description, query in checks:
-                value = await conn.fetchval(query)
-                results.append({"check": description, "passed": bool(value)})
-            if not checks:
-                verdict = "unprovable"
-            else:
-                verdict = "proven" if all(r["passed"] for r in results) else "not_proven"
-            version_entry[filename] = {"evidence": results, "verdict": verdict}
-            if verdict != "proven":
-                receipt.verdict = "blocked"
-        receipt.duplicates[version] = version_entry
-    return receipt
-
-
 def legacy_missing_files(
     state: LedgerState, migrations: list[LegacyMigration]
 ) -> list[LegacyMigration]:
@@ -224,14 +171,11 @@ async def adopt_baseline(
     fingerprint dict on success and raises with a drift report otherwise.
     """
     existing = await conn.fetch(ledger.SELECT_BASELINE)
-    if existing:
-        current = str(existing[0]["baseline_id"])
-        if current != baseline.baseline_id:
-            raise AuthorityError(
-                f"database already adopted baseline {current!r}; "
-                f"refusing adoption marker for {baseline.baseline_id!r}"
-            )
-        return {"already_adopted": current}
+    adopted_id = validate_existing_adoption_marker(
+        existing, baseline, manifest_sha256=manifest_sha256
+    )
+    if adopted_id is not None:
+        return {"already_adopted": adopted_id}
 
     computed = await compute_fingerprints(
         conn, role_prefix=role_prefix, reference_sets=baseline.reference_data
@@ -260,6 +204,14 @@ async def adopt_baseline(
         baseline.extensions_sha256,
         baseline.reference_data_sha256,
         baseline.source_git_sha,
+    )
+    # ``INSERT_BASELINE_MARKER`` deliberately uses ON CONFLICT so concurrent
+    # writers cannot replace immutable evidence.  Never interpret the command
+    # completing as proof that *our* marker won the race: read the single row
+    # back and compare every frozen identity field before reporting success.
+    inserted = await conn.fetch(ledger.SELECT_BASELINE)
+    validate_existing_adoption_marker(
+        inserted, baseline, manifest_sha256=manifest_sha256
     )
     return computed
 

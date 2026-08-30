@@ -8,10 +8,8 @@ platform-architecture-convergence-prd-2026-08.md §ARC-03.
 
 from .adoption import (
     LedgerState,
-    ReconciliationReceipt,
     adopt_baseline,
     detect_legacy_state,
-    reconcile_numeric_duplicates,
 )
 from .bootstrap import (
     database_empty,
@@ -20,6 +18,7 @@ from .bootstrap import (
     startup_schema_check,
 )
 from .commands import (
+    MigrationCommandResult,
     command_init_fresh,
     command_migrate,
     command_startup_check,
@@ -59,6 +58,11 @@ from .manifest import (
     load_baseline_manifest,
     load_epoch_manifest,
 )
+from .numeric_reconciliation import (
+    NumericReconciliationBlocked,
+    NumericReconciliationReceipt,
+    reconcile_numeric_legacy_history,
+)
 from .runner import (
     RUNNER_DIGEST,
     AuthorityBlockedError,
@@ -66,6 +70,10 @@ from .runner import (
     AuthorityPaths,
     MigrationAuthority,
 )
+
+# Historical import name; the canonical receipt now lives in the dedicated
+# fail-closed reconciliation module.
+ReconciliationReceipt = NumericReconciliationReceipt
 
 __all__ = [
     "ATTEMPTS_TABLE",
@@ -91,6 +99,9 @@ __all__ = [
     "MIGRATION_ADVISORY_LOCK_ID",
     "MIGRATION_ADVISORY_LOCK_NAMESPACE",
     "MigrationAuthority",
+    "MigrationCommandResult",
+    "NumericReconciliationBlocked",
+    "NumericReconciliationReceipt",
     "RUNNER_DIGEST",
     "ReconciliationReceipt",
     "RollbackClass",
@@ -109,7 +120,7 @@ __all__ = [
     "load_baseline_manifest",
     "load_epoch_manifest",
     "preflight_database_empty",
-    "reconcile_numeric_duplicates",
+    "reconcile_numeric_legacy_history",
     "startup_schema_check",
     "validate_legacy_chain",
 ]

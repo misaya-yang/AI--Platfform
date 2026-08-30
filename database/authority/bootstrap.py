@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Any
 
 from . import ledger
-from .constants import DEFAULT_ROLE_PREFIX
+from .adoption import validate_existing_adoption_marker
+from .constants import DEFAULT_ROLE_PREFIX, LEDGER_TABLES
 from .fingerprint import compute_fingerprints
 from .manifest import BaselineManifest
 from .runner import AuthorityError, AuthorityPaths
@@ -80,15 +81,51 @@ async def run_baseline_sql_file(
 
 
 async def database_empty(conn: Any) -> bool:
-    """True when the database holds no user-visible relations at all."""
+    """True when the database has no user-created schema objects.
+
+    Relations alone are insufficient: an enum, function, custom schema or
+    preinstalled extension can collide with the frozen init while still
+    making the old relation-only preflight report "empty".
+    """
     count = await conn.fetchval(
         """
-        SELECT count(*)
-        FROM pg_class AS c
-        JOIN pg_namespace AS n ON n.oid = c.relnamespace
-        WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
-          AND n.nspname NOT LIKE 'pg_temp%'
-          AND c.relkind IN ('r', 'p', 'm', 'S', 'v', 'f')
+        SELECT sum(object_count)
+        FROM (
+            SELECT count(*) AS object_count
+            FROM pg_class AS c
+            JOIN pg_namespace AS n ON n.oid = c.relnamespace
+            WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+              AND n.nspname NOT LIKE 'pg_temp%'
+              AND n.nspname NOT LIKE 'pg_toast_temp%'
+              AND c.relkind IN ('r', 'p', 'm', 'S', 'v', 'f', 'c')
+            UNION ALL
+            SELECT count(*)
+            FROM pg_proc AS p
+            JOIN pg_namespace AS n ON n.oid = p.pronamespace
+            WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+              AND n.nspname NOT LIKE 'pg_temp%'
+              AND n.nspname NOT LIKE 'pg_toast_temp%'
+            UNION ALL
+            SELECT count(*)
+            FROM pg_type AS t
+            JOIN pg_namespace AS n ON n.oid = t.typnamespace
+            WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+              AND n.nspname NOT LIKE 'pg_temp%'
+              AND n.nspname NOT LIKE 'pg_toast_temp%'
+              AND t.typrelid = 0
+              AND t.typelem = 0
+              AND t.typtype IN ('b', 'c', 'd', 'e', 'm', 'r')
+            UNION ALL
+            SELECT count(*)
+            FROM pg_namespace AS n
+            WHERE n.nspname NOT IN ('public', 'pg_catalog', 'information_schema', 'pg_toast')
+              AND n.nspname NOT LIKE 'pg_temp%'
+              AND n.nspname NOT LIKE 'pg_toast_temp%'
+            UNION ALL
+            SELECT count(*)
+            FROM pg_extension
+            WHERE extname <> 'plpgsql'
+        ) AS user_objects
         """
     )
     return not count
@@ -111,51 +148,105 @@ async def fresh_install(
     *,
     role_prefix: str = DEFAULT_ROLE_PREFIX,
 ) -> dict[str, str]:
-    """Bootstrap one empty database onto the frozen baseline."""
+    """Bootstrap one empty database atomically onto the frozen baseline.
+
+    Roles, extensions, schema, reference rows, grants, fingerprints, ledger and
+    marker share one outer transaction.  The per-file transactions below are
+    savepoints when used with asyncpg.  Any failure therefore leaves no partial
+    init that would make the next empty-database preflight permanently fail.
+    Fresh install deliberately has no durable attempt row: rollback means
+    "not started", while the atomic baseline marker means "complete".
+    """
+    ledger_presence = {
+        table: bool(
+            await conn.fetchval(
+                "SELECT to_regclass($1) IS NOT NULL", f"public.{table}"
+            )
+        )
+        for table in LEDGER_TABLES
+    }
+    ledger_present = ledger_presence[ledger.BASELINES_TABLE]
+    if ledger_present:
+        missing_ledger = sorted(
+            table for table, present in ledger_presence.items() if not present
+        )
+        if missing_ledger:
+            raise AuthorityError(
+                "fresh-install marker ledger is incomplete; missing tables "
+                f"{missing_ledger}"
+            )
+        existing = await conn.fetch(ledger.SELECT_BASELINE)
+        if not existing:
+            raise AuthorityError(
+                "fresh-install ledger exists without an adoption marker; "
+                "refusing to guess whether a partial or foreign schema is safe"
+            )
+        validate_existing_adoption_marker(
+            existing, baseline, manifest_sha256=manifest_sha256
+        )
+        computed = await compute_fingerprints(
+            conn, role_prefix=role_prefix, reference_sets=baseline.reference_data
+        )
+        drift = [
+            f"{name}: expected {baseline.fingerprints[name]}, computed {computed[name]}"
+            for name in ("structural", "acl", "extensions", "reference_data")
+            if baseline.fingerprints[name] != computed[name]
+        ]
+        if drift:
+            raise AuthorityError(
+                "fresh-install marker exists but live fingerprints drifted: "
+                + "; ".join(drift)
+            )
+        return computed
+
     await preflight_database_empty(conn)
-    await bootstrap_roles(conn, paths, role_prefix)
-    await bootstrap_extensions(conn, paths)
+    async with conn.transaction():
+        await bootstrap_roles(conn, paths, role_prefix)
+        await bootstrap_extensions(conn, paths)
 
-    baseline_dir = paths.baseline_dir(baseline.baseline_id)
-    # Objects created for the baseline are owned by the NOLOGIN owner; the
-    # connecting (admin/migrator) session only borrows that identity.  This
-    # must match the adoption path, whose cutover re-owns every object.
-    # grants.sql names roles and is never run as the owner (GRANT requires
-    # the grantor to hold the privileges), so it runs after RESET ROLE.
-    owner_role = f"{role_prefix}owner"
-    await conn.execute(f'SET ROLE "{owner_role}"')
-    try:
-        for file_name in ("init.sql", "reference_data.sql"):
-            await run_baseline_sql_file(conn, baseline_dir / file_name)
-    finally:
-        await conn.execute("RESET ROLE")
-    await run_baseline_sql_file(conn, baseline_dir / "grants.sql", role_prefix=role_prefix)
-
-    computed = await compute_fingerprints(
-        conn, role_prefix=role_prefix, reference_sets=baseline.reference_data
-    )
-    drift = [
-        f"{name}: expected {baseline.fingerprints[name]}, computed {computed[name]}"
-        for name in ("structural", "acl", "extensions", "reference_data")
-        if baseline.fingerprints[name] != computed[name]
-    ]
-    if drift:
-        raise AuthorityError(
-            "fresh install fingerprint mismatch — baseline files do not "
-            f"reproduce the frozen baseline: {'; '.join(drift)}"
+        baseline_dir = paths.baseline_dir(baseline.baseline_id)
+        # Objects created for the baseline are owned by the NOLOGIN owner; the
+        # connecting session borrows that identity only inside this transaction.
+        owner_role = f"{role_prefix}owner"
+        await conn.execute(f'SET LOCAL ROLE "{owner_role}"')
+        try:
+            for file_name in ("init.sql", "reference_data.sql"):
+                await run_baseline_sql_file(conn, baseline_dir / file_name)
+        finally:
+            await conn.execute("RESET ROLE")
+        await run_baseline_sql_file(
+            conn, baseline_dir / "grants.sql", role_prefix=role_prefix
         )
 
-    await conn.execute(ledger.LEDGER_DDL)
-    await conn.execute(
-        ledger.INSERT_BASELINE_MARKER,
-        baseline.baseline_id,
-        manifest_sha256,
-        baseline.structural_sha256,
-        baseline.acl_sha256,
-        baseline.extensions_sha256,
-        baseline.reference_data_sha256,
-        baseline.source_git_sha,
-    )
+        computed = await compute_fingerprints(
+            conn, role_prefix=role_prefix, reference_sets=baseline.reference_data
+        )
+        drift = [
+            f"{name}: expected {baseline.fingerprints[name]}, computed {computed[name]}"
+            for name in ("structural", "acl", "extensions", "reference_data")
+            if baseline.fingerprints[name] != computed[name]
+        ]
+        if drift:
+            raise AuthorityError(
+                "fresh install fingerprint mismatch — baseline files do not "
+                f"reproduce the frozen baseline: {'; '.join(drift)}"
+            )
+
+        await conn.execute(ledger.LEDGER_DDL)
+        await conn.execute(
+            ledger.INSERT_BASELINE_MARKER,
+            baseline.baseline_id,
+            manifest_sha256,
+            baseline.structural_sha256,
+            baseline.acl_sha256,
+            baseline.extensions_sha256,
+            baseline.reference_data_sha256,
+            baseline.source_git_sha,
+        )
+        inserted = await conn.fetch(ledger.SELECT_BASELINE)
+        validate_existing_adoption_marker(
+            inserted, baseline, manifest_sha256=manifest_sha256
+        )
     return computed
 
 
