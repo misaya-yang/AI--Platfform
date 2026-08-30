@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from ...core.auth.user_resolver import UserContext
+from ...services.agent_runtime.model_plane import _estimate_tokens
 from ...services.assistant_entry.launch_resolution import (
     AgentLaunchResolutionError,
     resolve_agent_launch,
@@ -264,6 +265,7 @@ def _completed_response(
     response_id: str,
     model: str,
     text: str,
+    input_value: Any = None,
     status: str = "completed",
     usage: dict[str, Any] | None = None,
     error: dict[str, Any] | None = None,
@@ -272,7 +274,11 @@ def _completed_response(
     tool_choice: Any = "auto",
     parallel_tool_calls: bool = True,
 ) -> dict[str, Any]:
-    normalized_usage = _responses_usage(usage)
+    normalized_usage = _responses_usage(
+        usage,
+        input_value=input_value,
+        output_text=text,
+    )
     output: list[dict[str, Any]] = list(tool_calls or [])
     output.append(
         {
@@ -320,7 +326,12 @@ def _response_function_call(data: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _responses_usage(value: dict[str, Any] | None) -> dict[str, Any]:
+def _responses_usage(
+    value: dict[str, Any] | None,
+    *,
+    input_value: Any = None,
+    output_text: str = "",
+) -> dict[str, Any]:
     value = value if isinstance(value, dict) else {}
 
     def token(*names: str) -> int:
@@ -332,6 +343,10 @@ def _responses_usage(value: dict[str, Any] | None) -> dict[str, Any]:
 
     input_tokens = token("input_tokens", "prompt_tokens")
     output_tokens = token("output_tokens", "completion_tokens")
+    if input_tokens == 0 and input_value not in (None, ""):
+        input_tokens = _estimate_tokens(input_value)
+    if output_tokens == 0 and output_text:
+        output_tokens = _estimate_tokens(output_text)
     details = value.get("input_tokens_details")
     cached_tokens = token("cached_input_tokens")
     if isinstance(details, dict):
@@ -828,6 +843,7 @@ async def create_response(
                     response_id=response_id,
                     model=model_id,
                     text="".join(text_parts),
+                    input_value=message,
                     status="failed" if failed else "completed",
                     usage=usage,
                     tool_calls=list(tool_calls.values()),
@@ -1001,6 +1017,7 @@ async def create_response(
                 response_id=response_id,
                 model=model_id,
                 text=text,
+                input_value=message,
                 status="failed" if failed else "completed",
                 usage=usage,
                 tool_calls=list(tool_calls.values()),
@@ -1023,6 +1040,7 @@ async def create_response(
             response_id=response_id,
             model=model_id,
             text="".join(text_parts),
+            input_value=message,
             status="failed",
             usage=usage,
             tool_calls=list(tool_calls.values()),

@@ -237,11 +237,13 @@ def test_public_responses_uses_agent_runtime_for_nonstream_and_stream(
 
     assert nonstream.status_code == 200
     assert nonstream.json()["output_text"] == "hello"
+    assert nonstream.json()["usage"]["total_tokens"] > 0
     assert stream.status_code == 200
     assert "response.output_text.delta" in stream.text
     assert "response.content_part.added" in stream.text
     assert "response.content_part.done" in stream.text
     assert "response.completed" in stream.text
+    assert '"total_tokens":0' not in stream.text
     assert len(control.calls) == 2
     assert isinstance(control.calls[0]["resolved_agent_launch"], ResolvedAgentLaunchV1)
     assert control.calls[0]["resolved_agent_launch"].identity["entrypoint"] == "responses"
