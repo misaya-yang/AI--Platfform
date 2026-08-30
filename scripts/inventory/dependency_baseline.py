@@ -7,11 +7,11 @@ Produces ``dependency-baseline.json``:
 * actual cross-unit Python import edges discovered by an AST scan
   (``src`` ↔ ``apps/*`` ↔ ``packages/ai-gateway-core``).
 
-AGENTS.md states the intended direction: ``src/`` and ``apps/*`` are siblings
-that may depend on ``packages/ai-gateway-core``; they must not import each
-other, and one app must not import another. This baseline records where the
-tree stands against that rule at the pinned revision, so ARC-00B's static
-import-boundary gate starts from facts, not assumptions.
+``docs/harness/architecture.md`` states the intended direction: ``src/`` and
+``apps/*`` are siblings that may depend on ``packages/ai-gateway-core``; they
+must not import each other, and one app must not import another. This baseline
+records where the tree stands against that rule at the pinned revision, so the
+static import-boundary gate starts from facts, not assumptions.
 """
 
 from __future__ import annotations
@@ -141,7 +141,8 @@ def import_edges() -> dict:
         "edges": serialized,
         "violations": [edge for edge in serialized if not edge["allowed_by_agents_md"]],
         "rule": (
-            "AGENTS.md: src/ and apps/* are siblings that may depend on packages/ai-gateway-core; "
+            "docs/harness/architecture.md: src/ and apps/* are siblings that may depend on "
+            "packages/ai-gateway-core; "
             "they must not import each other, and one app must not import another. "
             "Static enforcement is an ARC-00B gate."
         ),
