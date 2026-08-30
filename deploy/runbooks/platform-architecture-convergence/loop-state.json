@@ -14,84 +14,93 @@
     "integrate_direct",
     "decide"
   ],
-  "active_phase": "ARC-00A",
+  "active_phase": null,
   "active_feature": null,
   "iteration": 1,
   "max_iterations": 10,
   "base_sha": "336851c1",
   "execution_model": "PRD §8 plans sequential single-owner waves. On 2026-08-29 the user explicitly directed same-directory parallel execution of Wave-1+ packages under mutually exclusive owned paths, with all commits performed by the primary session. Package states below are recorded truthfully under that deviation.",
-  "last_result": "Program activated 2026-08-29. ARC-00A produced the 2026-08-post-rag baseline set, contract freeze, ADR-008 (Accepted), FRC terminal closeout, PPR supersession with per-phase disposition, and this runbook.",
-  "next_action": "Complete ARC-00A final verification (baseline regeneration at settled tree, harness-check, JSON validation) and hand to the primary session for themed commits; parallel packages ARC-00B/00C/01/02/02B/03/04 continue under their own agents.",
+  "last_result": "2026-08-30: Claude Code Wave-1 stopped by user direction and handed to Codex. ARC-00A/01/01B/04 committed and direct-gate green (state=review, cross-review NOT performed). ARC-00B/00C/02/02B/03 interrupted mid-work; their tree state is preserved as explicit wip() checkpoint commits. Working tree clean at 9fc5095f.",
+  "next_action": "Codex owns all remaining work: read HANDOFF.md in this directory first, finish the five WIP packages, perform the cancelled cross-review, regenerate baselines at the settled tree, then Wave 2 (ARC-05..08) and the deferred live/heavy acceptance scenarios.",
   "blockers": [],
   "confirmation": null,
   "phases": [
     {
       "id": "ARC-00A",
       "result": "Fact + contract freeze, successor ADR, single authoritative program, terminal/superseded ledgers.",
-      "status": "in_progress",
+      "status": "review",
       "owner": "arc-00a-agent",
       "evidence": [
         "docs/architecture/baselines/2026-08-post-rag/*.json",
         "docs/architecture/ADR-008-bounded-contexts-no-new-services.md",
         "deploy/runbooks/agent-runtime-full-rust-cutover/loop-state.json",
         "deploy/runbooks/platform-plane-restructure/loop-state.json"
-      ]
+      ],
+      "checkpoint": "8f42d655..eb4dc048"
     },
     {
       "id": "ARC-00B",
       "result": "Trustworthy gates: real type-check, offline+live OpenAPI split, static import boundary, gate schema/selector/CI, hygiene + LOC no-growth.",
       "status": "in_progress",
       "owner": "arc-00b-agent",
-      "evidence": []
+      "evidence": [],
+      "checkpoint": "f327e0f0 (WIP)"
     },
     {
       "id": "ARC-00C",
       "result": "Rust build/distribution economics: per-crate artifact identity, build/update scripts, shared locks, baseline registration; absorbs PPR-01.",
       "status": "in_progress",
       "owner": "arc-00c-agent",
-      "evidence": []
+      "evidence": [],
+      "checkpoint": "023b06a2 (WIP, with ARC-02B)"
     },
     {
       "id": "ARC-01",
       "result": "Assistant Gateway API modularization (src/api/v1/assistant.py split) with OpenAPI/SSE/import/error-contract parity.",
-      "status": "in_progress",
+      "status": "review",
       "owner": "arc-01-agent",
-      "evidence": []
+      "evidence": [],
+      "checkpoint": "b0cac34d"
     },
     {
       "id": "ARC-01B",
       "result": "src/services/agent_runtime/agent_runtime.py split by use case.",
-      "status": "queued",
-      "owner": null,
-      "evidence": []
+      "status": "review",
+      "owner": "arc-01-agent",
+      "evidence": [],
+      "checkpoint": "ab087b7f"
     },
     {
       "id": "ARC-02",
       "result": "Runtime control/model plane modularization, self-HTTP removal, ResolvedAgentLaunchV1, Capability V2 convergence, Rust HTTP boundary.",
       "status": "in_progress",
       "owner": "arc-02-agent",
-      "evidence": []
+      "evidence": [],
+      "checkpoint": "9fc5095f (WIP)"
     },
     {
       "id": "ARC-02B",
       "result": "Runtime/Worker HTTP boundary module split with zero wire-protocol drift.",
       "status": "in_progress",
       "owner": "arc-02b-agent",
-      "evidence": []
+      "evidence": [],
+      "checkpoint": "023b06a2 (WIP)"
     },
     {
       "id": "ARC-03",
       "result": "Single migration authority and per-service PostgreSQL roles (runner/ledger/schema convergence, then roles/grants/adoption).",
       "status": "in_progress",
       "owner": "arc-03-agent",
-      "evidence": []
+      "evidence": [],
+      "checkpoint": "ec487d80 (WIP)"
     },
     {
       "id": "ARC-04",
       "result": "Shrink ai-gateway-core, establish the I/O-free contracts layer, allowlist gate, inventory report.",
-      "status": "in_progress",
+      "status": "review",
       "owner": "arc-04-agent",
-      "evidence": []
+      "evidence": [],
+      "checkpoint": "11acba6d..e1af4a35"
     },
     {
       "id": "ARC-05",
@@ -122,5 +131,25 @@
       "evidence": []
     }
   ],
-  "features": []
+  "features": [],
+  "handoff": {
+    "to": "codex",
+    "date": "2026-08-30",
+    "branch": "platform-arch-convergence-2026-08",
+    "head_sha": "9fc5095f",
+    "document": "deploy/runbooks/platform-architecture-convergence/HANDOFF.md",
+    "verified_packages": [
+      "ARC-00A",
+      "ARC-01",
+      "ARC-01B",
+      "ARC-04"
+    ],
+    "wip_checkpoints": {
+      "ARC-00B": "f327e0f0",
+      "ARC-03": "ec487d80",
+      "ARC-02B+ARC-00C": "023b06a2",
+      "ARC-02": "9fc5095f"
+    },
+    "cross_review_performed": false
+  }
 }
