@@ -384,14 +384,12 @@ impl ApprovalBroker {
             .get("method")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let kind = match method {
-            "item/commandExecution/requestApproval" => ApprovalKind::Command,
-            "item/fileChange/requestApproval" => ApprovalKind::FileChange,
-            _ => return Ok(None),
-        };
         let params = raw
             .get("params")
             .ok_or_else(|| "approval_params_missing".to_string())?;
+        let Some(kind) = server_request_approval_kind(method, params)? else {
+            return Ok(None);
+        };
         let thread_id = params
             .get("threadId")
             .or_else(|| params.get("conversationId"))
@@ -716,5 +714,27 @@ impl ApprovalBroker {
             event: SequencedAssistantTurnEventV1 { sequence, event },
             status: projection_status,
         })
+    }
+}
+
+/// The upstream command-approval request gained a `kind` discriminator.
+/// This Runtime has a durable approval binding only for complete command
+/// execution, not writes to an already-running process. Treat a missing kind
+/// as the legacy command form, but fail closed for every other kind so an
+/// approval recorded for one action cannot authorize a different action.
+fn server_request_approval_kind(
+    method: &str,
+    params: &Value,
+) -> Result<Option<ApprovalKind>, String> {
+    match method {
+        "item/commandExecution/requestApproval" => {
+            match params.get("kind").and_then(Value::as_str) {
+                None | Some("command") => Ok(Some(ApprovalKind::Command)),
+                Some("writeStdin") => Err("unsupported_command_approval_kind".to_string()),
+                Some(_) => Err("invalid_command_approval_kind".to_string()),
+            }
+        }
+        "item/fileChange/requestApproval" => Ok(Some(ApprovalKind::FileChange)),
+        _ => Ok(None),
     }
 }

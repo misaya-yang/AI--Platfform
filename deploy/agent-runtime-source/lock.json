@@ -1,23 +1,23 @@
 {
   "build": {
-    "app_server_schema_file_count": 292,
-    "app_server_schema_sha256": "d6fc70952574166e7c69d6524601065a81fc94d26a1b99d180d7c3918c46e3f7",
+    "app_server_schema_file_count": 1005,
+    "app_server_schema_sha256": "ec57a2516f9dfd89d56fafd84bfbaa1a9b19fc03507867f123a03c03ddcc837b",
     "capability_worker_sbom": "deploy/agent-runtime-source/capability-worker-sbom.cdx.json",
-    "capability_worker_sbom_sha256": "8d9411d746aedbc3477ea0763ac413bfe614ab2f80f3d868e75d2af23df27482",
+    "capability_worker_sbom_sha256": "acd60f18d58de5acc001a82ebb8d5fa9d0cbd0f09eb7c5e479b8af259f4063f5",
     "capability_worker_schema_sha256": "b2b6a1ae71f054387b16daecc0325faf0acb09be7a6119adbfe3227cbfb945a7",
     "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
-    "cargo_lock_sha256": "6c57d517924acb8c74f7e8c9c1a0f9ccd786b133d8c862bf74c3f546fc63d988",
+    "cargo_lock_sha256": "068b81252e9b3c00a73f6ba1c9cf7fb97260207d55e1ea6926c94ea82a816bdb",
     "local_image_profile": "dev-small",
-    "overlay_cargo_lock_sha256": "dbdd065635faf9c54d7d67da5cc0c1bf40f0d83dd56a461cba3a8e825fa95b79",
-    "overlay_file_count": 103,
+    "overlay_cargo_lock_sha256": "068b81252e9b3c00a73f6ba1c9cf7fb97260207d55e1ea6926c94ea82a816bdb",
+    "overlay_file_count": 104,
     "overlay_manifest": "rust/agent-runtime-overlay/manifest.json",
-    "overlay_sha256": "c489b7e4d1479ec3d761bcfbcaf3c32e1eed0ca444e1be8edb2346ce000651ef",
+    "overlay_sha256": "efdf596fa98d375ca034eae1767f410df9fe59051e25df20634bbdb3ac79e57d",
     "rust_toolchain_sha256": "570656042681cfd8795403a455baf9a33035331a07db0645e866bbcea89a3d64",
     "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
     "sbom": "deploy/agent-runtime-source/sbom.cdx.json",
-    "sbom_sha256": "41a6a321a0d412353f65891015976f430bafe239f57ac2ee77b10aab290aa607",
+    "sbom_sha256": "183f270c8c148f4e0d1f15ddfb0c8494697f7b2a412625da5299a6f19a7804ba",
     "source_receipt": "deploy/agent-runtime-source/source-receipt.json",
-    "source_receipt_sha256": "e5a1498ce929966676e4b0e3f72aeda3977dcefc479297fdffa79eb4faa42b60"
+    "source_receipt_sha256": "abbd6e98a50f104e3280cd1f69a626f34800c60d4ce8f00438f6f24ffac220b5"
   },
   "license": {
     "notice": "deploy/agent-runtime-source/NOTICE.md",
@@ -30,9 +30,9 @@
     "artifacts": {
       "agent_runtime": {
         "binary": "ai-platform-agent-runtime",
-        "candidate_start_allowed": true,
-        "image_digest": "sha256:9d736eb9666166d54215e675525442540384af7c21b1ef81cc63dc613dde7ad6",
-        "image_ref": "local-image://sha256:9d736eb9666166d54215e675525442540384af7c21b1ef81cc63dc613dde7ad6",
+        "candidate_start_allowed": false,
+        "image_digest": null,
+        "image_ref": null,
         "platforms": [
           "linux/arm64"
         ],
@@ -50,9 +50,9 @@
       },
       "capability_worker": {
         "binary": "ai-platform-capability-worker",
-        "candidate_start_allowed": true,
-        "image_digest": "sha256:ac33b36d39462cc2d9db13d8c8f2af0eea15ff6c50054ca31945c8b0d265c3c9",
-        "image_ref": "local-image://sha256:ac33b36d39462cc2d9db13d8c8f2af0eea15ff6c50054ca31945c8b0d265c3c9",
+        "candidate_start_allowed": false,
+        "image_digest": null,
+        "image_ref": null,
         "platforms": [
           "linux/arm64"
         ],
@@ -60,14 +60,14 @@
       }
     }
   },
-  "release_state": "local_image_locked",
+  "release_state": "local_source_locked",
   "schema_version": "ai-platform/agent-runtime-source-lock/v2",
   "source": {
-    "branch": "ai-platform/main",
-    "fork_repository": "local://AI--Platfform-agent-runtime-source",
-    "fork_sha": "c84c011f403a18be3db3e6c0f2cb603ee7ea1cdd",
-    "git_tree_sha": "4c0ebd059212af3f9e0f28ab219606201540616f",
-    "upstream_sha": "93c54bca38996b56d344a2ca65f01627b1953b27",
+    "branch": "upstream/main",
+    "fork_repository": "local://AI--Platfform-codex-harness-composed-source",
+    "fork_sha": "94cbbddafc1776d5e377bca1b05932c697e82238",
+    "git_tree_sha": "2b39fe175db641c8ac6ee87356a2f5db2765c835",
+    "upstream_sha": "94cbbddafc1776d5e377bca1b05932c697e82238",
     "upstream_url": "https://github.com/openai/codex.git"
   }
 }

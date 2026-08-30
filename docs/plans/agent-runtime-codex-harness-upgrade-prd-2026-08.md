@@ -5,7 +5,7 @@
 - **owner：** 下一轮 Agent Runtime 主实现 Session
 - **last_verified：** 2026-08-30
 - **当前 Runtime pin：** `93c54bca38996b56d344a2ca65f01627b1953b27`
-- **目标 upstream：** `/Users/yang/projects/opensource-harness/codex-harness@63d213884daea50e4f74efc192cdc44f549b67d5`
+- **本轮 selected upstream：** `/Users/yang/projects/opensource-harness/codex-harness@94cbbddafc1776d5e377bca1b05932c697e82238`（2026-08-30 session 启动时 fetch `upstream/main` 后固定）
 
 > 这是实现合同，不是完成证据。任务只做一件事：把平台使用的 Codex Runtime 源码整体更新到固定
 > upstream 快照，修好平台兼容性，并用编译后的系统、真实接口和 UI 点击完成验收。
@@ -262,4 +262,4 @@ merge_ready
 - `docs/architecture/ADR-007-agent-runtime-data-boundaries.md`
 - `docs/harness/runtime-and-secrets.md`
 - `docs/harness/commands.md`
-- upstream range：`93c54bca38996b56d344a2ca65f01627b1953b27..63d213884daea50e4f74efc192cdc44f549b67d5`
+- upstream range：`93c54bca38996b56d344a2ca65f01627b1953b27..94cbbddafc1776d5e377bca1b05932c697e82238`
