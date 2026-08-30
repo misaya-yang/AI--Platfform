@@ -204,14 +204,63 @@ async function projectChatStream(
 ): Promise<void> {
   const responseId = `resp_${randomUUID().replaceAll("-", "")}`;
   const messageId = `msg_${responseId.slice(5)}`;
+  const reasoningId = `rs_${responseId.slice(5)}`;
   let sequence = 0;
   let textOutput = "";
+  let reasoningOutput = "";
+  let messageOutputIndex: number | undefined;
+  let reasoningOutputIndex: number | undefined;
+  let reasoningClosed = false;
+  let nextOutputIndex = 0;
   let usage: Record<string, unknown> | null = null;
   let terminalSeen = false;
   let terminalFailure: string | undefined;
   const tools = new Map<number, ToolCallState>();
   const emit = (type: string, payload: Record<string, unknown>) => {
     writeSse(output, type, { type, sequence_number: sequence++, ...payload });
+  };
+  const ensureMessageOpen = () => {
+    if (messageOutputIndex !== undefined) return;
+    messageOutputIndex = nextOutputIndex++;
+    emit("response.output_item.added", {
+      output_index: messageOutputIndex,
+      item: {
+        id: messageId,
+        type: "message",
+        role: "assistant",
+        status: "in_progress",
+        content: [],
+      },
+    });
+    emit("response.content_part.added", {
+      item_id: messageId,
+      output_index: messageOutputIndex,
+      content_index: 0,
+      part: { type: "output_text", text: "", annotations: [] },
+    });
+  };
+  const closeReasoning = () => {
+    if (reasoningOutputIndex === undefined || reasoningClosed) return;
+    const item = {
+      id: reasoningId,
+      type: "reasoning",
+      status: "completed",
+      summary: [{ type: "summary_text", text: reasoningOutput }],
+    };
+    emit("response.reasoning_summary_text.done", {
+      item_id: reasoningId,
+      output_index: reasoningOutputIndex,
+      summary_index: 0,
+      text: reasoningOutput,
+    });
+    emit("response.reasoning_summary_part.done", {
+      item_id: reasoningId,
+      output_index: reasoningOutputIndex,
+      summary_index: 0,
+      part: { type: "summary_text", text: reasoningOutput },
+    });
+    emit("response.output_item.done", { output_index: reasoningOutputIndex, item });
+    reasoningClosed = true;
   };
   const responseObject = (status: string, error: Record<string, unknown> | null = null) => ({
     id: responseId,
@@ -225,16 +274,6 @@ async function projectChatStream(
   });
   emit("response.created", { response: responseObject("in_progress") });
   emit("response.in_progress", { response: responseObject("in_progress") });
-  emit("response.output_item.added", {
-    output_index: 0,
-    item: { id: messageId, type: "message", role: "assistant", status: "in_progress", content: [] },
-  });
-  emit("response.content_part.added", {
-    item_id: messageId,
-    output_index: 0,
-    content_index: 0,
-    part: { type: "output_text", text: "", annotations: [] },
-  });
 
   try {
     for await (const payload of readSsePayloads(upstream.body!, idleTimeoutMs, signal)) {
@@ -266,13 +305,49 @@ async function projectChatStream(
         throw new CompatibilityError("provider_content_delta_unsupported");
       }
       if (content) {
+        closeReasoning();
+        ensureMessageOpen();
         textOutput += content;
         emit("response.output_text.delta", {
-          item_id: messageId, output_index: 0, content_index: 0, delta: content, logprobs: [],
+          item_id: messageId,
+          output_index: messageOutputIndex,
+          content_index: 0,
+          delta: content,
+          logprobs: [],
         });
       }
-      if (delta.reasoning_content !== undefined || delta.reasoning !== undefined) {
-        throw new CompatibilityError("provider_reasoning_delta_unsupported");
+      const rawReasoning = delta.reasoning_content ?? delta.reasoning;
+      if (rawReasoning !== undefined && rawReasoning !== null) {
+        if (typeof rawReasoning !== "string") {
+          throw new CompatibilityError("provider_reasoning_delta_unsupported");
+        }
+        if (rawReasoning) {
+          if (reasoningOutputIndex === undefined) {
+            reasoningOutputIndex = nextOutputIndex++;
+            emit("response.output_item.added", {
+              output_index: reasoningOutputIndex,
+              item: {
+                id: reasoningId,
+                type: "reasoning",
+                status: "in_progress",
+                summary: [],
+              },
+            });
+            emit("response.reasoning_summary_part.added", {
+              item_id: reasoningId,
+              output_index: reasoningOutputIndex,
+              summary_index: 0,
+              part: { type: "summary_text", text: "" },
+            });
+          }
+          reasoningOutput += rawReasoning;
+          emit("response.reasoning_summary_text.delta", {
+            item_id: reasoningId,
+            output_index: reasoningOutputIndex,
+            summary_index: 0,
+            delta: rawReasoning,
+          });
+        }
       }
       if (Array.isArray(delta.tool_calls)) {
         for (const rawTool of delta.tool_calls) {
@@ -284,7 +359,7 @@ async function projectChatStream(
             id: "",
             name: "",
             arguments: "",
-            outputIndex: index + 1,
+            outputIndex: nextOutputIndex++,
             announced: false,
           };
           const wasAnnounced = current.announced;
@@ -375,28 +450,60 @@ async function projectChatStream(
     return;
   }
 
+  closeReasoning();
+  ensureMessageOpen();
   emit("response.output_text.done", {
-    item_id: messageId, output_index: 0, content_index: 0, text: textOutput, logprobs: [],
+    item_id: messageId,
+    output_index: messageOutputIndex,
+    content_index: 0,
+    text: textOutput,
+    logprobs: [],
   });
   const part = { type: "output_text", text: textOutput, annotations: [] };
-  emit("response.content_part.done", { item_id: messageId, output_index: 0, content_index: 0, part });
-  emit("response.output_item.done", {
-    output_index: 0,
-    item: { id: messageId, type: "message", role: "assistant", status: "completed", content: [part] },
+  emit("response.content_part.done", {
+    item_id: messageId,
+    output_index: messageOutputIndex,
+    content_index: 0,
+    part,
   });
-  const toolOutput: Array<Record<string, unknown>> = [];
+  const messageItem = {
+    id: messageId,
+    type: "message",
+    role: "assistant",
+    status: "completed",
+    content: [part],
+  };
+  emit("response.output_item.done", {
+    output_index: messageOutputIndex,
+    item: messageItem,
+  });
+  const indexedOutput: Array<{ index: number; item: Record<string, unknown> }> = [
+    { index: messageOutputIndex!, item: messageItem },
+  ];
+  if (reasoningOutputIndex !== undefined) {
+    indexedOutput.push({
+      index: reasoningOutputIndex,
+      item: {
+        id: reasoningId,
+        type: "reasoning",
+        status: "completed",
+        summary: [{ type: "summary_text", text: reasoningOutput }],
+      },
+    });
+  }
   for (const tool of [...tools.values()].sort((a, b) => a.outputIndex - b.outputIndex)) {
     emit("response.function_call_arguments.done", {
       item_id: tool.id, output_index: tool.outputIndex, name: tool.name, arguments: tool.arguments,
     });
     const item = { id: tool.id, type: "function_call", status: "completed", call_id: tool.id, name: tool.name, arguments: tool.arguments };
     emit("response.output_item.done", { output_index: tool.outputIndex, item });
-    toolOutput.push(item);
+    indexedOutput.push({ index: tool.outputIndex, item });
   }
-  const completed = { ...responseObject("completed"), output: [
-    { id: messageId, type: "message", role: "assistant", status: "completed", content: [part] },
-    ...toolOutput,
-  ] };
+  indexedOutput.sort((a, b) => a.index - b.index);
+  const completed = {
+    ...responseObject("completed"),
+    output: indexedOutput.map(({ item }) => item),
+  };
   emit("response.completed", { response: completed });
   output.end();
 }

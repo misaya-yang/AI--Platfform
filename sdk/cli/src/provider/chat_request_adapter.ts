@@ -53,23 +53,47 @@ export function responsesToChat(body: ResponsesRequest): Record<string, unknown>
   }
   if (body.tools !== undefined) {
     if (!Array.isArray(body.tools)) throw new CompatibilityError("responses_tools_invalid");
-    chat.tools = body.tools.map((tool) => {
+    const projectedTools: Array<Record<string, unknown>> = [];
+    const projectedNames = new Set<string>();
+    const appendFunction = (tool: unknown) => {
       const value = record(tool, "responses_tool_unsupported");
-      if (value.type !== "function") throw new CompatibilityError("responses_tool_unsupported");
       const functionValue = value.function && typeof value.function === "object"
         ? record(value.function, "responses_tool_invalid") : value;
-      return {
+      const name = text(functionValue.name, "responses_tool_invalid");
+      if (projectedNames.has(name)) throw new CompatibilityError("responses_tool_duplicate");
+      projectedNames.add(name);
+      projectedTools.push({
         type: "function",
         function: {
-          name: text(functionValue.name, "responses_tool_invalid"),
+          name,
           description: typeof functionValue.description === "string" ? functionValue.description : "",
           parameters: functionValue.parameters ?? { type: "object", properties: {} },
           ...(typeof functionValue.strict === "boolean" ? { strict: functionValue.strict } : {}),
         },
-      };
-    });
-    chat.tool_choice = chatToolChoice(body.tool_choice);
-    if (body.parallel_tool_calls !== undefined) {
+      });
+    };
+    for (const tool of body.tools) {
+      const value = record(tool, "responses_tool_unsupported");
+      if (value.type === "function") appendFunction(value);
+      else if (value.type === "web_search") continue;
+      else if (value.type === "namespace") {
+        if (!Array.isArray(value.tools)) throw new CompatibilityError("responses_tool_unsupported");
+        for (const child of value.tools) {
+          const childValue = record(child, "responses_tool_unsupported");
+          if (childValue.type !== "function") throw new CompatibilityError("responses_tool_unsupported");
+          appendFunction(childValue);
+        }
+      } else throw new CompatibilityError("responses_tool_unsupported");
+    }
+    const toolChoice = chatToolChoice(body.tool_choice);
+    if (!projectedTools.length && !["auto", "none"].includes(String(toolChoice))) {
+      throw new CompatibilityError("responses_tool_choice_requires_tools");
+    }
+    if (projectedTools.length) {
+      chat.tools = projectedTools;
+      chat.tool_choice = toolChoice;
+    }
+    if (projectedTools.length && body.parallel_tool_calls !== undefined) {
       if (typeof body.parallel_tool_calls !== "boolean") {
         throw new CompatibilityError("responses_parallel_tool_calls_invalid");
       }

@@ -80,7 +80,7 @@ describe("Responses to Chat Completions compatibility", () => {
       expect(body.messages).toEqual([{ role: "user", content: "hello" }]);
       expect(body.tools[0].function.name).toBe("lookup");
       return { chunks: [
-        'data: {"choices":[{"delta":{"content":"Hi "}}]}\r\n\r\n',
+        'data: {"choices":[{"delta":{"reasoning_content":"think","content":"Hi "}}]}\r\n\r\n',
         'data: {"choices":[{"delta":{"content":"there","tool_calls":[{"index":0,"function":{"name":"lookup","arguments":"{\\"q\\":"}}]}}]}\n\n',
         'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"arguments":"\\"x\\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}\n\n',
         "data: [DONE]\n\n",
@@ -104,6 +104,8 @@ describe("Responses to Chat Completions compatibility", () => {
     const text = await response.text();
     expect(text).toContain("event: response.created");
     expect(text).toContain('"delta":"Hi "');
+    expect(text).toContain("response.reasoning_summary_text.delta");
+    expect(text).toContain('"text":"think"');
     expect(text).toContain('"name":"lookup"');
     expect(text).toContain('"arguments":"{\\"q\\":\\"x\\"}"');
     expect(text).toContain('"input_tokens":3');
@@ -154,6 +156,31 @@ describe("Responses to Chat Completions compatibility", () => {
         ] },
       ],
     })).toThrow(/responses_function_output_unsupported/);
+  });
+
+  it("flattens Runtime namespaces and omits native web search for Chat providers", () => {
+    const result = responsesToChat({
+      model: "chat-model",
+      stream: true,
+      input: "hello",
+      tools: [
+        { type: "web_search" },
+        {
+          type: "namespace",
+          name: "mcp",
+          tools: [
+            {
+              type: "function",
+              name: "write",
+              description: "Write one value",
+              parameters: { type: "object", properties: {} },
+            },
+          ],
+        },
+      ],
+    });
+
+    expect((result.tools as any[]).map((tool) => tool.function.name)).toEqual(["write"]);
   });
 
   it("fails closed for image input instead of silently dropping it", () => {
