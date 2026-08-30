@@ -91,19 +91,35 @@ async def _run_authority_in_process(dsn: str) -> None:
 
 
 async def _prepare_real_pre_freeze_state(dsn: str) -> str:
-    """Run the real chain once, then rewind only its final ledger identity."""
-    conn = await asyncpg.connect(dsn)
-    try:
-        await conn.execute((ROOT / "database/schema.sql").read_text(encoding="utf-8"))
-    finally:
-        await conn.close()
-
-    await _run_authority_in_process(dsn)
-
+    """Run the real post-bootstrap chain, then rewind its final ledger identity."""
     paths = default_paths()
     migrations = discover_legacy_migrations(paths.migrations_root)
     manifest = load_legacy_manifest(paths.migrations_root / LEGACY_MANIFEST_NAME)
     assert last_legacy_change(migrations) == manifest.freeze_point
+
+    conn = await asyncpg.connect(dsn)
+    try:
+        await conn.execute((ROOT / "database/schema.sql").read_text(encoding="utf-8"))
+        await conn.execute(
+            """
+            CREATE TABLE public.schema_migrations (
+                filename TEXT PRIMARY KEY,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        await conn.executemany(
+            "INSERT INTO public.schema_migrations (filename) VALUES ($1)",
+            [
+                (migration.path.name,)
+                for migration in migrations
+                if int(migration.version) < 100
+            ],
+        )
+    finally:
+        await conn.close()
+
+    await _run_authority_in_process(dsn)
 
     conn = await asyncpg.connect(dsn)
     try:

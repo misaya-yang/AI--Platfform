@@ -119,6 +119,22 @@ async def migration_database(
                 "datasets",
             ):
                 await conn.execute(f'ALTER TABLE public."{table}" SET SCHEMA knowledge')
+        await conn.execute(
+            """
+            CREATE TABLE public.schema_migrations (
+                filename TEXT PRIMARY KEY,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        await conn.executemany(
+            "INSERT INTO public.schema_migrations (filename) VALUES ($1)",
+            [
+                (path.name,)
+                for version, _description, path in cli.discover_migrations()
+                if int(version) < 100
+            ],
+        )
     finally:
         await conn.close()
 
