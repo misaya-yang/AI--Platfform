@@ -486,6 +486,14 @@ fn database_error(error: sqlx::Error) -> StoreError {
 
 #[async_trait]
 impl ExecutionStore for PostgresExecutionStore {
+    async fn ready(&self) -> Result<(), StoreError> {
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(database_error)
+    }
+
     async fn authorize_runtime_binding(
         &self,
         scope: &crate::CapabilityScopeV2,

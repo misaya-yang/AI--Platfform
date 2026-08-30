@@ -208,12 +208,14 @@ async fn handle_dynamic_tool_call(
     // Re-check the durable lease on every call. The in-memory entry is only a
     // consistency witness; using it as authority would allow a revoked lease
     // or completed run to invoke the capability plane.
-    let binding = load_readonly_turn_binding(store, &identity, &params.turn_id).await?;
-    if let Some(cached_binding) = cached_binding
-        && (cached_binding.snapshot_id != binding.snapshot_id
-            || cached_binding.capability_revision != binding.capability_revision)
-    {
-        return Err("dynamic_tool_binding_changed".to_string());
+    let mut binding = load_readonly_turn_binding(store, &identity, &params.turn_id).await?;
+    if let Some(cached_binding) = cached_binding {
+        if cached_binding.snapshot_id != binding.snapshot_id
+            || cached_binding.capability_revision != binding.capability_revision
+        {
+            return Err("dynamic_tool_binding_changed".to_string());
+        }
+        binding.trace_context = cached_binding.trace_context;
     }
     let (capability_allowlist, expected_tool, descriptor, effect) =
         crate::readonly_capabilities::resolve_dynamic_capability_descriptor(
@@ -447,6 +449,9 @@ async fn handle_dynamic_tool_call(
                     &worker_url,
                     internal_token.clone(),
                 )
+                .map(|worker| {
+                    worker.with_trace_context(binding.trace_context.clone(), params.turn_id.clone())
+                })
                 .map_err(|error| error.code().to_string());
                 match worker {
                     Ok(worker) => execute_capability(
@@ -483,6 +488,7 @@ async fn handle_dynamic_tool_call(
             &bound_dataset_ids,
             &capability_allowlist,
             &expected_tool,
+            &binding.trace_context,
         )
         .await
         .map(|response| CapabilityExecutionOutcome {
@@ -621,6 +627,7 @@ async fn load_readonly_turn_binding(
             .try_get("capability_revision")
             .map_err(|_| "dynamic_tool_snapshot_invalid".to_string())?,
         payload,
+        trace_context: crate::trace_context::InternalTraceContext::default(),
         created_at: Instant::now(),
     })
 }

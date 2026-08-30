@@ -4,7 +4,7 @@ use std::sync::Arc;
 use ai_platform_capability_contract::{
     CapabilityDescriptorV2, CapabilityExecutionV2, CapabilityScopeV2,
 };
-use axum::extract::DefaultBodyLimit;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -379,8 +379,135 @@ pub fn router(state: WorkerState) -> Router {
         .with_state(state)
 }
 
-async fn health() -> impl IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({"status": "ready"})))
+#[derive(Serialize)]
+struct WorkerHealthResponse {
+    status: &'static str,
+    core_ready: bool,
+    degraded: bool,
+    core: BTreeMap<&'static str, &'static str>,
+    capabilities: BTreeMap<&'static str, &'static str>,
+}
+
+async fn health(State(state): State<WorkerState>) -> impl IntoResponse {
+    let store_ready = state.store.ready().await.is_ok();
+    let capabilities = worker_capability_health(&state);
+    let degraded = capabilities.values().any(|value| *value == "unavailable");
+    let response = WorkerHealthResponse {
+        status: if store_ready { "ready" } else { "not_ready" },
+        core_ready: store_ready,
+        degraded,
+        core: BTreeMap::from([(
+            "execution_store",
+            if store_ready {
+                "healthy"
+            } else {
+                "unavailable"
+            },
+        )]),
+        capabilities,
+    };
+    (
+        if store_ready {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
+        Json(response),
+    )
+}
+
+fn worker_capability_health(state: &WorkerState) -> BTreeMap<&'static str, &'static str> {
+    fn advertised(state: &WorkerState, ids: &[&str], configured: bool) -> &'static str {
+        if !ids
+            .iter()
+            .any(|capability_id| state.capability_registry.contains_key(*capability_id))
+        {
+            "not_configured"
+        } else if configured {
+            "configured"
+        } else {
+            "unavailable"
+        }
+    }
+
+    BTreeMap::from([
+        ("catalog", "healthy"),
+        (
+            "read",
+            advertised(
+                state,
+                &[
+                    "search_knowledge_base",
+                    "confluence_read",
+                    "read_tool_artifact",
+                    "todo_read",
+                    "web_fetch",
+                    "search_web",
+                ],
+                state.read_executor.is_some(),
+            ),
+        ),
+        (
+            "write",
+            advertised(
+                state,
+                &["todo_write", "update_user_memory"],
+                state.write_executor.is_some(),
+            ),
+        ),
+        (
+            "external_write",
+            advertised(
+                state,
+                &["confluence_write", "generate_image"],
+                state.external_write_executor.is_some(),
+            ),
+        ),
+        (
+            "quiz",
+            advertised(state, &["generate_quiz"], state.quiz_executor.is_some()),
+        ),
+        (
+            "office",
+            advertised(
+                state,
+                &[
+                    "mcp_docgen__generate_document",
+                    "mcp_docgen__modify_document",
+                    "mcp_docgen__preview_document",
+                ],
+                state.office_executor.is_some(),
+            ),
+        ),
+        (
+            "python",
+            advertised(
+                state,
+                &["execute_python_code"],
+                state.python_executor.is_some(),
+            ),
+        ),
+        (
+            "attachment",
+            advertised(
+                state,
+                &["read_attachment"],
+                state.attachment_executor.is_some(),
+            ),
+        ),
+        (
+            "local_node",
+            advertised(
+                state,
+                &[
+                    "local_node_catalog",
+                    "local_node_describe",
+                    "local_node_action",
+                ],
+                state.local_node_broker.is_some(),
+            ),
+        ),
+    ])
 }
 
 fn validate_execution_id(value: &str) -> Result<(), HttpError> {
@@ -460,6 +587,18 @@ mod tests {
             fixtures_enabled,
         )
         .expect("checked-in catalog must load")
+    }
+
+    #[tokio::test]
+    async fn arc05_readiness_uses_store_and_reports_optional_capabilities() {
+        let state = state(false);
+        let response = health(State(state.clone())).await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(state.store.ready().await.is_ok());
+        let capabilities = worker_capability_health(&state);
+        assert_eq!(capabilities["catalog"], "healthy");
+        assert_eq!(capabilities["read"], "unavailable");
+        assert_eq!(capabilities["write"], "not_configured");
     }
 
     #[test]

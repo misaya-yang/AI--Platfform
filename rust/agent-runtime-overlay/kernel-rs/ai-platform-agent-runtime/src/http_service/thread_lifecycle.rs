@@ -208,7 +208,7 @@ fn validate_instructions(value: Option<&str>, field: &str) -> Result<(), Runtime
     Ok(())
 }
 
-fn valid_model_plane_base_url(value: &str) -> bool {
+pub(super) fn valid_model_plane_base_url(value: &str) -> bool {
     let remainder = value
         .strip_prefix("http://")
         .or_else(|| value.strip_prefix("https://"));

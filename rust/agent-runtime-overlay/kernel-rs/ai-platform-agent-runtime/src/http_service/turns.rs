@@ -63,6 +63,7 @@ pub(super) async fn start_turn(
     let tenant_id = required_header(&headers, TENANT_HEADER)?;
     let user_id = required_header(&headers, USER_HEADER)?;
     let session_id = required_header(&headers, SESSION_HEADER)?;
+    let trace_context = crate::trace_context::InternalTraceContext::from_headers(&headers);
     let readonly_input = body
         .readonly
         .as_ref()
@@ -178,6 +179,7 @@ pub(super) async fn start_turn(
                 snapshot_id: body.snapshot_id.to_string(),
                 capability_revision: body.capability_revision,
                 payload,
+                trace_context: trace_context.clone(),
                 created_at: now,
             },
         );
@@ -196,6 +198,7 @@ pub(super) async fn start_turn(
         "ai_platform_scope_sha256".to_string(),
         runtime_scope_sha256(&tenant_id, &user_id, &session_id),
     );
+    trace_context.extend_model_metadata(&mut metadata, &body.run_id.to_string());
     let input = vec![UserInput::Text {
         text: body.message,
         text_elements: Vec::new(),

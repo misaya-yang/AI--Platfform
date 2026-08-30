@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -10,6 +11,8 @@ use std::time::Instant;
 use axum::Json;
 use axum::Router;
 use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::routing::post;
 use codex_app_server_client::InProcessAppServerRequestHandle;
@@ -40,7 +43,6 @@ use self::approvals::decide_approval;
 use self::approvals::get_approval;
 use self::capability_dispatch::route_kernel_events;
 use self::events::events;
-use self::security::RuntimeError;
 use self::thread_lifecycle::archive_thread;
 use self::thread_lifecycle::interrupt_turn;
 use self::thread_lifecycle::resume_thread;
@@ -61,6 +63,7 @@ pub struct RuntimeHttpState {
     kernel_ready: Arc<AtomicBool>,
     readonly_by_turn: Arc<Mutex<HashMap<String, ReadonlyTurnBinding>>>,
     turn_cancellations: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    capability_client: reqwest::Client,
 }
 
 #[derive(Clone, Debug)]
@@ -68,6 +71,7 @@ pub(super) struct ReadonlyTurnBinding {
     pub(super) snapshot_id: String,
     pub(super) capability_revision: i64,
     pub(super) payload: serde_json::Value,
+    pub(super) trace_context: crate::trace_context::InternalTraceContext,
     pub(super) created_at: Instant,
 }
 
@@ -243,6 +247,7 @@ impl RuntimeHttpService {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let capability_health_client = capability_client.clone();
         let event_task = tokio::spawn(route_kernel_events(
             kernel,
             Arc::clone(&store),
@@ -264,6 +269,7 @@ impl RuntimeHttpService {
                 kernel_ready,
                 readonly_by_turn,
                 turn_cancellations,
+                capability_client: capability_health_client,
             },
             shutdown_tx: Some(shutdown_tx),
             event_task,
@@ -314,30 +320,119 @@ impl RuntimeHttpService {
 }
 
 #[derive(Serialize)]
-struct HealthResponse {
+struct LivenessHealthResponse {
     status: &'static str,
     kernel: &'static str,
 }
 
-async fn live() -> Json<HealthResponse> {
-    Json(HealthResponse {
+async fn live() -> Json<LivenessHealthResponse> {
+    Json(LivenessHealthResponse {
         status: "ok",
         kernel: "agent-runtime",
     })
 }
 
-async fn ready(
-    State(state): State<RuntimeHttpState>,
-) -> Result<Json<HealthResponse>, RuntimeError> {
-    if !state.kernel_ready.load(Ordering::Acquire) {
-        return Err(RuntimeError::unavailable("agent_kernel_unavailable"));
-    }
-    sqlx::query_scalar::<_, i32>("SELECT 1")
+#[derive(Serialize)]
+struct ReadinessHealthResponse {
+    status: &'static str,
+    core_ready: bool,
+    degraded: bool,
+    kernel: &'static str,
+    core: BTreeMap<&'static str, &'static str>,
+    dependencies: BTreeMap<&'static str, &'static str>,
+}
+
+async fn ready(State(state): State<RuntimeHttpState>) -> impl IntoResponse {
+    let kernel_ready = state.kernel_ready.load(Ordering::Acquire);
+    let store_ready = sqlx::query_scalar::<_, i32>("SELECT 1")
         .fetch_one(&state.store.pool)
         .await
-        .map_err(|_| RuntimeError::unavailable("runtime_store_unavailable"))?;
-    Ok(Json(HealthResponse {
-        status: "ready",
+        .is_ok_and(|value| value == 1);
+    let core_ready = kernel_ready && store_ready;
+    let worker_status = capability_worker_status(&state.capability_client).await;
+    let model_plane_status = model_plane_status();
+    let catalog_status = if state.readonly_by_turn.lock().is_ok() {
+        "healthy"
+    } else {
+        "degraded"
+    };
+    let dependencies = BTreeMap::from([
+        ("capability_catalog", catalog_status),
+        ("capability_worker", worker_status),
+        ("model_plane", model_plane_status),
+    ]);
+    let degraded = dependencies
+        .values()
+        .any(|value| matches!(*value, "degraded" | "misconfigured" | "unavailable"));
+    let response = ReadinessHealthResponse {
+        status: if core_ready { "ready" } else { "not_ready" },
+        core_ready,
+        degraded,
         kernel: "agent-runtime",
-    }))
+        core: BTreeMap::from([
+            (
+                "kernel",
+                if kernel_ready {
+                    "healthy"
+                } else {
+                    "unavailable"
+                },
+            ),
+            (
+                "store",
+                if store_ready {
+                    "healthy"
+                } else {
+                    "unavailable"
+                },
+            ),
+        ]),
+        dependencies,
+    };
+    (
+        if core_ready {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
+        Json(response),
+    )
+}
+
+async fn capability_worker_status(client: &reqwest::Client) -> &'static str {
+    if !capability_dispatch::capability_worker_enabled(
+        std::env::var("AI_PLATFORM_CAPABILITY_WORKER_ENABLED")
+            .ok()
+            .as_deref(),
+    ) {
+        return "not_configured";
+    }
+    let worker_url = std::env::var("AI_PLATFORM_CAPABILITY_WORKER_URL").unwrap_or_default();
+    let internal_token = std::env::var("AI_PLATFORM_INTERNAL_TOKEN").unwrap_or_default();
+    let Ok(worker) = crate::capability_worker::CapabilityWorkerClient::new(
+        client.clone(),
+        &worker_url,
+        internal_token,
+    ) else {
+        return "misconfigured";
+    };
+    if worker.health().await.is_ok() {
+        "healthy"
+    } else {
+        "unavailable"
+    }
+}
+
+fn model_plane_status() -> &'static str {
+    let url =
+        std::env::var("AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_RUNTIME_BASE_URL").unwrap_or_default();
+    let token =
+        std::env::var("AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_INTERNAL_TOKEN").unwrap_or_default();
+    if url.trim().is_empty() && token.trim().is_empty() {
+        "not_configured"
+    } else if token.trim().is_empty() || !thread_lifecycle::valid_model_plane_base_url(url.trim()) {
+        "misconfigured"
+    } else {
+        "configured"
+    }
 }

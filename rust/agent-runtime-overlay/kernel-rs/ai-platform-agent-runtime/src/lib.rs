@@ -14,6 +14,7 @@ mod postgres_store;
 pub mod readonly_capabilities;
 mod readonly_extension;
 pub mod tool_lifecycle;
+mod trace_context;
 mod v1_projector;
 
 pub use postgres_store::PlatformThreadIdentity;

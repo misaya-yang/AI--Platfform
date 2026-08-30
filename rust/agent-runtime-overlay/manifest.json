@@ -1,8 +1,8 @@
 {
   "cargo_lock_sha256": "dbdd065635faf9c54d7d67da5cc0c1bf40f0d83dd56a461cba3a8e825fa95b79",
-  "file_count": 101,
+  "file_count": 103,
   "schema_version": "ai-platform/agent-runtime-overlay/v1",
-  "sha256": "614a66eed7fb2268b9eed5faf5202a8400684b6f1a14b22a6bf108c8681022dc",
+  "sha256": "566aa9e17b93730f6d8aeed243dd3d8c49b3f70379b60b7b3948dceac631dd61",
   "source_revision": "c84c011f403a18be3db3e6c0f2cb603ee7ea1cdd",
   "upstream_sha": "93c54bca38996b56d344a2ca65f01627b1953b27"
 }

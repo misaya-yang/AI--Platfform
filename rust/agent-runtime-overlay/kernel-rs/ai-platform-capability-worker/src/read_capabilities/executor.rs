@@ -411,7 +411,7 @@ impl ReadCapabilityExecutor {
                 nonce: Uuid::now_v7().simple().to_string(),
             },
         )?;
-        Ok(vec![
+        let mut headers = vec![
             (
                 "x-ai-platform-internal-token".to_string(),
                 self.config.internal_token.clone(),
@@ -421,15 +421,16 @@ impl ReadCapabilityExecutor {
             ("x-ai-session-id".to_string(), context.session_id.clone()),
             ("x-ai-capability-proof".to_string(), proof),
             (
-                "x-ai-execution-id".to_string(),
-                context.execution_id.clone(),
-            ),
-            ("x-ai-run-id".to_string(), context.run_id.clone()),
-            (
                 "x-ai-tool-call-id".to_string(),
                 context.tool_call_id.clone(),
             ),
-        ])
+        ];
+        headers.extend(crate::trace_context::header_pairs(
+            &context.run_id,
+            &context.run_id,
+            &context.execution_id,
+        ));
+        Ok(headers)
     }
 
     fn scoped_workspace_root(&self, context: &ReadCapabilityContext) -> PathBuf {

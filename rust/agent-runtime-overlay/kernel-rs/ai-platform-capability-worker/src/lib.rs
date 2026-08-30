@@ -14,6 +14,7 @@ pub mod postgres_store;
 pub mod python_code_execution;
 pub mod quiz_capabilities;
 pub mod read_capabilities;
+mod trace_context;
 pub mod write_capabilities;
 
 use std::collections::BTreeMap;
@@ -204,6 +205,7 @@ pub enum StoreError {
 
 #[async_trait]
 pub trait ExecutionStore: Send + Sync {
+    async fn ready(&self) -> Result<(), StoreError>;
     async fn authorize_runtime_binding(
         &self,
         scope: &CapabilityScopeV2,
@@ -549,6 +551,10 @@ pub(crate) fn durable_recovery_result(record: &ExecutionRecord) -> Option<Value>
 
 #[async_trait]
 impl ExecutionStore for MemoryStore {
+    async fn ready(&self) -> Result<(), StoreError> {
+        Ok(())
+    }
+
     async fn authorize_runtime_binding(
         &self,
         scope: &CapabilityScopeV2,

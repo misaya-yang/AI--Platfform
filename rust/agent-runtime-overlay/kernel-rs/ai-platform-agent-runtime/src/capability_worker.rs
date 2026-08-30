@@ -9,7 +9,10 @@ use ai_platform_capability_contract::{
     CreateCapabilityExecutionRequestV2,
 };
 use reqwest::{Client, Method, Response, StatusCode, Url};
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
+
+use crate::trace_context::InternalTraceContext;
 
 const MAX_RESPONSE_BYTES: usize = 1_048_576;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -48,6 +51,8 @@ pub struct CapabilityWorkerClient {
     client: Client,
     base_url: Url,
     internal_token: String,
+    trace_context: InternalTraceContext,
+    run_id: Option<String>,
 }
 
 impl CapabilityWorkerClient {
@@ -67,7 +72,45 @@ impl CapabilityWorkerClient {
             client,
             base_url,
             internal_token,
+            trace_context: InternalTraceContext::default(),
+            run_id: None,
         })
+    }
+
+    pub(crate) fn with_trace_context(
+        mut self,
+        trace_context: InternalTraceContext,
+        run_id: impl Into<String>,
+    ) -> Self {
+        self.trace_context = trace_context;
+        self.run_id = Some(run_id.into());
+        self
+    }
+
+    pub async fn health(&self) -> Result<(), CapabilityWorkerError> {
+        let mut url = self.base_url.clone();
+        url.set_path("/health/ready");
+        url.set_query(None);
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            self.client
+                .get(url)
+                .header("x-request-id", "runtime-health")
+                .timeout(Duration::from_secs(2))
+                .send(),
+        )
+        .await
+        .map_err(|_| CapabilityWorkerError::Timeout)?
+        .map_err(|_| CapabilityWorkerError::Unavailable)?;
+        if !response.status().is_success() {
+            return Err(CapabilityWorkerError::Rejected(response.status().as_u16()));
+        }
+        let body: WorkerHealthResponse = serde_json::from_slice(&bounded_bytes(response).await?)
+            .map_err(|_| CapabilityWorkerError::InvalidResponse)?;
+        if body.status != "ready" || !body.core_ready {
+            return Err(CapabilityWorkerError::InvalidResponse);
+        }
+        Ok(())
     }
 
     pub async fn catalog(
@@ -175,6 +218,11 @@ impl CapabilityWorkerClient {
             .header("x-ai-user-id", &scope.user_id)
             .header("x-ai-session-id", &scope.session_id)
             .timeout(REQUEST_TIMEOUT);
+        if let Some(run_id) = self.run_id.as_deref() {
+            request =
+                self.trace_context
+                    .apply(request, run_id, run_id, execution_id_from_path(path));
+        }
         if let Some(body) = body {
             request = request.json(body);
         }
@@ -192,6 +240,18 @@ impl CapabilityWorkerClient {
         let bytes = bounded_bytes(response).await?;
         serde_json::from_slice(&bytes).map_err(|_| CapabilityWorkerError::InvalidResponse)
     }
+}
+
+#[derive(Deserialize)]
+struct WorkerHealthResponse {
+    status: String,
+    core_ready: bool,
+}
+
+fn execution_id_from_path(path: &str) -> Option<&str> {
+    let value = path.strip_prefix("executions/")?;
+    let value = value.split(['/', ':']).next()?;
+    uuid::Uuid::parse_str(value).ok().map(|_| value)
 }
 
 fn validate_scope(scope: &CapabilityScopeV2) -> Result<(), CapabilityWorkerError> {
@@ -361,6 +421,32 @@ mod tests {
             Err(CapabilityWorkerError::ResponseTooLarge)
         );
 
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn arc05_health_requires_worker_core_ready_schema() {
+        use axum::{Json, Router, routing::get};
+
+        let app = Router::new().route(
+            "/health/ready",
+            get(|| async { Json(serde_json::json!({"status": "ready", "core_ready": true})) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let address = listener.local_addr().expect("test listener address");
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let client = CapabilityWorkerClient::new(
+            Client::builder()
+                .no_proxy()
+                .build()
+                .expect("test client should build"),
+            &format!("http://{address}"),
+            "internal-token",
+        )
+        .expect("worker client should build");
+        assert_eq!(client.health().await, Ok(()));
         server.abort();
     }
 }

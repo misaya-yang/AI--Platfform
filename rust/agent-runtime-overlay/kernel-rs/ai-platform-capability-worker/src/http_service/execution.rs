@@ -28,6 +28,7 @@ pub(super) async fn create_execution(
     Json(request): Json<CreateCapabilityExecutionRequestV2>,
 ) -> Result<impl IntoResponse, HttpError> {
     let scope = authorize(&headers, &state)?;
+    let trace_context = crate::trace_context::InternalTraceContext::from_headers(&headers);
     request.validate(now_epoch_ms()).map_err(|_| {
         error(
             StatusCode::BAD_REQUEST,
@@ -231,14 +232,14 @@ pub(super) async fn create_execution(
 
     if outcome.created && !outcome.record.execution.status.is_terminal() {
         state.register_cancellation(&actual_id).await;
-        tokio::spawn(run_execution(
+        tokio::spawn(trace_context.scope(run_execution(
             state.clone(),
             scope,
             actual_id.clone(),
             outcome.record.execution.capability_id.clone(),
             outcome.record.arguments.clone(),
             descriptor,
-        ));
+        )));
     }
     let current = state
         .store

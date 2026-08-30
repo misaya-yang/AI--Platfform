@@ -9,6 +9,7 @@ use serde_json::Value;
 
 use crate::CapabilityAllowlistEntry;
 use crate::PlatformThreadIdentity;
+use crate::trace_context::InternalTraceContext;
 
 fn endpoint(base_url: &str) -> Result<Url, String> {
     let mut url = Url::parse(base_url).map_err(|_| "capability_plane_url_invalid".to_string())?;
@@ -58,7 +59,7 @@ fn build_invoke_payload(
 /// DynamicToolCallResponse-shaped JSON. The model loop remains in Codex; this
 /// helper only handles the capability-service hop and response projection.
 #[allow(clippy::too_many_arguments)]
-pub async fn invoke_dynamic_tool(
+pub(crate) async fn invoke_dynamic_tool(
     client: &reqwest::Client,
     params: &DynamicToolCallParams,
     identity: &PlatformThreadIdentity,
@@ -69,6 +70,7 @@ pub async fn invoke_dynamic_tool(
     bound_dataset_ids: &[String],
     capability_allowlist: &[CapabilityAllowlistEntry],
     expected_tool: &CapabilityAllowlistEntry,
+    trace_context: &InternalTraceContext,
 ) -> Result<Value, String> {
     let url = endpoint(capability_plane_url)?;
     if internal_token.is_empty() {
@@ -87,12 +89,14 @@ pub async fn invoke_dynamic_tool(
     {
         return Err("capability_plane_allowlist_binding_invalid".to_string());
     }
-    let response = client
+    let request = client
         .post(url)
         .header("x-ai-platform-internal-token", internal_token)
         .header("x-ai-tenant-id", &identity.tenant_id)
         .header("x-ai-user-id", &identity.user_id)
-        .header("x-ai-session-id", &identity.session_id)
+        .header("x-ai-session-id", &identity.session_id);
+    let response = trace_context
+        .apply(request, &params.turn_id, &params.turn_id, None)
         .json(&build_invoke_payload(
             params,
             identity,
@@ -238,6 +242,7 @@ mod tests {
             &["dataset-a".to_string()],
             &capability_allowlist,
             &expected_tool,
+            &InternalTraceContext::default(),
         )
         .await
         .expect("dynamic call should resolve");
@@ -290,6 +295,7 @@ mod tests {
             &[],
             &capability_allowlist,
             &expected_tool,
+            &InternalTraceContext::default(),
         )
         .await
         .expect_err("approval response must fail closed");

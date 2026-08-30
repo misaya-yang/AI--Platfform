@@ -166,22 +166,22 @@ impl AttachmentCapabilityBroker {
             return Err(AttachmentCapabilityError::ArgumentsHashMismatch);
         }
         let proof = self.proof(&lease, &execution_id, &body)?;
-        let response = self
+        let request = self
             .client
             .post(self.config.endpoint()?)
             .header("x-ai-platform-internal-token", &self.config.internal_token)
             .header("x-ai-tenant-id", &lease.tenant_id)
             .header("x-ai-user-id", &lease.user_id)
             .header("x-ai-session-id", &lease.session_id)
-            .header("x-ai-execution-id", &execution_id)
-            .header("x-ai-run-id", &lease.run_id)
             .header("x-ai-tool-call-id", &lease.tool_call_id)
-            .header("x-ai-capability-proof", proof)
-            .json(&body)
-            .timeout(Duration::from_secs(PROOF_TTL_SECONDS + 10))
-            .send()
-            .await
-            .map_err(|_| AttachmentCapabilityError::SideEffectUnknown)?;
+            .header("x-ai-capability-proof", proof);
+        let response =
+            crate::trace_context::apply(request, &lease.run_id, &lease.run_id, &execution_id)
+                .json(&body)
+                .timeout(Duration::from_secs(PROOF_TTL_SECONDS + 10))
+                .send()
+                .await
+                .map_err(|_| AttachmentCapabilityError::SideEffectUnknown)?;
         if response.status().is_server_error() {
             return Err(AttachmentCapabilityError::SideEffectUnknown);
         }

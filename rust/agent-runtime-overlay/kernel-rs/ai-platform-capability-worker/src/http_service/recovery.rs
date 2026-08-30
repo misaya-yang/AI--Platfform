@@ -97,13 +97,15 @@ pub(super) async fn recover_executions_loop(state: WorkerState) {
             if !registered {
                 continue;
             }
-            tokio::spawn(run_execution(
-                state.clone(),
-                record.execution.scope(),
-                execution_id,
-                record.execution.capability_id,
-                record.arguments,
-                descriptor,
+            tokio::spawn(crate::trace_context::InternalTraceContext::default().scope(
+                run_execution(
+                    state.clone(),
+                    record.execution.scope(),
+                    execution_id,
+                    record.execution.capability_id,
+                    record.arguments,
+                    descriptor,
+                ),
             ));
         }
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;

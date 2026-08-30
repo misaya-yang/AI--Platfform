@@ -149,28 +149,32 @@ impl GatewayWriteBroker for ReqwestConfluenceWriteBroker {
             .map_err(|_| GatewayBrokerError::Unavailable)?
             .as_secs();
         let proof = self.proof(&request, &body, now)?;
-        let response = self
+        let request_builder = self
             .client
             .post(endpoint)
             .header("x-ai-platform-internal-token", &self.config.internal_token)
             .header("x-ai-tenant-id", &request.tenant_id)
             .header("x-ai-user-id", &request.user_id)
             .header("x-ai-session-id", &request.session_id)
-            .header("x-ai-execution-id", &request.execution_id)
-            .header("x-ai-run-id", &request.run_id)
             .header("x-ai-tool-call-id", &request.tool_call_id)
-            .header("x-ai-capability-proof", proof)
-            .json(&body)
-            .timeout(Duration::from_secs(15))
-            .send()
-            .await
-            .map_err(|error| {
-                if error.is_timeout() {
-                    GatewayBrokerError::Timeout
-                } else {
-                    GatewayBrokerError::Unavailable
-                }
-            })?;
+            .header("x-ai-capability-proof", proof);
+        let response = crate::trace_context::apply(
+            request_builder,
+            &request.run_id,
+            &request.run_id,
+            &request.execution_id,
+        )
+        .json(&body)
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|error| {
+            if error.is_timeout() {
+                GatewayBrokerError::Timeout
+            } else {
+                GatewayBrokerError::Unavailable
+            }
+        })?;
         let status = response.status().as_u16();
         if !response.status().is_success() {
             return Err(GatewayBrokerError::HttpStatus(status));
