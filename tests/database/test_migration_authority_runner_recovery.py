@@ -312,10 +312,18 @@ async def test_fresh_install_rolls_back_partial_init_and_is_reentrant(
     assert statements[extension_index - 1] == 'SET LOCAL ROLE "ai_gateway_owner"'
     assert statements[extension_index + 1] == "RESET ROLE"
 
-    executed_count = len(conn.executed)
+    executed_schema_statements = [
+        statement
+        for statement in conn.executed
+        if not statement[0].startswith("SET LOCAL ROLE")
+    ]
     rerun = await bootstrap.fresh_install(conn, paths, baseline, "5" * 64)
     assert rerun == baseline.fingerprints
-    assert len(conn.executed) == executed_count
+    assert [
+        statement
+        for statement in conn.executed
+        if not statement[0].startswith("SET LOCAL ROLE")
+    ] == executed_schema_statements
 
 
 async def test_fresh_install_wrong_nonempty_database_fails_before_sql(

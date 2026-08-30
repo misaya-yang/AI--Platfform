@@ -465,66 +465,80 @@ async def fresh_install(
     Fresh install deliberately has no durable attempt row: rollback means
     "not started", while the atomic baseline marker means "complete".
     """
-    ledger_presence = {
-        table: bool(await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", f"public.{table}"))
-        for table in LEDGER_TABLES
-    }
-    ledger_present = ledger_presence[ledger.BASELINES_TABLE]
-    if ledger_present:
-        missing_ledger = sorted(table for table, present in ledger_presence.items() if not present)
-        if missing_ledger:
-            raise AuthorityError(
-                f"fresh-install marker ledger is incomplete; missing tables {missing_ledger}"
-            )
-        existing = await conn.fetch(ledger.SELECT_BASELINE)
-        if not existing:
-            raise AuthorityError(
-                "fresh-install ledger exists without an adoption marker; "
-                "refusing to guess whether a partial or foreign schema is safe"
-            )
-        validate_existing_adoption_marker(existing, baseline, manifest_sha256=manifest_sha256)
-        computed = await compute_fingerprints(
-            conn, role_prefix=role_prefix, reference_sets=baseline.reference_data
-        )
-        drift = [
-            f"{name}: expected {baseline.fingerprints[name]}, computed {computed[name]}"
-            for name in ("structural", "acl", "extensions", "reference_data")
-            if baseline.fingerprints[name] != computed[name]
-        ]
-        if drift:
-            raise AuthorityError(
-                "fresh-install marker exists but live fingerprints drifted: " + "; ".join(drift)
-            )
-        return computed
-
     # Cluster roles and empty owner-controlled schemas are provisioned by a
     # separate admin connection before the schema migrator starts. Verify that
-    # contract first, then ignore only those empty schema shells. Any object in
-    # them is still counted above and blocks init.sql.
+    # contract before borrowing the NOLOGIN owner identity.  The migrator has
+    # NOINHERIT and deliberately receives no direct schema privileges, so all
+    # baseline inspection and DDL must happen after SET LOCAL ROLE owner.
     await bootstrap_roles(conn, paths, role_prefix)
-    await preflight_database_empty(
-        conn,
-        allowed_empty_schemas=tuple(PLATFORM_SCHEMAS),
-    )
+    owner_role = f"{role_prefix}owner"
     async with conn.transaction():
+        await conn.execute(f'SET LOCAL ROLE "{owner_role}"')
+        ledger_presence = {
+            table: bool(
+                await conn.fetchval(
+                    "SELECT to_regclass($1) IS NOT NULL", f"public.{table}"
+                )
+            )
+            for table in LEDGER_TABLES
+        }
+        ledger_present = ledger_presence[ledger.BASELINES_TABLE]
+        if ledger_present:
+            missing_ledger = sorted(
+                table for table, present in ledger_presence.items() if not present
+            )
+            if missing_ledger:
+                raise AuthorityError(
+                    "fresh-install marker ledger is incomplete; "
+                    f"missing tables {missing_ledger}"
+                )
+            existing = await conn.fetch(ledger.SELECT_BASELINE)
+            if not existing:
+                raise AuthorityError(
+                    "fresh-install ledger exists without an adoption marker; "
+                    "refusing to guess whether a partial or foreign schema is safe"
+                )
+            validate_existing_adoption_marker(
+                existing, baseline, manifest_sha256=manifest_sha256
+            )
+            computed = await compute_fingerprints(
+                conn, role_prefix=role_prefix, reference_sets=baseline.reference_data
+            )
+            drift = [
+                f"{name}: expected {baseline.fingerprints[name]}, computed {computed[name]}"
+                for name in ("structural", "acl", "extensions", "reference_data")
+                if baseline.fingerprints[name] != computed[name]
+            ]
+            if drift:
+                raise AuthorityError(
+                    "fresh-install marker exists but live fingerprints drifted: "
+                    + "; ".join(drift)
+                )
+            return computed
+
+        # Ignore only the empty schema shells created by roles.sql. Any object
+        # inside them is still counted and blocks init.sql.
+        await preflight_database_empty(
+            conn,
+            allowed_empty_schemas=tuple(PLATFORM_SCHEMAS),
+        )
         await bootstrap_extensions(conn, paths, role_prefix)
 
         baseline_dir = paths.baseline_dir(baseline.baseline_id)
         # Objects created for the baseline are owned by the NOLOGIN owner; the
-        # connecting session borrows that identity only inside this transaction.
-        owner_role = f"{role_prefix}owner"
+        # extension helper resets role on return, so borrow it again here.
         await conn.execute(f'SET LOCAL ROLE "{owner_role}"')
-        try:
-            for file_name in ("init.sql", "reference_data.sql"):
-                await run_baseline_sql_file(conn, baseline_dir / file_name)
-        finally:
-            await conn.execute("RESET ROLE")
+        for file_name in ("init.sql", "reference_data.sql"):
+            await run_baseline_sql_file(conn, baseline_dir / file_name)
         await run_baseline_sql_file(
             conn,
             baseline_dir / "grants.sql",
             role_prefix=role_prefix,
             execution_role=owner_role,
         )
+        # grants.sql runs in an owner savepoint and resets role on return.
+        # Re-enter owner for verification, fingerprints, and ledger creation.
+        await conn.execute(f'SET LOCAL ROLE "{owner_role}"')
         await verify_baseline_sql_file(conn, baseline_dir / "verify.sql")
 
         computed = await compute_fingerprints(
