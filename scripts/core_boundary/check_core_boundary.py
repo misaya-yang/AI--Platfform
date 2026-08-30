@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -51,8 +52,11 @@ from inventory_core_consumption import (  # noqa: E402
     CORE_TO_CONTRACTS,
     MIXED_CORE_EXPORTS,
     SHIM_MARKER,
+    InventoryProvenanceError,
     build_inventory,
+    build_inventory_from_git,
     repo_root,
+    verify_inventory_provenance,
 )
 
 BASELINE_PATH = Path("reports/inventory/core-import-inventory.json")
@@ -64,6 +68,7 @@ BASELINE_PATH = Path("reports/inventory/core-import-inventory.json")
 CONTRACTS_ALLOWLIST: frozenset[str] = frozenset(
     {
         "ai_gateway_contracts",
+        "ai_gateway_contracts.agent_launch",
         "ai_gateway_contracts.agent_runtime",
         "ai_gateway_contracts.agent_runtime_lease",
         "ai_gateway_contracts.capability_proof",
@@ -92,6 +97,7 @@ CONTRACTS_ALLOWED_STDLIB: frozenset[str] = frozenset(
         "hashlib",
         "hmac",
         "json",
+        "math",
         "re",
         "secrets",
         "threading",
@@ -469,6 +475,53 @@ def self_test() -> int:
         "shim_consumers": {},
     }
 
+    # 0: v3 provenance must be reconstructable from the declared Git object;
+    # editing payload facts or tree identity can never self-bless the baseline.
+    with tempfile.TemporaryDirectory(prefix="arc04-gate-provenance-") as tmp:
+        root = Path(tmp)
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "arc04@example.invalid"],
+            cwd=root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "ARC04 Selftest"],
+            cwd=root,
+            check=True,
+        )
+        _write(root / CORE_PKG_DIR / "__init__.py", "")
+        _write(root / CORE_PKG_DIR / "keep.py", "VALUE = 1\n")
+        _write(root / CONTRACTS_PKG_DIR / "__init__.py", "")
+        subprocess.run(["git", "add", "."], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "source"], cwd=root, check=True)
+        source_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        proven = build_inventory_from_git(root, source_commit)
+        try:
+            verify_inventory_provenance(root, proven)
+        except InventoryProvenanceError as exc:
+            failures.append(f"provenance-clean: valid Git inventory failed: {exc}")
+        forged_tree = json.loads(json.dumps(proven))
+        forged_tree["provenance"]["source_tree"] = "0" * 40
+        try:
+            verify_inventory_provenance(root, forged_tree)
+            failures.append("provenance-tree: forged tree was accepted")
+        except InventoryProvenanceError:
+            pass
+        forged_payload = json.loads(json.dumps(proven))
+        forged_payload["gateway_core_module_count"] = 99
+        try:
+            verify_inventory_provenance(root, forged_payload)
+            failures.append("provenance-payload: payload drift was accepted")
+        except InventoryProvenanceError:
+            pass
+
     # 1+2: contracts with a non-allowlisted module and forbidden imports.
     with tempfile.TemporaryDirectory(prefix="arc04-gate-selftest-") as tmp:
         root = Path(tmp)
@@ -666,9 +719,15 @@ def main(argv: list[str] | None = None) -> int:
     if not baseline_path.is_file():
         print(f"baseline not found: {args.baseline}")
         return 2
-    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
-    if not str(baseline.get("schema_version", "")).startswith("arc04-core-inventory/"):
-        print(f"baseline schema not recognized: {baseline.get('schema_version')!r}")
+    try:
+        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+        provenance = verify_inventory_provenance(root, baseline)
+    except (
+        InventoryProvenanceError,
+        json.JSONDecodeError,
+        OSError,
+    ) as exc:
+        print(f"baseline provenance invalid: {exc}")
         return 2
 
     violations = run_checks(root, baseline)
@@ -685,7 +744,8 @@ def main(argv: list[str] | None = None) -> int:
         f"knowledge→core = {live['knowledge_core_module_count']} "
         f"(baseline {baseline.get('knowledge_core_module_count')}), "
         f"{len(live['shim_consumers'])} shims + "
-        f"{len(live['mixed_export_consumers'])} mixed exports tracked"
+        f"{len(live['mixed_export_consumers'])} mixed exports tracked; "
+        f"baseline source={provenance['source_commit']}"
     )
     return 0
 

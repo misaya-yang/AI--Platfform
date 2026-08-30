@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts" / "inventory"))
 sys.path.insert(0, str(ROOT / "scripts" / "core_boundary"))
 
+import inventory_core_consumption as core_inventory  # noqa: E402
 from _common import (  # noqa: E402
     BaselineProvenanceError,
     clean_git_head,
@@ -28,7 +29,11 @@ from inventory_core_consumption import (  # noqa: E402
     CONTRACTS_PKG_DIR,
     CORE_PKG_DIR,
     MIXED_CORE_EXPORTS,
+    InventoryProvenanceError,
     build_inventory,
+    build_inventory_from_git,
+    clean_source_revision,
+    verify_inventory_provenance,
 )
 
 
@@ -112,6 +117,55 @@ def test_source_revision_allows_only_a_committed_baseline_artifact(tmp_path: Pat
             root,
             included_paths=(root / "tracked.txt",),
         )
+
+
+def test_core_inventory_v3_rebuilds_declared_git_object(tmp_path: Path) -> None:
+    root, source_sha = _clean_repo(tmp_path)
+
+    inventory = build_inventory_from_git(root, source_sha)
+    provenance = verify_inventory_provenance(root, inventory)
+
+    assert inventory["schema_version"] == "arc04-core-inventory/v3"
+    assert inventory["base_sha"] == source_sha
+    assert provenance["source_commit"] == source_sha
+
+    inventory["gateway_core_module_count"] = 1
+    with pytest.raises(InventoryProvenanceError, match="does not match"):
+        verify_inventory_provenance(root, inventory)
+
+
+def test_core_inventory_formal_flow_rejects_dirty_checkout(tmp_path: Path) -> None:
+    root, source_sha = _clean_repo(tmp_path)
+    assert clean_source_revision(root, source_sha) == source_sha
+
+    (root / "tracked.txt").write_text("dirty facts\n", encoding="utf-8")
+    with pytest.raises(InventoryProvenanceError, match="clean working tree"):
+        clean_source_revision(root, source_sha)
+
+    # An explicit Git-object build remains bound to the committed content and
+    # never incorporates the dirty file bytes.
+    inventory = build_inventory_from_git(root, source_sha)
+    assert verify_inventory_provenance(root, inventory)["source_commit"] == source_sha
+
+
+def test_core_inventory_write_requires_separate_committed_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, source_sha = _clean_repo(tmp_path)
+    output = "reports/inventory/core-import-inventory.json"
+    monkeypatch.setattr(core_inventory, "repo_root", lambda: root)
+
+    assert core_inventory.main(
+        ["--write", "--source-rev", source_sha, "--output", output]
+    ) == 0
+    # The newly written artifact makes the checkout dirty, so the safe default
+    # cannot immediately bless the same command's output.
+    assert core_inventory.main(["--output", output]) == 2
+
+    _git(root, "add", output)
+    _git(root, "commit", "-q", "-m", "reviewed inventory")
+    assert core_inventory.main(["--verify", "--output", output]) == 0
 
 
 def _write(path: Path, text: str) -> None:

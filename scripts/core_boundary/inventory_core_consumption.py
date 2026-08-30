@@ -12,9 +12,12 @@ Generates the machine-readable inventory required by PRD §ARC-04 goal 1:
 - Rust-side schema-version markers sharing a wire contract with Python.
 
 The committed JSON doubles as the no-growth baseline for
-``check_core_boundary``.  Regenerate with::
+``check_core_boundary``. Verification is the safe default; a reviewed refresh
+must name the exact clean source commit::
 
     uv run python scripts/core_boundary/inventory_core_consumption.py
+    uv run python scripts/core_boundary/inventory_core_consumption.py \
+        --write --source-rev <full-clean-HEAD>
 
 Output: ``reports/inventory/core-import-inventory.json`` (stable key order).
 """
@@ -23,15 +26,31 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import json
 import re
 import subprocess
 import sys
+import tarfile
+import tempfile
 from collections.abc import Iterable
-from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 SCHEMA_VERSION = "arc04-core-inventory/v3"
+PROVENANCE_SCHEMA = "arc04-core-inventory-provenance/v1"
+GENERATOR_PATH = "scripts/core_boundary/inventory_core_consumption.py"
+
+GIT_SOURCE_PATHS: tuple[str, ...] = (
+    "src",
+    "apps/knowledge-service",
+    "tests",
+    "packages/ai-gateway-core",
+    "packages/ai-gateway-contracts",
+    "scripts",
+    "sdk/python",
+    "database",
+    "rust",
+)
 
 CORE_PKG_DIR = Path("packages/ai-gateway-core/src/ai_gateway_core")
 CONTRACTS_PKG_DIR = Path("packages/ai-gateway-contracts/src/ai_gateway_contracts")
@@ -132,19 +151,129 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def base_sha(root: Path) -> str:
-    try:
-        out = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+class InventoryProvenanceError(RuntimeError):
+    """The inventory is not bound to one immutable Git source object."""
+
+
+def _git_text(root: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise InventoryProvenanceError(
+            f"git {' '.join(args)} failed: {detail or f'exit {result.returncode}'}"
+        )
+    return result.stdout.strip()
+
+
+def resolve_source_commit(root: Path, raw_revision: object) -> str:
+    """Resolve only a full, lowercase commit SHA without accepting aliases."""
+    if not isinstance(raw_revision, str) or not re.fullmatch(
+        r"[0-9a-f]{40}", raw_revision
+    ):
+        raise InventoryProvenanceError(
+            "inventory source revision must be a full lowercase 40-character Git SHA"
+        )
+    resolved = _git_text(root, "rev-parse", "--verify", f"{raw_revision}^{{commit}}")
+    if resolved != raw_revision:
+        raise InventoryProvenanceError(
+            f"inventory source revision did not resolve exactly: {raw_revision} -> {resolved}"
+        )
+    return resolved
+
+
+def source_tree_sha(root: Path, source_commit: str) -> str:
+    tree = _git_text(root, "rev-parse", "--verify", f"{source_commit}^{{tree}}")
+    if not re.fullmatch(r"[0-9a-f]{40}", tree):
+        raise InventoryProvenanceError(
+            f"inventory source tree is not a full Git object id: {tree!r}"
+        )
+    return tree
+
+
+def clean_source_revision(root: Path, expected_revision: str | None = None) -> str:
+    """Require a stable clean HEAD before any formal verify/write workflow."""
+    head = _git_text(root, "rev-parse", "--verify", "HEAD")
+    if expected_revision is not None and head != expected_revision:
+        raise InventoryProvenanceError(
+            f"--source-rev {expected_revision!r} does not equal clean HEAD {head}"
+        )
+    status = _git_text(root, "status", "--porcelain=v1", "--untracked-files=all")
+    if status:
+        raise InventoryProvenanceError(
+            "formal inventory verification/generation requires a clean working tree, "
+            "including no untracked files"
+        )
+    return resolve_source_commit(root, head)
+
+
+def _archive_paths_at_revision(root: Path, source_commit: str) -> list[str]:
+    paths: list[str] = []
+    for path in GIT_SOURCE_PATHS:
+        exists = subprocess.run(
+            ["git", "cat-file", "-e", f"{source_commit}:{path}"],
             cwd=root,
             capture_output=True,
-            text=True,
             timeout=30,
-            check=True,
+            check=False,
         )
-        return out.stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
+        if exists.returncode == 0:
+            paths.append(path)
+    return paths
+
+
+@contextlib.contextmanager
+def materialized_git_source(root: Path, source_commit: str) -> Iterable[Path]:
+    """Yield a temporary tree extracted from ``source_commit``, never the worktree."""
+    commit = resolve_source_commit(root, source_commit)
+    with tempfile.TemporaryDirectory(prefix="arc04-core-source-") as tmp:
+        snapshot = Path(tmp) / "source"
+        snapshot.mkdir()
+        archive_path = Path(tmp) / "source.tar"
+        paths = _archive_paths_at_revision(root, commit)
+        with archive_path.open("wb") as archive_file:
+            result = subprocess.run(
+                ["git", "archive", "--format=tar", commit, "--", *paths],
+                cwd=root,
+                stdout=archive_file,
+                stderr=subprocess.PIPE,
+                timeout=120,
+                check=False,
+            )
+        if result.returncode != 0:
+            detail = result.stderr.decode("utf-8", errors="replace").strip()
+            raise InventoryProvenanceError(
+                f"cannot materialize inventory source {commit}: "
+                f"{detail or f'exit {result.returncode}'}"
+            )
+        destination = snapshot.resolve()
+        with tarfile.open(archive_path, "r:") as archive:
+            members = archive.getmembers()
+            for member in members:
+                member_path = PurePosixPath(member.name)
+                if (
+                    member_path.is_absolute()
+                    or ".." in member_path.parts
+                    or member.issym()
+                    or member.islnk()
+                    or not (member.isfile() or member.isdir())
+                ):
+                    raise InventoryProvenanceError(
+                        f"unsafe path in Git archive: {member.name!r}"
+                    )
+                target = (destination / member.name).resolve()
+                if not target.is_relative_to(destination):
+                    raise InventoryProvenanceError(
+                        f"Git archive path escapes snapshot: {member.name!r}"
+                    )
+            archive.extractall(snapshot, members=members)
+        yield snapshot
 
 
 def iter_python_files(root: Path, rel_dir: str) -> Iterable[Path]:
@@ -751,8 +880,11 @@ def build_inventory(root: Path) -> dict:
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "base_sha": base_sha(root),
+        "base_sha": None,
+        "provenance": {
+            "schema_version": PROVENANCE_SCHEMA,
+            "source_kind": "working-tree",
+        },
         "core_package_dir": CORE_PKG_DIR.as_posix(),
         "contracts_package_dir": CONTRACTS_PKG_DIR.as_posix(),
         "modules": module_info,
@@ -783,6 +915,75 @@ def build_inventory(root: Path) -> dict:
         "core_import_paths_seen": sorted(core_import_paths),
         "contracts_import_paths_seen": sorted(contracts_import_paths),
     }
+
+
+def build_inventory_from_git(root: Path, source_revision: str) -> dict:
+    """Build the formal inventory solely from one verified Git commit object."""
+    source_commit = resolve_source_commit(root, source_revision)
+    tree = source_tree_sha(root, source_commit)
+    with materialized_git_source(root, source_commit) as snapshot:
+        inventory = build_inventory(snapshot)
+    inventory["base_sha"] = source_commit
+    inventory["provenance"] = {
+        "schema_version": PROVENANCE_SCHEMA,
+        "source_kind": "git-commit",
+        "source_commit": source_commit,
+        "source_tree": tree,
+        "generator": GENERATOR_PATH,
+    }
+    return inventory
+
+
+def verify_inventory_provenance(root: Path, baseline: dict) -> dict[str, str]:
+    """Rebuild v3 from its Git object and reject any self-certified payload."""
+    if baseline.get("schema_version") != SCHEMA_VERSION:
+        raise InventoryProvenanceError(
+            f"core inventory schema must be exactly {SCHEMA_VERSION!r}, got "
+            f"{baseline.get('schema_version')!r}"
+        )
+    provenance = baseline.get("provenance")
+    if not isinstance(provenance, dict):
+        raise InventoryProvenanceError("core inventory v3 provenance is missing")
+    expected_metadata = {
+        "schema_version": PROVENANCE_SCHEMA,
+        "source_kind": "git-commit",
+        "generator": GENERATOR_PATH,
+    }
+    for field, expected in expected_metadata.items():
+        if provenance.get(field) != expected:
+            raise InventoryProvenanceError(
+                f"core inventory provenance {field} must be {expected!r}, got "
+                f"{provenance.get(field)!r}"
+            )
+    source_commit = resolve_source_commit(root, provenance.get("source_commit"))
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", source_commit, "HEAD"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if ancestor.returncode != 0:
+        raise InventoryProvenanceError(
+            f"core inventory source commit is not an ancestor of HEAD: {source_commit}"
+        )
+    tree = source_tree_sha(root, source_commit)
+    if provenance.get("source_tree") != tree:
+        raise InventoryProvenanceError(
+            f"core inventory provenance source_tree does not match {source_commit}: "
+            f"recorded {provenance.get('source_tree')!r}, Git object {tree!r}"
+        )
+    if baseline.get("base_sha") != source_commit:
+        raise InventoryProvenanceError(
+            f"core inventory base_sha must equal provenance source_commit {source_commit}"
+        )
+    rebuilt = build_inventory_from_git(root, source_commit)
+    if baseline != rebuilt:
+        raise InventoryProvenanceError(
+            "core inventory payload does not match its declared Git source object"
+        )
+    return {"source_commit": source_commit, "source_tree": tree}
 
 
 def dotted_to_marker(dotted: str) -> str | None:
@@ -828,6 +1029,21 @@ def _rust_marker_files(root: Path, marker: str) -> Iterable[str]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--verify",
+        action="store_true",
+        help="verify the committed inventory against its Git object (default)",
+    )
+    mode.add_argument(
+        "--write",
+        action="store_true",
+        help="write a reviewed refresh from --source-rev",
+    )
+    parser.add_argument(
+        "--source-rev",
+        help="full clean HEAD required with --write",
+    )
     parser.add_argument(
         "--output",
         default="reports/inventory/core-import-inventory.json",
@@ -835,24 +1051,55 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     root = repo_root()
-    inventory = build_inventory(root)
     out_path = root / args.output
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(
-        json.dumps(inventory, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
-    print(
-        f"wrote {out_path.relative_to(root)}: "
-        f"{len(inventory['modules'])} core modules, "
-        f"{len(inventory['contracts_modules'])} contracts modules, "
-        f"gateway consumes {inventory['gateway_core_module_count']}, "
-        f"knowledge consumes {inventory['knowledge_core_module_count']}, "
-        f"cross-boundary candidates: "
-        f"{len(inventory['cross_boundary_protocol_candidates'])}, "
-        f"shims: {len(inventory['shim_consumers'])}, "
-        f"mixed exports: {len(inventory['mixed_export_consumers'])}"
-    )
-    return 0
+    try:
+        clean_head = clean_source_revision(root)
+        if args.write:
+            if args.source_rev is None:
+                parser.error("--write requires --source-rev with the full clean HEAD")
+            source_revision = resolve_source_commit(root, args.source_rev)
+            if source_revision != clean_head:
+                raise InventoryProvenanceError(
+                    f"--source-rev {source_revision} does not equal clean HEAD {clean_head}"
+                )
+            inventory = build_inventory_from_git(root, source_revision)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(
+                json.dumps(
+                    inventory,
+                    indent=2,
+                    sort_keys=True,
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            print(
+                f"wrote {out_path.relative_to(root)} from Git commit {source_revision}; "
+                "review and commit this diff before running the independent gate"
+            )
+            return 0
+        if args.source_rev is not None:
+            parser.error("--source-rev is only valid with --write")
+        if not out_path.is_file():
+            raise InventoryProvenanceError(
+                f"committed core inventory is missing: {out_path.relative_to(root)}"
+            )
+        baseline = json.loads(out_path.read_text(encoding="utf-8"))
+        provenance = verify_inventory_provenance(root, baseline)
+        print(
+            f"verified {out_path.relative_to(root)} against Git commit "
+            f"{provenance['source_commit']} (no files written)"
+        )
+        return 0
+    except (
+        InventoryProvenanceError,
+        json.JSONDecodeError,
+        OSError,
+        subprocess.SubprocessError,
+    ) as exc:
+        print(f"PROVENANCE ERROR: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
