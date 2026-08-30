@@ -274,12 +274,7 @@ def create_app() -> FastAPI:
         ],
     )
     app.add_middleware(StreamingAuthMiddleware, config=auth_config)
-
-    # Bridge the pure-ASGI request id into the shared ContextVar used by
-    # Runtime/Knowledge clients. Added before logging so logging is the outer
-    # owner and its exact client-visible id is propagated downstream.
     app.add_middleware(RequestContextBridgeMiddleware)
-
     # 请求日志中间件 - 纯 ASGI
     request_log_config = StreamingLogConfig(
         enabled=True,
@@ -288,7 +283,6 @@ def create_app() -> FastAPI:
         exclude_paths=["/health", "/health/live", "/health/ready", "/metrics"],
     )
     app.add_middleware(StreamingLoggingMiddleware, config=request_log_config)
-
     # CORS 中间件（Starlette 内置，已经是纯 ASGI）
     cors = getattr(settings, "cors", None)
     allow_origins = cors.allow_origins if cors else ["*"]

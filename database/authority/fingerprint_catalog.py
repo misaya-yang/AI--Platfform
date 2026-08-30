@@ -45,6 +45,25 @@ class CatalogFingerprintError(RuntimeError):
     pass
 
 
+def logical_principal_map(role_prefix: str) -> dict[str, str]:
+    """Map physical role names to logical principal ids for ACL hashing."""
+    return {
+        f"{role_prefix}owner": "owner",
+        f"{role_prefix}migrator": "migrator",
+        f"{role_prefix}gateway": "gateway",
+        f"{role_prefix}runtime": "runtime",
+        f"{role_prefix}capability_worker": "capability_worker",
+        f"{role_prefix}knowledge_api": "knowledge_api",
+        f"{role_prefix}knowledge_worker": "knowledge_worker",
+    }
+
+
+def like_prefix_pattern(prefix: str) -> str:
+    """Literal SQL LIKE prefix; ``_``/``%`` in role names are not wildcards."""
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"{escaped}%"
+
+
 def _regprocedure(column: str, alias: str) -> str:
     return f"CASE WHEN {column} = 0 THEN '' ELSE {column}::regprocedure::text END AS {alias}"
 

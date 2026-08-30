@@ -28,8 +28,12 @@ from .fingerprint_catalog import (
     column_acl_lines,
     database_acl_lines,
     extension_catalog_lines,
+    logical_principal_map,
     policy_acl_lines,
     structural_catalog_detail_lines,
+)
+from .fingerprint_catalog import (
+    like_prefix_pattern as _like_prefix_pattern,
 )
 from .fingerprint_values import (
     UnsupportedFingerprintValue,
@@ -114,25 +118,6 @@ def _normalized_owner(owner: str, owner_map: dict[str, str] | None) -> str:
     if owner_map and owner in owner_map:
         return owner_map[owner]
     return owner
-
-
-def logical_principal_map(role_prefix: str) -> dict[str, str]:
-    """Map physical role names to logical principal ids for ACL hashing."""
-    return {
-        f"{role_prefix}owner": "owner",
-        f"{role_prefix}migrator": "migrator",
-        f"{role_prefix}gateway": "gateway",
-        f"{role_prefix}runtime": "runtime",
-        f"{role_prefix}capability_worker": "capability_worker",
-        f"{role_prefix}knowledge_api": "knowledge_api",
-        f"{role_prefix}knowledge_worker": "knowledge_worker",
-    }
-
-
-def _like_prefix_pattern(prefix: str) -> str:
-    """Literal SQL LIKE prefix; ``_``/``%`` in role names are not wildcards."""
-    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return f"{escaped}%"
 
 
 async def structural_lines(conn: Any) -> list[str]:
