@@ -28,10 +28,10 @@ import re
 import subprocess
 import sys
 from collections.abc import Iterable
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = "arc04-core-inventory/v2"
+SCHEMA_VERSION = "arc04-core-inventory/v3"
 
 CORE_PKG_DIR = Path("packages/ai-gateway-core/src/ai_gateway_core")
 CONTRACTS_PKG_DIR = Path("packages/ai-gateway-contracts/src/ai_gateway_contracts")
@@ -40,6 +40,23 @@ CONTRACTS_PKG_DIR = Path("packages/ai-gateway-contracts/src/ai_gateway_contracts
 # and the boundary gate use it to tell true shims apart from core modules
 # that merely import a contracts helper (e.g. auth/gateway_secret.py).
 SHIM_MARKER = "Compatibility shim — implementation moved to ``ai_gateway_contracts``"
+
+# Mixed core modules that still own concrete I/O/business behavior while
+# re-exporting selected contracts objects.  They are not compatibility shims
+# and must not carry SHIM_MARKER, but their exported symbols and consumers need
+# the same machine-readable lifetime discipline.
+MIXED_CORE_EXPORTS: dict[str, dict[str, object]] = {
+    "ai_gateway_core.auth.gateway_secret": {
+        "contracts_module": "ai_gateway_contracts.replay",
+        "symbols": ("InMemoryReplayStore", "ReplayStore"),
+        "replacement": "import from ai_gateway_contracts.replay",
+        "deletion_condition": (
+            "Remove these two re-exports after every direct and facade consumer imports "
+            "ai_gateway_contracts.replay; gateway_secret continues to own GatewaySecret "
+            "and RedisReplayStore."
+        ),
+    }
+}
 
 # Directories scanned for consumers, mapped to an owner label.  Order matters:
 # first match wins (e.g. packages/*/tests before packages/**).  ``core``
@@ -180,6 +197,229 @@ def parse_imports(path: Path) -> tuple[set[str], set[str]]:
     return plain, from_modules
 
 
+def _resolve_from_module(
+    current_module: str,
+    *,
+    is_package: bool,
+    node: ast.ImportFrom,
+) -> str | None:
+    """Resolve one absolute or relative ``from`` import to a dotted module."""
+
+    if node.level == 0:
+        return node.module
+    package = current_module.split(".") if is_package else current_module.split(".")[:-1]
+    climb = node.level - 1
+    if climb > len(package):
+        return None
+    parts = package[: len(package) - climb]
+    if node.module:
+        parts.extend(node.module.split("."))
+    return ".".join(parts) or None
+
+
+def shim_facade_exports(
+    modules: dict[str, Path],
+    shim_modules: set[str],
+) -> dict[str, dict[str, str]]:
+    """Map package-facade symbols back to the compatibility shim that owns them."""
+
+    facades: dict[str, dict[str, str]] = {}
+    for dotted, path in modules.items():
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for node in tree.body:
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            source = _resolve_from_module(
+                dotted,
+                is_package=path.name == "__init__.py",
+                node=node,
+            )
+            if source not in shim_modules:
+                continue
+            exports = facades.setdefault(dotted, {})
+            for alias in node.names:
+                if alias.name != "*":
+                    exports[alias.asname or alias.name] = source
+    return facades
+
+
+def shim_targets_for_imports(
+    path: Path,
+    *,
+    known_submodules: set[str],
+    shim_modules: set[str],
+    facade_exports: dict[str, dict[str, str]],
+) -> set[str]:
+    """Return shims consumed directly or through a package facade.
+
+    ``from ai_gateway_core.agents import RuntimeModelLeaseSigner`` consumes the
+    ``runtime_lease`` shim even though its textual import stops at the
+    ``ai_gateway_core.agents`` facade.  The no-growth ledger must retain that
+    origin or it can report zero consumers while production still relies on
+    the compatibility path.
+    """
+
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (SyntaxError, UnicodeDecodeError):
+        return set()
+
+    def reduce(dotted: str) -> str | None:
+        parts = dotted.split(".")
+        for depth in range(len(parts), 0, -1):
+            candidate = ".".join(parts[:depth])
+            if candidate in known_submodules:
+                return candidate
+        return None
+
+    targets: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                target = reduce(alias.name)
+                if target in shim_modules:
+                    targets.add(target)
+                if target in facade_exports:
+                    targets.update(facade_exports[target].values())
+            continue
+        if not isinstance(node, ast.ImportFrom) or node.level or not node.module:
+            continue
+        source = reduce(node.module)
+        if source in shim_modules:
+            targets.add(source)
+        exports = facade_exports.get(source or "", {})
+        for alias in node.names:
+            if alias.name == "*":
+                targets.update(exports.values())
+                continue
+            origin = exports.get(alias.name)
+            if origin:
+                targets.add(origin)
+                continue
+            # ``from ai_gateway_core import agents`` and
+            # ``from ai_gateway_core.agents import runtime`` name a deeper
+            # module rather than a symbol re-export.
+            candidate = reduce(f"{node.module}.{alias.name}")
+            if candidate in shim_modules:
+                targets.add(candidate)
+            if candidate in facade_exports:
+                targets.update(facade_exports[candidate].values())
+    return targets
+
+
+def mixed_export_facade_exports(
+    modules: dict[str, Path],
+) -> dict[str, dict[str, tuple[str, str]]]:
+    """Map facade names to ``(mixed module, original symbol)`` origins."""
+
+    facades: dict[str, dict[str, tuple[str, str]]] = {}
+    for dotted, path in modules.items():
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for node in tree.body:
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            source = _resolve_from_module(
+                dotted,
+                is_package=path.name == "__init__.py",
+                node=node,
+            )
+            spec = MIXED_CORE_EXPORTS.get(source or "")
+            if spec is None:
+                continue
+            symbols = set(spec["symbols"])
+            exports = facades.setdefault(dotted, {})
+            for alias in node.names:
+                if alias.name in symbols:
+                    exports[alias.asname or alias.name] = (source, alias.name)
+    return facades
+
+
+def _attribute_paths(tree: ast.AST) -> set[tuple[str, ...]]:
+    paths: set[tuple[str, ...]] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        parts: list[str] = []
+        current: ast.expr = node
+        while isinstance(current, ast.Attribute):
+            parts.append(current.attr)
+            current = current.value
+        if isinstance(current, ast.Name):
+            parts.append(current.id)
+            paths.add(tuple(reversed(parts)))
+    return paths
+
+
+def mixed_export_targets_for_imports(
+    path: Path,
+    *,
+    facade_exports: dict[str, dict[str, tuple[str, str]]],
+) -> set[tuple[str, str]]:
+    """Return mixed-export symbols actually referenced by one consumer file."""
+
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (SyntaxError, UnicodeDecodeError):
+        return set()
+    attributes = _attribute_paths(tree)
+    targets: set[tuple[str, str]] = set()
+
+    def record_bound(prefix: tuple[str, ...], source: str) -> None:
+        symbols = set(MIXED_CORE_EXPORTS[source]["symbols"])
+        for attribute in attributes:
+            if attribute[: len(prefix)] == prefix and len(attribute) == len(prefix) + 1:
+                symbol = attribute[-1]
+                if symbol in symbols:
+                    targets.add((source, symbol))
+
+    def record_facade_bound(prefix: tuple[str, ...], facade: str) -> None:
+        exports = facade_exports[facade]
+        for attribute in attributes:
+            if attribute[: len(prefix)] == prefix and len(attribute) == len(prefix) + 1:
+                origin = exports.get(attribute[-1])
+                if origin:
+                    targets.add(origin)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in MIXED_CORE_EXPORTS:
+                    prefix = (alias.asname,) if alias.asname else tuple(alias.name.split("."))
+                    record_bound(prefix, alias.name)
+                if alias.name in facade_exports:
+                    prefix = (alias.asname,) if alias.asname else tuple(alias.name.split("."))
+                    record_facade_bound(prefix, alias.name)
+            continue
+        if not isinstance(node, ast.ImportFrom) or node.level or not node.module:
+            continue
+        direct = MIXED_CORE_EXPORTS.get(node.module)
+        facade = facade_exports.get(node.module)
+        for alias in node.names:
+            if alias.name == "*":
+                if direct is not None:
+                    targets.update((node.module, symbol) for symbol in direct["symbols"])
+                if facade is not None:
+                    targets.update(facade.values())
+                continue
+            if direct is not None and alias.name in set(direct["symbols"]):
+                targets.add((node.module, alias.name))
+            if facade is not None and alias.name in facade:
+                targets.add(facade[alias.name])
+            candidate = f"{node.module}.{alias.name}"
+            binding = (alias.asname or alias.name,)
+            if candidate in MIXED_CORE_EXPORTS:
+                record_bound(binding, candidate)
+            if candidate in facade_exports:
+                record_facade_bound(binding, candidate)
+    return targets
+
+
 def package_modules(root: Path, pkg_dir: Path) -> dict[str, Path]:
     """Dotted module path -> file for every module of a workspace package."""
     modules: dict[str, Path] = {}
@@ -242,6 +482,13 @@ def sql_tables(path: Path) -> dict[str, list[str]]:
 def build_inventory(root: Path) -> dict:
     modules = core_modules(root)
     known_submodules = set(modules)
+    shim_modules = {
+        dotted
+        for dotted, path in modules.items()
+        if SHIM_MARKER in path.read_text(encoding="utf-8")
+    }
+    facade_exports = shim_facade_exports(modules, shim_modules)
+    mixed_facade_exports = mixed_export_facade_exports(modules)
     contracts = package_modules(root, CONTRACTS_PKG_DIR)
     known_contracts_submodules = set(contracts)
 
@@ -253,6 +500,14 @@ def build_inventory(root: Path) -> dict:
         owner: {} for _, owner in CONSUMER_SCOPES
     }
     contracts_consumption.setdefault("other", {})
+    shim_consumption: dict[str, dict[str, dict[str, object]]] = {
+        owner: {} for _, owner in CONSUMER_SCOPES
+    }
+    shim_consumption.setdefault("other", {})
+    mixed_consumption: dict[str, dict[str, dict[str, object]]] = {
+        owner: {} for _, owner in CONSUMER_SCOPES
+    }
+    mixed_consumption.setdefault("other", {})
     core_import_paths: set[str] = set()
     contracts_import_paths: set[str] = set()
 
@@ -275,12 +530,43 @@ def build_inventory(root: Path) -> dict:
             files.append(rel_posix)
             bucket["count"] = len(files)
 
+    # A facade is itself a real shim consumer.  Seed it explicitly because
+    # ``parse_imports`` intentionally ignores relative imports.
+    for facade, exports in facade_exports.items():
+        facade_path = modules[facade].relative_to(root).as_posix()
+        owner = owner_for(Path(facade_path)) or "other"
+        for shim in set(exports.values()):
+            record(shim_consumption[owner], owner, shim, facade_path)
+
+    # Mixed-module facades are real consumers of the exported contracts symbol
+    # even though the owning module retains unrelated concrete behavior.
+    for facade, exports in mixed_facade_exports.items():
+        facade_path = modules[facade].relative_to(root).as_posix()
+        owner = owner_for(Path(facade_path)) or "other"
+        for mixed_module, symbol in set(exports.values()):
+            record(
+                mixed_consumption[owner],
+                owner,
+                f"{mixed_module}:{symbol}",
+                facade_path,
+            )
+
     scan_dirs = [prefix for prefix, _ in CONSUMER_SCOPES] + ["database"]
     for rel_dir in scan_dirs:
         for path in iter_python_files(root, rel_dir):
             rel = path.relative_to(root)
             owner = owner_for(rel) or "other"
             plain, from_modules = parse_imports(path)
+            imported_shims = shim_targets_for_imports(
+                path,
+                known_submodules=known_submodules,
+                shim_modules=shim_modules,
+                facade_exports=facade_exports,
+            )
+            imported_mixed_exports = mixed_export_targets_for_imports(
+                path,
+                facade_exports=mixed_facade_exports,
+            )
             targets: set[str] = set()
             contracts_targets: set[str] = set()
             for dotted in plain:
@@ -318,6 +604,15 @@ def build_inventory(root: Path) -> dict:
                 record(consumption[owner], owner, target, rel_posix)
             for target in contracts_targets:
                 record(contracts_consumption[owner], owner, target, rel_posix)
+            for target in imported_shims:
+                record(shim_consumption[owner], owner, target, rel_posix)
+            for mixed_module, symbol in imported_mixed_exports:
+                record(
+                    mixed_consumption[owner],
+                    owner,
+                    f"{mixed_module}:{symbol}",
+                    rel_posix,
+                )
 
     # Also catch bare `import ai_gateway_core` consumers.
     module_info: dict[str, dict] = {}
@@ -398,23 +693,65 @@ def build_inventory(root: Path) -> dict:
 
     # Shim consumption baseline: files importing through compat paths that
     # re-export from ai_gateway_contracts (only meaningful post-migration).
-    shim_modules = sorted(m for m, i in module_info.items() if i["contracts_shim"])
+    sorted_shim_modules = sorted(shim_modules)
     shim_consumers = {
         m: {
             "files": sorted(
                 f
                 for owner in ("gateway", "knowledge", "tests", "scripts", "sdk", "core", "other")
-                for f in module_info[m]["consumer_owners"].get(owner, [])
+                for f in shim_consumption[owner].get(m, {}).get("files", [])
             )
         }
-        for m in shim_modules
+        for m in sorted_shim_modules
     }
-    for m in shim_modules:
+    for m in sorted_shim_modules:
         shim_consumers[m]["count"] = len(shim_consumers[m]["files"])
+
+    mixed_export_consumers: dict[str, dict[str, object]] = {}
+    for module, spec in sorted(MIXED_CORE_EXPORTS.items()):
+        symbol_rows: dict[str, dict[str, object]] = {}
+        all_files: set[str] = set()
+        for symbol in sorted(spec["symbols"]):
+            key = f"{module}:{symbol}"
+            files = sorted(
+                {
+                    file
+                    for owner in (
+                        "gateway",
+                        "knowledge",
+                        "tests",
+                        "scripts",
+                        "sdk",
+                        "core",
+                        "other",
+                    )
+                    for file in mixed_consumption[owner].get(key, {}).get("files", [])
+                }
+            )
+            all_files.update(files)
+            symbol_rows[symbol] = {"files": files, "count": len(files)}
+        facades = {
+            facade: {
+                exposed: origin_symbol
+                for exposed, (origin_module, origin_symbol) in sorted(exports.items())
+                if origin_module == module
+            }
+            for facade, exports in sorted(mixed_facade_exports.items())
+            if any(origin_module == module for origin_module, _symbol in exports.values())
+        }
+        mixed_export_consumers[module] = {
+            "contracts_module": spec["contracts_module"],
+            "symbols": symbol_rows,
+            "files": sorted(all_files),
+            "count": len(all_files),
+            "facades": facades,
+            "replacement": spec["replacement"],
+            "deletion_condition": spec["deletion_condition"],
+        }
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "base_sha": base_sha(root),
         "core_package_dir": CORE_PKG_DIR.as_posix(),
         "contracts_package_dir": CONTRACTS_PKG_DIR.as_posix(),
@@ -438,6 +775,11 @@ def build_inventory(root: Path) -> dict:
         "rust_markers": rust_markers,
         "table_access": table_access,
         "shim_consumers": shim_consumers,
+        "shim_facade_exports": {
+            facade: dict(sorted(exports.items()))
+            for facade, exports in sorted(facade_exports.items())
+        },
+        "mixed_export_consumers": mixed_export_consumers,
         "core_import_paths_seen": sorted(core_import_paths),
         "contracts_import_paths_seen": sorted(contracts_import_paths),
     }
@@ -507,7 +849,8 @@ def main(argv: list[str] | None = None) -> int:
         f"knowledge consumes {inventory['knowledge_core_module_count']}, "
         f"cross-boundary candidates: "
         f"{len(inventory['cross_boundary_protocol_candidates'])}, "
-        f"shims: {len(inventory['shim_consumers'])}"
+        f"shims: {len(inventory['shim_consumers'])}, "
+        f"mixed exports: {len(inventory['mixed_export_consumers'])}"
     )
     return 0
 

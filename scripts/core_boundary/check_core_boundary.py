@@ -6,9 +6,10 @@ committed inventory baseline (``reports/inventory/core-import-inventory.json``):
 
 1. **Contracts content allowlist** — only whitelisted modules may exist in
    ``ai_gateway_contracts``; adding a module requires updating this gate.
-2. **No forbidden dependencies in contracts** — contracts may import only
-   stdlib + ``pydantic``.  Database, Redis, HTTP, FastAPI, provider SDK and
-   service-config imports fail the gate.
+2. **No forbidden dependencies in contracts** — contracts may import only an
+   explicit pure-computation stdlib allowlist + ``pydantic``.  Filesystem,
+   process, socket/HTTP, database, Redis, provider SDK and service-config
+   imports fail the gate.
 3. **No new domain implementations in core** — the set of ``ai_gateway_core``
    modules must not grow beyond the committed baseline.
 4. **Knowledge→core dependency count does not grow** — the number of core
@@ -20,6 +21,9 @@ committed inventory baseline (``reports/inventory/core-import-inventory.json``):
 7. **Shim map consistency** — ``CORE_TO_CONTRACTS`` (the authoritative shim
    list) must match the tree: every mapped shim file exists, carries the shim
    marker, and its contracts target exists and is allowlisted.
+8. **Mixed exports stay bounded** — concrete core modules that re-export a
+   contracts symbol retain a separate consumer/deletion ledger; they are not
+   mislabeled as pure compatibility shims.
 
 Run::
 
@@ -45,6 +49,7 @@ from inventory_core_consumption import (  # noqa: E402
     CONTRACTS_PKG_DIR,
     CORE_PKG_DIR,
     CORE_TO_CONTRACTS,
+    MIXED_CORE_EXPORTS,
     SHIM_MARKER,
     build_inventory,
     repo_root,
@@ -70,8 +75,31 @@ CONTRACTS_ALLOWLIST: frozenset[str] = frozenset(
 
 # --- check 2: forbidden imports ----------------------------------------------
 
-# Third-party packages contracts may import. Everything else must be stdlib.
+# Third-party packages contracts may import.
 CONTRACTS_ALLOWED_THIRD_PARTY: frozenset[str] = frozenset({"pydantic"})
+
+# Explicit pure-computation stdlib surface used by the current contracts.
+# Everything else is denied until reviewed; this is intentionally not
+# ``sys.stdlib_module_names`` because stdlib includes filesystem, subprocess,
+# socket and HTTP clients.
+CONTRACTS_ALLOWED_STDLIB: frozenset[str] = frozenset(
+    {
+        "base64",
+        "collections",
+        "copy",
+        "dataclasses",
+        "datetime",
+        "hashlib",
+        "hmac",
+        "json",
+        "re",
+        "secrets",
+        "threading",
+        "time",
+        "typing",
+        "uuid",
+    }
+)
 
 # Explicit names kept for readable error messages (subset of the effective
 # rule "stdlib + pydantic only", listed so a violation message can point at
@@ -101,6 +129,38 @@ FORBIDDEN_EXAMPLES: frozenset[str] = frozenset(
         "tiktoken",
         "websockets",
         "sse_starlette",
+        # stdlib I/O / process / network entry points
+        "http",
+        "io",
+        "os",
+        "pathlib",
+        "shutil",
+        "socket",
+        "subprocess",
+        "tempfile",
+        "urllib",
+    }
+)
+
+FORBIDDEN_IO_CALLS: frozenset[str] = frozenset(
+    {
+        "open",
+        "__import__",
+        "connect",
+        "mkdir",
+        "read_bytes",
+        "read_text",
+        "recv",
+        "rename",
+        "request",
+        "rmdir",
+        "send",
+        "system",
+        "touch",
+        "unlink",
+        "urlopen",
+        "write_bytes",
+        "write_text",
     }
 )
 
@@ -118,6 +178,22 @@ def _all_import_targets(path: Path) -> list[str]:
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
             targets.append(node.module)
     return targets
+
+
+def _forbidden_io_calls(path: Path) -> list[str]:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (SyntaxError, UnicodeDecodeError):
+        return []
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_IO_CALLS:
+            found.add(node.func.id)
+        elif isinstance(node.func, ast.Attribute) and node.func.attr in FORBIDDEN_IO_CALLS:
+            found.add(node.func.attr)
+    return sorted(found)
 
 
 def _iter_pkg_files(root: Path, pkg_dir: Path) -> list[Path]:
@@ -163,11 +239,16 @@ def check_contracts_imports(root: Path) -> list[str]:
                 continue
             if top in CONTRACTS_ALLOWED_THIRD_PARTY:
                 continue
-            if top in sys.stdlib_module_names:
+            if top in CONTRACTS_ALLOWED_STDLIB:
                 continue
             violations.append(
                 f"forbidden contracts dependency: {top} ({target} in "
-                f"{path.relative_to(root)}) — contracts allows stdlib + pydantic only"
+                f"{path.relative_to(root)}) — contracts allows only the reviewed "
+                "pure-computation stdlib surface + pydantic"
+            )
+        for call in _forbidden_io_calls(path):
+            violations.append(
+                f"forbidden contracts I/O call: {call} ({path.relative_to(root)})"
             )
     return violations
 
@@ -216,13 +297,63 @@ def check_shim_consumers_no_growth(root: Path, baseline: dict) -> list[str]:
             continue
         base_count = base.get("count", 0)
         live_count = live_entry.get("count", 0)
-        if live_count > base_count:
-            added = sorted(set(live_entry["files"]) - set(base["files"]))
+        added = sorted(set(live_entry["files"]) - set(base["files"]))
+        if added:
             violations.append(
-                f"shim consumers grew for {module} ({base_count} → {live_count}); "
+                f"shim gained consumers for {module} ({base_count} → {live_count}); "
                 f"new consumers must import the contracts module instead: "
                 f"{', '.join(added)}"
             )
+    return violations
+
+
+def check_mixed_export_consumers_no_growth(root: Path, baseline: dict) -> list[str]:
+    """Bound contracts re-exports from core modules that retain real behavior."""
+
+    live = build_inventory(root).get("mixed_export_consumers", {})
+    recorded = baseline.get("mixed_export_consumers")
+    if not isinstance(recorded, dict):
+        return [
+            "mixed-export consumer ledger missing from baseline — regenerate and review "
+            "the ARC-04 inventory before this gate can pass"
+        ]
+
+    violations: list[str] = []
+    for module, spec in sorted(MIXED_CORE_EXPORTS.items()):
+        live_entry = live.get(module)
+        base_entry = recorded.get(module)
+        if not isinstance(live_entry, dict):
+            violations.append(f"configured mixed export missing from live inventory: {module}")
+            continue
+        if not isinstance(base_entry, dict):
+            violations.append(f"mixed export missing from baseline: {module}")
+            continue
+        for field in ("contracts_module", "replacement", "deletion_condition"):
+            if base_entry.get(field) != live_entry.get(field):
+                violations.append(
+                    f"mixed export metadata drift for {module}.{field}: "
+                    f"{base_entry.get(field)!r} -> {live_entry.get(field)!r}"
+                )
+        base_symbols = base_entry.get("symbols")
+        live_symbols = live_entry.get("symbols")
+        if not isinstance(base_symbols, dict) or not isinstance(live_symbols, dict):
+            violations.append(f"mixed export symbol ledger malformed: {module}")
+            continue
+        for symbol in sorted(spec["symbols"]):
+            base_symbol = base_symbols.get(symbol)
+            live_symbol = live_symbols.get(symbol)
+            if not isinstance(base_symbol, dict) or not isinstance(live_symbol, dict):
+                violations.append(f"mixed export symbol missing from ledger: {module}.{symbol}")
+                continue
+            base_files = set(base_symbol.get("files") or [])
+            live_files = set(live_symbol.get("files") or [])
+            added = sorted(live_files - base_files)
+            if added:
+                violations.append(
+                    f"mixed export gained consumers for {module}.{symbol} "
+                    f"({len(base_files)} → {len(live_files)}); import "
+                    f"{spec['contracts_module']} directly: {', '.join(added)}"
+                )
     return violations
 
 
@@ -255,6 +386,48 @@ def check_shim_map_consistency(root: Path) -> list[str]:
     return violations
 
 
+def check_mixed_export_map_consistency(root: Path) -> list[str]:
+    """Mixed-export config must name real contracts imports and modules."""
+
+    from inventory_core_consumption import package_modules
+
+    violations: list[str] = []
+    core_catalog = package_modules(root, CORE_PKG_DIR)
+    contracts_catalog = package_modules(root, CONTRACTS_PKG_DIR)
+    for module, spec in sorted(MIXED_CORE_EXPORTS.items()):
+        path = core_catalog.get(module)
+        contracts_module = str(spec["contracts_module"])
+        if path is None:
+            violations.append(f"configured mixed-export module missing from tree: {module}")
+            continue
+        if contracts_module not in contracts_catalog:
+            violations.append(
+                f"mixed-export contracts target missing from tree: {contracts_module}"
+            )
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (SyntaxError, UnicodeDecodeError) as exc:
+            violations.append(f"cannot parse mixed-export module {module}: {exc}")
+            continue
+        imported: set[str] = set()
+        for node in tree.body:
+            if (
+                isinstance(node, ast.ImportFrom)
+                and node.level == 0
+                and node.module == contracts_module
+            ):
+                imported.update(alias.name for alias in node.names)
+        missing = sorted(set(spec["symbols"]) - imported)
+        if missing:
+            violations.append(
+                f"mixed-export symbols not imported from {contracts_module} by {module}: "
+                f"{', '.join(missing)}"
+            )
+        if not str(spec.get("deletion_condition") or "").strip():
+            violations.append(f"mixed export has no deletion condition: {module}")
+    return violations
+
+
 def run_checks(root: Path, baseline: dict) -> list[str]:
     violations: list[str] = []
     violations += check_contracts_allowlist(root)
@@ -262,7 +435,9 @@ def run_checks(root: Path, baseline: dict) -> list[str]:
     violations += check_core_no_new_modules(root, baseline)
     violations += check_knowledge_no_growth(root, baseline)
     violations += check_shim_consumers_no_growth(root, baseline)
+    violations += check_mixed_export_consumers_no_growth(root, baseline)
     violations += check_shim_map_consistency(root)
+    violations += check_mixed_export_map_consistency(root)
     return violations
 
 
@@ -299,7 +474,10 @@ def self_test() -> int:
         root = Path(tmp)
         contracts = CONTRACTS_PKG_DIR
         _write(root / contracts / "__init__.py", "")
-        _write(root / contracts / "capability_proof.py", "import redis\n")
+        _write(
+            root / contracts / "capability_proof.py",
+            "import redis\nimport urllib.request\nopen('forbidden')\n",
+        )
         _write(root / contracts / "rogue_module.py", "import fastapi\n")
         core = CORE_PKG_DIR
         _write(root / core / "__init__.py", "")
@@ -309,6 +487,8 @@ def self_test() -> int:
         expect("allowlist", allowlist, "rogue_module")
         imports = check_contracts_imports(root)
         expect("forbidden-dependency", imports, "redis")
+        expect("forbidden-stdlib-io", imports, "urllib")
+        expect("forbidden-builtin-io", imports, "I/O call: open")
         expect("forbidden-dependency", imports, "fastapi")
         if check_core_no_new_modules(root, clean_baseline):
             failures.append("core-clean fixture unexpectedly reported growth")
@@ -377,7 +557,84 @@ def self_test() -> int:
         _write(root / contracts / "__init__.py", "")
         _write(root / contracts / "capability_proof.py", "SCHEMA_VERSION = 'x'\n")
         shim = check_shim_consumers_no_growth(root, shim_baseline)
-        expect("shim-growth", shim, "shim consumers grew")
+        expect("shim-growth", shim, "shim gained consumers")
+
+    # 6b: package-facade imports must remain attributed to their real shim.
+    # A textual scan that stops at ``ai_gateway_core.agents`` would otherwise
+    # report zero runtime consumers while production imports the re-export.
+    facade_baseline = json.loads(json.dumps(clean_baseline))
+    facade_path = "packages/ai-gateway-core/src/ai_gateway_core/agents/__init__.py"
+    facade_baseline["shim_consumers"] = {
+        "ai_gateway_core.agents.runtime": {
+            "files": [facade_path],
+            "count": 1,
+        }
+    }
+    with tempfile.TemporaryDirectory(prefix="arc04-gate-selftest-") as tmp:
+        root = Path(tmp)
+        core = CORE_PKG_DIR
+        _write(root / core / "__init__.py", "")
+        _write(
+            root / core / "agents" / "__init__.py",
+            "from .runtime import runtime_sha256\n",
+        )
+        _write(
+            root / core / "agents" / "runtime.py",
+            '"""Compatibility shim — implementation moved to ``ai_gateway_contracts``."""\n'
+            "from ai_gateway_contracts.agent_runtime import runtime_sha256\n",
+        )
+        _write(
+            root / "src" / "new_facade_consumer.py",
+            "from ai_gateway_core.agents import runtime_sha256\n",
+        )
+        contracts = CONTRACTS_PKG_DIR
+        _write(root / contracts / "__init__.py", "")
+        _write(root / contracts / "agent_runtime.py", "def runtime_sha256(value): return value\n")
+        shim = check_shim_consumers_no_growth(root, facade_baseline)
+        expect("facade-shim-growth", shim, "shim gained consumers")
+
+    # 8: mixed-module contracts exports keep their own facade/consumer ledger.
+    with tempfile.TemporaryDirectory(prefix="arc04-gate-selftest-") as tmp:
+        root = Path(tmp)
+        core = CORE_PKG_DIR
+        facade_path = "packages/ai-gateway-core/src/ai_gateway_core/auth/__init__.py"
+        _write(root / core / "__init__.py", "")
+        _write(
+            root / core / "auth" / "gateway_secret.py",
+            "from ai_gateway_contracts.replay import InMemoryReplayStore, ReplayStore\n",
+        )
+        _write(
+            root / core / "auth" / "__init__.py",
+            "from .gateway_secret import InMemoryReplayStore, ReplayStore\n",
+        )
+        _write(
+            root / "src" / "new_mixed_consumer.py",
+            "from ai_gateway_core.auth import ReplayStore\n",
+        )
+        contracts = CONTRACTS_PKG_DIR
+        _write(root / contracts / "__init__.py", "")
+        _write(
+            root / contracts / "replay.py",
+            "class InMemoryReplayStore: pass\nclass ReplayStore: pass\n",
+        )
+        mixed_baseline = json.loads(json.dumps(clean_baseline))
+        spec = MIXED_CORE_EXPORTS["ai_gateway_core.auth.gateway_secret"]
+        mixed_baseline["mixed_export_consumers"] = {
+            "ai_gateway_core.auth.gateway_secret": {
+                "contracts_module": spec["contracts_module"],
+                "replacement": spec["replacement"],
+                "deletion_condition": spec["deletion_condition"],
+                "symbols": {
+                    "InMemoryReplayStore": {"files": [facade_path], "count": 1},
+                    "ReplayStore": {"files": [facade_path], "count": 1},
+                },
+            }
+        }
+        mixed = check_mixed_export_consumers_no_growth(root, mixed_baseline)
+        expect("mixed-export-growth", mixed, "mixed export gained consumers")
+        consistency = check_mixed_export_map_consistency(root)
+        if consistency:
+            failures.append(f"mixed-export-map clean fixture failed: {consistency}")
 
     if failures:
         print("SELF-TEST FAILED")
@@ -427,7 +684,8 @@ def main(argv: list[str] | None = None) -> int:
         f"{len(live['modules'])} core modules (no growth), "
         f"knowledge→core = {live['knowledge_core_module_count']} "
         f"(baseline {baseline.get('knowledge_core_module_count')}), "
-        f"{len(live['shim_consumers'])} shims tracked"
+        f"{len(live['shim_consumers'])} shims + "
+        f"{len(live['mixed_export_consumers'])} mixed exports tracked"
     )
     return 0
 

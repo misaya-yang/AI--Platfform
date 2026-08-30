@@ -26,13 +26,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import subprocess
 import sys
-import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BASELINE = ROOT / "docs" / "architecture" / "baselines" / "2026-08-post-rag" / "loc-baseline.json"
 DEFAULT_EVIDENCE = ROOT / "tmp" / "gate-evidence" / "loc-no-growth.json"
+PY_THRESHOLD = 800
+TS_THRESHOLD = 500
 
 # Must mirror scripts/inventory/loc_baseline.py and scripts/inventory/_common.py.
 SCAN_ROOTS = ("src", "apps", "packages", "scripts", "database", "web", "sdk", "tests")
@@ -42,6 +45,128 @@ PRUNED_DIRS = {
     ".worktrees", "tmp", "temp", "logs", "uploads", "test-results",
     "playwright-report", "htmlcov", "target",
 }
+
+
+class LocBaselineError(RuntimeError):
+    """Raised when the checked-in LOC ledger has invalid Git provenance."""
+
+
+def _resolve_base_commit(root: Path, raw_sha: object) -> str:
+    if not isinstance(raw_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", raw_sha):
+        raise LocBaselineError("base_git_sha must be a full lowercase 40-character Git SHA")
+    resolved = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{raw_sha}^{{commit}}"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if resolved.returncode != 0 or resolved.stdout.strip() != raw_sha:
+        raise LocBaselineError(f"base_git_sha is not a resolvable commit: {raw_sha}")
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", raw_sha, "HEAD"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if ancestor.returncode != 0:
+        raise LocBaselineError(f"base_git_sha is not an ancestor of HEAD: {raw_sha}")
+    return raw_sha
+
+
+def _safe_ledger_path(raw: object) -> str:
+    if not isinstance(raw, str) or not raw or "\\" in raw:
+        raise LocBaselineError(f"invalid LOC ledger path: {raw!r}")
+    path = PurePosixPath(raw)
+    if (
+        path.is_absolute()
+        or path.as_posix() != raw
+        or ".." in path.parts
+        or any(ord(char) < 32 for char in raw)
+    ):
+        raise LocBaselineError(f"invalid LOC ledger path: {raw!r}")
+    return raw
+
+
+def _git_blob_lines(root: Path, base_sha: str, rel_path: str) -> int:
+    blob = subprocess.run(
+        ["git", "show", f"{base_sha}:{rel_path}"],
+        cwd=root,
+        capture_output=True,
+        check=False,
+    )
+    if blob.returncode != 0:
+        raise LocBaselineError(
+            f"LOC ledger path is missing from base_git_sha: {rel_path}"
+        )
+    try:
+        text = blob.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise LocBaselineError(
+            f"LOC ledger path is not UTF-8 at base_git_sha: {rel_path}"
+        ) from exc
+    return len(text.splitlines())
+
+
+def verify_baseline_provenance(root: Path, baseline: dict) -> dict:
+    """Bind every constrained LOC entry to the immutable Git base object."""
+
+    thresholds = baseline.get("thresholds")
+    if not isinstance(thresholds, dict):
+        raise LocBaselineError("LOC baseline thresholds are missing")
+    if thresholds.get("python_new_file_max") != PY_THRESHOLD:
+        raise LocBaselineError(
+            f"python LOC threshold must remain {PY_THRESHOLD}, got "
+            f"{thresholds.get('python_new_file_max')!r}"
+        )
+    if thresholds.get("typescript_new_file_max") != TS_THRESHOLD:
+        raise LocBaselineError(
+            f"TypeScript LOC threshold must remain {TS_THRESHOLD}, got "
+            f"{thresholds.get('typescript_new_file_max')!r}"
+        )
+
+    base_sha = _resolve_base_commit(root, baseline.get("base_git_sha"))
+    checked: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for ledger_key, suffixes, threshold in (
+        ("oversized_python", (".py",), PY_THRESHOLD),
+        ("oversized_typescript", (".ts", ".tsx"), TS_THRESHOLD),
+    ):
+        ledger = baseline.get(ledger_key)
+        rows = ledger.get("files") if isinstance(ledger, dict) else None
+        if not isinstance(rows, list):
+            raise LocBaselineError(f"LOC baseline ledger is missing: {ledger_key}.files")
+        for row in rows:
+            if not isinstance(row, dict):
+                raise LocBaselineError(f"LOC baseline row is not an object: {ledger_key}")
+            rel_path = _safe_ledger_path(row.get("file"))
+            if rel_path in seen:
+                raise LocBaselineError(f"duplicate LOC baseline path: {rel_path}")
+            seen.add(rel_path)
+            if not rel_path.endswith(suffixes):
+                raise LocBaselineError(
+                    f"LOC baseline path has the wrong language suffix: {rel_path}"
+                )
+            recorded = row.get("lines")
+            if isinstance(recorded, bool) or not isinstance(recorded, int):
+                raise LocBaselineError(f"LOC baseline line count is invalid: {rel_path}")
+            if recorded <= threshold:
+                raise LocBaselineError(
+                    f"LOC baseline constrained file is not over threshold: {rel_path}"
+                )
+            actual = _git_blob_lines(root, base_sha, rel_path)
+            if actual != recorded:
+                raise LocBaselineError(
+                    f"LOC baseline line count does not match {base_sha}:{rel_path}: "
+                    f"recorded {recorded}, Git object {actual}"
+                )
+            checked.append({"file": rel_path, "lines": actual, "ledger": ledger_key})
+    return {
+        "result": "pass",
+        "base_git_sha": base_sha,
+        "constrained_files_checked": len(checked),
+    }
 
 
 def count_lines(path: Path) -> int:
@@ -128,6 +253,30 @@ def run(base: Path, baseline_path: Path, evidence_path: Path) -> int:
         print(f"GATE ERROR: unexpected baseline schema: {baseline.get('schema')!r}", file=sys.stderr)
         return 2
 
+    try:
+        provenance = verify_baseline_provenance(base, baseline)
+    except (LocBaselineError, OSError, subprocess.SubprocessError) as exc:
+        print(f"GATE ERROR: invalid LOC baseline provenance: {exc}", file=sys.stderr)
+        if evidence_path is not None:
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            evidence_path.write_text(
+                json.dumps(
+                    {
+                        "gate": "loc-no-growth",
+                        "tier": "L0",
+                        "baseline": str(baseline_path),
+                        "base_git_sha": baseline.get("base_git_sha"),
+                        "provenance": {"result": "fail", "error": str(exc)},
+                        "result": "error",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        return 2
+
     current_py = walk(base, ".py")
     current_ts = {**walk(base, ".ts"), **walk(base, ".tsx")}
     violations, informational = evaluate(baseline, current_py, current_ts)
@@ -138,6 +287,7 @@ def run(base: Path, baseline_path: Path, evidence_path: Path) -> int:
         "baseline": str(baseline_path.relative_to(base)) if baseline_path.is_relative_to(base) else str(baseline_path),
         "baseline_id": baseline.get("baseline_id"),
         "base_git_sha": baseline.get("base_git_sha"),
+        "provenance": provenance,
         "scanned": {"python_files": len(current_py), "typescript_files": len(current_ts)},
         "violations": violations,
         "informational": informational,
