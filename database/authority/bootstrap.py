@@ -91,17 +91,25 @@ SELECT desired.nspname, desired.objtype::text,
        EXISTS (
            SELECT 1
            FROM aclexplode(
-               COALESCE(default_acl.defaclacl, acldefault(desired.objtype, owner_role.oid))
+               COALESCE(global_acl.defaclacl, acldefault(desired.objtype, owner_role.oid))
            ) AS privilege
+           WHERE privilege.grantee = 0
+       ) OR EXISTS (
+           SELECT 1
+           FROM aclexplode(COALESCE(schema_acl.defaclacl, '{}'::aclitem[])) AS privilege
            WHERE privilege.grantee = 0
        ) AS public_has_privilege
 FROM desired
 CROSS JOIN owner_role
 JOIN pg_namespace AS namespace ON namespace.nspname = desired.nspname
-LEFT JOIN pg_default_acl AS default_acl
-  ON default_acl.defaclrole = owner_role.oid
- AND default_acl.defaclnamespace = namespace.oid
- AND default_acl.defaclobjtype = desired.objtype
+LEFT JOIN pg_default_acl AS global_acl
+  ON global_acl.defaclrole = owner_role.oid
+ AND global_acl.defaclnamespace = 0
+ AND global_acl.defaclobjtype = desired.objtype
+LEFT JOIN pg_default_acl AS schema_acl
+  ON schema_acl.defaclrole = owner_role.oid
+ AND schema_acl.defaclnamespace = namespace.oid
+ AND schema_acl.defaclobjtype = desired.objtype
 ORDER BY desired.nspname, desired.objtype
 """
 

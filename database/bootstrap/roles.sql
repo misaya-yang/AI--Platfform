@@ -146,6 +146,13 @@ REVOKE CREATE ON SCHEMA public, gateway, assistant, knowledge FROM
 -- PostgreSQL grants PUBLIC EXECUTE on new routines and PUBLIC USAGE on new
 -- types unless the creating role overrides those defaults.  Baseline DDL runs
 -- as ai_gateway_owner, so freeze the four schemas before any object exists.
+-- The built-in grants are global defaults; schema-specific REVOKE cannot
+-- subtract them. Revoke globally first, then retain explicit per-schema rows
+-- so the fingerprint proves the intended scope.
+ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner
+    REVOKE EXECUTE ON ROUTINES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner
+    REVOKE USAGE ON TYPES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner IN SCHEMA public
     REVOKE ALL ON TABLES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner IN SCHEMA public

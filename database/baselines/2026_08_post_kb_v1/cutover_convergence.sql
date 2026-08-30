@@ -253,6 +253,12 @@ END
 $$;
 
 -- Future objects created by the owner must not inherit PUBLIC grants.
+-- Routine/type PUBLIC privileges originate in PostgreSQL's global defaults;
+-- revoke those before applying the per-schema defaults below.
+ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner
+    REVOKE EXECUTE ON ROUTINES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner
+    REVOKE USAGE ON TYPES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner IN SCHEMA public
     REVOKE ALL ON TABLES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner IN SCHEMA public

@@ -219,10 +219,11 @@ def _assert_cutover_contract(sql: str) -> None:
     assert "SET search_path = pg_catalog, %I" in sql
     assert "REVOKE EXECUTE ON %s %s FROM PUBLIC" in sql
     assert "REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA %I FROM PUBLIC" in sql
-    assert sql.count("REVOKE EXECUTE ON ROUTINES FROM PUBLIC") == 4
+    # One global PostgreSQL default plus one explicit row per platform schema.
+    assert sql.count("REVOKE EXECUTE ON ROUTINES FROM PUBLIC") == 5
     for schema in ("public", "gateway", "assistant", "knowledge"):
         assert f"ALTER DEFAULT PRIVILEGES FOR ROLE ai_gateway_owner IN SCHEMA {schema}" in sql
-    assert sql.count("REVOKE USAGE ON TYPES FROM PUBLIC") == 4
+    assert sql.count("REVOKE USAGE ON TYPES FROM PUBLIC") == 5
     assert "REVOKE USAGE ON TYPE %I.%I FROM PUBLIC" in sql
 
 
