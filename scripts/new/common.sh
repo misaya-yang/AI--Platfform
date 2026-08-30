@@ -117,7 +117,10 @@ compose_service_containers() {
 }
 compose_running_service_containers() {
     local service="$1"
-    docker ps +        --filter "label=com.docker.compose.project=$(compose_project_name)" +        --filter "label=com.docker.compose.service=$service" +        --format '{{.Names}}' 2>/dev/null
+    docker ps \
+        --filter "label=com.docker.compose.project=$(compose_project_name)" \
+        --filter "label=com.docker.compose.service=$service" \
+        --format '{{.Names}}' 2>/dev/null
 }
 compose_service_container() {
     local service="$1"
@@ -133,12 +136,14 @@ topology_service_present() {
 topology_service_replicas() {
     local service="$1"
     local mode="${AI_PLATFORM_TOPOLOGY_MODE:-full}"
-    python3 "$PROJECT_ROOT/scripts/deploy/topology_modes.py" +        --mode "$mode" --service-replicas "$service"
+    python3 "$PROJECT_ROOT/scripts/deploy/topology_modes.py" \
+        --mode "$mode" --service-replicas "$service"
 }
 topology_service_ids() {
     local scope="$1"
     local mode="${AI_PLATFORM_TOPOLOGY_MODE:-full}"
-    python3 "$PROJECT_ROOT/scripts/deploy/topology_modes.py" +        --mode "$mode" --service-ids "$scope"
+    python3 "$PROJECT_ROOT/scripts/deploy/topology_modes.py" \
+        --mode "$mode" --service-ids "$scope"
 }
 running_service_replica_count() {
     local service="$1"
