@@ -144,7 +144,7 @@ SELECT EXISTS (
 
 _FRESH_EXTENSION_ACL_HARDENING_SQL = """
 /* arc03-fresh-extension-acl-hardening */
-REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA public FROM PUBLIC
+REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA public, gateway, assistant, knowledge FROM PUBLIC
 """
 
 
@@ -533,12 +533,12 @@ async def fresh_install(
         # Objects created for the baseline are owned by the NOLOGIN owner; the
         # extension helper resets role on return, so borrow it again here.
         await conn.execute(f'SET LOCAL ROLE "{owner_role}"')
-        # Extension scripts can grant PUBLIC explicitly even when the owner's
-        # default routine ACL is closed. Legacy cutover handles old extension
-        # owners separately; this owner-only revoke is safe for a fresh DB.
-        await conn.execute(_FRESH_EXTENSION_ACL_HARDENING_SQL)
         for file_name in ("init.sql", "reference_data.sql"):
             await run_baseline_sql_file(conn, baseline_dir / file_name)
+        # Extension scripts and restored routines can retain built-in PUBLIC
+        # EXECUTE independently of the owner's default ACL. Fresh objects are
+        # owner-controlled, so close all four schemas before exact grants.
+        await conn.execute(_FRESH_EXTENSION_ACL_HARDENING_SQL)
         await run_baseline_sql_file(
             conn,
             baseline_dir / "grants.sql",
