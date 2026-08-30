@@ -853,12 +853,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     # --- Health ---
-    from .api.version import version_router
+    from .api.version import register_version_route
 
     version_service_id = (
         "knowledge-worker" if resolved.runtime_role == "worker" else "knowledge-service"
     )
-    app.include_router(version_router(version_service_id))
+    register_version_route(app, version_service_id)
 
     @app.middleware("http")
     async def security_headers(request, call_next):
