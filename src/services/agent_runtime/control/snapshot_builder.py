@@ -234,6 +234,17 @@ def snapshot_capability_allowlist(
         raise AgentRuntimeControlError(
             "AI_PLATFORM_AGENT_RUNTIME_AGENT_SNAPSHOT_INVALID", status_code=409
         )
+    if not raw_capabilities:
+        agent_spec = snapshot.get("agent_spec")
+        channel = agent_spec.get("channel") if isinstance(agent_spec, dict) else None
+        # The built-in Assistant/Responses surface intentionally inherits the
+        # platform catalog.  Treating its empty signed binding list as an
+        # explicit deny-list made Thread creation pin the full catalog while
+        # the first Turn projected an empty catalog, forcing every live chat
+        # to fail with CAPABILITY_THREAD_RECREATE_REQUIRED.  Published Agents
+        # keep the closed empty-list meaning.
+        if channel == "builtin":
+            return None
     allowlist: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str]] = set()
     for raw in raw_capabilities:

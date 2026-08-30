@@ -176,6 +176,21 @@ def test_connector_allowlist_keeps_only_signed_non_secret_binding() -> None:
         )
 
 
+def test_builtin_empty_capabilities_inherit_platform_catalog() -> None:
+    assert (
+        AgentRuntimeControlPlane._snapshot_capability_allowlist(
+            {"agent_spec": {"channel": "builtin"}, "capabilities": []}
+        )
+        is None
+    )
+
+
+def test_published_empty_capabilities_remain_closed() -> None:
+    assert AgentRuntimeControlPlane._snapshot_capability_allowlist(
+        {"agent_spec": {"channel": "api"}, "capabilities": []}
+    ) == []
+
+
 def test_responses_tool_controls_are_preserved_in_runtime_readonly_snapshot() -> None:
     payload = AgentRuntimeControlPlane._readonly_capability_payload(
         {
