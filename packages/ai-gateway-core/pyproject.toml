@@ -14,6 +14,9 @@ authors = [{ name = "AI Gateway Maintainers" }]
 # (DatabaseStorage, S3 storage, skill parser, usage recorder) and declares
 # their dependencies directly so standalone installations remain complete.
 dependencies = [
+    # I/O-free protocol contracts (workspace member, PRD §ARC-04). Core
+    # re-exports the migrated protocol modules as compatibility shims.
+    "ai-gateway-contracts",
     "httpx>=0.28.0",
     "fastapi>=0.124.0",
     "starlette>=0.50.0",
@@ -44,6 +47,9 @@ dependencies = [
 dev = [
     "fakeredis>=2.20",
 ]
+
+[tool.uv.sources]
+ai-gateway-contracts = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ai_gateway_core"]

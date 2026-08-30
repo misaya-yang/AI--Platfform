@@ -12,6 +12,7 @@ resolution-markers = [
 [manifest]
 members = [
     "ai-gateway",
+    "ai-gateway-contracts",
     "ai-gateway-core",
     "ai-gateway-sdk",
     "knowledge-service",
@@ -22,6 +23,7 @@ name = "ai-gateway"
 version = "2.0.0"
 source = { editable = "." }
 dependencies = [
+    { name = "ai-gateway-contracts" },
     { name = "ai-gateway-core" },
     { name = "bcrypt" },
     { name = "cachetools" },
@@ -119,6 +121,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "ai-gateway", extras = ["database", "knowledge", "documents", "grpc", "aiohttp", "storage", "sandbox"], marker = "extra == 'all'" },
+    { name = "ai-gateway-contracts", editable = "packages/ai-gateway-contracts" },
     { name = "ai-gateway-core", editable = "packages/ai-gateway-core" },
     { name = "aioboto3", marker = "extra == 'storage'", specifier = ">=14.0.0" },
     { name = "aiofiles", marker = "extra == 'storage'", specifier = ">=24.0.0" },
@@ -175,10 +178,22 @@ requires-dist = [
 provides-extras = ["database", "knowledge", "documents", "grpc", "aiohttp", "storage", "sandbox", "all", "dev", "test"]
 
 [[package]]
+name = "ai-gateway-contracts"
+version = "0.1.0"
+source = { editable = "packages/ai-gateway-contracts" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.12.0" }]
+
+[[package]]
 name = "ai-gateway-core"
 version = "0.1.1"
 source = { editable = "packages/ai-gateway-core" }
 dependencies = [
+    { name = "ai-gateway-contracts" },
     { name = "aioboto3" },
     { name = "aiofiles" },
     { name = "asyncpg" },
@@ -206,6 +221,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "ai-gateway-contracts", editable = "packages/ai-gateway-contracts" },
     { name = "aioboto3", specifier = ">=12" },
     { name = "aiofiles", specifier = ">=23" },
     { name = "asyncpg", specifier = ">=0.29" },

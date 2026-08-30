@@ -75,16 +75,21 @@ dependencies = [
 
     # Shared primitives (workspace member — see packages/ai-gateway-core/)
     "ai-gateway-core",
+    # I/O-free cross-service protocol contracts (workspace member — see
+    # packages/ai-gateway-contracts/, PRD §ARC-04)
+    "ai-gateway-contracts",
 ]
 
 [tool.uv.workspace]
 members = [
+    "packages/ai-gateway-contracts",
     "packages/ai-gateway-core",
     "apps/knowledge-service",
     "sdk/python",
 ]
 
 [tool.uv.sources]
+ai-gateway-contracts = { workspace = true }
 ai-gateway-core = { workspace = true }
 
 [project.optional-dependencies]
