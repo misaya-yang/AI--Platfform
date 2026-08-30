@@ -11,6 +11,11 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any
 
+from ..capability_catalog import (
+    RUNTIME_CATALOG_SCHEMA_VERSION,
+    CapabilityCatalogError,
+    CapabilityCatalogQuery,
+)
 from .types import DISCOVERY_BRIDGE_NAMES, AgentRuntimeControlError
 
 if TYPE_CHECKING:
@@ -39,39 +44,40 @@ async def fetch_capability_catalog(
 ) -> None:
     """Fetch stable read-only schemas before the first Thread is created."""
 
-    if not plane.capability_plane_url:
-        return
-    response = await plane.http_client.post(
-        f"{plane.capability_plane_url}/catalog",
-        headers={
-            "x-ai-platform-internal-token": plane.runtime_internal_token,
-            "x-ai-tenant-id": tenant_id,
-            "x-ai-user-id": user_id,
-            "x-ai-session-id": session_id,
-        },
-        json={
-            "tenant_id": tenant_id,
-            "user_id": user_id,
-            "session_id": session_id,
-            "model_id": model_id,
-            "capability_revision": capability_revision,
-            **(
-                {"capability_allowlist": capability_allowlist}
-                if capability_allowlist is not None
-                else {}
-            ),
-        },
-    )
-    if response.status_code >= 400:
-        raise AgentRuntimeControlError(
-            "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_CATALOG_UNAVAILABLE", status_code=503
+    try:
+        query = CapabilityCatalogQuery.create(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            model_id=model_id,
+            capability_revision=capability_revision,
+            capability_allowlist=capability_allowlist,
         )
-    payload = response.json()
-    tools = payload.get("tools") if isinstance(payload, dict) else None
-    mcp = payload.get("mcp", []) if isinstance(payload, dict) else None
-    deferred = payload.get("deferred", []) if isinstance(payload, dict) else None
+        payload = await plane.capability_catalog_client.fetch_catalog(query)
+    except CapabilityCatalogError as exc:
+        code = (
+            "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_CATALOG_DEGRADED"
+            if exc.code == "CAPABILITY_CATALOG_DEGRADED"
+            else "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_CATALOG_UNAVAILABLE"
+        )
+        raise AgentRuntimeControlError(code, status_code=503) from exc
+    if not isinstance(payload, dict):
+        raise AgentRuntimeControlError(
+            "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_CATALOG_INVALID", status_code=503
+        )
+    tools = payload.get("tools")
+    mcp = payload.get("mcp", [])
+    deferred = payload.get("deferred", [])
     if (
-        not isinstance(tools, list)
+        (
+            payload.get("schema_version") is not None
+            and payload.get("schema_version") != RUNTIME_CATALOG_SCHEMA_VERSION
+        )
+        or (
+            payload.get("capability_revision") is not None
+            and payload.get("capability_revision") != capability_revision
+        )
+        or not isinstance(tools, list)
         or not isinstance(mcp, list)
         or not isinstance(deferred, list)
     ):
@@ -89,7 +95,10 @@ async def fetch_capability_catalog(
                 "AI_PLATFORM_AGENT_RUNTIME_WRITE_CAPABILITY_NOT_MIGRATED",
                 status_code=409,
             )
-        deferred = []
+        raise AgentRuntimeControlError(
+            "AI_PLATFORM_AGENT_RUNTIME_WRITE_CAPABILITY_DEGRADED",
+            status_code=503,
+        )
     readonly["tools"] = [
         plane._validate_catalog_descriptor(
             descriptor,

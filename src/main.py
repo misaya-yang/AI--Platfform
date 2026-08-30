@@ -828,6 +828,13 @@ def create_app() -> FastAPI:
         agent_runtime_control = getattr(app.state, "agent_runtime_control", None)
         if agent_runtime_control is not None:
             await agent_runtime_control.close()
+        agent_capability_catalog_service = getattr(
+            app.state,
+            "agent_capability_catalog_service",
+            None,
+        )
+        if agent_capability_catalog_service is not None:
+            await agent_capability_catalog_service.close()
         agent_knowledge_resolver = getattr(
             app.state,
             "agent_runtime_knowledge_resolver",
@@ -1044,6 +1051,10 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     from ai_gateway_contracts.agent_runtime_lease import RuntimeModelLeaseSigner
 
     from .services.agent_runtime import AgentModelPlane, AgentRuntimeControlPlane
+    from .services.agent_runtime.capability_catalog import (
+        CapabilityCatalogService,
+        LocalCapabilityCatalogClient,
+    )
 
     model_plane_token = os.environ.get(
         "AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_INTERNAL_TOKEN", ""
@@ -1063,6 +1074,24 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     runtime_url = os.environ.get(
         "AI_PLATFORM_AGENT_RUNTIME_URL", "http://agent-runtime:8094"
     ).strip()
+    capability_worker_url = os.environ.get(
+        "AI_PLATFORM_CAPABILITY_WORKER_URL", "http://agent-capability-worker:8095"
+    ).strip()
+    app.state.agent_capability_catalog_service = (
+        CapabilityCatalogService(
+            database=container.database,
+            worker_url=capability_worker_url,
+            internal_token=runtime_internal_token,
+            web_search_configured=bool(os.environ.get("TAVILY_API_KEY", "").strip()),
+        )
+        if container.settings.database.enabled
+        else None
+    )
+    capability_catalog_client = (
+        LocalCapabilityCatalogClient(app.state.agent_capability_catalog_service)
+        if app.state.agent_capability_catalog_service is not None
+        else None
+    )
     model_plane_runtime_base_url = os.environ.get(
         "AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_RUNTIME_BASE_URL",
         "http://gateway:8080/internal/v1/agent-model-plane",
@@ -1079,6 +1108,7 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
             model_plane_base_url=model_plane_runtime_base_url,
             kernel_revision=str(app.state.assistant_runtime_kernel_revision or ""),
             memory_service=app.state.memory_service,
+            capability_catalog_client=capability_catalog_client,
         )
         if (
             container.settings.database.enabled

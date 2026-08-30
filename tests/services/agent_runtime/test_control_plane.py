@@ -21,6 +21,17 @@ from src.services.agent_runtime.control_plane import (
 from src.services.assistant_entry.launch_resolution import resolve_agent_launch
 
 
+class _StaticCatalogClient:
+    async def fetch_catalog(self, _query):
+        return {
+            "schema_version": "agent-capability-catalog/v1",
+            "capability_revision": 7,
+            "tools": [],
+            "mcp": [],
+            "deferred": [],
+        }
+
+
 def test_child_runtime_events_project_to_subagent_lifecycle() -> None:
     parent_turn_id = "parent-turn"
     started = _project_child_runtime_event(
@@ -588,6 +599,7 @@ async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() ->
         model_plane_base_url="http://gateway.test/internal/v1/agent-model-plane",
         kernel_revision="kernel-1",
         http_client=client,
+        capability_catalog_client=_StaticCatalogClient(),
     )
     try:
         readonly_capabilities = {
@@ -867,6 +879,24 @@ async def test_generic_assistant_exposes_worker_writes_only_when_worker_is_ready
             model_id="qwen3.7-plus",
             capability_revision=7,
         )
+        monkeypatch.setenv("AI_PLATFORM_CAPABILITY_WORKER_WRITES_ENABLED", "false")
+        degraded = plane._readonly_capability_payload(
+            None,
+            tenant_id="tenant-a",
+            capability_revision=7,
+        )
+        with pytest.raises(
+            AgentRuntimeControlError,
+            match="AI_PLATFORM_AGENT_RUNTIME_WRITE_CAPABILITY_DEGRADED",
+        ):
+            await plane._fetch_capability_catalog(
+                degraded,
+                tenant_id="tenant-a",
+                user_id="user-a",
+                session_id="session-a",
+                model_id="qwen3.7-plus",
+                capability_revision=7,
+            )
     finally:
         await client.aclose()
 
@@ -1099,6 +1129,7 @@ async def test_control_plane_fails_before_lease_issue_when_runtime_resume_reject
         model_plane_base_url="http://gateway.test/internal/v1/agent-model-plane",
         kernel_revision="kernel-1",
         http_client=client,
+        capability_catalog_client=_StaticCatalogClient(),
     )
     try:
         launch = await resolve_agent_launch(
@@ -1317,6 +1348,9 @@ async def test_dynamic_tool_catalog_does_not_depend_on_turn_scoped_bindings() ->
             model_plane_base_url="http://gateway.test/internal/v1/agent-model-plane",
             kernel_revision="kernel-1",
             http_client=client,
+        )
+        plane.capability_plane_url = (
+            "http://capability.test/internal/v1/capabilities"
         )
         try:
             readonly = plane._readonly_capability_payload(

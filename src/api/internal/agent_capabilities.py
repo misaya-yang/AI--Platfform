@@ -17,7 +17,18 @@ from ai_gateway_core.storage import get_artifact_storage
 from fastapi import APIRouter, Body, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from ...core.assistant_capability_catalog import load_assistant_capability_catalog
+from ...core.assistant_capability_catalog import (
+    load_assistant_capability_catalog as load_assistant_capability_catalog,
+)
+from ...services.agent_runtime.capability_catalog import (
+    MAX_CATALOG_BYTES,
+    CapabilityCatalogError,
+    CapabilityCatalogQuery,
+    CapabilityDescriptorV2,
+    descriptor_kind,
+    project_runtime_descriptor,
+    user_has_permissions,
+)
 
 router = APIRouter(
     prefix="/internal/v2/agent-capabilities",
@@ -35,8 +46,7 @@ _REQUIRED_METADATA = {
 
 _CATALOG_REQUEST_SCHEMA_VERSION = "capability-catalog/v2"
 _CATALOG_RESPONSE_SCHEMA_VERSION = "capability-catalog/v2"
-_MAX_CATALOG_BYTES = 4 * 1024 * 1024
-_MAX_CATALOG_ENTRIES = 256
+_MAX_CATALOG_BYTES = MAX_CATALOG_BYTES
 _TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 _MAX_WEB_SEARCH_RESPONSE_BYTES = 2 * 1024 * 1024
 
@@ -86,44 +96,16 @@ def _scope_header(value: str | None, field: str) -> str:
 
 
 def _user_has_permissions(roles: set[str], permissions: set[str], required: list[str]) -> bool:
-    """Apply the catalog's permission lattice without trusting Worker input."""
+    """Preserve the historical private permission seam."""
 
-    if not required:
-        return True
-    subjects = roles | permissions
-    if "admin" in subjects:
-        return True
-    tier_order = {"anonymous": 0, "normal": 1, "premium": 2, "enterprise": 3, "admin": 4}
-    tier = next((subject.split(":", 1)[1].lower() for subject in subjects if subject.startswith("tier:")), "normal")
-    for permission in required:
-        if permission.startswith("role:"):
-            if permission.split(":", 1)[1].strip() not in subjects:
-                return False
-        elif permission.startswith("tier:"):
-            required_tier = permission.split(":", 1)[1].strip().lower()
-            if required_tier not in tier_order or tier not in tier_order:
-                return False
-            if tier_order[tier] < tier_order[required_tier]:
-                return False
-        elif permission not in subjects:
-            return False
-    return True
+    return user_has_permissions(roles, permissions, required)
 
 
 def _descriptor_kind(descriptor: dict[str, Any], record: dict[str, Any] | None) -> str:
-    if record is not None:
-        kind = record.get("kind")
-        if kind in {"tool", "knowledge", "mcp", "connector", "office_read", "platform_tool_discovery"}:
-            return str(kind)
-    tags = descriptor.get("tags")
-    if not isinstance(tags, list):
+    try:
+        return descriptor_kind(descriptor, record)
+    except CapabilityCatalogError:
         raise HTTPException(status_code=503, detail="capability catalog is invalid")
-    for kind in ("knowledge", "mcp", "connector", "platform_tool_discovery", "tool"):
-        if f"kind:{kind}" in tags:
-            return kind
-    if "fixture" in tags:
-        return "tool"
-    raise HTTPException(status_code=503, detail="capability catalog is invalid")
 
 
 def _project_worker_descriptor(
@@ -133,82 +115,15 @@ def _project_worker_descriptor(
     capability_revision: int,
     record: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    if set(descriptor) - {
-        "schema_version",
-        "id",
-        "name",
-        "version",
-        "description",
-        "schema_hash",
-        "input_schema",
-        "output_schema",
-        "effect",
-        "approval_policy",
-        "execution_mode",
-        "timeout_ms",
-        "tags",
-        "protocol",
-        "connector_binding",
-    }:
+    try:
+        parsed = CapabilityDescriptorV2.parse(descriptor, record=record)
+        return project_runtime_descriptor(
+            parsed,
+            tenant_id=tenant_id,
+            capability_revision=capability_revision,
+        )
+    except CapabilityCatalogError:
         raise HTTPException(status_code=503, detail="capability catalog is invalid")
-    name = descriptor.get("name")
-    schema = descriptor.get("input_schema")
-    schema_hash = descriptor.get("schema_hash")
-    if (
-        descriptor.get("schema_version") != "capability-descriptor/v2"
-        or not isinstance(name, str)
-        or descriptor.get("id") != name
-        or not isinstance(descriptor.get("description"), str)
-        or not isinstance(schema, dict)
-        or not isinstance(schema_hash, str)
-        or not re.fullmatch(r"sha256:[0-9a-f]{64}", schema_hash)
-        or descriptor.get("effect") not in {"read", "write", "unknown"}
-        or descriptor.get("approval_policy") not in {"never", "on_request", "always"}
-        or not isinstance(descriptor.get("tags"), list)
-    ):
-        raise HTTPException(status_code=503, detail="capability catalog is invalid")
-    kind = _descriptor_kind(descriptor, record)
-    version = descriptor.get("version")
-    if version == "null":
-        version = None
-    if record is not None and (
-        schema_hash != record.get("schema_hash")
-        or descriptor.get("effect") != record.get("effect")
-        or descriptor.get("protocol") != record.get("protocol")
-        or version != record.get("version")
-        or f"kind:{record.get('kind')}" not in descriptor["tags"]
-    ):
-        raise HTTPException(status_code=503, detail="capability catalog is invalid")
-    read_only = descriptor["effect"] == "read"
-    if read_only and descriptor["approval_policy"] != "never":
-        raise HTTPException(status_code=503, detail="capability catalog is invalid")
-    if not read_only and descriptor["approval_policy"] == "never":
-        raise HTTPException(status_code=503, detail="capability catalog is invalid")
-    return {
-        "name": name,
-        "id": descriptor["id"],
-        "version": version,
-        "schema_hash": schema_hash,
-        "description": descriptor["description"],
-        "schema": schema,
-        "output_schema": descriptor["output_schema"],
-        "source": "capability_worker",
-        "kind": kind,
-        "read_only": read_only,
-        "effect": descriptor["effect"],
-        "approval_policy": descriptor["approval_policy"],
-        "execution_mode": descriptor["execution_mode"],
-        "timeout_ms": descriptor["timeout_ms"],
-        "tags": list(descriptor["tags"]),
-        "protocol": descriptor["protocol"],
-        "tenant_id": tenant_id,
-        "capability_revision": capability_revision,
-        **(
-            {"connector_binding": descriptor["connector_binding"]}
-            if isinstance(descriptor.get("connector_binding"), dict)
-            else {}
-        ),
-    }
 
 
 async def _worker_catalog_response(
@@ -277,107 +192,29 @@ async def broker_agent_capability_catalog(
     }
     if any(getattr(payload, key) != value for key, value in scope.items()):
         raise HTTPException(status_code=403, detail="catalog scope mismatch")
-    database = getattr(request.app.state, "database", None)
-    if database is None or getattr(database, "enabled", True) is False:
-        raise HTTPException(status_code=503, detail="catalog identity unavailable")
-    get_user = getattr(database, "get_user_for_tenant", None)
-    if not callable(get_user):
-        raise HTTPException(status_code=503, detail="catalog identity unavailable")
-    try:
-        user = await get_user(scope["user_id"], scope["tenant_id"])
-    except Exception:
-        raise HTTPException(status_code=503, detail="catalog identity unavailable") from None
-    if not user:
-        raise HTTPException(status_code=403, detail="catalog scope is not authorized")
-    roles = {str(role) for role in (user.get("roles") or [])}
-    permissions = {str(permission) for permission in (user.get("permissions") or [])}
-    for method_name, target in (("get_user_roles", roles), ("get_user_permissions", permissions)):
-        method = getattr(database, method_name, None)
-        if callable(method):
-            try:
-                target.update(str(value) for value in await method(scope["user_id"]))
-            except Exception:
-                raise HTTPException(status_code=503, detail="catalog identity unavailable") from None
-    policy = {}
-    fetchrow = getattr(database, "fetchrow", None)
-    if callable(fetchrow):
-        try:
-            row = await fetchrow(
-                "SELECT allowed_tools, blocked_tools, allowed_categories "
-                "FROM tenant_tool_policies WHERE tenant_id = $1",
-                scope["tenant_id"],
-            )
-            policy = dict(row) if row else {}
-        except Exception:
-            raise HTTPException(status_code=503, detail="catalog policy unavailable") from None
-    try:
-        _, records = load_assistant_capability_catalog()
-    except Exception:
-        raise HTTPException(status_code=503, detail="capability catalog unavailable") from None
-    record_by_id = {str(record["id"]): record for record in records}
-    response = await _worker_catalog_response(
-        request,
-        scope=scope,
-        capability_revision=payload.capability_revision,
-    )
-    if response.status_code >= 400 or len(response.content) > _MAX_CATALOG_BYTES:
-        raise HTTPException(status_code=503, detail="capability worker unavailable")
-    try:
-        envelope = response.json()
-    except (ValueError, json.JSONDecodeError):
-        raise HTTPException(status_code=503, detail="capability catalog is invalid") from None
-    if (
-        not isinstance(envelope, dict)
-        or envelope.get("schema_version") != _CATALOG_RESPONSE_SCHEMA_VERSION
-        or envelope.get("capability_revision") != payload.capability_revision
-        or not isinstance(envelope.get("capabilities"), list)
-        or len(envelope["capabilities"]) > _MAX_CATALOG_ENTRIES
-    ):
-        raise HTTPException(status_code=503, detail="capability catalog is invalid")
-    allowed_tools = set(policy.get("allowed_tools") or [])
-    blocked_tools = set(policy.get("blocked_tools") or [])
-    allowed_categories = set(policy.get("allowed_categories") or [])
-    tools: list[dict[str, Any]] = []
-    mcp: list[dict[str, Any]] = []
-    deferred: list[dict[str, Any]] = []
-    for raw in envelope["capabilities"]:
-        if not isinstance(raw, dict):
-            raise HTTPException(status_code=503, detail="capability catalog is invalid")
-        record = record_by_id.get(str(raw.get("id") or ""))
-        name = str(raw.get("name") or "")
-        # The provider-native Responses search tool is the zero-secret default.
-        # Publish the Worker/Tavily implementation only when its dedicated key
-        # is configured; otherwise two equivalent tools are advertised and the
-        # model can select a capability that is guaranteed to fail.
-        if name == "search_web" and not os.getenv("TAVILY_API_KEY", "").strip():
-            continue
-        category = str(record.get("category") or "") if record else ""
-        required = list(record.get("required_permissions") or []) if record else []
-        tags = raw.get("tags") if isinstance(raw.get("tags"), list) else []
-        required.extend(str(tag)[11:] for tag in tags if str(tag).startswith("permission:"))
-        if not _user_has_permissions(roles, permissions, list(dict.fromkeys(required))):
-            continue
-        if allowed_tools and name not in allowed_tools:
-            continue
-        if name in blocked_tools or (allowed_categories and category not in allowed_categories):
-            continue
-        descriptor = _project_worker_descriptor(
-            raw,
-            tenant_id=scope["tenant_id"],
-            capability_revision=payload.capability_revision,
-            record=record,
+    service = getattr(request.app.state, "agent_capability_catalog_service", None)
+    if service is None or not callable(getattr(service, "resolve", None)):
+        raise HTTPException(
+            status_code=503,
+            detail="capability catalog service unavailable",
         )
-        if descriptor["read_only"]:
-            (mcp if descriptor["kind"] == "mcp" else tools).append(descriptor)
-        else:
-            deferred.append(descriptor)
-    return {
-        "schema_version": "agent-capability-catalog/v1",
-        "capability_revision": payload.capability_revision,
-        "tools": tools,
-        "mcp": mcp,
-        "deferred": deferred,
-    }
+    try:
+        query = CapabilityCatalogQuery.create(
+            tenant_id=payload.tenant_id,
+            user_id=payload.user_id,
+            session_id=payload.session_id,
+            model_id=payload.model_id,
+            capability_revision=payload.capability_revision,
+            capability_allowlist=payload.capability_allowlist,
+        )
+        return await service.resolve(
+            query,
+            worker_client=getattr(
+                request.app.state, "agent_capability_worker_client", None
+            ),
+        )
+    except CapabilityCatalogError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from None
 
 
 def _authorize(

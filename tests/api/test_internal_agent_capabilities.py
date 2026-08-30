@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from types import SimpleNamespace
 
@@ -10,6 +11,7 @@ from ai_gateway_contracts.capability_proof import sign_capability_proof
 from fastapi import HTTPException
 
 from src.api.internal import agent_capabilities
+from src.services.agent_runtime.capability_catalog import CapabilityCatalogService
 
 PROOF_SECRET = "p" * 32
 
@@ -92,11 +94,19 @@ def _catalog_request() -> agent_capabilities.CapabilityCatalogRequest:
 
 
 def _catalog_request_context(client: _CatalogClient):
+    database = _CatalogDatabase()
     return SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
-                database=_CatalogDatabase(),
+                database=database,
                 agent_capability_worker_client=client,
+                agent_capability_catalog_service=CapabilityCatalogService(
+                    database=database,
+                    worker_url="http://worker:8095",
+                    internal_token="internal-token",
+                    worker_client=client,
+                    web_search_configured=bool(os.getenv("TAVILY_API_KEY", "").strip()),
+                ),
             )
         )
     )

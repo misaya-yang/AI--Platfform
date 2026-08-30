@@ -14,6 +14,11 @@ import httpx
 from ai_gateway_contracts.agent_launch import ResolvedAgentLaunchV1
 from ai_gateway_contracts.agent_runtime_lease import RuntimeModelLeaseSigner
 
+from .capability_catalog import (
+    CapabilityCatalogClient,
+    HttpCapabilityCatalogClient,
+    UnavailableCapabilityCatalogClient,
+)
 from .control import (
     approvals,
     capability_catalog,
@@ -73,6 +78,7 @@ class AgentRuntimeControlPlane:
         kernel_revision: str,
         memory_service: Any | None = None,
         http_client: httpx.AsyncClient | None = None,
+        capability_catalog_client: CapabilityCatalogClient | None = None,
     ) -> None:
         if not runtime_url or not runtime_internal_token or not model_plane_base_url:
             raise ValueError("Agent Runtime control-plane endpoints and token are required")
@@ -86,9 +92,6 @@ class AgentRuntimeControlPlane:
         self.runtime_url = runtime_url.rstrip("/")
         self.runtime_internal_token = runtime_internal_token
         self.model_plane_base_url = model_plane_base_url.rstrip("/")
-        self.capability_plane_url = (
-            os.getenv("AI_PLATFORM_CAPABILITY_PLANE_URL", "").strip().rstrip("/")
-        )
         self.kernel_revision = kernel_revision
         self.memory_service = memory_service
         if self.memory_service is None:
@@ -102,6 +105,10 @@ class AgentRuntimeControlPlane:
             trust_env=False,
         )
         self._owns_http_client = http_client is None
+        self.capability_catalog_client = (
+            capability_catalog_client or UnavailableCapabilityCatalogClient()
+        )
+        self._capability_plane_url = ""
         self.lease_ttl_seconds = max(
             30,
             min(
@@ -130,6 +137,26 @@ class AgentRuntimeControlPlane:
         )
         self._thread_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
         self._thread_lock_users: dict[asyncio.Lock, int] = {}
+
+    @property
+    def capability_plane_url(self) -> str:
+        """Dated compatibility seam for an explicitly external catalog service."""
+
+        return self._capability_plane_url
+
+    @capability_plane_url.setter
+    def capability_plane_url(self, value: str) -> None:
+        normalized = str(value or "").strip().rstrip("/")
+        if not normalized:
+            self._capability_plane_url = ""
+            self.capability_catalog_client = UnavailableCapabilityCatalogClient()
+            return
+        self.capability_catalog_client = HttpCapabilityCatalogClient(
+            base_url=normalized,
+            internal_token=self.runtime_internal_token,
+            http_client=self.http_client,
+        )
+        self._capability_plane_url = normalized
 
     async def close(self) -> None:
         if self._owns_http_client:
