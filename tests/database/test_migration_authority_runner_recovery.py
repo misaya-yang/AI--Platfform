@@ -279,6 +279,42 @@ def _write_bootstrap_files(paths: AuthorityPaths, baseline: BaselineManifest) ->
     )
 
 
+async def test_failed_role_sql_preserves_original_error_without_reset(tmp_path: Path) -> None:
+    sql_path = tmp_path / "failing.sql"
+    sql_path.write_text("-- FAIL DDL\n", encoding="utf-8")
+
+    class Transaction:
+        async def __aenter__(self) -> Transaction:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    class Connection:
+        def __init__(self) -> None:
+            self.executed: list[str] = []
+
+        def transaction(self) -> Transaction:
+            return Transaction()
+
+        async def execute(self, query: str, *_args: Any) -> None:
+            self.executed.append(query)
+            if query == "-- FAIL DDL\n":
+                raise RuntimeError("original DDL failure")
+            if query == "RESET ROLE":
+                raise AssertionError("RESET ROLE must not run in an aborted transaction")
+
+    conn = Connection()
+    with pytest.raises(RuntimeError, match="original DDL failure"):
+        await bootstrap.run_baseline_sql_file(
+            conn,
+            sql_path,
+            execution_role="ai_gateway_owner",
+        )
+
+    assert conn.executed == ['SET LOCAL ROLE "ai_gateway_owner"', "-- FAIL DDL\n"]
+
+
 async def test_fresh_install_rolls_back_partial_init_and_is_reentrant(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -44,6 +44,7 @@ from .bootstrap import (
     bootstrap_roles,
     database_empty,
     fresh_install,
+    provision_extensions_admin,
     provision_roles_admin,
     run_baseline_sql_file,
     startup_schema_check,
@@ -480,7 +481,7 @@ async def command_prepare_cutover_ownership(
             await _guard_known_database(conn)
             receipt = await _verify_legacy_cutover_ready(conn, authority.paths, log=log)
             await provision_roles_admin(conn, authority.paths, authority.role_prefix)
-            await bootstrap_extensions(conn, authority.paths, authority.role_prefix)
+            await provision_extensions_admin(conn, authority.paths)
             await run_baseline_sql_file(
                 conn,
                 authority.paths.baseline_dir(baseline.baseline_id)

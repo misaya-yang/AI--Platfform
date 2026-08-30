@@ -305,7 +305,8 @@ def _assert_cutover_contract(sql: str) -> None:
     assert "WHEN 'a' THEN 'AGGREGATE'" in sql
     assert "SET search_path = pg_catalog, %I" in sql
     assert "REVOKE EXECUTE ON %s %s FROM PUBLIC" in sql
-    assert "REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA %I FROM PUBLIC" in sql
+    assert sql.count("REVOKE EXECUTE ON %s %s FROM PUBLIC") >= 2
+    assert "platform_routine" in sql
     # One global PostgreSQL default plus one explicit row per platform schema.
     assert sql.count("REVOKE EXECUTE ON ROUTINES FROM PUBLIC") == 5
     for schema in ("public", "gateway", "assistant", "knowledge"):

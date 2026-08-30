@@ -359,7 +359,9 @@ async def run_baseline_sql_file(
             await conn.execute(f'SET LOCAL ROLE "{execution_role}"')
         try:
             await conn.execute(sql)
-        finally:
+        except Exception:
+            raise
+        else:
             if execution_role is not None:
                 await conn.execute("RESET ROLE")
 

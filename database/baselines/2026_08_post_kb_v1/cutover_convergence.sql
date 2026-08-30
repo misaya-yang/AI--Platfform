@@ -592,13 +592,40 @@ REVOKE ALL ON SCHEMA knowledge FROM PUBLIC;
 DO $$
 DECLARE
     s TEXT;
+    platform_routine RECORD;
     platform_type RECORD;
 BEGIN
     FOREACH s IN ARRAY ARRAY['public', 'gateway', 'assistant', 'knowledge']
     LOOP
         EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA %I FROM PUBLIC', s);
         EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA %I FROM PUBLIC', s);
-        EXECUTE format('REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA %I FROM PUBLIC', s);
+        -- Trusted extension members retain their bootstrap-admin owner and
+        -- are hardened by the explicit admin prepare phase. The migrator may
+        -- only modify owner-controlled platform routines here.
+        FOR platform_routine IN
+            SELECT p.oid::regprocedure AS signature,
+                   CASE p.prokind
+                       WHEN 'p' THEN 'PROCEDURE'
+                       WHEN 'a' THEN 'AGGREGATE'
+                       ELSE 'FUNCTION'
+                   END AS object_kind
+            FROM pg_proc AS p
+            WHERE p.pronamespace = to_regnamespace(s)
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM pg_depend AS dependency
+                  WHERE dependency.classid = 'pg_proc'::regclass
+                    AND dependency.objid = p.oid
+                    AND dependency.deptype = 'e'
+              )
+            ORDER BY p.oid::regprocedure::text
+        LOOP
+            EXECUTE format(
+                'REVOKE EXECUTE ON %s %s FROM PUBLIC',
+                platform_routine.object_kind,
+                platform_routine.signature
+            );
+        END LOOP;
         FOR platform_type IN
             SELECT t.typname
             FROM pg_type AS t
