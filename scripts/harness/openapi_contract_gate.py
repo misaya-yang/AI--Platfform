@@ -42,6 +42,13 @@ DEFAULT_EVIDENCE = ROOT / "tmp" / "gate-evidence" / "verify-openapi-contract.jso
 HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
 
 
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 def _resolve_ref(spec: dict, ref: str) -> dict:
     """Resolve a local $ref (components/schemas/...) inside *spec*."""
     node: object = spec
@@ -382,7 +389,7 @@ def run_real_gate(baseline_path: Path, evidence_path: Path) -> int:
     evidence = {
         "gate": "verify-openapi-contract",
         "tier": "L1-offline-in-process",
-        "baseline": str(baseline_path.relative_to(ROOT)),
+        "baseline": _display_path(baseline_path),
         "baseline_stats": base_stats,
         "current_stats": cur_stats,
         "determinism_hash_seeds": [1, 2],
@@ -407,7 +414,7 @@ def run_real_gate(baseline_path: Path, evidence_path: Path) -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"OK: public OpenAPI contract preserved (evidence: {evidence_path.relative_to(ROOT)})")
+    print(f"OK: public OpenAPI contract preserved (evidence: {_display_path(evidence_path)})")
     return 0
 
 
