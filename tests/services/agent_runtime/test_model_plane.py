@@ -1052,10 +1052,10 @@ async def test_chat_completions_receives_snapshot_tool_controls_and_projects_too
         "parameters": {"type": "object", "properties": {}},
     }
     call = _call(
-        _profile(),
+        _native_search_profile(),
         wire_protocol="chat_completions",
         readonly_capabilities={
-            "responses_tool_names": ["lookup"],
+            "responses_tool_names": ["lookup", "write"],
             "responses_tool_choice": {"type": "function", "name": "lookup"},
             "responses_parallel_tool_calls": False,
         },
@@ -1066,7 +1066,22 @@ async def test_chat_completions_receives_snapshot_tool_controls_and_projects_too
             async for chunk in plane.stream(
                 body={
                     "input": [{"role": "user", "content": "lookup"}],
-                    "tools": [tool],
+                    "tools": [
+                        tool,
+                        {"type": "web_search"},
+                        {
+                            "type": "namespace",
+                            "name": "mcp",
+                            "tools": [
+                                {
+                                    "type": "function",
+                                    "name": "write",
+                                    "description": "Write through MCP.",
+                                    "parameters": {"type": "object", "properties": {}},
+                                }
+                            ],
+                        },
+                    ],
                 },
                 turn_metadata={},
                 authorized_call=call,
@@ -1083,7 +1098,15 @@ async def test_chat_completions_receives_snapshot_tool_controls_and_projects_too
                 "description": "Look up one value.",
                 "parameters": {"type": "object", "properties": {}},
             },
-        }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "write",
+                "description": "Write through MCP.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
     ]
     assert captured["body"]["tool_choice"] == {
         "type": "function",

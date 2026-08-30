@@ -84,7 +84,8 @@ async function openAssistantWithQwen(page: Page): Promise<LiveModel> {
   const models = modelsResponse.body?.models ?? [];
   const qwen = requestedQwenModel
     ? models.find((model) => model.id === requestedQwenModel)
-    : models.find((model) =>
+    : models.find((model) => model.id === "qwen3.7-plus") ??
+      models.find((model) =>
         model.provider.toLowerCase().includes("dashscope") ||
         /qwen/i.test(`${model.id} ${model.name}`),
       );
@@ -238,8 +239,8 @@ test.describe("Platform convergence live acceptance", () => {
 
     await beginQwenTurn(
       page,
-      `${rejectMarker}: call todo_write exactly once with one pending item named ` +
-        `"${rejectMarker}". Do not call another tool and do not retry after rejection.`,
+      `Please verify the Python workspace by using execute_python_code to run ` +
+        `print("${rejectMarker}"). I will review the execution when the approval dialog appears.`,
       qwen.id,
     );
     await expect(
@@ -260,8 +261,8 @@ test.describe("Platform convergence live acceptance", () => {
 
     await beginQwenTurn(
       page,
-      `${approveMarker}: call todo_write exactly once with one completed item named ` +
-        `"${approveMarker}". Do not call another tool. After it succeeds, reply "approval complete".`,
+      `Please verify the Python workspace again by using execute_python_code to run ` +
+        `print("${approveMarker}"). After the approved execution succeeds, reply "approval complete".`,
       qwen.id,
     );
     await expect(

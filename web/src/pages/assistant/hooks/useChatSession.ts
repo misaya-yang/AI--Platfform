@@ -3503,17 +3503,37 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
   // the session still being active so a session switch during the poll cannot
   // clobber the conversation the user has since opened.
   const reconcileDeadApprovalRun = useCallback(
-    async (runId?: string, sessionIdHint?: string | null) => {
+    async (
+      runId?: string,
+      runtimeThreadId?: string,
+      sessionIdHint?: string | null,
+    ) => {
       const terminal = new Set(["succeeded", "failed", "cancelled"]);
       let sessionId = sessionIdHint || undefined;
+      let terminalConfirmed = !runId;
       try {
         if (runId) {
           for (let attempt = 0; attempt < 40; attempt += 1) {
+            // Runtime terminal events are durable, but the Gateway run ledger
+            // is finalized while consuming the per-turn cursor. A restored
+            // approval has no live consumer, so reconnect it before polling
+            // the ledger; polling alone would leave the run "running".
+            if (runtimeThreadId) {
+              const { getAgentRuntimeV2RunSnapshot } = await import("@/api/agentThreads");
+              await getAgentRuntimeV2RunSnapshot(runtimeThreadId, runId);
+            }
             const { run } = await getAssistantRunStatus(runId);
             sessionId = nonEmptyString(run.session_id) || sessionId;
-            if (terminal.has(run.status || "")) break;
+            if (terminal.has(run.status || "")) {
+              terminalConfirmed = true;
+              break;
+            }
             await new Promise((resolve) => setTimeout(resolve, 1500));
           }
+        }
+        if (!terminalConfirmed) {
+          console.warn("Approval decision did not reach a terminal run state");
+          return;
         }
         if (!sessionId) return;
         const [history, sessionArtifacts] = await Promise.all([
@@ -3533,6 +3553,17 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         void hydrateQuizData(restored, setMessages);
       } catch {
         console.warn("Reconcile after dead-stream approval decision failed");
+      } finally {
+        // The approval decision endpoint acknowledges the decision before the
+        // kernel necessarily exits the parked turn. Keep the composer locked
+        // until the authoritative run status is terminal, otherwise a second
+        // turn can race the old one and be rejected by the Runtime.
+        if (
+          terminalConfirmed &&
+          (!sessionId || activeSessionIdRef.current === sessionId)
+        ) {
+          setServerRunBlocking(false);
+        }
       }
     },
     [],
@@ -3586,7 +3617,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         runtimeThreadId &&
         (!abortControllerRef.current || deadApprovalMessageIdsRef.current.delete(messageId)),
       );
-      setServerRunBlocking(false);
+      setServerRunBlocking(runtimeNeedsReconciliation);
 
       setMessages((prev) => {
         return prev.map((message) => {
@@ -3616,7 +3647,11 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         // A rejected approval ends the turn; reconcile the dead-stream case so
         // the rejection is reflected instead of leaving a parked "blocked" card.
         if (runtimeNeedsReconciliation) {
-          void reconcileDeadApprovalRun(runId, activeSessionIdRef.current);
+          void reconcileDeadApprovalRun(
+            runId,
+            runtimeThreadId,
+            activeSessionIdRef.current,
+          );
         }
         return;
       }
@@ -3626,7 +3661,11 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         // continued turn itself. Only the dead-stream case — flagged by the
         // consumer's ``finally`` — needs a client-side reconcile.
         if (runtimeNeedsReconciliation) {
-          void reconcileDeadApprovalRun(runId, activeSessionIdRef.current);
+          void reconcileDeadApprovalRun(
+            runId,
+            runtimeThreadId,
+            activeSessionIdRef.current,
+          );
         }
         return;
       }

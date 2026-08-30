@@ -12,6 +12,7 @@ from ai_gateway_core.models import ReasoningWireError
 
 from ..timing import ModelPlaneTiming
 from .authorization import (
+    _TOOL_NAME_RE,
     KERNEL_TOOL_TRANSCRIPT_NAMES,
     AgentModelPlaneError,
     _AuthorizedCall,
@@ -32,11 +33,38 @@ def _chat_tools_from_runtime(
 ) -> list[dict[str, Any]]:
     """Convert the Runtime's Responses-shaped tools to Chat Completions."""
 
-    validated = _helpers._validated_native_tools(raw_tools, profile)
+    # Namespace containers and provider-native web search are Responses-only
+    # wire shapes. Flatten their function children for Chat Completions and
+    # omit native search instead of failing an otherwise compatible turn.
+    compatible_tools: Any = raw_tools
+    if isinstance(raw_tools, list):
+        compatible_tools = []
+        for tool in raw_tools:
+            if not isinstance(tool, Mapping) or tool.get("type") != "namespace":
+                compatible_tools.append(tool)
+                continue
+            namespace = tool.get("name")
+            children = tool.get("tools")
+            if (
+                not isinstance(namespace, str)
+                or not _TOOL_NAME_RE.fullmatch(namespace)
+                or not isinstance(children, list)
+                or len(children) > 256
+            ):
+                raise AgentModelPlaneError("RUNTIME_TOOL_SCHEMA_INVALID", status_code=422)
+            if any(
+                not isinstance(child, Mapping) or child.get("type") != "function"
+                for child in children
+            ):
+                raise AgentModelPlaneError("RUNTIME_TOOL_SCHEMA_UNSUPPORTED", status_code=422)
+            compatible_tools.extend(children)
+    validated = _helpers._validated_native_tools(compatible_tools, profile)
     function_tools = [tool for tool in validated.tools if tool.get("type") == "function"]
-    if len(function_tools) != len(validated.tools):
-        raise AgentModelPlaneError("RUNTIME_TOOL_SCHEMA_UNSUPPORTED", status_code=422)
     names = {str(tool["name"]) for tool in function_tools}
+    logger.info(
+        "Chat Completions tool projection function_names=%s",
+        sorted(names),
+    )
     if allowed_tool_names is not None and not names.issubset(allowed_tool_names):
         raise AgentModelPlaneError("RUNTIME_TOOL_SCHEMA_SCOPE_MISMATCH", status_code=422)
     return [
