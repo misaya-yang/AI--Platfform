@@ -46,6 +46,7 @@ from .core.file_cleanup import get_cleanup_service
 
 # 使用流式友好的纯 ASGI 中间件（替换 BaseHTTPMiddleware）
 from .core.middleware.streaming import (
+    RequestContextBridgeMiddleware,
     SecurityHeadersMiddleware,
     StreamingAnonymousConfig,
     StreamingAnonymousMiddleware,
@@ -273,6 +274,11 @@ def create_app() -> FastAPI:
         ],
     )
     app.add_middleware(StreamingAuthMiddleware, config=auth_config)
+
+    # Bridge the pure-ASGI request id into the shared ContextVar used by
+    # Runtime/Knowledge clients. Added before logging so logging is the outer
+    # owner and its exact client-visible id is propagated downstream.
+    app.add_middleware(RequestContextBridgeMiddleware)
 
     # 请求日志中间件 - 纯 ASGI
     request_log_config = StreamingLogConfig(

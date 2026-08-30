@@ -40,6 +40,7 @@ async def test_readiness_probes_runtime_ready_endpoint() -> None:
     from src.services.health_contract import probe_http_service
 
     requested: list[str] = []
+    request_ids: list[str] = []
 
     class _Client:
         async def __aenter__(self):
@@ -48,8 +49,9 @@ async def test_readiness_probes_runtime_ready_endpoint() -> None:
         async def __aexit__(self, *_args):
             return None
 
-        async def get(self, url: str):
+        async def get(self, url: str, *, headers: dict[str, str]):
             requested.append(url)
+            request_ids.append(headers["x-request-id"])
             status = "ready" if url.endswith("/health/ready") else "ok"
             return SimpleNamespace(status_code=200, json=lambda: {"status": status})
 
@@ -78,3 +80,4 @@ async def test_readiness_probes_runtime_ready_endpoint() -> None:
         "http://knowledge-service:8092/health/ready",
     ]
     assert checks == {"agent_runtime": "healthy", "knowledge_service": "healthy"}
+    assert all(request_id.startswith("svc-") for request_id in request_ids)

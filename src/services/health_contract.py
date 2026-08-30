@@ -7,6 +7,7 @@ import os
 from typing import Any
 
 import httpx
+from ai_gateway_core.tracing import internal_http_headers
 
 
 async def probe_http_service(
@@ -17,6 +18,7 @@ async def probe_http_service(
     path: str = "/health",
     required: bool = False,
     expected_status: str | None = None,
+    require_core_ready: bool = False,
     client: httpx.AsyncClient | None = None,
 ) -> bool:
     """Probe one explicit service contract and reject malformed success payloads."""
@@ -28,11 +30,12 @@ async def probe_http_service(
     url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
     try:
         timeout = httpx.Timeout(2.0, connect=1.0)
+        headers = internal_http_headers()
         if client is None:
             async with httpx.AsyncClient(timeout=timeout, trust_env=False) as owned_client:
-                response = await owned_client.get(url)
+                response = await owned_client.get(url, headers=headers)
         else:
-            response = await client.get(url)
+            response = await client.get(url, headers=headers)
         if 200 <= response.status_code < 300:
             if expected_status is not None:
                 try:
@@ -40,7 +43,11 @@ async def probe_http_service(
                 except (TypeError, ValueError):
                     checks[name] = "schema_mismatch"
                     return False
-                if not isinstance(payload, dict) or payload.get("status") != expected_status:
+                if (
+                    not isinstance(payload, dict)
+                    or payload.get("status") != expected_status
+                    or (require_core_ready and payload.get("core_ready") is not True)
+                ):
                     checks[name] = "schema_mismatch"
                     return False
             checks[name] = "healthy"
@@ -184,6 +191,7 @@ async def gateway_readiness_snapshot(
             path="/health/ready",
             required=True,
             expected_status="ready",
+            require_core_ready=True,
             client=http_client,
         ),
         probe_http_service(
@@ -192,6 +200,7 @@ async def gateway_readiness_snapshot(
             capability_worker_checks,
             path="/health/ready",
             expected_status="ready",
+            require_core_ready=True,
             client=http_client,
         ),
         probe_http_service(

@@ -88,6 +88,10 @@ impl CapabilityWorkerClient {
     }
 
     pub async fn health(&self) -> Result<(), CapabilityWorkerError> {
+        self.health_degraded().await.map(|_| ())
+    }
+
+    pub(crate) async fn health_degraded(&self) -> Result<bool, CapabilityWorkerError> {
         let mut url = self.base_url.clone();
         url.set_path("/health/ready");
         url.set_query(None);
@@ -110,7 +114,7 @@ impl CapabilityWorkerClient {
         if body.status != "ready" || !body.core_ready {
             return Err(CapabilityWorkerError::InvalidResponse);
         }
-        Ok(())
+        Ok(body.degraded)
     }
 
     pub async fn catalog(
@@ -246,6 +250,7 @@ impl CapabilityWorkerClient {
 struct WorkerHealthResponse {
     status: String,
     core_ready: bool,
+    degraded: bool,
 }
 
 fn execution_id_from_path(path: &str) -> Option<&str> {
@@ -430,7 +435,13 @@ mod tests {
 
         let app = Router::new().route(
             "/health/ready",
-            get(|| async { Json(serde_json::json!({"status": "ready", "core_ready": true})) }),
+            get(|| async {
+                Json(serde_json::json!({
+                    "status": "ready",
+                    "core_ready": true,
+                    "degraded": true
+                }))
+            }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -446,6 +457,7 @@ mod tests {
             "internal-token",
         )
         .expect("worker client should build");
+        assert_eq!(client.health_degraded().await, Ok(true));
         assert_eq!(client.health().await, Ok(()));
         server.abort();
     }

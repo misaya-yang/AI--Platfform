@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Mapping
 
 _CORRELATION_HEADERS = {
@@ -26,6 +27,15 @@ def _safe_correlation_id(value: object) -> str:
     return normalized
 
 
+def _safe_request_id(value: object) -> str:
+    normalized = str(value or "").strip()
+    if not normalized or len(normalized) > 64:
+        return ""
+    if any(character not in _SAFE_CORRELATION_CHARS - {":"} for character in normalized):
+        return ""
+    return normalized
+
+
 def internal_http_headers(
     existing: Mapping[str, str] | None = None,
     *,
@@ -43,7 +53,8 @@ def internal_http_headers(
         request_id = REQUEST_ID_CTX.get()
     except Exception:  # noqa: BLE001 - optional middleware context
         request_id = ""
-    if request_id and "x-request-id" not in lowered:
+    request_id = _safe_request_id(request_id) or f"svc-{uuid.uuid4()}"
+    if "x-request-id" not in lowered:
         headers["x-request-id"] = request_id
         lowered.add("x-request-id")
 

@@ -424,7 +424,7 @@ fn worker_capability_health(state: &WorkerState) -> BTreeMap<&'static str, &'sta
         {
             "not_configured"
         } else if configured {
-            "configured"
+            "healthy"
         } else {
             "unavailable"
         }

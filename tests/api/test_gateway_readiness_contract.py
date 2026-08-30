@@ -65,7 +65,11 @@ def _transport(
     knowledge_status: int = 200,
     capability_worker_status: int = 200,
 ) -> httpx.MockTransport:
-    runtime_payload = runtime_payload or {"status": "ready", "kernel": "agent-runtime"}
+    runtime_payload = runtime_payload or {
+        "status": "ready",
+        "core_ready": True,
+        "kernel": "agent-runtime",
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "runtime.test":
@@ -83,7 +87,8 @@ def _transport(
                 json={
                     "status": (
                         "ready" if capability_worker_status == 200 else "not_ready"
-                    )
+                    ),
+                    "core_ready": capability_worker_status == 200,
                 },
             )
         raise AssertionError(f"unexpected health probe: {request.url}")
@@ -177,6 +182,7 @@ async def test_optional_capability_worker_failure_degrades_only_its_capability(
     [
         (503, {"status": "not_ready"}, "status_503"),
         (200, {"status": "ok"}, "schema_mismatch"),
+        (200, {"status": "ready", "core_ready": False}, "schema_mismatch"),
         (200, ["ready"], "schema_mismatch"),
     ],
 )

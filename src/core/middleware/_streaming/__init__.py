@@ -20,11 +20,13 @@ from .rate_limit import (
     StreamingRateLimitConfig,
     StreamingRateLimitMiddleware,
 )
+from .request_context import RequestContextBridgeMiddleware
 from .security_headers import SecurityHeadersMiddleware
 from .tracing import StreamingTracingConfig, StreamingTracingMiddleware
 
 __all__ = [
     "PureASGIMiddleware",
+    "RequestContextBridgeMiddleware",
     "SecurityHeadersMiddleware",
     "STREAMING_KEYWORDS",
     "STREAMING_PATH_PREFIXES",

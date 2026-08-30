@@ -416,10 +416,10 @@ async fn capability_worker_status(client: &reqwest::Client) -> &'static str {
     ) else {
         return "misconfigured";
     };
-    if worker.health().await.is_ok() {
-        "healthy"
-    } else {
-        "unavailable"
+    match worker.health_degraded().await {
+        Ok(true) => "degraded",
+        Ok(false) => "healthy",
+        Err(_) => "unavailable",
     }
 }
 

@@ -35,6 +35,7 @@ from ._streaming import (
     STREAMING_PATHS,
     STREAMING_SUFFIXES,
     PureASGIMiddleware,
+    RequestContextBridgeMiddleware,
     SecurityHeadersMiddleware,
     StreamingAdmissionConfig,
     StreamingAnonymousConfig,
@@ -58,6 +59,7 @@ logger = get_logger(__name__)
 # while implementations live in focused private modules.
 for _compat_symbol in (
     PureASGIMiddleware,
+    RequestContextBridgeMiddleware,
     StreamingAdmissionConfig,
     StreamingAnonymousConfig,
     StreamingAnonymousMiddleware,
@@ -81,6 +83,7 @@ __all__ = [
     "JSONResponse",
     "Message",
     "PureASGIMiddleware",
+    "RequestContextBridgeMiddleware",
     "RateLimitInfo",
     "Receive",
     "STREAMING_KEYWORDS",
