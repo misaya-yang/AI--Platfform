@@ -54,6 +54,23 @@ def _marker(baseline: BaselineManifest, manifest_sha: str = "5" * 64) -> dict[st
 class EmptyConnection:
     def __init__(self) -> None:
         self.queries: list[tuple[str, tuple[Any, ...]]] = []
+        self.settings: list[tuple[str, tuple[Any, ...]]] = []
+
+    def transaction(self) -> EmptyConnection:
+        return self
+
+    async def __aenter__(self) -> EmptyConnection:
+        return self
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+    async def fetchval(self, query: str, *_args: Any) -> str:
+        assert query == "SELECT current_setting('search_path')"
+        return "pg_catalog, gateway, assistant, knowledge, public"
+
+    async def execute(self, query: str, *args: Any) -> None:
+        self.settings.append((query, args))
 
     async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
         self.queries.append((query, args))
@@ -371,10 +388,18 @@ async def test_reference_fingerprint_is_independent_of_database_collation_order(
 
 
 async def test_compute_fingerprints_always_returns_the_four_named_classes() -> None:
-    computed = await compute_fingerprints(EmptyConnection(), role_prefix="ai_platform_")
+    conn = EmptyConnection()
+    computed = await compute_fingerprints(conn, role_prefix="ai_platform_")
 
     assert set(computed) == {"structural", "acl", "extensions", "reference_data"}
     assert all(len(digest) == 64 for digest in computed.values())
+    assert conn.settings == [
+        ("SELECT set_config('search_path', 'pg_catalog', true)", ()),
+        (
+            "SELECT set_config('search_path', $1, true)",
+            ("pg_catalog, gateway, assistant, knowledge, public",),
+        ),
+    ]
 
 
 @pytest.mark.parametrize(

@@ -780,10 +780,23 @@ async def compute_fingerprints(
     reference_sets: Iterable[ReferenceDataSet] = (),
 ) -> dict[str, str]:
     """Compute all four fingerprints in one read-only pass."""
-    structural = canonical_digest(await structural_lines(conn))
-    acl = canonical_digest(await acl_lines(conn, role_prefix=role_prefix))
-    extensions = canonical_digest(await extensions_lines(conn, role_prefix=role_prefix))
-    reference = canonical_digest(await reference_data_lines(conn, reference_sets))
+    # PostgreSQL deparse helpers omit schema qualification according to the
+    # caller's search_path. Pin it while hashing so admin, migrator and app
+    # connections serialize the same catalog facts, then restore the caller.
+    async with conn.transaction():
+        previous_search_path = await conn.fetchval("SELECT current_setting('search_path')")
+        await conn.execute("SELECT set_config('search_path', 'pg_catalog', true)")
+        try:
+            structural = canonical_digest(await structural_lines(conn))
+            acl = canonical_digest(await acl_lines(conn, role_prefix=role_prefix))
+            extensions = canonical_digest(await extensions_lines(conn, role_prefix=role_prefix))
+            reference = canonical_digest(await reference_data_lines(conn, reference_sets))
+        except Exception:
+            raise
+        else:
+            await conn.execute(
+                "SELECT set_config('search_path', $1, true)", previous_search_path
+            )
     return {
         "structural": structural,
         "acl": acl,
