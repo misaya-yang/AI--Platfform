@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from hashlib import sha256
 from typing import Any
 
@@ -167,6 +167,8 @@ def validate_catalog_descriptor(
 def allowlisted_catalog_descriptors(
     descriptors: list[dict[str, Any]],
     allowlist: list[dict[str, Any]] | None,
+    *,
+    _logger: logging.Logger = logger,
 ) -> list[dict[str, Any]]:
     if allowlist is None:
         return descriptors
@@ -184,7 +186,7 @@ def allowlisted_catalog_descriptors(
             # dropping is at least as closed as rejecting for capability
             # exposure, and rejecting made every Agent preview whose
             # allowlist did not happen to name each worker builtin 409.
-            logger.debug(
+            _logger.debug(
                 "Withholding capability %r: not named exactly once by the "
                 "agent allowlist (%d entries)",
                 str(descriptor.get("id") or ""),
@@ -430,6 +432,7 @@ def attach_read_attachment_descriptors(
     *,
     tenant_id: str,
     capability_revision: int,
+    descriptor_factory: Callable[..., dict[str, Any]] = attachment_tool_descriptor,
 ) -> None:
     refs = [
         str(item["payload"].get("content_ref"))
@@ -442,7 +445,7 @@ def attach_read_attachment_descriptors(
     references = sorted(set(refs))
     descriptors = (
         [
-            attachment_tool_descriptor(
+            descriptor_factory(
                 tenant_id=tenant_id,
                 capability_revision=capability_revision,
                 references=references,

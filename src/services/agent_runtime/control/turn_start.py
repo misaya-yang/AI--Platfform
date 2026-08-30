@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any
@@ -20,13 +22,6 @@ from ..runtime_configuration import (
     build_runtime_platform_config,
     runtime_platform_config_hash,
 )
-from .snapshot_builder import (
-    attach_read_attachment_descriptors,
-    readonly_capability_payload,
-    snapshot_capability_allowlist,
-    turn_prompt_readonly,
-)
-from .thread_lifecycle import assignment, ensure_thread, logger, resume_thread
 from .types import (
     GENERIC_AGENT_INSTRUCTIONS_V1,
     AgentRuntimeControlError,
@@ -36,6 +31,8 @@ from .types import (
 
 if TYPE_CHECKING:
     from ..control_plane import AgentRuntimeControlPlane
+
+logger = logging.getLogger(__name__)
 
 
 async def start_turn(
@@ -57,8 +54,10 @@ async def start_turn(
     memory_mode: str = "auto",
     memory_profile: str | None = None,
     enable_dynamic_tools: bool = True,
+    _logger: logging.Logger = logger,
+    _provider_revision_func: Callable[[Any], str] = _provider_revision,
 ) -> AgentTurn:
-    assignment_row = await assignment(plane, tenant_id, user_id, session_id)
+    assignment_row = await plane._assignment(tenant_id, user_id, session_id)
     model = await plane.model_service.get_model(tenant_id, model_id)
     if not model or not bool(model.get("is_enabled", True)):
         raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_MODEL_NOT_FOUND", status_code=400)
@@ -232,7 +231,7 @@ async def start_turn(
         user_id=user_id,
         mode=selected_memory_mode,
     )
-    capability_allowlist = snapshot_capability_allowlist(resolved_agent_snapshot)
+    capability_allowlist = plane._snapshot_capability_allowlist(resolved_agent_snapshot)
     readonly_input = dict(readonly_capabilities or {})
     if capability_allowlist is not None:
         readonly_input["capability_allowlist"] = capability_allowlist
@@ -240,7 +239,7 @@ async def start_turn(
         readonly_input["memory_context"] = memory_context["context"]
     resolved = resolve_reasoning_option(profile, requested)
     capability_revision = int(model.get("capability_revision") or 1)
-    provider_revision = _provider_revision(provider.get("updated_at"))
+    provider_revision = _provider_revision_func(provider.get("updated_at"))
     wire_protocols = profile.get("wire_protocols")
     if not isinstance(wire_protocols, dict):
         raise AgentRuntimeControlError(
@@ -259,7 +258,7 @@ async def start_turn(
         int(model.get("max_output_tokens") or 4096),
     )
     output_limit = max(1, output_limit)
-    readonly = readonly_capability_payload(
+    readonly = plane._readonly_capability_payload(
         readonly_input,
         tenant_id=tenant_id,
         capability_revision=capability_revision,
@@ -293,7 +292,7 @@ async def start_turn(
         ) from exc
     platform_config["config_hash"] = runtime_platform_config_hash(platform_config)
     readonly["platform_config"] = platform_config
-    attach_read_attachment_descriptors(
+    plane._attach_read_attachment_descriptors(
         readonly,
         tenant_id=tenant_id,
         capability_revision=capability_revision,
@@ -308,8 +307,7 @@ async def start_turn(
             capability_revision=capability_revision,
             capability_allowlist=capability_allowlist,
         )
-    thread = await ensure_thread(
-        plane,
+    thread = await plane.ensure_thread(
         tenant_id=tenant_id,
         user_id=user_id,
         session_id=session_id,
@@ -324,8 +322,7 @@ async def start_turn(
         ),
     )
     runtime_thread_id = uuid.UUID(str(thread["runtime_thread_id"]))
-    await resume_thread(
-        plane,
+    await plane._resume_thread(
         runtime_thread_id=runtime_thread_id,
         tenant_id=tenant_id,
         user_id=user_id,
@@ -512,7 +509,7 @@ async def start_turn(
             "model": model_id,
             "effort": effort,
             "capabilityRevision": capability_revision,
-            "readonly": turn_prompt_readonly(readonly),
+            "readonly": plane._turn_prompt_readonly(readonly),
             "platformConfig": platform_config,
         },
     )
@@ -521,7 +518,7 @@ async def start_turn(
             runtime_error = response.json().get("error")
         except (ValueError, AttributeError):
             runtime_error = None
-        logger.warning(
+        _logger.warning(
             "Agent Runtime rejected turn start status=%s error=%s",
             response.status_code,
             str(runtime_error or "unknown")[:160],

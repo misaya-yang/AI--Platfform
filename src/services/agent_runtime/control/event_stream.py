@@ -12,7 +12,7 @@ import contextlib
 import json
 import logging
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING, Any
 
 from .types import AgentRuntimeControlError, AgentTurn
@@ -89,6 +89,7 @@ async def stream_events(
     tenant_id: str,
     user_id: str,
     session_id: str,
+    _logger: logging.Logger = logger,
 ) -> AsyncIterator[bytes]:
     url = f"{plane.runtime_url}/internal/v1/threads/{turn.runtime_thread_id}/events"
     headers = {
@@ -167,7 +168,7 @@ async def stream_events(
                         if event_type in {"run_finished", "run_error"}:
                             terminal_status = str(event_data.get("status") or "failed")
                     elif event_type in {"run_finished", "run_error"}:
-                        logger.warning(
+                        _logger.warning(
                             "Terminal %s not matched to turn run_id=%s (event run_id=%r); "
                             "V1 stream will not close on it",
                             event_type,
@@ -193,6 +194,9 @@ async def stream_thread_events(
     after_sequence: int = 0,
     limit: int = 1000,
     turn_id: str | None = None,
+    _projector: Callable[
+        [dict[str, Any], str], dict[str, Any] | None
+    ] = project_child_runtime_event,
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream Runtime replay + live broadcast without Gateway DB polling."""
     url = f"{plane.runtime_url}/internal/v1/threads/{runtime_thread_id}/events"
@@ -235,7 +239,7 @@ async def stream_thread_events(
                     continue
                 event_data = envelope.get("data")
                 if turn_id:
-                    projected = project_child_runtime_event(envelope, turn_id)
+                    projected = _projector(envelope, turn_id)
                     if projected is None:
                         continue
                     envelope = projected

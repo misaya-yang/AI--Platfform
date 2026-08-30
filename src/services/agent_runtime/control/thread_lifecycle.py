@@ -11,15 +11,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
-from .snapshot_builder import (
-    dynamic_tool_fingerprint,
-    dynamic_tools,
-    readonly_capability_payload,
-    runtime_model_config,
-)
 from .types import (
     BASE_AGENT_INSTRUCTIONS_V1,
     GENERIC_AGENT_INSTRUCTIONS_V1,
@@ -31,6 +26,28 @@ if TYPE_CHECKING:
     from ..control_plane import AgentRuntimeControlPlane
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _thread_creation_lock(
+    plane: AgentRuntimeControlPlane,
+    key: tuple[str, str, str],
+):
+    """Serialize one session and retire the lock after its last user exits."""
+
+    lock = plane._thread_locks.setdefault(key, asyncio.Lock())
+    plane._thread_lock_users[lock] = plane._thread_lock_users.get(lock, 0) + 1
+    try:
+        async with lock:
+            yield
+    finally:
+        remaining = plane._thread_lock_users.get(lock, 1) - 1
+        if remaining > 0:
+            plane._thread_lock_users[lock] = remaining
+        else:
+            plane._thread_lock_users.pop(lock, None)
+            if plane._thread_locks.get(key) is lock:
+                plane._thread_locks.pop(key, None)
 
 
 async def cleanup_session(
@@ -136,15 +153,15 @@ async def bind_dynamic_tool_fingerprint(
     """
     stored_fingerprint = str(existing.get("dynamic_tool_fingerprint") or "")
     if stored_fingerprint:
-        assert_dynamic_tool_fingerprint(existing, fingerprint)
+        plane._assert_dynamic_tool_fingerprint(existing, fingerprint)
     if stored_fingerprint:
         return existing
     if not created_by_this_request:
         for _ in range(5):
             await asyncio.sleep(0.05)
-            refreshed = await existing_thread(plane, tenant_id, user_id, session_id)
+            refreshed = await plane._existing_thread(tenant_id, user_id, session_id)
             if refreshed is not None and refreshed.get("dynamic_tool_fingerprint"):
-                assert_dynamic_tool_fingerprint(refreshed, fingerprint)
+                plane._assert_dynamic_tool_fingerprint(refreshed, fingerprint)
                 return refreshed
         raise AgentRuntimeControlError(
             "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_THREAD_RECREATE_REQUIRED", status_code=409
@@ -174,9 +191,9 @@ async def bind_dynamic_tool_fingerprint(
                 }
         except Exception as exc:  # retry a transient mapping write
             last_error = exc
-        refreshed = await existing_thread(plane, tenant_id, user_id, session_id)
+        refreshed = await plane._existing_thread(tenant_id, user_id, session_id)
         if refreshed is not None:
-            assert_dynamic_tool_fingerprint(refreshed, fingerprint)
+            plane._assert_dynamic_tool_fingerprint(refreshed, fingerprint)
             if refreshed.get("dynamic_tool_fingerprint"):
                 return refreshed
         if attempt < 2:
@@ -207,7 +224,7 @@ async def ensure_thread(
                 "AI_PLATFORM_AGENT_RUNTIME_MODEL_NOT_FOUND", status_code=400
             )
         capability_revision = int(model.get("capability_revision") or 1)
-        readonly_capabilities = readonly_capability_payload(
+        readonly_capabilities = plane._readonly_capability_payload(
             None,
             tenant_id=tenant_id,
             capability_revision=capability_revision,
@@ -221,11 +238,10 @@ async def ensure_thread(
             capability_revision=capability_revision,
             capability_allowlist=capability_allowlist,
         )
-    existing = await existing_thread(plane, tenant_id, user_id, session_id)
+    existing = await plane._existing_thread(tenant_id, user_id, session_id)
     if existing:
-        fingerprint = dynamic_tool_fingerprint(readonly_capabilities or {})
-        return await bind_dynamic_tool_fingerprint(
-            plane,
+        fingerprint = plane._dynamic_tool_fingerprint(readonly_capabilities or {})
+        return await plane._bind_dynamic_tool_fingerprint(
             existing=existing,
             fingerprint=fingerprint,
             tenant_id=tenant_id,
@@ -233,13 +249,11 @@ async def ensure_thread(
             session_id=session_id,
         )
     key = (tenant_id, user_id, session_id)
-    lock = plane._thread_locks.setdefault(key, asyncio.Lock())
-    async with lock:
-        existing = await existing_thread(plane, tenant_id, user_id, session_id)
+    async with _thread_creation_lock(plane, key):
+        existing = await plane._existing_thread(tenant_id, user_id, session_id)
         if existing:
-            fingerprint = dynamic_tool_fingerprint(readonly_capabilities or {})
-            return await bind_dynamic_tool_fingerprint(
-                plane,
+            fingerprint = plane._dynamic_tool_fingerprint(readonly_capabilities or {})
+            return await plane._bind_dynamic_tool_fingerprint(
                 existing=existing,
                 fingerprint=fingerprint,
                 tenant_id=tenant_id,
@@ -256,12 +270,11 @@ async def ensure_thread(
             # before any handler is allowed to dispatch.
             "approvalPolicy": "on-request",
             "sandbox": "read-only",
-            "config": runtime_model_config(
-                plane.model_plane_base_url,
+            "config": plane._runtime_model_config(
                 model_id,
                 native_web_search_enabled=native_web_search_enabled,
             ),
-            "dynamicTools": dynamic_tools(readonly_capabilities or {}),
+            "dynamicTools": plane._dynamic_tools(readonly_capabilities or {}),
         }
         response = await plane.http_client.post(
             f"{plane.runtime_url}/internal/v1/threads",
@@ -275,12 +288,11 @@ async def ensure_thread(
         )
         if response.status_code >= 400:
             # A concurrent process may have won the unique session scope.
-            existing = await existing_thread(plane, tenant_id, user_id, session_id)
+            existing = await plane._existing_thread(tenant_id, user_id, session_id)
             if existing:
-                return await bind_dynamic_tool_fingerprint(
-                    plane,
+                return await plane._bind_dynamic_tool_fingerprint(
                     existing=existing,
-                    fingerprint=dynamic_tool_fingerprint(readonly_capabilities or {}),
+                    fingerprint=plane._dynamic_tool_fingerprint(readonly_capabilities or {}),
                     tenant_id=tenant_id,
                     user_id=user_id,
                     session_id=session_id,
@@ -297,9 +309,8 @@ async def ensure_thread(
                 "AI_PLATFORM_AGENT_RUNTIME_THREAD_CREATE_INVALID",
                 status_code=503,
             )
-        fingerprint = dynamic_tool_fingerprint(readonly_capabilities or {})
-        await bind_dynamic_tool_fingerprint(
-            plane,
+        fingerprint = plane._dynamic_tool_fingerprint(readonly_capabilities or {})
+        await plane._bind_dynamic_tool_fingerprint(
             existing={
                 "runtime_thread_id": uuid.UUID(thread_id),
                 "dynamic_tool_fingerprint": None,
@@ -372,8 +383,7 @@ async def verify_thread(
     profile = model.get("effective_capabilities") if isinstance(model, dict) else None
     native_search = profile.get("native_search") if isinstance(profile, dict) else None
     tools = profile.get("tools") if isinstance(profile, dict) else None
-    await resume_thread(
-        plane,
+    await plane._resume_thread(
         runtime_thread_id=uuid.UUID(str(runtime_thread_id)),
         tenant_id=tenant_id,
         user_id=user_id,

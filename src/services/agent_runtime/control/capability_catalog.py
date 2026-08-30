@@ -11,10 +11,6 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any
 
-from .snapshot_builder import (
-    allowlisted_catalog_descriptors,
-    validate_catalog_descriptor,
-)
 from .types import DISCOVERY_BRIDGE_NAMES, AgentRuntimeControlError
 
 if TYPE_CHECKING:
@@ -87,7 +83,7 @@ async def fetch_capability_catalog(
         raise AgentRuntimeControlError(
             "AI_PLATFORM_AGENT_RUNTIME_CAPABILITY_CATALOG_INVALID", status_code=503
         )
-    if deferred and not worker_ready_for_writes():
+    if deferred and not plane._worker_ready_for_writes():
         if capability_allowlist is not None:
             raise AgentRuntimeControlError(
                 "AI_PLATFORM_AGENT_RUNTIME_WRITE_CAPABILITY_NOT_MIGRATED",
@@ -95,7 +91,7 @@ async def fetch_capability_catalog(
             )
         deferred = []
     readonly["tools"] = [
-        validate_catalog_descriptor(
+        plane._validate_catalog_descriptor(
             descriptor,
             tenant_id=tenant_id,
             capability_revision=capability_revision,
@@ -103,7 +99,7 @@ async def fetch_capability_catalog(
         for descriptor in tools
     ]
     readonly["mcp"] = [
-        validate_catalog_descriptor(
+        plane._validate_catalog_descriptor(
             descriptor,
             tenant_id=tenant_id,
             capability_revision=capability_revision,
@@ -111,7 +107,7 @@ async def fetch_capability_catalog(
         for descriptor in mcp
     ]
     deferred = [
-        validate_catalog_descriptor(
+        plane._validate_catalog_descriptor(
             descriptor,
             tenant_id=tenant_id,
             capability_revision=capability_revision,
@@ -159,10 +155,12 @@ async def fetch_capability_catalog(
     bound_tools = [
         item for item in tools if item.get("name") not in DISCOVERY_BRIDGE_NAMES
     ]
-    allowed_tools = allowlisted_catalog_descriptors(bound_tools, capability_allowlist)
-    allowed_mcp = allowlisted_catalog_descriptors(mcp, capability_allowlist)
+    allowed_tools = plane._allowlisted_catalog_descriptors(
+        bound_tools, capability_allowlist
+    )
+    allowed_mcp = plane._allowlisted_catalog_descriptors(mcp, capability_allowlist)
     allowed_deferred = (
-        allowlisted_catalog_descriptors(deferred, capability_allowlist)
+        plane._allowlisted_catalog_descriptors(deferred, capability_allowlist)
         if capability_allowlist is not None
         else deferred
     )
