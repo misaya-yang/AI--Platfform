@@ -16,9 +16,10 @@ import pytest_asyncio
 from dotenv import dotenv_values
 
 from database import cli
+from database.authority.commands import command_migrate, default_paths
+from database.authority.runner import MigrationAuthority
 
 ROOT = Path(__file__).resolve().parents[2]
-RAG_VERSIONS = tuple(f"{version:03d}" for version in range(100, 113))
 RAG_FILENAMES = {
     path.name
     for path in (ROOT / "database" / "migrations").glob("*.sql")
@@ -84,6 +85,14 @@ def _dsn(config: dict[str, Any], database: str) -> str:
     user = quote(str(config["user"]), safe="")
     password = quote(str(config["password"]), safe="")
     return f"postgresql://{user}:{password}@{config['host']}:{config['port']}/{database}"
+
+
+async def _migrate_legacy_chain(dsn: str) -> None:
+    result = await command_migrate(
+        MigrationAuthority(dsn, default_paths()),
+        allow_adoption=False,
+    )
+    assert result.exit_code == 0
 
 
 @pytest_asyncio.fixture(params=("public", "main", "split"))
@@ -158,13 +167,10 @@ async def fresh_central_database() -> AsyncIterator[str]:
 @pytest.mark.asyncio
 async def test_fresh_schema_replays_current_upgrade_forward_chain(
     fresh_central_database: str,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The current upgrade chain tolerates optional per-service tables being absent."""
-    monkeypatch.setattr(cli, "get_dsn", lambda: fresh_central_database)
-
-    await cli.cmd_migrate()
-    await cli.cmd_migrate()
+    await _migrate_legacy_chain(fresh_central_database)
+    await _migrate_legacy_chain(fresh_central_database)
 
     conn = await asyncpg.connect(fresh_central_database)
     try:
@@ -187,11 +193,8 @@ async def test_fresh_schema_replays_current_upgrade_forward_chain(
 @pytest.mark.asyncio
 async def test_100_to_112_full_chain_uses_one_idempotent_public_ledger(
     migration_database: tuple[str, str],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dsn, layout = migration_database
-    monkeypatch.setattr(cli, "get_dsn", lambda: dsn)
-
     preflight = await asyncpg.connect(dsn)
     try:
         assert (
@@ -219,10 +222,8 @@ async def test_100_to_112_full_chain_uses_one_idempotent_public_ledger(
     finally:
         await preflight.close()
 
-    for version in RAG_VERSIONS:
-        await cli.cmd_migrate(version)
-    for version in RAG_VERSIONS:
-        await cli.cmd_migrate(version)
+    await _migrate_legacy_chain(dsn)
+    await _migrate_legacy_chain(dsn)
 
     conn = await asyncpg.connect(dsn)
     try:
@@ -240,7 +241,7 @@ async def test_100_to_112_full_chain_uses_one_idempotent_public_ledger(
             row["filename"]
             for row in await conn.fetch("SELECT filename FROM public.schema_migrations")
         }
-        assert recorded == RAG_FILENAMES
+        assert recorded >= RAG_FILENAMES
         assert all(not name.endswith("_rollback.sql") for name in recorded)
 
         metadata_owner = await conn.fetchval(
@@ -336,10 +337,8 @@ async def test_100_to_112_full_chain_uses_one_idempotent_public_ledger(
 @pytest.mark.asyncio
 async def test_112_bounds_document_progress_retention(
     fresh_central_database: str,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(cli, "get_dsn", lambda: fresh_central_database)
-    await cli.cmd_migrate()
+    await _migrate_legacy_chain(fresh_central_database)
 
     conn = await asyncpg.connect(fresh_central_database)
     try:

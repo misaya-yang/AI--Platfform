@@ -1,10 +1,10 @@
-"""Cross-process PostgreSQL proof for canonical migration serialization."""
+"""Live serialization proof for the single PostgreSQL migration authority."""
 
 from __future__ import annotations
 
 import asyncio
 import os
-import shutil
+import signal
 import uuid
 from pathlib import Path
 from typing import Any
@@ -14,7 +14,18 @@ import asyncpg
 import pytest
 from dotenv import dotenv_values
 
-from database import cli
+from database.authority.commands import command_migrate, default_paths
+from database.authority.constants import (
+    MIGRATION_ADVISORY_LOCK_ID,
+    MIGRATION_ADVISORY_LOCK_NAMESPACE,
+)
+from database.authority.discovery import (
+    LEGACY_MANIFEST_NAME,
+    discover_legacy_migrations,
+    last_legacy_change,
+)
+from database.authority.manifest import load_legacy_manifest
+from database.authority.runner import MigrationAuthority
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -41,251 +52,266 @@ def _dsn(config: dict[str, Any], database: str) -> str:
     return f"postgresql://{user}:{password}@{config['host']}:{config['port']}/{database}"
 
 
-def _write_shell_fixture(
-    project: Path,
-    config: dict[str, Any],
-    database: str,
-) -> tuple[Path, Path, Path]:
-    script_dir = project / "scripts" / "new"
-    migrations_dir = project / "database" / "migrations"
-    script_dir.mkdir(parents=True)
-    migrations_dir.mkdir(parents=True)
-    shutil.copy2(ROOT / "scripts/new/common.sh", script_dir / "common.sh")
-    shutil.copy2(ROOT / "scripts/new/migrate.sh", script_dir / "migrate.sh")
+def _authority_environment(dsn: str) -> dict[str, str]:
+    return {**os.environ, "AI_GATEWAY_DATABASE_MIGRATOR_DSN": dsn}
 
-    (project / "database/schema.sql").write_text(
-        """
-        CREATE TABLE public.services (service_id TEXT PRIMARY KEY);
-        CREATE TABLE public.datasets (dataset_id TEXT PRIMARY KEY);
-        CREATE TABLE public.documents (document_id TEXT PRIMARY KEY);
-        CREATE TABLE public.segments (segment_id TEXT PRIMARY KEY);
-        """,
-        encoding="utf-8",
+
+async def _start_authority_cli(dsn: str) -> asyncio.subprocess.Process:
+    return await asyncio.create_subprocess_exec(
+        "uv",
+        "run",
+        "--extra",
+        "database",
+        "python",
+        "-m",
+        "database.authority",
+        "migrate",
+        "--no-adoption",
+        cwd=ROOT,
+        env=_authority_environment(dsn),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
     )
-    migration = migrations_dir / "100_lock_probe.sql"
-    migration.write_text(
-        """
-        BEGIN;
-        CREATE SCHEMA IF NOT EXISTS knowledge;
-        SET LOCAL search_path = knowledge, gateway, assistant, public;
-        CREATE TABLE IF NOT EXISTS migration_lock_probe (
-            singleton INTEGER PRIMARY KEY,
-            execution_count INTEGER NOT NULL
-        );
-        INSERT INTO migration_lock_probe (singleton, execution_count) VALUES (1, 1);
-        SELECT pg_sleep(0.5);
-        COMMIT;
-        """,
-        encoding="utf-8",
+
+
+async def _run_authority_cli(dsn: str) -> None:
+    process = await _start_authority_cli(dsn)
+    _stdout, _stderr = await process.communicate()
+    assert process.returncode == 0, "authority CLI failed; output intentionally redacted"
+
+
+async def _run_authority_in_process(dsn: str) -> None:
+    result = await command_migrate(
+        MigrationAuthority(dsn, default_paths()),
+        allow_adoption=False,
+        log=lambda *_args: None,
     )
-    env_file = project / ".env"
-    env_file.write_text(
-        "\n".join(
-            (
-                f"POSTGRES_HOST={config['host']}",
-                f"POSTGRES_PORT={config['port']}",
-                f"POSTGRES_USER={config['user']}",
-                f"POSTGRES_PASSWORD={config['password']}",
-                f"POSTGRES_DB={database}",
-            )
+    assert result.exit_code == 0
+
+
+async def _prepare_real_pre_freeze_state(dsn: str) -> str:
+    """Run the real chain once, then rewind only its final ledger identity."""
+    conn = await asyncpg.connect(dsn)
+    try:
+        await conn.execute((ROOT / "database/schema.sql").read_text(encoding="utf-8"))
+    finally:
+        await conn.close()
+
+    await _run_authority_in_process(dsn)
+
+    paths = default_paths()
+    migrations = discover_legacy_migrations(paths.migrations_root)
+    manifest = load_legacy_manifest(paths.migrations_root / LEGACY_MANIFEST_NAME)
+    assert last_legacy_change(migrations) == manifest.freeze_point
+
+    conn = await asyncpg.connect(dsn)
+    try:
+        applied = await conn.fetchval(
+            "SELECT count(*) FROM public.schema_migrations WHERE filename = $1",
+            manifest.freeze_point,
         )
-        + "\n",
-        encoding="utf-8",
+        assert applied == 1
+        await conn.execute(
+            "DELETE FROM public.schema_migrations WHERE filename = $1",
+            manifest.freeze_point,
+        )
+    finally:
+        await conn.close()
+    return manifest.freeze_point
+
+
+async def _authority_lock_count(conn: asyncpg.Connection, *, granted: bool) -> int:
+    return int(
+        await conn.fetchval(
+            """
+            SELECT count(*)
+            FROM pg_locks AS lock
+            JOIN pg_stat_activity AS activity ON activity.pid = lock.pid
+            WHERE lock.locktype = 'advisory'
+              AND lock.classid::bigint = $1
+              AND lock.objid::bigint = $2
+              AND lock.objsubid = 2
+              AND lock.granted = $3
+              AND activity.datname = current_database()
+              AND activity.application_name LIKE 'ai_gateway_authority_%'
+            """,
+            MIGRATION_ADVISORY_LOCK_NAMESPACE,
+            MIGRATION_ADVISORY_LOCK_ID,
+            granted,
+        )
     )
-    env_file.chmod(0o600)
-    return script_dir / "migrate.sh", env_file, migration
 
 
-def _shell_environment(
-    config: dict[str, Any],
-    database: str,
-) -> dict[str, str]:
-    client_container = os.environ.get("POSTGRES_CLIENT_CONTAINER")
-    if client_container is None and shutil.which("psql") is None:
-        pytest.fail("psql is required for the shell migration lock gate")
-    return {
-        **os.environ,
-        "POSTGRES_HOST": str(config["host"]),
-        "POSTGRES_PORT": str(config["port"]),
-        "POSTGRES_USER": str(config["user"]),
-        "POSTGRES_PASSWORD": str(config["password"]),
-        "POSTGRES_DB": database,
-        "POSTGRES_CONTAINER": client_container or f"no-shared-postgres-{uuid.uuid4().hex}",
-    }
+async def _wait_for_authority_lock_count(
+    conn: asyncpg.Connection,
+    *,
+    granted: bool,
+    expected: int,
+) -> None:
+    for _attempt in range(200):
+        if await _authority_lock_count(conn, granted=granted) == expected:
+            return
+        await asyncio.sleep(0.025)
+    actual = await _authority_lock_count(conn, granted=granted)
+    pytest.fail(
+        f"expected {expected} authority advisory locks with granted={granted}, got {actual}"
+    )
+
+
+async def _assert_final_change_state(
+    conn: asyncpg.Connection,
+    freeze_point: str,
+    *,
+    applied: bool,
+) -> None:
+    expected = 1 if applied else 0
+    assert (
+        await conn.fetchval(
+            "SELECT count(*) FROM public.schema_migrations WHERE filename = $1",
+            freeze_point,
+        )
+        == expected
+    )
+    assert (
+        await conn.fetchval(
+            "SELECT to_regclass('knowledge.idx_kb_document_progress_events_dataset_created') "
+            "IS NOT NULL"
+        )
+        is applied
+    )
+    assert (
+        await conn.fetchval(
+            "SELECT to_regprocedure('knowledge.prune_kb_document_progress_events()') IS NOT NULL"
+        )
+        is applied
+    )
+    assert (
+        await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM pg_trigger
+                WHERE tgrelid = 'knowledge.kb_document_progress_events'::regclass
+                  AND tgname = 'trg_kb_document_progress_retention'
+                  AND NOT tgisinternal
+            )
+            """
+        )
+        is applied
+    )
 
 
 @pytest.mark.asyncio
-async def test_python_and_shell_runners_serialize_then_reread_ledger(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_two_authority_entrypoints_serialize_one_legacy_change() -> None:
     config = _postgres_config()
-    database_name = f"migration_lock_{uuid.uuid4().hex}"
+    database_name = f"migration_authority_lock_{uuid.uuid4().hex}"
     admin = await asyncpg.connect(**config)
     await admin.execute(f'CREATE DATABASE "{database_name}"')
-    shell_script, env_file, migration = _write_shell_fixture(
-        tmp_path / "project",
-        config,
-        database_name,
-    )
     dsn = _dsn(config, database_name)
-    monkeypatch.setattr(cli, "get_dsn", lambda: dsn)
-    monkeypatch.setattr(
-        cli,
-        "discover_migrations",
-        lambda _migrations_dir=cli.MIGRATIONS_DIR: [("100", "Lock Probe", migration)],
-    )
-
-    shell_env = _shell_environment(config, database_name)
-
-    async def run_shell() -> None:
-        process = await asyncio.create_subprocess_exec(
-            "bash",
-            str(shell_script),
-            "--auto",
-            "--env",
-            str(env_file),
-            env=shell_env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _stdout, _stderr = await process.communicate()
-        assert process.returncode == 0, (
-            f"shell migration runner failed with exit code {process.returncode}; "
-            "output is intentionally redacted"
-        )
 
     try:
-        await asyncio.gather(cli.cmd_migrate(), run_shell())
-
-        conn = await asyncpg.connect(dsn)
+        freeze_point = await _prepare_real_pre_freeze_state(dsn)
+        holder = await asyncpg.connect(
+            dsn,
+            server_settings={"application_name": "test_migration_lock_holder"},
+        )
+        observer = await asyncpg.connect(dsn)
+        tasks: list[asyncio.Task[None]] = []
         try:
-            assert (
-                await conn.fetchval("SELECT execution_count FROM knowledge.migration_lock_probe")
-                == 1
+            await holder.execute(
+                "SELECT pg_advisory_lock($1::integer, $2::integer)",
+                MIGRATION_ADVISORY_LOCK_NAMESPACE,
+                MIGRATION_ADVISORY_LOCK_ID,
             )
-            assert (
-                await conn.fetchval(
-                    """
-                SELECT count(*) FROM public.schema_migrations
-                WHERE filename = '100_lock_probe.sql'
-                """
-                )
-                == 1
+            tasks = [
+                asyncio.create_task(_run_authority_in_process(dsn)),
+                asyncio.create_task(_run_authority_cli(dsn)),
+            ]
+            await _wait_for_authority_lock_count(
+                observer,
+                granted=False,
+                expected=2,
             )
-            assert (
-                await conn.fetchval(
-                    """
-                SELECT count(*) FROM pg_stat_activity
-                WHERE application_name LIKE 'ai_gateway_migrate_%'
-                """
-                )
-                == 0
+            await holder.execute(
+                "SELECT pg_advisory_unlock($1::integer, $2::integer)",
+                MIGRATION_ADVISORY_LOCK_NAMESPACE,
+                MIGRATION_ADVISORY_LOCK_ID,
             )
+            await asyncio.gather(*tasks)
+            await _wait_for_authority_lock_count(observer, granted=True, expected=0)
+            await _assert_final_change_state(observer, freeze_point, applied=True)
         finally:
-            await conn.close()
+            await holder.execute(
+                "SELECT pg_advisory_unlock($1::integer, $2::integer)",
+                MIGRATION_ADVISORY_LOCK_NAMESPACE,
+                MIGRATION_ADVISORY_LOCK_ID,
+            )
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            await observer.close()
+            await holder.close()
     finally:
-        await admin.execute(f'DROP DATABASE "{database_name}"')
+        await admin.execute(f'DROP DATABASE "{database_name}" WITH (FORCE)')
         await admin.close()
 
 
-@pytest.mark.parametrize("signal_name", ("terminate", "kill"))
+@pytest.mark.parametrize("signal_number", (signal.SIGTERM, signal.SIGKILL))
 @pytest.mark.asyncio
-async def test_shell_lock_session_releases_on_runner_exit(
-    tmp_path: Path,
-    signal_name: str,
+async def test_authority_cli_crash_releases_lock_without_ghost_change(
+    signal_number: signal.Signals,
 ) -> None:
     config = _postgres_config()
-    database_name = f"migration_signal_{uuid.uuid4().hex}"
+    database_name = f"migration_authority_crash_{uuid.uuid4().hex}"
     admin = await asyncpg.connect(**config)
     await admin.execute(f'CREATE DATABASE "{database_name}"')
-    shell_script, env_file, _migration = _write_shell_fixture(
-        tmp_path / signal_name,
-        config,
-        database_name,
-    )
-    holder = shell_script.with_name("hold-lock.sh")
-    holder.write_text(
-        """#!/bin/bash
-set -euo pipefail
-source "$(dirname "$0")/common.sh"
-ENV_FILE="$1"
-load_env
-acquire_migration_advisory_lock
-trap release_migration_advisory_lock EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-while true; do sleep 0.2; done
-""",
-        encoding="utf-8",
-    )
-    process = await asyncio.create_subprocess_exec(
-        "bash",
-        str(holder),
-        str(env_file),
-        env=_shell_environment(config, database_name),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
     dsn = _dsn(config, database_name)
-    conn: asyncpg.Connection | None = None
-    held = False
-    try:
-        conn = await asyncpg.connect(dsn)
-        for _attempt in range(100):
-            held = bool(
-                await conn.fetchval(
-                    """
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM pg_locks AS l
-                        JOIN pg_stat_activity AS a ON a.pid = l.pid
-                        WHERE a.application_name LIKE 'ai_gateway_migrate_%'
-                          AND l.locktype = 'advisory'
-                          AND l.granted
-                          AND l.classid::bigint = $1
-                          AND l.objid::bigint = $2
-                          AND l.objsubid = 2
-                    )
-                    """,
-                    cli.MIGRATION_ADVISORY_LOCK_NAMESPACE,
-                    cli.MIGRATION_ADVISORY_LOCK_ID,
-                )
-            )
-            if held:
-                break
-            await asyncio.sleep(0.05)
-        assert held, "shell runner did not acquire the canonical migration lock"
 
-        getattr(process, signal_name)()
-        await asyncio.wait_for(process.wait(), timeout=5)
-        for _attempt in range(100):
-            held = bool(
-                await conn.fetchval(
-                    """
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM pg_locks AS l
-                        WHERE l.locktype = 'advisory'
-                          AND l.granted
-                          AND l.classid::bigint = $1
-                          AND l.objid::bigint = $2
-                          AND l.objsubid = 2
-                    )
-                    """,
-                    cli.MIGRATION_ADVISORY_LOCK_NAMESPACE,
-                    cli.MIGRATION_ADVISORY_LOCK_ID,
-                )
+    try:
+        freeze_point = await _prepare_real_pre_freeze_state(dsn)
+        blocker = await asyncpg.connect(dsn)
+        observer = await asyncpg.connect(dsn)
+        process: asyncio.subprocess.Process | None = None
+        communicate_task: asyncio.Task[tuple[bytes, bytes]] | None = None
+        try:
+            await observer.execute(
+                "DROP TRIGGER IF EXISTS trg_kb_document_progress_retention "
+                "ON knowledge.kb_document_progress_events"
             )
-            if not held:
-                break
-            await asyncio.sleep(0.05)
-        assert not held
+            await observer.execute(
+                "DROP FUNCTION IF EXISTS knowledge.prune_kb_document_progress_events()"
+            )
+            await observer.execute(
+                "DROP INDEX IF EXISTS knowledge.idx_kb_document_progress_events_dataset_created"
+            )
+            await _assert_final_change_state(observer, freeze_point, applied=False)
+
+            await blocker.execute("BEGIN")
+            await blocker.execute(
+                "LOCK TABLE knowledge.kb_document_progress_events IN ACCESS EXCLUSIVE MODE"
+            )
+            process = await _start_authority_cli(dsn)
+            communicate_task = asyncio.create_task(process.communicate())
+            await _wait_for_authority_lock_count(observer, granted=True, expected=1)
+
+            os.killpg(process.pid, signal_number)
+            await asyncio.wait_for(communicate_task, timeout=10)
+            await _wait_for_authority_lock_count(observer, granted=True, expected=0)
+            await _assert_final_change_state(observer, freeze_point, applied=False)
+
+            await blocker.execute("ROLLBACK")
+            await _run_authority_in_process(dsn)
+            await _assert_final_change_state(observer, freeze_point, applied=True)
+        finally:
+            if process is not None and process.returncode is None:
+                os.killpg(process.pid, signal.SIGKILL)
+            if communicate_task is not None and not communicate_task.done():
+                await asyncio.gather(communicate_task, return_exceptions=True)
+            await blocker.execute("ROLLBACK")
+            await observer.close()
+            await blocker.close()
     finally:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
-        if conn is not None:
-            await conn.close()
-        await admin.execute(f'DROP DATABASE "{database_name}"')
+        await admin.execute(f'DROP DATABASE "{database_name}" WITH (FORCE)')
         await admin.close()
