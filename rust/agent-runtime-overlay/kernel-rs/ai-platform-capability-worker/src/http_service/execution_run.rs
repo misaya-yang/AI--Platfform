@@ -18,6 +18,9 @@ use crate::external_write_capabilities::ExternalWriteContext;
 use crate::fixture_result;
 use crate::local_node_broker::{LocalNodeActionRequest, LocalNodeScope};
 use crate::office_capabilities::OfficeExecutionContext;
+use crate::python_artifact_broker::{
+    PythonArtifactBrokerError, PythonArtifactUploadContext, terminal_result,
+};
 use crate::python_code_execution::{
     CodeInputAttachment, PythonCodeExecutionRequest, PythonSandboxBroker, PythonSandboxLimits,
 };
@@ -315,10 +318,9 @@ pub(super) async fn run_execution(
                         inputs,
                         limits,
                     };
-                    return executor
+                    let result = executor
                         .execute(request)
                         .await
-                        .map(|value| serde_json::to_value(value).unwrap_or(Value::Null))
                         .map_err(|error| match error {
                             crate::python_code_execution::CodeExecutionError::TimedOut => {
                                 OperationError::Failed("capability_timeout".into())
@@ -330,6 +332,36 @@ pub(super) async fn run_execution(
                                 OperationError::SideEffectUnknown
                             }
                             _ => OperationError::Failed(error.to_string()),
+                        })?;
+                    let Some(artifact_store) = &state.python_artifact_store else {
+                        return Err(OperationError::Failed(
+                            "python_artifact_store_unavailable".into(),
+                        ));
+                    };
+                    let context = PythonArtifactUploadContext {
+                        tenant_id: scope.tenant_id.clone(),
+                        user_id: scope.user_id.clone(),
+                        session_id: scope.session_id.clone(),
+                        // This is the durable execution record id, not the
+                        // capability lease id emitted by the local sandbox.
+                        execution_id: execution_id.clone(),
+                        run_id: dispatch.record.execution.run_id.clone(),
+                        tool_call_id: dispatch.record.execution.tool_call_id.clone(),
+                        arguments_hash: dispatch.record.execution.arguments_hash.clone(),
+                    };
+                    return terminal_result(artifact_store.as_ref(), &context, result)
+                        .await
+                        .map_err(|error| match error {
+                            PythonArtifactBrokerError::SideEffectUnknown => {
+                                OperationError::SideEffectUnknown
+                            }
+                            PythonArtifactBrokerError::Failed => {
+                                OperationError::Failed("python_artifact_upload_rejected".into())
+                            }
+                            PythonArtifactBrokerError::Configuration
+                            | PythonArtifactBrokerError::InvalidMetadata => {
+                                OperationError::Failed("python_artifact_metadata_invalid".into())
+                            }
                         });
                 }
                 if capability_id == "local_node_action" {

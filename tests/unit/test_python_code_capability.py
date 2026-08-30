@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 
 import pytest
+from pydantic import ValidationError
 
 from src.api.internal.python_code_capabilities import (
+    PythonArtifactRequest,
     PythonCodeCapability,
     SandboxBrokerError,
     _arguments_hash,
+    _python_artifact_id,
 )
 
 
@@ -67,3 +71,48 @@ async def test_unknown_sandbox_outcome_is_not_retried_or_persisted():
     transport = FakeTransport({"execution_id": "exec-1", "side_effect_state": "side_effect_unknown"})
     with pytest.raises(SandboxBrokerError, match="unknown"):
         await PythonCodeCapability(transport, FakeArtifacts()).execute(request())
+
+
+def _artifact_payload(content: bytes = b"plot") -> dict[str, object]:
+    return {
+        "tool_call_id": "call-1",
+        "arguments_hash": "sha256:" + "a" * 64,
+        "filename": "plot.png",
+        "mime_type": "image/png",
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "size_bytes": len(content),
+        "content_base64": base64.b64encode(content).decode(),
+    }
+
+
+def test_python_artifact_request_is_exact_and_accepts_null_mime() -> None:
+    payload = _artifact_payload()
+    request = PythonArtifactRequest.model_validate(payload)
+    assert request.mime_type == "image/png"
+
+    null_mime = {**payload, "mime_type": None}
+    assert PythonArtifactRequest.model_validate(null_mime).mime_type is None
+
+    with pytest.raises(ValidationError):
+        PythonArtifactRequest.model_validate({k: v for k, v in payload.items() if k != "mime_type"})
+    with pytest.raises(ValidationError):
+        PythonArtifactRequest.model_validate({**payload, "storage_key": "must-not-cross-boundary"})
+
+
+def test_python_artifact_id_binds_the_complete_execution_identity() -> None:
+    digest = hashlib.sha256(b"plot").hexdigest()
+    artifact_id = _python_artifact_id(
+        execution_id="c39884a5-e8f5-466d-8a74-12141ea08a69",
+        tool_call_id="call-1",
+        arguments_hash="sha256:" + "a" * 64,
+        filename="plot.png",
+        sha256=digest,
+    )
+    assert artifact_id.startswith("art_") and len(artifact_id) == 20
+    assert artifact_id != _python_artifact_id(
+        execution_id="c39884a5-e8f5-466d-8a74-12141ea08a69",
+        tool_call_id="call-2",
+        arguments_hash="sha256:" + "a" * 64,
+        filename="plot.png",
+        sha256=digest,
+    )

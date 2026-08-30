@@ -461,6 +461,8 @@ fn run_python_process(
     let workspace = create_workspace(&config.workspace_root)?;
     let started = Instant::now();
     let result = (|| {
+        fs::create_dir(workspace.join(".proc")).map_err(|_| CodeExecutionError::ProcessStart)?;
+        fs::create_dir(workspace.join(".mask")).map_err(|_| CodeExecutionError::ProcessStart)?;
         fs::create_dir(workspace.join("output")).map_err(|_| CodeExecutionError::ProcessStart)?;
         for input in &request.inputs {
             let path = workspace.join(&input.filename);
@@ -786,11 +788,13 @@ fn python_command(config: &LocalPythonSandboxConfig, pids: u32) -> Command {
             .arg("--map-root-user")
             .arg("--net")
             .arg("--mount")
+            .arg("--pid")
+            .arg("--fork")
             .arg("--")
             .arg("/bin/sh")
             .arg("-c")
             .arg(
-                "mount --bind \"$PWD\" /workspace && cd /workspace && pids=\"$1\" && shift && exec /usr/bin/prlimit --nproc=\"$pids\" -- \"$@\"",
+                "mount --make-rprivate / && mount -t tmpfs -o size=4k,mode=0555,nosuid,nodev,noexec tmpfs \"$PWD/.proc\" && mount --bind \"$PWD/.proc\" /proc && mount -o remount,bind,ro /proc && mount -t tmpfs -o size=4k,mode=0555,nosuid,nodev,noexec tmpfs \"$PWD/.mask\" && for target in /tmp /var/tmp /run/lock /dev/shm /dev/mqueue; do mount --bind \"$PWD/.mask\" \"$target\" && mount -o remount,bind,ro \"$target\" || exit 1; done && mount --bind \"$PWD\" /workspace && mount -o remount,rw,bind /workspace && cd /workspace && pids=\"$1\" && shift && exec /usr/bin/prlimit --nproc=\"$pids\" -- \"$@\"",
             )
             .arg("python-sandbox")
             .arg(pids.to_string())
@@ -863,10 +867,12 @@ mod tests {
                     "--map-root-user",
                     "--net",
                     "--mount",
+                    "--pid",
+                    "--fork",
                     "--",
                     "/bin/sh",
                     "-c",
-                    "mount --bind \"$PWD\" /workspace && cd /workspace && pids=\"$1\" && shift && exec /usr/bin/prlimit --nproc=\"$pids\" -- \"$@\"",
+                    "mount --make-rprivate / && mount -t tmpfs -o size=4k,mode=0555,nosuid,nodev,noexec tmpfs \"$PWD/.proc\" && mount --bind \"$PWD/.proc\" /proc && mount -o remount,bind,ro /proc && mount -t tmpfs -o size=4k,mode=0555,nosuid,nodev,noexec tmpfs \"$PWD/.mask\" && for target in /tmp /var/tmp /run/lock /dev/shm /dev/mqueue; do mount --bind \"$PWD/.mask\" \"$target\" && mount -o remount,bind,ro \"$target\" || exit 1; done && mount --bind \"$PWD\" /workspace && mount -o remount,rw,bind /workspace && cd /workspace && pids=\"$1\" && shift && exec /usr/bin/prlimit --nproc=\"$pids\" -- \"$@\"",
                     "python-sandbox",
                     "32",
                     "/usr/local/bin/python3",

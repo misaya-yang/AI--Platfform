@@ -16,11 +16,15 @@ import hmac
 import json
 import os
 import re
+import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 import httpx
+from ai_gateway_contracts.capability_proof import CapabilityProofError, verify_capability_proof
+from ai_gateway_core.storage import get_artifact_storage
 from fastapi import APIRouter, Body, Header, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 router = APIRouter(prefix="/internal/v2/agent-capabilities", tags=["internal-agent-capabilities"])
 
@@ -31,7 +35,13 @@ MAX_STREAM_BYTES = 2_000_000
 MAX_OUTPUT_FILES = 64
 MAX_TIMEOUT_SECONDS = 300
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_ARGUMENTS_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 _MAX_FILENAME_BYTES = 255
+_PYTHON_ARTIFACT_PATH = "/internal/v2/agent-capabilities/python/artifacts"
+_PYTHON_ARTIFACT_MAX_B64 = ((MAX_OUTPUT_BYTES + 2) // 3) * 4 + 4
+_MIME = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$"
+)
 
 
 class SandboxBrokerError(RuntimeError):
@@ -126,6 +136,79 @@ def _validate_filename(filename: Any) -> str:
     if any(ord(char) < 32 for char in filename):
         raise SandboxBrokerError("artifact filename is invalid")
     return filename
+
+
+class PythonArtifactRequest(BaseModel):
+    """One code-execution output artifact supplied by the isolated worker."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_call_id: str = Field(min_length=1, max_length=160)
+    arguments_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    filename: str = Field(min_length=1, max_length=_MAX_FILENAME_BYTES)
+    mime_type: str | None = Field(..., max_length=128)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(ge=0, le=MAX_OUTPUT_BYTES)
+    content_base64: str = Field(min_length=0, max_length=_PYTHON_ARTIFACT_MAX_B64)
+
+    @field_validator("filename", "tool_call_id")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        try:
+            return _validate_filename(value)
+        except SandboxBrokerError as exc:
+            raise ValueError("invalid artifact field") from exc
+
+    @field_validator("mime_type")
+    @classmethod
+    def validate_mime_type(cls, value: str | None) -> str | None:
+        if value is not None and not _MIME.fullmatch(value):
+            raise ValueError("mime type invalid")
+        return value.lower() if value else None
+
+    @model_validator(mode="after")
+    def validate_content(self) -> PythonArtifactRequest:
+        try:
+            content = base64.b64decode(self.content_base64, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError("content_base64 invalid") from exc
+        if len(content) != self.size_bytes:
+            raise ValueError("content size mismatch")
+        if not hmac.compare_digest(hashlib.sha256(content).hexdigest(), self.sha256):
+            raise ValueError("content hash mismatch")
+        return self
+
+
+def _capability_scope(value: str | None, *, name: str) -> str:
+    if not value or len(value) > 255 or any(ord(char) < 32 for char in value):
+        raise HTTPException(status_code=403, detail=f"{name} is invalid")
+    return value
+
+
+def _python_artifact_id(
+    *,
+    execution_id: str,
+    tool_call_id: str,
+    arguments_hash: str,
+    filename: str,
+    sha256: str,
+) -> str:
+    """Stable id for one output; content and filename changes must not replay."""
+
+    return "art_" + hashlib.sha256(
+        (
+            "python-output\0"
+            + execution_id
+            + "\0"
+            + tool_call_id
+            + "\0"
+            + arguments_hash
+            + "\0"
+            + filename
+            + "\0"
+            + sha256
+        ).encode("utf-8")
+    ).hexdigest()[:16]
 
 
 def _validate_input(item: Any) -> dict[str, Any]:
@@ -248,3 +331,184 @@ async def execute_python_capability(
         return await capability.execute(payload)
     except SandboxBrokerError as exc:
         raise HTTPException(status_code=424, detail=str(exc)) from None
+
+
+@router.post("/python/artifacts")
+async def put_python_artifact(
+    request: Request,
+    payload: dict[str, Any] = Body(...),
+    x_ai_platform_internal_token: str | None = Header(default=None),
+    x_ai_tenant_id: str | None = Header(default=None),
+    x_ai_user_id: str | None = Header(default=None),
+    x_ai_session_id: str | None = Header(default=None),
+    x_ai_execution_id: str | None = Header(default=None),
+    x_ai_run_id: str | None = Header(default=None),
+    x_ai_tool_call_id: str | None = Header(default=None),
+    x_ai_arguments_hash: str | None = Header(default=None),
+    x_ai_capability_proof: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Persist one isolated Python output without exposing storage credentials."""
+
+    expected_token = os.getenv("AI_PLATFORM_INTERNAL_TOKEN", "")
+    if not expected_token or not x_ai_platform_internal_token or not hmac.compare_digest(
+        x_ai_platform_internal_token, expected_token
+    ):
+        raise HTTPException(status_code=401, detail="internal authorization failed")
+    tenant = _capability_scope(x_ai_tenant_id, name="tenant")
+    user = _capability_scope(x_ai_user_id, name="user")
+    session = _capability_scope(x_ai_session_id, name="session")
+    if not x_ai_execution_id or not x_ai_run_id or not x_ai_tool_call_id:
+        raise HTTPException(status_code=401, detail="capability proof required")
+    try:
+        execution_id = uuid.UUID(x_ai_execution_id)
+        run_id = uuid.UUID(x_ai_run_id)
+    except ValueError:
+        raise HTTPException(status_code=401, detail="capability scope invalid") from None
+    if not x_ai_arguments_hash or not _ARGUMENTS_HASH.fullmatch(x_ai_arguments_hash):
+        raise HTTPException(status_code=401, detail="arguments hash required")
+    try:
+        verify_capability_proof(
+            os.getenv("AI_PLATFORM_CAPABILITY_PROOF_SECRET", ""),
+            x_ai_capability_proof or "",
+            method="POST",
+            path=_PYTHON_ARTIFACT_PATH,
+            body=payload,
+            tenant_id=tenant,
+            user_id=user,
+            session_id=session,
+            execution_id=x_ai_execution_id,
+            run_id=x_ai_run_id,
+        )
+    except CapabilityProofError:
+        raise HTTPException(status_code=401, detail="capability proof invalid") from None
+    try:
+        data = PythonArtifactRequest.model_validate(payload)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="invalid python output artifact") from None
+    if data.tool_call_id != x_ai_tool_call_id or data.arguments_hash != x_ai_arguments_hash:
+        raise HTTPException(status_code=403, detail="capability scope mismatch")
+
+    storage = get_artifact_storage()
+    database = getattr(storage, "database", None) if storage else None
+    pool = getattr(database, "_pool", None)
+    if storage is None or pool is None or not callable(getattr(storage, "create_artifact", None)):
+        raise HTTPException(status_code=503, detail="artifact storage unavailable")
+
+    try:
+        async with pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                """SELECT tenant_id, user_id, session_id, run_id, tool_call_id,
+                              arguments_sha256, capability_id, effect, approval_status, status
+                         FROM assistant_capability_executions
+                        WHERE execution_id = $1 AND tenant_id = $2 AND user_id = $3
+                          AND session_id = $4 AND run_id = $5
+                        FOR UPDATE""",
+                execution_id,
+                tenant,
+                user,
+                session,
+                run_id,
+            )
+            if (
+                not row
+                or row["tool_call_id"] != data.tool_call_id
+                or not isinstance(row["arguments_sha256"], str)
+                or not hmac.compare_digest(row["arguments_sha256"].strip(), data.arguments_hash[7:])
+            ):
+                raise HTTPException(status_code=403, detail="capability scope mismatch")
+            artifact_id = _python_artifact_id(
+                execution_id=x_ai_execution_id,
+                tool_call_id=data.tool_call_id,
+                arguments_hash=data.arguments_hash,
+                filename=data.filename,
+                sha256=data.sha256,
+            )
+            if row["capability_id"] != "execute_python_code":
+                raise HTTPException(status_code=403, detail="capability not authorized")
+            if (
+                row["effect"] != "write"
+                or row["approval_status"] != "consumed"
+                or row["status"] not in {"dispatched", "running"}
+            ):
+                raise HTTPException(status_code=403, detail="capability execution not active")
+
+            prior = await conn.fetch(
+                """SELECT artifact_id, filename, size_bytes
+                     FROM artifacts
+                    WHERE tenant_id = $1 AND user_id = $2 AND session_id = $3
+                      AND source = 'code_execution'
+                      AND metadata ->> 'execution_id' = $4
+                    FOR UPDATE""",
+                tenant,
+                user,
+                session,
+                x_ai_execution_id,
+            )
+            conflicting_name = next(
+                (
+                    item
+                    for item in prior
+                    if item["filename"] == data.filename and item["artifact_id"] != artifact_id
+                ),
+                None,
+            )
+            if conflicting_name:
+                raise HTTPException(status_code=409, detail="artifact filename conflict")
+            is_replay = any(item["artifact_id"] == artifact_id for item in prior)
+            if not is_replay and (
+                len(prior) >= MAX_OUTPUT_FILES
+                or sum(int(item["size_bytes"]) for item in prior) + data.size_bytes
+                > MAX_OUTPUT_BYTES
+            ):
+                raise HTTPException(status_code=413, detail="artifact output limit exceeded")
+
+            content = base64.b64decode(data.content_base64, validate=True)
+            suffix = data.filename.rpartition(".")[2].lower()
+            try:
+                artifact = await storage.create_artifact(
+                    session_id=session,
+                    tenant_id=tenant,
+                    user_id=user,
+                    type="code",
+                    format=suffix or "bin",
+                    title=data.filename,
+                    filename=data.filename,
+                    content=content,
+                    source="code_execution",
+                    metadata={
+                        "schema_version": "ai-platform/python-code-artifact/v1",
+                        "execution_id": x_ai_execution_id,
+                        "run_id": x_ai_run_id,
+                        "tool_call_id": data.tool_call_id,
+                        "arguments_hash": data.arguments_hash,
+                        "content_sha256": data.sha256,
+                        "requested_mime_type": data.mime_type,
+                    },
+                    artifact_id=artifact_id,
+                )
+            except ValueError as exc:
+                if "idempotency conflict" in str(exc):
+                    raise HTTPException(
+                        status_code=409, detail="artifact idempotency conflict"
+                    ) from None
+                raise
+            download_url = f"/api/v1/assistant/artifacts/{artifact.artifact_id}/download"
+            result = {
+                "artifact_id": str(artifact.artifact_id),
+                "download_url": download_url,
+                "filename": str(artifact.filename),
+                "mime_type": str(
+                    getattr(artifact, "mime_type", None)
+                    or data.mime_type
+                    or "application/octet-stream"
+                ),
+                "size_bytes": int(artifact.size_bytes),
+                "sha256": data.sha256,
+            }
+            return result
+    except HTTPException:
+        raise
+    except Exception:
+        # Upload can succeed while the durable execution receipt fails.  Do not
+        # acknowledge a write whose outcome the Runtime cannot safely recover.
+        raise HTTPException(status_code=502, detail="artifact persistence outcome unknown") from None

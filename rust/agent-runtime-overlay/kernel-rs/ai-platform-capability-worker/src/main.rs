@@ -19,6 +19,7 @@ use ai_platform_capability_worker::{
     local_node_broker::{LocalNodeBroker, UnavailableLocalNodeTransport},
     office_artifact_broker::{OfficeArtifactBrokerConfig, ReqwestOfficeArtifactStore},
     office_capabilities::OfficeCapabilityExecutor,
+    python_artifact_broker::{PythonArtifactBrokerConfig, ReqwestPythonArtifactStore},
     python_code_execution::{LocalPythonSandboxBroker, LocalPythonSandboxConfig},
 };
 use anyhow::Context;
@@ -227,6 +228,17 @@ async fn main() -> anyhow::Result<()> {
         })
         .context("configure Python sandbox")?,
     );
+    let python_artifact_store = Arc::new(
+        ReqwestPythonArtifactStore::new(
+            read_http_client.clone(),
+            PythonArtifactBrokerConfig {
+                gateway_url: args.gateway_url.clone(),
+                internal_token: args.internal_token.clone(),
+                proof_secret: args.proof_secret.clone(),
+            },
+        )
+        .context("configure Python artifact broker")?,
+    );
     let attachment_executor = Arc::new(
         AttachmentCapabilityBroker::new(
             read_http_client.clone(),
@@ -261,6 +273,7 @@ async fn main() -> anyhow::Result<()> {
     .with_read_executor(read_executor);
     let state = state
         .with_python_executor(python_executor)
+        .with_python_artifact_store(python_artifact_store)
         .with_attachment_executor(attachment_executor)
         .with_local_node_broker(local_node_broker);
     let state = if let Some(write_executor) = write_executor {

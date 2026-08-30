@@ -20,8 +20,9 @@ use crate::{
     external_write_capabilities::ExternalWriteExecutor, local_node_broker::LocalNodeBroker,
     office_capabilities::OfficeCapabilityExecutor,
     platform_catalog::worker_capability_catalog_with_writes,
-    python_code_execution::LocalPythonSandboxBroker, quiz_capabilities::QuizPersistenceAdapter,
-    read_capabilities::ReadCapabilityExecutor, write_capabilities::WriteCapabilityExecutor,
+    python_artifact_broker::PythonArtifactStore, python_code_execution::LocalPythonSandboxBroker,
+    quiz_capabilities::QuizPersistenceAdapter, read_capabilities::ReadCapabilityExecutor,
+    write_capabilities::WriteCapabilityExecutor,
 };
 
 mod catalog;
@@ -54,6 +55,7 @@ pub struct WorkerState {
     pub external_write_executor: Option<Arc<ExternalWriteExecutor>>,
     pub office_executor: Option<Arc<OfficeCapabilityExecutor>>,
     pub python_executor: Option<Arc<LocalPythonSandboxBroker>>,
+    pub python_artifact_store: Option<Arc<dyn PythonArtifactStore>>,
     pub attachment_executor: Option<Arc<AttachmentCapabilityBroker>>,
     pub local_node_broker: Option<Arc<LocalNodeBroker>>,
     /// Immutable descriptor registry.  It is constructed once at startup and
@@ -91,6 +93,7 @@ impl WorkerState {
             external_write_executor: None,
             office_executor: None,
             python_executor: None,
+            python_artifact_store: None,
             attachment_executor: None,
             local_node_broker: None,
             capability_registry: Arc::new({
@@ -138,6 +141,11 @@ impl WorkerState {
 
     pub fn with_python_executor(mut self, executor: Arc<LocalPythonSandboxBroker>) -> Self {
         self.python_executor = Some(executor);
+        self
+    }
+
+    pub fn with_python_artifact_store(mut self, store: Arc<dyn PythonArtifactStore>) -> Self {
+        self.python_artifact_store = Some(store);
         self
     }
 

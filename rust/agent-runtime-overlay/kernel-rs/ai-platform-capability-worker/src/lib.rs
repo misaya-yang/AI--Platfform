@@ -11,6 +11,7 @@ pub mod office_artifact_broker;
 pub mod office_capabilities;
 pub mod platform_catalog;
 pub mod postgres_store;
+pub mod python_artifact_broker;
 pub mod python_code_execution;
 pub mod quiz_capabilities;
 pub mod read_capabilities;
