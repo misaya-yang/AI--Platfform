@@ -609,6 +609,7 @@ class LiveTextGate:
             model_service=self.control.model_service,
             reasoning_option="auto",
             max_tokens=max_tokens,
+            enable_dynamic_tools=False,
         )
         turn = await self.control.start_turn(
             tenant_id=self.tenant_id,
@@ -620,6 +621,7 @@ class LiveTextGate:
             legacy_thinking_level=None,
             max_tokens=max_tokens,
             resolved_agent_launch=launch,
+            enable_dynamic_tools=False,
         )
         self.thread_id = turn.runtime_thread_id
         first_visible: float | None = None
