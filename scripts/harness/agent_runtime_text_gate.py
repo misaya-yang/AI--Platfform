@@ -3,8 +3,7 @@
 
 The gate starts disposable PostgreSQL and Runtime containers, hosts only the
 Gateway's private model plane on loopback, and executes simple, long, and
-restart-resumed multi-turn scenarios. Provider credentials are read at runtime
-and are never printed, copied into an image, or persisted in a receipt.
+restart-resumed multi-turn scenarios without printing or persisting credentials.
 """
 
 from __future__ import annotations
@@ -621,7 +620,6 @@ class LiveTextGate:
             legacy_thinking_level=None,
             max_tokens=max_tokens,
             resolved_agent_launch=launch,
-            enable_dynamic_tools=False,
         )
         self.thread_id = turn.runtime_thread_id
         first_visible: float | None = None
