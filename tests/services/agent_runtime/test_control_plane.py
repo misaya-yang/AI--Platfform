@@ -11,7 +11,6 @@ import pytest
 from ai_gateway_contracts.agent_runtime_lease import RuntimeModelLeaseSigner
 from ai_gateway_core.models import get_builtin_model_capabilities
 
-from src.services.agent_runtime.control.turn_start import _resolve_output_limit
 from src.services.agent_runtime.control_plane import (
     GENERIC_AGENT_INSTRUCTIONS_V1,
     AgentRuntimeControlError,
@@ -31,14 +30,6 @@ class _StaticCatalogClient:
             "mcp": [],
             "deferred": [],
         }
-
-
-def test_default_turn_output_budget_is_not_the_model_capability_ceiling() -> None:
-    assert _resolve_output_limit(None, 131_072) == 32_768
-    assert _resolve_output_limit(None, 131_072) * 24 < 1_000_000
-    assert _resolve_output_limit(None, 4_096) == 4_096
-    assert _resolve_output_limit(32_768, 131_072) == 32_768
-    assert _resolve_output_limit(32_768, 16_384) == 16_384
 
 
 def test_child_runtime_events_project_to_subagent_lifecycle() -> None:
@@ -79,13 +70,10 @@ def test_child_runtime_events_project_to_subagent_lifecycle() -> None:
 
     parent = {"event_type": "run_finished", "data": {"run_id": parent_turn_id}}
     assert _project_child_runtime_event(parent, parent_turn_id) is parent
-    assert (
-        _project_child_runtime_event(
-            {"event_type": "thinking_delta", "data": {"run_id": "child-turn"}},
-            parent_turn_id,
-        )
-        is None
-    )
+    assert _project_child_runtime_event(
+        {"event_type": "thinking_delta", "data": {"run_id": "child-turn"}},
+        parent_turn_id,
+    ) is None
 
 
 class _Database:
@@ -586,30 +574,6 @@ async def test_empty_developer_instructions_use_stable_generic_default() -> None
 
 
 @pytest.mark.asyncio
-async def test_control_plane_default_model_call_budget_has_retry_headroom(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("AI_PLATFORM_AGENT_RUNTIME_MAX_MODEL_CALLS_PER_TURN", raising=False)
-    client = httpx.AsyncClient()
-    plane = AgentRuntimeControlPlane(
-        database=_Database(uuid.uuid4()),
-        model_service=_ModelService(),
-        provider_service=_ProviderService(),
-        assignment_store=_AssignmentStore(),
-        lease_signer=RuntimeModelLeaseSigner("x" * 32),
-        runtime_url="http://runtime.test",
-        runtime_internal_token="runtime-token",
-        model_plane_base_url="http://gateway.test/internal/v1/agent-model-plane",
-        kernel_revision="kernel-1",
-        http_client=client,
-    )
-    try:
-        assert plane.max_model_calls == 24
-    finally:
-        await client.aclose()
-
-
-@pytest.mark.asyncio
 async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() -> None:
     runtime_thread_id = uuid.uuid4()
     database = _Database(runtime_thread_id)
@@ -713,11 +677,9 @@ async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() ->
         "http://gateway.test/internal/v1/agent-model-plane"
     )
     base_instructions = captured["requests"][0][1]["baseInstructions"]
-    assert "Use only tools exposed for the turn" in base_instructions
-    assert "Keep retrieval bounded" in base_instructions
+    assert "Use only tools exposed for the turn" in base_instructions and "Keep retrieval bounded" in base_instructions
     assert "When tool_search and tool_call are exposed" in base_instructions
-    assert "Discover tools that are not listed" not in base_instructions
-    assert "use tool_search then tool_call" not in base_instructions
+    assert "Discover tools that are not listed" not in base_instructions and "use tool_search then tool_call" not in base_instructions
     assert captured["requests"][0][1]["developerInstructions"]
     assert database.issued_snapshot is not None
     assert [

@@ -21,6 +21,7 @@ from .authorization import (
 
 logger = logging.getLogger("src.services.agent_runtime.model_plane")
 
+
 @dataclass(frozen=True, slots=True)
 class _ValidatedNativeTools:
     tools: list[dict[str, Any]]
@@ -215,28 +216,29 @@ def _native_responses_body(
         aliases=validated_tools.aliases,
         wire_aliases=validated_tools.wire_aliases,
     )
-    input_items = raw_input if isinstance(raw_input, list) else []
     has_tool_transcript = isinstance(raw_input, list) and any(
         isinstance(item, Mapping) and item.get("type") in {"function_call", "function_call_output"}
         for item in raw_input
     )
-    transcript_calls = [
-        item
-        for item in input_items
-        if isinstance(item, Mapping)
-        and item.get("type") == "function_call"
-        and isinstance(item.get("name"), str)
-    ]
-    kernel_only_transcript = bool(transcript_calls) and all(
-        _helpers._is_kernel_tool_identity(item.get("name"), item.get("namespace"))
-        for item in transcript_calls
-    )
-    allow_function_transcript = bool(function_tool_names) or kernel_only_transcript
+    transcript_prevalidated = False
+    allow_function_transcript = bool(function_tool_names)
+    if has_tool_transcript and not allow_function_transcript:
+        try:
+            _helpers._validate_tool_transcript(
+                wire_input,
+                allowed_tool_names=_helpers.KERNEL_TOOL_TRANSCRIPT_NAMES,
+                allowed_namespaced_tools=set(validated_tools.aliases.values()),
+            )
+        except AgentModelPlaneError:
+            pass
+        else:
+            transcript_prevalidated = True
+            allow_function_transcript = True
     _helpers._validate_phase2_responses_input(
         body,
         allow_tool_transcript=allow_function_transcript,
     )
-    if has_tool_transcript:
+    if has_tool_transcript and not transcript_prevalidated:
         _helpers._validate_tool_transcript(
             wire_input,
             allowed_tool_names=function_tool_names | _helpers.KERNEL_TOOL_TRANSCRIPT_NAMES,
@@ -274,7 +276,6 @@ def _native_responses_body(
             result[key] = value
     _apply_reasoning_wire(result, profile, reasoning_option)
     return result, validated_tools.aliases
-
 
 
 async def _stream_native_responses(

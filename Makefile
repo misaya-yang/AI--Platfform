@@ -619,6 +619,7 @@ gateway-unit-gate:          ## Gateway 离线单元门禁: 排除 integration �
 		tests/core \
 		tests/contract \
 		tests/harness \
+		tests/scripts/test_topology_modes.py \
 		tests/services/eval \
 		tests/services/agent_runtime \
 		tests/services/assistant

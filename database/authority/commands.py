@@ -9,11 +9,14 @@ Flow of ``command_migrate`` for a database without a baseline marker:
    ``schema.sql`` and the historical chain are never replayed;
 2. non-empty database guard: an unknown database without any platform object is
    refused (the authority never mistakes foreign data for a legacy install);
-3. legacy base schema: ``database/schema.sql`` is applied when the required objects
-   are missing (same rule as ``ensure_base_schema`` in migrate.sh);
-4. legacy chain: the historical ``002…112`` files are executed by the
+3. legacy base schema: required platform objects must already exist; the
+   authority never replays ``database/schema.sql`` into a non-empty database;
+4. legacy chain: when an existing ledger identifies the history, the
+   historical ``002…112`` files are executed by the
    authority's native executor, recorded in whichever legacy ledger shape
-   the database already carries (filename ledger created when none exists);
+   the database already carries; a ledgerless ``schema.sql`` bootstrap is
+   preserved and proven only by convergence postconditions plus all four
+   frozen fingerprints — no synthetic legacy rows are created;
 5. per-service track: topped up ONLY on databases that already carry
    ``public.schema_migrations_meta``;
 6. cutover + adoption (when the baseline files are frozen and adoption is
@@ -260,18 +263,39 @@ async def command_migrate(
                     _write_migration_evidence(result, reconciliation_evidence_out)
                     return result
                 await _guard_known_database(conn)
-                try:
-                    _, _, reconciliation_receipt = await legacy.apply_legacy_chain(
-                        conn, paths, log=log
+                legacy_state = await detect_legacy_state(conn)
+                ledgerless_schema = not legacy_state.has_any
+                if ledgerless_schema:
+                    if baseline is None:
+                        raise AuthorityBlockedError(
+                            "existing platform schema has no legacy ledger and no frozen "
+                            "baseline is available for fingerprint reconciliation; refusing "
+                            "to replay schema.sql or guess historical migrations"
+                        )
+                    if not allow_adoption:
+                        raise AuthorityBlockedError(
+                            "ledgerless schema reconciliation cannot stop before adoption; "
+                            "convergence, four-fingerprint verification, and the immutable "
+                            "baseline marker must complete in one successful authority plan"
+                        )
+                    log(
+                        "authority: ledgerless schema bootstrap detected; preserving existing "
+                        "objects for convergence and four-fingerprint proof (no legacy rows "
+                        "synthesized)"
                     )
-                except NumericReconciliationBlocked as exc:
-                    log("authority: numeric reconciliation BLOCKED:\n" + exc.receipt.to_json())
-                    _write_migration_evidence(
-                        MigrationCommandResult(1, exc.receipt),
-                        reconciliation_evidence_out,
-                    )
-                    raise
-                await legacy.apply_per_service_chain(conn, paths, log=log)
+                else:
+                    try:
+                        _, _, reconciliation_receipt = await legacy.apply_legacy_chain(
+                            conn, paths, log=log
+                        )
+                    except NumericReconciliationBlocked as exc:
+                        log("authority: numeric reconciliation BLOCKED:\n" + exc.receipt.to_json())
+                        _write_migration_evidence(
+                            MigrationCommandResult(1, exc.receipt),
+                            reconciliation_evidence_out,
+                        )
+                        raise
+                    await legacy.apply_per_service_chain(conn, paths, log=log)
                 if baseline is None or not allow_adoption:
                     result = MigrationCommandResult(0, reconciliation_receipt)
                     _write_migration_evidence(result, reconciliation_evidence_out)
@@ -283,6 +307,7 @@ async def command_migrate(
                         baseline,
                         manifest_sha,
                         reconciliation_receipt=reconciliation_receipt,
+                        allow_ledgerless_schema=ledgerless_schema,
                         log=log,
                     )
                 except NumericReconciliationBlocked as exc:
@@ -329,6 +354,7 @@ async def _cutover_and_adopt(
     manifest_sha: str,
     *,
     reconciliation_receipt: NumericReconciliationReceipt | None = None,
+    allow_ledgerless_schema: bool = False,
     log: Any = print,
 ) -> None:
     """Cut a completed legacy database over to the baseline, then adopt.
@@ -352,6 +378,7 @@ async def _cutover_and_adopt(
         conn,
         paths,
         reconciliation_receipt=reconciliation_receipt,
+        allow_ledgerless_schema=allow_ledgerless_schema,
         log=log,
     )
 
@@ -392,10 +419,12 @@ async def _cutover_and_adopt(
         _validate_adoption_marker(adopted, baseline, manifest_sha)
         log(f"authority: baseline already adopted ({computed['already_adopted']})")
     else:
-        log(
-            f"authority: baseline {baseline.baseline_id} adopted; "
-            "legacy ledgers frozen as historical evidence"
+        history = (
+            "ledgerless bootstrap preserved without synthetic legacy rows"
+            if allow_ledgerless_schema
+            else "legacy ledgers frozen as historical evidence"
         )
+        log(f"authority: baseline {baseline.baseline_id} adopted; {history}")
 
 
 async def _verify_legacy_cutover_ready(
@@ -403,14 +432,23 @@ async def _verify_legacy_cutover_ready(
     paths: AuthorityPaths,
     *,
     reconciliation_receipt: NumericReconciliationReceipt | None = None,
+    allow_ledgerless_schema: bool = False,
     log: Any = print,
 ) -> NumericReconciliationReceipt | None:
     """Read-only proof required by both admin ownership prep and adoption."""
     state = await detect_legacy_state(conn)
     if not state.has_any:
+        if allow_ledgerless_schema and await legacy.base_schema_present(conn):
+            log(
+                "authority: ledgerless schema source accepted for read-only object "
+                "reconciliation; convergence postconditions and frozen fingerprints "
+                "remain authoritative"
+            )
+            return reconciliation_receipt
         raise AuthorityBlockedError(
             "no legacy ledger present at adoption time; the compatibility "
-            "runner must complete the chain before the baseline marker"
+            "runner must complete the chain before the baseline marker, or an "
+            "explicit ledgerless schema reconciliation must prove the frozen baseline"
         )
 
     migrations = discover_legacy_migrations(paths.migrations_root)
@@ -479,13 +517,17 @@ async def command_prepare_cutover_ownership(
                     "admin ownership cutover is forbidden on an empty database"
                 )
             await _guard_known_database(conn)
-            receipt = await _verify_legacy_cutover_ready(conn, authority.paths, log=log)
+            receipt = await _verify_legacy_cutover_ready(
+                conn,
+                authority.paths,
+                allow_ledgerless_schema=True,
+                log=log,
+            )
             await provision_roles_admin(conn, authority.paths, authority.role_prefix)
             await provision_extensions_admin(conn, authority.paths)
             await run_baseline_sql_file(
                 conn,
-                authority.paths.baseline_dir(baseline.baseline_id)
-                / "cutover_convergence.sql",
+                authority.paths.baseline_dir(baseline.baseline_id) / "cutover_convergence.sql",
                 role_prefix=authority.role_prefix,
             )
         finally:
@@ -589,6 +631,29 @@ async def command_status(authority: MigrationAuthority, *, log: Any = print) -> 
     finally:
         await conn.close()
     return 0
+
+
+async def command_source_kind(authority: MigrationAuthority, *, log: Any = print) -> int:
+    """Print one stable, read-only source classification for deploy orchestration."""
+    conn = await authority.connect(read_only=True)
+    try:
+        if await authority.adopted_baseline(conn) is not None:
+            log("adopted")
+            return 0
+        if await database_empty(conn, allowed_empty_schemas=tuple(PLATFORM_SCHEMAS)):
+            log("empty")
+            return 0
+        await _guard_known_database(conn)
+        state = await detect_legacy_state(conn)
+        if state.has_any:
+            log("tracked-legacy")
+            return 0
+        if await legacy.base_schema_present(conn):
+            log("ledgerless-platform")
+            return 0
+        raise AuthorityBlockedError("database source cannot be classified safely")
+    finally:
+        await conn.close()
 
 
 async def command_verify(

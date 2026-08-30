@@ -14,6 +14,13 @@ from knowledge_service.services.knowledge.retrieval_service import RetrievalServ
 from knowledge_service.services.knowledge.text_reranker import RerankResult
 from knowledge_service.services.knowledge.vector_store import CollectionReadAuthorityError
 
+from tests.services.knowledge.retrieve_batch_support import (
+    FakeDatabase as FakeDatabase,
+)
+from tests.services.knowledge.retrieve_batch_support import (
+    make_bm25_service as _make_bm25_service,
+)
+
 
 def _mock_result(query: str, metadata: dict | None = None) -> SimpleNamespace:
     return SimpleNamespace(
@@ -48,69 +55,6 @@ class RejectedReadAuthorityStore:
 
     async def require_collection_readable(self, *_args, **_kwargs):
         raise CollectionReadAuthorityError(self.reason)
-
-
-class FakeDatabase:
-    def __init__(self, rows):
-        self.rows = rows
-        self.calls = []
-
-    async def search_segments_text(self, **kwargs):
-        self.calls.append(kwargs)
-        return self.rows
-
-    async def filter_active_segment_ids(self, *, segment_ids, **_kwargs):
-        return set(segment_ids)
-
-
-def _make_bm25_service(rows):
-    async def _require_dataset_access(user, dataset_id, required="viewer"):
-        return {
-            "dataset_id": dataset_id,
-            "tenant_id": "tenant-a",
-            "collection_name": "kb-demo-collection",
-            "index_config": {},
-            "embedding_provider": "local",
-            "embedding_model": "hash-384",
-        }
-
-    async def _get_presigned_image_url(_raw_url, _segment_id):
-        return None
-
-    database = FakeDatabase(rows)
-    svc = RetrievalService(
-        SimpleNamespace(
-            knowledge=SimpleNamespace(
-                retrieval_query_max_concurrency=2,
-                dashscope=SimpleNamespace(api_key=None),
-            )
-        ),
-        database,
-    )
-    svc.vector_store = ReadableVectorStore()
-    svc._ks = SimpleNamespace(
-        require_dataset_access=_require_dataset_access,
-        _resolve_fusion_config=lambda **kwargs: {
-            "method": "rrf",
-            "dense_weight": kwargs.get("dense_weight")
-            if kwargs.get("dense_weight") is not None
-            else 0.5,
-            "bm25_weight": kwargs.get("bm25_weight")
-            if kwargs.get("bm25_weight") is not None
-            else 0.5,
-            "rrf_k": 60,
-        },
-        _is_multimodal_dataset=lambda _dataset: False,
-        _should_apply_score_threshold=lambda _mode: False,
-        _filter_candidates_by_metadata=lambda candidates, source_type, language, metadata: (
-            KnowledgeService._filter_candidates_by_metadata(
-                None, candidates, source_type, language, metadata
-            )
-        ),
-        _get_presigned_image_url=_get_presigned_image_url,
-        _normalize_local_image_url=lambda raw_url, _segment_id: raw_url,
-    )
-    return svc, database
 
 
 class RecallProbe:
@@ -1293,6 +1237,52 @@ async def test_retrieve_batch_keeps_successful_candidates_after_partial_failure(
     ]
     assert "broken" in batch_results[0]["meta"]["recall_errors"]
     assert meta["total_results"] == 1
+
+
+@pytest.mark.asyncio
+async def test_retrieve_batch_does_not_turn_pipeline_failure_into_empty_success():
+    svc = object.__new__(RetrievalService)
+
+    async def _require_dataset_access(_user, dataset_id, required="viewer"):
+        assert required == "viewer"
+        return _readable_dataset(dataset_id)
+
+    async def _failed_retrieval(**_kwargs):
+        raise RuntimeError("vector dependency unavailable")
+
+    svc._ks = SimpleNamespace(require_dataset_access=_require_dataset_access)
+    svc.vector_store = ReadableVectorStore()
+    svc._retrieve_queries = _failed_retrieval
+
+    with pytest.raises(RuntimeError, match="knowledge batch retrieval failed"):
+        await RetrievalService.retrieve_batch(
+            svc,
+            user=SimpleNamespace(),
+            dataset_id="kb-demo",
+            queries=["real query"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_retrieve_batch_fails_when_every_recall_path_errors():
+    svc, _ = _make_bm25_service([])
+
+    class FailedDatabase:
+        async def search_segments_text(self, **_kwargs):
+            raise RuntimeError("postgres unavailable")
+
+    svc.db = FailedDatabase()
+
+    with pytest.raises(RuntimeError, match="knowledge batch retrieval failed"):
+        await svc.retrieve_batch(
+            user=SimpleNamespace(),
+            dataset_id="kb-demo",
+            queries=["real query"],
+            top_k=5,
+            mode="bm25",
+            rerank=False,
+            mmr=False,
+        )
 
 
 @pytest.mark.asyncio

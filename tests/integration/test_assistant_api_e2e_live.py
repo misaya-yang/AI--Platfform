@@ -199,8 +199,6 @@ def _approve_runtime_event(
     token: str,
     event: dict[str, Any],
 ) -> None:
-    """Decide an approval immediately so the active Runtime stream can continue."""
-
     approval_data = event.get("data")
     assert isinstance(approval_data, dict), event
     approval_id = str(approval_data.get("approval_id") or "")

@@ -21,7 +21,6 @@ router = APIRouter(prefix="/admin/architecture-status", tags=["administration"])
 TOPOLOGY_PATH = Path(__file__).resolve().parents[2] / "core/data/service_topology.json"
 HEALTHY_STATUS = {"healthy", "ready", "ok"}
 DEGRADED_STATUS = {
-    "degraded",
     "disabled",
     "draining",
     "error",
@@ -101,6 +100,8 @@ def _normalized_status(value: Any) -> str:
     status = str(value or "unknown").strip().lower()
     if status in HEALTHY_STATUS:
         return "healthy"
+    if status == "degraded":
+        return "degraded"
     if status in DEGRADED_STATUS or status.startswith(("error:", "status_")):
         return "unavailable"
     return "unknown"
@@ -213,12 +214,10 @@ async def architecture_status(
                         if required
                         else "optional_dependency_degraded"
                     )
-        if (
-            row.active_in_mode
-            and row.lifecycle == "long-running"
-            and row.status != "healthy"
-        ):
+        if row.active_in_mode and row.lifecycle == "long-running" and row.status != "healthy":
             reasons.add("health_contract_degraded")
+        if row.status == "healthy" and "optional_dependency_degraded" in reasons:
+            row.status = "degraded"
         row.dependencies = dependencies
         row.degraded_reasons = sorted(reasons)
 

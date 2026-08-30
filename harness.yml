@@ -293,7 +293,7 @@ gates:
   gateway_units:
     make: gateway-unit-gate
     purpose: Offline Gateway unit suites (integration-marked and KB/DB suites excluded).
-    triggers: ["src/**", "tests/unit/**", "tests/api/**", "tests/core/**", "tests/contract/**", "tests/harness/**", "tests/services/eval/**", "tests/services/agent_runtime/**", "tests/services/assistant/**"]
+    triggers: ["src/**", "scripts/deploy/**", "scripts/harness/**", "scripts/release/**", "tests/unit/**", "tests/api/**", "tests/core/**", "tests/contract/**", "tests/harness/**", tests/scripts/test_topology_modes.py, "tests/services/eval/**", "tests/services/agent_runtime/**", "tests/services/assistant/**"]
     tier: L1
     required_on: [change, release]
     resource: offline

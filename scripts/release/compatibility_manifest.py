@@ -116,8 +116,14 @@ def _database(root: Path) -> dict[str, Any]:
     baseline = root / f"database/baselines/{baseline_id}/manifest.json"
     epoch = root / f"database/migrations/{baseline_id}/manifest.yml"
     roles = root / "database/bootstrap/roles.sql"
-    grants = root / "database/bootstrap/grants.sql"
-    grants_revision = _canonical_sha({"roles": _sha(roles), "grants": _sha(grants)})
+    grants = root / f"database/baselines/{baseline_id}/grants.sql"
+    roles_sha = _sha(roles)
+    grants_sha = _sha(grants)
+    grants_revision = (
+        _canonical_sha({"roles": roles_sha, "grants": grants_sha})
+        if roles_sha and grants_sha
+        else None
+    )
     return {
         "baseline_id": baseline_id,
         "baseline_manifest_sha256": _sha(baseline),
@@ -126,13 +132,17 @@ def _database(root: Path) -> dict[str, Any]:
     }
 
 
-def _compose_revision(root: Path, files: tuple[str, ...]) -> str:
-    return _canonical_sha({name: _sha(root / name) for name in files})
+def _compose_revision(root: Path, files: tuple[str, ...]) -> str | None:
+    digests = {name: _sha(root / name) for name in files}
+    if any(digest is None for digest in digests.values()):
+        return None
+    return _canonical_sha(digests)
 
 
 def _release_evidence(root: Path) -> dict[str, Any]:
     files = {
         "matrix": "deploy/release/release-rollback-matrix.json",
+        "integration_gates": "deploy/release/integration-gates.json",
         "retirement_manifest": "deploy/release/historical-plan-retirement.json",
         "matrix_schema": "deploy/release/schemas/release-rollback-matrix-v1.schema.json",
         "receipt_schema": "deploy/release/schemas/integration-gate-receipt-v1.schema.json",
@@ -155,13 +165,6 @@ def build_offline(root: Path) -> dict[str, Any]:
     )
     bm25_text = bm25_source.read_text(encoding="utf-8") if bm25_source.is_file() else ""
     bm25_match = re.search(r'^BM25_V2_ENCODER_CONTRACT_VERSION\s*=\s*"([^"]+)"', bm25_text, re.M)
-    topology_files = (
-        "docker-compose.yml",
-        "docker-compose.dev.yml",
-        "docker-compose.build.yml",
-        "docker-compose.kbms.yml",
-        "docker-compose.capability.yml",
-    )
     return {
         "runtime_overlay": {
             "lock": "deploy/agent-runtime-source/lock.json",
@@ -185,12 +188,12 @@ def build_offline(root: Path) -> dict[str, Any]:
         },
         "topology": {
             "compact_profile_revision": _compose_revision(
-                root, ("docker-compose.yml", "docker-compose.dev.yml")
+                root, ("docker-compose.yml", "docker-compose.compact.yml")
             ),
-            "scale_profile_revision": _compose_revision(root, topology_files),
-            "service_topology_revision": _sha(
-                root / "docs/architecture/baselines/2026-08-post-rag/service-topology.json"
+            "scale_profile_revision": _compose_revision(
+                root, ("docker-compose.yml", "docker-compose.scale.yml")
             ),
+            "service_topology_revision": _sha(root / "src/core/data/service_topology.json"),
             "data_access_revision": _sha(
                 root / "docs/architecture/baselines/2026-08-post-rag/data-access-inventory.json"
             ),

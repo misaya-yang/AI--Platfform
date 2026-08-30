@@ -193,7 +193,11 @@ class BootstrapConnection:
                     "rolcreaterole": False,
                     "rolreplication": False,
                     "rolbypassrls": False,
-                    "rolconfig": ["search_path=pg_catalog, gateway, assistant, knowledge, public"],
+                    "rolconfig": [
+                        "search_path=pg_catalog, knowledge, gateway, assistant, public"
+                        if name.endswith(("knowledge_api", "knowledge_worker"))
+                        else "search_path=pg_catalog, gateway, assistant, knowledge, public"
+                    ],
                     "memberships": [owner] if name.endswith("migrator") else [],
                 }
                 for name in names
@@ -313,16 +317,12 @@ async def test_fresh_install_rolls_back_partial_init_and_is_reentrant(
     assert statements[extension_index + 1] == "RESET ROLE"
 
     executed_schema_statements = [
-        statement
-        for statement in conn.executed
-        if not statement[0].startswith("SET LOCAL ROLE")
+        statement for statement in conn.executed if not statement[0].startswith("SET LOCAL ROLE")
     ]
     rerun = await bootstrap.fresh_install(conn, paths, baseline, "5" * 64)
     assert rerun == baseline.fingerprints
     assert [
-        statement
-        for statement in conn.executed
-        if not statement[0].startswith("SET LOCAL ROLE")
+        statement for statement in conn.executed if not statement[0].startswith("SET LOCAL ROLE")
     ] == executed_schema_statements
 
 

@@ -17,6 +17,17 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
+try:
+    from scripts.release.release_evidence import (
+        ReleaseEvidenceError,
+        validate_integration_receipt,
+    )
+except ModuleNotFoundError:  # direct ``python scripts/release/...`` Make target
+    from release_evidence import (  # type: ignore[no-redef]
+        ReleaseEvidenceError,
+        validate_integration_receipt,
+    )
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SPEC = ROOT / "deploy/release/integration-gates.json"
 SCHEMA = "ai-platform/integration-gates/v1"
@@ -75,6 +86,33 @@ def load_spec(path: Path) -> dict[str, Any]:
                 raise IntegrationGateError(
                     f"fresh database DSNs must be explicit required environment names: {gate_id}"
                 )
+        external = gate.get("external_receipt")
+        if external is not None:
+            if not isinstance(external, dict) or set(external) != {
+                "env",
+                "gate",
+                "commands",
+            }:
+                raise IntegrationGateError(f"invalid external receipt contract: {gate_id}")
+            receipt_env = external["env"]
+            receipt_gate = external["gate"]
+            receipt_commands = external["commands"]
+            if (
+                not isinstance(receipt_env, str)
+                or ENV_NAME.fullmatch(receipt_env) is None
+                or receipt_env not in required_env
+                or not isinstance(receipt_gate, str)
+                or not receipt_gate
+                or not isinstance(receipt_commands, list)
+                or not receipt_commands
+                or not all(
+                    isinstance(command, list)
+                    and command
+                    and all(isinstance(value, str) and value for value in command)
+                    for command in receipt_commands
+                )
+            ):
+                raise IntegrationGateError(f"invalid external receipt contract: {gate_id}")
         ids: set[str] = set()
         for step in gate["steps"]:
             if not isinstance(step, dict) or not isinstance(step.get("id"), str):
@@ -297,6 +335,37 @@ def _step_record(
     }
 
 
+def _verify_external_receipt(
+    contract: dict[str, Any],
+    *,
+    release_id: str | None,
+    source_sha: str,
+) -> str:
+    """Validate fresh-machine evidence before local database checks run."""
+
+    path = Path(os.environ[contract["env"]])
+    if path.is_symlink() or not path.is_file():
+        raise IntegrationGateError("external fresh-runtime receipt is unavailable")
+    receipt = _load(path, "external fresh-runtime receipt")
+    try:
+        validate_integration_receipt(
+            receipt,
+            expected_gate=contract["gate"],
+            release_id=release_id,
+            source_git_sha=source_sha,
+            require_pass=True,
+        )
+    except ReleaseEvidenceError as exc:
+        raise IntegrationGateError("external fresh-runtime receipt is invalid") from exc
+    executed = {tuple(step["command"]) for step in receipt["steps"]}
+    missing = [command for command in contract["commands"] if tuple(command) not in executed]
+    if missing:
+        raise IntegrationGateError(
+            "external fresh-runtime receipt omits required quickstart checks"
+        )
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _failure(record: dict[str, Any]) -> tuple[str, int] | None:
     if record["exit_code"] == 0 and record["skip_markers"] == 0:
         return None
@@ -426,6 +495,34 @@ def _run_fresh_gate(
         "cleanup_result": "pending",
     }
     outcome: tuple[str, int] | None = None
+
+    external = gate.get("external_receipt")
+    if isinstance(external, dict):
+        verify_started = time.monotonic()
+        try:
+            output = _verify_external_receipt(
+                external,
+                release_id=receipt.get("release_id"),
+                source_sha=source_sha,
+            )
+            verify_exit = 0
+        except IntegrationGateError:
+            output = "external fresh-runtime receipt validation failed"
+            verify_exit = 2
+        verify_record = _step_record(
+            "fresh-runtime-receipt",
+            ["verify-external-receipt", str(external["gate"])],
+            verify_exit,
+            output,
+            verify_started,
+        )
+        receipt["steps"].append(verify_record)
+        outcome = _failure(verify_record)
+        if outcome is not None:
+            receipt["result"], return_code = outcome
+            receipt["duration_seconds"] = round(time.monotonic() - started, 3)
+            _write(receipt_path, receipt)
+            return return_code
 
     setup_started = time.monotonic()
     setup_exit, setup_output = _fresh_control(

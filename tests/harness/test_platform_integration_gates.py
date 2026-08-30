@@ -124,6 +124,16 @@ def test_checked_in_gate_manifest_has_real_commands_and_no_cycles() -> None:
         "admin_dsn_env": "AI_PLATFORM_FRESH_DATABASE_ADMIN_DSN",
         "migrator_dsn_env": "AI_PLATFORM_FRESH_DATABASE_MIGRATOR_DSN",
     }
+    assert fresh["external_receipt"] == {
+        "env": "AI_PLATFORM_FRESH_RUNTIME_RECEIPT",
+        "gate": "fresh-runtime",
+        "commands": [
+            ["make", "quickstart"],
+            ["make", "validate"],
+            ["make", "status"],
+            ["python3", "-m", "scripts.release.version_agreement_gate"],
+        ],
+    }
     commands = [step["command"] for step in fresh["steps"]]
     assert ["make", "quickstart"] not in commands
     assert [command[-1] for command in commands] == ["init-fresh", "verify", "fingerprint"]
@@ -249,3 +259,63 @@ def test_fresh_database_target_is_generated_and_never_the_main_database() -> Non
     ).endswith(f"/{name}?sslmode=disable")
     with pytest.raises(integration_gates.IntegrationGateError, match="non-generated"):
         integration_gates._validate_fresh_database_name("gateway")
+
+
+def test_external_fresh_runtime_receipt_is_candidate_bound_and_complete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_sha = "e" * 40
+    release_id = "platform-test-release"
+    contract = {
+        "env": "FRESH_RUNTIME_RECEIPT",
+        "gate": "fresh-runtime",
+        "commands": [["make", "quickstart"], ["make", "validate"], ["make", "status"]],
+    }
+    path = tmp_path / "fresh-runtime.json"
+    monkeypatch.setenv(contract["env"], str(path))
+    payload = {
+        "schema_version": "ai-platform/integration-gate-receipt/v1",
+        "gate": contract["gate"],
+        "release_id": release_id,
+        "source_git_sha": source_sha,
+        "result": "pass",
+        "unexpected_skips": 0,
+        "steps": [
+            {
+                "command": contract["commands"][0],
+                "exit_code": 0,
+                "skip_markers": 0,
+                "output_sha256": "1" * 64,
+            }
+        ],
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        integration_gates.IntegrationGateError,
+        match="omits required quickstart checks",
+    ):
+        integration_gates._verify_external_receipt(
+            contract,
+            release_id=release_id,
+            source_sha=source_sha,
+        )
+
+    payload["steps"] = [
+        {
+            "command": command,
+            "exit_code": 0,
+            "skip_markers": 0,
+            "output_sha256": "2" * 64,
+        }
+        for command in contract["commands"]
+    ]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    digest = integration_gates._verify_external_receipt(
+        contract,
+        release_id=release_id,
+        source_sha=source_sha,
+    )
+    assert len(digest) == 64

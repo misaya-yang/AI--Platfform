@@ -43,7 +43,34 @@ def test_offline_projection_covers_every_required_revision_family() -> None:
     assert offline["runtime_overlay"]["upstream_sha"]
     assert offline["contracts"]["openapi_sha256"]
     assert offline["topology"]["evidence_policy_revision"]
+    assert offline["database"]["grants_revision"]
+    assert offline["topology"]["compact_profile_revision"] == compatibility._compose_revision(
+        ROOT, ("docker-compose.yml", "docker-compose.compact.yml")
+    )
+    assert offline["topology"]["scale_profile_revision"] == compatibility._compose_revision(
+        ROOT, ("docker-compose.yml", "docker-compose.scale.yml")
+    )
+    assert offline["topology"]["service_topology_revision"] == compatibility._sha(
+        ROOT / "src/core/data/service_topology.json"
+    )
+    assert offline["release_evidence"]["integration_gates_sha256"] == compatibility._sha(
+        ROOT / "deploy/release/integration-gates.json"
+    )
     assert offline["toolchains"] == {"python_major": "3", "node_major": "22", "rust": "1.95.0"}
+
+
+def test_missing_compose_or_grant_inputs_cannot_produce_a_revision(tmp_path: Path) -> None:
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    assert (
+        compatibility._compose_revision(
+            tmp_path, ("docker-compose.yml", "docker-compose.scale.yml")
+        )
+        is None
+    )
+
+    (tmp_path / "database/bootstrap").mkdir(parents=True)
+    (tmp_path / "database/bootstrap/roles.sql").write_text("SELECT 1;\n", encoding="utf-8")
+    assert compatibility._database(tmp_path)["grants_revision"] is None
 
 
 def test_complete_candidate_requires_zero_skip_release_bound_receipts(

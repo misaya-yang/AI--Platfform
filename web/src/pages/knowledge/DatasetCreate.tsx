@@ -6,18 +6,18 @@
  * 2. Select Data - Upload files / URL
  * 3. Index Settings - Chunking, retrieval config
  */
-
 import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 import { message } from "antd";
-import { AlertCircle, ArrowLeft, ArrowRight, Check, Loader2 } from "lucide-react";
+import { ArrowLeft, ArrowRight, Check, Loader2 } from "lucide-react";
 
 import { createDataset, createDocumentFromUrl, uploadDocument } from "@/api/knowledge";
 import { Button } from "@/components/ui/button";
 import { DatasetCreateBasicStep } from "@/pages/knowledge/create/DatasetCreateBasicStep";
 import { DatasetCreateIndexStep } from "@/pages/knowledge/create/DatasetCreateIndexStep";
 import { DatasetCreateSourcesStep } from "@/pages/knowledge/create/DatasetCreateSourcesStep";
+import { SourceUploadFailureAlert } from "@/pages/knowledge/create/SourceUploadFailureAlert";
 import {
   EMBEDDING_MODELS,
   MAX_FILE_SIZE,
@@ -26,7 +26,6 @@ import {
   SUPPORTED_FILE_EXTENSIONS,
   URL_PATTERN,
   getSourceUploadError,
-  listFailedSources,
   type KBType,
   type PendingFile,
   type PendingUrl,
@@ -66,12 +65,6 @@ export default function DatasetCreatePage() {
   const [rerankModel, setRerankModel] = useState("default");
   const [scoreThreshold, setScoreThreshold] = useState(DEFAULT_RETRIEVAL_CONFIG.score_threshold);
   const [maxRecall, setMaxRecall] = useState(DEFAULT_RETRIEVAL_CONFIG.top_k);
-
-  const failedSources = listFailedSources(
-    pendingFiles,
-    pendingUrls,
-    t("knowledge.create.uploadFailed")
-  );
 
   const handleChunkingModeSelect = useCallback((mode: ChunkingMode) => {
     setChunkingMode(mode);
@@ -401,31 +394,12 @@ export default function DatasetCreatePage() {
       </div>
 
       <div className="max-w-4xl mx-auto px-4 py-6 sm:px-6 sm:py-8">
-        {error && (
-          <div
-            className="mb-6 p-4 bg-red-500/10 dark:bg-red-500/15 border border-red-500/20 rounded-lg flex items-start gap-3"
-            role="alert"
-          >
-            <AlertCircle className="h-5 w-5 text-red-500 shrink-0 mt-0.5" />
-            <div className="min-w-0">
-              <p className="text-sm font-medium text-red-800 dark:text-red-300">
-                {createdDatasetId
-                  ? t("knowledge.create.partialUploadTitle")
-                  : t("knowledge.create.createFailed")}
-              </p>
-              <p className="text-sm text-red-600 dark:text-red-400 mt-1">{error}</p>
-              {failedSources.length > 0 && (
-                <ul className="mt-3 space-y-1 text-sm text-red-700 dark:text-red-300">
-                  {failedSources.map((source) => (
-                    <li key={source.key} className="break-words">
-                      <span className="font-medium">{source.name}</span>: {source.error}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </div>
-        )}
+        <SourceUploadFailureAlert
+          error={error}
+          datasetCreated={Boolean(createdDatasetId)}
+          files={pendingFiles}
+          urls={pendingUrls}
+        />
 
         {step === 1 && (
           <DatasetCreateBasicStep

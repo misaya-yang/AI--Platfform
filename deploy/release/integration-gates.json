@@ -31,10 +31,20 @@
     },
     "fresh-install": {
       "tier": "L3",
-      "required_env": ["AI_PLATFORM_RELEASE_LIVE_AUTHORIZED", "AI_PLATFORM_COMPATIBILITY_MANIFEST_PATH", "AI_PLATFORM_FRESH_DATABASE_ADMIN_DSN", "AI_PLATFORM_FRESH_DATABASE_MIGRATOR_DSN"],
+      "required_env": ["AI_PLATFORM_RELEASE_LIVE_AUTHORIZED", "AI_PLATFORM_COMPATIBILITY_MANIFEST_PATH", "AI_PLATFORM_FRESH_DATABASE_ADMIN_DSN", "AI_PLATFORM_FRESH_DATABASE_MIGRATOR_DSN", "AI_PLATFORM_FRESH_RUNTIME_RECEIPT"],
       "fresh_database": {
         "admin_dsn_env": "AI_PLATFORM_FRESH_DATABASE_ADMIN_DSN",
         "migrator_dsn_env": "AI_PLATFORM_FRESH_DATABASE_MIGRATOR_DSN"
+      },
+      "external_receipt": {
+        "env": "AI_PLATFORM_FRESH_RUNTIME_RECEIPT",
+        "gate": "fresh-runtime",
+        "commands": [
+          ["make", "quickstart"],
+          ["make", "validate"],
+          ["make", "status"],
+          ["python3", "-m", "scripts.release.version_agreement_gate"]
+        ]
       },
       "steps": [
         {"id": "authority-init-fresh", "command": ["uv", "run", "--extra", "database", "python", "-m", "database.authority", "init-fresh"]},

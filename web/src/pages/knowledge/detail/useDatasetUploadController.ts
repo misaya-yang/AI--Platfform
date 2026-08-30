@@ -9,6 +9,8 @@ import {
   type ProcessingMode,
 } from "@/api/knowledge";
 import { toast } from "@/hooks/use-toast";
+import { getSourceUploadError } from "@/pages/knowledge/create/datasetCreateModel";
+import { uploadDatasetFiles } from "@/pages/knowledge/detail/datasetUploadModel";
 import { DEFAULT_CHUNKING_CONFIG, DEFAULT_RETRIEVAL_CONFIG, type Dataset } from "@/types/knowledge";
 
 export const DATASET_EMBEDDING_MODELS = [
@@ -231,85 +233,63 @@ export function useDatasetUploadController({
       const embeddingChanged =
         !datasetEmbedding || datasetEmbedding !== uploadEmbeddingModel;
 
-      try {
-        const configPatch: Parameters<typeof updateDatasetConfig>[1] = {
-          chunking_config: chunkingConfig,
-          retrieval_config: { rerank: { enabled: rerankEnabled, model: rerankModel } },
-        };
-        if (embeddingChanged) {
-          configPatch.embedding_provider = embeddingProvider;
-          configPatch.embedding_model = embeddingModel;
-          configPatch.embedding_dimension = selectedModel?.dimension || 1024;
-        }
-        await updateDatasetConfig(datasetId, configPatch);
-        await new Promise((resolve) => setTimeout(resolve, 200));
-      } catch (configError) {
-        console.warn("Config update failed (non-blocking):", configError);
+      const configPatch: Parameters<typeof updateDatasetConfig>[1] = {
+        chunking_config: chunkingConfig,
+        retrieval_config: { rerank: { enabled: rerankEnabled, model: rerankModel } },
+      };
+      if (embeddingChanged) {
+        configPatch.embedding_provider = embeddingProvider;
+        configPatch.embedding_model = embeddingModel;
+        configPatch.embedding_dimension = selectedModel?.dimension || 1024;
+      }
+      await updateDatasetConfig(datasetId, configPatch);
+
+      const describeError = (error: unknown) =>
+        getSourceUploadError(error, {
+          fallback: t("knowledge.detail.uploadFailed"),
+          requestTooLarge: t("knowledge.create.uploadTooLarge"),
+        });
+      const outcome = await uploadDatasetFiles(filesToUpload, {
+        uploadBatch: (files) => batchUploadDocuments(datasetId, files),
+        uploadOne: (file) => uploadDocument(datasetId, file, uploadProcessingMode),
+        describeError,
+      });
+
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["kb-documents", datasetId] }),
+        queryClient.invalidateQueries({ queryKey: ["kb-dataset", datasetId] }),
+        queryClient.invalidateQueries({ queryKey: ["kb-dataset-sources", datasetId] }),
+      ]);
+
+      if (outcome.failures.length > 0) {
+        onPendingFilesChange(outcome.failures.map(({ file }) => file));
+        toast.warning(
+          t("knowledge.detail.uploadDone", {
+            success: outcome.accepted,
+            failed: outcome.failures.length,
+          }),
+          outcome.failures.map(({ file, error }) => `${file.name}: ${error}`).join("; ")
+        );
+        return;
       }
 
-      onOpenChange(false);
       onPendingFilesChange([]);
-      onUploadingChange(false);
-
-      if (filesToUpload.length >= 3) {
-        try {
-          const result = await batchUploadDocuments(datasetId, filesToUpload);
-          await queryClient.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
-          if (result.rejected > 0) {
-            toast.warning(
-              t("knowledge.detail.batchUploadDone", {
-                success: result.accepted,
-                failed: result.rejected,
-              }),
-              result.errors.map((error) => `${error.filename}: ${error.error}`).join("; ")
-            );
-          } else {
-            toast.success(
-              t("knowledge.detail.batchUploadSuccess", { count: result.accepted }),
-              t("knowledge.detail.batchProcessing")
-            );
-          }
-        } catch (error) {
-          console.error("Batch upload failed:", error);
-          toast.error(
-            t("knowledge.detail.uploadFailed"),
-            error instanceof Error ? error.message : String(error)
-          );
-        }
-      } else {
-        let successCount = 0;
-        let failCount = 0;
-        for (const file of filesToUpload) {
-          try {
-            await uploadDocument(datasetId, file, uploadProcessingMode);
-            successCount += 1;
-          } catch (error) {
-            failCount += 1;
-            console.error(`Upload failed for ${file.name}:`, error);
-          }
-          await queryClient.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
-        }
-
-        if (failCount > 0) {
-          toast.warning(
-            t("knowledge.detail.uploadDone", { success: successCount, failed: failCount })
-          );
-        } else if (successCount > 0) {
-          toast.success(
-            t("knowledge.detail.filesUploaded", { count: successCount }),
-            t("knowledge.detail.docProcessing")
-          );
-        }
-      }
+      onOpenChange(false);
+      toast.success(
+        t("knowledge.detail.filesUploaded", { count: outcome.accepted }),
+        t("knowledge.detail.docProcessing")
+      );
     } catch (error) {
       console.error("Upload failed:", error);
-      onOpenChange(false);
-      onPendingFilesChange([]);
-      onUploadingChange(false);
       toast.error(
         t("knowledge.detail.uploadFailed"),
-        error instanceof Error ? error.message : String(error)
+        getSourceUploadError(error, {
+          fallback: t("knowledge.detail.uploadFailed"),
+          requestTooLarge: t("knowledge.create.uploadTooLarge"),
+        })
       );
+    } finally {
+      onUploadingChange(false);
     }
   }
 

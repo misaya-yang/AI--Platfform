@@ -1193,11 +1193,8 @@ export function AssistantPage() {
               isComposerBlocked={isComposerBlocked}
               isGeneratingImage={isGeneratingImage}
               isImageMode={isImageMode}
-              // Mirror of the `handleSend` guard: block only when nothing is
-              // selected, or when the catalog has resolved and is genuinely
-              // empty. Requiring `modelsLoaded` here disabled the composer
-              // while the catalog loaded, so the cached last model could never
-              // actually send the first message (W3).
+              // Match handleSend: a cached model stays usable while the catalog loads;
+              // only a resolved empty catalog disables the composer (W3).
               hasAvailableModel={
                 Boolean(selectedModel) && !(modelsLoaded && models.length === 0)
               }

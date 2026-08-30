@@ -97,21 +97,37 @@ fi
 log_step "Database authority: ${AUTHORITY_COMMAND}"
 
 # Local deploy owns the explicit admin bootstrap phase required by ARC-03.
-# First complete the immutable legacy chain without adoption, then transfer
-# legacy ownership and let the normal migrator verify fingerprints + mark the
-# frozen baseline. Empty/already-adopted databases finish in the first step.
+# Classify the source read-only, then route it without guessing migration
+# history. Tracked legacy sources complete their immutable chain before admin
+# ownership cutover. Ledgerless platform schemas go directly through explicit
+# admin cutover and four-fingerprint adoption; empty/adopted sources need only
+# the normal authority command.
 if [ "$AUTO_MODE" = true ] && [ "$AUTHORITY_COMMAND" = "migrate" ] \
     && [ -n "${AI_GATEWAY_DATABASE_ADMIN_DSN:-}" ]; then
     uv run --extra database python -m database.authority provision-roles
-    uv run --extra database python -m database.authority migrate --no-adoption
-    authority_status="$(uv run --extra database python -m database.authority status)"
-    if grep -qx 'baseline: none adopted' <<<"$authority_status"; then
-        uv run --extra database python -m database.authority \
-            prepare-cutover-ownership \
-            --expected-database "${POSTGRES_DB:-gateway}"
-        exec uv run --extra database python -m database.authority migrate
-    fi
-    exit 0
+    source_kind="$(uv run --extra database python -m database.authority source-kind)"
+    case "$source_kind" in
+        empty|adopted)
+            exec uv run --extra database python -m database.authority migrate
+            ;;
+        ledgerless-platform)
+            uv run --extra database python -m database.authority \
+                prepare-cutover-ownership \
+                --expected-database "${POSTGRES_DB:-gateway}"
+            exec uv run --extra database python -m database.authority migrate
+            ;;
+        tracked-legacy)
+            uv run --extra database python -m database.authority migrate --no-adoption
+            uv run --extra database python -m database.authority \
+                prepare-cutover-ownership \
+                --expected-database "${POSTGRES_DB:-gateway}"
+            exec uv run --extra database python -m database.authority migrate
+            ;;
+        *)
+            log_error "Database authority returned unknown source kind"
+            exit 1
+            ;;
+    esac
 fi
 
 exec uv run --extra database python -m database.authority "$AUTHORITY_COMMAND"

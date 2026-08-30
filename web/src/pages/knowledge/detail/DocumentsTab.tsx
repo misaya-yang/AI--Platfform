@@ -82,6 +82,7 @@ import {
 } from "@/types/knowledge";
 
 import { Button } from "@/components/ui/button";
+import { mergeDocumentPage } from "./documentCache";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -393,11 +394,7 @@ export function DocumentsTab({
    */
   function mergeDocumentIntoCache(updated: Document) {
     if (!datasetId) return;
-    qc.setQueryData<Document[]>(["kb-documents", datasetId], (old) =>
-      old?.map((d) =>
-        d.document_id === updated.document_id ? { ...d, ...updated } : d
-      )
-    );
+    qc.setQueriesData({ queryKey: ["kb-documents", datasetId] }, mergeDocumentPage(updated));
   }
 
   async function handleToggleDocEnabled(doc: Document, enabled: boolean) {

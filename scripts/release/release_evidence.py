@@ -124,9 +124,10 @@ def _validate_command_entrypoint(
     if executable in {"python", "python3"} and len(command) >= 3 and command[1] == "-m":
         module = command[2]
         module_path = root.joinpath(*module.split("."))
-        if not module_path.with_suffix(".py").is_file() and not (
-            module_path / "__main__.py"
-        ).is_file():
+        if (
+            not module_path.with_suffix(".py").is_file()
+            and not (module_path / "__main__.py").is_file()
+        ):
             raise ReleaseEvidenceError(
                 f"release scenario Python entrypoint is missing: {scenario_id}:{module}"
             )
@@ -146,7 +147,10 @@ def _validate_command_entrypoint(
             raise ReleaseEvidenceError(
                 f"release scenario Playwright config is missing: {scenario_id}"
             )
-        referenced = [command[config_index + 1], *[part for part in command if part.endswith(".spec.ts")]]
+        referenced = [
+            command[config_index + 1],
+            *[part for part in command if part.endswith(".spec.ts")],
+        ]
         missing = [part for part in referenced if not (project / part).is_file()]
         if missing:
             raise ReleaseEvidenceError(
@@ -213,6 +217,35 @@ def _derived_matrix_status(statuses: list[str]) -> str:
     return "PASS"
 
 
+def _validate_scenario_receipts(
+    root: Path,
+    *,
+    scenario_id: str,
+    evidence_paths: list[str],
+    commands: list[list[str]],
+    release_id: str,
+    source_git_sha: str,
+) -> None:
+    """Require executable, candidate-bound receipts for every PASS command."""
+
+    executed: set[tuple[str, ...]] = set()
+    for rel in evidence_paths:
+        receipt = _load(root / rel, f"release scenario receipt {scenario_id}")
+        validate_integration_receipt(
+            receipt,
+            release_id=release_id,
+            source_git_sha=source_git_sha,
+            require_pass=True,
+        )
+        executed.update(tuple(step["command"]) for step in receipt["steps"])
+
+    missing = [command for command in commands if tuple(command) not in executed]
+    if missing:
+        raise ReleaseEvidenceError(
+            f"PASS scenario receipt omits declared commands: {scenario_id}:{missing}"
+        )
+
+
 def validate_release_matrix(
     root: Path,
     matrix: dict[str, Any],
@@ -231,6 +264,8 @@ def validate_release_matrix(
     scenarios = matrix.get("scenarios")
     if not isinstance(scenarios, list):
         raise ReleaseEvidenceError("release/rollback matrix scenarios must be a list")
+    matrix_release = matrix.get("release_id")
+    matrix_source = matrix.get("source_git_sha")
     make_targets = _make_targets(root)
 
     seen: set[str] = set()
@@ -280,12 +315,24 @@ def validate_release_matrix(
         if scenario_status == "PASS":
             if not evidence_paths:
                 raise ReleaseEvidenceError(f"PASS scenario has no durable evidence: {scenario_id}")
+            if not isinstance(matrix_release, str) or not matrix_release.strip():
+                raise ReleaseEvidenceError("PASS release matrix has no release_id")
+            if HEX_40.fullmatch(str(matrix_source)) is None:
+                raise ReleaseEvidenceError("PASS release matrix has no exact source Git SHA")
             for rel in evidence_paths:
                 path = root / rel
                 if path.is_symlink() or not path.is_file():
                     raise ReleaseEvidenceError(
                         f"PASS scenario evidence is missing/symlinked: {scenario_id}:{rel}"
                     )
+            _validate_scenario_receipts(
+                root,
+                scenario_id=scenario_id,
+                evidence_paths=evidence_paths,
+                commands=commands,
+                release_id=matrix_release,
+                source_git_sha=matrix_source,
+            )
             passed += 1
         elif scenario_status == "FAIL" and not evidence_paths:
             raise ReleaseEvidenceError(f"FAIL scenario has no failure evidence: {scenario_id}")
@@ -299,12 +346,8 @@ def validate_release_matrix(
             f"release/rollback matrix aggregate drift: declared={status} derived={derived}"
         )
 
-    matrix_release = matrix.get("release_id")
-    matrix_source = matrix.get("source_git_sha")
     if level == "candidate" and status != "PASS":
-        raise ReleaseEvidenceError(
-            f"release candidate is blocked by matrix status {status}"
-        )
+        raise ReleaseEvidenceError(f"release candidate is blocked by matrix status {status}")
     if status == "PASS" or level == "candidate":
         if not isinstance(matrix_release, str) or not matrix_release.strip():
             raise ReleaseEvidenceError("candidate release matrix has no release_id")
@@ -361,19 +404,27 @@ def validate_retirement_manifest(root: Path, manifest: dict[str, Any]) -> dict[s
             raise ReleaseEvidenceError(f"retired historical plan is unreadable: {rel}") from exc
         if marker not in text:
             raise ReleaseEvidenceError(f"historical plan retirement marker is absent: {rel}")
-    return {"entries": len(entries), "superseded": sum(e["lifecycle"] == "superseded" for e in entries), "archived": sum(e["lifecycle"] == "archived" for e in entries)}
+    return {
+        "entries": len(entries),
+        "superseded": sum(e["lifecycle"] == "superseded" for e in entries),
+        "archived": sum(e["lifecycle"] == "archived" for e in entries),
+    }
 
 
 def validate_schema_documents(root: Path) -> dict[str, str]:
     schemas = {
         "release_matrix": root / "deploy/release/schemas/release-rollback-matrix-v1.schema.json",
-        "integration_receipt": root / "deploy/release/schemas/integration-gate-receipt-v1.schema.json",
+        "integration_receipt": root
+        / "deploy/release/schemas/integration-gate-receipt-v1.schema.json",
         "retirement": root / "deploy/release/schemas/historical-plan-retirement-v1.schema.json",
     }
     digests: dict[str, str] = {}
     for name, path in schemas.items():
         schema = _load(path, f"{name} JSON schema")
-        if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema" or schema.get("type") != "object":
+        if (
+            schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema"
+            or schema.get("type") != "object"
+        ):
             raise ReleaseEvidenceError(f"invalid JSON schema document: {name}")
         digests[name] = file_sha256(path)
     return digests
@@ -389,13 +440,21 @@ def main(argv: list[str] | None = None) -> int:
     try:
         root = args.repo_root.resolve()
         schemas = validate_schema_documents(root)
-        matrix = validate_release_matrix(root, _load(args.matrix, "release matrix"), level=args.level)
+        matrix = validate_release_matrix(
+            root, _load(args.matrix, "release matrix"), level=args.level
+        )
         retirement = validate_retirement_manifest(
             root, _load(args.retirement, "historical-plan retirement manifest")
         )
         print(
             json.dumps(
-                {"result": matrix["status"], "level": args.level, "matrix": matrix, "retirement": retirement, "schema_sha256": schemas},
+                {
+                    "result": matrix["status"],
+                    "level": args.level,
+                    "matrix": matrix,
+                    "retirement": retirement,
+                    "schema_sha256": schemas,
+                },
                 indent=2,
                 sort_keys=True,
             )

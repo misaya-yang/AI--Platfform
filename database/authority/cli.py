@@ -28,6 +28,7 @@ from .commands import (
     command_init_fresh,
     command_migrate,
     command_prepare_cutover_ownership,
+    command_source_kind,
     command_startup_check,
     command_status,
     command_verify,
@@ -127,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
             "migrate",
             "init-fresh",
             "status",
+            "source-kind",
             "verify",
             "startup-check",
             "fingerprint",
@@ -216,6 +218,8 @@ def main(argv: list[str] | None = None) -> int:
         return result.exit_code
     if args.command == "status":
         return asyncio.run(command_status(authority))
+    if args.command == "source-kind":
+        return asyncio.run(command_source_kind(authority))
     if args.command == "verify":
         return asyncio.run(command_verify(authority, baseline_id=args.baseline))
     if args.command == "startup-check":

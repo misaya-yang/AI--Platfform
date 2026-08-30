@@ -19,7 +19,7 @@ import httpx
 
 from ...config import get_settings as _live_settings
 from ...config.settings import Settings
-from ...core.exceptions import ValidationFailedError
+from ...core.exceptions import PermissionDeniedError, ValidationFailedError
 from ...core.observability import metrics as _metrics
 from ...core.observability.logging import get_logger
 from ...persistence.database import (
@@ -62,6 +62,7 @@ from .retrieval import (
     reciprocal_rank_fusion,
     tokenize,
 )
+from .retrieval_failures import raise_batch_failure, require_recall_result
 from .structural_routing import (
     apply_structural_routing,
     parse_structural_settings,
@@ -74,9 +75,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# SPO-04 / K3: interactive retrieval defaults — 12 dense + 12 lexical hybrid
-# with a tight candidate pool; rerank / MMR stay off unless explicitly
-# configured (unchanged).
+# SPO-04/K3: interactive recall uses 12 dense + 12 lexical; rerank and MMR stay opt-in.
 _INTERACTIVE_DEFAULT_VECTOR_K = 12
 _INTERACTIVE_DEFAULT_KEYWORD_K = 12
 _INTERACTIVE_DEFAULT_CANDIDATE_K = 24
@@ -2383,6 +2382,7 @@ class RetrievalService:
                 settings=structural_settings,
             )
 
+        require_recall_result(recall_errors, candidates)
         # Sort by fusion score
         ranked = sorted(
             candidates.values(), key=lambda c: float(c.get("_final_score") or 0.0), reverse=True
@@ -3997,14 +3997,14 @@ class RetrievalService:
                 _recall_max_parallel=max(int(max_parallel), 1),
                 _dataset=dataset,
             )
-        except ValidationFailedError:
+        except (ValidationFailedError, PermissionDeniedError, IndexLeaseUnavailableError):
+            raise
+        except _RetrievalGenerationChanged:
             raise
         except CollectionReadAuthorityError as exc:
             raise ValidationFailedError(f"dataset collection is not readable: {exc}") from exc
         except Exception as exc:
-            logger.warning("[retrieve_batch] Global retrieval failed: %s", exc)
-            results = []
-            pipeline_meta = {"error": str(exc)}
+            raise_batch_failure(exc)
 
         retrieve_time_ms = (time.perf_counter() - retrieve_started) * 1000
         pipeline_meta = dict(pipeline_meta or {})

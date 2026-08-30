@@ -159,6 +159,15 @@ def render_role_sql(role_sql: str, role_prefix: str) -> str:
     return role_sql.replace("ai_gateway_", role_prefix)
 
 
+def _expected_role_search_path(principal: str) -> list[str]:
+    domain_schemas = (
+        ["knowledge", "gateway", "assistant"]
+        if principal in {"knowledge_api", "knowledge_worker"}
+        else ["gateway", "assistant", "knowledge"]
+    )
+    return ["pg_catalog", *domain_schemas, "public"]
+
+
 async def role_bootstrap_issues(conn: Any, role_prefix: str) -> list[str]:
     """Read-only proof that the separate admin bootstrap is complete."""
     render_role_sql("", role_prefix)  # validates the configurable identifier prefix
@@ -206,8 +215,9 @@ async def role_bootstrap_issues(conn: Any, role_prefix: str) -> list[str]:
             issues.append(f"{name} has no role-level search_path")
         else:
             schemas = [value.strip() for value in search_path.split(",")]
-            if not schemas or schemas[0] != "pg_catalog" or schemas[-1] != "public":
-                issues.append(f"{name} search_path must start pg_catalog and end public")
+            expected_search_path = _expected_role_search_path(principal)
+            if schemas != expected_search_path:
+                issues.append(f"{name} search_path is {schemas}, expected {expected_search_path}")
 
     schema_rows = await conn.fetch(
         _SCHEMA_BOOTSTRAP_STATE_SQL,
@@ -357,13 +367,9 @@ async def run_baseline_sql_file(
             if re.fullmatch(r"[a-z][a-z0-9_]{0,62}", execution_role) is None:
                 raise AuthorityError(f"unsafe baseline execution role {execution_role!r}")
             await conn.execute(f'SET LOCAL ROLE "{execution_role}"')
-        try:
-            await conn.execute(sql)
-        except Exception:
-            raise
-        else:
-            if execution_role is not None:
-                await conn.execute("RESET ROLE")
+        await conn.execute(sql)
+        if execution_role is not None:
+            await conn.execute("RESET ROLE")
 
 
 async def verify_baseline_sql_file(conn: Any, path: Path) -> list[dict[str, Any]]:
@@ -509,9 +515,7 @@ async def fresh_install(
         await conn.execute(f'SET LOCAL ROLE "{owner_role}"')
         ledger_presence = {
             table: bool(
-                await conn.fetchval(
-                    "SELECT to_regclass($1) IS NOT NULL", f"public.{table}"
-                )
+                await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", f"public.{table}")
             )
             for table in LEDGER_TABLES
         }
@@ -522,8 +526,7 @@ async def fresh_install(
             )
             if missing_ledger:
                 raise AuthorityError(
-                    "fresh-install marker ledger is incomplete; "
-                    f"missing tables {missing_ledger}"
+                    f"fresh-install marker ledger is incomplete; missing tables {missing_ledger}"
                 )
             existing = await conn.fetch(ledger.SELECT_BASELINE)
             if not existing:
@@ -531,9 +534,7 @@ async def fresh_install(
                     "fresh-install ledger exists without an adoption marker; "
                     "refusing to guess whether a partial or foreign schema is safe"
                 )
-            validate_existing_adoption_marker(
-                existing, baseline, manifest_sha256=manifest_sha256
-            )
+            validate_existing_adoption_marker(existing, baseline, manifest_sha256=manifest_sha256)
             computed = await compute_fingerprints(
                 conn, role_prefix=role_prefix, reference_sets=baseline.reference_data
             )
@@ -544,8 +545,7 @@ async def fresh_install(
             ]
             if drift:
                 raise AuthorityError(
-                    "fresh-install marker exists but live fingerprints drifted: "
-                    + "; ".join(drift)
+                    "fresh-install marker exists but live fingerprints drifted: " + "; ".join(drift)
                 )
             return computed
 

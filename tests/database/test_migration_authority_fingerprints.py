@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from database.authority import commands
+from database.authority.adoption import LedgerState
 from database.authority.constants import PLATFORM_SCHEMAS
 from database.authority.fingerprint import (
     FingerprintError,
@@ -241,9 +242,7 @@ async def test_structural_queries_filter_temporary_schemas() -> None:
     assert "a.attcompression AS compression" in column_query
     assert "pg_collation AS coll" in column_query
     assert "pg_collation AS collation" not in column_query
-    type_query = next(
-        query for query, _args in conn.queries if "t.typbasetype = 0" in query
-    )
+    type_query = next(query for query, _args in conn.queries if "t.typbasetype = 0" in query)
     assert "pg_collation AS coll" in type_query
     assert "pg_collation AS collation" not in type_query
     trigger_query = next(query for query, _args in conn.queries if "pg_get_triggerdef" in query)
@@ -526,6 +525,91 @@ async def test_migrate_routes_empty_database_to_frozen_fresh_baseline(
     assert "fresh install on baseline" in calls[-1]
     assert authority.conn.closed
     assert authority.lock_conn.closed
+
+
+async def test_migrate_rejects_ledgerless_schema_without_adoption_or_legacy_replay(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    baseline = _baseline()
+    authority = CommandAuthority(tmp_path, _marker(baseline))
+    authority.marker = None  # type: ignore[assignment]
+    monkeypatch.setattr(commands, "baseline_ready", lambda *_args: True)
+    monkeypatch.setattr(
+        commands,
+        "load_baseline",
+        lambda *_args: (baseline, "5" * 64),
+    )
+
+    async def not_empty(_conn: Any, **_kwargs: Any) -> bool:
+        return False
+
+    async def known_database(_conn: Any) -> None:
+        return None
+
+    async def ledgerless(_conn: Any) -> LedgerState:
+        return LedgerState()
+
+    async def forbidden_legacy(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("ledgerless schema must not replay historical migrations")
+
+    monkeypatch.setattr(commands, "database_empty", not_empty)
+    monkeypatch.setattr(commands, "_guard_known_database", known_database)
+    monkeypatch.setattr(commands, "detect_legacy_state", ledgerless)
+    monkeypatch.setattr(commands.legacy, "apply_legacy_chain", forbidden_legacy)
+    monkeypatch.setattr(commands.legacy, "apply_per_service_chain", forbidden_legacy)
+
+    with pytest.raises(AuthorityError, match="cannot stop before adoption"):
+        await commands.command_migrate(
+            authority,
+            allow_adoption=False,
+        )
+
+
+async def test_ledgerless_cutover_requires_explicit_mode_and_base_objects(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def ledgerless(_conn: Any) -> LedgerState:
+        return LedgerState()
+
+    async def base_present(_conn: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(commands, "detect_legacy_state", ledgerless)
+    monkeypatch.setattr(commands.legacy, "base_schema_present", base_present)
+
+    with pytest.raises(AuthorityError, match="no legacy ledger"):
+        await commands._verify_legacy_cutover_ready(
+            object(),
+            AuthorityPaths(tmp_path / "database"),
+        )
+
+    messages: list[str] = []
+    result = await commands._verify_legacy_cutover_ready(
+        object(),
+        AuthorityPaths(tmp_path / "database"),
+        allow_ledgerless_schema=True,
+        log=messages.append,
+    )
+    assert result is None
+    assert any("frozen fingerprints" in message for message in messages)
+
+
+async def test_legacy_base_schema_never_replays_schema_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def base_absent(_conn: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(commands.legacy, "base_schema_present", base_absent)
+
+    with pytest.raises(AuthorityError, match="schema.sql replay is retired"):
+        await commands.legacy.ensure_base_schema(
+            object(),
+            AuthorityPaths(tmp_path / "database"),
+        )
 
 
 async def test_cutover_matching_existing_marker_is_a_read_only_noop(tmp_path: Path) -> None:

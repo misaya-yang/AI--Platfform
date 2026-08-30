@@ -5,11 +5,13 @@ import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 import yaml
 
 from database.authority import commands
+from database.authority.adoption import LedgerState
 from database.authority.commands import MigrationCommandResult, _write_migration_evidence
 from database.authority.legacy import (
     _strip_outer_transaction,
@@ -762,9 +764,7 @@ async def test_command_returns_and_explicitly_writes_proven_receipt(
     evidence = tmp_path / "receipt.json"
     monkeypatch.setattr(commands, "baseline_ready", lambda *_args: False)
 
-    async def guard(_conn: Any) -> None:
-        return None
-
+    numeric_ledger = AsyncMock(return_value=LedgerState(numeric_ledger=True))
     async def apply(_conn: Any, _paths: AuthorityPaths, *, log: Any) -> tuple[Any, ...]:
         log("authority: numeric reconciliation receipt:\n" + receipt.to_json())
         return "version", 0, receipt
@@ -772,7 +772,8 @@ async def test_command_returns_and_explicitly_writes_proven_receipt(
     async def per_service(_conn: Any, _paths: AuthorityPaths, *, log: Any) -> int:
         return 0
 
-    monkeypatch.setattr(commands, "_guard_known_database", guard)
+    monkeypatch.setattr(commands, "_guard_known_database", AsyncMock())
+    monkeypatch.setattr(commands, "detect_legacy_state", numeric_ledger)
     monkeypatch.setattr(commands.legacy, "apply_legacy_chain", apply)
     monkeypatch.setattr(commands.legacy, "apply_per_service_chain", per_service)
     messages: list[str] = []
@@ -804,13 +805,12 @@ async def test_command_preserves_blocked_receipt_at_explicit_output(
     evidence = tmp_path / "blocked.json"
     monkeypatch.setattr(commands, "baseline_ready", lambda *_args: False)
 
-    async def guard(_conn: Any) -> None:
-        return None
-
+    numeric_ledger = AsyncMock(return_value=LedgerState(numeric_ledger=True))
     async def blocked_apply(_conn: Any, _paths: AuthorityPaths, *, log: Any) -> tuple[Any, ...]:
         raise NumericReconciliationBlocked("blocked", receipt)
 
-    monkeypatch.setattr(commands, "_guard_known_database", guard)
+    monkeypatch.setattr(commands, "_guard_known_database", AsyncMock())
+    monkeypatch.setattr(commands, "detect_legacy_state", numeric_ledger)
     monkeypatch.setattr(commands.legacy, "apply_legacy_chain", blocked_apply)
 
     with pytest.raises(NumericReconciliationBlocked):

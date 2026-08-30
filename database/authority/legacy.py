@@ -115,15 +115,19 @@ async def base_schema_present(conn: Any) -> bool:
 
 
 async def ensure_base_schema(conn: Any, paths: AuthorityPaths, log: Any = print) -> None:
-    """Apply schema.sql when the four required base objects are absent."""
+    """Require an existing legacy base without replaying current ``schema.sql``.
+
+    The frozen baseline is the only fresh-install source. Applying the current
+    compatibility snapshot to a partial or foreign database would invent
+    migration history and can replay data-changing legacy SQL.
+    """
     if await base_schema_present(conn):
         return
-    schema_path = paths.database_dir / "schema.sql"
-    if not schema_path.exists():
-        raise AuthorityError(f"base schema file missing: {schema_path}")
-    log("authority: base schema missing; applying database/schema.sql")
-    async with conn.transaction():
-        await conn.execute(schema_path.read_text(encoding="utf-8"))
+    raise AuthorityBlockedError(
+        "legacy platform base objects are incomplete; database/schema.sql replay is retired. "
+        "Use the frozen baseline for an empty database or restore/reconcile this database "
+        "explicitly."
+    )
 
 
 async def configure_legacy_search_path(conn: Any) -> None:
@@ -545,8 +549,7 @@ async def apply_per_service_chain(conn: Any, paths: AuthorityPaths, log: Any = p
             note = applied_notes.get(spec.key, "")
             legacy_note = f"file=migrations/per_service/{spec.file}"
             authority_note = (
-                f"{legacy_note};sha256={spec.sha256};"
-                f"rollback={spec.rollback_class.value}"
+                f"{legacy_note};sha256={spec.sha256};rollback={spec.rollback_class.value}"
             )
             if note not in {legacy_note, authority_note}:
                 raise AuthorityBlockedError(

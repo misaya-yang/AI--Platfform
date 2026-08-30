@@ -46,7 +46,8 @@ MAX_EXTRACTED_TEXT_PARTS = 65_536
 # page, or table before returning control to us.
 MAX_TEXT_SOURCE_BYTES = 16 * 1024 * 1024
 MAX_HTML_SOURCE_BYTES = 4 * 1024 * 1024
-MAX_PDF_SOURCE_BYTES = 8 * 1024 * 1024
+# Match the public 16 MiB contract; independent decompression fences remain below.
+MAX_PDF_SOURCE_BYTES = 16 * 1024 * 1024
 MAX_DOCX_SOURCE_BYTES = 16 * 1024 * 1024
 
 # pypdf parses decoded content streams into an operator-object list, so this

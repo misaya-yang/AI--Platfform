@@ -52,13 +52,19 @@ import {
 } from "@/features/chat/sessionRestoreWindow";
 import { isExpectedApprovalRejection } from "@/features/chat/runtimeV2State";
 import { mergeKnowledgeContexts } from "@/features/chat/knowledgeContexts";
-import { resolveArtifactIdsByMessageIndex } from "@/features/chat/sessionArtifactHydration";
 import {
   createStreamTerminalLatch,
   type StreamTerminalOutcome,
 } from "@/features/chat/stream/terminalLatch";
 import { reduceSubAgentEvent } from "../subagentEventReducer";
-import { restoredMessageStatus } from "../restoredMessageStatus";
+import {
+  buildLatestRunOutputFilesFromArtifacts,
+  hydrateMessageArtifacts,
+} from "../artifactHydration";
+import {
+  restoredMessageStatus,
+  restoredProcessStatus,
+} from "../restoredMessageStatus";
 import type {
   ChatMessage as ChatMessageType,
   RetrievedContext,
@@ -311,23 +317,18 @@ async function restoreLatestRun(
         },
       };
     } else {
-      const succeeded = status === "succeeded";
-      const active = status === "running" || status === "queued" || status === "awaiting_approval";
+      const processStatus = restoredProcessStatus(status);
+      const active = processStatus === "running";
+      const succeeded = processStatus === "succeeded";
       next[targetIndex] = {
         ...current,
         isStreaming: false,
-        status: succeeded
-          ? "completed"
-          : active
-            ? "streaming"
-            : status === "cancelled"
-              ? "cancelled"
-              : "failed",
+        status: restoredMessageStatus(processStatus),
         processSummary: {
           ...base,
-          status: succeeded ? "succeeded" : active ? "running" : "failed",
+          status: processStatus,
           collapsed: succeeded || active ? base.collapsed : false,
-          isErrorExpanded: succeeded || active ? undefined : true,
+          isErrorExpanded: processStatus === "failed" ? true : undefined,
           tools: [],
         },
       };
@@ -555,106 +556,6 @@ const restoreMessageMetadata = (msg: any, index: number, sessionId: string): Cha
   }
   return baseMessage;
 };
-
-/** Hydrate generatedArtifacts on messages from the session artifact list */
-function hydrateMessageArtifacts(
-  messages: ChatMessageType[],
-  artifacts: ArtifactInfo[],
-): ChatMessageType[] {
-  if (!artifacts.length) return messages;
-  const artifactMap = new Map<string, ArtifactInfo>();
-  for (const a of artifacts) {
-    artifactMap.set(a.artifact_id, a);
-  }
-  const idsByMessageIndex = resolveArtifactIdsByMessageIndex(messages, artifacts);
-  return messages.map((m, messageIndex) => {
-    const ids = idsByMessageIndex.get(messageIndex);
-    if (!ids || ids.length === 0) return m;
-    const generatedArtifacts = new Map<string, GeneratedArtifact>(
-      (m.generatedArtifacts ?? []).map((artifact) => [artifact.id, artifact]),
-    );
-    for (const id of ids) {
-      const a = artifactMap.get(id);
-      if (a) {
-        generatedArtifacts.set(id, {
-          id: a.artifact_id,
-          type: (a.type || "file") as GeneratedArtifact["type"],
-          format: a.format || "",
-          title: a.title || a.filename || "Artifact",
-          url: getArtifactDownloadUrl(a.artifact_id),  // Proxy URL — never expires
-          filename: a.filename,
-          mimeType: a.mime_type,
-          sizeBytes: a.size_bytes,
-        });
-      }
-    }
-    if (generatedArtifacts.size > 0) {
-      return { ...m, _artifactIds: ids, generatedArtifacts: [...generatedArtifacts.values()] };
-    }
-    return m;
-  });
-}
-
-/**
- * Rebuild the "Current run" output files for the Artifacts drawer on reload.
- *
- * The live streaming path populates `codeExecution.outputFiles` with the tool
- * result payload. On session reload there is no live tool-call, so the
- * drawer's "Current run" section would be empty. We recover the most-recent
- * assistant message's files by intersecting its persisted `_artifactIds`
- * (message metadata) with the full session artifact list. Old sessions
- * without `artifact_ids` simply produce an empty list — ArtifactsPanel
- * already skips the "Current run" header when empty.
- *
- * Returns [] when no assistant message carries artifact IDs, so callers can
- * safely feed the result straight into the code-execution state.
- */
-function buildLatestRunOutputFilesFromArtifacts(
-  messages: ChatMessageType[],
-  artifacts: ArtifactInfo[],
-): Array<{
-  filename: string;
-  content_base64: string;
-  mime_type: string | null;
-  size_bytes: number;
-  artifact_id?: string;
-  download_url?: string;
-}> {
-  if (!artifacts.length || !messages.length) return [];
-  const artifactMap = new Map<string, ArtifactInfo>();
-  for (const a of artifacts) {
-    artifactMap.set(a.artifact_id, a);
-  }
-  // Find the most-recent assistant message that actually produced artifacts.
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m.role !== "assistant") continue;
-    const ids = m._artifactIds;
-    if (!ids || ids.length === 0) continue;
-    const files: Array<{
-      filename: string;
-      content_base64: string;
-      mime_type: string | null;
-      size_bytes: number;
-      artifact_id?: string;
-      download_url?: string;
-    }> = [];
-    for (const id of ids) {
-      const a = artifactMap.get(id);
-      if (!a) continue;
-      files.push({
-        filename: a.filename || a.title || "artifact",
-        content_base64: "",  // Already persisted server-side; stream URL only
-        mime_type: a.mime_type || null,
-        size_bytes: a.size_bytes || 0,
-        artifact_id: a.artifact_id,
-        download_url: a.download_url || getArtifactDownloadUrl(a.artifact_id),
-      });
-    }
-    if (files.length > 0) return files;
-  }
-  return [];
-}
 
 function toArtifact(artifact: ArtifactInfo): Artifact {
   return {

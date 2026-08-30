@@ -49,6 +49,7 @@ from ...services.knowledge.document_service import (
 )
 from ...services.knowledge.knowledge_service import KnowledgeService
 from ...services.knowledge.query_observability import QueryObservationConflictError
+from ...services.knowledge.upload_budget import require_parser_budget
 from ...services.knowledge.worker import KnowledgeWorker
 from ..deps import get_knowledge_service, get_knowledge_worker, get_settings, get_user_context
 from ..schemas.knowledge import (
@@ -102,16 +103,8 @@ DOCUMENT_PROGRESS_STREAM_BATCH_LIMIT = 200
 _UNRELEASED_MULTIMODAL_TYPES = frozenset({"image", "page_image", "mixed", "multimodal", "vision"})
 _UNRELEASED_IMAGE_METADATA_KEYS = frozenset(
     {
-        "associatedimages",
-        "imagebytes",
-        "imagecount",
-        "imagepresignedurl",
-        "images",
-        "imagesegmentid",
-        "imageurl",
-        "rawimageurl",
-        "storageurl",
-        "vlmdescription",
+        "associatedimages", "imagebytes", "imagecount", "imagepresignedurl", "images",
+        "imagesegmentid", "imageurl", "rawimageurl", "storageurl", "vlmdescription",
     }
 )
 
@@ -1176,6 +1169,7 @@ async def upload_document(
                 )
                 part_path = Path(part.path)
                 try:
+                    require_parser_budget(part_name, ".pdf", part_path.stat().st_size)
                     # The service contract still accepts bytes, so load only
                     # the current bounded part and release it before enqueueing.
                     part_bytes = await asyncio.to_thread(part_path.read_bytes)
@@ -1218,6 +1212,7 @@ async def upload_document(
             }
 
         # --- Standard single-document upload ---
+        require_parser_budget(filename, ext, size_bytes)
         # The storage contract accepts bytes. This read remains bounded by the
         # 48 MiB compressed-upload fence and runs off the event loop.
         content = await asyncio.to_thread(temp_path.read_bytes)
@@ -1360,6 +1355,7 @@ async def batch_upload_documents(
 
                 if file_size <= 0:
                     raise ValidationFailedError("Empty files are not accepted")
+                require_parser_budget(filename, ext, file_size)
                 accepted_bytes += file_size
 
                 # Read back for processing (file is now on disk, not all in memory at once)

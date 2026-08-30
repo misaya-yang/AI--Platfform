@@ -39,7 +39,9 @@ def test_release_matrix_rejects_missing_command_entrypoints() -> None:
         scenario for scenario in matrix["scenarios"] if scenario["id"] == "assistant-live-journeys"
     )
     assistant["commands"][-1][-1] = "e2e/not-a-real-live.spec.ts"
-    with pytest.raises(release_evidence.ReleaseEvidenceError, match="Playwright entrypoint is missing"):
+    with pytest.raises(
+        release_evidence.ReleaseEvidenceError, match="Playwright entrypoint is missing"
+    ):
         release_evidence.validate_release_matrix(ROOT, matrix, level="draft")
 
 
@@ -69,8 +71,90 @@ def test_pass_requires_durable_existing_evidence_and_exact_aggregate(tmp_path: P
     evidence.parent.mkdir(parents=True)
     evidence.write_text("{}", encoding="utf-8")
     scenario["evidence"] = ["reports/evidence/offline.json"]
+    matrix["release_id"] = "platform-test-release"
+    matrix["source_git_sha"] = "a" * 40
     matrix["status"] = "PASS"
+    with pytest.raises(release_evidence.ReleaseEvidenceError, match="receipt schema"):
+        release_evidence.validate_release_matrix(tmp_path, matrix, level="draft")
+
+    evidence.write_text(
+        json.dumps(
+            {
+                "schema_version": release_evidence.RECEIPT_SCHEMA,
+                "gate": "offline-release-suite",
+                "release_id": matrix["release_id"],
+                "source_git_sha": matrix["source_git_sha"],
+                "result": "pass",
+                "unexpected_skips": 0,
+                "steps": [
+                    {
+                        "command": command,
+                        "exit_code": 0,
+                        "skip_markers": 0,
+                        "output_sha256": "1" * 64,
+                    }
+                    for command in scenario["commands"]
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     with pytest.raises(release_evidence.ReleaseEvidenceError, match="aggregate drift"):
+        release_evidence.validate_release_matrix(tmp_path, matrix, level="draft")
+
+
+def test_pass_receipt_must_cover_every_declared_command(tmp_path: Path) -> None:
+    matrix = _matrix()
+    (tmp_path / "Makefile").write_text((ROOT / "Makefile").read_text(encoding="utf-8"))
+    (tmp_path / "scripts/release").mkdir(parents=True)
+    (tmp_path / "scripts/release/version_agreement_gate.py").write_text("", encoding="utf-8")
+    (tmp_path / "web/e2e").mkdir(parents=True)
+    (tmp_path / "web/package.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "web/playwright.live.config.ts").write_text("", encoding="utf-8")
+    for name in (
+        "assistant-memory",
+        "assistant-history",
+        "knowledge-workflow",
+        "quiz-workflow",
+        "site-walkthrough",
+    ):
+        (tmp_path / f"web/e2e/{name}.spec.ts").write_text("", encoding="utf-8")
+
+    scenario = matrix["scenarios"][0]
+    scenario.update(
+        {
+            "status": "PASS",
+            "blocker": None,
+            "evidence": ["reports/evidence/incomplete.json"],
+        }
+    )
+    matrix["release_id"] = "platform-test-release"
+    matrix["source_git_sha"] = "b" * 40
+    receipt = tmp_path / scenario["evidence"][0]
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema_version": release_evidence.RECEIPT_SCHEMA,
+                "gate": "offline-release-suite",
+                "release_id": matrix["release_id"],
+                "source_git_sha": matrix["source_git_sha"],
+                "result": "pass",
+                "unexpected_skips": 0,
+                "steps": [
+                    {
+                        "command": scenario["commands"][0],
+                        "exit_code": 0,
+                        "skip_markers": 0,
+                        "output_sha256": "2" * 64,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(release_evidence.ReleaseEvidenceError, match="omits declared commands"):
         release_evidence.validate_release_matrix(tmp_path, matrix, level="draft")
 
 
@@ -90,9 +174,10 @@ def test_receipt_dry_run_and_skip_cannot_satisfy_candidate() -> None:
         "unexpected_skips": 0,
         "steps": [],
     }
-    assert release_evidence.validate_integration_receipt(
-        receipt, require_pass=False
-    )["result"] == "dry-run"
+    assert (
+        release_evidence.validate_integration_receipt(receipt, require_pass=False)["result"]
+        == "dry-run"
+    )
     with pytest.raises(release_evidence.ReleaseEvidenceError, match="zero-skip pass"):
         release_evidence.validate_integration_receipt(receipt, require_pass=True)
 

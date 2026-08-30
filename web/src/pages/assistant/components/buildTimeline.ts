@@ -14,7 +14,7 @@ import type {
   WebSearchResult,
 } from "../types";
 import { safeSubAgentText } from "../subagentSafety";
-import { appendReasoningAfterActivity } from "./activityTimelineOrder";
+import { appendReasoningAfterActivity, buildReasoningStep } from "./activityTimelineOrder";
 import type {
   TimelineIcon,
   TimelineSource,
@@ -429,26 +429,11 @@ export function buildTimeline(
   const steps: TimelineStepData[] = [];
   const processSummary = message.processSummary;
 
-  // Keep reasoning as one stable row below execution activity. Streaming
-  // tokens then grow only this row instead of pushing every tool card down.
-  const thinkingBody =
-    (message.streamingThinkingContent && message.streamingThinkingContent.trim()) ||
-    (message.thinkingContent && message.thinkingContent.trim()) ||
-    "";
-  const isStreamingThinking =
-    !!message.isThinkingStreaming ||
-    (!!message.streamingThinkingContent && !message.thinkingContent);
-  const thinkingStep: TimelineStepData | undefined = thinkingBody
-    ? {
-      kind: "thinking",
-      id: `thinking-${message.id}`,
-      title: isStreamingThinking
-        ? t("playground.activity.thinking", { defaultValue: "Thinking" })
-        : t("playground.activity.thought", { defaultValue: "Thought process" }),
-      body: thinkingBody,
-      streaming: isStreamingThinking,
-    }
-    : undefined;
+  const thinkingStep = buildReasoningStep(
+    message,
+    t("playground.activity.thinking", { defaultValue: "Thinking" }),
+    t("playground.activity.thought", { defaultValue: "Thought process" }),
+  );
 
   // 1. Process-summary steps from AG-UI / working-memory events.
   for (const step of processSummary?.steps ?? []) {

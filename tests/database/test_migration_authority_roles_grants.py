@@ -112,11 +112,13 @@ class FakeRoleBootstrapConnection:
         superuser: bool,
         public_create: bool = False,
         public_database_create: bool = False,
+        search_path_override: str | None = None,
     ) -> None:
         self.ready = ready
         self.superuser = superuser
         self.public_create = public_create
         self.public_database_create = public_database_create
+        self.search_path_override = search_path_override
         self.executed: list[str] = []
 
     def transaction(self) -> FakeRoleBootstrapConnection:
@@ -134,21 +136,31 @@ class FakeRoleBootstrapConnection:
                 return []
             names = list(args[0])
             owner = next(name for name in names if name.endswith("owner"))
-            return [
-                {
-                    "rolname": name,
-                    "rolcanlogin": not name.endswith("owner"),
-                    "rolinherit": False,
-                    "rolsuper": False,
-                    "rolcreatedb": False,
-                    "rolcreaterole": False,
-                    "rolreplication": False,
-                    "rolbypassrls": False,
-                    "rolconfig": ["search_path=pg_catalog, gateway, assistant, knowledge, public"],
-                    "memberships": [owner] if name.endswith("migrator") else [],
-                }
-                for name in names
-            ]
+            rows = []
+            for name in names:
+                domain_path = (
+                    "knowledge, gateway, assistant"
+                    if name.endswith(("knowledge_api", "knowledge_worker"))
+                    else "gateway, assistant, knowledge"
+                )
+                rows.append(
+                    {
+                        "rolname": name,
+                        "rolcanlogin": not name.endswith("owner"),
+                        "rolinherit": False,
+                        "rolsuper": False,
+                        "rolcreatedb": False,
+                        "rolcreaterole": False,
+                        "rolreplication": False,
+                        "rolbypassrls": False,
+                        "rolconfig": [
+                            "search_path="
+                            + (self.search_path_override or f"pg_catalog, {domain_path}, public")
+                        ],
+                        "memberships": [owner] if name.endswith("migrator") else [],
+                    }
+                )
+            return rows
         if "arc03-schema-bootstrap-state" in query:
             if not self.ready:
                 return []
@@ -247,6 +259,19 @@ async def test_role_bootstrap_rejects_public_database_create() -> None:
     ]
 
 
+async def test_role_bootstrap_rejects_unexpected_search_path_schema() -> None:
+    conn = FakeRoleBootstrapConnection(
+        ready=True,
+        superuser=False,
+        search_path_override="pg_catalog, attacker, public",
+    )
+
+    issues = await bootstrap.role_bootstrap_issues(conn, "ai_gateway_")
+
+    assert len(issues) == len(LOGICAL_PRINCIPALS)
+    assert all("search_path is" in issue and "attacker" in issue for issue in issues)
+
+
 async def test_schema_authority_never_uses_its_admin_connection_for_role_ddl() -> None:
     conn = FakeRoleBootstrapConnection(ready=False, superuser=True)
 
@@ -289,8 +314,7 @@ async def test_explicit_admin_extension_provisioning_closes_public_routines(
 
     assert any("EXTENSION BOOTSTRAP" in statement for statement in conn.executed)
     assert any(
-        "REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA" in statement
-        for statement in conn.executed
+        "REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA" in statement for statement in conn.executed
     )
 
 

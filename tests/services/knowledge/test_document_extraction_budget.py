@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from knowledge_service.api.routes import knowledge as routes
 from knowledge_service.auth.user_context import UserContext
 from knowledge_service.core.exceptions import ValidationFailedError
 from knowledge_service.services.knowledge import document_processor as processor_module
@@ -68,6 +69,22 @@ def test_document_processor_budget_defaults_match_ingestion_contract() -> None:
     assert processor_module.MAX_EXTRACTED_TEXT_BYTES == INGESTION_MAX_BYTES == 48 * 1024 * 1024
     assert processor_module.MAX_DOCX_ZIP_SINGLE_UNCOMPRESSED_BYTES == 16 * 1024 * 1024
     assert processor_module.MAX_DOCX_ZIP_TOTAL_UNCOMPRESSED_BYTES == INGESTION_MAX_BYTES
+    assert processor_module.MAX_PDF_SOURCE_BYTES == 16 * 1024 * 1024
+
+
+def test_public_upload_parser_budget_matches_format_limits() -> None:
+    routes.require_parser_budget(
+        filename="paper.pdf",
+        extension=".pdf",
+        size_bytes=16 * 1024 * 1024,
+    )
+
+    with pytest.raises(ValidationFailedError, match="4MB parser limit"):
+        routes.require_parser_budget(
+            filename="page.html",
+            extension=".html",
+            size_bytes=4 * 1024 * 1024 + 1,
+        )
 
 
 def test_docx_rejects_entry_count_before_python_docx_materialization(
