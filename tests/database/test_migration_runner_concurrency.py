@@ -159,6 +159,29 @@ async def _wait_for_authority_lock_count(
     )
 
 
+async def _wait_for_blocked_final_change(conn: asyncpg.Connection) -> None:
+    for _attempt in range(200):
+        blocked = await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_locks AS lock
+                JOIN pg_stat_activity AS activity ON activity.pid = lock.pid
+                WHERE lock.locktype = 'relation'
+                  AND lock.relation =
+                      'knowledge.kb_document_progress_events'::regclass
+                  AND NOT lock.granted
+                  AND activity.datname = current_database()
+                  AND activity.application_name LIKE 'ai_gateway_authority_%'
+            )
+            """
+        )
+        if blocked:
+            return
+        await asyncio.sleep(0.025)
+    pytest.fail("authority never entered the final migration's blocked table operation")
+
+
 async def _assert_final_change_state(
     conn: asyncpg.Connection,
     freeze_point: str,
@@ -295,6 +318,7 @@ async def test_authority_cli_crash_releases_lock_without_ghost_change(
             process = await _start_authority_cli(dsn)
             communicate_task = asyncio.create_task(process.communicate())
             await _wait_for_authority_lock_count(observer, granted=True, expected=1)
+            await _wait_for_blocked_final_change(observer)
 
             os.killpg(process.pid, signal_number)
             await asyncio.wait_for(communicate_task, timeout=10)
