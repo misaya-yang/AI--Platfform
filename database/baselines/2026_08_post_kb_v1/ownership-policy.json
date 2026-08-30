@@ -1,5 +1,5 @@
 {
-  "inventory_sha256": "d1fe866e7c12230075a1a5520c847caeae754b1421f58960d4d39392505d59bf",
+  "inventory_sha256": "bb30d601178990e554033d28efaff6979bb859b611d851adf8cf80de58fa893c",
   "objects": [
     {
       "evidence": [
@@ -2460,6 +2460,6 @@
     }
   ],
   "schema": "arc03-object-ownership/v1",
-  "source_git_sha": "a3c9dd56b1bdfc74eba00fa69b18d17b2187e5a7",
+  "source_git_sha": "ad56735b89d4b248b831ec7b358539b653eea81b",
   "state": "source-commit-bound-pending-live-acl"
 }

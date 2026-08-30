@@ -4704,6 +4704,6 @@
     ]
   },
   "schema": "arc03-data-access-policy/v1",
-  "source_git_sha": "a3c9dd56b1bdfc74eba00fa69b18d17b2187e5a7",
+  "source_git_sha": "ad56735b89d4b248b831ec7b358539b653eea81b",
   "state": "source-commit-bound-pending-live-acl"
 }
