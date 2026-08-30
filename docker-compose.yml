@@ -116,6 +116,10 @@ services:
     container_name: ai-gateway-migrate
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-gateway}"
+      # Explicit authority input. Local Compose may reuse the bootstrap
+      # credential during the pending-baseline compatibility epoch; managed
+      # deployments override this with the dedicated migrator DSN.
+      AI_GATEWAY_DATABASE_MIGRATOR_DSN: "${AI_GATEWAY_DATABASE_MIGRATOR_DSN:-postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-gateway}}"
     entrypoint: ["python", "-m", "database.authority"]
     command: ["migrate"]
     depends_on:

@@ -65,5 +65,27 @@ if ! command -v uv >/dev/null 2>&1; then
     exit 1
 fi
 
+# Local Compose-era env files predate the role-specific authority variable.
+# Keep the authority itself fail-closed while adapting that explicit local
+# bootstrap credential at this compatibility boundary. Managed deployments
+# set AI_GATEWAY_DATABASE_MIGRATOR_DSN directly and never enter this branch.
+if [ -z "${AI_GATEWAY_DATABASE_MIGRATOR_DSN:-}" ] && [ -n "${POSTGRES_PASSWORD:-}" ]; then
+    AI_GATEWAY_DATABASE_MIGRATOR_DSN="$({
+        python3 - "${POSTGRES_HOST:-127.0.0.1}" "${POSTGRES_PORT:-5432}" \
+            "${POSTGRES_USER:-postgres}" "$POSTGRES_PASSWORD" \
+            "${POSTGRES_DB:-gateway}" <<'PY'
+import sys
+from urllib.parse import quote
+
+host, port, user, password, database = sys.argv[1:]
+print(
+    f"postgresql://{quote(user, safe='')}:{quote(password, safe='')}@"
+    f"{host}:{port}/{quote(database, safe='')}"
+)
+PY
+    })"
+    export AI_GATEWAY_DATABASE_MIGRATOR_DSN
+fi
+
 log_step "Database authority: ${AUTHORITY_COMMAND}"
 exec uv run --extra database python -m database.authority "$AUTHORITY_COMMAND"

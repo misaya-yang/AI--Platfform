@@ -123,6 +123,7 @@ def test_runtime_manifests_run_authority_before_applications() -> None:
 
     assert 'entrypoint: ["python", "-m", "database.authority"]' in compose
     assert 'command: ["migrate"]' in compose
+    assert "AI_GATEWAY_DATABASE_MIGRATOR_DSN" in compose
     assert 'GATEWAY_DATABASE__AUTO_INIT: "false"' in compose
     runtime = compose.split("  agent-runtime:", 1)[1]
     assert "AI_PLATFORM_AGENT_RUNTIME_MODEL_PLANE_RUNTIME_BASE_URL" in runtime
@@ -142,12 +143,13 @@ def test_runtime_manifests_run_authority_before_applications() -> None:
     assert "post-install" not in helm_job
     assert 'GATEWAY_DATABASE__AUTO_INIT: "false"' in helm_values
 
-    for template in (
-        "deploy/helm/ai-gateway/templates/gateway-deployment.yaml",
-        "deploy/helm/ai-gateway/templates/knowledge-service-deployment.yaml",
-    ):
-        source = (ROOT / template).read_text(encoding="utf-8")
-        assert 'command: ["python", "-m", "database.authority", "startup-check"]' in source
+    gateway_template = (ROOT / "deploy/helm/ai-gateway/templates/gateway-deployment.yaml").read_text(encoding="utf-8")
+    knowledge_template = (ROOT / "deploy/helm/ai-gateway/templates/knowledge-service-deployment.yaml").read_text(encoding="utf-8")
+    assert 'command: ["python", "-m", "database.authority", "startup-check"]' in gateway_template
+    assert "AI_GATEWAY_DATABASE_GATEWAY_DSN" in gateway_template
+    assert '"startup-check", "--principal", "knowledge_api"' in knowledge_template
+    assert "AI_GATEWAY_DATABASE_KNOWLEDGE_API_DSN" in knowledge_template
+    assert "AI_GATEWAY_DATABASE_MIGRATOR_DSN" in helm_job
 
 
 def test_distribution_includes_the_public_authority_cli() -> None:

@@ -30,7 +30,7 @@ spec:
         - name: wait-for-schema-authority
           image: "{{ .Values.global.imageRegistry }}/{{ .Values.gateway.image.repository }}:{{ .Values.gateway.image.tag }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
-          command: ["python", "-m", "database.authority", "startup-check"]
+          command: ["python", "-m", "database.authority", "startup-check", "--principal", "knowledge_api"]
           env:
             - name: POSTGRES_USER
               valueFrom:
@@ -42,7 +42,7 @@ spec:
                 secretKeyRef:
                   name: {{ include "ai-gateway.fullname" . }}-secret
                   key: POSTGRES_PASSWORD
-            - name: GATEWAY_DATABASE__DSN
+            - name: AI_GATEWAY_DATABASE_KNOWLEDGE_API_DSN
               value: {{ include "ai-gateway.postgresDSN" . | quote }}
       affinity:
         podAntiAffinity:

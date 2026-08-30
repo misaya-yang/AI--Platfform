@@ -39,7 +39,7 @@ spec:
                 secretKeyRef:
                   name: {{ include "ai-gateway.fullname" . }}-secret
                   key: POSTGRES_PASSWORD
-            - name: GATEWAY_DATABASE__DSN
+            - name: AI_GATEWAY_DATABASE_GATEWAY_DSN
               value: {{ include "ai-gateway.postgresDSN" . | quote }}
       affinity:
         podAntiAffinity:

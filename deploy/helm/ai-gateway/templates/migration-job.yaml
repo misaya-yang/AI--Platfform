@@ -45,6 +45,6 @@ spec:
                   key: POSTGRES_PASSWORD
             - name: GATEWAY_DATABASE__ENABLED
               value: "true"
-            - name: GATEWAY_DATABASE__DSN
+            - name: AI_GATEWAY_DATABASE_MIGRATOR_DSN
               value: {{ include "ai-gateway.postgresDSN" . | quote }}
 {{- end }}
