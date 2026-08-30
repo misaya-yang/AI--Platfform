@@ -1,0 +1,17 @@
+# Epoch manifest for baseline 2026_08_post_kb_v1 (PRD ARC-03 §3C.10).
+#
+# This file is the machine carrier for post-baseline changes: every change
+# declares its full SHA-256, owner, transaction mode, rollback class,
+# pre/postconditions, timeout/lock budget and resume/repair handler.  The
+# runner and CI read this file only; they never infer intent from prose.
+#
+# The baseline itself is frozen at the end of the legacy chain
+# (112_kb_document_progress_retention.sql) plus the named post-KB schema
+# convergence change (baselines/2026_08_post_kb_v1/cutover_convergence.sql).
+# That convergence change runs during adoption only — init.sql already
+# carries the converged shape for fresh installs — so this epoch starts
+# with zero declared changes.  New post-baseline changes are appended here
+# as 001_<name>.sql, 002_<name>.sql, ... with contiguous sequences.
+baseline_id: 2026_08_post_kb_v1
+epoch: 1
+changes: []

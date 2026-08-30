@@ -1,0 +1,450 @@
+"""The single authoritative migration runner.
+
+Contract (PRD ARC-03 §3C):
+
+* one PostgreSQL session advisory lock serializes every writer;
+* the runner owns transactions — epoch migration files carry no
+  ``BEGIN``/``COMMIT``;
+* re-running is idempotent; every change is immutable with a full SHA-256;
+* preconditions and postconditions come from the epoch manifest;
+* an object that exists with the wrong definition fails closed;
+* concurrent runners, out-of-order application, and checksum tampering fail
+  closed;
+* ``status`` and ``verify`` are absolutely read-only.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+import socket
+import time
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from . import ledger
+from .constants import (
+    DEFAULT_ROLE_PREFIX,
+    MIGRATION_ADVISORY_LOCK_ID,
+    MIGRATION_ADVISORY_LOCK_NAMESPACE,
+    ROLE_PREFIX_ENV,
+)
+from .discovery import (
+    LEGACY_FILENAME_ALIASES,
+    LegacyMigration,
+    discover_legacy_migrations,
+    validate_legacy_chain,
+)
+from .manifest import (
+    ChangeSpec,
+    EpochManifest,
+    TransactionMode,
+)
+
+RUNNER_VERSION = "database-authority/1"
+RUNNER_DIGEST = hashlib.sha256(RUNNER_VERSION.encode("utf-8")).hexdigest()
+
+_TRANSACTION_STATEMENT_RE = re.compile(
+    r"^\s*(BEGIN|START\s+TRANSACTION|COMMIT|END|ROLLBACK|SAVEPOINT|ABORT)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+_NON_TRANSACTIONAL_MARKER_RE = re.compile(
+    r"^\s*--\s*@checkpoint\s+(?P<name>[a-z0-9_]+)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_DOLLAR_QUOTED_RE = re.compile(r"\$(?P<tag>[A-Za-z_][A-Za-z0-9_]*)?\$.*?\$(?P=tag)\$", re.DOTALL)
+_SINGLE_QUOTED_RE = re.compile(r"'(?:[^']|'')*'")
+_LINE_COMMENT_RE = re.compile(r"--[^\n]*")
+
+
+def strip_sql_bodies(sql: str) -> str:
+    """Reduce SQL to its top-level statements for transaction-control checks.
+
+    Dollar-quoted bodies (DO blocks, function bodies), string literals and
+    line comments are blanked out so a PL/pgSQL ``BEGIN`` inside a DO block
+    is never mistaken for a transaction-control statement, while a real
+    top-level ``BEGIN;``/``COMMIT;`` still is.
+    """
+    stripped = _DOLLAR_QUOTED_RE.sub(" $$ ", sql)
+    stripped = _LINE_COMMENT_RE.sub("", stripped)
+    stripped = _SINGLE_QUOTED_RE.sub("''", stripped)
+    return stripped
+
+
+class AuthorityError(RuntimeError):
+    """The authority refused to act; nothing was silently repaired."""
+
+
+class AuthorityBlockedError(AuthorityError):
+    """The authority cannot prove what happened; human reconciliation needed."""
+
+
+@dataclass(frozen=True)
+class AuthorityPaths:
+    database_dir: Path
+
+    @property
+    def migrations_root(self) -> Path:
+        return self.database_dir / "migrations"
+
+    @property
+    def bootstrap_dir(self) -> Path:
+        return self.database_dir / "bootstrap"
+
+    @property
+    def baselines_root(self) -> Path:
+        return self.database_dir / "baselines"
+
+    def baseline_dir(self, baseline_id: str) -> Path:
+        return self.baselines_root / baseline_id
+
+    def epoch_dir(self, baseline_id: str) -> Path:
+        return self.migrations_root / baseline_id
+
+
+def role_prefix_from_env(environ: dict[str, str] | None = None) -> str:
+    import os
+
+    env = environ if environ is not None else dict(os.environ)
+    prefix = env.get(ROLE_PREFIX_ENV, DEFAULT_ROLE_PREFIX)
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,20}_", prefix):
+        raise AuthorityError(
+            f"{ROLE_PREFIX_ENV}={prefix!r} is not a safe role prefix "
+            "(lowercase identifier ending in '_')"
+        )
+    return prefix
+
+
+class MigrationAuthority:
+    """Async façade over one migration run against one PostgreSQL database."""
+
+    def __init__(
+        self,
+        dsn: str,
+        paths: AuthorityPaths,
+        *,
+        role_prefix: str = DEFAULT_ROLE_PREFIX,
+        asyncpg_module: Any = None,
+    ) -> None:
+        if asyncpg_module is None:
+            import asyncpg
+
+            asyncpg_module = asyncpg
+        self._asyncpg = asyncpg_module
+        self.dsn = dsn
+        self.paths = paths
+        self.role_prefix = role_prefix
+
+    # ------------------------------------------------------------------
+    # connections
+    # ------------------------------------------------------------------
+
+    async def connect(self, *, read_only: bool = False) -> Any:
+        """Open one connection with the migrator application name."""
+        options = {"application_name": f"ai_gateway_authority_{uuid.uuid4().hex[:8]}"}
+        if read_only:
+            options["default_transaction_read_only"] = "on"
+        return await self._asyncpg.connect(self.dsn, server_settings=options)
+
+    async def acquire_lock(self, lock_conn: Any) -> None:
+        await lock_conn.execute(
+            "SELECT pg_advisory_lock($1::integer, $2::integer)",
+            MIGRATION_ADVISORY_LOCK_NAMESPACE,
+            MIGRATION_ADVISORY_LOCK_ID,
+        )
+
+    async def release_lock(self, lock_conn: Any) -> None:
+        try:
+            await lock_conn.execute(
+                "SELECT pg_advisory_unlock($1::integer, $2::integer)",
+                MIGRATION_ADVISORY_LOCK_NAMESPACE,
+                MIGRATION_ADVISORY_LOCK_ID,
+            )
+        finally:
+            await lock_conn.close()
+
+    # ------------------------------------------------------------------
+    # ledger
+    # ------------------------------------------------------------------
+
+    async def ensure_ledger(self, conn: Any) -> None:
+        await conn.execute(ledger.LEDGER_DDL)
+
+    @staticmethod
+    async def _ledger_table_exists(conn: Any, table: str) -> bool:
+        return bool(await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", f"public.{table}"))
+
+    async def adopted_baseline(self, conn: Any) -> dict[str, Any] | None:
+        """The adoption marker row, or None.
+
+        A database without the ledger tables has adopted nothing; the ledger
+        is never created by a read.
+        """
+        if not await self._ledger_table_exists(conn, ledger.BASELINES_TABLE):
+            return None
+        rows = await conn.fetch(ledger.SELECT_BASELINE)
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise AuthorityError(
+                f"{len(rows)} baselines adopted in one database; "
+                "exactly one baseline can be authoritative"
+            )
+        return dict(rows[0])
+
+    async def applied_changes(self, conn: Any, baseline_id: str) -> dict[int, str]:
+        if not await self._ledger_table_exists(conn, ledger.CHANGES_TABLE):
+            return {}
+        rows = await conn.fetch(ledger.SELECT_APPLIED_CHANGES, baseline_id)
+        return {int(row["sequence"]): str(row["checksum_sha256"]) for row in rows}
+
+    # ------------------------------------------------------------------
+    # epoch changes
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _reject_embedded_transactions(sql: str, change_name: str) -> None:
+        match = _TRANSACTION_STATEMENT_RE.search(strip_sql_bodies(sql))
+        if match:
+            raise AuthorityError(
+                f"change {change_name} contains transaction control "
+                f"({match.group(1).upper()}); the runner owns transactions"
+            )
+
+    @staticmethod
+    def _split_checkpoints(sql: str) -> list[tuple[str, str]]:
+        """Split non-transactional SQL into (checkpoint, segment) pairs.
+
+        The leading segment before any marker runs under checkpoint ''.
+        """
+        segments: list[tuple[str, str]] = []
+        current_name = ""
+        last_end = 0
+        for match in _NON_TRANSACTIONAL_MARKER_RE.finditer(sql):
+            segments.append((current_name, sql[last_end : match.start()]))
+            current_name = match.group("name")
+            last_end = match.end()
+        segments.append((current_name, sql[last_end:]))
+        return [(name, part) for name, part in segments if part.strip()]
+
+    async def _evaluate_conditions(
+        self, conn: Any, conditions: tuple[str, ...], *, change_name: str, phase: str
+    ) -> None:
+        for index, condition in enumerate(conditions):
+            value = await conn.fetchval(condition)
+            if value is not True:
+                raise AuthorityError(
+                    f"{phase}condition {index + 1} of change {change_name} failed: "
+                    f"{condition.strip()} returned {value!r}; refusing to continue"
+                )
+
+    async def apply_change_transactional(
+        self, conn: Any, baseline_id: str, spec: ChangeSpec, epoch_dir: Path
+    ) -> int:
+        """Apply one transactional change; DDL and success ledger share a txn."""
+        sql = (epoch_dir / spec.file).read_text(encoding="utf-8")
+        actual_sha = hashlib.sha256(sql.encode("utf-8")).hexdigest()
+        if actual_sha != spec.sha256:
+            raise AuthorityError(
+                f"change {spec.sequence} ({spec.file}) checksum mismatch: "
+                f"manifest declares {spec.sha256}, file is {actual_sha}; "
+                "checksums are immutable once declared"
+            )
+        self._reject_embedded_transactions(sql, spec.name)
+
+        start = time.monotonic()
+        async with conn.transaction():
+            await conn.execute(
+                f"SET LOCAL statement_timeout = {int(spec.timeout_seconds) * 1000}"
+            )
+            await conn.execute(
+                f"SET LOCAL lock_timeout = {int(spec.lock_budget_seconds) * 1000}"
+            )
+            await self._evaluate_conditions(
+                conn, spec.preconditions, change_name=spec.name, phase="pre"
+            )
+            if spec.owner == "owner":
+                owner_role = f"{self.role_prefix}owner"
+                await conn.execute(f'SET LOCAL ROLE "{owner_role}"')
+            await conn.execute(sql)
+            # Ledger rows are written by the connected migrator identity,
+            # never by the temporary object-owner role.
+            await conn.execute("RESET ROLE")
+            await self._evaluate_conditions(
+                conn, spec.postconditions, change_name=spec.name, phase="post"
+            )
+            duration_ms = int((time.monotonic() - start) * 1000)
+            await conn.execute(
+                ledger.INSERT_CHANGE_SUCCESS,
+                baseline_id,
+                spec.sequence,
+                spec.name,
+                spec.sha256,
+                duration_ms,
+                RUNNER_DIGEST,
+            )
+        return duration_ms
+
+    async def apply_change_non_transactional(
+        self, conn: Any, baseline_id: str, spec: ChangeSpec, epoch_dir: Path
+    ) -> int:
+        """Apply an explicitly non-transactional change with attempts/leases.
+
+        This path never pretends to be atomic: attempt rows record the phase,
+        checkpoint and lease so a crash lands in a decidable resumable/failed
+        state.  The success ledger row is written only after every
+        postcondition passes.
+        """
+        sql = (epoch_dir / spec.file).read_text(encoding="utf-8")
+        actual_sha = hashlib.sha256(sql.encode("utf-8")).hexdigest()
+        if actual_sha != spec.sha256:
+            raise AuthorityError(
+                f"change {spec.sequence} ({spec.file}) checksum mismatch: "
+                f"manifest declares {spec.sha256}, file is {actual_sha}"
+            )
+
+        attempt_id = f"{spec.sequence:03d}-{uuid.uuid4().hex}"
+        lease_owner = f"{RUNNER_DIGEST}:{socket.gethostname()}:{uuid.uuid4().hex[:8]}"
+        open_attempts = await conn.fetch(
+            ledger.SELECT_OPEN_ATTEMPTS, baseline_id, spec.sequence
+        )
+        resume_checkpoint = ""
+        for attempt in open_attempts:
+            if attempt["checksum_sha256"] != spec.sha256:
+                raise AuthorityError(
+                    f"change {spec.sequence} has an open attempt with a different "
+                    "checksum; refusing to proceed until an operator reconciles"
+                )
+            resume_checkpoint = attempt["checkpoint"]
+
+        await conn.execute(
+            ledger.INSERT_ATTEMPT,
+            attempt_id,
+            baseline_id,
+            spec.sequence,
+            spec.sha256,
+            RUNNER_DIGEST,
+            "apply",
+            resume_checkpoint,
+            lease_owner,
+            0,
+        )
+
+        await self._evaluate_conditions(
+            conn, spec.preconditions, change_name=spec.name, phase="pre"
+        )
+        segments = self._split_checkpoints(sql)
+        reached = resume_checkpoint
+        start = time.monotonic()
+        try:
+            for checkpoint_name, segment in segments:
+                if reached:
+                    if checkpoint_name == reached:
+                        reached = ""  # resume from the NEXT segment
+                    continue
+                await conn.execute(segment)
+                await conn.execute(
+                    ledger.UPDATE_ATTEMPT_CHECKPOINT,
+                    attempt_id,
+                    lease_owner,
+                    checkpoint_name,
+                )
+            await self._evaluate_conditions(
+                conn, spec.postconditions, change_name=spec.name, phase="post"
+            )
+        except Exception as exc:  # noqa: BLE001 - attempt must record the failure
+            await conn.execute(
+                ledger.UPDATE_ATTEMPT_TERMINAL,
+                attempt_id,
+                lease_owner,
+                ledger.ATTEMPT_STATE_FAILED,
+                type(exc).__name__,
+            )
+            raise
+        duration_ms = int((time.monotonic() - start) * 1000)
+        async with conn.transaction():
+            await conn.execute(
+                ledger.INSERT_CHANGE_SUCCESS,
+                baseline_id,
+                spec.sequence,
+                spec.name,
+                spec.sha256,
+                duration_ms,
+                RUNNER_DIGEST,
+            )
+            await conn.execute(
+                ledger.UPDATE_ATTEMPT_TERMINAL,
+                attempt_id,
+                lease_owner,
+                ledger.ATTEMPT_STATE_SUCCEEDED,
+                None,
+            )
+        return duration_ms
+
+    async def apply_epoch(
+        self, conn: Any, epoch_manifest: EpochManifest, epoch_dir: Path
+    ) -> list[str]:
+        """Apply all pending epoch changes in strict sequence order."""
+        applied = await self.applied_changes(conn, epoch_manifest.baseline_id)
+        applied_lines: list[str] = []
+
+        expected_next = max(applied, default=0) + 1
+        for spec in epoch_manifest.changes:
+            recorded = applied.get(spec.sequence)
+            if recorded is not None:
+                if recorded != spec.sha256:
+                    raise AuthorityError(
+                        f"change {spec.sequence} is recorded with checksum "
+                        f"{recorded} but the manifest declares {spec.sha256}; "
+                        "ledger history is immutable — refusing to migrate"
+                    )
+                continue
+            if spec.sequence != expected_next:
+                raise AuthorityError(
+                    f"change {spec.sequence} cannot be applied before sequence "
+                    f"{expected_next}; out-of-order application is rejected"
+                )
+            await self.ensure_ledger(conn)
+            if spec.transaction_mode is TransactionMode.TRANSACTIONAL:
+                duration = await self.apply_change_transactional(
+                    conn, epoch_manifest.baseline_id, spec, epoch_dir
+                )
+            else:
+                duration = await self.apply_change_non_transactional(
+                    conn, epoch_manifest.baseline_id, spec, epoch_dir
+                )
+            applied_lines.append(
+                f"applied {epoch_manifest.baseline_id}:{spec.sequence:03d} "
+                f"{spec.name} ({duration}ms, rollback={spec.rollback_class.value})"
+            )
+            expected_next += 1
+
+        return applied_lines
+
+    # ------------------------------------------------------------------
+    # legacy chain (pre-baseline history, compatibility path)
+    # ------------------------------------------------------------------
+
+    def discover_legacy(self) -> list[LegacyMigration]:
+        migrations = discover_legacy_migrations(self.paths.migrations_root)
+        validate_legacy_chain(migrations, allow_historical_filename_duplicates=True)
+        return migrations
+
+    @staticmethod
+    def legacy_is_applied(applied: set[str], migration: LegacyMigration) -> bool:
+        if migration.path.name in applied:
+            return True
+        alias = LEGACY_FILENAME_ALIASES.get(migration.path.name)
+        return alias in applied if alias else False
+
+    async def pending_legacy(
+        self, conn: Any, tracking_mode: str, applied: set[str]
+    ) -> list[LegacyMigration]:
+        migrations = self.discover_legacy()
+        if tracking_mode == "version":
+            validate_legacy_chain(migrations, allow_historical_filename_duplicates=False)
+            numeric_applied = {name[:3] for name in applied}
+            return [m for m in migrations if m.version not in numeric_applied]
+        return [m for m in migrations if not self.legacy_is_applied(applied, m)]
