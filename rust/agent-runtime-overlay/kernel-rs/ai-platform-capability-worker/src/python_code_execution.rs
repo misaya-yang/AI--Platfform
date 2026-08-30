@@ -18,6 +18,7 @@ use ai_platform_capability_contract::RuntimeCapabilityLeaseV1;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
