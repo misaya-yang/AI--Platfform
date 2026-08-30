@@ -163,11 +163,11 @@ reads `~/.ai-gateway-cli/providers.json`.
 - Non-TLS provider URLs are rejected except explicit loopback development
   profiles.
 - The Chat adapter supports text, function tools, tool results, usage,
-  reasoning-effort request passthrough, retries before streaming, and strict
-  SSE projection. Stream reconnect is intentionally disabled because replay
-  could duplicate output or tool intent. Reasoning history/deltas, images,
-  hosted tools, and input forms that cannot be represented losslessly fail
-  closed.
+  reasoning-effort request passthrough, structured reasoning-summary deltas,
+  retries before streaming, and strict SSE projection. Stream reconnect is
+  intentionally disabled because replay could duplicate output or tool intent.
+  Responses reasoning-history inputs, images, hosted tools, and input forms
+  that cannot be represented losslessly fail closed.
 - The native build and package verifier derive source identity from the Runtime
   source receipt, overlay manifest, and lock; package assembly fails when they
   disagree. The launcher re-checks receipt target/name and binary SHA-256.

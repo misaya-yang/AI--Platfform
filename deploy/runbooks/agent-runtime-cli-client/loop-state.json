@@ -7,12 +7,12 @@
     "verify",
     "decide"
   ],
-  "active_phase": "CLI-02",
-  "active_feature": "CLI-F003",
-  "iteration": 2,
+  "active_phase": "CLI-05",
+  "active_feature": "CLI-F006",
+  "iteration": 3,
   "max_iterations": 3,
-  "last_result": "After the owner corrected the product boundary, CLI-00 adopted the independent local Runtime ADR. CLI-01 and CLI-03 implemented strict provider config, launcher, legacy Gateway compatibility subcommand, direct Responses config, bounded Chat compatibility, and source-derived package identity; 40 CLI tests, 2107 Gateway tests, required source-level gates, source-identity dry-run, and built-entrypoint smoke passed.",
-  "next_action": "Run the Docker-contained composed native CLI build, package preview, and native mock workflows for CLI-02 against upgrade SHA f6390bca and overlay 46158add.",
+  "last_result": "CLI-02 and CLI-04 are complete: 43 source tests and required gates passed; Docker built and receipted Linux arm64 codex-cli from upstream 94cbbdd plus overlay 46158add; npm pack preview passed; real Direct Responses, Chat-only reasoning/text, tool auto-approval, resume, and SIGINT recovery journeys passed.",
+  "next_action": "Build and verify Darwin arm64 packaging and an explicit interactive denial journey before declaring cross-platform CANDIDATE_80; retain Darwin/Windows matrix work for RELEASE_100.",
   "blockers": [],
   "confirmation": null,
   "phases": [
@@ -39,10 +39,10 @@
       "status": "done",
       "evidence": [
         "npm --prefix sdk/cli run typecheck -> exit 0",
-        "npm --prefix sdk/cli test -> 6 files, 40 tests passed",
+        "npm --prefix sdk/cli test -> 6 files, 43 tests passed",
         "npm --prefix sdk/cli run build -> Built dist/cli.js",
         "dist launcher smoke -> isolated 0700/0600 runtime config and explicit legacy Gateway compatibility exit",
-        "make gateway-unit-gate -> 2107 passed, 3 deselected"
+        "make gateway-unit-gate -> 2111 passed, 3 deselected"
       ],
       "review": "not_required"
     },
@@ -52,9 +52,13 @@
       "depends_on": [
         "CLI-01"
       ],
-      "status": "ready",
+      "status": "done",
       "evidence": [
-        "build_agent_runtime_cli_package.sh --dry-run -> upstream 94cbbdd and overlay 46158add identity valid"
+        "Docker build -> codex-cli 0.0.0 from upstream 94cbbdd and overlay 46158add",
+        "linux-arm64 artifact receipt and npm pack --dry-run -> pass",
+        "native Direct Responses -> READY with completed usage",
+        "native Chat-only -> structured reasoning then CHAT_READY",
+        "native tool auto-approval -> CLI_APPROVED_OK; resume --last and SIGINT recovery passed"
       ],
       "review": "not_required"
     },
@@ -78,8 +82,12 @@
         "CLI-02",
         "CLI-03"
       ],
-      "status": "pending",
-      "evidence": [],
+      "status": "done",
+      "evidence": [
+        "make independent-cli-gate -> 6 files, 43 tests passed and bundle built",
+        "package verifier source/target/hash tamper fixtures -> pass",
+        "native missing-bwrap preflight, signal forwarding, Chat reasoning ordering, abort, retry, and tool identity regressions -> pass"
+      ],
       "review": "not_required"
     },
     {
@@ -88,7 +96,7 @@
       "depends_on": [
         "CLI-04"
       ],
-      "status": "pending",
+      "status": "ready",
       "evidence": [],
       "review": "not_required"
     },
@@ -132,12 +140,12 @@
         "Build the composed codex-cli binary inside Docker and record upstream/overlay/binary identity.",
         "Run native version and mock-provider exec/JSONL/tool/approval/interrupt/resume tests without host Cargo."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "CLI-F004",
       "phase_id": "CLI-03",
-      "description": "A loopback-only adapter converts the lossless Responses text/function-tool subset to Chat Completions and projects ordered Responses SSE without owning Agent state.",
+      "description": "A loopback-only adapter converts the lossless Responses text/function-tool subset to Chat Completions and projects ordered text, reasoning-summary, and function-tool Responses SSE without owning Agent state.",
       "steps": [
         "Run Chat request/stream fixtures for text, reasoning, function tools, usage, retries, and tool transcript continuation.",
         "Observe fail-closed unsupported inputs and provider secret absence from native child/config/output."
@@ -152,7 +160,7 @@
         "Run independent-cli-gate, harness-check, composed native tests, and package/source identity checks.",
         "Observe no failures and distinguish Node/mock/dry-run evidence from native behavior."
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "CLI-F006",
