@@ -256,6 +256,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         embedding_migration_worker = None
         db_storage = None
         qdrant = None
+        vlm_ocr_service = None
         try:
             if idempotency_redis_client is not None:
                 await _probe_idempotency_redis(idempotency_redis_client)
@@ -442,7 +443,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.knowledge_service = knowledge_service
 
             # --- Initialize VLM OCR Service (if configured) ---
-            vlm_ocr_service = None
             ocr = resolved.ocr
             if ocr.enabled and ocr.strategy in ("vlm", "hybrid"):
                 try:

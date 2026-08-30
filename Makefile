@@ -393,7 +393,7 @@ kb-unit-gate:               ## 运行 Knowledge Service 真实单元门禁（导
 		tests/services/knowledge \
 		tests/knowledge
 
-kb-migration-gate:          ## 运行 KB 100–111 + 097/101 restore + 完整链/账本迁移门禁（需临时 Postgres + pg_dump/restore）
+kb-migration-gate:          ## 运行 KB 100–112 + 097/101 restore + 完整链/账本迁移门禁（需临时 Postgres + pg_dump/restore）
 	@$(EVAL_UV_RUN) pytest -q --no-cov \
 		tests/database/test_run_migration.py \
 		tests/database/test_migration_runner_contract.py \

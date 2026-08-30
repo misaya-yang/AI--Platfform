@@ -18,9 +18,14 @@ export function shouldApplyDocumentProgressEvent(
   datasetId: string,
   lastEventId: string | undefined,
   candidateEventId: string | undefined,
+  eventType = "progress",
 ): boolean {
   const candidate = parseDocumentProgressEventSequence(datasetId, candidateEventId);
   if (candidate === null) return false;
+  // A reset is emitted when retention or database restore invalidates the
+  // stored cursor. It deliberately may move backwards to the current server
+  // watermark, after which normal monotonic comparison resumes.
+  if (eventType === "reset") return true;
   const previous = parseDocumentProgressEventSequence(datasetId, lastEventId);
   return previous === null || candidate > previous;
 }

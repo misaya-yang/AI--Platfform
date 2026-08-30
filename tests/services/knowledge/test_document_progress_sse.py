@@ -37,6 +37,16 @@ class _EventDatabase:
         limit = int(kwargs.get("limit", 200))
         return [event for event in self.events if int(event["event_sequence"]) > after][:limit]
 
+    async def get_document_progress_event_bounds(
+        self,
+        dataset_id: str,
+    ) -> tuple[int | None, int | None]:
+        assert dataset_id == "dataset-a"
+        if not self.events:
+            return None, None
+        sequences = [int(event["event_sequence"]) for event in self.events]
+        return min(sequences), max(sequences)
+
 
 class _Service:
     def __init__(self, database: Any) -> None:
@@ -118,6 +128,56 @@ async def test_document_progress_stream_deduplicates_non_monotonic_rows() -> Non
 
     with pytest.raises(StopAsyncIteration):
         await response.body_iterator.__anext__()
+
+
+@pytest.mark.asyncio
+async def test_document_progress_stream_fresh_connection_starts_at_current_watermark() -> None:
+    database = _EventDatabase(
+        [
+            {"event_sequence": 1, "event_type": "progress", "payload": {"n": 1}},
+            {"event_sequence": 250, "event_type": "terminal", "payload": {"n": 250}},
+        ]
+    )
+    response = await stream_document_progress(
+        "dataset-a",
+        request=_Request(disconnect_after=0),
+        svc=_Service(database),  # type: ignore[arg-type]
+        user=USER,
+    )
+
+    assert await _next_frame(response) == ": connected\nretry: 2000\n\n"
+    with pytest.raises(StopAsyncIteration):
+        await response.body_iterator.__anext__()
+    assert database.calls == [
+        {"dataset_id": "dataset-a", "after_sequence": 250, "limit": 1}
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cursor", ["dataset-a:7", "dataset-a:999"])
+async def test_document_progress_stream_resets_cursor_outside_retention_window(
+    cursor: str,
+) -> None:
+    database = _EventDatabase(
+        [
+            {"event_sequence": 100, "event_type": "progress", "payload": {"n": 100}},
+            {"event_sequence": 105, "event_type": "terminal", "payload": {"n": 105}},
+        ]
+    )
+    response = await stream_document_progress(
+        "dataset-a",
+        request=_Request(cursor, disconnect_after=0),
+        svc=_Service(database),  # type: ignore[arg-type]
+        user=USER,
+    )
+
+    assert await _next_frame(response) == ": connected\nretry: 2000\n\n"
+    reset = await _next_frame(response)
+    assert "id: dataset-a:105\n" in reset
+    assert "event: reset\n" in reset
+    assert json.loads(next(line[6:] for line in reset.splitlines() if line.startswith("data: "))) == {
+        "reason": "cursor_expired"
+    }
 
 
 @pytest.mark.asyncio

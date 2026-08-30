@@ -69,7 +69,7 @@ Every target above accepts `ENV_FILE=/path/to/.env` when the real env file lives
 | Run pending migrations | `make migrate` |
 | Initialize schema on a fresh database | `make migrate-init` |
 | Show applied vs pending | `make migrate-status` |
-| Back up / restore / list backups | `make backup` / `make restore` / `make backup-list` |
+| Back up / restore / list backups | `make backup` / `make restore` / `make backup-list` (external `AI_PLATFORM_BACKUP_DIR`, otherwise the XDG/HOME state directory; repository paths are rejected) |
 
 `make migrate` is the canonical deployment runner. Both it and
 `database/cli.py` use `public.schema_migrations`; new databases use exact
@@ -174,7 +174,7 @@ until then report which exact checks actually ran rather than claiming “same a
 | Agent compatibility OpenAPI | **KNOWN INSUFFICIENT:** current live test may skip; ARC-00 adds in-process `verify-openapi-contract` |
 | RAG retrieval | `make rag-eval-regression-gate` is fixture-only evidence; implementation/live quality require separate ARC-00 gates |
 | Knowledge service (real KB suite, imports `knowledge_service`) | `make kb-unit-gate` |
-| KB migrations 100–111 + public/main-N-1/split full-chain ledger replay, 097 late-table handoff, 101 dump/restore boundary, and durable embedding-action jobs (needs Postgres with temporary-database privilege plus `pg_dump`/`pg_restore`) | `make kb-migration-gate` |
+| KB migrations 100–112 + public/main-N-1/split full-chain ledger replay, 097 late-table handoff, 101 dump/restore boundary, and durable embedding-action jobs (needs Postgres with temporary-database privilege plus `pg_dump`/`pg_restore`) | `make kb-migration-gate` |
 | KB development fixture structure / manifest hashes / seed drift (`tests/fixtures/eval/rag/golden/**`; not a release claim) | `make kb-golden-gate` |
 | KB T0 release evidence (200–400 reviewed cases, source mix, manifest/pointer/reviewed real-corpus baseline binding) | `make kb-release-evidence-gate` |
 | Project a golden JSONL into the versioned Postgres store (PRD T0-#2; `--dry-run` first) | `uv run --all-packages python scripts/import_kb_eval_golden.py <jsonl> --dry-run` |
@@ -225,4 +225,4 @@ central-chain entrypoints are `make migrate` and
 always refuses single-file execution before reading credentials. The separate
 `database/migrate_per_service.py` image runner remains limited to the legal
 schema-split/per-service track and must not receive central RAG migrations
-100–111.
+100–112.

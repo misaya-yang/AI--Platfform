@@ -18,11 +18,11 @@ from dotenv import dotenv_values
 from database import cli
 
 ROOT = Path(__file__).resolve().parents[2]
-RAG_VERSIONS = tuple(f"{version:03d}" for version in range(100, 112))
+RAG_VERSIONS = tuple(f"{version:03d}" for version in range(100, 113))
 RAG_FILENAMES = {
     path.name
     for path in (ROOT / "database" / "migrations").glob("*.sql")
-    if path.name.split("_", 1)[0].isdigit() and 100 <= int(path.name.split("_", 1)[0]) <= 111
+    if path.name.split("_", 1)[0].isdigit() and 100 <= int(path.name.split("_", 1)[0]) <= 112
     if not path.name.endswith("_rollback.sql")
 }
 
@@ -185,7 +185,7 @@ async def test_fresh_schema_replays_current_upgrade_forward_chain(
 
 
 @pytest.mark.asyncio
-async def test_100_to_111_full_chain_uses_one_idempotent_public_ledger(
+async def test_100_to_112_full_chain_uses_one_idempotent_public_ledger(
     migration_database: tuple[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -329,5 +329,78 @@ async def test_100_to_111_full_chain_uses_one_idempotent_public_ledger(
             """
         )
         assert invalid_knowledge_constraints == 0
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_112_bounds_document_progress_retention(
+    fresh_central_database: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "get_dsn", lambda: fresh_central_database)
+    await cli.cmd_migrate()
+
+    conn = await asyncpg.connect(fresh_central_database)
+    try:
+        await conn.execute(
+            "ALTER TABLE knowledge.kb_document_progress_events "
+            "DISABLE TRIGGER trg_kb_document_progress_retention"
+        )
+        await conn.execute(
+            """
+            INSERT INTO knowledge.kb_document_progress_events (
+                dataset_id, document_id, event_type, payload, created_at
+            )
+            SELECT
+                'retention-dataset',
+                'document-' || value::text,
+                'progress',
+                '{}'::jsonb,
+                CASE WHEN value = 1
+                    THEN NOW() - INTERVAL '8 days'
+                    ELSE NOW()
+                END
+            FROM generate_series(1, 10005) AS value
+            """
+        )
+        await conn.execute(
+            "ALTER TABLE knowledge.kb_document_progress_events "
+            "ENABLE TRIGGER trg_kb_document_progress_retention"
+        )
+        maximum = await conn.fetchval(
+            "SELECT MAX(event_sequence) FROM knowledge.kb_document_progress_events"
+        )
+        next_cleanup = ((int(maximum) // 128) + 1) * 128
+        sequence_name = await conn.fetchval(
+            "SELECT pg_get_serial_sequence("
+            "'knowledge.kb_document_progress_events', 'event_sequence')"
+        )
+        await conn.execute("SELECT setval($1, $2, TRUE)", sequence_name, next_cleanup - 1)
+        await conn.execute(
+            """
+            INSERT INTO knowledge.kb_document_progress_events (
+                dataset_id, document_id, event_type, payload
+            ) VALUES ('retention-dataset', 'cleanup-trigger', 'progress', '{}'::jsonb)
+            """
+        )
+
+        count = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM knowledge.kb_document_progress_events
+            WHERE dataset_id = 'retention-dataset'
+            """
+        )
+        expired = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM knowledge.kb_document_progress_events
+            WHERE dataset_id = 'retention-dataset'
+              AND created_at < NOW() - INTERVAL '7 days'
+            """
+        )
+        assert count == 10000
+        assert expired == 0
     finally:
         await conn.close()

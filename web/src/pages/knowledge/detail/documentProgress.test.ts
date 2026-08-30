@@ -17,6 +17,10 @@ test("document progress cursors are dataset-scoped and monotonic", () => {
   assert.equal(shouldApplyDocumentProgressEvent("dataset-a", "dataset-a:8", "dataset-a:8"), false);
   assert.equal(shouldApplyDocumentProgressEvent("dataset-a", "dataset-a:8", "dataset-a:7"), false);
   assert.equal(shouldApplyDocumentProgressEvent("dataset-a", "dataset-a:8", "dataset-a:9"), true);
+  assert.equal(
+    shouldApplyDocumentProgressEvent("dataset-a", "dataset-a:50", "dataset-a:12", "reset"),
+    true,
+  );
 });
 
 test("document progress reconnect delay backs off and is bounded", () => {

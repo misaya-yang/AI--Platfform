@@ -571,6 +571,16 @@ def _format_document_progress_event(dataset_id: str, event: Mapping[str, Any]) -
     )
 
 
+def _format_document_progress_reset(dataset_id: str, sequence: int) -> str:
+    """Tell a stale client to refresh its authoritative document snapshot."""
+
+    return (
+        f"id: {dataset_id}:{sequence}\n"
+        "event: reset\n"
+        'data: {"reason":"cursor_expired"}\n\n'
+    )
+
+
 async def _get_route_document_or_404(
     svc: KnowledgeService, dataset_id: str, document_id: str
 ) -> dict[str, Any]:
@@ -1495,17 +1505,39 @@ async def stream_document_progress(
     without holding a database connection or performing a write.
     """
 
+    raw_cursor = request.headers.get("last-event-id")
     cursor = _parse_document_progress_cursor(
         dataset_id,
-        request.headers.get("last-event-id"),
+        raw_cursor,
     )
+    reset_sequence: int | None = None
     try:
         await svc.require_dataset_access(user, dataset_id, required="viewer")
         list_events = getattr(getattr(svc, "db", None), "list_document_progress_events", None)
-        if not callable(list_events):
+        event_bounds = getattr(
+            getattr(svc, "db", None),
+            "get_document_progress_event_bounds",
+            None,
+        )
+        if not callable(list_events) or not callable(event_bounds):
             raise RuntimeError("document progress event store is unavailable")
-        # Preflight also verifies that migration 111 is present before the
-        # StreamingResponse commits headers to the client.
+        # A fresh page already owns an authoritative document-list snapshot, so
+        # it starts at the current watermark instead of replaying the ledger's
+        # complete history. Last-Event-ID reconnects retain lossless replay.
+        oldest_sequence, newest_sequence = await event_bounds(dataset_id)
+        newest_sequence = newest_sequence or 0
+        if not str(raw_cursor or "").strip():
+            cursor = newest_sequence
+        elif cursor > newest_sequence or (
+            oldest_sequence is not None and cursor + 1 < oldest_sequence
+        ):
+            # Migration 112 bounds retention. A cursor outside that window
+            # receives one reset event so the client refreshes the current
+            # snapshot and resumes from a valid durable watermark.
+            cursor = newest_sequence
+            reset_sequence = newest_sequence
+        # This read verifies the event table before StreamingResponse commits
+        # headers and closes the race between the watermark and generator.
         await list_events(dataset_id, after_sequence=cursor, limit=1)
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -1528,6 +1560,8 @@ async def stream_document_progress(
         sequence = cursor
         last_heartbeat = asyncio.get_running_loop().time()
         yield ": connected\nretry: 2000\n\n"
+        if reset_sequence is not None:
+            yield _format_document_progress_reset(dataset_id, reset_sequence)
         try:
             while not await request.is_disconnected():
                 events = await list_events(

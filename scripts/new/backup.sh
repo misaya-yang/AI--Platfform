@@ -9,16 +9,17 @@
 #   (default)           Create a new backup
 #   --restore [file]    Restore from backup (latest if no file specified)
 #   --list              List available backups
+#   --backup-dir DIR    Store/list backups in an external directory
 #   --env FILE          Use a specific env file instead of .env
 # =============================================================================
 
 source "$(dirname "$0")/common.sh"
 
-BACKUP_DIR="${PROJECT_ROOT}/backups"
-
 RESTORE=false
 LIST=false
 BACKUP_FILE=""
+BACKUP_DIR=""
+BACKUP_DIR_FROM_CLI=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -28,6 +29,12 @@ while [[ $# -gt 0 ]]; do
                 BACKUP_FILE="$1"; shift
             fi ;;
         --list) LIST=true; shift ;;
+        --backup-dir)
+            if [ -z "${2:-}" ] || [[ "${2:-}" =~ ^-- ]]; then
+                log_error "--backup-dir requires a directory path"
+                exit 2
+            fi
+            BACKUP_DIR="$2"; BACKUP_DIR_FROM_CLI=true; shift 2 ;;
         --env)
             if [ -z "${2:-}" ] || [[ "${2:-}" =~ ^-- ]]; then
                 log_error "--env requires a file path"
@@ -35,11 +42,46 @@ while [[ $# -gt 0 ]]; do
             fi
             ENV_FILE="$2"; shift 2 ;;
         -h|--help)
-            echo "Usage: $0 [--restore [file]] [--list] [--env FILE]"
+            echo "Usage: $0 [--restore [file]] [--list] [--backup-dir DIR] [--env FILE]"
             exit 0 ;;
         *) log_error "Unknown option: $1"; exit 2 ;;
     esac
 done
+
+if [ "$BACKUP_DIR_FROM_CLI" = false ]; then
+    # A present env file may select an external directory, while list/help still
+    # work on a machine that has not bootstrapped the rest of the stack.
+    load_env
+    BACKUP_DIR="${AI_PLATFORM_BACKUP_DIR:-}"
+fi
+
+if [ -z "$BACKUP_DIR" ]; then
+    if [ -n "${XDG_STATE_HOME:-}" ]; then
+        BACKUP_DIR="${XDG_STATE_HOME}/ai-gateway/backups"
+    elif [ -n "${HOME:-}" ]; then
+        BACKUP_DIR="${HOME}/.local/state/ai-gateway/backups"
+    else
+        log_error "Cannot resolve an external backup directory; set AI_PLATFORM_BACKUP_DIR"
+        exit 2
+    fi
+fi
+
+# Database dumps can contain tenant content and authentication material. Keep
+# every generated backup outside the source checkout, even when an operator
+# supplies an override containing '..' components or symlinks.
+BACKUP_DIR="$(python3 - "$BACKUP_DIR" <<'PY'
+from pathlib import Path
+import sys
+
+print(Path(sys.argv[1]).expanduser().resolve(strict=False))
+PY
+)"
+case "${BACKUP_DIR}/" in
+    "${PROJECT_ROOT}/"*)
+        log_error "Backup directory must be outside the source checkout: $PROJECT_ROOT"
+        exit 2
+        ;;
+esac
 
 # -- List backups ------------------------------------------------------------
 if [ "$LIST" = true ]; then
@@ -75,6 +117,7 @@ fi
 # -- Create backup -----------------------------------------------------------
 log_step "Creating database backup"
 
+umask 077
 mkdir -p "$BACKUP_DIR"
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -89,7 +132,7 @@ if ! docker exec "$(pg_container)" pg_dump -U "$(pg_user)" -d "$(pg_database)" |
 fi
 
 BACKUP_SIZE=$(ls -lh "$BACKUP_FILE" | awk '{print $5}')
-log_success "Backup created: $(basename "$BACKUP_FILE") ($BACKUP_SIZE)"
+log_success "Backup created: $BACKUP_FILE ($BACKUP_SIZE)"
 
 # Cleanup: keep last 7
 BACKUP_COUNT=$(find "$BACKUP_DIR" -name "*.sql.gz" | wc -l | tr -d ' ')

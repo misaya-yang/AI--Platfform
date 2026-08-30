@@ -159,13 +159,14 @@ export function useDocumentProgressStream(
                 streamDatasetId,
                 cursorRef.current.eventId,
                 event.id,
+                event.event,
               )
             ) {
               continue;
             }
             cursorRef.current.eventId = event.id;
             reconnectAttempt = 0;
-            if (["progress", "terminal", "deleted"].includes(event.event)) {
+            if (["progress", "terminal", "deleted", "reset"].includes(event.event)) {
               void queryClient.invalidateQueries({
                 queryKey: ["kb-documents", streamDatasetId],
               });

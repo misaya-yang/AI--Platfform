@@ -1084,6 +1084,37 @@ class DatasetPersistenceMixin:
             )
         return [self._row_to_dict(row) for row in rows]
 
+    async def get_document_progress_event_bounds(
+        self,
+        dataset_id: str,
+    ) -> tuple[int | None, int | None]:
+        """Return the oldest and newest retained event sequence for a dataset."""
+
+        if not self._pool:
+            raise RuntimeError("database is not connected")
+        normalized_dataset = str(dataset_id or "").strip()
+        if not normalized_dataset:
+            raise ValueError("dataset_id is required")
+
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT MIN(event_sequence) AS oldest_sequence,
+                       MAX(event_sequence) AS newest_sequence
+                FROM kb_document_progress_events
+                WHERE dataset_id = $1
+                """,
+                normalized_dataset,
+            )
+        if not row:
+            return None, None
+        oldest = row["oldest_sequence"]
+        newest = row["newest_sequence"]
+        return (
+            int(oldest) if oldest is not None else None,
+            int(newest) if newest is not None else None,
+        )
+
     # ------------------------------------------------------------------
     # Per-document pipeline executions (migration 101). One row per queued
     # generation: the immutable input snapshot reprocess/recover replay

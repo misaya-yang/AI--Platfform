@@ -1248,6 +1248,7 @@ def test_backup_restore_uses_env_file_and_stops_on_first_psql_error() -> None:
     script = Path("scripts/new/backup.sh").read_text()
 
     assert "--env FILE          Use a specific env file instead of .env" in script
+    assert "--backup-dir DIR    Store/list backups in an external directory" in script
     assert "--env)" in script
     assert 'log_error "--env requires a file path"' in script
     assert 'ENV_FILE="$2"; shift 2 ;;' in script
@@ -1256,6 +1257,66 @@ def test_backup_restore_uses_env_file_and_stops_on_first_psql_error() -> None:
     )
     assert script.index("require_env_file") < script.index('mkdir -p "$BACKUP_DIR"')
     assert 'psql -v ON_ERROR_STOP=1 -U "$(pg_user)" -d "$(pg_database)"' in script
+
+
+def test_backup_defaults_outside_checkout_and_rejects_repository_paths(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / "test.env"
+    env_file.write_text("")
+    external_state = tmp_path / "state"
+
+    listed = subprocess.run(
+        ["bash", "scripts/new/backup.sh", "--list"],
+        text=True,
+        capture_output=True,
+        env={**os.environ, "XDG_STATE_HOME": str(external_state), "AI_PLATFORM_BACKUP_DIR": ""},
+        check=False,
+    )
+    assert listed.returncode == 0, listed.stdout + listed.stderr
+    assert not (Path.cwd() / "backups").exists()
+
+    rejected = subprocess.run(
+        [
+            "bash",
+            "scripts/new/backup.sh",
+            "--backup-dir",
+            str(Path.cwd() / "tmp" / "../backups"),
+            "--env",
+            str(env_file),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    output = rejected.stdout + rejected.stderr
+    assert rejected.returncode == 2, output
+    assert "must be outside the source checkout" in output
+    assert not (Path.cwd() / "backups").exists()
+
+
+def test_backup_list_reads_external_directory_from_env_file(tmp_path: Path) -> None:
+    external = tmp_path / "private-backups"
+    external.mkdir()
+    expected = external / "gateway_20260829_000000.sql.gz"
+    expected.write_bytes(b"backup")
+    env_file = tmp_path / "test.env"
+    env_file.write_text(f"AI_PLATFORM_BACKUP_DIR={external}\n")
+
+    result = subprocess.run(
+        ["bash", "scripts/new/backup.sh", "--list", "--env", str(env_file)],
+        text=True,
+        capture_output=True,
+        env={
+            key: value
+            for key, value in os.environ.items()
+            if key != "AI_PLATFORM_BACKUP_DIR"
+        },
+        check=False,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert expected.name in output
 
 
 def test_backup_missing_env_does_not_create_backup_directory(tmp_path: Path) -> None:
@@ -1294,6 +1355,8 @@ def test_backup_rejects_unknown_or_missing_env_option() -> None:
         (["--typo"], "Unknown option: --typo"),
         (["--env"], "--env requires a file path"),
         (["--env", "--list"], "--env requires a file path"),
+        (["--backup-dir"], "--backup-dir requires a directory path"),
+        (["--backup-dir", "--list"], "--backup-dir requires a directory path"),
     ]:
         result = subprocess.run(
             ["bash", "scripts/new/backup.sh", *args],
