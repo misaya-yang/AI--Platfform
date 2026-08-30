@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -29,12 +30,17 @@ async def test_cleanup_session_calls_runtime_with_bound_scope() -> None:
     assert call.args == (
         "http://agent-runtime:8094/internal/v1/sessions/session-1/cleanup",
     )
-    assert call.kwargs["headers"] == {
+    expected_scope = {
         "x-ai-platform-internal-token": "internal-token",
         "x-ai-tenant-id": "tenant-1",
         "x-ai-user-id": "user-1",
         "x-ai-session-id": "session-1",
     }
+    headers = call.kwargs["headers"]
+    assert {name: headers[name] for name in expected_scope} == expected_scope
+    request_id = headers["x-request-id"]
+    assert request_id.startswith("svc-")
+    assert str(uuid.UUID(request_id.removeprefix("svc-"))) == request_id.removeprefix("svc-")
     assert call.kwargs["json"] == {}
 
 
