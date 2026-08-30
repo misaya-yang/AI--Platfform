@@ -78,6 +78,33 @@ def baseline_ready(paths: AuthorityPaths, baseline_id: str = DEFAULT_BASELINE_ID
     return all((baseline_dir / name).exists() for name in required)
 
 
+def _validate_adoption_marker(
+    adopted: dict[str, Any],
+    baseline: BaselineManifest,
+    manifest_sha256: str,
+) -> None:
+    """Prove that an existing marker names this exact frozen baseline."""
+    expected = {
+        "baseline_id": baseline.baseline_id,
+        "manifest_sha256": manifest_sha256,
+        "structural_sha256": baseline.structural_sha256,
+        "acl_sha256": baseline.acl_sha256,
+        "extensions_sha256": baseline.extensions_sha256,
+        "reference_data_sha256": baseline.reference_data_sha256,
+        "source_git_sha": baseline.source_git_sha,
+    }
+    drift = [
+        f"{field}: marker={adopted.get(field)!r}, manifest={value!r}"
+        for field, value in expected.items()
+        if str(adopted.get(field, "")) != str(value)
+    ]
+    if drift:
+        raise AuthorityError(
+            "adopted baseline marker does not match the frozen manifest; "
+            + "; ".join(drift)
+        )
+
+
 # ----------------------------------------------------------------------
 # migrate: the single write path
 # ----------------------------------------------------------------------
@@ -140,11 +167,12 @@ async def command_migrate(
                 return 0
 
             # Phase 2: epoch changes under the frozen baseline.
-            if adopted["baseline_id"] != baseline_id:
+            if baseline is None:
                 raise AuthorityError(
-                    f"database adopted baseline {adopted['baseline_id']!r}; "
-                    f"this authority serves {baseline_id!r}"
+                    f"database carries adopted baseline {adopted['baseline_id']!r}, but "
+                    f"the frozen local manifest for {baseline_id!r} is unavailable"
                 )
+            _validate_adoption_marker(adopted, baseline, manifest_sha)
             epoch_dir = paths.epoch_dir(baseline_id)
             manifest_path = epoch_dir / EPOCH_MANIFEST_NAME
             if manifest_path.exists():
@@ -176,6 +204,12 @@ async def _cutover_and_adopt(
     extensions first (grants reference the roles), then the convergence
     change, then least-privilege grants, then the ledger + marker.
     """
+    existing = await authority.adopted_baseline(conn)
+    if existing is not None:
+        _validate_adoption_marker(existing, baseline, manifest_sha)
+        log(f"authority: baseline already adopted ({existing['baseline_id']})")
+        return
+
     paths = authority.paths
     baseline_dir = paths.baseline_dir(baseline.baseline_id)
     cutover_path = baseline_dir / "cutover_convergence.sql"
@@ -222,6 +256,12 @@ async def _cutover_and_adopt(
         role_prefix=authority.role_prefix,
     )
     if "already_adopted" in computed:
+        adopted = await authority.adopted_baseline(conn)
+        if adopted is None:
+            raise AuthorityError(
+                "adoption reported an existing marker, but no marker row can be read"
+            )
+        _validate_adoption_marker(adopted, baseline, manifest_sha)
         log(f"authority: baseline already adopted ({computed['already_adopted']})")
     else:
         log(
@@ -332,11 +372,15 @@ async def command_verify(
     paths = authority.paths
     if not baseline_ready(paths, baseline_id):
         raise AuthorityError(f"baseline {baseline_id} is not frozen; cannot verify")
-    baseline, _manifest_sha = load_baseline(paths, baseline_id)
+    baseline, manifest_sha = load_baseline(paths, baseline_id)
 
     conn = await authority.connect(read_only=True)
     try:
         from .fingerprint import compute_fingerprints
+
+        adopted = await authority.adopted_baseline(conn)
+        if adopted is not None:
+            _validate_adoption_marker(adopted, baseline, manifest_sha)
 
         computed = await compute_fingerprints(
             conn, role_prefix=authority.role_prefix, reference_sets=baseline.reference_data

@@ -16,9 +16,15 @@ data and credentials never enter a fingerprint.
 
 from __future__ import annotations
 
+import base64
 import hashlib
-from collections.abc import Iterable
+import json
+import math
+from collections.abc import Iterable, Mapping
+from datetime import date, datetime, time
+from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 from .constants import (
     CATALOG_SCHEMAS,
@@ -88,12 +94,25 @@ def logical_principal_map(role_prefix: str) -> dict[str, str]:
     }
 
 
+def _like_prefix_pattern(prefix: str) -> str:
+    """Literal SQL LIKE prefix; ``_``/``%`` in role names are not wildcards."""
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"{escaped}%"
+
+
 async def structural_lines(conn: Any) -> list[str]:
     """Deterministic structural description of every platform relation."""
     lines: list[str] = []
 
     schemas = await conn.fetch(
-        "SELECT nspname FROM pg_namespace WHERE nspname <> ALL($1) ORDER BY 1",
+        """
+        SELECT n.nspname
+        FROM pg_namespace AS n
+        WHERE n.nspname <> ALL($1)
+          AND n.nspname NOT LIKE 'pg_temp_%'
+          AND n.nspname NOT LIKE 'pg_toast_temp_%'
+        ORDER BY 1
+        """,
         list(CATALOG_SCHEMAS),
     )
     lines.extend(f"schema:{row['nspname']}" for row in schemas)
@@ -200,6 +219,8 @@ async def structural_lines(conn: Any) -> list[str]:
                start_value, increment_by, cycle
         FROM pg_sequences
         WHERE schemaname <> ALL($1)
+          AND schemaname NOT LIKE 'pg_temp_%'
+          AND schemaname NOT LIKE 'pg_toast_temp_%'
         ORDER BY schemaname, sequencename
         """,
         list(CATALOG_SCHEMAS),
@@ -290,6 +311,60 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
             f"{_normalized_owner(row['owner'], principal_map)}"
         )
 
+    schema_owners = await conn.fetch(
+        """
+        SELECT n.nspname AS schema, pg_get_userbyid(n.nspowner) AS owner
+        FROM pg_namespace AS n
+        WHERE n.nspname <> ALL($1)
+          AND n.nspname NOT LIKE 'pg_temp_%'
+          AND n.nspname NOT LIKE 'pg_toast_temp_%'
+        ORDER BY n.nspname
+        """,
+        list(CATALOG_SCHEMAS),
+    )
+    for row in schema_owners:
+        lines.append(
+            f"schema_owner:{row['schema']}:"
+            f"{_normalized_owner(row['owner'], principal_map)}"
+        )
+
+    function_owners = await conn.fetch(
+        f"""
+        SELECT n.nspname AS schema, p.proname AS name,
+               pg_get_function_identity_arguments(p.oid) AS identity_args,
+               pg_get_userbyid(p.proowner) AS owner
+        FROM pg_proc AS p
+        JOIN pg_namespace AS n ON n.oid = p.pronamespace
+        WHERE TRUE
+        {_SCHEMA_FILTER}
+        ORDER BY n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)
+        """,
+        list(CATALOG_SCHEMAS),
+    )
+    for row in function_owners:
+        lines.append(
+            f"function_owner:{row['schema']}.{row['name']}({row['identity_args']}):"
+            f"{_normalized_owner(row['owner'], principal_map)}"
+        )
+
+    type_owners = await conn.fetch(
+        f"""
+        SELECT n.nspname AS schema, t.typname AS name, t.typtype AS type,
+               pg_get_userbyid(t.typowner) AS owner
+        FROM pg_type AS t
+        JOIN pg_namespace AS n ON n.oid = t.typnamespace
+        WHERE t.typtype IN ('e', 'd')
+        {_SCHEMA_FILTER}
+        ORDER BY n.nspname, t.typname
+        """,
+        list(CATALOG_SCHEMAS),
+    )
+    for row in type_owners:
+        lines.append(
+            f"type_owner:{row['schema']}.{row['name']}:{row['type']}:"
+            f"{_normalized_owner(row['owner'], principal_map)}"
+        )
+
     acls = await conn.fetch(
         f"""
         SELECT n.nspname AS schema, c.relname AS name,
@@ -346,6 +421,8 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
         FROM pg_namespace AS n
         CROSS JOIN LATERAL aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) AS a
         WHERE n.nspname <> ALL($1)
+          AND n.nspname NOT LIKE 'pg_temp_%'
+          AND n.nspname NOT LIKE 'pg_toast_temp_%'
         GROUP BY n.nspname, a.grantee, a.grant_option
         ORDER BY n.nspname, grantee
         """,
@@ -358,26 +435,65 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
             f"grantopt={1 if row['grant_option'] else 0}"
         )
 
+    type_acls = await conn.fetch(
+        f"""
+        SELECT n.nspname AS schema, t.typname AS name, t.typtype AS type,
+               COALESCE(pg_get_userbyid(a.grantee), 'PUBLIC') AS grantee,
+               a.grant_option,
+               string_agg(a.privilege_type, ',' ORDER BY a.privilege_type) AS privileges
+        FROM pg_type AS t
+        JOIN pg_namespace AS n ON n.oid = t.typnamespace
+        CROSS JOIN LATERAL aclexplode(COALESCE(t.typacl, acldefault('T', t.typowner))) AS a
+        WHERE t.typtype IN ('e', 'd')
+        {_SCHEMA_FILTER}
+        GROUP BY n.nspname, t.typname, t.typtype, a.grantee, a.grant_option
+        ORDER BY n.nspname, t.typname, grantee, a.grant_option
+        """,
+        list(CATALOG_SCHEMAS),
+    )
+    for row in type_acls:
+        grantee = _normalized_owner(row["grantee"], principal_map)
+        lines.append(
+            f"type_acl:{row['schema']}.{row['name']}:{row['type']}:{grantee}:"
+            f"{row['privileges']}:grantopt={1 if row['grant_option'] else 0}"
+        )
+
     default_privileges = await conn.fetch(
         """
         SELECT COALESCE(pg_get_userbyid(d.defaclrole), '?') AS grantor,
                CASE d.defaclobjtype WHEN 'r' THEN 'table' WHEN 'f' THEN 'function'
                     WHEN 'S' THEN 'sequence' WHEN 'n' THEN 'schema' WHEN 'T' THEN 'type'
                     ELSE d.defaclobjtype::text END AS object_type,
-               COALESCE(d.defaclnamespace::regnamespace::text, '') AS schema,
+               COALESCE(n.nspname, '') AS schema,
                COALESCE(pg_get_userbyid(a.grantee), 'PUBLIC') AS grantee,
+               a.grant_option,
                string_agg(a.privilege_type, ',' ORDER BY a.privilege_type) AS privileges
         FROM pg_default_acl AS d
+        LEFT JOIN pg_namespace AS n ON n.oid = d.defaclnamespace
         CROSS JOIN LATERAL aclexplode(d.defaclacl) AS a
+        WHERE pg_get_userbyid(d.defaclrole) LIKE $2 ESCAPE E'\\'
+          AND (
+              d.defaclnamespace = 0
+              OR (
+                  n.nspname <> ALL($1)
+                  AND n.nspname NOT LIKE 'pg_temp_%'
+                  AND n.nspname NOT LIKE 'pg_toast_temp_%'
+              )
+          )
+        GROUP BY d.defaclrole, d.defaclobjtype, n.nspname,
+                 a.grantee, a.grant_option
         ORDER BY grantor, object_type, schema, grantee
-        """
+        """,
+        list(CATALOG_SCHEMAS),
+        _like_prefix_pattern(role_prefix),
     )
     for row in default_privileges:
         grantor = _normalized_owner(row["grantor"], principal_map)
         grantee = _normalized_owner(row["grantee"], principal_map)
         lines.append(
             f"default_privilege:{grantor}:{row['object_type']}:{row['schema']}:"
-            f"{grantee}:{row['privileges']}"
+            f"{grantee}:{row['privileges']}:"
+            f"grantopt={1 if row['grant_option'] else 0}"
         )
 
     # Only the platform's own roles enter the fingerprint.  The bootstrap
@@ -390,10 +506,10 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
                COALESCE((SELECT string_agg(option, ',' ORDER BY option)
                          FROM pg_options_to_table(r.rolconfig)), '') AS config
         FROM pg_roles AS r
-        WHERE r.rolname LIKE $1
+        WHERE r.rolname LIKE $1 ESCAPE E'\\'
         ORDER BY r.rolname
         """,
-        f"{role_prefix}%",
+        _like_prefix_pattern(role_prefix),
     )
     for row in roles:
         name = _normalized_owner(row["name"], principal_map)
@@ -441,17 +557,81 @@ async def reference_data_lines(conn: Any, reference_sets: Iterable[ReferenceData
         )
         lines.append(f"reference:{ref.table}:columns={','.join(columns)}:rows={len(rows)}")
         for row in rows:
-            values = "|".join(_canonical_value(row[column]) for column in columns)
+            values = _canonical_row(row[column] for column in columns)
             lines.append(f"row:{ref.table}:{values}")
     return lines
 
 
 def _canonical_value(value: Any) -> str:
+    """Type-tagged canonical JSON for one PostgreSQL/JSON value."""
+    return json.dumps(
+        _canonical_value_tree(value),
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+
+
+def _canonical_row(values: Iterable[Any]) -> str:
+    return json.dumps(
+        [_canonical_value_tree(value) for value in values],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+
+
+def _canonical_value_tree(value: Any) -> list[Any]:
     if value is None:
-        return "\x00null"
+        return ["null"]
     if isinstance(value, bool):
-        return "true" if value else "false"
-    return str(value)
+        return ["bool", value]
+    if isinstance(value, int):
+        return ["int", str(value)]
+    if isinstance(value, Decimal):
+        if value.is_finite():
+            normalized = format(value.normalize(), "f")
+            if normalized == "-0":
+                normalized = "0"
+        else:
+            normalized = str(value)
+        return ["decimal", normalized]
+    if isinstance(value, float):
+        if math.isnan(value):
+            rendered = "nan"
+        elif math.isinf(value):
+            rendered = "+inf" if value > 0 else "-inf"
+        else:
+            rendered = value.hex()
+        return ["float", rendered]
+    if isinstance(value, str):
+        return ["str", value]
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return ["bytes", base64.b64encode(bytes(value)).decode("ascii")]
+    if isinstance(value, datetime):
+        return ["datetime", value.isoformat(timespec="microseconds")]
+    if isinstance(value, date):
+        return ["date", value.isoformat()]
+    if isinstance(value, time):
+        return ["time", value.isoformat(timespec="microseconds")]
+    if isinstance(value, UUID):
+        return ["uuid", str(value)]
+    if isinstance(value, Mapping):
+        items = [
+            [_canonical_value_tree(key), _canonical_value_tree(item)]
+            for key, item in value.items()
+        ]
+        items.sort(
+            key=lambda pair: json.dumps(
+                pair[0], ensure_ascii=True, separators=(",", ":")
+            )
+        )
+        return ["map", items]
+    if isinstance(value, list):
+        return ["list", [_canonical_value_tree(item) for item in value]]
+    if isinstance(value, tuple):
+        return ["tuple", [_canonical_value_tree(item) for item in value]]
+    raise FingerprintError(
+        f"unsupported reference-data value type: {type(value).__module__}.{type(value).__qualname__}"
+    )
 
 
 async def compute_fingerprints(
