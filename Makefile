@@ -567,7 +567,7 @@ ci-gate-enforcement:        ## CI 最终门禁: diff 所需 job 必须存在且�
 ci-gate-enforcement-selftest: ## CI 最终门禁的纯离线负向自测
 	@python3 scripts/harness/ci_gate_enforcement.py --selftest
 
-rust-changed-crate-gate:    ## Rust overlay 门禁: 仅测试被改动路径命中的 crate（无改动 = 不适用）
+rust-changed-crate-gate:    ## 组合 lock-pinned upstream + 当前 overlay，串行测试变更 crate
 	@test -n "$(BASE_SHA)" || { echo "usage: make rust-changed-crate-gate BASE_SHA=<base git sha>"; exit 2; }
 	@python3 scripts/harness/rust_changed_crate_gate.py --base "$(BASE_SHA)"
 

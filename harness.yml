@@ -521,8 +521,8 @@ gates:
     ci_job: frontend
   rust_changed_crate:
     make: rust-changed-crate-gate
-    purpose: Test only the Rust crates touched by the diff; no Rust changes = not applicable.
-    triggers: ["rust/**"]
+    purpose: Compose the lock-pinned upstream Git object with the current overlay, then test only changed Rust crates with the exact locked toolchain.
+    triggers: ["rust/**", deploy/agent-runtime-source/lock.json, scripts/harness/rust_changed_crate_gate.py, tests/harness/test_rust_changed_crate_gate.py, tests/scripts/test_rust_build_tooling.py]
     tier: L1
     required_on: [change, release]
     resource: offline
