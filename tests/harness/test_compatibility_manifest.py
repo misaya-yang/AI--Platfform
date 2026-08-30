@@ -68,11 +68,21 @@ def test_complete_candidate_requires_zero_skip_release_bound_receipts(
     services = {
         service: {
             "image_digest": image,
-            "reported_version": {
+            "identity": {
+                "mode": (
+                    "http_version"
+                    if service in compatibility.HTTP_VERSION_SERVICES
+                    else "container_image"
+                ),
                 "service_id": service,
                 "release_id": release_id,
                 "git_sha": source_sha,
                 "image_digest": image,
+                **(
+                    {"image_version": "2.0.0"}
+                    if service in compatibility.APP_CONTAINER_SERVICES
+                    else {}
+                ),
             },
         }
         for service in compatibility.SERVICES
@@ -149,6 +159,10 @@ def test_complete_candidate_requires_zero_skip_release_bound_receipts(
     }
 
     assert compatibility.validate(root, manifest, level="candidate")["result"] == "pass"
+    manifest["services"]["frontend"]["identity"]["mode"] = "http_version"
+    with pytest.raises(compatibility.ManifestError, match="frontend.mode"):
+        compatibility.validate(root, manifest, level="candidate")
+    manifest["services"]["frontend"]["identity"]["mode"] = "container_image"
     (root / receipts["knowledge"]).write_text(
         json.dumps(
             {

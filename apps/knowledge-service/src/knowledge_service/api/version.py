@@ -1,4 +1,4 @@
-"""Knowledge API/Worker /version projection from one compatibility manifest."""
+"""Knowledge API /version projection from one compatibility manifest."""
 
 from ai_gateway_core.release_manifest import ReleaseManifestUnavailable, service_version
 from fastapi import APIRouter, FastAPI
@@ -27,12 +27,7 @@ def version_router(service_id: str) -> APIRouter:
 
 
 def register_version_route(app: FastAPI, service_id: str) -> None:
-    """Register ``/version`` without an included-router marker.
-
-    The worker-only Knowledge process intentionally has no business routers.
-    Registering this single operational endpoint directly keeps that topology
-    contract true while sharing the same manifest projection as the API role.
-    """
+    """Register the API release surface without an included-router marker."""
 
     async def version():
         try:

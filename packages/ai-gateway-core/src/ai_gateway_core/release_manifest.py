@@ -54,9 +54,11 @@ def service_version(service_id: str, path: Path | None = None) -> dict[str, Any]
         raise ReleaseManifestUnavailable("compatibility manifest identity is incomplete")
     record = services[service_id]
     digest = record.get("image_digest")
-    expected = record.get("reported_version")
+    expected = record.get("identity")
     if IMAGE_DIGEST.fullmatch(str(digest)) is None or not isinstance(expected, dict):
         raise ReleaseManifestUnavailable("service release identity is incomplete")
+    if expected.get("mode") != "http_version":
+        raise ReleaseManifestUnavailable("service does not expose HTTP version identity")
     payload = {
         "schema_version": "ai-platform/service-version/v1",
         "service_id": service_id,
@@ -68,12 +70,19 @@ def service_version(service_id: str, path: Path | None = None) -> dict[str, Any]
     for key in ("service_id", "release_id", "git_sha", "image_digest"):
         if expected.get(key) != payload[key]:
             raise ReleaseManifestUnavailable("service version projection disagrees with manifest")
+    runtime_release = os.environ.get("AI_PLATFORM_RELEASE_ID")
     runtime_git = os.environ.get("AI_PLATFORM_GIT_SHA")
     runtime_image = os.environ.get("AI_PLATFORM_IMAGE_DIGEST")
-    if runtime_git and runtime_git != payload["git_sha"]:
+    if not runtime_release or not runtime_git or not runtime_image:
+        raise ReleaseManifestUnavailable("runtime release identity is incomplete")
+    if runtime_release != payload["release_id"]:
+        raise ReleaseManifestUnavailable("runtime release ID disagrees with compatibility manifest")
+    if runtime_git != payload["git_sha"]:
         raise ReleaseManifestUnavailable("runtime Git SHA disagrees with compatibility manifest")
-    if runtime_image and runtime_image != payload["image_digest"]:
-        raise ReleaseManifestUnavailable("runtime image digest disagrees with compatibility manifest")
+    if runtime_image != payload["image_digest"]:
+        raise ReleaseManifestUnavailable(
+            "runtime image digest disagrees with compatibility manifest"
+        )
     return payload
 
 

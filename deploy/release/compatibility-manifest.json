@@ -4,20 +4,42 @@
   "release_id": null,
   "source": {"git_sha": null, "git_tree_sha": null},
   "services": {
-    "gateway": {"image_digest": null, "reported_version": null},
-    "frontend": {"image_digest": null, "reported_version": null},
-    "knowledge-service": {"image_digest": null, "reported_version": null},
-    "knowledge-worker": {"image_digest": null, "reported_version": null},
-    "migrator": {"image_digest": null, "reported_version": null},
-    "agent-runtime": {"image_digest": null, "reported_version": null},
-    "capability-worker": {"image_digest": null, "reported_version": null}
+    "gateway": {
+      "image_digest": null,
+      "identity": {"mode": "http_version", "service_id": "gateway", "release_id": null, "git_sha": null, "image_digest": null}
+    },
+    "frontend": {
+      "image_digest": null,
+      "identity": {"mode": "container_image", "service_id": "frontend", "release_id": null, "git_sha": null, "image_digest": null, "image_version": null}
+    },
+    "knowledge-service": {
+      "image_digest": null,
+      "identity": {"mode": "http_version", "service_id": "knowledge-service", "release_id": null, "git_sha": null, "image_digest": null}
+    },
+    "knowledge-worker": {
+      "image_digest": null,
+      "identity": {"mode": "container_image", "service_id": "knowledge-worker", "release_id": null, "git_sha": null, "image_digest": null, "image_version": null}
+    },
+    "migrator": {
+      "image_digest": null,
+      "identity": {"mode": "container_image", "service_id": "migrator", "release_id": null, "git_sha": null, "image_digest": null, "image_version": null}
+    },
+    "agent-runtime": {
+      "image_digest": null,
+      "identity": {"mode": "container_image", "service_id": "agent-runtime", "release_id": null, "git_sha": null, "image_digest": null}
+    },
+    "capability-worker": {
+      "image_digest": null,
+      "identity": {"mode": "container_image", "service_id": "capability-worker", "release_id": null, "git_sha": null, "image_digest": null}
+    }
   },
   "runtime_overlay": {
     "lock": "deploy/agent-runtime-source/lock.json",
     "lock_sha256": null,
     "upstream_sha": null,
     "overlay_sha256": null,
-    "schema_digest": null
+    "runtime_schema_digest": null,
+    "capability_worker_schema_digest": null
   },
   "database": {
     "baseline_id": "2026_08_post_kb_v1",

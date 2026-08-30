@@ -284,6 +284,10 @@ services:
       AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION: "${AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION:-}"
       AI_PLATFORM_AGENT_RUNTIME_URL: "${AI_PLATFORM_AGENT_RUNTIME_URL:-http://agent-runtime:8094}"
       AI_PLATFORM_CAPABILITY_WORKER_URL: "${AI_PLATFORM_CAPABILITY_WORKER_URL:-http://agent-capability-worker:8095}"
+      AI_PLATFORM_COMPATIBILITY_MANIFEST_PATH: "/app/deploy/release/compatibility-manifest.json"
+      AI_PLATFORM_RELEASE_ID: "${AI_PLATFORM_RELEASE_ID:-}"
+      AI_PLATFORM_GIT_SHA: "${VCS_REF:-}"
+      AI_PLATFORM_IMAGE_DIGEST: "${GATEWAY_IMAGE_DIGEST:-}"
       AI_PLATFORM_CAPABILITY_WORKER_WRITES_ENABLED: "${AI_PLATFORM_CAPABILITY_WORKER_WRITES_ENABLED:-true}"
       AI_PLATFORM_CAPABILITY_WORKER_ENABLED: "${AI_PLATFORM_CAPABILITY_WORKER_ENABLED:-true}"
       AGENT_RUNTIME_MEMORY_DIR: "${AGENT_RUNTIME_MEMORY_DIR:-/app/agent-memory}"
@@ -345,6 +349,7 @@ services:
       - gateway-logs:/app/logs
       - gateway-data:/app/data
       - assistant-memory-data:/app/agent-memory
+      - "${AI_PLATFORM_COMPATIBILITY_MANIFEST_PATH:-./deploy/release/compatibility-manifest.json}:/app/deploy/release/compatibility-manifest.json:ro"
     networks:
       - ai-gateway-net
     depends_on:
@@ -485,6 +490,10 @@ services:
       KNOWLEDGE_STORAGE__SIGNING_KEY: "${GATEWAY_ENCRYPTION_KEY:?GATEWAY_ENCRYPTION_KEY is required for local image URL signing}"
       AI_PLATFORM_INTERNAL_TOKEN: "${AI_PLATFORM_INTERNAL_TOKEN:?AI_PLATFORM_INTERNAL_TOKEN is required}"
       AI_PLATFORM_CAPABILITY_PROOF_SECRET: "${AI_PLATFORM_CAPABILITY_PROOF_SECRET:?AI_PLATFORM_CAPABILITY_PROOF_SECRET is required}"
+      AI_PLATFORM_COMPATIBILITY_MANIFEST_PATH: "/app/deploy/release/compatibility-manifest.json"
+      AI_PLATFORM_RELEASE_ID: "${AI_PLATFORM_RELEASE_ID:-}"
+      AI_PLATFORM_GIT_SHA: "${VCS_REF:-}"
+      AI_PLATFORM_IMAGE_DIGEST: "${KNOWLEDGE_IMAGE_DIGEST:-}"
       # Phase K5c: gateway HMAC verification (Polaris #6-KB). Same secret as
       GATEWAY_ENCRYPTION_KEY: "${GATEWAY_ENCRYPTION_KEY:?GATEWAY_ENCRYPTION_KEY is required}"
       INTERNAL_COMM_STATE_BACKEND: "${INTERNAL_COMM_STATE_BACKEND:-redis}"
@@ -505,6 +514,7 @@ services:
     command: ["python", "-m", "uvicorn", "knowledge_service.main:app", "--host", "0.0.0.0", "--port", "8092", "--workers", "1"]
     volumes:
       - kb-data:/app/data
+      - "${AI_PLATFORM_COMPATIBILITY_MANIFEST_PATH:-./deploy/release/compatibility-manifest.json}:/app/deploy/release/compatibility-manifest.json:ro"
     ports:
       - "127.0.0.1:${KNOWLEDGE_SERVICE_PORT:-8092}:8092"
     networks:
@@ -538,6 +548,7 @@ services:
     command: ["python", "-m", "uvicorn", "knowledge_service.main:app", "--host", "0.0.0.0", "--port", "8092", "--workers", "1"]
     volumes:
       - kb-data:/app/data
+      - "${AI_PLATFORM_COMPATIBILITY_MANIFEST_PATH:-./deploy/release/compatibility-manifest.json}:/app/deploy/release/compatibility-manifest.json:ro"
     networks:
       - ai-gateway-net
     depends_on:

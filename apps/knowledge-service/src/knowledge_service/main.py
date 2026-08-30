@@ -855,10 +855,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # --- Health ---
     from .api.version import register_version_route
 
-    version_service_id = (
-        "knowledge-worker" if resolved.runtime_role == "worker" else "knowledge-service"
-    )
-    register_version_route(app, version_service_id)
+    # The API has a real HTTP release surface.  The worker exposes probes only;
+    # its release identity is verified from the running container image and OCI
+    # labels instead of inventing a worker `/version` contract.
+    if resolved.runtime_role != "worker":
+        register_version_route(app, "knowledge-service")
 
     @app.middleware("http")
     async def security_headers(request, call_next):

@@ -30,15 +30,24 @@ except ModuleNotFoundError:  # direct ``python scripts/release/...`` Make target
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MANIFEST = ROOT / "deploy/release/compatibility-manifest.json"
 SCHEMA = "ai-platform/compatibility-manifest/v1"
-SERVICES = {
-    "gateway",
-    "frontend",
-    "knowledge-service",
-    "knowledge-worker",
-    "migrator",
-    "agent-runtime",
-    "capability-worker",
-}
+HTTP_VERSION_SERVICES = frozenset(
+    {
+        "gateway",
+        "knowledge-service",
+    }
+)
+CONTAINER_IDENTITY_SERVICES = frozenset(
+    {
+        "frontend",
+        "knowledge-worker",
+        "migrator",
+        "agent-runtime",
+        "capability-worker",
+    }
+)
+APP_CONTAINER_SERVICES = frozenset({"frontend", "knowledge-worker", "migrator"})
+RUST_CONTAINER_SERVICES = frozenset({"agent-runtime", "capability-worker"})
+SERVICES = HTTP_VERSION_SERVICES | CONTAINER_IDENTITY_SERVICES
 RECEIPTS = {
     "platform_db",
     "agent_execution",
@@ -92,9 +101,7 @@ def _canonical_sha(value: Any) -> str:
 
 
 def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        ["git", *args], cwd=root, capture_output=True, text=True, check=False
-    )
+    result = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=False)
     if check and result.returncode != 0:
         raise ManifestError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
     return result
@@ -110,9 +117,7 @@ def _database(root: Path) -> dict[str, Any]:
     epoch = root / f"database/migrations/{baseline_id}/manifest.yml"
     roles = root / "database/bootstrap/roles.sql"
     grants = root / "database/bootstrap/grants.sql"
-    grants_revision = _canonical_sha(
-        {"roles": _sha(roles), "grants": _sha(grants)}
-    )
+    grants_revision = _canonical_sha({"roles": _sha(roles), "grants": _sha(grants)})
     return {
         "baseline_id": baseline_id,
         "baseline_manifest_sha256": _sha(baseline),
@@ -134,12 +139,8 @@ def _release_evidence(root: Path) -> dict[str, Any]:
         "retirement_schema": "deploy/release/schemas/historical-plan-retirement-v1.schema.json",
         "closeout_template": "deploy/release/FINAL-CLOSEOUT-TEMPLATE.md",
     }
-    return {
-        f"{name}_path": path
-        for name, path in files.items()
-    } | {
-        f"{name}_sha256": _sha(root / path)
-        for name, path in files.items()
+    return {f"{name}_path": path for name, path in files.items()} | {
+        f"{name}_sha256": _sha(root / path) for name, path in files.items()
     }
 
 
@@ -149,7 +150,9 @@ def build_offline(root: Path) -> dict[str, Any]:
     build = runtime.get("build") if isinstance(runtime.get("build"), dict) else {}
     rust = str(build.get("rustc") or "")
     rust_match = re.match(r"^rustc ([0-9]+\.[0-9]+\.[0-9]+)", rust)
-    bm25_source = root / "apps/knowledge-service/src/knowledge_service/services/knowledge/lexical_config.py"
+    bm25_source = (
+        root / "apps/knowledge-service/src/knowledge_service/services/knowledge/lexical_config.py"
+    )
     bm25_text = bm25_source.read_text(encoding="utf-8") if bm25_source.is_file() else ""
     bm25_match = re.search(r'^BM25_V2_ENCODER_CONTRACT_VERSION\s*=\s*"([^"]+)"', bm25_text, re.M)
     topology_files = (
@@ -165,14 +168,16 @@ def build_offline(root: Path) -> dict[str, Any]:
             "lock_sha256": _sha(root / "deploy/agent-runtime-source/lock.json"),
             "upstream_sha": source.get("upstream_sha"),
             "overlay_sha256": build.get("overlay_sha256"),
-            "schema_digest": build.get("capability_worker_schema_sha256"),
+            "runtime_schema_digest": build.get("app_server_schema_sha256"),
+            "capability_worker_schema_digest": build.get("capability_worker_schema_sha256"),
         },
         "database": _database(root),
         "contracts": {
             "openapi_sha256": _sha(root / "sdk/openapi.json"),
             "sse_fixture_sha256": _sha(root / "sdk/fixtures/sse_inner_envelopes.json"),
             "capability_contract_sha256": _sha(
-                root / "rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-contract/src/lib.rs"
+                root
+                / "rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-contract/src/lib.rs"
             ),
             "agent_event_schema_sha256": _sha(
                 root / "packages/ai-gateway-contracts/src/ai_gateway_contracts/event_envelope.py"
@@ -217,9 +222,17 @@ def missing_candidate_fields(root: Path, manifest: dict[str, Any]) -> list[str]:
     services = manifest.get("services") if isinstance(manifest.get("services"), dict) else {}
     for service in sorted(SERVICES):
         record = services.get(service) if isinstance(services.get(service), dict) else {}
-        for field in ("image_digest", "reported_version"):
-            if not record.get(field):
-                missing.append(f"services.{service}.{field}")
+        if not record.get("image_digest"):
+            missing.append(f"services.{service}.image_digest")
+        identity = record.get("identity") if isinstance(record.get("identity"), dict) else {}
+        if not identity:
+            missing.append(f"services.{service}.identity")
+            continue
+        for field in ("mode", "service_id", "release_id", "git_sha", "image_digest"):
+            if not identity.get(field):
+                missing.append(f"services.{service}.identity.{field}")
+        if service in APP_CONTAINER_SERVICES and not identity.get("image_version"):
+            missing.append(f"services.{service}.identity.image_version")
     vectors = manifest.get("vectors") if isinstance(manifest.get("vectors"), dict) else {}
     for field in (
         "qdrant_dataset_revision",
@@ -238,7 +251,12 @@ def missing_candidate_fields(root: Path, manifest: dict[str, Any]) -> list[str]:
             missing.append(f"receipts.{receipt}")
     expected = build_offline(root)
     for section in (
-        "runtime_overlay", "database", "contracts", "topology", "toolchains", "release_evidence"
+        "runtime_overlay",
+        "database",
+        "contracts",
+        "topology",
+        "toolchains",
+        "release_evidence",
     ):
         actual = manifest.get(section) if isinstance(manifest.get(section), dict) else {}
         for field, current in expected[section].items():
@@ -252,7 +270,12 @@ def missing_candidate_fields(root: Path, manifest: dict[str, Any]) -> list[str]:
 
 def _compare_offline(manifest: dict[str, Any], expected: dict[str, Any]) -> None:
     for section in (
-        "runtime_overlay", "database", "contracts", "topology", "toolchains", "release_evidence"
+        "runtime_overlay",
+        "database",
+        "contracts",
+        "topology",
+        "toolchains",
+        "release_evidence",
     ):
         actual = manifest.get(section)
         if not isinstance(actual, dict):
@@ -305,19 +328,64 @@ def _verify_receipts(root: Path, manifest: dict[str, Any]) -> None:
             raise ManifestError(f"receipt is not a zero-skip pass: {name}: {exc}") from exc
 
 
+def _validate_service_identities(manifest: dict[str, Any], *, require_complete: bool) -> None:
+    release_id = manifest.get("release_id")
+    source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+    services = manifest.get("services") if isinstance(manifest.get("services"), dict) else {}
+    for service in sorted(SERVICES):
+        record = services.get(service)
+        if not isinstance(record, dict):
+            raise ManifestError(f"service release record is invalid: {service}")
+        identity = record.get("identity")
+        if identity is None and not require_complete:
+            continue
+        if not isinstance(identity, dict):
+            raise ManifestError(f"service release identity is invalid: {service}")
+        expected_mode = "http_version" if service in HTTP_VERSION_SERVICES else "container_image"
+        expected = {
+            "mode": expected_mode,
+            "service_id": service,
+            "release_id": release_id,
+            "git_sha": source.get("git_sha"),
+            "image_digest": record.get("image_digest"),
+        }
+        for key, value in expected.items():
+            actual = identity.get(key)
+            if (require_complete or actual is not None) and actual != value:
+                raise ManifestError(f"service release identity mismatch: {service}.{key}")
+        if service in APP_CONTAINER_SERVICES:
+            image_version = identity.get("image_version")
+            if require_complete and not isinstance(image_version, str):
+                raise ManifestError(f"service OCI version identity is missing: {service}")
+            if image_version is not None and (
+                not isinstance(image_version, str) or not image_version.strip()
+            ):
+                raise ManifestError(f"service OCI version identity is invalid: {service}")
+        elif identity.get("image_version") is not None:
+            raise ManifestError(f"service OCI version identity is unexpected: {service}")
+
+
 def validate(root: Path, manifest: dict[str, Any], *, level: str) -> dict[str, Any]:
     if manifest.get("schema_version") != SCHEMA or manifest.get("status") not in {
-        "draft", "release_candidate", "released"
+        "draft",
+        "release_candidate",
+        "released",
     }:
         raise ManifestError("unsupported compatibility manifest schema/status")
-    if set(manifest.get("services") or {}) != SERVICES or set(manifest.get("receipts") or {}) != RECEIPTS:
+    if (
+        set(manifest.get("services") or {}) != SERVICES
+        or set(manifest.get("receipts") or {}) != RECEIPTS
+    ):
         raise ManifestError("compatibility manifest service/receipt set drift")
+    _validate_service_identities(manifest, require_complete=False)
     _compare_offline(manifest, build_offline(root))
     missing = missing_candidate_fields(root, manifest)
     if level == "candidate" and (
         manifest.get("status") not in {"release_candidate", "released"} or missing
     ):
         raise ManifestError(f"candidate manifest is incomplete: {missing}")
+    if level == "candidate":
+        _validate_service_identities(manifest, require_complete=True)
     try:
         matrix = _load(
             root / "deploy/release/release-rollback-matrix.json", "release/rollback matrix"
@@ -341,22 +409,14 @@ def validate(root: Path, manifest: dict[str, Any], *, level: str) -> dict[str, A
         if RELEASE_ID.fullmatch(manifest["release_id"]) is None:
             raise ManifestError("release_id is invalid")
         source = manifest["source"]
-        if HEX_40.fullmatch(source["git_sha"]) is None or HEX_40.fullmatch(source["git_tree_sha"]) is None:
+        if (
+            HEX_40.fullmatch(source["git_sha"]) is None
+            or HEX_40.fullmatch(source["git_tree_sha"]) is None
+        ):
             raise ManifestError("source Git identity is invalid")
         for service, record in manifest["services"].items():
             if IMAGE_DIGEST.fullmatch(record["image_digest"]) is None:
                 raise ManifestError(f"service image is not digest-pinned: {service}")
-            version = record["reported_version"]
-            if not isinstance(version, dict) or any(
-                version.get(key) != expected
-                for key, expected in (
-                    ("release_id", manifest["release_id"]),
-                    ("git_sha", source["git_sha"]),
-                    ("image_digest", record["image_digest"]),
-                    ("service_id", service),
-                )
-            ):
-                raise ManifestError(f"service /version identity mismatch: {service}")
         resolved = _git(root, "rev-parse", f"{source['git_sha']}^{{commit}}").stdout.strip()
         tree = _git(root, "rev-parse", f"{source['git_sha']}^{{tree}}").stdout.strip()
         if resolved != source["git_sha"] or tree != source["git_tree_sha"]:
@@ -382,7 +442,11 @@ def generate_candidate(root: Path, source_rev: str, inputs: dict[str, Any]) -> d
     vectors = inputs.get("vectors")
     receipts = inputs.get("receipts")
     release_id = inputs.get("release_id")
-    if not isinstance(services, dict) or not isinstance(vectors, dict) or not isinstance(receipts, dict):
+    if (
+        not isinstance(services, dict)
+        or not isinstance(vectors, dict)
+        or not isinstance(receipts, dict)
+    ):
         raise ManifestError("candidate inputs require services, vectors, and receipts objects")
     if not isinstance(release_id, str) or RELEASE_ID.fullmatch(release_id) is None:
         raise ManifestError("candidate inputs require a valid release_id")
@@ -419,7 +483,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.write:
             if not args.source_rev or args.inputs is None:
                 raise ManifestError("--write requires --source-rev and --inputs")
-            payload = generate_candidate(root, args.source_rev, _load(args.inputs, "release inputs"))
+            payload = generate_candidate(
+                root, args.source_rev, _load(args.inputs, "release inputs")
+            )
             args.manifest.parent.mkdir(parents=True, exist_ok=True)
             args.manifest.write_text(
                 json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"

@@ -243,6 +243,7 @@ def test_worker_role_exposes_health_without_business_routes(monkeypatch) -> None
     app = main.create_app(main.Settings(_env_file=None, runtime_role="worker"))
     paths = {route.path for route in app.routes}
     assert "/health/ready" in paths
+    assert "/version" not in paths
     assert not any(path.startswith("/api/v1/") for path in paths)
 
 
