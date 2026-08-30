@@ -3,21 +3,21 @@
     "app_server_schema_file_count": 292,
     "app_server_schema_sha256": "d6fc70952574166e7c69d6524601065a81fc94d26a1b99d180d7c3918c46e3f7",
     "capability_worker_sbom": "deploy/agent-runtime-source/capability-worker-sbom.cdx.json",
-    "capability_worker_sbom_sha256": "3055ff9cb89f7c1e766ce460521b7ce0ae7c7ad88951c507d7d672e360bdb595",
+    "capability_worker_sbom_sha256": "f1cbb329a86e3025e14e377fec397b651a08a49d20b1782a40ffa2b97ceb1e60",
     "capability_worker_schema_sha256": "b2b6a1ae71f054387b16daecc0325faf0acb09be7a6119adbfe3227cbfb945a7",
     "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
     "cargo_lock_sha256": "6c57d517924acb8c74f7e8c9c1a0f9ccd786b133d8c862bf74c3f546fc63d988",
     "local_image_profile": "dev-small",
     "overlay_cargo_lock_sha256": "dbdd065635faf9c54d7d67da5cc0c1bf40f0d83dd56a461cba3a8e825fa95b79",
-    "overlay_file_count": 85,
+    "overlay_file_count": 101,
     "overlay_manifest": "rust/agent-runtime-overlay/manifest.json",
-    "overlay_sha256": "c2f4e4c2ef8e27893b51f6ca758fd97fd25a21a25f256f3c267460777676410c",
+    "overlay_sha256": "614a66eed7fb2268b9eed5faf5202a8400684b6f1a14b22a6bf108c8681022dc",
     "rust_toolchain_sha256": "570656042681cfd8795403a455baf9a33035331a07db0645e866bbcea89a3d64",
     "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
     "sbom": "deploy/agent-runtime-source/sbom.cdx.json",
     "sbom_sha256": "41a6a321a0d412353f65891015976f430bafe239f57ac2ee77b10aab290aa607",
     "source_receipt": "deploy/agent-runtime-source/source-receipt.json",
-    "source_receipt_sha256": "d03eb14a5ed15eb3830cf42b5e3541d103130e6054396d89df6e87f816edea7b"
+    "source_receipt_sha256": "7e8ae32a4841408a054e4299912048a68fdad78cc9868889d450510ec9e8f84c"
   },
   "license": {
     "notice": "deploy/agent-runtime-source/NOTICE.md",
@@ -30,9 +30,9 @@
     "artifacts": {
       "agent_runtime": {
         "binary": "ai-platform-agent-runtime",
-        "candidate_start_allowed": true,
-        "image_digest": "sha256:bace447b5001eb33c697fc7c6d8e0cc8b6609ef3146730c0108caa3a0b13e7de",
-        "image_ref": "local-image://sha256:bace447b5001eb33c697fc7c6d8e0cc8b6609ef3146730c0108caa3a0b13e7de",
+        "candidate_start_allowed": false,
+        "image_digest": null,
+        "image_ref": null,
         "platforms": [
           "linux/arm64"
         ],
@@ -50,9 +50,9 @@
       },
       "capability_worker": {
         "binary": "ai-platform-capability-worker",
-        "candidate_start_allowed": true,
-        "image_digest": "sha256:3539ff8a3499b36c7f0da448663e77db8fb759ff8e2673d3223e03b69e6bb43f",
-        "image_ref": "local-image://sha256:3539ff8a3499b36c7f0da448663e77db8fb759ff8e2673d3223e03b69e6bb43f",
+        "candidate_start_allowed": false,
+        "image_digest": null,
+        "image_ref": null,
         "platforms": [
           "linux/arm64"
         ],
@@ -60,7 +60,7 @@
       }
     }
   },
-  "release_state": "local_image_locked",
+  "release_state": "local_source_locked",
   "schema_version": "ai-platform/agent-runtime-source-lock/v2",
   "source": {
     "branch": "ai-platform/main",

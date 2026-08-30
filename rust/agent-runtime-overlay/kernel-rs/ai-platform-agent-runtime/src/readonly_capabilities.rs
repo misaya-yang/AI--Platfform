@@ -403,8 +403,7 @@ pub fn validate_platform_config(
     let object = value
         .as_object()
         .ok_or_else(|| ReadonlyCapabilityError::new("runtime_platform_config_invalid"))?;
-    if object.get("schema_version").and_then(Value::as_str)
-        != Some(PLATFORM_CONFIG_SCHEMA_VERSION)
+    if object.get("schema_version").and_then(Value::as_str) != Some(PLATFORM_CONFIG_SCHEMA_VERSION)
         || object.get("tenant_id").and_then(Value::as_str) != Some(scope.tenant_id.as_str())
         || object.get("user_id").and_then(Value::as_str) != Some(scope.user_id.as_str())
         || object.get("session_id").and_then(Value::as_str) != Some(scope.session_id.as_str())
@@ -427,8 +426,12 @@ pub fn validate_platform_config(
         "attachments",
     ];
     if object.keys().any(|key| !allowed.contains(&key.as_str()))
-        || object.get("agent_spec").is_none_or(|value| !value.is_object())
-        || object.get("instructions").is_none_or(|value| !value.is_object())
+        || object
+            .get("agent_spec")
+            .is_none_or(|value| !value.is_object())
+        || object
+            .get("instructions")
+            .is_none_or(|value| !value.is_object())
     {
         return Err(ReadonlyCapabilityError::new(
             "runtime_platform_config_invalid",
@@ -469,7 +472,11 @@ pub fn validate_platform_config(
     }
     let mut unhashed = object.clone();
     unhashed.remove("config_hash");
-    if canonical_json_hash(&Value::Object(unhashed)).ok().as_deref() != Some(config_hash) {
+    if canonical_json_hash(&Value::Object(unhashed))
+        .ok()
+        .as_deref()
+        != Some(config_hash)
+    {
         return Err(ReadonlyCapabilityError::new(
             "runtime_platform_config_hash_mismatch",
         ));
@@ -484,10 +491,15 @@ pub fn validate_platform_config(
             .ok_or_else(|| ReadonlyCapabilityError::new("runtime_platform_skill_invalid"))?;
         for key in ["id", "version", "content_hash", "permissions", "manifest"] {
             if skill.get(key).is_none() {
-                return Err(ReadonlyCapabilityError::new("runtime_platform_skill_invalid"));
+                return Err(ReadonlyCapabilityError::new(
+                    "runtime_platform_skill_invalid",
+                ));
             }
         }
-        if skill.get("id").and_then(Value::as_str).is_none_or(str::is_empty)
+        if skill
+            .get("id")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
             || skill
                 .get("version")
                 .and_then(Value::as_str)
@@ -496,10 +508,14 @@ pub fn validate_platform_config(
                 .get("content_hash")
                 .and_then(Value::as_str)
                 .is_none_or(|hash| !valid_schema_hash(Some(hash)))
-            || skill.get("permissions").is_none_or(|value| !value.is_array())
+            || skill
+                .get("permissions")
+                .is_none_or(|value| !value.is_array())
             || skill.get("manifest").is_none_or(|value| !value.is_object())
         {
-            return Err(ReadonlyCapabilityError::new("runtime_platform_skill_invalid"));
+            return Err(ReadonlyCapabilityError::new(
+                "runtime_platform_skill_invalid",
+            ));
         }
     }
     for plugin in object
@@ -510,7 +526,10 @@ pub fn validate_platform_config(
         let plugin = plugin
             .as_object()
             .ok_or_else(|| ReadonlyCapabilityError::new("runtime_platform_plugin_invalid"))?;
-        if plugin.get("id").and_then(Value::as_str).is_none_or(str::is_empty)
+        if plugin
+            .get("id")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
             || plugin
                 .get("version")
                 .and_then(Value::as_str)
@@ -519,9 +538,13 @@ pub fn validate_platform_config(
                 .get("capability_id")
                 .and_then(Value::as_str)
                 .is_none_or(str::is_empty)
-            || plugin.get("metadata").is_none_or(|value| !value.is_object())
+            || plugin
+                .get("metadata")
+                .is_none_or(|value| !value.is_object())
         {
-            return Err(ReadonlyCapabilityError::new("runtime_platform_plugin_invalid"));
+            return Err(ReadonlyCapabilityError::new(
+                "runtime_platform_plugin_invalid",
+            ));
         }
     }
     for grant in object
@@ -552,7 +575,9 @@ pub fn validate_platform_config(
                 )
             })
         {
-            return Err(ReadonlyCapabilityError::new("runtime_platform_grant_invalid"));
+            return Err(ReadonlyCapabilityError::new(
+                "runtime_platform_grant_invalid",
+            ));
         }
     }
     for attachment in object
@@ -560,12 +585,14 @@ pub fn validate_platform_config(
         .and_then(Value::as_array)
         .expect("validated attachments array")
     {
-        let attachment = attachment.as_object().ok_or_else(|| {
-            ReadonlyCapabilityError::new("runtime_platform_attachment_invalid")
-        })?;
-        if attachment.get("ref").and_then(Value::as_str).is_none_or(str::is_empty)
-            || attachment.get("descriptor").and_then(Value::as_str)
-                != Some("read_attachment")
+        let attachment = attachment
+            .as_object()
+            .ok_or_else(|| ReadonlyCapabilityError::new("runtime_platform_attachment_invalid"))?;
+        if attachment
+            .get("ref")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+            || attachment.get("descriptor").and_then(Value::as_str) != Some("read_attachment")
             || attachment.get("version").and_then(Value::as_str) != Some("v1")
         {
             return Err(ReadonlyCapabilityError::new(
@@ -1258,8 +1285,8 @@ mod tests {
             "deferred": [],
             "attachment_tools": []
         });
-        let rendered = render_turn_input(&scope(), &payload)
-            .expect("catalog-only payload should validate");
+        let rendered =
+            render_turn_input(&scope(), &payload).expect("catalog-only payload should validate");
         assert_eq!(rendered, None);
     }
 
@@ -1354,7 +1381,13 @@ mod tests {
     #[test]
     fn native_child_controls_never_resolve_as_dynamic_worker_tools() {
         let payload = serde_json::json!({"tools": []});
-        for name in ["spawn_agent", "steer", "wait", "interrupt", "spawn_subagent"] {
+        for name in [
+            "spawn_agent",
+            "steer",
+            "wait",
+            "interrupt",
+            "spawn_subagent",
+        ] {
             assert!(!allows_dynamic_tool(&payload, None, name));
             assert_eq!(
                 resolve_dynamic_capability(&payload, None, name)

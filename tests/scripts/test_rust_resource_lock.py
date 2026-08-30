@@ -586,3 +586,53 @@ def test_heartbeat_failure_kills_child_that_ignores_sigterm_without_timeout_leak
     assert time.monotonic() - started < 6
     assert not lock.mutex_dir.exists()
     assert not lock.resource_dir.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process-group cleanup is POSIX-only")
+def test_heartbeat_failure_kills_descendant_process_group(tmp_path: Path) -> None:
+    repo = _git_repo(tmp_path)
+    descendant_pid_path = tmp_path / "descendant-pid"
+    descendant = (
+        "import signal,time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "time.sleep(30)"
+    )
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "import pathlib,signal,subprocess,sys,time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            f"child=subprocess.Popen([sys.executable, '-c', {descendant!r}]); "
+            f"pathlib.Path({str(descendant_pid_path)!r}).write_text(str(child.pid)); "
+            "time.sleep(30)"
+        ),
+    ]
+    lock = ResourceLock(
+        "rust-build",
+        command=command,
+        timeout_seconds=5,
+        expected_end_condition="process tree exits",
+        cwd=repo,
+    )
+
+    def failed_heartbeat() -> None:
+        deadline = time.monotonic() + 2
+        while not descendant_pid_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        raise LockError("synthetic heartbeat failure")
+
+    lock.heartbeat = failed_heartbeat  # type: ignore[method-assign]
+    with pytest.raises(LockError, match="child was terminated"):
+        run_locked(lock, command, heartbeat_seconds=0.05)
+
+    descendant_pid = int(descendant_pid_path.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        try:
+            os.kill(descendant_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.02)
+    else:
+        pytest.fail("descendant survived lock-supervisor cleanup")

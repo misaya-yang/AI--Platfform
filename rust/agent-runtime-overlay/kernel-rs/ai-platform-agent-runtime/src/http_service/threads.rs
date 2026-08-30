@@ -28,7 +28,7 @@ use crate::PlatformThreadIdentity;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CreateThreadRequest {
+pub(super) struct CreateThreadRequest {
     tenant_id: String,
     user_id: String,
     session_id: String,
@@ -105,7 +105,7 @@ pub(super) async fn create_thread(
 }
 
 #[derive(Serialize)]
-struct SessionCleanupResponse {
+pub(super) struct SessionCleanupResponse {
     session_id: String,
     status: &'static str,
 }

@@ -23,13 +23,13 @@ use tracing::warn;
 use uuid::Uuid;
 
 use super::RuntimeHttpState;
-use super::threads::apply_model_limits;
 use super::security::RuntimeError;
 use super::security::SESSION_HEADER;
 use super::security::TENANT_HEADER;
 use super::security::USER_HEADER;
 use super::security::authorize;
 use super::security::required_header;
+use super::threads::apply_model_limits;
 use crate::PlatformThreadIdentity;
 
 #[derive(Deserialize)]

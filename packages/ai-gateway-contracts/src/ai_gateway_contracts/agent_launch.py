@@ -406,6 +406,19 @@ class ResolvedAgentLaunchV1:
 
     _canonical_payload: str
 
+    def __post_init__(self) -> None:
+        """Reject forged instances that bypass :meth:`parse`."""
+
+        if not isinstance(self._canonical_payload, str):
+            raise ResolvedAgentLaunchError("RESOLVED_AGENT_LAUNCH_INVALID")
+        try:
+            raw = json.loads(self._canonical_payload)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ResolvedAgentLaunchError("RESOLVED_AGENT_LAUNCH_INVALID") from exc
+        payload = _validated_payload(raw)
+        if canonical_runtime_json(payload) != self._canonical_payload:
+            raise ResolvedAgentLaunchError("RESOLVED_AGENT_LAUNCH_INVALID")
+
     @classmethod
     def parse(cls, value: Mapping[str, Any]) -> ResolvedAgentLaunchV1:
         payload = _validated_payload(dict(value))

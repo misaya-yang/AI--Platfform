@@ -501,4 +501,3 @@ class _NativeResponsesStreamValidator:
         if not self.seen_created or self.terminal is None:
             raise AgentModelPlaneError("RUNTIME_PROVIDER_STREAM_INCOMPLETE", status_code=502)
         return self.terminal
-

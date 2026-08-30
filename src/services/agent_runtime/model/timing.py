@@ -43,4 +43,3 @@ def _log_model_plane_timing(
         re.sub(r"\s+", "_", call.model_id),
         rendered,
     )
-

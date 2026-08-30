@@ -18,7 +18,6 @@ use codex_protocol::ThreadId;
 use serde::Deserialize;
 use tokio::sync::broadcast;
 
-use super::RuntimeBroadcastEvent;
 use super::RuntimeHttpState;
 use super::security::RuntimeError;
 use super::security::SESSION_HEADER;
@@ -30,7 +29,7 @@ use crate::PlatformThreadIdentity;
 use crate::SequencedAssistantTurnEventV1;
 
 #[derive(Deserialize)]
-struct EventsQuery {
+pub(super) struct EventsQuery {
     #[serde(default)]
     after_sequence: i64,
     #[serde(default = "default_event_limit")]

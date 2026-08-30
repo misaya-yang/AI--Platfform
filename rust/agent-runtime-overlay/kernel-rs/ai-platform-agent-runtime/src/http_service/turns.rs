@@ -37,7 +37,7 @@ use crate::readonly_capabilities::validate_platform_config;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct StartTurnRequest {
+pub(super) struct StartTurnRequest {
     run_id: Uuid,
     snapshot_id: Uuid,
     lease_id: Uuid,
@@ -286,15 +286,6 @@ fn runtime_scope_sha256(tenant_id: &str, user_id: &str, session_id: &str) -> Str
 
 #[cfg(test)]
 mod turn_request_tests {
-    use super::*;
-    use codex_app_server_protocol::AgentMessageDeltaNotification;
-    use codex_app_server_protocol::ItemCompletedNotification;
-    use codex_app_server_protocol::ServerNotification;
-    use codex_app_server_protocol::ThreadItem;
-    use codex_app_server_protocol::Turn;
-    use codex_app_server_protocol::TurnCompletedNotification;
-    use codex_app_server_protocol::TurnItemsView;
-    use codex_app_server_protocol::TurnStatus;
     use super::super::TextProjectionState;
     use super::super::capability_dispatch::capability_result_detail;
     use super::super::capability_dispatch::capability_status_name;
@@ -302,12 +293,21 @@ mod turn_request_tests {
     use super::super::projection::terminal_admission_failure_event;
     use super::super::threads::apply_model_limits;
     use super::super::threads::validate_memory_mode;
-    use ai_platform_capability_contract::CapabilityExecutionStatus;
-    use codex_app_server_protocol::ThreadMemoryMode;
-    use codex_app_server_protocol::ThreadStartParams;
-    use serde_json::json;
+    use super::*;
     use crate::V1ProjectionContext;
     use crate::capability_execution::CapabilityExecutionOutcome;
+    use ai_platform_capability_contract::CapabilityExecutionStatus;
+    use codex_app_server_protocol::AgentMessageDeltaNotification;
+    use codex_app_server_protocol::ItemCompletedNotification;
+    use codex_app_server_protocol::ServerNotification;
+    use codex_app_server_protocol::ThreadItem;
+    use codex_app_server_protocol::ThreadMemoryMode;
+    use codex_app_server_protocol::ThreadStartParams;
+    use codex_app_server_protocol::Turn;
+    use codex_app_server_protocol::TurnCompletedNotification;
+    use codex_app_server_protocol::TurnItemsView;
+    use codex_app_server_protocol::TurnStatus;
+    use serde_json::json;
 
     fn request(signature: String) -> StartTurnRequest {
         StartTurnRequest {

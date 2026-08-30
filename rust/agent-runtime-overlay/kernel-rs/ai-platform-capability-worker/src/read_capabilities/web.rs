@@ -38,7 +38,10 @@ pub(super) async fn validated_public_url(value: &str) -> Result<Url, ReadCapabil
     Ok(url)
 }
 
-pub(super) fn resolved_peer_ip(remote: Option<IpAddr>, pinned: &[std::net::SocketAddr]) -> Option<IpAddr> {
+pub(super) fn resolved_peer_ip(
+    remote: Option<IpAddr>,
+    pinned: &[std::net::SocketAddr],
+) -> Option<IpAddr> {
     // `resolve_to_addrs` pins the TCP peer. Only when the HTTP stack leaves
     // `remote_addr()` empty do we fall back to the already-validated pin. An
     // *observed* peer is never overridden: if the connection actually landed on

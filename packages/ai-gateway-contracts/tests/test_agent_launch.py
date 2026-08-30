@@ -115,6 +115,13 @@ def test_launch_is_immutable_and_accessors_are_defensive() -> None:
     assert launch.model["id"] == "model-a"
 
 
+def test_launch_direct_constructor_cannot_bypass_validation() -> None:
+    with pytest.raises(
+        ResolvedAgentLaunchError, match="RESOLVED_AGENT_LAUNCH_INVALID"
+    ):
+        ResolvedAgentLaunchV1("{}")
+
+
 def test_legacy_snapshot_adapter_preserves_control_projection() -> None:
     original = ResolvedAgentLaunchV1.parse(_payload(entrypoint="published_agent"))
     snapshot = original.to_control_snapshot()

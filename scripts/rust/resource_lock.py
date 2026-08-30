@@ -15,6 +15,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -617,22 +618,50 @@ def force_release(
     }
 
 
+def _child_tree_alive(process: subprocess.Popen[Any]) -> bool:
+    if os.name != "posix":
+        return process.poll() is None
+    try:
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _signal_child_tree(process: subprocess.Popen[Any], signum: int) -> None:
+    if os.name == "posix":
+        os.killpg(process.pid, signum)
+    else:
+        process.send_signal(signum)
+
+
+def _wait_for_child_tree(process: subprocess.Popen[Any], timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while _child_tree_alive(process):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=min(0.05, remaining))
+        time.sleep(min(0.01, max(0.0, remaining)))
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=0)
+    return True
+
+
 def _terminate_child(process: subprocess.Popen[Any], *, context: str) -> None:
-    if process.poll() is not None:
+    if not _child_tree_alive(process):
         return
     with contextlib.suppress(ProcessLookupError):
-        process.terminate()
-    try:
-        process.wait(timeout=CHILD_TERMINATE_GRACE_SECONDS)
+        _signal_child_tree(process, signal.SIGTERM)
+    if _wait_for_child_tree(process, CHILD_TERMINATE_GRACE_SECONDS):
         return
-    except subprocess.TimeoutExpired:
-        pass
     with contextlib.suppress(ProcessLookupError):
-        process.kill()
-    try:
-        process.wait(timeout=CHILD_TERMINATE_GRACE_SECONDS)
-    except subprocess.TimeoutExpired as exc:
-        raise LockError(f"{context}: child did not exit after SIGKILL") from exc
+        _signal_child_tree(process, signal.SIGKILL)
+    if not _wait_for_child_tree(process, CHILD_TERMINATE_GRACE_SECONDS):
+        raise LockError(f"{context}: child process group did not exit after SIGKILL")
 
 
 def run_locked(
@@ -663,8 +692,9 @@ def run_locked(
 
     def handle_signal(signum: int, _frame: Any) -> None:
         received_signal.append(signum)
-        if process is not None and process.poll() is None:
-            process.send_signal(signum)
+        if process is not None and _child_tree_alive(process):
+            with contextlib.suppress(ProcessLookupError):
+                _signal_child_tree(process, signum)
 
     for signum in (signal.SIGINT, signal.SIGTERM):
         previous_handlers[signum] = signal.getsignal(signum)
@@ -678,7 +708,11 @@ def run_locked(
             target=heartbeat_loop, name="resource-lock-heartbeat"
         )
         heartbeat_thread.start()
-        process = subprocess.Popen(command, cwd=lock.worktree)
+        process = subprocess.Popen(
+            command,
+            cwd=lock.worktree,
+            start_new_session=os.name == "posix",
+        )
         while True:
             if received_signal:
                 _terminate_child(process, context="signal cleanup failed")
@@ -699,7 +733,7 @@ def run_locked(
     finally:
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
-        if process is not None and process.poll() is None:
+        if process is not None and _child_tree_alive(process):
             _terminate_child(process, context="final lock cleanup failed")
         stop.set()
         if heartbeat_thread is not None:
