@@ -11,7 +11,8 @@ global:
 # Gateway - higher resources for production
 # -----------------------------------------------------------------------------
 gateway:
-  replicaCount: 3
+  # ARC-05/06: process-local schedulers and SSE ownership require one pod.
+  replicaCount: 1
   resources:
     requests:
       cpu: 500m
@@ -20,9 +21,9 @@ gateway:
       cpu: "4"
       memory: 4Gi
   autoscaling:
-    enabled: true
-    minReplicas: 3
-    maxReplicas: 20
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 1
     targetCPUUtilization: 60
 
 # -----------------------------------------------------------------------------

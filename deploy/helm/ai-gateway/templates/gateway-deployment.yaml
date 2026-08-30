@@ -6,18 +6,16 @@ metadata:
     {{- include "ai-gateway.labels" . | nindent 4 }}
     app.kubernetes.io/component: gateway
 spec:
-  {{- if not .Values.gateway.autoscaling.enabled }}
-  replicas: {{ .Values.gateway.replicaCount }}
-  {{- end }}
+  # Gateway owns process-local schedulers and SSE state. Keep this literal so
+  # a values override cannot accidentally create concurrent owners.
+  replicas: 1
   selector:
     matchLabels:
       {{- include "ai-gateway.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: gateway
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 0
-      maxSurge: 1
+    # RollingUpdate with maxSurge would briefly run two scheduler owners.
+    type: Recreate
   template:
     metadata:
       labels:
@@ -25,6 +23,24 @@ spec:
         app.kubernetes.io/component: gateway
     spec:
       terminationGracePeriodSeconds: 60
+      initContainers:
+        - name: wait-for-schema-authority
+          image: "{{ .Values.global.imageRegistry }}/{{ .Values.gateway.image.repository }}:{{ .Values.gateway.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          command: ["python", "-m", "database.authority", "startup-check"]
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ai-gateway.fullname" . }}-secret
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ai-gateway.fullname" . }}-secret
+                  key: POSTGRES_PASSWORD
+            - name: GATEWAY_DATABASE__DSN
+              value: {{ include "ai-gateway.postgresDSN" . | quote }}
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:

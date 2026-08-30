@@ -32,6 +32,8 @@ jobs:
 
       - name: Check shell script syntax
         run: |
+          bash -n scripts/new/migrate.sh
+          bash -n scripts/new/setup-dev.sh
           bash -n scripts/new/validate-env.sh
           bash -n scripts/new/seed-demo-data.sh
 
@@ -384,6 +386,11 @@ jobs:
         continue-on-error: true
         run: make architecture-boundary-gate
 
+      - name: Enforce Gateway and Agent Runtime single-instance topology
+        id: single_instance_guard
+        continue-on-error: true
+        run: make single-instance-guard
+
       - name: Run offline OpenAPI contract gate
         id: openapi_offline
         continue-on-error: true
@@ -403,6 +410,7 @@ jobs:
         if: always()
         env:
           ARCHITECTURE_BOUNDARY_OUTCOME: ${{ steps.architecture_boundary.outcome }}
+          SINGLE_INSTANCE_GUARD_OUTCOME: ${{ steps.single_instance_guard.outcome }}
           OPENAPI_OFFLINE_OUTCOME: ${{ steps.openapi_offline.outcome }}
           HYGIENE_OUTCOME: ${{ steps.hygiene.outcome }}
           LOC_NO_GROWTH_OUTCOME: ${{ steps.loc_no_growth.outcome }}
@@ -410,6 +418,7 @@ jobs:
           failed=0
           for result in \
             "$ARCHITECTURE_BOUNDARY_OUTCOME" \
+            "$SINGLE_INSTANCE_GUARD_OUTCOME" \
             "$OPENAPI_OFFLINE_OUTCOME" \
             "$HYGIENE_OUTCOME" \
             "$LOC_NO_GROWTH_OUTCOME"; do

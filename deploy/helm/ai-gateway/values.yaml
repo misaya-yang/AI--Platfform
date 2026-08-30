@@ -2,7 +2,7 @@
 # AI Gateway Helm Chart - Default Values
 # =============================================================================
 # Override with: helm install -f values-production.yaml
-# or:            helm install --set gateway.replicaCount=3
+# Gateway remains single-instance until scheduler leases are implemented.
 # =============================================================================
 
 global:
@@ -13,7 +13,7 @@ global:
 # Gateway (Python backend)
 # -----------------------------------------------------------------------------
 gateway:
-  replicaCount: 2
+  replicaCount: 1
   image:
     repository: ai-gateway
     tag: latest
@@ -25,9 +25,9 @@ gateway:
       cpu: "2"
       memory: 2Gi
   autoscaling:
-    enabled: true
-    minReplicas: 2
-    maxReplicas: 10
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 1
     targetCPUUtilization: 70
   probes:
     liveness:
@@ -44,7 +44,7 @@ gateway:
     GATEWAY_HOST: "0.0.0.0"
     GATEWAY_PORT: "8080"
     GATEWAY_DATABASE__ENABLED: "true"
-    GATEWAY_DATABASE__AUTO_INIT: "true"
+    GATEWAY_DATABASE__AUTO_INIT: "false"
     GATEWAY_REDIS__ENABLED: "true"
     GATEWAY_AUTHENTICATION__JWT__ENABLED: "true"
     GATEWAY_AUTHENTICATION__JWT__ALGORITHMS: '["HS256"]'

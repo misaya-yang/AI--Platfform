@@ -204,13 +204,22 @@ def build() -> dict:
         required_deps: list[str] | None = None,
         optional_deps: list[str] | None = None,
         notes: str = "",
+        scale_class: str = "other",
+        helm_values_key: str | None = None,
     ) -> None:
+        hpa_allowed = scale_class in {"stateless", "worker"}
         record = {
             "service_id": service_id,
             "bounded_context": context,
             "process_role": process_role,
             "exposure": exposure,
             "scale_support": scale_support,
+            "scale_contract": {
+                "class": scale_class,
+                "max_replicas": 1 if scale_class == "single-instance" else None,
+                "hpa_allowed": hpa_allowed,
+                **({"helm_values_key": helm_values_key} if helm_values_key else {}),
+            },
             "image_artifact": image_artifact,
             "state_owner": state_owner,
             "health_contract": health_contract,
@@ -236,6 +245,8 @@ def build() -> dict:
         "static asset delivery; no readiness probe of its own",
         ["docker-compose.yml:frontend"],
         required_deps=["gateway"],
+        scale_class="stateless",
+        helm_values_key="frontend",
     )
     entry(
         "gateway",
@@ -250,6 +261,8 @@ def build() -> dict:
         required_deps=["postgres", "redis"],
         optional_deps=["agent-runtime", "knowledge-service", "qdrant (via knowledge proxy)"],
         notes="Fixed container_name blocks multi-replica compose scaling until removed (ARC-06).",
+        scale_class="single-instance",
+        helm_values_key="gateway",
     )
     entry(
         "gateway-init",
@@ -262,18 +275,24 @@ def build() -> dict:
         "runs to completion before gateway",
         ["docker-compose.yml:gateway-init"],
         required_deps=["postgres"],
+        scale_class="one-shot",
     )
     entry(
         "migrate",
         "infrastructure",
         "one-shot migration job (not a long-running service)",
         "private",
-        "no (single migrator authority is an ARC-03 target)",
+        "no (single database.authority writer, serialized by PostgreSQL advisory lock)",
         compose_image("migrate"),
-        "database/migrations ledger",
+        "platform_schema_baselines/changes/change_attempts; legacy ledgers are read-only adoption evidence",
         "runs to completion; failure blocks dependent services",
-        ["docker-compose.yml:migrate", "database/schema.sql", "database/migrations/"],
+        [
+            "docker-compose.yml:migrate",
+            "database/authority/",
+            "database/migrations/legacy-manifest.yml",
+        ],
         required_deps=["postgres"],
+        scale_class="one-shot",
     )
     entry(
         "agent-runtime",
@@ -293,6 +312,8 @@ def build() -> dict:
         required_deps=["gateway (private model plane)", "postgres"],
         optional_deps=["agent-capability-worker"],
         notes="Fixed container_name blocks multi-replica compose scaling until removed (ARC-06).",
+        scale_class="single-instance",
+        helm_values_key="agentRuntime",
     )
     entry(
         "agent-capability-worker",
@@ -311,6 +332,8 @@ def build() -> dict:
         required_deps=["agent-runtime", "postgres"],
         optional_deps=["gateway brokers", "knowledge-service"],
         notes="Fixed container_name blocks multi-replica compose scaling until removed (ARC-06).",
+        scale_class="worker",
+        helm_values_key="agentCapabilityWorker",
     )
     entry(
         "knowledge-service",
@@ -328,6 +351,8 @@ def build() -> dict:
         required_deps=["postgres", "qdrant"],
         optional_deps=["object storage", "redis"],
         notes="Fixed container_name blocks multi-replica compose scaling until removed (ARC-06).",
+        scale_class="stateless",
+        helm_values_key="knowledgeService",
     )
     entry(
         "knowledge-worker",
@@ -345,6 +370,8 @@ def build() -> dict:
         required_deps=["postgres", "qdrant"],
         optional_deps=["embedding providers", "object storage"],
         notes="Fixed container_name blocks multi-replica compose scaling until removed (ARC-06).",
+        scale_class="worker",
+        helm_values_key="knowledgeWorker",
     )
     entry(
         "local-node",
@@ -358,6 +385,7 @@ def build() -> dict:
         ["apps/local-node/", "database/migrations/098_local_node_control_plane.sql"],
         required_deps=["gateway"],
         notes="Not a Compose service: runs on the user's machine; compose files define no local-node entry.",
+        scale_class="per-host",
     )
     entry(
         "postgres",
@@ -366,9 +394,10 @@ def build() -> dict:
         "private",
         "vertical only in this program (no physical split planned)",
         compose_image("postgres"),
-        "all relational state; schema.sql + migrations are the DDL authority",
+        "all relational state; database.authority + frozen baseline/epoch manifests are the DDL authority",
         "pg_isready via compose healthcheck",
         ["docker-compose.yml:postgres", "database/schema.sql"],
+        scale_class="stateful",
     )
     entry(
         "redis",
@@ -380,6 +409,7 @@ def build() -> dict:
         "cache only: sessions, service/task caches, rate limits; no durable system of record",
         "compose healthcheck",
         ["docker-compose.yml:redis"],
+        scale_class="stateful",
     )
     entry(
         "qdrant",
@@ -391,6 +421,7 @@ def build() -> dict:
         "dataset vectors (knowledge), agent memory vectors (gateway data governance)",
         "compose healthcheck",
         ["docker-compose.yml:qdrant"],
+        scale_class="stateful",
     )
     entry(
         "tempo",
@@ -403,6 +434,7 @@ def build() -> dict:
         "compose healthcheck",
         ["docker-compose.yml:tempo"],
         optional_deps=["gateway", "knowledge-service"],
+        scale_class="stateful",
     )
 
     overlay = REPO_ROOT / "rust" / "agent-runtime-overlay" / "manifest.json"
@@ -436,6 +468,7 @@ def build() -> dict:
             "Gateway route surface taken from the published snapshot sdk/openapi.json; it is the contract authority frozen in contract-freeze.json.",
             "Knowledge route surface is a static AST decorator scan; it excludes mounted prefixes but is stable for drift comparison.",
             "scale_support values are current facts per PRD §5.1, not promises.",
+            "scale_contract is the machine authority consumed by the fail-closed single-instance guard; Gateway and Agent Runtime cannot be reclassified by Helm values.",
         ],
     }
 

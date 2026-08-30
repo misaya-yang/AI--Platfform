@@ -151,6 +151,9 @@ commands:
   architecture_boundary_gate:
     make: architecture-boundary-gate
     purpose: Static import boundary between gateway/apps/core/contracts zones.
+  single_instance_guard:
+    make: single-instance-guard
+    purpose: Keep Gateway and Agent Runtime fail-closed single-instance in generated topology and Helm.
   verify_openapi_contract:
     make: verify-openapi-contract
     purpose: Offline in-process OpenAPI contract gate — no live stack, never skips.
@@ -230,6 +233,17 @@ gates:
     skip: never
     timeout: 5
     evidence: tmp/gate-evidence/architecture-boundary-gate.json
+    ci_job: architecture-gates
+  single_instance_guard:
+    make: single-instance-guard
+    purpose: Reject Gateway/Agent Runtime replica, HPA, or rollout overlap while allowing manifest-declared stateless/worker scale.
+    triggers: [deploy/helm/ai-gateway/**, docker-compose*, scripts/inventory/service_topology.py, scripts/harness/single_instance_guard.py, tests/harness/test_single_instance_guard.py]
+    tier: L0
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 5
+    evidence: tmp/gate-evidence/single-instance-guard.json
     ci_job: architecture-gates
   openapi_offline:
     make: verify-openapi-contract
