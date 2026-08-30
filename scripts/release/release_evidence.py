@@ -98,6 +98,66 @@ def _commands(value: Any, scenario_id: str) -> list[list[str]]:
     return value
 
 
+def _make_targets(root: Path) -> set[str]:
+    makefile = root / "Makefile"
+    try:
+        text = makefile.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ReleaseEvidenceError(f"canonical Makefile is unreadable: {makefile}: {exc}") from exc
+    return set(re.findall(r"^([A-Za-z0-9_.\-]+):", text, re.MULTILINE))
+
+
+def _validate_command_entrypoint(
+    root: Path,
+    command: list[str],
+    scenario_id: str,
+    make_targets: set[str],
+) -> None:
+    executable = command[0]
+    if executable == "make":
+        if len(command) < 2 or command[1] not in make_targets:
+            target = command[1] if len(command) > 1 else "(missing)"
+            raise ReleaseEvidenceError(
+                f"release scenario references unknown Make target: {scenario_id}:{target}"
+            )
+        return
+    if executable in {"python", "python3"} and len(command) >= 3 and command[1] == "-m":
+        module = command[2]
+        module_path = root.joinpath(*module.split("."))
+        if not module_path.with_suffix(".py").is_file() and not (
+            module_path / "__main__.py"
+        ).is_file():
+            raise ReleaseEvidenceError(
+                f"release scenario Python entrypoint is missing: {scenario_id}:{module}"
+            )
+        return
+    if executable == "pnpm" and len(command) >= 6 and command[1] == "-C":
+        project = root / command[2]
+        if not (project / "package.json").is_file() or command[3:6] != [
+            "exec",
+            "playwright",
+            "test",
+        ]:
+            raise ReleaseEvidenceError(
+                f"release scenario pnpm entrypoint is missing: {scenario_id}"
+            )
+        config_index = command.index("--config") if "--config" in command else -1
+        if config_index < 0 or config_index + 1 >= len(command):
+            raise ReleaseEvidenceError(
+                f"release scenario Playwright config is missing: {scenario_id}"
+            )
+        referenced = [command[config_index + 1], *[part for part in command if part.endswith(".spec.ts")]]
+        missing = [part for part in referenced if not (project / part).is_file()]
+        if missing:
+            raise ReleaseEvidenceError(
+                f"release scenario Playwright entrypoint is missing: {scenario_id}:{missing}"
+            )
+        return
+    raise ReleaseEvidenceError(
+        f"release scenario executable entrypoint is unsupported: {scenario_id}:{executable}"
+    )
+
+
 def validate_integration_receipt(
     receipt: dict[str, Any],
     *,
@@ -171,6 +231,7 @@ def validate_release_matrix(
     scenarios = matrix.get("scenarios")
     if not isinstance(scenarios, list):
         raise ReleaseEvidenceError("release/rollback matrix scenarios must be a list")
+    make_targets = _make_targets(root)
 
     seen: set[str] = set()
     scenario_statuses: list[str] = []
@@ -189,7 +250,9 @@ def validate_release_matrix(
             raise ReleaseEvidenceError(f"release scenario tier/category drift: {scenario_id}")
         if scenario.get("required") is not True:
             raise ReleaseEvidenceError(f"release scenario is not required: {scenario_id}")
-        _commands(scenario.get("commands"), scenario_id)
+        commands = _commands(scenario.get("commands"), scenario_id)
+        for command in commands:
+            _validate_command_entrypoint(root, command, scenario_id, make_targets)
         scenario_status = scenario.get("status")
         if scenario_status not in RESULTS:
             raise ReleaseEvidenceError(f"invalid release scenario status: {scenario_id}")

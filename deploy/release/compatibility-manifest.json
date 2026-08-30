@@ -47,7 +47,7 @@
     "receipt_schema_path": "deploy/release/schemas/integration-gate-receipt-v1.schema.json",
     "retirement_schema_path": "deploy/release/schemas/historical-plan-retirement-v1.schema.json",
     "closeout_template_path": "deploy/release/FINAL-CLOSEOUT-TEMPLATE.md",
-    "matrix_sha256": "c0fc002a224faa9f5e7b488608b07265fcb46d7d136422ca1317886690cf46ab",
+    "matrix_sha256": "699a77c4452d06759bdf77e56f90899484bca0b093e1c5ef95f26d2ff3c1b3ba",
     "retirement_manifest_sha256": "25f294b6fc95317415729b9699172a386c0eea625dd2750e4369cf742c19f0f2",
     "matrix_schema_sha256": "f19cec5ad32b3f84df869ef88b08e070b6459754a81df7a05b90f46a266720af",
     "receipt_schema_sha256": "ce99c9d1ae8add61c5bce20ff52bf497ff91360e91aab0ca6f7e55b88954fec0",

@@ -9,7 +9,7 @@
       "tier": "L1",
       "category": "release",
       "required": true,
-      "commands": [["make", "harness-check"], ["make", "affected-gates"], ["make", "architecture-boundary-gate"], ["make", "verify-openapi-contract"], ["make", "web-quality-gate"], ["make", "rust-workspace-gate"], ["make", "hygiene-check"], ["make", "loc-no-growth-gate"]],
+      "commands": [["make", "harness-check"], ["make", "affected-gates", "BASE_SHA=main"], ["make", "architecture-boundary-gate"], ["make", "verify-openapi-contract"], ["make", "web-quality-gate"], ["make", "rust-changed-crate-gate", "BASE_SHA=main"], ["make", "hygiene-check"], ["make", "loc-no-growth-gate"]],
       "status": "NOT_RUN",
       "evidence": [],
       "blocker": "Final settled candidate SHA and unified offline rerun are not yet recorded."
@@ -49,7 +49,7 @@
       "tier": "L3",
       "category": "release",
       "required": true,
-      "commands": [["make", "e2e-release-gate"]],
+      "commands": [["make", "agent-execution-integration-gate"], ["make", "agent-runtime-text-gate"], ["pnpm", "-C", "web", "exec", "playwright", "test", "--config", "playwright.live.config.ts", "--workers=1", "e2e/assistant-memory.spec.ts", "e2e/assistant-history.spec.ts", "e2e/knowledge-workflow.spec.ts", "e2e/quiz-workflow.spec.ts", "e2e/site-walkthrough.spec.ts"]],
       "status": "NOT_RUN",
       "evidence": [],
       "blocker": "Final UI Assistant, tool approval, cancellation, refresh, restart, and paid-provider journeys are not yet recorded at the candidate SHA."

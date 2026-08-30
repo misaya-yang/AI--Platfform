@@ -27,8 +27,38 @@ def test_checked_in_release_matrix_is_truthful_not_run_and_not_candidate() -> No
         release_evidence.validate_release_matrix(ROOT, matrix, level="candidate")
 
 
+def test_release_matrix_rejects_missing_command_entrypoints() -> None:
+    matrix = _matrix()
+    matrix["scenarios"][0]["commands"][0] = ["make", "not-a-real-release-target"]
+
+    with pytest.raises(release_evidence.ReleaseEvidenceError, match="unknown Make target"):
+        release_evidence.validate_release_matrix(ROOT, matrix, level="draft")
+
+    matrix = _matrix()
+    assistant = next(
+        scenario for scenario in matrix["scenarios"] if scenario["id"] == "assistant-live-journeys"
+    )
+    assistant["commands"][-1][-1] = "e2e/not-a-real-live.spec.ts"
+    with pytest.raises(release_evidence.ReleaseEvidenceError, match="Playwright entrypoint is missing"):
+        release_evidence.validate_release_matrix(ROOT, matrix, level="draft")
+
+
 def test_pass_requires_durable_existing_evidence_and_exact_aggregate(tmp_path: Path) -> None:
     matrix = _matrix()
+    (tmp_path / "Makefile").write_text((ROOT / "Makefile").read_text(encoding="utf-8"))
+    (tmp_path / "scripts/release").mkdir(parents=True)
+    (tmp_path / "scripts/release/version_agreement_gate.py").write_text("", encoding="utf-8")
+    (tmp_path / "web/e2e").mkdir(parents=True)
+    (tmp_path / "web/package.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "web/playwright.live.config.ts").write_text("", encoding="utf-8")
+    for name in (
+        "assistant-memory",
+        "assistant-history",
+        "knowledge-workflow",
+        "quiz-workflow",
+        "site-walkthrough",
+    ):
+        (tmp_path / f"web/e2e/{name}.spec.ts").write_text("", encoding="utf-8")
     scenario = matrix["scenarios"][0]
     scenario.update({"status": "PASS", "blocker": None, "evidence": []})
 
