@@ -461,6 +461,7 @@ fn run_python_process(
     let workspace = create_workspace(&config.workspace_root)?;
     let started = Instant::now();
     let result = (|| {
+        fs::create_dir(workspace.join("output")).map_err(|_| CodeExecutionError::ProcessStart)?;
         for input in &request.inputs {
             let path = workspace.join(&input.filename);
             let bytes = STANDARD
@@ -491,7 +492,7 @@ fn run_python_process(
                 .map_err(|_| CodeExecutionError::ProcessStart)?;
         }
 
-        let mut command = python_command(config);
+        let mut command = python_command(config, request.limits.pids);
         command
             .arg("-I")
             .arg("-S")
@@ -710,7 +711,7 @@ fn collect_output_file(
 fn configure_child(
     command: &mut Command,
     limits: &PythonSandboxLimits,
-    _require_network_isolation: bool,
+    require_network_isolation: bool,
 ) -> Result<(), CodeExecutionError> {
     use std::os::unix::process::CommandExt;
     let cpu_seconds = u64::from(limits.cpu_millis).div_ceil(1000).max(1);
@@ -720,6 +721,17 @@ fn configure_child(
     unsafe {
         command.pre_exec(move || {
             if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            if !require_network_isolation
+                && libc::setrlimit(
+                    libc::RLIMIT_NPROC,
+                    &libc::rlimit {
+                        rlim_cur: pids,
+                        rlim_max: pids,
+                    },
+                ) != 0
+            {
                 return Err(io::Error::last_os_error());
             }
             if libc::setrlimit(
@@ -744,13 +756,6 @@ fn configure_child(
                     },
                 ) != 0
                 || libc::setrlimit(
-                    libc::RLIMIT_NPROC,
-                    &libc::rlimit {
-                        rlim_cur: pids,
-                        rlim_max: pids,
-                    },
-                ) != 0
-                || libc::setrlimit(
                     libc::RLIMIT_FSIZE,
                     &libc::rlimit {
                         rlim_cur: file_bytes,
@@ -772,7 +777,7 @@ fn configure_child(
     Ok(())
 }
 
-fn python_command(config: &LocalPythonSandboxConfig) -> Command {
+fn python_command(config: &LocalPythonSandboxConfig, pids: u32) -> Command {
     #[cfg(target_os = "linux")]
     if config.require_network_isolation {
         let mut command = Command::new("/usr/bin/unshare");
@@ -784,8 +789,11 @@ fn python_command(config: &LocalPythonSandboxConfig) -> Command {
             .arg("--")
             .arg("/bin/sh")
             .arg("-c")
-            .arg("mount --bind \"$PWD\" /workspace && cd /workspace && exec \"$@\"")
+            .arg(
+                "mount --bind \"$PWD\" /workspace && cd /workspace && pids=\"$1\" && shift && exec /usr/bin/prlimit --nproc=\"$pids\" -- \"$@\"",
+            )
             .arg("python-sandbox")
+            .arg(pids.to_string())
             .arg(&config.python_binary);
         return command;
     }
@@ -840,7 +848,7 @@ mod tests {
 
     #[test]
     fn linux_network_isolation_uses_an_unprivileged_namespace_wrapper() {
-        let command = python_command(&LocalPythonSandboxConfig::default());
+        let command = python_command(&LocalPythonSandboxConfig::default(), 32);
         #[cfg(target_os = "linux")]
         {
             assert_eq!(command.get_program(), "/usr/bin/unshare");
@@ -858,8 +866,9 @@ mod tests {
                     "--",
                     "/bin/sh",
                     "-c",
-                    "mount --bind \"$PWD\" /workspace && cd /workspace && exec \"$@\"",
+                    "mount --bind \"$PWD\" /workspace && cd /workspace && pids=\"$1\" && shift && exec /usr/bin/prlimit --nproc=\"$pids\" -- \"$@\"",
                     "python-sandbox",
+                    "32",
                     "/usr/local/bin/python3",
                 ]
             );

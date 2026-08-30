@@ -3,7 +3,7 @@
     "app_server_schema_file_count": 1005,
     "app_server_schema_sha256": "ec57a2516f9dfd89d56fafd84bfbaa1a9b19fc03507867f123a03c03ddcc837b",
     "capability_worker_sbom": "deploy/agent-runtime-source/capability-worker-sbom.cdx.json",
-    "capability_worker_sbom_sha256": "dca36ff5a870c252ae2070ad0e3cb142f4322033e2e01ed46687b33cb559b8aa",
+    "capability_worker_sbom_sha256": "079115d085c858e3b1b4bad6e52be21679e43ae10dc8722979db98a8e9b0c09f",
     "capability_worker_schema_sha256": "b2b6a1ae71f054387b16daecc0325faf0acb09be7a6119adbfe3227cbfb945a7",
     "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
     "cargo_lock_sha256": "068b81252e9b3c00a73f6ba1c9cf7fb97260207d55e1ea6926c94ea82a816bdb",
@@ -11,13 +11,13 @@
     "overlay_cargo_lock_sha256": "068b81252e9b3c00a73f6ba1c9cf7fb97260207d55e1ea6926c94ea82a816bdb",
     "overlay_file_count": 104,
     "overlay_manifest": "rust/agent-runtime-overlay/manifest.json",
-    "overlay_sha256": "ff48e0a1d0a9001cb40719517616357c4c09fc5a0e4a5ce5ccbdf4ac7954fac5",
+    "overlay_sha256": "90dd9d25da0cff1b9979422632fca48b1601c537b3cc578656eb28cd577d38c8",
     "rust_toolchain_sha256": "570656042681cfd8795403a455baf9a33035331a07db0645e866bbcea89a3d64",
     "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
     "sbom": "deploy/agent-runtime-source/sbom.cdx.json",
     "sbom_sha256": "183f270c8c148f4e0d1f15ddfb0c8494697f7b2a412625da5299a6f19a7804ba",
     "source_receipt": "deploy/agent-runtime-source/source-receipt.json",
-    "source_receipt_sha256": "9cbeb2a9867a1781a62fd4811ee3c0314fdf18d572c2e180da3a7b9be0af7891"
+    "source_receipt_sha256": "e7b96c26a2c5f7e6d8540b9ab6ce8df34cd625943bcb7818d16ea4bae61c215b"
   },
   "license": {
     "notice": "deploy/agent-runtime-source/NOTICE.md",
@@ -30,9 +30,9 @@
     "artifacts": {
       "agent_runtime": {
         "binary": "ai-platform-agent-runtime",
-        "candidate_start_allowed": true,
-        "image_digest": "sha256:6acb54c5b11629557b19d0b2ef49326ed485bd36b70553dadbf0a3b7bfcff578",
-        "image_ref": "local-image://sha256:6acb54c5b11629557b19d0b2ef49326ed485bd36b70553dadbf0a3b7bfcff578",
+        "candidate_start_allowed": false,
+        "image_digest": null,
+        "image_ref": null,
         "platforms": [
           "linux/arm64"
         ],
@@ -50,9 +50,9 @@
       },
       "capability_worker": {
         "binary": "ai-platform-capability-worker",
-        "candidate_start_allowed": true,
-        "image_digest": "sha256:63ed9153d5f84226acd47301a214b5962cddf1a2621f411256c9ffc75b00eb5f",
-        "image_ref": "local-image://sha256:63ed9153d5f84226acd47301a214b5962cddf1a2621f411256c9ffc75b00eb5f",
+        "candidate_start_allowed": false,
+        "image_digest": null,
+        "image_ref": null,
         "platforms": [
           "linux/arm64"
         ],
@@ -60,7 +60,7 @@
       }
     }
   },
-  "release_state": "local_image_locked",
+  "release_state": "local_source_locked",
   "schema_version": "ai-platform/agent-runtime-source-lock/v2",
   "source": {
     "branch": "upstream/main",
