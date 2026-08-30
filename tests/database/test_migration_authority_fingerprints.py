@@ -271,9 +271,9 @@ async def test_acl_covers_all_owner_acl_classes_and_default_privileges() -> None
     assert "GROUP BY d.defaclrole, d.defaclobjtype, n.nspname" in default_query
     assert "a.grantee, a.is_grantable" in default_query
     assert "NOT LIKE 'pg_temp_%'" in default_query
-    assert "ESCAPE E'\\'" in default_query
+    assert "ESCAPE E'\\\\'" in default_query
     assert default_args[1] == r"ai\_platform\_%"
-    assert "ESCAPE E'\\'" in roles_query
+    assert "ESCAPE E'\\\\'" in roles_query
     assert roles_args == (r"ai\_platform\_%",)
 
 

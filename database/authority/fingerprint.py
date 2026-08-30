@@ -652,7 +652,7 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
         FROM pg_default_acl AS d
         LEFT JOIN pg_namespace AS n ON n.oid = d.defaclnamespace
         CROSS JOIN LATERAL aclexplode(d.defaclacl) AS a
-        WHERE pg_get_userbyid(d.defaclrole) LIKE $2 ESCAPE E'\\'
+        WHERE pg_get_userbyid(d.defaclrole) LIKE $2 ESCAPE E'\\\\'
           AND (
               d.defaclnamespace = 0
               OR (
@@ -697,7 +697,7 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
                    ORDER BY granted.rolname
                ) AS memberships
         FROM pg_roles AS r
-        WHERE r.rolname LIKE $1 ESCAPE E'\\'
+        WHERE r.rolname LIKE $1 ESCAPE E'\\\\'
         ORDER BY r.rolname
         """,
         _like_prefix_pattern(role_prefix),

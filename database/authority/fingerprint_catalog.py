@@ -222,7 +222,7 @@ async def database_acl_lines(
         WHERE database.datname = current_database()
           AND (
               privilege.grantee = 0
-              OR pg_get_userbyid(privilege.grantee) LIKE $1 ESCAPE E'\\'
+              OR pg_get_userbyid(privilege.grantee) LIKE $1 ESCAPE E'\\\\'
           )
         GROUP BY privilege.grantee, privilege.is_grantable
         ORDER BY grantee, privilege.is_grantable
