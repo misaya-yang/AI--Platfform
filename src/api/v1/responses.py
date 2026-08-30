@@ -39,7 +39,6 @@ from .responses_usage import responses_usage
 
 router = APIRouter(tags=["Responses"])
 logger = logging.getLogger(__name__)
-
 _RESPONSES_TOOL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _MAX_RESPONSES_TOOLS = 128
 
@@ -669,9 +668,7 @@ async def create_response(
     try:
         requested_tools = tool_config["tool_names"]
         readonly_capabilities: dict[str, Any] = {
-            "responses_tool_choice": (
-                tool_config["tool_choice"] if requested_tools else "none"
-            ),
+            "responses_tool_choice": tool_config["tool_choice"] if requested_tools else "none",
             "responses_parallel_tool_calls": tool_config["parallel_tool_calls"],
         }
         if requested_tools:
@@ -710,9 +707,8 @@ async def create_response(
             resolved_agent_launch=launch,
             developer_instructions=instructions,
             memory_mode="off",
-            # Responses exposes no implicit platform tools. Every descriptor
-            # must be explicitly selected by the caller and resolved against
-            # the tenant catalog before the Runtime sees it.
+            # Responses tools must be caller-selected and tenant-catalog resolved;
+            # platform tools are never exposed implicitly.
             enable_dynamic_tools=enable_dynamic_tools,
         )
     except HTTPException as exc:
