@@ -11,8 +11,9 @@ usage() {
     cat <<'EOF'
 Usage: scripts/rust/build-update.sh [--artifact runtime|worker|app-server|all] [--dry-run]
 
-Runs the existing local Rust image build entrypoints under the shared rust-build
-lock. This command is local-only: it does not publish or claim multi-arch images.
+Runs the existing Docker-contained Rust image build entrypoints under the shared
+rust-build lock. Cargo executes only inside Docker multi-stage builders. This
+command does not publish or claim multi-arch images.
 EOF
 }
 
@@ -121,8 +122,36 @@ git_root="$(git -C "$repo_root" rev-parse --show-toplevel 2>/dev/null)" || fail 
     "repository root is not a Git checkout"
 [[ "$(cd "$git_root" && pwd -P)" == "$repo_root" ]] || fail \
     "script path and Git repository root disagree"
-[[ -z "$(git -C "$repo_root" status --porcelain)" ]] || fail \
-    "platform checkout must be clean before artifact identity/build"
+allowed_platform_wip_path() {
+    case "$1" in
+        docs/*|reports/*) return 0 ;;
+        deploy/runbooks/*/README.md) return 0 ;;
+        deploy/runbooks/*/HANDOFF.md) return 0 ;;
+        deploy/runbooks/*/loop-state.json) return 0 ;;
+        deploy/runbooks/*/work-packages.yml) return 0 ;;
+        deploy/runbooks/*/receipts/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+declare -a blocked_dirty_paths=()
+record_dirty_path() {
+    local path="$1"
+    if ! allowed_platform_wip_path "$path"; then
+        blocked_dirty_paths+=("$path")
+    fi
+}
+while IFS= read -r -d '' path; do
+    record_dirty_path "$path"
+done < <(git -C "$repo_root" diff --name-only --no-renames -z HEAD)
+while IFS= read -r -d '' path; do
+    record_dirty_path "$path"
+done < <(git -C "$repo_root" ls-files --others --exclude-standard -z)
+if ((${#blocked_dirty_paths[@]})); then
+    printf 'ERROR: platform checkout has dirty non-documentation/build-input paths:\n' >&2
+    printf '  %s\n' "${blocked_dirty_paths[@]}" >&2
+    fail "commit or revert Rust/build inputs and non-receipt code before artifact identity/build"
+fi
 
 source_root="${AI_PLATFORM_AGENT_RUNTIME_SOURCE:-}"
 [[ -n "$source_root" ]] || fail "AI_PLATFORM_AGENT_RUNTIME_SOURCE is required"
@@ -190,16 +219,16 @@ run_command() {
     fi
 }
 
-echo "Rust build/update preflight: artifact=$artifact jobs=$CARGO_BUILD_JOBS cargo_mode=--locked"
+echo "Docker-contained Rust build preflight: artifact=$artifact jobs=$CARGO_BUILD_JOBS cargo_mode=--locked"
 echo "Resources: available_memory=${available_mb}MB free_disk=${disk_mb}MB"
 echo "LOCAL-ONLY: this command does not publish or claim multi-arch artifacts."
 
-for identity_artifact in "${identity_artifacts[@]}"; do
-    run_command python3 "$identity_script" validate \
-        --repo-root "$repo_root" \
-        --lock "$lock_file" \
-        --require-artifact "$identity_artifact"
-done
+# A freshly refreshed source lock intentionally has no runnable image digest.
+# Validate its source/build identity first, let each Docker builder record its
+# immutable local image, then require the selected runnable artifacts below.
+run_command python3 "$identity_script" validate \
+    --repo-root "$repo_root" \
+    --lock "$lock_file"
 for build_script in "${build_scripts[@]}"; do
     run_command bash "$build_script"
 done
@@ -213,5 +242,5 @@ done
 if [[ "$dry_run" == "true" ]]; then
     echo "DRY RUN: preflight passed; no identity or build command was executed."
 else
-    echo "Local Rust build/update completed; publication and multi-arch evidence remain separate."
+    echo "Docker-contained Rust build completed; publication and multi-arch evidence remain separate."
 fi

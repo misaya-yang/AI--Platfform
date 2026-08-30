@@ -145,17 +145,32 @@ if [ "$BUILD" = true ]; then
     fi
 
     if [ "$INFRA_ONLY" != true ]; then
-        if [ -z "${AI_PLATFORM_AGENT_RUNTIME_SOURCE:-}" ]; then
-            log_error "AI_PLATFORM_AGENT_RUNTIME_SOURCE is required for --build so the pinned Agent Runtime image can be built."
-            exit 2
-        fi
-        log_step "Building pinned Agent Runtime image"
-        runtime_build_output="$(bash scripts/harness/build_agent_runtime_image.sh)"
-        printf '%s\n' "$runtime_build_output"
-        runtime_image="$(printf '%s\n' "$runtime_build_output" | awk -F= '$1 == "AI_PLATFORM_AGENT_RUNTIME_IMAGE_TAG" {print $2; exit}')"
-        if [ -z "$runtime_image" ]; then
-            log_error "Pinned Agent Runtime build did not report an image tag."
-            exit 1
+        if [ "${AI_PLATFORM_RUST_IMAGES_PREBUILT:-0}" != "1" ]; then
+            if [ -z "${AI_PLATFORM_AGENT_RUNTIME_SOURCE:-}" ]; then
+                log_error "AI_PLATFORM_AGENT_RUNTIME_SOURCE is required for --build so the pinned Agent Runtime image can be built."
+                exit 2
+            fi
+            log_step "Building pinned Agent Runtime image"
+            runtime_build_output="$(bash scripts/harness/build_agent_runtime_image.sh)"
+            printf '%s\n' "$runtime_build_output"
+            runtime_image="$(printf '%s\n' "$runtime_build_output" | awk -F= '$1 == "AI_PLATFORM_AGENT_RUNTIME_IMAGE_TAG" {print $2; exit}')"
+            if [ -z "$runtime_image" ]; then
+                log_error "Pinned Agent Runtime build did not report an image tag."
+                exit 1
+            fi
+        else
+            log_info "Using Runtime and capability worker images built under the completed rust-build lease"
+            for rust_artifact in agent_runtime capability_worker; do
+                if ! python3 scripts/harness/agent_runtime_supply_chain.py validate \
+                    --repo-root "$PROJECT_ROOT" \
+                    --lock "$PROJECT_ROOT/deploy/agent-runtime-source/lock.json" \
+                    --require-artifact "$rust_artifact" >/dev/null; then
+                    log_error "Prebuilt Rust artifact lock validation failed: $rust_artifact"
+                    exit 1
+                fi
+            done
+            runtime_image="$(agent_runtime_image_tag)"
+            export AGENT_CAPABILITY_WORKER_IMAGE="$(agent_capability_worker_image_tag)"
         fi
         export AI_PLATFORM_AGENT_RUNTIME_IMAGE="$runtime_image"
     fi

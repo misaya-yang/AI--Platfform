@@ -262,6 +262,11 @@ def test_deploy_builds_and_pins_the_agent_runtime_image() -> None:
         f"{receipt['source']['upstream_sha'][:12]}-"
         f"{receipt['overlay']['sha256'][:12]}"
     )
+    expected_worker_image = (
+        "ai-gateway-agent-capability-worker:local-"
+        f"{receipt['source']['upstream_sha'][:12]}-"
+        f"{receipt['overlay']['sha256'][:12]}"
+    )
     expected_revision = (
         f"{receipt['source']['upstream_sha']}+{receipt['overlay']['sha256'][:12]}"
     )
@@ -274,6 +279,8 @@ def test_deploy_builds_and_pins_the_agent_runtime_image() -> None:
     assert "assert_agent_runtime_image_locked" in deploy
     assert f"AI_PLATFORM_AGENT_RUNTIME_IMAGE:-{expected_image}" in compose
     assert f"AI_PLATFORM_AGENT_RUNTIME_IMAGE={expected_image}" in example
+    assert f"AGENT_CAPABILITY_WORKER_IMAGE:-{expected_worker_image}" in compose
+    assert f"AGENT_CAPABILITY_WORKER_IMAGE={expected_worker_image}" in example
     assert f"AI_PLATFORM_AGENT_RUNTIME_KERNEL_REVISION={expected_revision}" in example
 
 

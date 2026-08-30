@@ -219,7 +219,14 @@ deploy:                     ## 部署全部服务 (启动+迁移+健康检查，
 	@bash $(SCRIPTS)/deploy.sh --env "$(ENV_FILE)" $(ARGS)
 
 deploy-build:               ## 部署并重新构建镜像
-	@bash $(SCRIPTS)/deploy.sh --env "$(ENV_FILE)" --build $(ARGS)
+	@bash scripts/rust/build-update.sh --artifact all
+	@bash scripts/rust/locks.sh run \
+		--resource integration-runtime \
+		--timeout-seconds "$${AI_PLATFORM_INTEGRATION_LOCK_TIMEOUT_SECONDS:-7200}" \
+		--heartbeat-seconds 10 \
+		--expected-end-condition "serial candidate image deploy and health checks finish" \
+		-- env AI_PLATFORM_RUST_IMAGES_PREBUILT=1 \
+		bash $(SCRIPTS)/deploy.sh --env "$(ENV_FILE)" --build $(ARGS)
 
 deploy-cn:                  ## 使用国内镜像构建部署
 	@bash $(SCRIPTS)/deploy.sh --env "$(ENV_FILE)" --cn $(ARGS)

@@ -561,7 +561,7 @@ services:
 
   # Rust capability worker. It owns durable tool execution but never a model loop.
   agent-capability-worker:
-    image: "${AGENT_CAPABILITY_WORKER_IMAGE:-ai-gateway-agent-capability-worker:local-93c54bca3899-566aa9e17b93}"
+    image: "${AGENT_CAPABILITY_WORKER_IMAGE:-ai-gateway-agent-capability-worker:local-93c54bca3899-2f75ee8eff88}"
     expose:
       - "8095"
     environment:
@@ -609,7 +609,7 @@ services:
   # Rust Agent Runtime. It is the sole Agent kernel for new and resumed turns.
   agent-runtime:
     container_name: ai-gateway-agent-runtime
-    image: "${AI_PLATFORM_AGENT_RUNTIME_IMAGE:-ai-gateway-agent-runtime:local-93c54bca3899-566aa9e17b93}"
+    image: "${AI_PLATFORM_AGENT_RUNTIME_IMAGE:-ai-gateway-agent-runtime:local-93c54bca3899-2f75ee8eff88}"
     expose:
       - "8094"
     environment:

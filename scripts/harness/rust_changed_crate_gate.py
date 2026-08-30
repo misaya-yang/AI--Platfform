@@ -39,6 +39,7 @@ GATE_CONTROL_PATHS = {
     "tests/harness/test_rust_changed_crate_gate.py",
     "tests/scripts/test_rust_build_tooling.py",
 }
+HOSTED_CI_OVERRIDE = "AI_PLATFORM_RUST_GATE_HOSTED_CI"
 HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 TOOL_VERSION = re.compile(
@@ -47,6 +48,20 @@ TOOL_VERSION = re.compile(
 
 class GateError(RuntimeError):
     """The Rust gate cannot prove or execute its declared contract."""
+
+
+def require_hosted_ci(environment: dict[str, str] | None = None) -> None:
+    """Refuse host Rust execution unless a hosted CI runner is explicit."""
+
+    values = os.environ if environment is None else environment
+    ci = values.get("CI", "").lower() == "true"
+    github_actions = values.get("GITHUB_ACTIONS", "").lower() == "true"
+    explicit_hosted = values.get(HOSTED_CI_OVERRIDE) == "1"
+    if not ci or not (github_actions or explicit_hosted):
+        raise GateError(
+            "host Rust execution is prohibited; rust-changed-crate-gate requires "
+            "CI=true plus GITHUB_ACTIONS=true or AI_PLATFORM_RUST_GATE_HOSTED_CI=1"
+        )
 
 @dataclass(frozen=True)
 class LockAuthority:
@@ -754,6 +769,24 @@ def main(argv: list[str] | None = None) -> int:
             "ERROR: --base <sha> is required (make rust-changed-crate-gate BASE_SHA=<sha>)",
             file=sys.stderr,
         )
+        return 2
+    try:
+        require_hosted_ci()
+    except GateError as exc:
+        failure = {
+            "schema_version": "ai-platform/rust-changed-crate-gate/v2",
+            "gate": "rust-changed-crate-gate",
+            "tier": "L1",
+            "base": args.base,
+            "executor_policy": "hosted-ci-only",
+            "error": str(exc),
+            "result": "error",
+        }
+        try:
+            _write_evidence(args.evidence_out, failure)
+        except GateError as evidence_error:
+            print(f"GATE ERROR: {evidence_error}", file=sys.stderr)
+        print(f"GATE ERROR: {exc}", file=sys.stderr)
         return 2
     if _selftest() != 0:
         failure = {

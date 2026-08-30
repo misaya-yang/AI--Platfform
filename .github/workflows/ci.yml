@@ -478,6 +478,7 @@ jobs:
     timeout-minutes: 65
     env:
       CARGO_BUILD_JOBS: "1"
+      AI_PLATFORM_RUST_GATE_HOSTED_CI: "1"
     steps:
       - uses: actions/checkout@v4
         with:

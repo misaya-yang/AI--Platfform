@@ -257,6 +257,59 @@ def test_gate_control_change_is_pass_only_after_embedded_selftest(tmp_path: Path
     assert payload["mode"] == "control-only-selftest"
 
 
+def test_main_rejects_host_execution_before_selftest_or_cargo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "host-rejected.json"
+    for name in ("CI", "GITHUB_ACTIONS", gate.HOSTED_CI_OVERRIDE):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(
+        gate,
+        "_selftest",
+        lambda: pytest.fail("host policy must run before the executable gate selftest"),
+    )
+
+    result = gate.main(
+        ["--base", "fixture-base", "--evidence-out", str(evidence)]
+    )
+
+    assert result == 2
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    assert payload["executor_policy"] == "hosted-ci-only"
+    assert payload["result"] == "error"
+    assert "host Rust execution is prohibited" in payload["error"]
+
+
+@pytest.mark.parametrize(
+    "environment",
+    (
+        {"CI": "true", "GITHUB_ACTIONS": "true"},
+        {"CI": "true", gate.HOSTED_CI_OVERRIDE: "1"},
+    ),
+)
+def test_hosted_ci_policy_accepts_github_or_explicit_hosted_runner(
+    environment: dict[str, str],
+) -> None:
+    gate.require_hosted_ci(environment)
+
+
+@pytest.mark.parametrize(
+    "environment",
+    (
+        {"GITHUB_ACTIONS": "true"},
+        {gate.HOSTED_CI_OVERRIDE: "1"},
+        {"CI": "true"},
+        {"CI": "1", "GITHUB_ACTIONS": "true"},
+    ),
+)
+def test_hosted_ci_policy_rejects_incomplete_or_ambiguous_signals(
+    environment: dict[str, str],
+) -> None:
+    with pytest.raises(gate.GateError, match="host Rust execution is prohibited"):
+        gate.require_hosted_ci(environment)
+
+
 def test_overlay_drift_fails_before_cargo(tmp_path: Path) -> None:
     repo, source, lock_path, cargo, rustc = _fixture(tmp_path)
     evidence = tmp_path / "overlay-drift.json"
@@ -336,6 +389,7 @@ def test_ci_toolchain_pin_is_derived_from_current_lock() -> None:
     assert authority.toolchain_version == "1.95.0"
     assert f"uses: dtolnay/rust-toolchain@{authority.toolchain_version}" in workflow
     assert "AI_PLATFORM_RUST_GATE_FETCH_PUBLIC_SOURCE" in workflow
+    assert "AI_PLATFORM_RUST_GATE_HOSTED_CI" in workflow
     assert "tests/harness/test_rust_changed_crate_gate.py" in workflow
     assert "dtolnay/rust-toolchain@stable" not in workflow
 
