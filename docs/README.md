@@ -66,6 +66,7 @@ Rule of thumb: **design** says why, **plans** say what next, **runbooks** track 
 | [`ADR-005`](architecture/ADR-005-model-capability-profiles.md) | Tenant-configurable model capability profiles |
 | [`ADR-006`](architecture/ADR-006-agent-runtime-single-kernel.md) | Agent Runtime as the single target Agent kernel |
 | [`ADR-007`](architecture/ADR-007-agent-runtime-data-boundaries.md) | Gateway model plane, ThreadStore, and capability-service boundaries |
+| [`ADR-009`](architecture/ADR-009-independent-cli-local-runtime.md) | Independent CLI local Runtime and provider ownership |
 
 Write a new ADR when a change alters a dependency boundary, adds a service, or changes a contract
 listed in [`harness/architecture.md`](harness/architecture.md) §6.
