@@ -26,6 +26,8 @@ Never mix package managers: **pnpm for `web/`, uv for Python.** No `npm install`
 | --- | --- |
 | Preflight the machine before anything else | `make doctor` |
 | Verify the pinned Agent Runtime source release unit | `make agent-runtime-source-contract` |
+| Verify the independent local-Runtime CLI | `make independent-cli-gate` |
+| Build the independent native CLI inside Docker | `AI_PLATFORM_AGENT_RUNTIME_SOURCE=/absolute/fork make agent-runtime-cli-build-local` |
 | Verify the pinned Rust Agent Runtime image | `make agent-runtime-contract` |
 | Verify the Agent PostgreSQL ThreadStore | `AI_PLATFORM_AGENT_RUNTIME_SOURCE=/path/to/fork make agent-thread-store-contract` |
 | Serial single-kernel release contract | `make agent-runtime-release-gate` |
@@ -186,6 +188,8 @@ until then report which exact checks actually ran rather than claiming “same a
 | RAG eval fixtures / `scripts/eval_rag.py` | `make rag-eval-regression-gate` |
 | Deploy scripts, `.env.example`, Compose | `make validate-example-config` |
 | Shared/Java/Dart SDK streaming change | `SDK_SSE_CONTRACT_REQUIRE_ALL=1 make sdk-sse-contract` (plain command is optional-tool sub-evidence) |
+| Independent CLI config, launcher, provider adapter, package | `make independent-cli-gate` |
+| Independent native CLI composed-source artifact | `AI_PLATFORM_AGENT_RUNTIME_SOURCE=/absolute/fork make agent-runtime-cli-build-local` |
 
 ## 8. What CI runs
 

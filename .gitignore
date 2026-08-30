@@ -109,6 +109,10 @@ temp/
 claude/
 outputs/
 node_modules/
+sdk/cli/vendor/*/codex
+sdk/cli/vendor/*/codex.exe
+sdk/cli/vendor/*/artifact.json
+sdk/cli/vendor/source.json
 
 # ======================== OS Generated ========================
 .DS_Store
