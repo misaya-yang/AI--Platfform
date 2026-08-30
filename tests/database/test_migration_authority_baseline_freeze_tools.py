@@ -22,16 +22,19 @@ from database.authority.commands import baseline_ready  # noqa: E402
 from database.authority.runner import AuthorityPaths  # noqa: E402
 
 
-def test_pending_baseline_is_deterministic_but_never_activates() -> None:
+def test_frozen_baseline_is_bound_and_activates() -> None:
     manifest = json.loads((BASELINE / "manifest.json").read_text(encoding="utf-8"))
 
-    assert manifest["state"] == "pending-live-freeze"
-    assert manifest["source_git_sha"] is None
-    assert manifest["structural_sha256"] is None
-    assert manifest["acl_sha256"] is None
-    assert manifest["extensions_sha256"] is None
-    assert manifest["reference_data_sha256"] is None
-    assert not baseline_ready(AuthorityPaths(ROOT / "database"))
+    assert manifest["state"] == "frozen"
+    assert len(manifest["source_git_sha"]) == 40
+    for field in (
+        "structural_sha256",
+        "acl_sha256",
+        "extensions_sha256",
+        "reference_data_sha256",
+    ):
+        assert len(manifest[field]) == 64
+    assert baseline_ready(AuthorityPaths(ROOT / "database"))
     for field, filenames in (
         ("files_sha256", freeze_baseline.SQL_FILES),
         ("policy_files_sha256", freeze_baseline.POLICY_FILES),
@@ -44,8 +47,9 @@ def test_pending_baseline_is_deterministic_but_never_activates() -> None:
 
 
 def test_static_policy_and_sql_regenerate_exactly() -> None:
+    manifest = json.loads((BASELINE / "manifest.json").read_text(encoding="utf-8"))
     inventory, ownership, grants_policy = database_policy.build(
-        pending_live_freeze=True
+        source_git_sha=manifest["source_git_sha"]
     )
     generated = {
         "data-access-inventory.json": database_policy._serialized(inventory),
