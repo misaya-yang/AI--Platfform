@@ -530,7 +530,8 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
         f"""
         SELECT n.nspname AS schema, c.relname AS name,
                COALESCE(pg_get_userbyid(a.grantee), 'PUBLIC') AS grantee,
-               a.grant_option, string_agg(a.privilege_type, ',' ORDER BY a.privilege_type) AS privileges,
+               a.is_grantable AS grant_option,
+               string_agg(a.privilege_type, ',' ORDER BY a.privilege_type) AS privileges,
                pg_get_userbyid(c.relowner) AS grantor_default
         FROM pg_class AS c
         JOIN pg_namespace AS n ON n.oid = c.relnamespace
@@ -540,8 +541,8 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
         {_SCHEMA_FILTER}
         {_EXCLUDED_RELATION_FILTER}
         {_EXTENSION_RELATION_FILTER}
-        GROUP BY n.nspname, c.relname, a.grantee, a.grant_option, c.relowner
-        ORDER BY n.nspname, c.relname, grantee, a.grant_option
+        GROUP BY n.nspname, c.relname, a.grantee, a.is_grantable, c.relowner
+        ORDER BY n.nspname, c.relname, grantee, a.is_grantable
         """,
         list(CATALOG_SCHEMAS),
     )
@@ -559,14 +560,15 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
         SELECT n.nspname AS schema, p.proname AS name,
                pg_get_function_identity_arguments(p.oid) AS identity_args,
                COALESCE(pg_get_userbyid(a.grantee), 'PUBLIC') AS grantee,
-               a.grant_option, string_agg(a.privilege_type, ',' ORDER BY a.privilege_type) AS privileges
+               a.is_grantable AS grant_option,
+               string_agg(a.privilege_type, ',' ORDER BY a.privilege_type) AS privileges
         FROM pg_proc AS p
         JOIN pg_namespace AS n ON n.oid = p.pronamespace
         CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) AS a
         WHERE TRUE
         {_SCHEMA_FILTER}
         {_EXTENSION_FUNCTION_FILTER}
-        GROUP BY n.nspname, p.proname, p.oid, a.grantee, a.grant_option
+        GROUP BY n.nspname, p.proname, p.oid, a.grantee, a.is_grantable
         ORDER BY n.nspname, p.proname, identity_args, grantee
         """,
         list(CATALOG_SCHEMAS),
@@ -582,13 +584,14 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
         """
         SELECT n.nspname AS schema,
                COALESCE(pg_get_userbyid(a.grantee), 'PUBLIC') AS grantee,
-               a.grant_option, string_agg(a.privilege_type, ',' ORDER BY a.privilege_type) AS privileges
+               a.is_grantable AS grant_option,
+               string_agg(a.privilege_type, ',' ORDER BY a.privilege_type) AS privileges
         FROM pg_namespace AS n
         CROSS JOIN LATERAL aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) AS a
         WHERE n.nspname <> ALL($1)
           AND n.nspname NOT LIKE 'pg_temp_%'
           AND n.nspname NOT LIKE 'pg_toast_temp_%'
-        GROUP BY n.nspname, a.grantee, a.grant_option
+        GROUP BY n.nspname, a.grantee, a.is_grantable
         ORDER BY n.nspname, grantee
         """,
         list(CATALOG_SCHEMAS),
@@ -612,7 +615,7 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
         f"""
         SELECT n.nspname AS schema, t.typname AS name, t.typtype AS type,
                COALESCE(pg_get_userbyid(a.grantee), 'PUBLIC') AS grantee,
-               a.grant_option,
+               a.is_grantable AS grant_option,
                string_agg(a.privilege_type, ',' ORDER BY a.privilege_type) AS privileges
         FROM pg_type AS t
         JOIN pg_namespace AS n ON n.oid = t.typnamespace
@@ -622,8 +625,8 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
         {_SCHEMA_FILTER}
         {_PLATFORM_TYPE_FILTER}
         {_EXTENSION_TYPE_FILTER}
-        GROUP BY n.nspname, t.typname, t.typtype, a.grantee, a.grant_option
-        ORDER BY n.nspname, t.typname, grantee, a.grant_option
+        GROUP BY n.nspname, t.typname, t.typtype, a.grantee, a.is_grantable
+        ORDER BY n.nspname, t.typname, grantee, a.is_grantable
         """,
         list(CATALOG_SCHEMAS),
     )
@@ -644,7 +647,7 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
                     ELSE d.defaclobjtype::text END AS object_type,
                COALESCE(n.nspname, '') AS schema,
                COALESCE(pg_get_userbyid(a.grantee), 'PUBLIC') AS grantee,
-               a.grant_option,
+               a.is_grantable AS grant_option,
                string_agg(a.privilege_type, ',' ORDER BY a.privilege_type) AS privileges
         FROM pg_default_acl AS d
         LEFT JOIN pg_namespace AS n ON n.oid = d.defaclnamespace
@@ -659,7 +662,7 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
               )
           )
         GROUP BY d.defaclrole, d.defaclobjtype, n.nspname,
-                 a.grantee, a.grant_option
+                 a.grantee, a.is_grantable
         ORDER BY grantor, object_type, schema, grantee
         """,
         list(CATALOG_SCHEMAS),

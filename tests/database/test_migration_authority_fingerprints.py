@@ -240,6 +240,10 @@ async def test_acl_covers_all_owner_acl_classes_and_default_privileges() -> None
         query for query, _args in conn.queries if "aclexplode(COALESCE(c.relacl" in query
     )
     assert 'END)::"char"' in relation_acl_query
+    for query, _args in conn.queries:
+        if "aclexplode" in query:
+            assert ".grant_option" not in query
+            assert ".is_grantable" in query
 
     assert "owner:public.widgets:owner" in lines
     assert "schema_owner:public:owner" in lines
@@ -265,7 +269,7 @@ async def test_acl_covers_all_owner_acl_classes_and_default_privileges() -> None
         (query, args) for query, args in conn.queries if "FROM pg_roles AS r" in query
     )
     assert "GROUP BY d.defaclrole, d.defaclobjtype, n.nspname" in default_query
-    assert "a.grantee, a.grant_option" in default_query
+    assert "a.grantee, a.is_grantable" in default_query
     assert "NOT LIKE 'pg_temp_%'" in default_query
     assert "ESCAPE E'\\'" in default_query
     assert default_args[1] == r"ai\_platform\_%"

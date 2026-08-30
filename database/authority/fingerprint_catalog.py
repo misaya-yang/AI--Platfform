@@ -211,7 +211,7 @@ async def database_acl_lines(
     rows = await conn.fetch(
         """
         SELECT COALESCE(pg_get_userbyid(privilege.grantee), 'PUBLIC') AS grantee,
-               privilege.grant_option,
+               privilege.is_grantable AS grant_option,
                string_agg(
                    privilege.privilege_type, ',' ORDER BY privilege.privilege_type
                ) AS privileges
@@ -224,8 +224,8 @@ async def database_acl_lines(
               privilege.grantee = 0
               OR pg_get_userbyid(privilege.grantee) LIKE $1 ESCAPE E'\\'
           )
-        GROUP BY privilege.grantee, privilege.grant_option
-        ORDER BY grantee, privilege.grant_option
+        GROUP BY privilege.grantee, privilege.is_grantable
+        ORDER BY grantee, privilege.is_grantable
         """,
         role_prefix_pattern,
     )
@@ -245,7 +245,7 @@ async def column_acl_lines(conn: Any, principal_map: dict[str, str]) -> list[str
         SELECT n.nspname AS schema, c.relname AS relation,
                attribute.attname AS column,
                COALESCE(pg_get_userbyid(privilege.grantee), 'PUBLIC') AS grantee,
-               privilege.grant_option,
+               privilege.is_grantable AS grant_option,
                string_agg(
                    privilege.privilege_type, ',' ORDER BY privilege.privilege_type
                ) AS privileges
@@ -259,9 +259,9 @@ async def column_acl_lines(conn: Any, principal_map: dict[str, str]) -> list[str
         {_EXCLUDED_RELATIONS}
         {_EXTENSION_RELATION_FILTER}
         GROUP BY n.nspname, c.relname, attribute.attname,
-                 privilege.grantee, privilege.grant_option
+                 privilege.grantee, privilege.is_grantable
         ORDER BY n.nspname, c.relname, attribute.attname, grantee,
-                 privilege.grant_option
+                 privilege.is_grantable
         """,
         list(CATALOG_SCHEMAS),
     )
