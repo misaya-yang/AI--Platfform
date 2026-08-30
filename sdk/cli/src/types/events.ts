@@ -7,6 +7,10 @@ export interface StreamEvent {
   eventType: string;
   data: Record<string, any>;
   timestamp: number;
+  sequence?: number;
+  threadId?: string;
+  turnId?: string;
+  eventId?: string;
 }
 
 export const EventType = {

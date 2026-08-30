@@ -45,4 +45,30 @@ describe("shared SSE inner-envelope fixture", () => {
       expect(event?.data).toEqual({ value: fixture[name].value });
     },
   );
+
+  it("preserves and projects a real V2 event envelope with cursor metadata", () => {
+    const event = parseSSEEvent("item", [JSON.stringify({
+      schema_version: "agent-event/v2",
+      thread_id: "thread-1",
+      sequence: 7,
+      timestamp: "2026-08-30T18:00:00Z",
+      event: {
+        id: "event-7",
+        turn_id: "turn-1",
+        payload: {
+          event_type: "text_delta",
+          data: { content: "hello" },
+        },
+      },
+    })], "7");
+    expect(event).toEqual({
+      eventType: "text_delta",
+      data: { content: "hello" },
+      timestamp: Date.parse("2026-08-30T18:00:00Z") / 1000,
+      sequence: 7,
+      threadId: "thread-1",
+      turnId: "turn-1",
+      eventId: "event-7",
+    });
+  });
 });

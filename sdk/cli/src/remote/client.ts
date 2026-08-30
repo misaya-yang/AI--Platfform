@@ -11,8 +11,29 @@ import { request as httpRequest } from "node:http";
 import type { CLIConfig } from "../types/config.js";
 import type { StreamEvent } from "../types/events.js";
 import { EventType } from "../types/events.js";
+import { CLI_VERSION } from "../version.js";
 
-const CLI_VERSION = "1.0.3";
+export interface GatewayRequestOptions {
+  signal?: AbortSignal;
+  headers?: Record<string, string>;
+  timeoutMs?: number;
+}
+
+export interface GatewayStreamOptions extends GatewayRequestOptions {
+  method?: "GET" | "POST";
+  stopOnTerminal?: boolean;
+}
+
+export class GatewayHttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly body: string,
+    readonly retryAfterMs?: number,
+  ) {
+    super(`HTTP ${status}: ${body || "request failed"}`);
+    this.name = "GatewayHttpError";
+  }
+}
 
 export class GatewayClient {
   private config: CLIConfig;
@@ -21,7 +42,7 @@ export class GatewayClient {
     this.config = config;
   }
 
-  private getHeaders(): Record<string, string> {
+  private getHeaders(extra?: Record<string, string>): Record<string, string> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "X-API-Key": this.config.api_key,
@@ -32,7 +53,7 @@ export class GatewayClient {
     if (this.config.user_id) {
       headers["X-User-Id"] = this.config.user_id;
     }
-    return headers;
+    return { ...headers, ...extra };
   }
 
   private baseUrl(): string {
@@ -46,20 +67,30 @@ export class GatewayClient {
     method: string,
     path: string,
     body?: Record<string, any>,
+    options: GatewayRequestOptions = {},
   ): Promise<any> {
     const url = `${this.baseUrl()}${path}`;
-    const headers = this.getHeaders();
-
-    const resp = await fetch(url, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-    });
-
-    if (resp.ok) return resp.json();
-
-    const errBody = await resp.text();
-    throw new Error(`HTTP ${resp.status}: ${errBody || resp.statusText}`);
+    const headers = this.getHeaders(options.headers);
+    const timeoutMs = options.timeoutMs ?? Math.max(1, this.config.timeout) * 1000;
+    const controller = new AbortController();
+    const forwardAbort = () => controller.abort(options.signal?.reason);
+    if (options.signal?.aborted) forwardAbort();
+    else options.signal?.addEventListener("abort", forwardAbort, { once: true });
+    const timer = setTimeout(() => controller.abort(new Error(`request timed out after ${timeoutMs}ms`)), timeoutMs);
+    try {
+      const resp = await fetch(url, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
+      if (resp.ok) return resp.status === 204 ? undefined : resp.json();
+      const errBody = await resp.text();
+      throw new GatewayHttpError(resp.status, errBody || resp.statusText, retryAfterMs(resp.headers.get("retry-after")));
+    } finally {
+      clearTimeout(timer);
+      options.signal?.removeEventListener("abort", forwardAbort);
+    }
   }
 
   /**
@@ -68,14 +99,15 @@ export class GatewayClient {
    */
   async *streamSSE(
     path: string,
-    body: Record<string, any>,
+    body?: Record<string, any>,
+    options: GatewayStreamOptions = {},
   ): AsyncGenerator<StreamEvent> {
     const url = new URL(path, this.baseUrl());
-    const headers = this.getHeaders();
+    const headers = this.getHeaders(options.headers);
     headers["Accept"] = "text/event-stream";
 
-    const payload = JSON.stringify(body);
-    headers["Content-Length"] = String(Buffer.byteLength(payload));
+    const payload = body === undefined ? undefined : JSON.stringify(body);
+    if (payload !== undefined) headers["Content-Length"] = String(Buffer.byteLength(payload));
 
     const reqFn = url.protocol === "https:" ? httpsRequest : httpRequest;
 
@@ -84,13 +116,17 @@ export class GatewayClient {
       (resolve, reject) => {
         const req = reqFn(
           url,
-          { method: "POST", headers },
+          { method: options.method ?? (payload === undefined ? "GET" : "POST"), headers },
           (res) => {
             if (res.statusCode && res.statusCode >= 400) {
               let body = "";
               res.on("data", (chunk) => (body += chunk));
               res.on("end", () =>
-                reject(new Error(`SSE HTTP ${res.statusCode}: ${body || res.statusMessage}`)),
+                reject(new GatewayHttpError(
+                  res.statusCode ?? 500,
+                  body || res.statusMessage || "stream request failed",
+                  retryAfterMs(String(res.headers["retry-after"] ?? "")),
+                )),
               );
               return;
             }
@@ -98,7 +134,15 @@ export class GatewayClient {
           },
         );
         req.on("error", reject);
-        req.write(payload);
+        const abort = () => req.destroy(options.signal?.reason instanceof Error ? options.signal.reason : new Error("request aborted"));
+        if (options.signal?.aborted) abort();
+        else options.signal?.addEventListener("abort", abort, { once: true });
+        req.setTimeout(
+          options.timeoutMs ?? Math.max(1, this.config.stream_idle_timeout) * 1000,
+          () => req.destroy(new Error("SSE stream idle timeout")),
+        );
+        req.once("close", () => options.signal?.removeEventListener("abort", abort));
+        if (payload !== undefined) req.write(payload);
         req.end();
       },
     );
@@ -106,6 +150,7 @@ export class GatewayClient {
     // Parse SSE from the response stream with cleanup
     let buffer = "";
     let bufEvent: string | null = null;
+    let bufId: string | null = null;
     let bufDataLines: string[] = [];
 
     try {
@@ -119,13 +164,14 @@ export class GatewayClient {
 
           if (!line) {
             if (bufDataLines.length > 0) {
-              const event = parseSSEEvent(bufEvent, bufDataLines);
+              const event = parseSSEEvent(bufEvent, bufDataLines, bufId);
               if (event) {
                 yield event;
-                if (isTerminalEvent(event)) return;
+                if (options.stopOnTerminal !== false && isTerminalEvent(event)) return;
               }
             }
             bufEvent = null;
+            bufId = null;
             bufDataLines = [];
             continue;
           }
@@ -134,13 +180,15 @@ export class GatewayClient {
             bufDataLines.push(line[5] === " " ? line.slice(6) : line.slice(5));
           } else if (line.startsWith("event:")) {
             bufEvent = line.slice(6).trim();
+          } else if (line.startsWith("id:")) {
+            bufId = line.slice(3).trim();
           }
         }
       }
 
       // Flush trailing
       if (bufDataLines.length > 0) {
-        const event = parseSSEEvent(bufEvent, bufDataLines);
+        const event = parseSSEEvent(bufEvent, bufDataLines, bufId);
         if (event) yield event;
       }
     } finally {
@@ -157,13 +205,16 @@ export function isTerminalEvent(event: StreamEvent): boolean {
     event.eventType === EventType.RUN_FINISHED ||
     event.eventType === EventType.ERROR ||
     event.eventType === EventType.RUN_ERROR ||
-    event.eventType === EventType.CANCELLED
+    event.eventType === EventType.CANCELLED ||
+    event.eventType === "response.completed" ||
+    event.eventType === "response.failed"
   );
 }
 
 export function parseSSEEvent(
   eventField: string | null,
   dataLines: string[],
+  idField: string | null = null,
 ): StreamEvent | null {
   const raw = dataLines.join("\n");
 
@@ -178,20 +229,17 @@ export function parseSSEEvent(
     payload = { raw };
   }
 
-  const eventType =
-    eventField ?? payload.event_type ?? payload.event ?? "message";
-  delete payload.event_type;
-  delete payload.event;
-
-  const timestamp = payload.timestamp ?? Date.now() / 1000;
-  delete payload.timestamp;
+  const embeddedEvent = payload.event;
+  const eventType = eventField ?? payload.event_type ??
+    (typeof embeddedEvent === "string" ? embeddedEvent : undefined) ?? payload.type ?? "message";
+  const timestamp = normalizeTimestamp(payload.timestamp);
 
   // V2 cursor streams wrap the V1-compatible payload in an `item` envelope.
   // Normalize it here so CLI consumers see the same event vocabulary from
   // either endpoint.
   if (eventType === EventType.ITEM && payload.schema_version === "agent-event/v2") {
-    const envelope = payload.event && typeof payload.event === "object"
-      ? payload.event as Record<string, any>
+    const envelope = embeddedEvent && typeof embeddedEvent === "object"
+      ? embeddedEvent as Record<string, any>
       : payload;
     const raw = envelope.payload && typeof envelope.payload === "object"
       ? envelope.payload as Record<string, any>
@@ -202,7 +250,7 @@ export function parseSSEEvent(
       const projected = rawData && typeof rawData === "object" && !Array.isArray(rawData)
         ? rawData
         : typeof rawData === "string" ? { content: rawData } : { value: rawData };
-      return { eventType: rawType, data: projected, timestamp: Number(timestamp) };
+      return withV2Metadata({ eventType: rawType, data: projected, timestamp }, payload, envelope, idField);
     }
     const item = rawData && typeof rawData === "object" && !Array.isArray(rawData)
       ? rawData as Record<string, any>
@@ -217,16 +265,16 @@ export function parseSSEEvent(
           ? itemPayload.content.map((part: any) => part?.text ?? part?.content ?? "").join("")
           : "";
     if (text && (itemPayload.role === "assistant" || itemPayload.type === "agent_message")) {
-      return { eventType: EventType.TEXT_DELTA, data: { content: text }, timestamp: Number(timestamp) };
+      return withV2Metadata({ eventType: EventType.TEXT_DELTA, data: { content: text }, timestamp }, payload, envelope, idField);
     }
     if (text && (itemPayload.role === "reasoning" || itemPayload.type === "reasoning")) {
-      return { eventType: EventType.THINKING_DELTA, data: { content: text }, timestamp: Number(timestamp) };
+      return withV2Metadata({ eventType: EventType.THINKING_DELTA, data: { content: text }, timestamp }, payload, envelope, idField);
     }
     const toolName = itemPayload.name ?? itemPayload.tool;
     if (toolName || ["function_call", "tool_use", "command_execution", "mcp_tool_call"].includes(String(item.type))) {
       const status = String(item.status ?? itemPayload.status ?? "").toLowerCase();
       const terminal = ["completed", "succeeded", "failed", "error", "cancelled"].includes(status);
-      return {
+      return withV2Metadata({
         eventType: terminal ? EventType.TOOL_CALL_RESULT : EventType.TOOL_CALL_START,
         data: {
           tool_call_id: item.id ?? itemPayload.id,
@@ -235,23 +283,27 @@ export function parseSSEEvent(
           result: itemPayload.result ?? itemPayload.output,
           status: item.status ?? itemPayload.status,
         },
-        timestamp: Number(timestamp),
-      };
+        timestamp,
+      }, payload, envelope, idField);
     }
     if (itemPayload.approval_id || item.type === "approval_request") {
-      return { eventType: EventType.APPROVAL_REQUIRED, data: itemPayload, timestamp: Number(timestamp) };
+      return withV2Metadata({ eventType: EventType.APPROVAL_REQUIRED, data: itemPayload, timestamp }, payload, envelope, idField);
     }
     if (itemPayload.artifact_id || item.type === "artifact") {
-      return { eventType: EventType.ARTIFACT_CREATED, data: itemPayload, timestamp: Number(timestamp) };
+      return withV2Metadata({ eventType: EventType.ARTIFACT_CREATED, data: itemPayload, timestamp }, payload, envelope, idField);
     }
     if (item.type === "activity" || item.type === "event_msg") {
-      return { eventType: EventType.ACTIVITY, data: itemPayload, timestamp: Number(timestamp) };
+      return withV2Metadata({ eventType: EventType.ACTIVITY, data: itemPayload, timestamp }, payload, envelope, idField);
     }
     return null;
   }
 
   // Unwrap nested "data" — can be string (text_delta) or object
-  const inner = payload.data !== undefined ? payload.data : payload;
+  const genericPayload = { ...payload };
+  delete genericPayload.event_type;
+  if (typeof genericPayload.event === "string") delete genericPayload.event;
+  delete genericPayload.timestamp;
+  const inner = genericPayload.data !== undefined ? genericPayload.data : genericPayload;
 
   let data: Record<string, any>;
   if (typeof inner === "string") {
@@ -262,5 +314,47 @@ export function parseSSEEvent(
     data = { value: inner };
   }
 
-  return { eventType, data, timestamp: Number(timestamp) };
+  return {
+    eventType,
+    data,
+    timestamp,
+    ...(Number.isFinite(Number(payload.sequence_number)) ? { sequence: Number(payload.sequence_number) } : {}),
+    ...(idField ? { eventId: idField } : {}),
+  };
+}
+
+function normalizeTimestamp(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const numeric = Number(value);
+    if (value.trim() && Number.isFinite(numeric)) return numeric;
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed / 1000;
+  }
+  return Date.now() / 1000;
+}
+
+function withV2Metadata(
+  event: StreamEvent,
+  outer: Record<string, any>,
+  envelope: Record<string, any>,
+  idField: string | null,
+): StreamEvent {
+  const sequence = Number(outer.sequence ?? idField);
+  return {
+    ...event,
+    ...(Number.isFinite(sequence) ? { sequence } : {}),
+    ...(typeof outer.thread_id === "string" ? { threadId: outer.thread_id } : {}),
+    ...(typeof envelope.turn_id === "string" ? { turnId: envelope.turn_id } : {}),
+    ...(typeof envelope.id === "string" ? { eventId: envelope.id } : idField ? { eventId: idField } : {}),
+  };
+}
+
+function retryAfterMs(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const date = Date.parse(value);
+  if (!Number.isFinite(date)) return undefined;
+  return Math.max(0, date - Date.now());
 }

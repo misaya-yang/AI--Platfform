@@ -1,4 +1,7 @@
 import { build, context } from "esbuild";
+import { readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const isWatch = process.argv.includes("--watch");
 
@@ -24,7 +27,7 @@ const options = {
   entryPoints: ["src/cli.tsx"],
   bundle: true,
   platform: "node",
-  target: "node18",
+  target: "node22",
   format: "esm",
   outfile: "dist/cli.js",
   sourcemap: false,
@@ -67,5 +70,31 @@ if (isWatch) {
   console.log("Watching for changes...");
 } else {
   await build(options);
+  writeNativeSourceIdentity();
   console.log("Built dist/cli.js");
+}
+
+function writeNativeSourceIdentity() {
+  const cliRoot = dirname(fileURLToPath(import.meta.url));
+  const repositoryRoot = resolve(cliRoot, "../..");
+  const sourceReceipt = readJson(resolve(repositoryRoot, "deploy/agent-runtime-source/source-receipt.json"));
+  const overlayManifest = readJson(resolve(repositoryRoot, "rust/agent-runtime-overlay/manifest.json"));
+  const sourceLock = readJson(resolve(repositoryRoot, "deploy/agent-runtime-source/lock.json"));
+  const upstreamSha = sourceReceipt.source?.upstream_sha;
+  const overlaySha = overlayManifest.sha256;
+  if (sourceReceipt.overlay?.sha256 !== overlaySha || sourceLock.build?.overlay_sha256 !== overlaySha) {
+    throw new Error("Agent Runtime source receipt, overlay manifest, and lock disagree");
+  }
+  if (overlayManifest.upstream_sha !== upstreamSha || sourceLock.source?.upstream_sha !== upstreamSha) {
+    throw new Error("Agent Runtime upstream identity disagrees across source records");
+  }
+  writeFileSync(resolve(cliRoot, "dist/native-source.json"), `${JSON.stringify({
+    schema_version: "ai-gateway-cli/native-source/v1",
+    upstream_sha: upstreamSha,
+    overlay_sha256: overlaySha,
+  }, null, 2)}\n`);
+}
+
+function readJson(path) {
+  return JSON.parse(readFileSync(path, "utf8"));
 }

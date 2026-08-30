@@ -1,7 +1,7 @@
 {
   "name": "ai-gateway-cli",
   "version": "1.5.0",
-  "description": "AI Gateway CLI — remote streaming chat with slash commands and knowledge base integration",
+  "description": "Independent Agent Runtime CLI with local provider profiles and third-party API compatibility",
   "type": "module",
   "bin": {
     "ai-gateway": "dist/cli.js"
@@ -12,7 +12,9 @@
     "start": "node dist/cli.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
-    "prepublishOnly": "npm run build"
+    "verify:native": "node scripts/verify-native-package.mjs",
+    "prepack": "npm run build && npm run verify:native",
+    "prepublishOnly": "npm run build && npm run verify:native"
   },
   "keywords": [
     "ai",
@@ -20,10 +22,10 @@
     "assistant",
     "agent",
     "mcp",
-    "chat",
+    "runtime",
     "slash-commands",
     "terminal",
-    "gateway"
+    "responses-api"
   ],
   "author": "AI Gateway Maintainers",
   "license": "MIT",
@@ -36,7 +38,8 @@
     "node": ">=22.12.0"
   },
   "files": [
-    "dist/"
+    "dist/",
+    "vendor/"
   ],
   "dependencies": {},
   "devDependencies": {
