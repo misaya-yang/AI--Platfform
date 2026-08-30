@@ -24,12 +24,13 @@ WORKDIR /build
 # every accepted artifact.
 COPY apps/knowledge-service/build-requirements.lock.txt /build/knowledge-service/build-requirements.lock.txt
 COPY apps/knowledge-service/requirements.lock.txt /build/knowledge-service/requirements.lock.txt
+COPY packages/ai-gateway-contracts/ /build/packages/ai-gateway-contracts/
 COPY packages/ai-gateway-core/ /build/packages/ai-gateway-core/
 COPY apps/knowledge-service/pyproject.toml apps/knowledge-service/README.md /build/knowledge-service/
 COPY apps/knowledge-service/src /build/knowledge-service/src
 
 # PRD T7-3: install the hash-locked build toolchain first so source-only
-# transitive packages cannot pull floating setuptools/wheel versions. The two
+# transitive packages cannot pull floating setuptools/wheel versions. The three
 # local workspace wheels use the exact-pinned Hatchling from that toolchain,
 # with build isolation disabled. `make kb-image-lock-refresh` regenerates the
 # exports and `make kb-image-lock-gate` rejects drift.
@@ -43,7 +44,9 @@ RUN --mount=type=cache,id=ai-gateway-pip,target=/root/.cache/pip,sharing=locked 
     --index-url ${PIP_INDEX_URL} \
     ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}} && \
     python -m pip install --no-deps --no-build-isolation \
-    /build/packages/ai-gateway-core /build/knowledge-service \
+    /build/packages/ai-gateway-contracts \
+    /build/packages/ai-gateway-core \
+    /build/knowledge-service \
     --index-url ${PIP_INDEX_URL} \
     ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
 

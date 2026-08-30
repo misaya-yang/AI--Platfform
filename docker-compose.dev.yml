@@ -16,6 +16,7 @@ services:
       - ./src:/app/src
       - ./database:/app/database
       - ./config:/app/config
+      - ./packages/ai-gateway-contracts/src/ai_gateway_contracts:/opt/venv/lib/python3.12/site-packages/ai_gateway_contracts
       - ./packages/ai-gateway-core/src/ai_gateway_core:/opt/venv/lib/python3.12/site-packages/ai_gateway_core
 
   knowledge-service:
@@ -23,9 +24,11 @@ services:
       ["python", "-m", "uvicorn", "knowledge_service.main:app", "--host", "0.0.0.0", "--port", "8092", "--reload"]
     volumes:
       - ./apps/knowledge-service/src/knowledge_service:/opt/venv/lib/python3.12/site-packages/knowledge_service
+      - ./packages/ai-gateway-contracts/src/ai_gateway_contracts:/opt/venv/lib/python3.12/site-packages/ai_gateway_contracts
       - ./packages/ai-gateway-core/src/ai_gateway_core:/opt/venv/lib/python3.12/site-packages/ai_gateway_core
 
   knowledge-worker:
     volumes:
       - ./apps/knowledge-service/src/knowledge_service:/opt/venv/lib/python3.12/site-packages/knowledge_service
+      - ./packages/ai-gateway-contracts/src/ai_gateway_contracts:/opt/venv/lib/python3.12/site-packages/ai_gateway_contracts
       - ./packages/ai-gateway-core/src/ai_gateway_core:/opt/venv/lib/python3.12/site-packages/ai_gateway_core

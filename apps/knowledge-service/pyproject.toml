@@ -37,12 +37,14 @@ dependencies = [
     "cachetools>=5.5.0",
     "dashscope>=1.25.0",
     "google-genai>=1.0.0",
+    "ai-gateway-contracts",
     "ai-gateway-core",
     # sentence-transformers / paddleocr removed — embeddings use remote Gemini API,
     # OCR uses VLM service. Avoids pulling PyTorch (~2GB) into the image.
 ]
 
 [tool.uv.sources]
+ai-gateway-contracts = { workspace = true }
 ai-gateway-core = { workspace = true }
 
 [project.optional-dependencies]

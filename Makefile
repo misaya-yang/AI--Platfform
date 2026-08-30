@@ -389,6 +389,7 @@ kb-image-lock-refresh:      ## 从 uv.lock 重建 Knowledge Service 镜像依赖
 	@uv export --locked --package knowledge-service --no-dev --no-group image-build \
 		--no-annotate --no-header \
 		--no-emit-package knowledge-service --no-emit-package ai-gateway-core \
+		--no-emit-package ai-gateway-contracts \
 		--output-file $(KB_IMAGE_RUNTIME_LOCK)
 
 kb-image-lock-gate:         ## 校验 Knowledge Service 镜像锁同步、哈希与静态分发合同

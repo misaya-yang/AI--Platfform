@@ -1620,6 +1620,7 @@ name = "knowledge-service"
 version = "0.1.0"
 source = { editable = "apps/knowledge-service" }
 dependencies = [
+    { name = "ai-gateway-contracts" },
     { name = "ai-gateway-core" },
     { name = "aioboto3" },
     { name = "asyncpg" },
@@ -1662,6 +1663,7 @@ image-build = [
 
 [package.metadata]
 requires-dist = [
+    { name = "ai-gateway-contracts", editable = "packages/ai-gateway-contracts" },
     { name = "ai-gateway-core", editable = "packages/ai-gateway-core" },
     { name = "aioboto3", specifier = ">=14.0.0" },
     { name = "asyncpg", specifier = ">=0.31.0" },

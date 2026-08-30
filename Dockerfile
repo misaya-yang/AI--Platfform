@@ -56,13 +56,13 @@ COPY src/ ./src/
 COPY rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/platform_catalog_v1.json \
     ./rust/agent-runtime-overlay/kernel-rs/ai-platform-capability-worker/src/platform_catalog_v1.json
 
-# Copy workspace member packages. ``pyproject.toml`` lists
-# ``ai-gateway-core`` as a dependency with ``{ workspace = true }`` — pip
-# doesn't understand uv workspaces so we install the local package first
-# from its path, then the outer gateway package picks it up as satisfied.
+# Copy workspace member packages. ``pyproject.toml`` lists both packages with
+# ``{ workspace = true }`` — pip doesn't understand uv workspaces, so install
+# the local contracts and core packages together before the outer Gateway.
+COPY packages/ai-gateway-contracts/ ./packages/ai-gateway-contracts/
 COPY packages/ai-gateway-core/ ./packages/ai-gateway-core/
 RUN --mount=type=cache,id=ai-gateway-pip,target=/root/.cache/pip,sharing=locked \
-    pip install ./packages/ai-gateway-core \
+    pip install ./packages/ai-gateway-contracts ./packages/ai-gateway-core \
     --index-url ${PIP_INDEX_URL} \
     ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
 
