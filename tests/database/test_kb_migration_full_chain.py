@@ -58,7 +58,7 @@ _LEGACY_SEGMENT_IDENTITY = re.compile(
 def _schema_for_layout(layout: str) -> str:
     schema = (ROOT / "database" / "schema.sql").read_text(encoding="utf-8")
     # schema.sql is intentionally the stable pre-RAG bootstrap baseline.  All
-    # three layouts must prove that 100-110 build the final shape rather than
+    # three layouts must prove that 100-112 build the final shape rather than
     # succeeding because branch-final objects were selectively folded in.
     assert len(_LEGACY_SEGMENT_IDENTITY.findall(schema)) == 1
     return schema

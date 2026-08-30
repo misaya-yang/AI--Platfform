@@ -4,13 +4,15 @@
 
 **最终结论：CONDITIONAL PASS**
 
-本地 `main` 已从 `origin/main@47b7a9b9` 安全快进至 `157e5918`；
+本地 `main` 已从 `origin/main@47b7a9b9` 安全快进 RAG 代码至 `157e5918`，
+随后提交架构/harness 收敛 `ef824bc3` 和最终 review 修复 `5d43bd6f`；
 `worktree-kb-frontend@f75e709b` 是 `worktree-kb-rag-upgrade` 的祖先，因此两个
 worktree 的提交均已包含。此前受测代码提交为 `966c9168`，本轮新增逻辑提交为
-`73faefa7`、`701b3b0f`。本轮没有发现仍未解决的 P0/P1 正确性、安全性或数据一致性
+`73faefa7`、`701b3b0f`、`5d43bd6f`。本轮没有发现仍未解决的 P0/P1 正确性、安全性或数据一致性
 缺陷；知识库核心 API、真实 PostgreSQL/Qdrant/Redis 链路、付费模型 QA、真实
 双嵌入模型回填、文档进度 SSE、批量部分成功、DashScope Qwen-OCR 单页实机和内置浏览器 UI 主链路均已通过。
-本次集成未启动 Docker、未执行迁移或内置浏览器复测，因此没有新增运行时证据；没有 push。
+最终 review 没有重启共享 Compose 栈或重复内置浏览器；迁移 112 在独立临时
+PostgreSQL 16 容器完成全门禁，容器随后删除。既有浏览器证据保持不变。
 
 不能给出 PASS，原因是以下强制发布证据尚未完成：
 
@@ -35,8 +37,8 @@ worktree 的提交均已包含。此前受测代码提交为 `966c9168`，本轮
 - `docs/plans/rag-upgrade-prd-addendum-dify-2026-08.md`
 - `reports/kb-rag-ui-t5/backend-dependency-handoff.md`
 
-开始修改前已确认 Claude 任务停止；之后没有并发写入。功能分支相对最新
-`origin/main` 共 320 个路径：195 新增、119 修改、6 删除，最终无未跟踪或
+开始修改前已确认 Claude 任务停止；之后没有并发写入。最终本地 main 相对
+`origin/main` 共 357 个路径：200 新增、151 修改、6 删除，最终无未跟踪或
 未提交文件。删除项逐一复核如下：
 
 | 删除项 | 复核结果 |
@@ -115,7 +117,7 @@ worktree 的提交均已包含。此前受测代码提交为 `966c9168`，本轮
 | D5 查询遥测读端 | **PASS** | `/queries` 活栈返回；修复 JSON 字符串 `stage_timings` 导致的 500。 |
 | D6 配置字段往返 | **PASS** | `ChunkingConfigSchema` 与 retrieval config 全字段 round-trip 测试通过。 |
 | D7 黄金用例删除 | **PASS** | tenant-scoped 持久删除端点及 UI 回归通过。 |
-| D8 QA/hit-test `trace_id` | **PASS** | 内部关联保留，公开响应不泄露内部 trace；schema 回归通过。 |
+| D8 QA/hit-test `trace_id` | **PASS** | tenant-scoped QA/hit-test 响应已暴露 `trace_id`，前端已接通反馈与 trace-backed 黄金集桥接；schema 回归通过。 |
 
 ## 6. H2/H3 七个场景
 
@@ -135,13 +137,14 @@ worktree 的提交均已包含。此前受测代码提交为 `966c9168`，本轮
 
 | 命令/操作 | 结果 |
 | --- | --- |
-| `make harness-check` | PASS；1 个已知 warning：`deploy/runbooks/kb-rag-ui-t5` 的旧 loop-state schema。 |
+| `make harness-check` | PASS：36 targets、18 required docs、99 links；1 个已知 warning：`deploy/runbooks/kb-rag-ui-t5` 的旧 loop-state schema。 |
 | 触及 Python 路径的 `ruff check` | PASS，0 error。 |
-| `uv run --all-packages --extra test pytest -q --no-cov tests/services/knowledge/test_document_progress_sse.py` | PASS：6 passed，1 个既有 Starlette warning；覆盖续传、terminal、重复/非单调行、非法游标、403/404/503。 |
+| `uv run --all-packages --extra test pytest -q --no-cov tests/services/knowledge/test_document_progress_sse.py` | PASS：9 passed；覆盖 fresh watermark、有效续传、过期/未来游标 reset、terminal、重复/非单调行、非法游标、403/404/503。 |
 | `node --experimental-strip-types --test web/src/lib/sseEventParser.test.ts web/src/pages/knowledge/detail/documentProgress.test.ts` | PASS：4 passed。 |
-| `make kb-unit-gate` | PASS：1824 passed，1 skipped（缺专用 backfill PG DSN；迁移真库门禁另行覆盖）。 |
-| `POSTGRES_CLIENT_CONTAINER=ai-gateway-pg make kb-migration-gate` | PASS：131 passed；包含 100–111 三种布局/restore/账本链。 |
-| `pytest tests/scripts` 对应门禁 | PASS：354 passed，2 skipped（专用 KB DSN；本地无 jieba 的分支）。 |
+| `make kb-unit-gate` | PASS：1835 passed，2 skipped（缺专用 backfill PG DSN；共享 Qdrant 栈未启动）。 |
+| 隔离 PostgreSQL 16 + `make kb-migration-gate` | PASS：132 passed；包含 100–112 三种布局/restore/账本链和 112 的 7 日/10k retention 实测。临时容器已删除。 |
+| `pytest tests/scripts` 对应门禁 | PASS：357 passed，2 skipped（专用 KB DSN；本地无 jieba 的分支）。 |
+| 备份安全回归 | PASS：仓库路径及 `..`/symlink 解析后 fail-closed；外部目录创建成功、文件 mode `0600`、失败无残片。 |
 | 真实中文 lexical shadow（含 jieba） | PASS：simple 0.167、bigram 0.833、jieba 0.917；BGE-M3 未配置，明确 skipped。 |
 | `make gateway-kb-boundary-gate` + gateway KB 回归 | PASS：114 passed。 |
 | 前端 Node 单测 | PASS：94 passed。 |
@@ -153,7 +156,7 @@ worktree 的提交均已包含。此前受测代码提交为 `966c9168`，本轮
 | `make kb-image-lock-gate` | PASS：6 passed。 |
 | `make kb-release-evidence-gate` | **BLOCKED（预期 exit 2）**：5 个正式证据缺口，见 T0。 |
 | 真实 qwen3-rerank bake-off | PASS（开发证据）：12 case，nDCG 0.967911，MRR 1.0；不是 release evidence。 |
-| `make migrate` + `make migrate-status` | PASS：迁移 111 已登记；status 显示无 pending migration。 |
+| 共享栈 `make migrate` + `make migrate-status` | 既有证据：迁移 111 已登记。最终 review 未启动共享栈；迁移 112 仅在隔离 PostgreSQL 完整验证，部署时仍须正常执行 `make migrate`。 |
 | `make hot-update ARGS="--all"` | PASS：源代码与前端产物更新到功能 worktree；未执行 pip install 或镜像重建；Node 24 对项目期望 Node 22 仅有 engine warning。 |
 | `make validate` + `make status` | PASS：PG/Redis/Qdrant/Knowledge/worker/Gateway/frontend/Agent Runtime 健康；仅本地默认密码 warning。 |
 | `docker compose config --quiet` + `docker compose up -d --no-build knowledge-service knowledge-worker` | PASS：先核对 Compose owner 指向功能 worktree；仅重建知识服务容器以应用 OCR 专用环境变量，没有删除 volume 或重建镜像。 |
@@ -171,8 +174,10 @@ worktree 的提交均已包含。此前受测代码提交为 `966c9168`，本轮
 ## 8. Docker、代码版本与迁移状态
 
 在 Docker/E2E 前已阅读 `docs/harness/runtime-and-secrets.md`。没有并行启动冲突
-栈；根 checkout 的栈先安全停止，未删除 volume、未 prune。根数据库先备份为
-未跟踪文件 `gateway_20260829_064104.sql.gz`（约 80 MiB）。
+栈；根 checkout 的栈先安全停止，未删除 volume、未 prune。根数据库备份
+`gateway_20260829_064104.sql.gz`（约 80 MiB）已按最终 review 从仓库移至
+operator-owned 外部目录，移动前后 SHA-256 一致，权限收紧为 `0600`。仓库内
+不再存在或忽略任何备份副本；`make backup` 也已改为强制仓库外目标。
 
 Compose 标签确认 `config_files`、`working_dir` 均指向本功能 worktree。镜像：
 
@@ -197,8 +202,9 @@ HEAD 代码”的证据。
 迁移 100–105 在 fresh public layout、从 main schema 升级、已完成 per-service
 split 的旧库中执行；canonical CLI 与 shell 都设置 Knowledge-first
 `search_path`。legacy `run_migration.py` 对这些迁移 fail-closed。重复启动、账本、
-约束、并发 runner 和数据保留均通过。迁移 100–111 共 12 条已在 public ledger
-登记；当前 `make migrate-status` 显示迁移 111 已登记且无 pending migration。
+约束、并发 runner 和数据保留均通过。隔离 fresh/public/main/split 门禁验证迁移
+100–112 共 13 条进入 public ledger；共享运行栈此前登记至 111，部署本提交时
+必须由 canonical `make migrate` 应用 112。
 
 100–105 新增的 8 张表均位于 `knowledge` schema，owner 为执行 canonical runner
 的数据库角色（本地为 `postgres`），不存在 public/其他 schema 重复表：
@@ -216,6 +222,11 @@ split 的旧库中执行；canonical CLI 与 shell 都设置 Knowledge-first
 `knowledge.record_kb_document_progress_event()` 触发器；真实运行栈探针验证了
 waiting/parsing/splitting/indexing/completed/deleted 的单调事件序列，删除临时
 文档后事件收据仍可续传。事件读取仍受 dataset viewer scope 保护。
+
+迁移 112 为事件账本增加 7 日与每数据集约 10k 的保留边界。Fresh SSE 连接从
+当前 dataset watermark 开始，不再重放全部历史；合法 `Last-Event-ID` 保持无损
+增量续传，裁剪后或数据库恢复造成的失效游标收到单个 `reset` 并刷新权威快照。
+真 PostgreSQL 测试验证 10,005 条种子事件清理为 10,000 条且过期事件为 0。
 
 迁移 101 会改写状态/hash、替换唯一约束并扫描/锁表。N-1 Knowledge binary 不能
 作为安全回滚路径；本升级明确标记为 **restore-required**。真 PostgreSQL
@@ -271,6 +282,9 @@ Completed；浏览器打开文档页期间网关日志记录了
 | P1 | 文档进度只支持条件轮询，缺少 PRD 要求的 SSE/`Last-Event-ID` | 迁移 111 追加事件账本与触发器；Knowledge SSE 端点完成 scope/单调 ID/续传/terminal/断开清理/403/404/503；后端 6 个定向回归、前端 4 个游标/解析回归和真实网关续传通过 | `73faefa7` |
 | P1 | 批量部分成功未做内置浏览器实机验证 | 真实禁用+活动文档批量操作得到 `1 queued, 1 skipped`；全跳过逐项提示、启用后重试、刷新持久性均通过；临时文档已清理 | `73faefa7` |
 | P1 | OCR 默认仍为 Gemini，DashScope 适配未使用 Qwen-OCR 原生任务/独立地域端点 | 默认切换为 `dashscope/qwen-vl-ocr`；原生 OCR `document_parsing`、像素边界、自动转正、`max_tokens`、独立 OCR key/base URL、资源关闭和文档 provenance；定向回归与真实单页调用通过 | `701b3b0f` |
+| P1 | Fresh SSE 从 sequence 0 重放无界历史，事件账本无 retention | Fresh 从 watermark 开始；合法游标增量续传；过期/未来游标 reset；迁移 112 强制 7 日/约 10k 保留 | `5d43bd6f` |
+| P1 | `make backup` 默认把敏感 dump 写入开源仓库且文件为 `0644` | 默认改为 XDG/HOME 外部状态目录，仓库路径 fail-closed，创建权限 `0700/0600`；现有 80 MiB dump 校验后移出仓库 | `5d43bd6f` |
+| P1 | OCR 初始化前 Redis fail-closed 会在清理阶段触发 `UnboundLocalError` | 生命周期入口预置 OCR 资源句柄；原始失败测试和 KB 全门禁通过 | `5d43bd6f` |
 
 功能提交与验收提交保持可审查分组：
 
@@ -281,10 +295,11 @@ Completed；浏览器打开文档页期间网关日志记录了
 - `966c9168 fix(kb): close live acceptance findings`
 - `73faefa7 feat(kb): add durable document progress SSE`
 - `701b3b0f feat(kb): use DashScope Qwen OCR for scanned PDFs`
+- `5d43bd6f fix(kb): close final acceptance review findings`
 
 ## 11. 未验证项与执行前置条件
 
-交给后续 Luna 或发布负责人时，不应再花时间重复已通过的 1824 单测和主 UI
+交给后续 Luna 或发布负责人时，不应再花时间重复已通过的 1835 单测和主 UI
 链路；优先处理：
 
 1. 建立 200–400 条正式黄金集、provenance、人工复核和 release pointer，重跑
@@ -301,8 +316,9 @@ Completed；浏览器打开文档页期间网关日志记录了
 
 ## 12. 与 main 的集成方式
 
-本地 `main` 已使用旧值守卫从 `47b7a9b9` 快进至 `157e5918`，没有新建合并提交、
-没有改写历史、rebase、amend、force push 或 push。`worktree-kb-rag-upgrade` 与
+本地 `main` 已使用旧值守卫从 `47b7a9b9` 快进 RAG 代码至 `157e5918`，随后线性
+提交架构/harness 与最终 review 修复至 `5d43bd6f`；没有改写历史、rebase、amend
+或 force push。`worktree-kb-rag-upgrade` 与
 `worktree-kb-frontend` 均已由 `git merge-base --is-ancestor` 验证为 `main` 的祖先。
 
 集成时先对除两个重叠文件外的目标分支补丁执行了 `git apply --check --index`，再
@@ -314,5 +330,5 @@ Completed；浏览器打开文档页期间网关日志记录了
 - `docs/harness/commands.md`
 - `harness.yml`
 
-本次仅完成 Git 集成与工作树保护核对；既有门禁和实机证据仍以本报告前文为准，
-未验证项仍保持 BLOCKED/CONDITIONAL PASS，不因本次快进而改变。
+最终 review 已补充真迁移、KB、scripts、前端和备份安全回归；没有重启共享栈或
+重复浏览器。未验证发布项仍保持 BLOCKED/CONDITIONAL PASS，不因代码合入改变。

@@ -1294,6 +1294,25 @@ def test_backup_defaults_outside_checkout_and_rejects_repository_paths(
     assert "must be outside the source checkout" in output
     assert not (Path.cwd() / "backups").exists()
 
+    checkout_alias = tmp_path / "checkout-alias"
+    checkout_alias.symlink_to(Path.cwd(), target_is_directory=True)
+    symlink_rejected = subprocess.run(
+        [
+            "bash",
+            "scripts/new/backup.sh",
+            "--backup-dir",
+            str(checkout_alias / "backups"),
+            "--env",
+            str(env_file),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    symlink_output = symlink_rejected.stdout + symlink_rejected.stderr
+    assert symlink_rejected.returncode == 2, symlink_output
+    assert "must be outside the source checkout" in symlink_output
+
 
 def test_backup_list_reads_external_directory_from_env_file(tmp_path: Path) -> None:
     external = tmp_path / "private-backups"
