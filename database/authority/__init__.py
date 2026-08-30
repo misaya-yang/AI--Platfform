@@ -12,9 +12,12 @@ from .adoption import (
     detect_legacy_state,
 )
 from .bootstrap import (
+    bootstrap_roles,
     database_empty,
     fresh_install,
     preflight_database_empty,
+    provision_roles_admin,
+    role_bootstrap_issues,
     startup_schema_check,
 )
 from .commands import (
@@ -93,6 +96,7 @@ __all__ = [
     "apply_legacy_chain",
     "apply_per_service_chain",
     "base_schema_present",
+    "bootstrap_roles",
     "database_empty",
     "ensure_base_schema",
     "per_service_ledger_present",
@@ -120,7 +124,9 @@ __all__ = [
     "load_baseline_manifest",
     "load_epoch_manifest",
     "preflight_database_empty",
+    "provision_roles_admin",
     "reconcile_numeric_legacy_history",
+    "role_bootstrap_issues",
     "startup_schema_check",
     "validate_legacy_chain",
 ]

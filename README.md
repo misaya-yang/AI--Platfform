@@ -229,8 +229,9 @@ make stop          # stop containers without deleting volumes
 `deploy-infra` and `deploy-app` are separate partial-deploy modes; do not combine them in one command.
 `deploy-app` still runs database migrations by default after PostgreSQL is healthy.
 Use `make deploy-app ARGS="--no-migrate"` for application restarts that must not run migrations.
-Automatic migrations initialize `database/schema.sql` first when the base
-schema is missing, then run pending files from `database/migrations`.
+Automatic migrations call the single `python -m database.authority migrate`
+plan. Compose's one-shot migrator owns DDL and every application container
+waits for it; Gateway/Knowledge `AUTO_INIT` paths are disabled.
 Automatic migration failures stop deployment; fix the failed migration before rerunning deploy.
 Database restore uses the selected env file and stops on the first SQL error; do
 not run restore against shared data without a current backup and explicit
