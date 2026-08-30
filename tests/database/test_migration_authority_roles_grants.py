@@ -668,6 +668,8 @@ async def test_roles_and_cutover_contract_on_explicit_scratch_postgres() -> None
             "WHERE c.relname = 'arc03_owner_probe'"
         )
         assert {row["owner"] for row in owners} == {prefix + "owner"}
+        for schema in ("public", "gateway", "assistant", "knowledge"):
+            await conn.execute(f'DROP TABLE "{schema}".arc03_owner_probe')
 
         await conn.execute(
             "CREATE TYPE public.arc03_cutover_state AS ENUM ('ready'); "
