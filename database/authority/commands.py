@@ -527,8 +527,18 @@ async def command_prepare_cutover_ownership(
             await provision_extensions_admin(conn, authority.paths)
             await run_baseline_sql_file(
                 conn,
+                authority.paths.bootstrap_dir / "legacy_duplicate_reconciliation.sql",
+                role_prefix=authority.role_prefix,
+            )
+            await run_baseline_sql_file(
+                conn,
                 authority.paths.baseline_dir(baseline.baseline_id) / "cutover_convergence.sql",
                 role_prefix=authority.role_prefix,
+            )
+            await run_baseline_sql_file(
+                conn,
+                authority.paths.bootstrap_dir / "legacy_structural_reconciliation.sql",
+                execution_role=f"{authority.role_prefix}owner",
             )
         finally:
             await conn.close()

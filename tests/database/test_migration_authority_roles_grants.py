@@ -24,6 +24,12 @@ from scripts.inventory.generate_database_grants import (
 ROOT = Path(__file__).resolve().parents[2]
 ROLES_SQL = ROOT / "database/bootstrap/roles.sql"
 CUTOVER_SQL = ROOT / "database/baselines/2026_08_post_kb_v1/cutover_convergence.sql"
+LEGACY_DUPLICATE_RECONCILIATION_SQL = (
+    ROOT / "database/bootstrap/legacy_duplicate_reconciliation.sql"
+)
+LEGACY_STRUCTURAL_RECONCILIATION_SQL = (
+    ROOT / "database/bootstrap/legacy_structural_reconciliation.sql"
+)
 EXTENSIONS_SQL = ROOT / "database/bootstrap/extensions.sql"
 ROLE_SUFFIXES = (
     "owner",
@@ -594,6 +600,30 @@ def test_grants_cli_check_detects_stale_or_hand_edited_sql(
         == 2
     )
     assert json.loads(capsys.readouterr().err)["status"] == "BLOCKED"
+
+
+def test_legacy_duplicate_reconciliation_is_lossless_and_fail_closed() -> None:
+    sql = LEGACY_DUPLICATE_RECONCILIATION_SQL.read_text(encoding="utf-8")
+    assert "sessions overlap" in sql
+    assert "session_memory overlap" in sql
+    assert "assistant_runs overlap" in sql
+    assert "unexpected data" in sql
+    assert "platform_legacy" in sql
+    assert "ALTER COLUMN tool_name TYPE VARCHAR(160)" in sql
+    assert "REFERENCES knowledge.datasets(dataset_id)" in sql
+    assert "live archive dependencies remain" in sql
+    assert "DROP TABLE" not in sql.upper()
+    assert "TRUNCATE" not in sql.upper()
+
+
+def test_legacy_structural_reconciliation_matches_frozen_scope() -> None:
+    sql = LEGACY_STRUCTURAL_RECONCILIATION_SQL.read_text(encoding="utf-8")
+    assert sql.count("DROP CONSTRAINT IF EXISTS") == 90
+    assert sql.count("ADD CONSTRAINT") == 90
+    assert sql.count("DROP INDEX IF EXISTS") == 10
+    assert sql.count("CREATE INDEX") + sql.count("CREATE UNIQUE INDEX") == 10
+    assert "DROP TABLE" not in sql.upper()
+    assert "TRUNCATE" not in sql.upper()
 
 
 @pytest.mark.asyncio
