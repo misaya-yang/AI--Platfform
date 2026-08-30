@@ -35,9 +35,9 @@ def test_gateway_boot_imports_resolve() -> None:
 
 
 @pytest.mark.asyncio
-async def test_readiness_probes_runtime_ready_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_readiness_probes_runtime_ready_endpoint() -> None:
     """The Rust Runtime has no /health endpoint; probe its readiness contract."""
-    from src import main
+    from src.services.health_contract import probe_http_service
 
     requested: list[str] = []
 
@@ -50,25 +50,31 @@ async def test_readiness_probes_runtime_ready_endpoint(monkeypatch: pytest.Monke
 
         async def get(self, url: str):
             requested.append(url)
-            return SimpleNamespace(status_code=200)
+            status = "ready" if url.endswith("/health/ready") else "ok"
+            return SimpleNamespace(status_code=200, json=lambda: {"status": status})
 
-    monkeypatch.setattr(main.httpx, "AsyncClient", lambda **_kwargs: _Client())
+    client = _Client()
     checks: dict[str, str] = {}
 
-    assert await main._probe_http_service(
+    assert await probe_http_service(
         "agent_runtime",
         "http://agent-runtime:8094",
         checks,
         path="/health/ready",
         required=True,
+        expected_status="ready",
+        client=client,
     )
-    assert await main._probe_http_service(
+    assert await probe_http_service(
         "knowledge_service",
         "http://knowledge-service:8092",
         checks,
+        path="/health/ready",
+        expected_status="ready",
+        client=client,
     )
     assert requested == [
         "http://agent-runtime:8094/health/ready",
-        "http://knowledge-service:8092/health",
+        "http://knowledge-service:8092/health/ready",
     ]
     assert checks == {"agent_runtime": "healthy", "knowledge_service": "healthy"}

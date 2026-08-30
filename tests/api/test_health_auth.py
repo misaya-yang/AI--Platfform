@@ -134,6 +134,84 @@ class TestHealthEndpointAuth:
 
         assert result["agent_runtime"]["status"] == "healthy"
 
+    @pytest.mark.asyncio
+    async def test_admin_health_exposes_private_core_and_optional_degradation(self):
+        """Admin detail reports why capabilities degraded without changing core."""
+        from src.api.v1 import health
+
+        async def probe():
+            return {
+                "status": "ready",
+                "core_ready": True,
+                "degraded": True,
+                "core": {
+                    "auth_config": "healthy",
+                    "database": "healthy",
+                    "redis": "healthy",
+                    "agent_runtime": "healthy",
+                    "model_plane": "healthy",
+                },
+                "capabilities": {
+                    "knowledge_service": "status_503",
+                    "image_worker": "healthy",
+                },
+            }
+
+        connector = SimpleNamespace(
+            status="unhealthy",
+            latency=0.1,
+            last_check=None,
+            error="timeout",
+        )
+        monitor = SimpleNamespace(all_status=lambda: {"optional_connector": connector})
+        request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(gateway_health_probe=probe))
+        )
+        user = MockUserContext(user_id="admin123", is_authenticated=True, roles=["admin"])
+
+        result = await health.all_services_health(request=request, monitor=monitor, user=user)
+
+        assert result["gateway_core"] == {
+            "status": "healthy",
+            "dependencies": {
+                "auth_config": "healthy",
+                "database": "healthy",
+                "redis": "healthy",
+                "agent_runtime": "healthy",
+                "model_plane": "healthy",
+            },
+        }
+        assert result["knowledge_service"] == {
+            "status": "status_503",
+            "required": False,
+        }
+        assert result["assistant"]["status"] == "degraded"
+
+    @pytest.mark.asyncio
+    async def test_non_admin_cannot_trigger_private_dependency_probe(self):
+        """Authorization runs before any dependency enumeration or network probe."""
+        from fastapi import HTTPException
+
+        from src.api.v1 import health
+
+        called = False
+
+        async def probe():
+            nonlocal called
+            called = True
+            return {}
+
+        request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(gateway_health_probe=probe))
+        )
+        monitor = SimpleNamespace(all_status=lambda: {})
+        user = MockUserContext(user_id="user123", is_authenticated=True, roles=["user"])
+
+        with pytest.raises(HTTPException, match="Admin access required"):
+            await health.all_services_health(request=request, monitor=monitor, user=user)
+
+        assert called is False
+
 
 class TestHealthEndpointInfoProtection:
     """Test that sensitive info is not exposed."""

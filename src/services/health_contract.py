@@ -1,0 +1,227 @@
+"""Gateway live/core-ready/capability health projections."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from typing import Any
+
+import httpx
+
+
+async def probe_http_service(
+    name: str,
+    base_url: str | None,
+    checks: dict[str, str],
+    *,
+    path: str = "/health",
+    required: bool = False,
+    expected_status: str | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> bool:
+    """Probe one explicit service contract and reject malformed success payloads."""
+
+    if not base_url:
+        checks[name] = "not_configured"
+        return not required
+
+    url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+    try:
+        timeout = httpx.Timeout(2.0, connect=1.0)
+        if client is None:
+            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as owned_client:
+                response = await owned_client.get(url)
+        else:
+            response = await client.get(url)
+        if 200 <= response.status_code < 300:
+            if expected_status is not None:
+                try:
+                    payload = response.json()
+                except (TypeError, ValueError):
+                    checks[name] = "schema_mismatch"
+                    return False
+                if not isinstance(payload, dict) or payload.get("status") != expected_status:
+                    checks[name] = "schema_mismatch"
+                    return False
+            checks[name] = "healthy"
+            return True
+        checks[name] = f"status_{response.status_code}"
+        return False
+    except Exception as exc:
+        checks[name] = f"error: {type(exc).__name__}"
+        return False
+
+
+async def gateway_database_is_ready(
+    database: object,
+    *,
+    timeout_seconds: float = 1.0,
+) -> bool:
+    """Run a bounded read against the live Gateway pool."""
+
+    async def probe() -> bool:
+        fetchval = getattr(database, "fetchval", None)
+        if callable(fetchval):
+            return await fetchval("SELECT 1") == 1
+        pool = getattr(database, "_pool", None)
+        if pool is None:
+            return False
+        async with pool.acquire() as connection:
+            return await connection.fetchval("SELECT 1") == 1
+
+    try:
+        return await asyncio.wait_for(probe(), timeout=max(float(timeout_seconds), 0.05))
+    except Exception:
+        return False
+
+
+async def gateway_redis_is_ready(redis: object, *, timeout_seconds: float = 1.0) -> bool:
+    ping = getattr(redis, "ping", None)
+    if not callable(ping):
+        return False
+    try:
+        return bool(
+            await asyncio.wait_for(ping(), timeout=max(float(timeout_seconds), 0.05))
+        )
+    except Exception:
+        return False
+
+
+def gateway_auth_config_is_ready(settings: object) -> bool:
+    authentication = getattr(settings, "authentication", None)
+    if authentication is None:
+        return False
+    jwt = getattr(authentication, "jwt", None)
+    if getattr(jwt, "enabled", False) and (
+        not str(getattr(jwt, "secret", "") or "").strip()
+        or not getattr(jwt, "algorithms", None)
+    ):
+        return False
+    api_key = getattr(authentication, "api_key", None)
+    return not (
+        getattr(api_key, "enabled", False) and not getattr(api_key, "keys", None)
+    )
+
+
+def _background_task_status(owner: object | None, task_name: str) -> str:
+    task = getattr(owner, task_name, None)
+    if task is None or getattr(task, "done", lambda: True)():
+        return "unavailable"
+    if getattr(owner, "_drain", False):
+        return "draining"
+    return "healthy"
+
+
+def _model_plane_is_ready(app: Any) -> bool:
+    plane = getattr(app.state, "agent_model_plane", None)
+    if (
+        plane is None
+        or getattr(app.state, "provider_service", None) is None
+        or getattr(app.state, "model_service", None) is None
+    ):
+        return False
+    client = getattr(plane, "http_client", None)
+    return client is None or getattr(client, "is_closed", False) is False
+
+
+async def gateway_readiness_snapshot(
+    app: Any,
+    settings: Any,
+    container: Any,
+    *,
+    http_client: httpx.AsyncClient | None = None,
+    draining: bool = False,
+) -> dict[str, object]:
+    """Return private core/capability detail for public and admin projections."""
+
+    core: dict[str, str] = {
+        "auth_config": "healthy" if gateway_auth_config_is_ready(settings) else "misconfigured",
+        "database": "unavailable",
+        "redis": "unavailable",
+        "agent_runtime": "unavailable",
+        "model_plane": "healthy" if _model_plane_is_ready(app) else "unavailable",
+        "traffic_acceptance": "unavailable" if draining else "healthy",
+    }
+    capabilities: dict[str, str] = {
+        "knowledge_service": "not_configured",
+        "image_worker": _background_task_status(
+            getattr(app.state, "image_task_worker", None), "_loop_task"
+        ),
+    }
+
+    database_enabled = bool(getattr(getattr(settings, "database", None), "enabled", False))
+    redis_enabled = bool(getattr(getattr(settings, "redis", None), "enabled", False))
+    control = getattr(app.state, "agent_runtime_control", None)
+    runtime_url = getattr(control, "runtime_url", None) if control is not None else None
+    runtime_checks: dict[str, str] = {}
+    knowledge_checks: dict[str, str] = {}
+
+    database_ready, redis_ready, _runtime_ready, _knowledge_ready = await asyncio.gather(
+        gateway_database_is_ready(container.database)
+        if database_enabled
+        else asyncio.sleep(0, result=False),
+        gateway_redis_is_ready(container.redis)
+        if redis_enabled
+        else asyncio.sleep(0, result=False),
+        probe_http_service(
+            "agent_runtime",
+            runtime_url,
+            runtime_checks,
+            path="/health/ready",
+            required=True,
+            expected_status="ready",
+            client=http_client,
+        ),
+        probe_http_service(
+            "knowledge_service",
+            os.environ.get("KB_SERVICE_URL"),
+            knowledge_checks,
+            path="/health/ready",
+            expected_status="ready",
+            client=http_client,
+        ),
+    )
+    core["database"] = "healthy" if database_ready else (
+        "disabled" if not database_enabled else "unavailable"
+    )
+    core["redis"] = "healthy" if redis_ready else (
+        "disabled" if not redis_enabled else "unavailable"
+    )
+    core["agent_runtime"] = runtime_checks.get("agent_runtime", "unavailable")
+    capabilities["knowledge_service"] = knowledge_checks.get(
+        "knowledge_service", "not_configured"
+    )
+
+    core_ready = all(value == "healthy" for value in core.values())
+    snapshot: dict[str, object] = {
+        "status": "ready" if core_ready else "not_ready",
+        "core_ready": core_ready,
+        "degraded": any(
+            value not in {"healthy", "not_configured", "disabled"}
+            for value in capabilities.values()
+        ),
+        "core": core,
+        "capabilities": capabilities,
+    }
+    app.state.gateway_health_snapshot = snapshot
+    return snapshot
+
+
+def public_gateway_readiness(snapshot: dict[str, object]) -> dict[str, object]:
+    """Project private health detail to the non-fingerprinting public contract."""
+
+    ready = snapshot.get("core_ready") is True
+    return {
+        "status": "ready" if ready else "not_ready",
+        "checks": {"core": "healthy" if ready else "unavailable"},
+    }
+
+
+__all__ = [
+    "gateway_auth_config_is_ready",
+    "gateway_database_is_ready",
+    "gateway_readiness_snapshot",
+    "gateway_redis_is_ready",
+    "probe_http_service",
+    "public_gateway_readiness",
+]

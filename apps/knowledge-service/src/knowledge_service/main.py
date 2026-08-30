@@ -19,6 +19,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 
 from .config import Settings, get_settings
+from .health import (
+    public_readiness as _public_knowledge_readiness,
+)
+from .health import (
+    readiness_snapshot as _knowledge_readiness_snapshot,
+)
 
 # ---------------------------------------------------------------------------
 # Structured logging
@@ -103,24 +109,6 @@ async def _init_qdrant(settings: Settings) -> Any:
         await qdrant.close()
         raise
     return qdrant
-
-
-async def _database_is_ready(database: Any, *, timeout_seconds: float = 1.0) -> bool:
-    """Run bounded authority-backed readiness instead of checking object presence."""
-
-    fetchval = getattr(database, "fetchval", None)
-    if not callable(fetchval):
-        return False
-    try:
-        return (
-            await asyncio.wait_for(
-                fetchval("SELECT 1"),
-                timeout=max(float(timeout_seconds), 0.05),
-            )
-            == 1
-        )
-    except Exception:
-        return False
 
 
 _LOCAL_IDEMPOTENCY_ENVIRONMENTS = frozenset(
@@ -881,26 +869,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def health_ready(request: Request):
         from ai_gateway_core.proxy.drain import DRAIN
 
-        startup_ready = bool(getattr(request.app.state, "_ready", False))
-        db_ready = await _database_is_ready(
-            getattr(request.app.state, "db", None),
+        snapshot = await _knowledge_readiness_snapshot(
+            request.app,
+            runtime_role=resolved.runtime_role,
+            draining=DRAIN.draining,
             timeout_seconds=1.0,
         )
-        qdrant_ready = getattr(request.app.state, "qdrant", None) is not None
-        ready = startup_ready and db_ready and qdrant_ready and not DRAIN.draining
-        checks = {
-            "startup": "ready" if startup_ready else "starting",
-            "database": "healthy" if db_ready else "not_connected",
-            "qdrant": "healthy" if qdrant_ready else "not_connected",
-            "drain": "draining" if DRAIN.draining else "accepting",
-        }
         return ORJSONResponse(
-            status_code=200 if ready else 503,
-            content={
-                "status": "ready" if ready else "not_ready",
-                "service": "knowledge-service",
-                "checks": checks,
-            },
+            status_code=200 if snapshot["core_ready"] is True else 503,
+            content=_public_knowledge_readiness(snapshot),
         )
 
     # --- Metrics (PRD §7 Phase 0; drained /health-style path, no auth) ---

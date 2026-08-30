@@ -14,7 +14,6 @@ import os
 # This ensures env vars are available for module-level configurations
 from pathlib import Path
 
-import httpx
 from dotenv import load_dotenv
 
 # Load .env from project root (one level up from src/)
@@ -30,7 +29,7 @@ from .adapters.registry import auto_register_builtin_adapters
 from .core.auth.permissions import Capability
 from .api.router import api_router
 from .config.settings import Settings
-from .container import Container, create_container, get_container
+from .container import Container, create_container
 from .core.errors import setup_exception_handlers
 from .core.openapi import stable_openapi_operation_id
 
@@ -63,42 +62,12 @@ from ai_gateway_core.logging import configure_structured_logging, get_logger
 from .core.observability.metrics import get_metrics
 from .services.metrics.metrics_recorder import init_metrics_recorder
 from .services.metrics.realtime_metrics import init_realtime_metrics
+from .services.health_contract import (
+    gateway_readiness_snapshot as _gateway_readiness_snapshot,
+    public_gateway_readiness as _public_gateway_readiness,
+)
 
 logger = get_logger(__name__)
-
-
-async def _probe_http_service(
-    name: str,
-    base_url: str | None,
-    checks: dict[str, str],
-    *,
-    path: str = "/health",
-    required: bool = False,
-) -> bool:
-    """Probe a service's explicitly configured health contract.
-
-    The Gateway and Knowledge services expose ``/health`` while the Rust
-    Agent Runtime deliberately exposes only ``/health/live`` and
-    ``/health/ready``.  Keeping the path explicit prevents a healthy Runtime
-    from being classified as unhealthy because of a synthetic 404 probe.
-    """
-    if not base_url:
-        checks[name] = "not_configured"
-        return not required
-
-    url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
-    try:
-        timeout = httpx.Timeout(2.0, connect=1.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.get(url)
-        if 200 <= response.status_code < 300:
-            checks[name] = "healthy"
-            return True
-        checks[name] = f"status_{response.status_code}"
-        return False
-    except Exception as e:
-        checks[name] = f"error: {type(e).__name__}"
-        return False
 
 OPENAPI_TAGS = [
     {
@@ -338,10 +307,12 @@ def create_app() -> FastAPI:
     # rejected with 503 + Retry-After while in-flight requests get to finish.
     # The shutdown event awaits ``DRAIN.wait_drained`` before tearing down
     # container singletons (DB pool, Redis, billing interceptor). Health-probe
-    # paths bypass DRAIN entirely so the LB still sees readiness during drain.
+    # paths bypass DRAIN middleware so probes answer; readiness itself reports
+    # core unavailable while draining so the load balancer removes this pod.
     #
     # The Knowledge Service uses the same signal/drain contract.
     from ai_gateway_core.proxy import DrainMiddleware
+    from ai_gateway_core.proxy.drain import DRAIN
 
     app.add_middleware(DrainMiddleware)
 
@@ -461,82 +432,32 @@ def create_app() -> FastAPI:
 
     @app.get("/health/ready", tags=["Health"])
     async def readiness_check():
-        """就绪检查端点（K8s readiness probe）"""
-        container = get_container()
+        """Public core-readiness only; dependency detail is admin-authorized."""
 
-        checks = {
-            "database": "unknown",
-            "redis": "unknown",
-            "knowledge_service": "unknown",
-            "agent_runtime": "unknown",
-            "image_worker": "unknown",
-        }
-        healthy = True
-
-        # 检查数据库
-        if settings.database.enabled:
-            try:
-                database = container.database
-                if database._pool:
-                    checks["database"] = "healthy"
-                else:
-                    checks["database"] = "not_connected"
-                    healthy = False
-            except Exception as e:
-                logger.warning("Readiness database check failed: %s", type(e).__name__)
-                checks["database"] = "error: database_unavailable"
-                healthy = False
-        else:
-            checks["database"] = "disabled"
-
-        # 检查 Redis
-        if settings.redis.enabled:
-            try:
-                redis = container.redis
-                if await redis.ping():
-                    checks["redis"] = "healthy"
-                else:
-                    checks["redis"] = "not_responding"
-                    healthy = False
-            except Exception as e:
-                logger.warning("Readiness Redis check failed: %s", type(e).__name__)
-                checks["redis"] = "error: redis_unavailable"
-                healthy = False
-        else:
-            checks["redis"] = "disabled"
-
-        runtime_url = os.environ.get("AI_PLATFORM_AGENT_RUNTIME_URL") or getattr(
-            getattr(app.state, "agent_runtime_control", None), "runtime_url", None
+        snapshot = await _gateway_readiness_snapshot(
+            app,
+            settings,
+            container,
+            draining=DRAIN.draining,
         )
-        service_results = await asyncio.gather(
-            _probe_http_service("knowledge_service", os.environ.get("KB_SERVICE_URL"), checks),
-            _probe_http_service(
-                "agent_runtime",
-                runtime_url,
-                checks,
-                path="/health/ready",
-                required=True,
-            ),
-        )
-        if not all(service_results):
-            healthy = False
-
-        image_worker = getattr(app.state, "image_task_worker", None)
-        worker_task = getattr(image_worker, "_loop_task", None)
-        if image_worker is None or worker_task is None or worker_task.done():
-            checks["image_worker"] = "not_running"
-            healthy = False
-        elif getattr(image_worker, "_drain", False):
-            checks["image_worker"] = "draining"
-            healthy = False
-        else:
-            checks["image_worker"] = "healthy"
-
-        status_code = 200 if healthy else 503
+        payload = _public_gateway_readiness(snapshot)
+        status_code = 200 if snapshot["core_ready"] is True else 503
         return JSONResponse(
             status_code=status_code,
-            content={"status": "ready" if healthy else "not_ready", "checks": checks},
+            content=payload,
         )
+
+    async def refresh_gateway_health() -> dict[str, object]:
+        return await _gateway_readiness_snapshot(
+            app,
+            settings,
+            container,
+            draining=DRAIN.draining,
+        )
+
+    # Existing authenticated /api/v1/health/services endpoints call this
+    # seam. Public probes never expose the returned dependency map.
+    app.state.gateway_health_probe = refresh_gateway_health
 
     @app.get("/metrics", tags=["Observability"])
     async def metrics(

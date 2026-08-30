@@ -56,6 +56,62 @@ async def gateway_health(
     return {"status": "ok"}
 
 
+async def _gateway_dependency_snapshot(request: Request) -> dict:
+    """Resolve the private snapshot through the Gateway-owned probe seam."""
+
+    probe = getattr(request.app.state, "gateway_health_probe", None)
+    if callable(probe):
+        value = await probe()
+        if isinstance(value, dict):
+            return value
+    cached = getattr(request.app.state, "gateway_health_snapshot", None)
+    if isinstance(cached, dict):
+        return cached
+
+    # Narrow compatibility fallback for tests/partial app construction. It
+    # never feeds the public readiness endpoint.
+    runtime_ready = getattr(request.app.state, "agent_runtime_control", None) is not None
+    model_plane_ready = getattr(request.app.state, "agent_model_plane", None) is not None
+    worker = getattr(request.app.state, "image_task_worker", None)
+    worker_ready = (
+        worker is not None
+        and getattr(getattr(worker, "_loop_task", None), "done", lambda: True)() is False
+    )
+    return {
+        "status": "ready" if runtime_ready and model_plane_ready else "not_ready",
+        "core_ready": runtime_ready and model_plane_ready,
+        "degraded": not worker_ready,
+        "core": {
+            "agent_runtime": "healthy" if runtime_ready else "unavailable",
+            "model_plane": "healthy" if model_plane_ready else "unavailable",
+        },
+        "capabilities": {
+            "knowledge_service": "not_configured",
+            "image_worker": "healthy" if worker_ready else "unavailable",
+        },
+    }
+
+
+def _dependency_service_status(snapshot: dict, service_id: str) -> dict:
+    core = snapshot.get("core") if isinstance(snapshot.get("core"), dict) else {}
+    capabilities = (
+        snapshot.get("capabilities")
+        if isinstance(snapshot.get("capabilities"), dict)
+        else {}
+    )
+    if service_id == "gateway_core":
+        return {
+            "status": "healthy" if snapshot.get("core_ready") is True else "unavailable",
+            "dependencies": dict(core),
+        }
+    source = core if service_id in core else capabilities
+    status = source.get(service_id, "unavailable")
+    return {
+        "status": "healthy" if status == "healthy" else status,
+        "required": source is core,
+    }
+
+
 @router.get("/health/services")
 async def all_services_health(
     request: Request,
@@ -67,6 +123,7 @@ async def all_services_health(
     Requires admin authentication to prevent infrastructure fingerprinting.
     """
     require_admin(user)
+    snapshot = await _gateway_dependency_snapshot(request)
     # 获取数据库服务的健康状态
     health_status = {
         service_id: {
@@ -77,26 +134,34 @@ async def all_services_health(
         }
         for service_id, s in monitor.all_status().items()
     }
+    health_status["gateway_core"] = _dependency_service_status(snapshot, "gateway_core")
+    for service_id in (
+        "auth_config",
+        "database",
+        "redis",
+        "agent_runtime",
+        "model_plane",
+        "knowledge_service",
+        "image_worker",
+    ):
+        health_status[service_id] = _dependency_service_status(snapshot, service_id)
 
-    control = getattr(request.app.state, "agent_runtime_control", None)
-    worker = getattr(request.app.state, "image_task_worker", None)
-    runtime_ready = control is not None
-    worker_ready = (
-        worker is not None
-        and getattr(getattr(worker, "_loop_task", None), "done", lambda: True)() is False
+    optional_degraded = snapshot.get("degraded") is True or any(
+        getattr(status, "status", None) not in {None, "healthy"}
+        for status in monitor.all_status().values()
     )
-    health_status["agent_runtime"] = {
-        "status": "healthy" if runtime_ready else "unavailable",
-    }
-    health_status["image_worker"] = {
-        "status": "healthy" if worker_ready else "unavailable",
-    }
     # The built-in Assistant is published by ``/api/v1/services`` under the
     # ``assistant`` service_id. Key its health the same way, or every consumer
     # of this map (the Services console among them) reports it as unhealthy
     # because the lookup misses. Same readiness signal as the catalog uses.
     health_status["assistant"] = {
-        "status": "healthy" if runtime_ready and worker_ready else "unavailable",
+        "status": (
+            "unavailable"
+            if snapshot.get("core_ready") is not True
+            else "degraded"
+            if optional_degraded
+            else "healthy"
+        ),
     }
 
     return health_status
@@ -114,21 +179,21 @@ async def service_health(
     Requires admin authentication.
     """
     require_admin(user)
-    if service_id == "agent_runtime":
+    known_dependencies = {
+        "gateway_core",
+        "auth_config",
+        "database",
+        "redis",
+        "agent_runtime",
+        "model_plane",
+        "knowledge_service",
+        "image_worker",
+    }
+    if service_id in known_dependencies:
+        snapshot = await _gateway_dependency_snapshot(request)
         return {
             "service_id": service_id,
-            "status": "healthy"
-            if getattr(request.app.state, "agent_runtime_control", None) is not None
-            else "unavailable",
-        }
-    if service_id == "image_worker":
-        worker = getattr(request.app.state, "image_task_worker", None)
-        return {
-            "service_id": service_id,
-            "status": "healthy"
-            if worker is not None
-            and getattr(getattr(worker, "_loop_task", None), "done", lambda: True)() is False
-            else "unavailable",
+            **_dependency_service_status(snapshot, service_id),
         }
 
     # 处理数据库中的服务
