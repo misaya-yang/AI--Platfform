@@ -1,7 +1,7 @@
 {
-  "acl_sha256": "9f2400d21e7b14617186428ccd65586efa541001d0b2eccba094b4ddc1186674",
+  "acl_sha256": null,
   "baseline_id": "2026_08_post_kb_v1",
-  "extensions_sha256": "fa377cfe2398572eae2671196acec5bd65b812ad55a5848099ca1fb3b9d9cc5c",
+  "extensions_sha256": null,
   "files_sha256": {
     "cutover_convergence.sql": "878512b97b6012216cdc96c64ac731da5eeeb2d46bb4628bd84aa2725f937216",
     "grants.sql": "d98b6a7c270a49fb50a96cc5e4e3e3acbd92d2b451319ffc6432f914c59a8d2c",
@@ -9,17 +9,20 @@
     "reference_data.sql": "d2ff4d253115e9a4aeaca8ce78bfcbbc34e10e554bd4368ef4d5201fa5a0a9f3",
     "verify.sql": "19e806da96353774c5fe9cc0f1ecba06a334412d3757d51173eca0cb6688431b"
   },
-  "generated_at": "2026-08-30T07:02:43-04:00",
+  "generated_at": null,
   "generator": "scripts/database/freeze_baseline.py",
-  "generator_sha256": "52e71b2fa15e2c32a10de55fd1fde989289fefb5b012783565744e4a7086ba79",
   "last_legacy_change": "112_kb_document_progress_retention.sql",
-  "pg_dump_version": "16.15",
+  "live_evidence": {
+    "fresh_reproduction": "NOT_RUN",
+    "role_connection_matrix": "NOT_RUN",
+    "source_fingerprints": "NOT_RUN"
+  },
   "policy_files_sha256": {
     "data-access-inventory.json": "bb30d601178990e554033d28efaff6979bb859b611d851adf8cf80de58fa893c",
     "grants-policy.json": "ddedc90f3830c131461b3117a934dc4de01f00b0bf87f801dd52cf615f31ecf1",
     "ownership-policy.json": "a197d24c18ff11f2a19701baf0211b9a5b5ae9907316dea7fb32b2f85bb73a73"
   },
-  "postgres_version": "16.15",
+  "postgres_version": null,
   "reference_data": [
     {
       "immutable_columns": [
@@ -61,10 +64,11 @@
       "where": "role_name IN (SELECT role_name FROM gateway.rbac_roles WHERE is_system IS TRUE)"
     }
   ],
-  "reference_data_sha256": "c71c1fd656e4e2559f4c6b09f8cbd1d0b2d57de6e5991bcd2c10d1b068c02318",
+  "reference_data_sha256": null,
+  "required_live_command": "uv run --all-packages --extra test python scripts/database/freeze_baseline.py --source-database arc03_<source> --verify-database arc03_<empty_verify> --write",
   "schema": "migration-authority/baseline-manifest/v1",
   "schema_revision": "112",
-  "source_git_sha": "ad56735b89d4b248b831ec7b358539b653eea81b",
-  "state": "frozen",
-  "structural_sha256": "1cb97bebe4aef680d61f88b46321ddf097a0404afc906be4f36b846e40140d39"
+  "source_git_sha": null,
+  "state": "pending-live-freeze",
+  "structural_sha256": null
 }
