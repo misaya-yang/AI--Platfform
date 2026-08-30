@@ -120,9 +120,10 @@ class AgentRuntimeControlPlane:
             1,
             min(
                 int(
-                    # Leave room for one schema-repair + final response after
-                    # a bounded multi-tool research turn.
-                    os.getenv("AI_PLATFORM_AGENT_RUNTIME_MAX_MODEL_CALLS_PER_TURN", "12")
+                    # Preserve a hard cap while leaving enough room for a
+                    # bounded multi-document Web research turn, approvals,
+                    # one schema repair, and a final response.
+                    os.getenv("AI_PLATFORM_AGENT_RUNTIME_MAX_MODEL_CALLS_PER_TURN", "24")
                 ),
                 128,
             ),

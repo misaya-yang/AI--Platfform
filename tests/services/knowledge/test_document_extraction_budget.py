@@ -156,9 +156,7 @@ def test_docx_rejects_single_and_total_uncompressed_limits(
         3,
     )
     with pytest.raises(ValidationFailedError, match="entry exceeds"):
-        processor.extract_text_from_docx_bytes(
-            _zip_bytes({"word/document.xml": b"1234"})
-        )
+        processor.extract_text_from_docx_bytes(_zip_bytes({"word/document.xml": b"1234"}))
 
     monkeypatch.setattr(
         processor_module,
@@ -310,6 +308,55 @@ def test_pdf_raw_budget_rejects_before_pypdf_import(
         processor.extract_text_from_pdf_bytes(b"%PDF-too-large")
 
     assert imported_pypdf is False
+
+
+def test_pdf_falls_back_to_bounded_pymupdf_when_pypdf_rejects_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processor = DocumentProcessor(_settings())
+
+    class RejectingReader:
+        def __init__(self, _stream: Any) -> None:
+            raise RuntimeError("Limit reached while decompressing")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "pypdf",
+        SimpleNamespace(
+            PdfReader=RejectingReader,
+            filters=SimpleNamespace(
+                ZLIB_MAX_OUTPUT_LENGTH=0,
+                LZW_MAX_OUTPUT_LENGTH=0,
+                RUN_LENGTH_MAX_OUTPUT_LENGTH=0,
+                JBIG2_MAX_OUTPUT_LENGTH=0,
+                MAX_ARRAY_BASED_STREAM_OUTPUT_LENGTH=0,
+            ),
+        ),
+    )
+
+    class FakePage:
+        def get_text(self, _mode: str) -> str:
+            return "A real reinforcement-learning guide"
+
+    class FakeDocument:
+        page_count = 1
+
+        def load_page(self, page_number: int) -> FakePage:
+            assert page_number == 0
+            return FakePage()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        processor_module,
+        "import_pymupdf",
+        lambda: SimpleNamespace(open=lambda **_kwargs: FakeDocument()),
+    )
+
+    extracted = processor.extract_text_from_pdf_bytes(b"%PDF-valid")
+
+    assert "reinforcement-learning guide" in extracted
 
 
 def test_pdf_cleaner_rejects_long_line_before_regex(

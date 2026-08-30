@@ -12,6 +12,7 @@ from .authorization import _TOOL_NAME_RE, AgentModelPlaneError, _is_allowed_tool
 
 logger = logging.getLogger("src.services.agent_runtime.model_plane")
 
+
 def _chat_completions_url(base_url: str) -> str:
     parsed = urlsplit(base_url.rstrip("/"))
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
@@ -119,6 +120,22 @@ def _native_responses_input(value: Any) -> Any:
     return normalized
 
 
+def _is_replayable_unsupported_tool_result(name: Any, namespace: Any, output: Any) -> bool:
+    """Recognize the exact failure emitted by Codex for an unknown Web tool.
+
+    The Web runtime must not gain permission to execute an unadvertised tool, but
+    Codex records an attempted unknown tool plus a paired failure before asking
+    the model to continue.  That completed failure is safe transcript history;
+    accepting any other output would weaken the dynamic tool allowlist.
+    """
+
+    if namespace not in {None, ""} or not isinstance(name, str) or not isinstance(output, str):
+        return False
+    return output in {
+        f"unsupported call: {name}",
+        f"unsupported custom tool call: {name}",
+    }
+
 
 def _validate_tool_transcript(
     raw_input: list[Any],
@@ -129,11 +146,9 @@ def _validate_tool_transcript(
     _helpers: Any = None,
 ) -> None:
     identity_allowed = (
-        _helpers._is_allowed_tool_identity
-        if _helpers is not None
-        else _is_allowed_tool_identity
+        _helpers._is_allowed_tool_identity if _helpers is not None else _is_allowed_tool_identity
     )
-    pending_calls: dict[str, str] = {}
+    pending_calls: dict[str, tuple[str, Any, bool]] = {}
     completed_calls: set[str] = set()
     for item in raw_input:
         if not isinstance(item, Mapping):
@@ -158,7 +173,6 @@ def _validate_tool_transcript(
                 or not isinstance(arguments, str)
                 or call_id in pending_calls
                 or call_id in completed_calls
-                or not allowed_identity
             ):
                 # Names and identities only — arguments can carry user content.
                 _logger.warning(
@@ -171,18 +185,29 @@ def _validate_tool_transcript(
                     isinstance(arguments, str),
                 )
                 raise AgentModelPlaneError("RUNTIME_TOOL_TRANSCRIPT_INVALID", status_code=422)
-            pending_calls[call_id] = name
+            pending_calls[call_id] = (name, namespace, allowed_identity)
         elif item_type == "function_call_output":
             call_id = item.get("call_id")
+            output = item.get("output")
             if (
                 not isinstance(call_id, str)
                 or call_id not in pending_calls
-                or not isinstance(item.get("output"), str)
+                or not isinstance(output, str)
             ):
                 _logger.warning(
                     "Tool transcript rejected: function_call_output has_call=%s output_str=%s",
                     isinstance(call_id, str) and call_id in pending_calls,
                     isinstance(item.get("output"), str),
+                )
+                raise AgentModelPlaneError("RUNTIME_TOOL_TRANSCRIPT_INVALID", status_code=422)
+            name, namespace, allowed_identity = pending_calls[call_id]
+            if not allowed_identity and not _is_replayable_unsupported_tool_result(
+                name, namespace, output
+            ):
+                _logger.warning(
+                    "Tool transcript rejected: unadvertised function_call name=%s "
+                    "did not have the canonical unsupported result",
+                    name[:64],
                 )
                 raise AgentModelPlaneError("RUNTIME_TOOL_TRANSCRIPT_INVALID", status_code=422)
             pending_calls.pop(call_id)
@@ -191,6 +216,6 @@ def _validate_tool_transcript(
         _logger.warning(
             "Tool transcript rejected: %d function_call item(s) without output (%s)",
             len(pending_calls),
-            ",".join(sorted(pending_calls.values()))[:200],
+            ",".join(sorted(call[0] for call in pending_calls.values()))[:200],
         )
         raise AgentModelPlaneError("RUNTIME_TOOL_TRANSCRIPT_INVALID", status_code=422)

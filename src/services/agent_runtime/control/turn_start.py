@@ -39,6 +39,25 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_TURN_OUTPUT_TOKENS = 32_768
+
+
+def _resolve_output_limit(effective_max_tokens: int | None, model_max_output_tokens: Any) -> int:
+    """Resolve one model call's output budget without reserving the model maximum.
+
+    A model's maximum is a capability ceiling, not a sensible default for each
+    step in a multi-call Web turn. Reserving that ceiling repeatedly exhausts
+    the lease before the model can synthesize its final answer.
+    """
+
+    model_limit = max(1, int(model_max_output_tokens or 4_096))
+    requested = (
+        effective_max_tokens
+        if effective_max_tokens is not None
+        else min(_DEFAULT_TURN_OUTPUT_TOKENS, model_limit)
+    )
+    return max(1, min(int(requested), model_limit))
+
 
 async def start_turn(
     plane: AgentRuntimeControlPlane,
@@ -92,17 +111,13 @@ async def start_turn(
         legacy_thinking_level = launch_policy["legacy_thinking_level"]
         max_tokens = launch_policy["max_tokens"]
         temperature = launch_policy["temperature"]
-        developer_instructions = resolved_agent_snapshot["agent_spec"][
-            "developerInstructions"
-        ]
+        developer_instructions = resolved_agent_snapshot["agent_spec"]["developerInstructions"]
         style_guidance = None
         memory_mode = launch_policy["memory_mode"]
         memory_profile = launch_policy["memory_profile"]
         enable_dynamic_tools = launch_policy["enable_dynamic_tools"]
     elif resolved_agent_snapshot is None:
-        raise AgentRuntimeControlError(
-            "AI_PLATFORM_AGENT_RUNTIME_LAUNCH_REQUIRED", status_code=409
-        )
+        raise AgentRuntimeControlError("AI_PLATFORM_AGENT_RUNTIME_LAUNCH_REQUIRED", status_code=409)
 
     assignment_row = await plane._assignment(tenant_id, user_id, session_id)
     model = await plane.model_service.get_model(tenant_id, model_id)
@@ -282,10 +297,10 @@ async def start_turn(
         if isinstance(signed_memory, dict)
         else "session"
     )
-    builtin_launch = (
-        resolved_agent_launch is not None
-        and launch.identity["entrypoint"] in {"assistant", "responses"}
-    )
+    builtin_launch = resolved_agent_launch is not None and launch.identity["entrypoint"] in {
+        "assistant",
+        "responses",
+    }
     selected_memory_mode = (
         str(memory_mode or "auto").strip().lower()
         if builtin_launch or signed_agent_spec is None
@@ -353,11 +368,10 @@ async def start_turn(
             "AI_PLATFORM_AGENT_RUNTIME_WIRE_CAPABILITY_INVALID",
             status_code=503,
         )
-    output_limit = min(
-        int(effective_max_tokens or model.get("max_output_tokens") or 4096),
-        int(model.get("max_output_tokens") or 4096),
+    output_limit = _resolve_output_limit(
+        effective_max_tokens,
+        model.get("max_output_tokens"),
     )
-    output_limit = max(1, output_limit)
     readonly = plane._readonly_capability_payload(
         readonly_input,
         tenant_id=tenant_id,

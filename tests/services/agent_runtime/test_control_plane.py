@@ -11,6 +11,7 @@ import pytest
 from ai_gateway_contracts.agent_runtime_lease import RuntimeModelLeaseSigner
 from ai_gateway_core.models import get_builtin_model_capabilities
 
+from src.services.agent_runtime.control.turn_start import _resolve_output_limit
 from src.services.agent_runtime.control_plane import (
     GENERIC_AGENT_INSTRUCTIONS_V1,
     AgentRuntimeControlError,
@@ -30,6 +31,14 @@ class _StaticCatalogClient:
             "mcp": [],
             "deferred": [],
         }
+
+
+def test_default_turn_output_budget_is_not_the_model_capability_ceiling() -> None:
+    assert _resolve_output_limit(None, 131_072) == 32_768
+    assert _resolve_output_limit(None, 131_072) * 24 < 1_000_000
+    assert _resolve_output_limit(None, 4_096) == 4_096
+    assert _resolve_output_limit(32_768, 131_072) == 32_768
+    assert _resolve_output_limit(32_768, 16_384) == 16_384
 
 
 def test_child_runtime_events_project_to_subagent_lifecycle() -> None:
@@ -595,7 +604,7 @@ async def test_control_plane_default_model_call_budget_has_retry_headroom(
         http_client=client,
     )
     try:
-        assert plane.max_model_calls == 12
+        assert plane.max_model_calls == 24
     finally:
         await client.aclose()
 
@@ -703,7 +712,10 @@ async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() ->
     assert captured["requests"][0][1]["modelPlaneBaseUrl"] == (
         "http://gateway.test/internal/v1/agent-model-plane"
     )
-    assert captured["requests"][0][1]["baseInstructions"]
+    base_instructions = captured["requests"][0][1]["baseInstructions"]
+    assert "Use only tools exposed for the turn" in base_instructions
+    assert "Keep retrieval bounded" in base_instructions
+    assert "Discover tools that are not listed" not in base_instructions
     assert captured["requests"][0][1]["developerInstructions"]
     assert database.issued_snapshot is not None
     assert [

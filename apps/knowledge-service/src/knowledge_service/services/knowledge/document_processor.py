@@ -1,4 +1,5 @@
 """Document text extraction for various file formats (PDF, DOCX, DOC, HTML, etc.)."""
+
 from __future__ import annotations
 
 import asyncio
@@ -14,6 +15,7 @@ from xml.parsers import expat
 
 from ...core.exceptions import ValidationFailedError
 from ...core.observability.logging import get_logger
+from .common import import_pymupdf
 from .ingestion_service import (
     MAX_EXTRACTED_TEXT_BYTES,
     MAX_EXTRACTED_TEXT_CHARS,
@@ -111,9 +113,7 @@ def _bounded_utf8_size(value: str, *, limit: int) -> int:
 
 def _require_source_bytes(content: bytes, *, limit: int, format_name: str) -> None:
     if len(content) > limit:
-        raise ValidationFailedError(
-            f"{format_name} source exceeds the {limit} byte parser limit"
-        )
+        raise ValidationFailedError(f"{format_name} source exceeds the {limit} byte parser limit")
 
 
 def _preflight_docx_central_directory(content: bytes) -> None:
@@ -187,11 +187,7 @@ def _preflight_docx_central_directory(content: bytes) -> None:
         ):
             raise ValidationFailedError("ZIP64 DOCX entries are not supported")
         record_end = (
-            cursor
-            + _ZIP_CENTRAL_STRUCT.size
-            + filename_size
-            + extra_size
-            + record_comment_size
+            cursor + _ZIP_CENTRAL_STRUCT.size + filename_size + extra_size + record_comment_size
         )
         if record_end > directory_end:
             raise ValidationFailedError("DOCX central directory record exceeds its bounds")
@@ -247,21 +243,15 @@ class _HTMLStructureGuard(HTMLParser):
     def _charge_tag(self, attrs: list[tuple[str, str | None]]) -> None:
         self.tag_count += 1
         self.attribute_count += len(attrs)
-        self.attribute_chars += sum(
-            len(name or "") + len(value or "") for name, value in attrs
-        )
+        self.attribute_chars += sum(len(name or "") + len(value or "") for name, value in attrs)
         if self.tag_count > MAX_HTML_TAGS:
-            raise ValidationFailedError(
-                f"HTML exceeds the {MAX_HTML_TAGS} tag parser limit"
-            )
+            raise ValidationFailedError(f"HTML exceeds the {MAX_HTML_TAGS} tag parser limit")
         if self.attribute_count > MAX_HTML_ATTRIBUTES:
             raise ValidationFailedError(
                 f"HTML exceeds the {MAX_HTML_ATTRIBUTES} attribute parser limit"
             )
         if self.attribute_chars > MAX_HTML_ATTRIBUTE_CHARS:
-            raise ValidationFailedError(
-                "HTML attributes exceed the parser text budget"
-            )
+            raise ValidationFailedError("HTML attributes exceed the parser text budget")
 
     def handle_starttag(
         self,
@@ -319,9 +309,7 @@ def _preflight_pdf_bytes(content: bytes) -> None:
         start=1,
     ):
         if page_markers > MAX_PDF_PAGE_MARKERS:
-            raise ValidationFailedError(
-                f"PDF exceeds the {MAX_PDF_PAGE_MARKERS} page marker limit"
-            )
+            raise ValidationFailedError(f"PDF exceeds the {MAX_PDF_PAGE_MARKERS} page marker limit")
     for object_markers, _match in enumerate(
         re.finditer(rb"\b\d+\s+\d+\s+obj\b", content),
         start=1,
@@ -341,21 +329,15 @@ class _PDFTableBudget:
     def begin_table(self) -> None:
         self.tables += 1
         if self.tables > MAX_PDF_TABLES:
-            raise ValidationFailedError(
-                f"PDF exceeds the {MAX_PDF_TABLES} table limit"
-            )
+            raise ValidationFailedError(f"PDF exceeds the {MAX_PDF_TABLES} table limit")
 
     def charge_row(self, cells: int) -> None:
         self.rows += 1
         self.cells += cells
         if self.rows > MAX_PDF_TABLE_ROWS:
-            raise ValidationFailedError(
-                f"PDF exceeds the {MAX_PDF_TABLE_ROWS} table row limit"
-            )
+            raise ValidationFailedError(f"PDF exceeds the {MAX_PDF_TABLE_ROWS} table row limit")
         if self.cells > MAX_PDF_TABLE_CELLS:
-            raise ValidationFailedError(
-                f"PDF exceeds the {MAX_PDF_TABLE_CELLS} table cell limit"
-            )
+            raise ValidationFailedError(f"PDF exceeds the {MAX_PDF_TABLE_CELLS} table cell limit")
 
 
 class _DOCXXMLBudget:
@@ -378,9 +360,7 @@ class _DOCXXMLBudget:
                 f"DOCX XML exceeds the {MAX_DOCX_XML_ELEMENTS} element limit"
             )
         if self.depth > MAX_DOCX_XML_DEPTH:
-            raise ValidationFailedError(
-                f"DOCX XML exceeds the {MAX_DOCX_XML_DEPTH} depth limit"
-            )
+            raise ValidationFailedError(f"DOCX XML exceeds the {MAX_DOCX_XML_DEPTH} depth limit")
         if self.attributes > MAX_DOCX_XML_ATTRIBUTES:
             raise ValidationFailedError(
                 f"DOCX XML exceeds the {MAX_DOCX_XML_ATTRIBUTES} attribute limit"
@@ -476,9 +456,7 @@ class _BoundedTextBuilder:
         remaining_bytes = self._max_bytes - self._bytes
         self._bytes += _bounded_utf8_size(text, limit=remaining_bytes)
         if self._bytes > self._max_bytes:
-            raise ValidationFailedError(
-                f"extracted text exceeds the {self._max_bytes} byte limit"
-            )
+            raise ValidationFailedError(f"extracted text exceeds the {self._max_bytes} byte limit")
 
     def build(self) -> str:
         value = "".join(self._parts)
@@ -633,10 +611,7 @@ class DocumentProcessor:
             prefix = line[:suffix_start].rstrip()
             has_page_suffix = suffix_start < suffix_end
             if has_page_suffix and (
-                ".." in prefix
-                or "··" in prefix
-                or "…" in prefix
-                or prefix.count(".") >= 2
+                ".." in prefix or "··" in prefix or "…" in prefix or prefix.count(".") >= 2
             ):
                 toc_indicators += 1
                 continue
@@ -690,9 +665,7 @@ class DocumentProcessor:
         try:
             import pypdf  # type: ignore
         except ImportError as exc:
-            raise ValidationFailedError(
-                "PDF parsing requires pypdf (pip install pypdf)"
-            ) from exc
+            raise ValidationFailedError("PDF parsing requires pypdf (pip install pypdf)") from exc
 
         for limit_name in (
             "ZLIB_MAX_OUTPUT_LENGTH",
@@ -712,28 +685,60 @@ class DocumentProcessor:
         try:
             reader = pypdf.PdfReader(BytesIO(content))
             if len(reader.pages) > MAX_PDF_PAGE_MARKERS:
-                raise ValidationFailedError(
-                    f"PDF exceeds the {MAX_PDF_PAGE_MARKERS} page limit"
-                )
+                raise ValidationFailedError(f"PDF exceeds the {MAX_PDF_PAGE_MARKERS} page limit")
             builder = _BoundedTextBuilder()
             for page in reader.pages:
                 text = page.extract_text() or ""
                 if len(text) > MAX_PDF_PAGE_TEXT_CHARS:
-                    raise ValidationFailedError(
-                        "PDF page text exceeds the parser output limit"
-                    )
+                    raise ValidationFailedError("PDF page text exceeds the parser output limit")
                 builder.append(text, separator="\n")
             text = builder.build()
         except ValidationFailedError:
             raise
         except Exception as exc:
-            raise ValidationFailedError(f"Failed to parse PDF: {exc}") from exc
+            # Some valid PDFs use compressed streams that pypdf refuses once
+            # its anti-decompression-bomb limit is reached. PyMuPDF has an
+            # independent parser and is already a required Knowledge runtime
+            # dependency, so retry through it while preserving the same source,
+            # page, per-page text, aggregate text and UTF-8 byte budgets.
+            logger.warning("pypdf parsing failed; retrying with bounded PyMuPDF: %s", exc)
+            try:
+                text = self._extract_text_from_pdf_with_pymupdf(content)
+            except ValidationFailedError as fallback_exc:
+                raise ValidationFailedError(
+                    f"Failed to parse PDF: {exc}; PyMuPDF fallback: {fallback_exc}"
+                ) from fallback_exc
 
         if not text or not text.strip():
             raise ValidationFailedError("Failed to extract any text from PDF")
 
         text = self._sanitize_text_for_db(normalize_text(text))
         return _require_extracted_text_budget(self.clean_pdf_content(text))
+
+    def _extract_text_from_pdf_with_pymupdf(self, content: bytes) -> str:
+        try:
+            fitz = import_pymupdf()
+            document = fitz.open(stream=content, filetype="pdf")
+        except Exception as exc:
+            raise ValidationFailedError(f"PyMuPDF could not open PDF: {exc}") from exc
+
+        try:
+            page_count = int(document.page_count)
+            if page_count > MAX_PDF_PAGE_MARKERS:
+                raise ValidationFailedError(f"PDF exceeds the {MAX_PDF_PAGE_MARKERS} page limit")
+            builder = _BoundedTextBuilder()
+            for page_number in range(page_count):
+                text = document.load_page(page_number).get_text("text") or ""
+                if len(text) > MAX_PDF_PAGE_TEXT_CHARS:
+                    raise ValidationFailedError("PDF page text exceeds the parser output limit")
+                builder.append(text, separator="\n")
+            return builder.build()
+        except ValidationFailedError:
+            raise
+        except Exception as exc:
+            raise ValidationFailedError(f"PyMuPDF text extraction failed: {exc}") from exc
+        finally:
+            document.close()
 
     def ocr_pdf_bytes(self, content: bytes) -> str:
         """Fail closed: the legacy OCR API materializes an unbounded whole result."""
@@ -759,8 +764,7 @@ class DocumentProcessor:
         emitted_rows = 0
         for row in table:
             cleaned = [
-                str(cell or "").strip().replace("|", "\\|").replace("\n", " ")
-                for cell in row
+                str(cell or "").strip().replace("|", "\\|").replace("\n", " ") for cell in row
             ]
             if not any(cleaned):
                 continue
@@ -811,9 +815,7 @@ class DocumentProcessor:
                             "Encrypted DOCX archive entries are not supported"
                         )
                     if entry.file_size < 0 or entry.compress_size < 0:
-                        raise ValidationFailedError(
-                            "DOCX archive contains an invalid entry size"
-                        )
+                        raise ValidationFailedError("DOCX archive contains an invalid entry size")
                     if entry.file_size > MAX_DOCX_ZIP_SINGLE_UNCOMPRESSED_BYTES:
                         raise ValidationFailedError(
                             "DOCX archive entry exceeds the uncompressed byte limit"
@@ -890,10 +892,7 @@ class DocumentProcessor:
         emitted_rows = 0
         for row in getattr(table, "rows", ()) or ():
             cells = [
-                str(getattr(cell, "text", "") or "")
-                .strip()
-                .replace("|", "\\|")
-                .replace("\n", " ")
+                str(getattr(cell, "text", "") or "").strip().replace("|", "\\|").replace("\n", " ")
                 for cell in (getattr(row, "cells", ()) or ())
             ]
             if not cells:

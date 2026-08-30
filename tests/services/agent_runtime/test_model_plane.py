@@ -109,6 +109,77 @@ def test_native_responses_rejects_invalid_tool_transcript_before_serialization(
         )
 
 
+def test_native_responses_replays_runtime_rejection_of_unadvertised_web_tool() -> None:
+    body, _aliases = _native_responses_body(
+        {
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call-unknown",
+                    "name": "execute_bash",
+                    "arguments": '{"command":"pwd"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-unknown",
+                    "output": "unsupported call: execute_bash",
+                },
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "read",
+                    "description": "Read one value.",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+        },
+        model_id="qwen3.7-plus",
+        max_output_tokens=256,
+        profile=_profile(),
+        reasoning_option="minimal",
+    )
+
+    assert body["input"][-1] == {
+        "type": "function_call_output",
+        "call_id": "call-unknown",
+        "output": "unsupported call: execute_bash",
+    }
+
+
+def test_native_responses_rejects_fake_success_for_unadvertised_web_tool() -> None:
+    with pytest.raises(AgentModelPlaneError, match="TRANSCRIPT"):
+        _native_responses_body(
+            {
+                "input": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-unknown",
+                        "name": "execute_bash",
+                        "arguments": "{}",
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-unknown",
+                        "output": "command completed",
+                    },
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "read",
+                        "description": "Read one value.",
+                        "parameters": {"type": "object", "properties": {}},
+                    }
+                ],
+            },
+            model_id="qwen3.7-plus",
+            max_output_tokens=256,
+            profile=_profile(),
+            reasoning_option="minimal",
+        )
+
+
 def test_native_responses_preserves_kernel_tool_history_and_child_task_payload() -> None:
     body, _aliases = _native_responses_body(
         {
@@ -379,9 +450,7 @@ def test_native_responses_rejects_kernel_like_name_in_external_namespace(
 def test_fake_responses_tool_call_then_capability_result_can_start_next_model_round() -> None:
     validator = _NativeResponsesStreamValidator(allow_tools=True)
     validator.consume(
-        json.dumps(
-            {"type": "response.created", "sequence_number": 0, "response": {"id": "r1"}}
-        )
+        json.dumps({"type": "response.created", "sequence_number": 0, "response": {"id": "r1"}})
     )
     validator.consume(
         json.dumps(
@@ -393,7 +462,7 @@ def test_fake_responses_tool_call_then_capability_result_can_start_next_model_ro
                     "type": "function_call",
                     "call_id": "call-1",
                     "name": "search_knowledge_base",
-                    "arguments": "{\"query\":\"transformer\"}",
+                    "arguments": '{"query":"transformer"}',
                 },
             }
         )
@@ -411,7 +480,7 @@ def test_fake_responses_tool_call_then_capability_result_can_start_next_model_ro
                             "type": "function_call",
                             "call_id": "call-1",
                             "name": "search_knowledge_base",
-                            "arguments": "{\"query\":\"transformer\"}",
+                            "arguments": '{"query":"transformer"}',
                         }
                     ],
                     "usage": {"input_tokens": 10, "output_tokens": 2},
@@ -427,7 +496,7 @@ def test_fake_responses_tool_call_then_capability_result_can_start_next_model_ro
                     "type": "function_call",
                     "call_id": "call-1",
                     "name": "search_knowledge_base",
-                    "arguments": "{\"query\":\"transformer\"}",
+                    "arguments": '{"query":"transformer"}',
                 },
                 {
                     "type": "function_call_output",
@@ -443,9 +512,7 @@ def test_fake_responses_tool_call_then_capability_result_can_start_next_model_ro
 def test_native_responses_accepts_provider_hosted_web_search_items() -> None:
     validator = _NativeResponsesStreamValidator(allow_tools=True)
     validator.consume(
-        json.dumps(
-            {"type": "response.created", "sequence_number": 0, "response": {"id": "r1"}}
-        )
+        json.dumps({"type": "response.created", "sequence_number": 0, "response": {"id": "r1"}})
     )
     search_item = {
         "id": "ws-1",
@@ -559,9 +626,7 @@ async def test_root_model_call_accepts_kernel_root_turn_identity() -> None:
         "thread_id": str(root_thread_id),
         "turn_id": str(run_id),
         "root_turn_id": str(run_id),
-        "ai_platform_scope_sha256": _runtime_scope_sha256(
-            "tenant-a", "user-a", "session-a"
-        ),
+        "ai_platform_scope_sha256": _runtime_scope_sha256("tenant-a", "user-a", "session-a"),
     }
     await plane._validate_turn_thread_scope(claims=claims, turn_metadata=root_metadata)
 
@@ -1130,9 +1195,7 @@ async def test_closing_native_responses_stream_terminalizes_dispatched_call() ->
     finally:
         await client.aclose()
 
-    execute_calls = [
-        args for operation, args in database.operations if operation == "execute"
-    ]
+    execute_calls = [args for operation, args in database.operations if operation == "execute"]
     assert execute_calls == [(call.call_id,), (call.call_id,)]
 
 
