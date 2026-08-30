@@ -13,6 +13,7 @@ BASELINE = ROOT / "database/baselines/2026_08_post_kb_v1"
 sys.path.insert(0, str(ROOT / "scripts/inventory"))
 sys.path.insert(0, str(ROOT / "scripts/database"))
 
+import data_access  # noqa: E402
 import database_policy  # noqa: E402
 import freeze_baseline  # noqa: E402
 import generate_database_grants  # noqa: E402
@@ -80,6 +81,14 @@ def test_static_policy_and_sql_regenerate_exactly() -> None:
     assert render_baseline_contract.render_verify(objects, matrix) == (
         BASELINE / "verify.sql"
     ).read_text(encoding="utf-8")
+
+    sql_inputs = {path.relative_to(ROOT).as_posix() for path in data_access._sql_files()}
+    assert "database/schema.sql" in sql_inputs
+    assert all(
+        path == "database/schema.sql" or path.startswith("database/migrations/")
+        for path in sql_inputs
+    )
+    assert not any(path.startswith("database/baselines/") for path in sql_inputs)
 
     # Three authority/legacy ledgers are deliberately outside business-object
     # relocation, leaving 163 managed tables from the 166-table inventory.

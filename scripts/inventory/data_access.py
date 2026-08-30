@@ -79,7 +79,7 @@ _DDL_NOISE = {"schema_migrations", "schema_migrations_meta"}
 def _sql_files() -> list[Path]:
     root = REPO_ROOT / "database"
     found = [root / "schema.sql"]
-    for path in sorted(root.rglob("*.sql")):
+    for path in sorted((root / "migrations").rglob("*.sql")):
         if path.is_file():
             found.append(path)
     return sorted(set(found))
