@@ -75,7 +75,7 @@ async function installDynamicRouteHarness(page: Page) {
     updated_at: nowIso(),
   });
 
-  await routeJson(page, "**/api/v1/knowledge/demo-kb-ai-gateway/documents", [
+  await routeJson(page, "**/api/v1/knowledge/demo-kb-ai-gateway/documents**", [
     {
       document_id: "demo-doc-quickstart-runbook",
       dataset_id: "demo-kb-ai-gateway",
