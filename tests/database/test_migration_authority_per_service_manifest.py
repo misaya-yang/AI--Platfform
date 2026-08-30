@@ -10,6 +10,7 @@ import pytest
 from database.authority.legacy import apply_per_service_chain
 from database.authority.manifest import AuthorityManifestError, RollbackClass, TransactionMode
 from database.authority.per_service_manifest import (
+    HISTORICAL_MARKER_NOTES,
     PER_SERVICE_MANIFEST_NAME,
     load_per_service_manifest,
 )
@@ -81,7 +82,14 @@ async def test_per_service_historical_phase_markers_are_atomic_adoption_evidence
         "phase6_tables_moved",
         *(change.key for change in manifest.changes[2:]),
     }
-    conn = PerServiceConnection(applied)
+    notes = {
+        **HISTORICAL_MARKER_NOTES,
+        **{
+            change.key: f"file=migrations/per_service/{change.file}"
+            for change in manifest.changes[2:]
+        },
+    }
+    conn = PerServiceConnection(applied, notes=notes)
 
     count = await apply_per_service_chain(
         conn,
@@ -96,7 +104,17 @@ async def test_per_service_historical_phase_markers_are_atomic_adoption_evidence
 async def test_per_service_sql_and_checksum_receipt_commit_atomically() -> None:
     manifest = load_per_service_manifest(PER_SERVICE_ROOT / PER_SERVICE_MANIFEST_NAME)
     missing = manifest.changes[-1]
-    conn = PerServiceConnection({change.key for change in manifest.changes[:-1]})
+    prior = manifest.changes[:-1]
+    conn = PerServiceConnection(
+        {change.key for change in prior},
+        notes={
+            change.key: (
+                f"file=migrations/per_service/{change.file};"
+                f"sha256={change.sha256};rollback={change.rollback_class.value}"
+            )
+            for change in prior
+        },
+    )
 
     count = await apply_per_service_chain(
         conn,
@@ -126,8 +144,43 @@ async def test_per_service_unknown_global_bootstrap_and_checksum_drift_block() -
     first = manifest.changes[0]
     drifted = PerServiceConnection(
         {change.key for change in manifest.changes},
-        notes={first.key: f"sha256={'0' * 64};"},
+        notes={
+            change.key: (
+                f"file=migrations/per_service/{change.file};"
+                f"sha256={'0' * 64 if change is first else change.sha256};"
+                f"rollback={change.rollback_class.value}"
+            )
+            for change in manifest.changes
+        },
     )
-    with pytest.raises(AuthorityBlockedError, match="records checksum"):
+    with pytest.raises(AuthorityBlockedError, match="no exact historical file"):
         await apply_per_service_chain(drifted, paths, log=lambda _message: None)
     assert drifted.executed == []
+
+
+@pytest.mark.parametrize(
+    ("applied", "notes", "message"),
+    [
+        ({"_global:001_create_schemas.sql"}, {}, "no exact historical file"),
+        (
+            {"phase6_schemas_created"},
+            {"phase6_schemas_created": "forged"},
+            "historical marker",
+        ),
+    ],
+)
+async def test_per_service_recorded_state_requires_an_exact_historical_receipt(
+    applied: set[str],
+    notes: dict[str, str],
+    message: str,
+) -> None:
+    conn = PerServiceConnection(applied, notes=notes)
+
+    with pytest.raises(AuthorityBlockedError, match=message):
+        await apply_per_service_chain(
+            conn,
+            AuthorityPaths(ROOT / "database"),
+            log=lambda _message: None,
+        )
+
+    assert conn.executed == []

@@ -18,6 +18,10 @@ from .manifest import (
 PER_SERVICE_MANIFEST_SCHEMA = "migration-authority/per-service-manifest/v1"
 PER_SERVICE_MANIFEST_NAME = "manifest.yml"
 PER_SERVICE_ORDER = ("_global", "gateway", "assistant", "knowledge")
+HISTORICAL_MARKER_NOTES = {
+    "phase6_schemas_created": "gateway/assistant/knowledge schemas + search_path",
+    "phase6_tables_moved": "tables relocated from public to gateway/assistant/knowledge",
+}
 _FILE_RE = re.compile(
     r"^(?P<service>_global|gateway|assistant|knowledge)/"
     r"(?P<filename>[0-9]{3}_[a-z0-9_]+\.sql)$"

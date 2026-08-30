@@ -55,6 +55,7 @@ from .manifest import (
     load_baseline_manifest,
     load_epoch_manifest,
     load_legacy_manifest,
+    verify_baseline_git_provenance,
 )
 from .numeric_reconciliation import (
     NumericReconciliationBlocked,
@@ -108,6 +109,13 @@ def load_baseline(paths: AuthorityPaths, baseline_id: str) -> tuple[BaselineMani
     baseline_dir = paths.baseline_dir(baseline_id)
     manifest_path = baseline_dir / "manifest.json"
     baseline = load_baseline_manifest(manifest_path)
+    repo_root = paths.database_dir.parent
+    if (repo_root / ".git").exists():
+        verify_baseline_git_provenance(
+            manifest_path,
+            baseline,
+            repo_root=repo_root,
+        )
     legacy_manifest = load_legacy_manifest(paths.migrations_root / LEGACY_MANIFEST_NAME)
     if baseline.last_legacy_change != legacy_manifest.freeze_point:
         raise AuthorityError(

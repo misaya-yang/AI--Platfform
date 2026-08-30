@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from database.authority import bootstrap, commands
-from database.authority.manifest import AuthorityManifestError, load_baseline_manifest
+from database.authority.manifest import (
+    AuthorityManifestError,
+    load_baseline_manifest,
+    verify_baseline_git_provenance,
+)
 from database.authority.runner import AuthorityError, AuthorityPaths
 
 BASELINE_ID = "2026_08_post_kb_v1"
@@ -25,10 +30,20 @@ def _sha(content: str) -> str:
     return hashlib.sha256(content.encode()).hexdigest()
 
 
+def _git(root: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
 def _write_baseline(root: Path, **overrides: object) -> tuple[AuthorityPaths, Path]:
     paths = AuthorityPaths(root / "database")
     baseline_dir = paths.baseline_dir(BASELINE_ID)
-    baseline_dir.mkdir(parents=True)
+    baseline_dir.mkdir(parents=True, exist_ok=True)
     files_sha256: dict[str, str] = {}
     for filename in BASELINE_FILES:
         content = f"-- {filename}\n"
@@ -87,6 +102,78 @@ def test_baseline_manifest_rejects_checksum_drift_and_extra_sql(tmp_path: Path) 
     (second_manifest.parent / "unreviewed.sql").write_text("SELECT 1;\n", encoding="utf-8")
     with pytest.raises(AuthorityManifestError, match="SQL coverage mismatch"):
         load_baseline_manifest(second_manifest)
+
+
+def test_baseline_git_provenance_requires_a_prior_unchanged_source_commit(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "arc03@example.invalid")
+    _git(root, "config", "user.name", "ARC03 Test")
+    generator = root / "scripts/freeze_arc03.py"
+    generator.parent.mkdir(parents=True)
+    generator.write_text("GENERATOR = 1\n", encoding="utf-8")
+    cutover = root / f"database/baselines/{BASELINE_ID}/cutover_convergence.sql"
+    cutover.parent.mkdir(parents=True)
+    cutover.write_text("-- cutover_convergence.sql\n", encoding="utf-8")
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "settled source")
+    source_sha = _git(root, "rev-parse", "HEAD")
+
+    _paths, manifest_path = _write_baseline(
+        root,
+        source_git_sha=source_sha,
+        generator="scripts/freeze_arc03.py",
+    )
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "frozen artifact")
+    baseline = load_baseline_manifest(manifest_path)
+
+    verify_baseline_git_provenance(manifest_path, baseline, repo_root=root)
+
+    generator.write_text("GENERATOR = 2\n", encoding="utf-8")
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "drift generator")
+    with pytest.raises(AuthorityManifestError, match="inputs differ"):
+        verify_baseline_git_provenance(manifest_path, baseline, repo_root=root)
+
+
+def test_baseline_git_provenance_rejects_fake_or_self_containing_source(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "arc03@example.invalid")
+    _git(root, "config", "user.name", "ARC03 Test")
+    generator = root / "scripts/freeze_arc03.py"
+    generator.parent.mkdir(parents=True)
+    generator.write_text("GENERATOR = 1\n", encoding="utf-8")
+    cutover = root / f"database/baselines/{BASELINE_ID}/cutover_convergence.sql"
+    cutover.parent.mkdir(parents=True)
+    cutover.write_text("-- cutover_convergence.sql\n", encoding="utf-8")
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "settled source")
+    source_sha = _git(root, "rev-parse", "HEAD")
+    _paths, manifest_path = _write_baseline(
+        root,
+        source_git_sha=source_sha,
+        generator="scripts/freeze_arc03.py",
+    )
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "artifact")
+
+    fake = load_baseline_manifest(manifest_path)
+    object.__setattr__(fake, "source_git_sha", "0" * 40)
+    with pytest.raises(AuthorityManifestError, match="not a resolvable"):
+        verify_baseline_git_provenance(manifest_path, fake, repo_root=root)
+
+    artifact_sha = _git(root, "rev-parse", "HEAD")
+    object.__setattr__(fake, "source_git_sha", artifact_sha)
+    with pytest.raises(AuthorityManifestError, match="already contains this manifest"):
+        verify_baseline_git_provenance(manifest_path, fake, repo_root=root)
 
 
 @pytest.mark.parametrize(

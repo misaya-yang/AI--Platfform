@@ -668,7 +668,6 @@ async def _numeric_ledger_records(conn: Any) -> list[NumericLedgerRecord]:
         SELECT version::text AS version, {name_expr} AS name,
                {checksum_expr} AS checksum, {dirty_expr} AS dirty
         FROM public.schema_migrations
-        WHERE version::integer IN (16, 30, 31)
         ORDER BY version::integer
         """
     )

@@ -16,10 +16,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -44,6 +45,17 @@ class RollbackClass(str, Enum):
 _CHANGE_FILE_RE = re.compile(r"^(\d{3})_[a-z0-9_]+\.sql$")
 _LEDGER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,62}$")
 _FULL_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_BASELINE_PROVENANCE_INPUTS = (
+    "database/schema.sql",
+    "database/migrations/legacy-manifest.yml",
+    "database/authority/fingerprint.py",
+    "database/authority/fingerprint_catalog.py",
+    "database/authority/fingerprint_values.py",
+    "database/bootstrap/roles.sql",
+    "database/bootstrap/extensions.sql",
+    "scripts/inventory/generate_database_grants.py",
+    ":(glob)database/migrations/*.sql",
+)
 LEGACY_MANIFEST_SCHEMA = "migration-authority/legacy-manifest/v1"
 LEGACY_NON_TRANSACTIONAL_FILES = frozenset({"049_session_list_performance.sql"})
 _REQUIRED_CHANGE_FIELDS = (
@@ -591,6 +603,81 @@ def load_baseline_manifest(path: Path) -> BaselineManifest:
         files_sha256=tuple(files_sha256),
         reference_data=tuple(reference_sets),
     )
+
+
+def verify_baseline_git_provenance(
+    path: Path,
+    baseline: BaselineManifest,
+    *,
+    repo_root: Path,
+) -> None:
+    """Offline proof that a frozen baseline is not its own source authority.
+
+    Runtime images need not contain ``.git``; the checked-out CI/release gate
+    calls this through ``commands.load_baseline``. The source commit must be an
+    ancestor, predate this manifest, contain the named generator, and preserve
+    every fingerprint/migration input through the artifact commit.
+    """
+
+    generator = PurePosixPath(baseline.generator)
+    if (
+        generator.is_absolute()
+        or not baseline.generator
+        or generator.as_posix() != baseline.generator
+        or ".." in generator.parts
+    ):
+        raise AuthorityManifestError(
+            f"baseline manifest {path}: generator must be a safe repository-relative path"
+        )
+    try:
+        manifest_rel = path.resolve().relative_to(repo_root.resolve()).as_posix()
+    except ValueError as exc:
+        raise AuthorityManifestError(
+            f"baseline manifest {path} is outside repository {repo_root}"
+        ) from exc
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    source = baseline.source_git_sha
+    resolved = git("rev-parse", "--verify", f"{source}^{{commit}}")
+    if resolved.returncode != 0 or resolved.stdout.strip() != source:
+        raise AuthorityManifestError(
+            f"baseline manifest {path}: source_git_sha is not a resolvable exact commit"
+        )
+    if git("merge-base", "--is-ancestor", source, "HEAD").returncode != 0:
+        raise AuthorityManifestError(
+            f"baseline manifest {path}: source_git_sha is not an ancestor of HEAD"
+        )
+    if git("cat-file", "-e", f"{source}:{manifest_rel}").returncode == 0:
+        raise AuthorityManifestError(
+            f"baseline manifest {path}: source_git_sha already contains this manifest"
+        )
+    if git("cat-file", "-e", f"{source}:{generator.as_posix()}").returncode != 0:
+        raise AuthorityManifestError(
+            f"baseline manifest {path}: generator is absent from source_git_sha"
+        )
+    cutover_rel = (path.parent / "cutover_convergence.sql").resolve().relative_to(
+        repo_root.resolve()
+    ).as_posix()
+    inputs = [*_BASELINE_PROVENANCE_INPUTS, generator.as_posix(), cutover_rel]
+    comparison = git("diff", "--quiet", source, "HEAD", "--", *inputs)
+    if comparison.returncode == 1:
+        raise AuthorityManifestError(
+            f"baseline manifest {path}: fingerprint or migration inputs differ "
+            "from source_git_sha"
+        )
+    if comparison.returncode != 0:
+        detail = (comparison.stderr or comparison.stdout).strip()
+        raise AuthorityManifestError(
+            f"baseline manifest {path}: cannot verify source provenance: {detail}"
+        )
 
 
 def _legacy_sql_files(migrations_root: Path) -> dict[str, Path]:

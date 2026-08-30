@@ -121,7 +121,7 @@ class FakeNumericConnection:
     async def fetch(self, query: str, *_args: Any) -> list[dict[str, Any]]:
         if "information_schema.columns" in query:
             return [{"column_name": column} for column in sorted(self.columns)]
-        if "WHERE version::integer IN (16, 30, 31)" in query:
+        if "version::text AS version" in query:
             return self.rows
         if "SELECT version FROM public.schema_migrations" in query:
             return [{"version": row["version"]} for row in self.rows]
@@ -376,6 +376,55 @@ async def test_numeric_030_forward_is_proven_but_rollback_and_mixed_states_block
     receipt = await reconcile_numeric_legacy_history(mixed, manifest)
     assert receipt.verdict == "blocked"
     assert "mixed" in receipt.versions["030"]["reason"]
+
+
+@pytest.mark.parametrize(
+    ("row", "reason"),
+    [
+        (_ledger_row(50, dirty=True), "dirty"),
+        (_ledger_row(50, checksum="0" * 16), "does not match immutable"),
+        (_ledger_row(50, name="Unrelated Migration"), "does not identify"),
+        (_ledger_row(999), "no unique immutable forward file"),
+    ],
+)
+async def test_numeric_nonduplicate_rows_fail_closed_on_untrusted_history(
+    row: dict[str, Any],
+    reason: str,
+) -> None:
+    manifest = load_legacy_manifest(LEGACY_MANIFEST)
+    conn = FakeNumericConnection(
+        [row, _proven_031_row(manifest)],
+        evidence={"031_hierarchy_effective": True},
+    )
+
+    receipt = await reconcile_numeric_legacy_history(conn, manifest)
+
+    version = f"{int(row['version']):03d}"
+    assert receipt.verdict == "blocked"
+    assert reason in receipt.versions[version]["reason"]
+
+
+async def test_numeric_unique_bare_and_historical_alias_rows_remain_supported() -> None:
+    manifest = load_legacy_manifest(LEGACY_MANIFEST)
+    renamed = manifest.by_file()["089_agent_runtime_thread_store.sql"]
+    conn = FakeNumericConnection(
+        [
+            _ledger_row(50),
+            _ledger_row(
+                89,
+                name="Codex Runtime Thread Store",
+                checksum=renamed.legacy_checksum,
+            ),
+            _proven_031_row(manifest),
+        ],
+        evidence={"031_hierarchy_effective": True},
+    )
+
+    receipt = await reconcile_numeric_legacy_history(conn, manifest)
+
+    assert receipt.verdict == "proven"
+    assert receipt.versions["050"]["identity_basis"] == "unique_version_only"
+    assert receipt.versions["089"]["identified_file"] == renamed.file
 
 
 class FakeExecutionConnection:

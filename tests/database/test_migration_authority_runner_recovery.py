@@ -586,6 +586,34 @@ def test_transaction_control_parser_ignores_sql_bodies_and_expressions(sql: str)
 @pytest.mark.parametrize(
     "sql",
     [
+        "SELECT '$$'; BEGIN; SELECT '$$';",
+        "-- $$ false opener\nBEGIN;\n-- $$ false closer\nSELECT 1;",
+        "SELECT '$tag$'; COMMIT; SELECT '$tag$';",
+    ],
+)
+def test_quote_like_tokens_in_comments_or_strings_cannot_hide_transaction_control(
+    sql: str,
+) -> None:
+    with pytest.raises(AuthorityError, match="transaction control"):
+        runner.MigrationAuthority._reject_embedded_transactions(sql, "probe")
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "DO $$ BEGIN PERFORM 1; END;",
+        "SELECT 'unterminated",
+        "/* unterminated",
+    ],
+)
+def test_transaction_parser_rejects_unterminated_lexical_bodies(sql: str) -> None:
+    with pytest.raises(AuthorityError, match="unterminated"):
+        runner.MigrationAuthority._reject_embedded_transactions(sql, "probe")
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
         "BEGIN; SELECT 1; COMMIT;",
         "START TRANSACTION ISOLATION LEVEL SERIALIZABLE; SELECT 1;",
         "SAVEPOINT unsafe; SELECT 1;",

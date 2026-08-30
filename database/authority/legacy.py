@@ -32,7 +32,11 @@ from .numeric_reconciliation import (
     NumericReconciliationReceipt,
     reconcile_numeric_legacy_history,
 )
-from .per_service_manifest import PER_SERVICE_MANIFEST_NAME, load_per_service_manifest
+from .per_service_manifest import (
+    HISTORICAL_MARKER_NOTES,
+    PER_SERVICE_MANIFEST_NAME,
+    load_per_service_manifest,
+)
 from .runner import AuthorityBlockedError, AuthorityError, AuthorityPaths
 
 # Same four required objects migrate.sh/base_schema_exists checks.
@@ -537,16 +541,27 @@ async def apply_per_service_chain(conn: Any, paths: AuthorityPaths, log: Any = p
         )
     applied_count = 0
     for spec in manifest.changes:
-        if spec.is_recorded(applied):
-            checksum_match = re.search(
-                r"(?:^|;)sha256=([0-9a-f]{64})(?:;|$)",
-                applied_notes.get(spec.key, ""),
+        if spec.key in applied:
+            note = applied_notes.get(spec.key, "")
+            legacy_note = f"file=migrations/per_service/{spec.file}"
+            authority_note = (
+                f"{legacy_note};sha256={spec.sha256};"
+                f"rollback={spec.rollback_class.value}"
             )
-            if checksum_match is not None and checksum_match.group(1) != spec.sha256:
+            if note not in {legacy_note, authority_note}:
                 raise AuthorityBlockedError(
-                    f"per-service ledger {spec.key} records checksum "
-                    f"{checksum_match.group(1)}, manifest declares {spec.sha256}"
+                    f"per-service ledger {spec.key} has no exact historical file "
+                    "receipt or current checksum receipt"
                 )
+            continue
+        historical = sorted(set(spec.historical_markers) & applied)
+        if historical:
+            for marker in historical:
+                expected_note = HISTORICAL_MARKER_NOTES.get(marker)
+                if expected_note is None or applied_notes.get(marker) != expected_note:
+                    raise AuthorityBlockedError(
+                        f"per-service historical marker {marker} has no exact notes receipt"
+                    )
             continue
         log(f"authority: per-service: applying {spec.key}")
         sql, _had_outer_transaction = _strip_outer_transaction(

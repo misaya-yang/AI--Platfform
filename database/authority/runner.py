@@ -62,14 +62,7 @@ _NON_TRANSACTIONAL_MARKER_RE = re.compile(
     r"^\s*--\s*@checkpoint\s+(?P<name>[a-z0-9_]+)\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
-_DOLLAR_QUOTED_RE = re.compile(
-    r"\$\$.*?\$\$|\$(?P<tag>[A-Za-z_][A-Za-z0-9_]*)\$.*?\$(?P=tag)\$",
-    re.DOTALL,
-)
-_SINGLE_QUOTED_RE = re.compile(r"'(?:[^']|'')*'")
-_DOUBLE_QUOTED_RE = re.compile(r'"(?:[^"]|"")*"')
-_LINE_COMMENT_RE = re.compile(r"--[^\n]*")
-_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_DOLLAR_QUOTE_DELIMITER_RE = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
 
 ATTEMPT_LEASE_TIMEOUT = timedelta(minutes=15)
 _PREAMBLE_CHECKPOINT = "__preamble__"
@@ -128,12 +121,77 @@ def strip_sql_bodies(sql: str) -> str:
     is never mistaken for a transaction-control statement, while a real
     top-level ``BEGIN;``/``COMMIT;`` still is.
     """
-    stripped = _DOLLAR_QUOTED_RE.sub(" $$ ", sql)
-    stripped = _BLOCK_COMMENT_RE.sub("", stripped)
-    stripped = _LINE_COMMENT_RE.sub("", stripped)
-    stripped = _SINGLE_QUOTED_RE.sub("''", stripped)
-    stripped = _DOUBLE_QUOTED_RE.sub('""', stripped)
-    return stripped
+    # This must be a lexical pass, not a sequence of regular-expression
+    # substitutions. A ``$$`` token inside a comment or quoted string is not
+    # a dollar-quote opener and must never mask a later top-level BEGIN/COMMIT.
+    masked = list(sql)
+    index = 0
+    length = len(sql)
+    while index < length:
+        if sql.startswith("--", index):
+            end = sql.find("\n", index + 2)
+            end = length if end == -1 else end
+            masked[index:end] = " " * (end - index)
+            index = end
+            continue
+        if sql.startswith("/*", index):
+            start = index
+            depth = 1
+            index += 2
+            while index < length and depth:
+                if sql.startswith("/*", index):
+                    depth += 1
+                    index += 2
+                elif sql.startswith("*/", index):
+                    depth -= 1
+                    index += 2
+                else:
+                    index += 1
+            if depth:
+                raise AuthorityError("SQL contains an unterminated block comment")
+            masked[start:index] = " " * (index - start)
+            continue
+        if sql[index] in {"'", '"'}:
+            quote = sql[index]
+            start = index
+            escape_string = (
+                quote == "'"
+                and start > 0
+                and sql[start - 1] in {"e", "E"}
+                and (start < 2 or not (sql[start - 2].isalnum() or sql[start - 2] == "_"))
+            )
+            index += 1
+            while index < length:
+                if sql[index] == quote:
+                    if index + 1 < length and sql[index + 1] == quote:
+                        index += 2
+                        continue
+                    index += 1
+                    break
+                # Backslash escapes are lexical only in explicit E'' strings.
+                # Plain strings follow modern standard_conforming_strings;
+                # treating ``\'`` as an escape there could hide top-level SQL.
+                if escape_string and sql[index] == "\\" and index + 1 < length:
+                    index += 2
+                else:
+                    index += 1
+            else:
+                raise AuthorityError("SQL contains an unterminated quoted string")
+            masked[start:index] = " " * (index - start)
+            continue
+        if sql[index] == "$":
+            match = _DOLLAR_QUOTE_DELIMITER_RE.match(sql, index)
+            if match is not None:
+                delimiter = match.group(0)
+                start = index
+                end = sql.find(delimiter, match.end())
+                if end == -1:
+                    raise AuthorityError("SQL contains an unterminated dollar quote")
+                index = end + len(delimiter)
+                masked[start:index] = " " * (index - start)
+                continue
+        index += 1
+    return "".join(masked)
 
 
 class AuthorityError(RuntimeError):

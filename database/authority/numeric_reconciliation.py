@@ -6,9 +6,10 @@ this module owns the version-specific decision policy and public API.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from .discovery import HISTORICAL_NUMERIC_IDENTITIES
+from .discovery import HISTORICAL_NUMERIC_IDENTITIES, LEGACY_FILENAME_ALIASES
 from .manifest import LegacyManifest
 from .numeric_evidence import (
     NUMERIC_EVIDENCE_SQL,
@@ -46,6 +47,66 @@ async def reconcile_numeric_legacy_history(
     records_by_version: dict[str, list[NumericLedgerRecord]] = {}
     for record in await _numeric_ledger_records(conn):
         records_by_version.setdefault(record.version, []).append(record)
+
+    # Validate every row that carries evidence, not only the three ambiguous
+    # historical revisions. Bare version-only ledgers remain supported for a
+    # unique revision, but dirty, unknown, or contradictory identities block.
+    forward_by_version: dict[str, list[str]] = {}
+    for filename in forward:
+        forward_by_version.setdefault(filename[:3], []).append(filename)
+    for version, records in sorted(records_by_version.items()):
+        if version in HISTORICAL_NUMERIC_IDENTITIES:
+            continue
+        entry: dict[str, Any] = {}
+        receipt.versions[version] = entry
+        if len(records) != 1:
+            receipt.block(version, f"numeric ledger has {len(records)} rows for one version")
+            continue
+        record = records[0]
+        entry["ledger"] = {
+            "name": record.name,
+            "checksum": record.checksum,
+            "dirty": record.dirty,
+        }
+        if record.dirty:
+            receipt.block(version, "numeric ledger row is dirty")
+            continue
+        candidates = forward_by_version.get(version, [])
+        if len(candidates) != 1:
+            receipt.block(
+                version,
+                "numeric ledger version has no unique immutable forward file",
+            )
+            continue
+        filename = candidates[0]
+        spec = forward[filename]
+        accepted_names = {filename, _legacy_description(filename)}
+        alias = LEGACY_FILENAME_ALIASES.get(filename)
+        if alias:
+            accepted_names.update({alias, _legacy_description(alias)})
+        if record.name and record.name not in accepted_names:
+            receipt.block(
+                version,
+                f"ledger name {record.name!r} does not identify {filename}",
+            )
+            continue
+        if record.checksum:
+            if not _valid_checksum_shape(record.checksum):
+                receipt.block(version, f"invalid legacy checksum shape {record.checksum!r}")
+                continue
+            if record.checksum not in {spec.sha256, spec.legacy_checksum}:
+                receipt.block(
+                    version,
+                    f"checksum {record.checksum!r} does not match immutable {filename}",
+                )
+                continue
+        entry["identified_file"] = filename
+        entry["identity_basis"] = (
+            "unique_version_only"
+            if not record.name and not record.checksum
+            else "unique_version_with_matching_identity"
+        )
+        entry["verdict"] = "proven"
 
     for version, ordered_identities in HISTORICAL_NUMERIC_IDENTITIES.items():
         records = records_by_version.get(version, [])
@@ -157,3 +218,11 @@ async def reconcile_numeric_legacy_history(
             "numeric duplicate history is safe to continue; this receipt never mutates a legacy ledger"
         )
     return receipt
+
+
+def _legacy_description(filename: str) -> str:
+    return filename[4:-4].replace("_", " ").title()
+
+
+def _valid_checksum_shape(value: str) -> bool:
+    return len(value) in (16, 64) and re.fullmatch(r"[0-9a-f]+", value) is not None
