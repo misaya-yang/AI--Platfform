@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -12,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts" / "inventory"))
 sys.path.insert(0, str(ROOT / "scripts" / "core_boundary"))
 
+import check_core_boundary as core_gate  # noqa: E402
 import inventory_core_consumption as core_inventory  # noqa: E402
 from _common import (  # noqa: E402
     BaselineProvenanceError,
@@ -166,6 +168,32 @@ def test_core_inventory_write_requires_separate_committed_review(
     _git(root, "add", output)
     _git(root, "commit", "-q", "-m", "reviewed inventory")
     assert core_inventory.main(["--verify", "--output", output]) == 0
+
+
+def test_core_gate_provenance_error_writes_failure_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _source_sha = _clean_repo(tmp_path)
+    baseline = root / "bad-inventory.json"
+    evidence = root / "core-boundary-evidence.json"
+    baseline.write_text('{"schema_version": "self-certified"}\n', encoding="utf-8")
+    monkeypatch.setattr(core_gate, "repo_root", lambda: root)
+
+    assert (
+        core_gate.main(
+            [
+                "--baseline",
+                str(baseline),
+                "--evidence-out",
+                str(evidence),
+            ]
+        )
+        == 2
+    )
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    assert payload["result"] == "error"
+    assert payload["provenance"]["result"] == "fail"
 
 
 def _write(path: Path, text: str) -> None:

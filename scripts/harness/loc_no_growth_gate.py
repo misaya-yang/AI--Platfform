@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
@@ -49,6 +50,10 @@ PRUNED_DIRS = {
 
 class LocBaselineError(RuntimeError):
     """Raised when the checked-in LOC ledger has invalid Git provenance."""
+
+
+class LocScanError(RuntimeError):
+    """Raised when the current source tree cannot be scanned completely."""
 
 
 def _resolve_base_commit(root: Path, raw_sha: object) -> str:
@@ -172,8 +177,8 @@ def verify_baseline_provenance(root: Path, baseline: dict) -> dict:
 def count_lines(path: Path) -> int:
     try:
         return len(path.read_text(encoding="utf-8").splitlines())
-    except (UnicodeDecodeError, OSError):
-        return 0
+    except (UnicodeDecodeError, OSError) as exc:
+        raise LocScanError(f"cannot read source file {path}: {exc}") from exc
 
 
 def walk(root: Path, suffix: str) -> dict[str, int]:
@@ -181,21 +186,35 @@ def walk(root: Path, suffix: str) -> dict[str, int]:
     counts: dict[str, int] = {}
     for scan_root in SCAN_ROOTS:
         start = root / scan_root
-        if not start.is_dir():
+        try:
+            start_mode = start.lstat().st_mode
+        except FileNotFoundError:
             continue
+        except OSError as exc:
+            raise LocScanError(f"cannot inspect scan root {start}: {exc}") from exc
+        if stat.S_ISLNK(start_mode) or not stat.S_ISDIR(start_mode):
+            raise LocScanError(f"scan root is not a real directory: {start}")
         stack = [start]
         while stack:
             current = stack.pop()
             try:
                 entries = sorted(current.iterdir())
-            except OSError:
-                continue
+            except OSError as exc:
+                raise LocScanError(f"cannot list scan directory {current}: {exc}") from exc
             for entry in entries:
-                if entry.is_dir():
-                    if entry.name not in PRUNED_DIRS:
-                        stack.append(entry)
-                elif entry.name.endswith(suffix):
-                    counts[str(entry.relative_to(root))] = count_lines(entry)
+                try:
+                    mode = entry.lstat().st_mode
+                    if stat.S_ISLNK(mode):
+                        raise LocScanError(
+                            f"symlink inside scan roots is not inspectable: {entry}"
+                        )
+                    if stat.S_ISDIR(mode):
+                        if entry.name not in PRUNED_DIRS:
+                            stack.append(entry)
+                    elif stat.S_ISREG(mode) and entry.name.endswith(suffix):
+                        counts[str(entry.relative_to(root))] = count_lines(entry)
+                except OSError as exc:
+                    raise LocScanError(f"cannot inspect scan path {entry}: {exc}") from exc
     return counts
 
 
@@ -277,8 +296,60 @@ def run(base: Path, baseline_path: Path, evidence_path: Path) -> int:
             )
         return 2
 
-    current_py = walk(base, ".py")
-    current_ts = {**walk(base, ".ts"), **walk(base, ".tsx")}
+    current_py: dict[str, int] = {}
+    current_ts: dict[str, int] = {}
+    try:
+        current_py = walk(base, ".py")
+        current_ts = {**walk(base, ".ts"), **walk(base, ".tsx")}
+    except LocScanError as exc:
+        print(f"GATE ERROR: LOC scan incomplete: {exc}", file=sys.stderr)
+        if evidence_path is not None:
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            evidence_path.write_text(
+                json.dumps(
+                    {
+                        "gate": "loc-no-growth",
+                        "tier": "L0",
+                        "baseline": str(baseline_path),
+                        "base_git_sha": baseline.get("base_git_sha"),
+                        "provenance": provenance,
+                        "scanned": {
+                            "python_files": len(current_py),
+                            "typescript_files": len(current_ts),
+                        },
+                        "scan_error": str(exc),
+                        "result": "error",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        return 2
+    if not current_py and not current_ts:
+        print("GATE ERROR: LOC scan discovered no source files", file=sys.stderr)
+        if evidence_path is not None:
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            evidence_path.write_text(
+                json.dumps(
+                    {
+                        "gate": "loc-no-growth",
+                        "tier": "L0",
+                        "baseline": str(baseline_path),
+                        "base_git_sha": baseline.get("base_git_sha"),
+                        "provenance": provenance,
+                        "scanned": {"python_files": 0, "typescript_files": 0},
+                        "scan_error": "no source files discovered",
+                        "result": "error",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        return 2
     violations, informational = evaluate(baseline, current_py, current_ts)
 
     result = {

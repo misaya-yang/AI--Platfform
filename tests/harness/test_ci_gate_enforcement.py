@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 
+import pytest
+
+from scripts.harness import affected_gates as selector
 from scripts.harness.ci_gate_enforcement import (
     evaluate,
     normalize_job_results,
@@ -232,3 +236,71 @@ def test_workflow_wiring_rejects_named_job_without_declared_entrypoint(
         "CI job 'unit-job' does not execute gate 'unit' entrypoint: unit-gate" in issue
         for issue in issues
     )
+
+
+def test_workflow_comment_cannot_claim_to_execute_a_gate(tmp_path: Path) -> None:
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text(
+        "name: test\n"
+        "jobs:\n"
+        "  unit-job:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: |\n"
+        "          # make unit-gate\n"
+        "          make unrelated-gate\n",
+        encoding="utf-8",
+    )
+    gates = {
+        "unit": {
+            "make": "unit-gate",
+            "ci_job": "unit-job",
+            "evidence": "tmp/gate-evidence/unit.log",
+            "required_on": "[change]",
+        }
+    }
+
+    issues = validate_workflow_wiring(workflow, gates)
+
+    assert any("does not execute gate 'unit' entrypoint" in issue for issue in issues)
+
+
+def test_empty_diff_still_writes_selector_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = tmp_path / "harness.yml"
+    evidence = tmp_path / "affected-gates.json"
+    harness.write_text(
+        "gates:\n"
+        "  harness:\n"
+        "    make: harness-check\n"
+        "    triggers: [harness.yml]\n"
+        "    tier: L0\n"
+        "    required_on: [change]\n"
+        "    resource: offline\n"
+        "    skip: never\n"
+        "    timeout: 5\n"
+        "    evidence: tmp/gate-evidence/harness.json\n"
+        "    ci_job: harness\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(selector, "changed_paths_since", lambda _base: [])
+
+    assert (
+        selector.main(
+            [
+                "--base",
+                "0" * 40,
+                "--harness",
+                str(harness),
+                "--evidence-out",
+                str(evidence),
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    assert payload["result"] == "pass"
+    assert payload["changed_paths"] == []
+    assert payload["selected"] == {}

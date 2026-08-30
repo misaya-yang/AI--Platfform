@@ -151,6 +151,9 @@ commands:
   architecture_boundary_gate:
     make: architecture-boundary-gate
     purpose: Static import boundary between gateway/apps/core/contracts zones.
+  core_boundary_gate:
+    make: core-boundary-gate
+    purpose: Verify the Git-bound core/contracts inventory and compatibility boundary.
   single_instance_guard:
     make: single-instance-guard
     purpose: Keep Gateway and Agent Runtime fail-closed single-instance in generated topology and Helm.
@@ -233,6 +236,17 @@ gates:
     skip: never
     timeout: 5
     evidence: tmp/gate-evidence/architecture-boundary-gate.json
+    ci_job: architecture-gates
+  core_boundary:
+    make: core-boundary-gate
+    purpose: Rebuild the formal core/contracts inventory from its declared Git object, then enforce no-growth and compatibility boundaries.
+    triggers: ["src/**", "apps/**", "packages/**", "database/**", "rust/**", "sdk/python/**", "scripts/core_boundary/**", reports/inventory/core-import-inventory.json, tests/scripts/test_architecture_inventory_guards.py]
+    tier: L0
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 5
+    evidence: tmp/gate-evidence/core-boundary-gate.json
     ci_job: architecture-gates
   single_instance_guard:
     make: single-instance-guard

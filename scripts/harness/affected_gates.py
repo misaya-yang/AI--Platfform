@@ -154,7 +154,7 @@ def changed_paths_since(base: str) -> list[str]:
         run("rev-parse", "--verify", "--quiet", base)
     except RuntimeError as exc:
         raise RuntimeError(f"invalid base SHA {base!r}: {exc}") from exc
-    diff = run("diff", "--name-only", base)
+    diff = run("diff", "--name-only", base, "--")
     untracked = run("ls-files", "--others", "--exclude-standard")
     paths = {p.strip() for p in (diff + untracked).splitlines() if p.strip()}
     return sorted(paths)
@@ -225,10 +225,6 @@ def main(argv: list[str] | None = None) -> int:
     except (RuntimeError, OSError) as exc:
         print(f"GATE ERROR: {exc}", file=sys.stderr)
         return 2
-    if not paths:
-        print("no changed paths relative to base; nothing to gate")
-        return 0
-
     selected, ungated = select_gates(gates, paths)
 
     evidence = {
@@ -244,6 +240,8 @@ def main(argv: list[str] | None = None) -> int:
     args.evidence_out.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     print(f"changed paths: {len(paths)}; affected gates: {len(selected)}")
+    if not paths:
+        print("no changed paths relative to base; empty selection recorded")
     for name in sorted(selected):
         entry = selected[name]
         entrypoint = entry["make"] or entry["shell"]
@@ -262,7 +260,14 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"OK: every changed path maps to at least one gate (evidence: {args.evidence_out.relative_to(ROOT)})")
+    try:
+        evidence_display = args.evidence_out.relative_to(ROOT)
+    except ValueError:
+        evidence_display = args.evidence_out
+    print(
+        "OK: every changed path maps to at least one gate "
+        f"(evidence: {evidence_display})"
+    )
     return 0
 
 

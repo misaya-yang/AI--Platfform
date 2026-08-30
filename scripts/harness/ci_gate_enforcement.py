@@ -64,13 +64,55 @@ def _workflow_job_bodies(path: Path) -> dict[str, str]:
     return {name: "\n".join(body) for name, body in bodies.items()}
 
 
+def _workflow_run_scripts(body: str) -> str:
+    """Extract only executable ``run:`` values from one workflow job body."""
+    lines = body.splitlines()
+    commands: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        match = re.match(r"^(\s*)run:\s*(.*?)\s*$", line)
+        if match is None:
+            index += 1
+            continue
+        indent = len(match.group(1))
+        value = match.group(2)
+        if value and value not in {"|", "|-", "|+", ">", ">-", ">+"}:
+            if not value.lstrip().startswith("#"):
+                commands.append(value)
+            index += 1
+            continue
+        index += 1
+        while index < len(lines):
+            candidate = lines[index]
+            if candidate.strip() and len(candidate) - len(candidate.lstrip()) <= indent:
+                break
+            stripped = candidate.strip()
+            if stripped and not stripped.startswith("#"):
+                commands.append(stripped)
+            index += 1
+    return "\n".join(commands)
+
+
 def _workflow_runs_entrypoint(fields: dict[str, str], body: str) -> bool:
+    scripts = _workflow_run_scripts(body)
     if "make" in fields:
         target = _clean_scalar(fields.get("make"))
-        return re.search(rf"\bmake\s+{re.escape(target)}(?:\s|$)", body) is not None
+        return (
+            re.search(
+                rf"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*"
+                rf"make\s+{re.escape(target)}(?:\s|$)",
+                scripts,
+                re.MULTILINE,
+            )
+            is not None
+        )
     shell = _clean_scalar(fields.get("shell"))
     commands = [command.strip() for command in shell.split("&&") if command.strip()]
-    return bool(commands) and all(command in body for command in commands)
+    script_lines = scripts.splitlines()
+    return bool(commands) and all(
+        any(line.startswith(command) for line in script_lines) for command in commands
+    )
 
 
 def validate_workflow_wiring(
@@ -109,7 +151,7 @@ def validate_workflow_wiring(
 
     fixed_snippets = {
         "compose-and-harness": ["make ci-gate-enforcement-selftest"],
-        "architecture-gates": ['exit "$failed"'],
+        "architecture-gates": ["fetch-depth: 0", 'exit "$failed"'],
         "agent-runtime-contracts": ['exit "$failed"'],
         "gate-enforcement": ["if: always()", "make ci-gate-enforcement"],
         "release-ready": ["- gate-enforcement"],

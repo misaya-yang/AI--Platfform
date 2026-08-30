@@ -373,6 +373,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -385,6 +387,11 @@ jobs:
         id: architecture_boundary
         continue-on-error: true
         run: make architecture-boundary-gate
+
+      - name: Run Git-bound core inventory gate
+        id: core_boundary
+        continue-on-error: true
+        run: make core-boundary-gate
 
       - name: Enforce Gateway and Agent Runtime single-instance topology
         id: single_instance_guard
@@ -410,6 +417,7 @@ jobs:
         if: always()
         env:
           ARCHITECTURE_BOUNDARY_OUTCOME: ${{ steps.architecture_boundary.outcome }}
+          CORE_BOUNDARY_OUTCOME: ${{ steps.core_boundary.outcome }}
           SINGLE_INSTANCE_GUARD_OUTCOME: ${{ steps.single_instance_guard.outcome }}
           OPENAPI_OFFLINE_OUTCOME: ${{ steps.openapi_offline.outcome }}
           HYGIENE_OUTCOME: ${{ steps.hygiene.outcome }}
@@ -418,6 +426,7 @@ jobs:
           failed=0
           for result in \
             "$ARCHITECTURE_BOUNDARY_OUTCOME" \
+            "$CORE_BOUNDARY_OUTCOME" \
             "$SINGLE_INSTANCE_GUARD_OUTCOME" \
             "$OPENAPI_OFFLINE_OUTCOME" \
             "$HYGIENE_OUTCOME" \

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -122,3 +123,34 @@ def test_threshold_cannot_be_raised_in_the_same_change(tmp_path: Path) -> None:
 
     with pytest.raises(gate.LocBaselineError, match="must remain 800"):
         gate.verify_baseline_provenance(root, baseline)
+
+
+def test_symlinked_scan_subtree_fails_closed(tmp_path: Path) -> None:
+    root = tmp_path / "scan"
+    external = tmp_path / "external"
+    (root / "src").mkdir(parents=True)
+    external.mkdir()
+    (external / "hidden.py").write_text("value = 1\n", encoding="utf-8")
+    (root / "src" / "linked").symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(gate.LocScanError, match="symlink inside scan roots"):
+        gate.walk(root, ".py")
+
+
+def test_empty_current_tree_is_gate_error_not_deletion_pass(tmp_path: Path) -> None:
+    root, base_sha = _repo(tmp_path)
+    (root / "src" / "big.py").unlink()
+    (root / "web" / "src" / "big.ts").unlink()
+    (root / "src").rmdir()
+    (root / "web" / "src").rmdir()
+    (root / "web").rmdir()
+    baseline_path = root / "loc-baseline.json"
+    baseline_path.write_text(
+        json.dumps(_baseline(base_sha)) + "\n",
+        encoding="utf-8",
+    )
+
+    assert gate.run(root, baseline_path, root / "evidence.json") == 2
+    evidence = json.loads((root / "evidence.json").read_text(encoding="utf-8"))
+    assert evidence["result"] == "error"
+    assert evidence["scan_error"] == "no source files discovered"

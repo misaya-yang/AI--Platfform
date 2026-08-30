@@ -53,7 +53,7 @@ export COMPOSE_PARALLEL_LIMIT
 
 # -- Quick Start --------------------------------------------------------------
 
-.PHONY: doctor harness-check runtime-dependency-gate gateway-kb-boundary-gate architecture-boundary-gate single-instance-guard verify-openapi-contract live-openapi-contract-gate agent-runtime-source-build-local agent-runtime-source-contract agent-runtime-build-local agent-runtime-contract agent-runtime-smoke agent-runtime-text-gate agent-runtime-single-kernel-gate agent-runtime-readonly-gate agent-runtime-write-gate agent-thread-store-contract agent-capability-worker-build-local agent-capability-worker-smoke agent-runtime-release-gate agent-runtime-rollback-rehearsal sdk-sse-contract snapshot-gateway-openapi quickstart quickstart-build validate-config validate-example-config validate seed-demo seed-demo-apply
+.PHONY: doctor harness-check runtime-dependency-gate gateway-kb-boundary-gate architecture-boundary-gate core-boundary-gate single-instance-guard verify-openapi-contract live-openapi-contract-gate agent-runtime-source-build-local agent-runtime-source-contract agent-runtime-build-local agent-runtime-contract agent-runtime-smoke agent-runtime-text-gate agent-runtime-single-kernel-gate agent-runtime-readonly-gate agent-runtime-write-gate agent-thread-store-contract agent-capability-worker-build-local agent-capability-worker-smoke agent-runtime-release-gate agent-runtime-rollback-rehearsal sdk-sse-contract snapshot-gateway-openapi quickstart quickstart-build validate-config validate-example-config validate seed-demo seed-demo-apply
 
 doctor:                     ## 环境体检: 工具/Docker/内存/端口/compose 归属 (只读)
 	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/doctor.sh --env "$(ENV_FILE)"
@@ -70,6 +70,10 @@ gateway-kb-boundary-gate:   ## 阻止 gateway 重新持有 KB 表 SQL 或 KB 请
 architecture-boundary-gate: ## 静态 import 边界门禁: gateway/apps/core/contracts 区间合同 (含负向自测)
 	@python3 scripts/harness/import_boundary_gate.py --selftest
 	@python3 scripts/harness/import_boundary_gate.py
+
+core-boundary-gate:         ## ai-gateway-core/contracts 清单与兼容边界（Git provenance + 负向自测）
+	@python3 scripts/core_boundary/check_core_boundary.py --self-test
+	@python3 scripts/core_boundary/check_core_boundary.py
 
 single-instance-guard:      ## Gateway/Runtime 单实例门禁: topology + Helm values/templates (含负向自测)
 	@python3 scripts/harness/single_instance_guard.py --selftest

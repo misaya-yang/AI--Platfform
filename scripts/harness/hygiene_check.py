@@ -38,6 +38,7 @@ import ast
 import datetime as dt
 import json
 import re
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -56,24 +57,42 @@ PRUNED_DIRS = {
 ASSERTION_TOKENS = ("assert", "raises(", "warns(", "fail(", "expect(")
 
 
+class HygieneScanError(RuntimeError):
+    """Raised when the gate cannot completely inspect its declared roots."""
+
+
 def _iter_files(roots: tuple[str, ...], base: Path, suffixes: tuple[str, ...]):
     for root in roots:
         start = base / root
-        if not start.is_dir():
+        try:
+            start_mode = start.lstat().st_mode
+        except FileNotFoundError:
             continue
+        except OSError as exc:
+            raise HygieneScanError(f"cannot inspect scan root {start}: {exc}") from exc
+        if stat.S_ISLNK(start_mode) or not stat.S_ISDIR(start_mode):
+            raise HygieneScanError(f"scan root is not a real directory: {start}")
         stack = [start]
         while stack:
             current = stack.pop()
             try:
                 entries = sorted(current.iterdir())
-            except OSError:
-                continue
+            except OSError as exc:
+                raise HygieneScanError(f"cannot list scan directory {current}: {exc}") from exc
             for entry in entries:
-                if entry.is_dir():
-                    if entry.name not in PRUNED_DIRS:
-                        stack.append(entry)
-                elif entry.suffix in suffixes:
-                    yield entry
+                try:
+                    mode = entry.lstat().st_mode
+                    if stat.S_ISLNK(mode):
+                        raise HygieneScanError(
+                            f"symlink inside scan roots is not inspectable: {entry}"
+                        )
+                    if stat.S_ISDIR(mode):
+                        if entry.name not in PRUNED_DIRS:
+                            stack.append(entry)
+                    elif stat.S_ISREG(mode) and entry.suffix in suffixes:
+                        yield entry
+                except OSError as exc:
+                    raise HygieneScanError(f"cannot inspect scan path {entry}: {exc}") from exc
 
 
 def _parse_python_test_file(path: Path) -> tuple[ast.Module | None, str, dict | None]:
@@ -123,17 +142,14 @@ def _self_proving_assert(node: ast.Assert) -> bool:
         return False
     operands = [expression.left, *expression.comparators]
     if all(
-        isinstance(operator, ast.Is)
+        isinstance(operator, (ast.Eq, ast.Is))
         and ast.dump(operands[index]) == ast.dump(operands[index + 1])
         and (
             isinstance(operands[index], ast.Name)
             or (
-                isinstance(operands[index], ast.Constant)
-                and (
-                    operands[index].value is None
-                    or operands[index].value is True
-                    or operands[index].value is False
-                )
+                isinstance(operator, ast.Is)
+                and isinstance(operands[index], ast.Constant)
+                and operands[index].value in (None, True, False)
             )
         )
         for index, operator in enumerate(expression.ops)
@@ -197,12 +213,18 @@ def _skip_decorator_without_reason(node) -> bool:
     return False
 
 
-def scan_python(base: Path) -> tuple[list[dict], list[dict]]:
+def scan_python(
+    base: Path,
+    *,
+    scan_counts: dict[str, int] | None = None,
+) -> tuple[list[dict], list[dict]]:
     failures: list[dict] = []
     warnings: list[dict] = []
+    files_scanned = 0
     for path in _iter_files(PY_SCAN_ROOTS, base, (".py",)):
         if not path.name.startswith("test_"):
             continue
+        files_scanned += 1
         rel = str(path.relative_to(base))
         tree, source, parse_failure = _parse_python_test_file(path)
         if parse_failure is not None:
@@ -236,6 +258,8 @@ def scan_python(base: Path) -> tuple[list[dict], list[dict]]:
                 failures.append({"file": rel, "line": node.lineno, "test": node.name, "issue": "pytest.skip() without a message"})
             if not any(token in segment for token in ASSERTION_TOKENS):
                 warnings.append({"file": rel, "line": node.lineno, "test": node.name, "issue": "no assertion token found"})
+    if scan_counts is not None:
+        scan_counts["python_test_files"] = files_scanned
     return failures, warnings
 
 
@@ -251,15 +275,29 @@ JS_EMPTY_BODY = re.compile(
 )
 
 
-def scan_js(base: Path) -> list[dict]:
+def scan_js(
+    base: Path,
+    *,
+    scan_counts: dict[str, int] | None = None,
+) -> list[dict]:
     failures: list[dict] = []
+    files_scanned = 0
     for path in _iter_files(JS_SCAN_ROOTS, base, (".ts", ".tsx")):
         if not re.search(r"\.(test|spec)\.tsx?$", path.name):
             continue
+        files_scanned += 1
         rel = str(path.relative_to(base))
         try:
             text = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
+        except (UnicodeDecodeError, OSError) as exc:
+            failures.append(
+                {
+                    "file": rel,
+                    "line": 1,
+                    "test": "<module>",
+                    "issue": f"typescript source unreadable: {type(exc).__name__}",
+                }
+            )
             continue
         for pattern, issue in (
             (JS_ONLY, ".only( focused test"),
@@ -282,6 +320,8 @@ def scan_js(base: Path) -> list[dict]:
                     "issue": "empty test body",
                 }
             )
+    if scan_counts is not None:
+        scan_counts["typescript_test_files"] = files_scanned
     return failures
 
 
@@ -335,14 +375,52 @@ def run(base: Path, evidence_path: Path, allowlist_path: Path) -> int:
         print(f"GATE ERROR: bad allowlist {allowlist_path}: {exc}", file=sys.stderr)
         return 2
 
-    py_failures, py_warnings = scan_python(base)
-    js_failures = scan_js(base)
+    scan_counts: dict[str, int] = {}
+    try:
+        py_failures, py_warnings = scan_python(base, scan_counts=scan_counts)
+        js_failures = scan_js(base, scan_counts=scan_counts)
+    except HygieneScanError as exc:
+        result = {
+            "gate": "hygiene-check",
+            "tier": "L0",
+            "scanned": scan_counts,
+            "scan_error": str(exc),
+            "result": "error",
+        }
+        if base == ROOT:
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            evidence_path.write_text(
+                json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        print(f"GATE ERROR: hygiene scan incomplete: {exc}", file=sys.stderr)
+        return 2
+    if sum(scan_counts.values()) == 0:
+        result = {
+            "gate": "hygiene-check",
+            "tier": "L0",
+            "scanned": scan_counts,
+            "scan_error": "no Python or TypeScript test files discovered",
+            "result": "error",
+        }
+        if base == ROOT:
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            evidence_path.write_text(
+                json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        print(
+            "GATE ERROR: hygiene scan discovered no Python or TypeScript test files",
+            file=sys.stderr,
+        )
+        return 2
     enforced, allowlisted, expired, stale = apply_allowlist(
         py_failures + js_failures, entries, dt.date.today()
     )
     result = {
         "gate": "hygiene-check",
         "tier": "L0",
+        "scanned": scan_counts,
         "failures": enforced,
         "allowlisted": allowlisted,
         "expired_entries": expired,

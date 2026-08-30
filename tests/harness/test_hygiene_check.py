@@ -42,6 +42,8 @@ def test_python_ast_flags_empty_and_self_proving_bodies_only(tmp_path: Path) -> 
         "    assert 1 < 2 < 3\n\n"
         "def test_identity(value):\n"
         "    assert value is value\n\n"
+        "def test_equality(value):\n"
+        "    assert value == value\n\n"
         "@pytest.mark.parametrize('value', [1])\n"
         "def test_parametrized_self_proof(value):\n"
         "    assert True\n\n"
@@ -59,6 +61,7 @@ def test_python_ast_flags_empty_and_self_proving_bodies_only(tmp_path: Path) -> 
         ("test_literal_truth", "self-proving assertion-only test"),
         ("test_literal_comparison", "self-proving assertion-only test"),
         ("test_identity", "self-proving assertion-only test"),
+        ("test_equality", "self-proving assertion-only test"),
         ("test_parametrized_self_proof", "self-proving assertion-only test"),
     }
     assert [item["test"] for item in warnings] == ["test_helper_only"]
@@ -145,3 +148,23 @@ def test_dated_allowlist_match_expiry_and_staleness_are_preserved() -> None:
     assert [item["test"] for item in allowlisted] == ["test_allowed"]
     assert [item["test"] for item in expired] == ["test_expired"]
     assert [item["test"] for item in stale] == ["test_stale"]
+
+
+def test_empty_scan_fails_closed(tmp_path: Path) -> None:
+    assert (
+        run(tmp_path, tmp_path / "evidence.json", tmp_path / "missing-allowlist.json")
+        == 2
+    )
+
+
+def test_symlinked_scan_subtree_fails_closed(tmp_path: Path) -> None:
+    external = tmp_path / "external"
+    external.mkdir()
+    _write(external, "test_hidden.py", "def test_hidden():\n    assert True\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "linked").symlink_to(external, target_is_directory=True)
+
+    assert (
+        run(tmp_path, tmp_path / "evidence.json", tmp_path / "missing-allowlist.json")
+        == 2
+    )

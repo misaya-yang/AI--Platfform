@@ -60,6 +60,7 @@ from inventory_core_consumption import (  # noqa: E402
 )
 
 BASELINE_PATH = Path("reports/inventory/core-import-inventory.json")
+EVIDENCE_PATH = Path("tmp/gate-evidence/core-boundary-gate.json")
 
 # --- check 1: contracts content allowlist -----------------------------------
 
@@ -710,44 +711,89 @@ def main(argv: list[str] | None = None) -> int:
         default=str(BASELINE_PATH),
         help="inventory baseline JSON (repo-relative)",
     )
+    parser.add_argument(
+        "--evidence-out",
+        default=str(EVIDENCE_PATH),
+        help="gate evidence JSON (repo-relative)",
+    )
     args = parser.parse_args(argv)
     if args.self_test:
         return self_test()
 
     root = repo_root()
     baseline_path = root / args.baseline
+    evidence_path = Path(args.evidence_out)
+    if not evidence_path.is_absolute():
+        evidence_path = root / evidence_path
+    evidence: dict[str, object] = {
+        "gate": "core-boundary",
+        "tier": "L0",
+        "baseline": args.baseline,
+        "violations": [],
+    }
     if not baseline_path.is_file():
         print(f"baseline not found: {args.baseline}")
-        return 2
-    try:
-        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
-        provenance = verify_inventory_provenance(root, baseline)
-    except (
-        InventoryProvenanceError,
-        json.JSONDecodeError,
-        OSError,
-    ) as exc:
-        print(f"baseline provenance invalid: {exc}")
-        return 2
+        evidence.update({"result": "error", "error": "baseline not found"})
+        exit_code = 2
+    else:
+        try:
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+            provenance = verify_inventory_provenance(root, baseline)
+        except (
+            InventoryProvenanceError,
+            json.JSONDecodeError,
+            OSError,
+        ) as exc:
+            print(f"baseline provenance invalid: {exc}")
+            evidence.update(
+                {
+                    "result": "error",
+                    "provenance": {"result": "fail", "error": str(exc)},
+                    "error": str(exc),
+                }
+            )
+            exit_code = 2
+        else:
+            evidence["provenance"] = {"result": "pass", **provenance}
+            violations = run_checks(root, baseline)
+            evidence["violations"] = violations
+            if violations:
+                print(f"core boundary gate FAILED — {len(violations)} violation(s):")
+                for violation in violations:
+                    print(f"  - {violation}")
+                evidence["result"] = "fail"
+                exit_code = 1
+            else:
+                live = build_inventory(root)
+                evidence["result"] = "pass"
+                evidence["scanned"] = {
+                    "contracts_modules": len(live["contracts_modules"]),
+                    "core_modules": len(live["modules"]),
+                    "shim_ledgers": len(live["shim_consumers"]),
+                    "mixed_export_ledgers": len(live["mixed_export_consumers"]),
+                }
+                print(
+                    "core boundary gate OK — "
+                    f"{len(live['contracts_modules'])} contracts modules within allowlist, "
+                    f"{len(live['modules'])} core modules (no growth), "
+                    f"knowledge→core = {live['knowledge_core_module_count']} "
+                    f"(baseline {baseline.get('knowledge_core_module_count')}), "
+                    f"{len(live['shim_consumers'])} shims + "
+                    f"{len(live['mixed_export_consumers'])} mixed exports tracked; "
+                    f"baseline source={provenance['source_commit']}"
+                )
+                exit_code = 0
 
-    violations = run_checks(root, baseline)
-    if violations:
-        print(f"core boundary gate FAILED — {len(violations)} violation(s):")
-        for violation in violations:
-            print(f"  - {violation}")
-        return 1
-    live = build_inventory(root)
-    print(
-        "core boundary gate OK — "
-        f"{len(live['contracts_modules'])} contracts modules within allowlist, "
-        f"{len(live['modules'])} core modules (no growth), "
-        f"knowledge→core = {live['knowledge_core_module_count']} "
-        f"(baseline {baseline.get('knowledge_core_module_count')}), "
-        f"{len(live['shim_consumers'])} shims + "
-        f"{len(live['mixed_export_consumers'])} mixed exports tracked; "
-        f"baseline source={provenance['source_commit']}"
-    )
-    return 0
+    try:
+        evidence_path.parent.mkdir(parents=True, exist_ok=True)
+        evidence_path.write_text(
+            json.dumps(evidence, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        print(f"cannot write core boundary evidence: {exc}", file=sys.stderr)
+        return 2
+    return exit_code
 
 
 if __name__ == "__main__":
