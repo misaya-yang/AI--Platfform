@@ -9,10 +9,17 @@ import asyncpg
 import pytest
 from fastapi import FastAPI, HTTPException, Request
 
-from src.api.v1 import assistant as assistant_api
-from src.api.v1.assistant import _browser_artifact_download_url, _list_assistant_sessions
+from src.api.schemas.artifacts import ArtifactCreateRequest
+from src.api.v1._artifact_headers import attachment_content_disposition
+from src.api.v1._assistant_routes import artifacts as artifact_routes
+from src.api.v1._assistant_routes import runs as run_routes
+from src.api.v1._assistant_routes import sessions as session_routes
+from src.api.v1._assistant_routes.artifacts import _browser_artifact_download_url
+from src.api.v1._assistant_routes.schemas import TaskCancelRequest
+from src.api.v1._assistant_routes.sessions import _list_assistant_sessions
 from src.core.auth.user_resolver import UserContext
 from src.models.session import Session, SessionMessage
+from src.services.assistant_entry.session_binding import session_runtime_assignment
 
 
 @pytest.mark.asyncio
@@ -86,7 +93,7 @@ async def test_create_session_persists_runtime_assignment() -> None:
     request.app.state.assistant_runtime_default_owner = "agent_runtime"
     request.app.state.assistant_runtime_kernel_revision = "fork-sha"
 
-    response = await assistant_api.create_session(None, user, request)
+    response = await session_routes.create_session(None, user, request)
 
     assert response.session_id == session.session_id
     assignment_store.bind.assert_awaited_once_with(
@@ -117,10 +124,26 @@ async def test_create_session_removes_row_when_runtime_assignment_fails() -> Non
     request.app.state.assistant_runtime_kernel_revision = None
 
     with pytest.raises(HTTPException) as exc_info:
-        await assistant_api.create_session(None, user, request)
+        await session_routes.create_session(None, user, request)
 
     assert exc_info.value.status_code == 500
     session_manager.delete.assert_awaited_once_with(session.session_id)
+
+
+@pytest.mark.asyncio
+async def test_create_session_sanitizes_internal_failure_detail() -> None:
+    """ARC-01 deliverable 6: 500 detail must not echo the exception."""
+    user = UserContext(user_id="user_1", tenant_id="tenant_1", is_authenticated=True)
+    session_manager = AsyncMock()
+    session_manager.create.side_effect = RuntimeError("db password=hunter2 at 10.0.0.7")
+    request = _build_request(session_manager, method="POST")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await session_routes.create_session(None, user, request)
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "Failed to create session"
+    assert "hunter2" not in str(exc_info.value.detail)
 
 
 @pytest.mark.asyncio
@@ -131,7 +154,7 @@ async def test_agent_runtime_assignment_is_accepted_without_python_fallback() ->
     assignment_store.resolve.return_value = SimpleNamespace(runtime_owner="agent_runtime")
     request.app.state.assistant_runtime_assignments = assignment_store
 
-    resolved = await assistant_api._session_runtime_assignment(request, user, "session-1")
+    resolved = await session_runtime_assignment(request, user, "session-1")
     assert resolved.runtime_owner == "agent_runtime"
 
 
@@ -145,7 +168,7 @@ async def test_agent_assignment_is_returned_only_when_control_plane_is_ready() -
     request.app.state.assistant_runtime_assignments = assignment_store
     request.app.state.agent_runtime_control = SimpleNamespace()
 
-    resolved = await assistant_api._session_runtime_assignment(
+    resolved = await session_runtime_assignment(
         request,
         user,
         "session-1",
@@ -182,7 +205,7 @@ async def test_session_history_appends_runtime_item_projection() -> None:
     )
     request.app.state.agent_thread_store = store
 
-    response = await assistant_api.get_session_history(
+    response = await session_routes.get_session_history(
         "session-1",
         limit=100,
         user=user,
@@ -194,6 +217,27 @@ async def test_session_history_appends_runtime_item_projection() -> None:
         ("user", "legacy"),
         ("assistant", "runtime answer"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_session_history_sanitizes_internal_failure_detail() -> None:
+    """History must stay a read projection and never leak storage internals."""
+    user = UserContext(user_id="user_1", tenant_id="tenant_1", is_authenticated=True)
+    session_manager = AsyncMock()
+    session_manager.get.side_effect = RuntimeError("connection string leaked")
+    request = _build_request(session_manager)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await session_routes.get_session_history(
+            "session-1",
+            limit=100,
+            user=user,
+            request=request,
+        )
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "Failed to get session history"
+    assert "connection string" not in str(exc_info.value.detail)
 
 
 @pytest.mark.asyncio
@@ -213,7 +257,7 @@ async def test_delete_session_tombstones_gateway_runtime_before_deleting_row() -
     control.cleanup_session.return_value = True
     request.app.state.agent_runtime_control = control
 
-    response = await assistant_api.delete_session("session-1", user, request)
+    response = await session_routes.delete_session("session-1", user, request)
 
     assert response == {"session_id": "session-1", "status": "deleted"}
     control.cleanup_session.assert_awaited_once_with(
@@ -245,7 +289,7 @@ async def test_delete_session_preserves_gateway_row_when_runtime_cleanup_fails(
     request.app.state.agent_runtime_control = control
 
     with pytest.raises(HTTPException) as error:
-        await assistant_api.delete_session("session-1", user, request)
+        await session_routes.delete_session("session-1", user, request)
 
     assert error.value.status_code == 500
     session_manager.delete.assert_not_awaited()
@@ -270,9 +314,11 @@ async def test_list_session_artifacts_returns_empty_when_schema_missing(
             del session_id, tenant_id
             raise asyncpg.UndefinedTableError('relation "assistant.artifacts" does not exist')
 
-    monkeypatch.setattr(assistant_api, "get_artifact_storage", lambda: BrokenArtifactStorage())
+    monkeypatch.setattr(
+        artifact_routes, "get_artifact_storage", lambda: BrokenArtifactStorage()
+    )
 
-    response = await assistant_api.list_session_artifacts(
+    response = await artifact_routes.list_session_artifacts(
         "session-1",
         _build_request(session_manager),
         user,
@@ -283,9 +329,10 @@ async def test_list_session_artifacts_returns_empty_when_schema_missing(
 
 
 @pytest.mark.asyncio
-async def test_list_session_artifacts_preserves_unexpected_storage_errors(
+async def test_list_session_artifacts_sanitizes_unexpected_storage_errors(
     monkeypatch: pytest.MonkeyPatch,
 ):
+    """ARC-01 deliverable 6: storage failures surface as 500 with a stable detail."""
     user = UserContext(user_id="user_1", tenant_id="tenant_1", is_authenticated=True)
     session = Session(
         session_id="session-1",
@@ -301,17 +348,20 @@ async def test_list_session_artifacts_preserves_unexpected_storage_errors(
             del session_id, tenant_id
             raise RuntimeError("storage offline")
 
-    monkeypatch.setattr(assistant_api, "get_artifact_storage", lambda: BrokenArtifactStorage())
+    monkeypatch.setattr(
+        artifact_routes, "get_artifact_storage", lambda: BrokenArtifactStorage()
+    )
 
     with pytest.raises(HTTPException) as exc_info:
-        await assistant_api.list_session_artifacts(
+        await artifact_routes.list_session_artifacts(
             "session-1",
             _build_request(session_manager),
             user,
         )
 
     assert exc_info.value.status_code == 500
-    assert exc_info.value.detail == "storage offline"
+    assert exc_info.value.detail == "Failed to list artifacts"
+    assert "storage offline" not in str(exc_info.value.detail)
 
 
 @pytest.mark.asyncio
@@ -328,11 +378,11 @@ async def test_create_artifact_rejects_foreign_session_before_writing(
     )
     artifact_storage = AsyncMock()
     monkeypatch.setattr(
-        assistant_api,
+        artifact_routes,
         "get_artifact_storage",
         lambda: artifact_storage,
     )
-    body = assistant_api.ArtifactCreateRequest(
+    body = ArtifactCreateRequest(
         session_id="foreign-session",
         type="document",
         format="txt",
@@ -342,7 +392,7 @@ async def test_create_artifact_rejects_foreign_session_before_writing(
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        await assistant_api.create_artifact(
+        await artifact_routes.create_artifact(
             body,
             _build_request(
                 session_manager,
@@ -361,9 +411,9 @@ async def test_create_artifact_rejects_foreign_session_before_writing(
 @pytest.mark.parametrize(
     ("handler", "args"),
     [
-        (assistant_api.get_artifact, ("artifact-1",)),
-        (assistant_api.download_artifact, ("artifact-1",)),
-        (assistant_api.delete_artifact, ("artifact-1",)),
+        (artifact_routes.get_artifact, ("artifact-1",)),
+        (artifact_routes.download_artifact, ("artifact-1",)),
+        (artifact_routes.delete_artifact, ("artifact-1",)),
     ],
 )
 async def test_artifact_lookup_returns_404_when_schema_missing(
@@ -379,13 +429,50 @@ async def test_artifact_lookup_returns_404_when_schema_missing(
             del artifact_id
             raise asyncpg.UndefinedTableError('relation "assistant.artifacts" does not exist')
 
-    monkeypatch.setattr(assistant_api, "get_artifact_storage", lambda: BrokenArtifactStorage())
+    monkeypatch.setattr(
+        artifact_routes, "get_artifact_storage", lambda: BrokenArtifactStorage()
+    )
 
     with pytest.raises(HTTPException) as exc_info:
         await handler(*args, _build_request(session_manager), user)
 
     assert exc_info.value.status_code == 404
     assert exc_info.value.detail == "Artifact not found"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler", "expected_detail"),
+    [
+        (artifact_routes.get_artifact, "Failed to get artifact"),
+        (artifact_routes.download_artifact, "Failed to download artifact"),
+        (artifact_routes.delete_artifact, "Failed to delete artifact"),
+    ],
+)
+async def test_artifact_storage_errors_are_sanitized_to_stable_detail(
+    handler,
+    expected_detail: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """ARC-01 deliverable 6: 500 detail never echoes the raw exception."""
+    user = UserContext(user_id="user_1", tenant_id="tenant_1", is_authenticated=True)
+    session_manager = AsyncMock()
+
+    class BrokenArtifactStorage:
+        async def get_artifact(self, artifact_id: str):
+            del artifact_id
+            raise RuntimeError("s3 bucket secret endpoint leaked")
+
+    monkeypatch.setattr(
+        artifact_routes, "get_artifact_storage", lambda: BrokenArtifactStorage()
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await handler("artifact-1", _build_request(session_manager), user)
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == expected_detail
+    assert "secret endpoint" not in str(exc_info.value.detail)
 
 
 def test_local_artifact_url_stays_behind_authenticated_http_route() -> None:
@@ -413,7 +500,7 @@ def test_local_artifact_url_stays_behind_authenticated_http_route() -> None:
     ],
 )
 def test_artifact_attachment_header_is_browser_safe(filename: str, expected: str) -> None:
-    assert assistant_api.attachment_content_disposition(filename) == expected
+    assert attachment_content_disposition(filename) == expected
 
 
 @pytest.mark.asyncio
@@ -443,12 +530,12 @@ async def test_download_artifact_streams_local_content_instead_of_file_redirect(
             return b"verified-result"
 
     monkeypatch.setattr(
-        assistant_api,
+        artifact_routes,
         "get_artifact_storage",
         lambda: LocalArtifactStorage(),
     )
 
-    response = await assistant_api.download_artifact(
+    response = await artifact_routes.download_artifact(
         artifact.artifact_id,
         _build_request(AsyncMock()),
         user,
@@ -482,10 +569,10 @@ async def test_cancel_task_interrupts_owning_agent_runtime_turn() -> None:
     control = AsyncMock()
     request.app.state.database = database
     request.app.state.agent_runtime_control = control
-    response = await assistant_api.cancel_task(
+    response = await run_routes.cancel_task(
         task_id=task_id,
         request=request,
-        body=assistant_api.TaskCancelRequest(reason=reason),
+        body=TaskCancelRequest(reason=reason),
         user=user,
     )
 

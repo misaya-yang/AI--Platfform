@@ -24,12 +24,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from ...core.auth.user_resolver import UserContext
+from ...services.assistant_entry.model_access import check_model_permission
+from ...services.assistant_entry.session_binding import ensure_agent_runtime_session
 from ..deps import enforce_rate_limit, get_user_context
 from ._agent_runtime_headers import reject_client_agent_forgery
-from .assistant import (
-    _check_model_permission,
-    _ensure_agent_runtime_session,
-)
 
 router = APIRouter(tags=["Responses"])
 logger = logging.getLogger(__name__)
@@ -537,7 +535,7 @@ async def create_response(
             error_type="server_error",
         )
     try:
-        await _check_model_permission(user, model, model_meta)
+        await check_model_permission(user, model, model_meta)
     except HTTPException as exc:
         if exc.status_code == 400:
             return _error(
@@ -660,7 +658,7 @@ async def create_response(
     if isinstance(idempotency, Response):
         return idempotency
     try:
-        await _ensure_agent_runtime_session(request, user, session_id)
+        await ensure_agent_runtime_session(request, user, session_id)
     except Exception as exc:
         await _abort_idempotent_response(idempotency)
         logger.error(

@@ -57,7 +57,7 @@ def test_public_responses_requires_runtime_for_authenticated_default_tenant(
     async def ensure_session(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(responses_route, "_ensure_agent_runtime_session", ensure_session)
+    monkeypatch.setattr(responses_route, "ensure_agent_runtime_session", ensure_session)
     class DefaultModelMeta:
         async def get_access_level(self, tenant_id: str, model_id: str) -> str | None:
             assert tenant_id == "default"
@@ -96,7 +96,7 @@ def test_public_responses_proxies_exact_body_and_preserves_idempotency_header(
     async def ensure_session(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(responses_route, "_ensure_agent_runtime_session", ensure_session)
+    monkeypatch.setattr(responses_route, "ensure_agent_runtime_session", ensure_session)
     payload = {"model": "qwen3.7-plus", "input": "hello", "store": False}
 
     with TestClient(_app(_user())) as client:
@@ -219,7 +219,7 @@ def test_public_responses_uses_agent_runtime_for_nonstream_and_stream(
     async def ensure_session(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(responses_route, "_ensure_agent_runtime_session", ensure_session)
+    monkeypatch.setattr(responses_route, "ensure_agent_runtime_session", ensure_session)
     with TestClient(app) as client:
         nonstream = client.post(
             "/v1/responses",
@@ -272,7 +272,7 @@ def test_public_responses_projects_function_tools_to_runtime_capability_selector
     async def ensure_session(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(responses_route, "_ensure_agent_runtime_session", ensure_session)
+    monkeypatch.setattr(responses_route, "ensure_agent_runtime_session", ensure_session)
     with TestClient(app) as client:
         response = client.post(
             "/v1/responses",
@@ -346,7 +346,7 @@ def test_public_responses_projects_runtime_tool_events_to_responses_sse(
     async def ensure_session(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(responses_route, "_ensure_agent_runtime_session", ensure_session)
+    monkeypatch.setattr(responses_route, "ensure_agent_runtime_session", ensure_session)
     with TestClient(app) as client:
         response = client.post(
             "/v1/responses",
@@ -367,7 +367,7 @@ def test_public_responses_rejects_unimplemented_store_semantics(
     async def ensure_session(*_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("store=true must fail before Runtime session creation")
 
-    monkeypatch.setattr(responses_route, "_ensure_agent_runtime_session", ensure_session)
+    monkeypatch.setattr(responses_route, "ensure_agent_runtime_session", ensure_session)
     with TestClient(_app(_user())) as client:
         response = client.post(
             "/v1/responses",
@@ -400,7 +400,7 @@ def test_public_responses_nonstream_idempotency_replays_without_second_turn(
     async def ensure_session(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(responses_route, "_ensure_agent_runtime_session", ensure_session)
+    monkeypatch.setattr(responses_route, "ensure_agent_runtime_session", ensure_session)
     headers = {"Idempotency-Key": "idem-1"}
     with TestClient(app) as client:
         first = client.post(
@@ -437,7 +437,7 @@ def test_public_responses_stream_without_terminal_fails_in_band(
     async def ensure_session(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(responses_route, "_ensure_agent_runtime_session", ensure_session)
+    monkeypatch.setattr(responses_route, "ensure_agent_runtime_session", ensure_session)
     with TestClient(app) as client:
         response = client.post(
             "/v1/responses",
@@ -467,7 +467,7 @@ def test_public_responses_runtime_error_releases_idempotency_key(
     async def ensure_session(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(responses_route, "_ensure_agent_runtime_session", ensure_session)
+    monkeypatch.setattr(responses_route, "ensure_agent_runtime_session", ensure_session)
     with TestClient(app) as client:
         first = client.post(
             "/v1/responses",

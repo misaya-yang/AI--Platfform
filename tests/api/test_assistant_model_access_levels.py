@@ -10,12 +10,12 @@ from pydantic import ValidationError
 from src.api import deps
 from src.api.schemas.assistant import AssistantChatRequest
 from src.api.v1 import assistant as assistant_routes
-from src.api.v1.assistant import (
-    _check_model_permission,
-    _effective_chat_model_id,
-    _user_can_access_model,
-)
 from src.core.auth.user_resolver import UserContext
+from src.services.assistant_entry.model_access import (
+    check_model_permission,
+    effective_chat_model_id,
+    user_can_access_model,
+)
 
 
 @pytest.mark.parametrize(
@@ -106,8 +106,8 @@ async def test_gateway_resolves_and_authorizes_omitted_default_model() -> None:
         tenant_id="tenant-1",
         is_authenticated=True,
     )
-    model_id = _effective_chat_model_id(request, None)
-    await _check_model_permission(
+    model_id = effective_chat_model_id(request, None)
+    await check_model_permission(
         user,
         model_id,
         SimpleNamespace(get_access_level=get_access_level),
@@ -132,9 +132,9 @@ async def test_gateway_denies_omitted_restricted_default_model_before_runtime() 
         tier="normal",
         is_authenticated=True,
     )
-    model_id = _effective_chat_model_id(request, None)
+    model_id = effective_chat_model_id(request, None)
     with pytest.raises(HTTPException) as exc:
-        await _check_model_permission(
+        await check_model_permission(
             user,
             model_id,
             SimpleNamespace(get_access_level=get_access_level),
@@ -167,7 +167,7 @@ def test_user_model_access_preserves_known_access_level_rules(
         is_authenticated=True,
     )
 
-    assert _user_can_access_model(user, access_level) is expected
+    assert user_can_access_model(user, access_level) is expected
 
 
 @pytest.mark.parametrize("tier", ["normal", "admin"])
@@ -179,7 +179,7 @@ def test_user_model_access_rejects_unknown_access_level_for_every_tier(tier: str
         is_authenticated=True,
     )
 
-    assert _user_can_access_model(user, "corrupt") is False
+    assert user_can_access_model(user, "corrupt") is False
 
 
 @pytest.mark.asyncio
@@ -198,7 +198,7 @@ async def test_model_permission_rejects_dirty_database_access_level() -> None:
     model_meta.get_access_level = get_access_level
 
     with pytest.raises(HTTPException) as exc_info:
-        await _check_model_permission(user, "model-1", model_meta)
+        await check_model_permission(user, "model-1", model_meta)
 
     assert exc_info.value.status_code == 403
 
