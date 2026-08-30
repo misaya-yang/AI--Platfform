@@ -1,5 +1,7 @@
 {
   "compilerOptions": {
+    // baseUrl is deprecated in TS 6.0; keep it (paths aliases) until TS 7 forces a move.
+    "ignoreDeprecations": "6.0",
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
     "target": "ES2022",
     "useDefineForClassFields": true,
@@ -28,5 +30,8 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  // *.test.ts files run under `node --test` (repo convention), not tsc/vite; their
+  // node:* imports intentionally lack types here. Keep them out of the app project.
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
 }
