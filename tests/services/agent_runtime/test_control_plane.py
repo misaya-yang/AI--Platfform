@@ -70,10 +70,13 @@ def test_child_runtime_events_project_to_subagent_lifecycle() -> None:
 
     parent = {"event_type": "run_finished", "data": {"run_id": parent_turn_id}}
     assert _project_child_runtime_event(parent, parent_turn_id) is parent
-    assert _project_child_runtime_event(
-        {"event_type": "thinking_delta", "data": {"run_id": "child-turn"}},
-        parent_turn_id,
-    ) is None
+    assert (
+        _project_child_runtime_event(
+            {"event_type": "thinking_delta", "data": {"run_id": "child-turn"}},
+            parent_turn_id,
+        )
+        is None
+    )
 
 
 class _Database:
@@ -186,9 +189,12 @@ def test_builtin_empty_capabilities_inherit_platform_catalog() -> None:
 
 
 def test_published_empty_capabilities_remain_closed() -> None:
-    assert AgentRuntimeControlPlane._snapshot_capability_allowlist(
-        {"agent_spec": {"channel": "api"}, "capabilities": []}
-    ) == []
+    assert (
+        AgentRuntimeControlPlane._snapshot_capability_allowlist(
+            {"agent_spec": {"channel": "api"}, "capabilities": []}
+        )
+        == []
+    )
 
 
 def test_responses_tool_controls_are_preserved_in_runtime_readonly_snapshot() -> None:
@@ -363,6 +369,7 @@ def test_mcp_snapshot_preserves_exact_runtime_principal_binding() -> None:
         "channel": "api",
     }
 
+
 def test_runtime_uses_native_multi_agent_and_hides_legacy_loop_alias() -> None:
     config = AgentRuntimeControlPlane._runtime_model_config(
         SimpleNamespace(model_plane_base_url="http://gateway.test/model-plane"),
@@ -473,9 +480,7 @@ def test_attachment_descriptor_is_turn_scoped_not_thread_fingerprint_state() -> 
         references=["blob-a"],
     )
     assert AgentRuntimeControlPlane._dynamic_tool_fingerprint({}) == (
-        AgentRuntimeControlPlane._dynamic_tool_fingerprint(
-            {"attachment_tools": [descriptor]}
-        )
+        AgentRuntimeControlPlane._dynamic_tool_fingerprint({"attachment_tools": [descriptor]})
     )
 
 
@@ -569,6 +574,30 @@ async def test_empty_developer_instructions_use_stable_generic_default() -> None
     finally:
         await client.aclose()
     assert captured["developerInstructions"] == GENERIC_AGENT_INSTRUCTIONS_V1
+
+
+@pytest.mark.asyncio
+async def test_control_plane_default_model_call_budget_has_retry_headroom(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AI_PLATFORM_AGENT_RUNTIME_MAX_MODEL_CALLS_PER_TURN", raising=False)
+    client = httpx.AsyncClient()
+    plane = AgentRuntimeControlPlane(
+        database=_Database(uuid.uuid4()),
+        model_service=_ModelService(),
+        provider_service=_ProviderService(),
+        assignment_store=_AssignmentStore(),
+        lease_signer=RuntimeModelLeaseSigner("x" * 32),
+        runtime_url="http://runtime.test",
+        runtime_internal_token="runtime-token",
+        model_plane_base_url="http://gateway.test/internal/v1/agent-model-plane",
+        kernel_revision="kernel-1",
+        http_client=client,
+    )
+    try:
+        assert plane.max_model_calls == 12
+    finally:
+        await client.aclose()
 
 
 @pytest.mark.asyncio
@@ -677,7 +706,9 @@ async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() ->
     assert captured["requests"][0][1]["baseInstructions"]
     assert captured["requests"][0][1]["developerInstructions"]
     assert database.issued_snapshot is not None
-    assert [item["kind"] for item in database.issued_snapshot["readonly_capabilities"]["items"]] == [
+    assert [
+        item["kind"] for item in database.issued_snapshot["readonly_capabilities"]["items"]
+    ] == [
         "knowledge",
         "attachment",
         "context",
@@ -809,10 +840,7 @@ async def test_catalog_is_fetched_before_first_thread_and_dynamic_tools_are_pinn
     assert thread_request["start"]["approvalPolicy"] == "on-request"
     assert thread_request["start"]["dynamicTools"][0]["name"] == "search_knowledge_base"
     assert len(thread_request["start"]["dynamicTools"]) == 1
-    assert all(
-        tool["name"] != "tool_search"
-        for tool in thread_request["start"]["dynamicTools"]
-    )
+    assert all(tool["name"] != "tool_search" for tool in thread_request["start"]["dynamicTools"])
     assert thread_request["start"]["dynamicTools"][0]["inputSchema"] == {
         "type": "object",
         "properties": {},
@@ -925,9 +953,7 @@ async def test_generic_assistant_exposes_worker_writes_only_when_worker_is_ready
             "schema_hash": "sha256:" + "c" * 64,
         }
     ]
-    assert [tool["name"] for tool in plane._dynamic_tools(readonly)] == [
-        "generate_document"
-    ]
+    assert [tool["name"] for tool in plane._dynamic_tools(readonly)] == ["generate_document"]
 
 
 @pytest.mark.asyncio
@@ -1364,9 +1390,7 @@ async def test_dynamic_tool_catalog_does_not_depend_on_turn_scoped_bindings() ->
             kernel_revision="kernel-1",
             http_client=client,
         )
-        plane.capability_plane_url = (
-            "http://capability.test/internal/v1/capabilities"
-        )
+        plane.capability_plane_url = "http://capability.test/internal/v1/capabilities"
         try:
             readonly = plane._readonly_capability_payload(
                 readonly_input, tenant_id="tenant-a", capability_revision=7

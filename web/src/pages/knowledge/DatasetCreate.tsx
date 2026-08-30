@@ -21,9 +21,12 @@ import { DatasetCreateSourcesStep } from "@/pages/knowledge/create/DatasetCreate
 import {
   EMBEDDING_MODELS,
   MAX_FILE_SIZE,
+  MAX_FILE_SIZE_MB,
   MAX_NAME_LENGTH,
   SUPPORTED_FILE_EXTENSIONS,
   URL_PATTERN,
+  getSourceUploadError,
+  listFailedSources,
   type KBType,
   type PendingFile,
   type PendingUrl,
@@ -64,6 +67,12 @@ export default function DatasetCreatePage() {
   const [scoreThreshold, setScoreThreshold] = useState(DEFAULT_RETRIEVAL_CONFIG.score_threshold);
   const [maxRecall, setMaxRecall] = useState(DEFAULT_RETRIEVAL_CONFIG.top_k);
 
+  const failedSources = listFailedSources(
+    pendingFiles,
+    pendingUrls,
+    t("knowledge.create.uploadFailed")
+  );
+
   const handleChunkingModeSelect = useCallback((mode: ChunkingMode) => {
     setChunkingMode(mode);
   }, []);
@@ -80,7 +89,7 @@ export default function DatasetCreatePage() {
           return;
         }
         const maxSize = MAX_FILE_SIZE;
-        const maxSizeLabel = "100MB";
+        const maxSizeLabel = `${MAX_FILE_SIZE_MB}MB`;
 
         if (file.size > maxSize) {
           errors.push(
@@ -221,10 +230,10 @@ export default function DatasetCreatePage() {
                 ? {
                     ...file,
                     status: "error",
-                    error:
-                      uploadError instanceof Error
-                        ? uploadError.message
-                        : t("knowledge.create.uploadFailed"),
+                    error: getSourceUploadError(uploadError, {
+                      fallback: t("knowledge.create.uploadFailed"),
+                      requestTooLarge: t("knowledge.create.uploadTooLarge"),
+                    }),
                   }
                 : file
             )
@@ -256,10 +265,10 @@ export default function DatasetCreatePage() {
                 ? {
                     ...url,
                     status: "error",
-                    error:
-                      fetchError instanceof Error
-                        ? fetchError.message
-                        : t("knowledge.create.fetchFailed"),
+                    error: getSourceUploadError(fetchError, {
+                      fallback: t("knowledge.create.fetchFailed"),
+                      requestTooLarge: t("knowledge.create.uploadTooLarge"),
+                    }),
                   }
                 : url
             )
@@ -268,6 +277,7 @@ export default function DatasetCreatePage() {
       }
 
       if (failedUploads > 0) {
+        setStep(2);
         setError(
           t(
             "knowledge.create.partialUploadFailed",
@@ -392,13 +402,27 @@ export default function DatasetCreatePage() {
 
       <div className="max-w-4xl mx-auto px-4 py-6 sm:px-6 sm:py-8">
         {error && (
-          <div className="mb-6 p-4 bg-red-500/10 dark:bg-red-500/15 border border-red-500/20 rounded-lg flex items-start gap-3">
+          <div
+            className="mb-6 p-4 bg-red-500/10 dark:bg-red-500/15 border border-red-500/20 rounded-lg flex items-start gap-3"
+            role="alert"
+          >
             <AlertCircle className="h-5 w-5 text-red-500 shrink-0 mt-0.5" />
-            <div>
+            <div className="min-w-0">
               <p className="text-sm font-medium text-red-800 dark:text-red-300">
-                {t("knowledge.create.createFailed")}
+                {createdDatasetId
+                  ? t("knowledge.create.partialUploadTitle")
+                  : t("knowledge.create.createFailed")}
               </p>
               <p className="text-sm text-red-600 dark:text-red-400 mt-1">{error}</p>
+              {failedSources.length > 0 && (
+                <ul className="mt-3 space-y-1 text-sm text-red-700 dark:text-red-300">
+                  {failedSources.map((source) => (
+                    <li key={source.key} className="break-words">
+                      <span className="font-medium">{source.name}</span>: {source.error}
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           </div>
         )}
@@ -472,7 +496,12 @@ export default function DatasetCreatePage() {
             <Button variant="outline" onClick={() => navigate("/knowledge")}>
               {t("knowledge.create.cancel")}
             </Button>
-            {step < 3 ? (
+            {step < 3 && createdDatasetId ? (
+              <Button variant="primary" onClick={handleSubmit} disabled={isSubmitting}>
+                {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                {t("knowledge.create.retryFailedSources")}
+              </Button>
+            ) : step < 3 ? (
               <Button variant="primary" onClick={handleNextStep}>
                 {t("knowledge.create.next")}
                 <ArrowRight className="ml-2 h-4 w-4" />

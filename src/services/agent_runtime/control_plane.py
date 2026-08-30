@@ -120,20 +120,16 @@ class AgentRuntimeControlPlane:
             1,
             min(
                 int(
-                    os.getenv(
-                        "AI_PLATFORM_AGENT_RUNTIME_MAX_MODEL_CALLS_PER_TURN", "8"
-                    )
+                    # Leave room for one schema-repair + final response after
+                    # a bounded multi-tool research turn.
+                    os.getenv("AI_PLATFORM_AGENT_RUNTIME_MAX_MODEL_CALLS_PER_TURN", "12")
                 ),
                 128,
             ),
         )
         self.max_cost_microusd = max(
             1,
-            int(
-                os.getenv(
-                    "AI_PLATFORM_AGENT_RUNTIME_MAX_COST_MICROUSD_PER_TURN", "5000000"
-                )
-            ),
+            int(os.getenv("AI_PLATFORM_AGENT_RUNTIME_MAX_COST_MICROUSD_PER_TURN", "5000000")),
         )
         self._thread_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
         self._thread_lock_users: dict[asyncio.Lock, int] = {}
@@ -179,17 +175,13 @@ class AgentRuntimeControlPlane:
     async def _existing_thread(
         self, tenant_id: str, user_id: str, session_id: str
     ) -> dict[str, Any] | None:
-        return await thread_lifecycle.existing_thread(
-            self, tenant_id, user_id, session_id
-        )
+        return await thread_lifecycle.existing_thread(self, tenant_id, user_id, session_id)
 
     @staticmethod
     def _assert_dynamic_tool_fingerprint(
         existing: dict[str, Any], requested_fingerprint: str
     ) -> None:
-        thread_lifecycle.assert_dynamic_tool_fingerprint(
-            existing, requested_fingerprint
-        )
+        thread_lifecycle.assert_dynamic_tool_fingerprint(existing, requested_fingerprint)
 
     async def _bind_dynamic_tool_fingerprint(
         self,
@@ -550,9 +542,7 @@ class AgentRuntimeControlPlane:
     async def _complete_run(self, run_id: uuid.UUID, terminal_status: str) -> None:
         await run_ledger.complete_run(self, run_id, terminal_status)
 
-    async def _fail_run(
-        self, run_id: uuid.UUID, snapshot_id: uuid.UUID, reason: str
-    ) -> None:
+    async def _fail_run(self, run_id: uuid.UUID, snapshot_id: uuid.UUID, reason: str) -> None:
         await run_ledger.fail_run(self, run_id, snapshot_id, reason)
 
 

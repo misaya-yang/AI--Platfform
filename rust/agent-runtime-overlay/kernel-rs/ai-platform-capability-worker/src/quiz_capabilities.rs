@@ -379,7 +379,7 @@ fn validate_arguments(arguments: &Value) -> Result<ValidatedQuiz, QuizPersistenc
     }
 
     let mut questions = Vec::with_capacity(parsed.questions.len());
-    for (index, question) in parsed.questions.into_iter().enumerate() {
+    for (index, mut question) in parsed.questions.into_iter().enumerate() {
         if question.question_num != i32::try_from(index + 1).unwrap_or(i32::MAX)
             || question.question_text.trim().is_empty()
             || question.question_text.chars().count() > MAX_QUESTION_TEXT_CHARS
@@ -393,6 +393,14 @@ fn validate_arguments(arguments: &Value) -> Result<ValidatedQuiz, QuizPersistenc
             "mc_single" | "mc_multi" | "true_false"
         ) {
             return Err(QuizPersistenceError::Failed);
+        }
+        // Real models commonly materialize a true/false question as the
+        // visible A=Correct/B=Incorrect pair even though the canonical quiz
+        // record stores only ["true"]/["false"].  The catalog schema permits
+        // options here, so normalize this one unambiguous representation
+        // instead of failing an otherwise valid, user-approved quiz.
+        if question_type == "true_false" && is_true_false_option_pair(&question.options) {
+            question.options.clear();
         }
         let mut labels = Vec::with_capacity(question.options.len());
         for option in &question.options {
@@ -491,6 +499,16 @@ fn has_duplicates(values: &[String]) -> bool {
         .any(|(index, value)| values[..index].contains(value))
 }
 
+fn is_true_false_option_pair(options: &[QuizOption]) -> bool {
+    if options.len() != 2 || options[0].label != "A" || options[1].label != "B" {
+        return false;
+    }
+    let truthy = options[0].text.trim().to_ascii_lowercase();
+    let falsy = options[1].text.trim().to_ascii_lowercase();
+    matches!(truthy.as_str(), "true" | "correct" | "正确" | "对" | "是")
+        && matches!(falsy.as_str(), "false" | "incorrect" | "错误" | "错" | "否")
+}
+
 fn stored_receipt(value: Option<Value>) -> Option<QuizPersistenceResult> {
     let value = value?;
     if value.get("schema_version").and_then(Value::as_str)
@@ -566,6 +584,13 @@ mod tests {
         true_false["questions"][0]["correct_answer"] = json!(["TRUE"]);
         let parsed = validate_arguments(&true_false).expect("true/false fixture");
         assert_eq!(parsed.questions[0].correct_answer, vec!["true"]);
+
+        true_false["questions"][0]["options"] = json!([
+            {"label": "A", "text": "正确"},
+            {"label": "B", "text": "错误"}
+        ]);
+        let parsed = validate_arguments(&true_false).expect("visible true/false options");
+        assert!(parsed.questions[0].options.is_empty());
     }
 
     #[test]

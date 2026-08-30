@@ -77,6 +77,72 @@ export type KBType = "document" | "data";
 export type UseCase = "basic_qa" | "rich_text_response";
 
 export const MAX_NAME_LENGTH = 100;
-export const MAX_FILE_SIZE = 100 * 1024 * 1024;
+export const MAX_FILE_SIZE_MB = 16;
+export const MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024;
 export const SUPPORTED_FILE_EXTENSIONS = /\.(pdf|docx|txt|md|html)$/i;
 export const URL_PATTERN = /^https?:\/\/([\w-]+\.)+[\w-]+(\/[\w\-./?%&=#]*)?$/i;
+
+interface UploadErrorResponse {
+  status?: number;
+  data?: unknown;
+}
+
+interface UploadErrorEnvelope {
+  response?: UploadErrorResponse;
+}
+
+export interface FailedSourceSummary {
+  key: string;
+  name: string;
+  error: string;
+}
+
+function responseDetail(data: unknown): string | null {
+  if (typeof data === "string") return data.trim() || null;
+  if (!data || typeof data !== "object") return null;
+
+  const detail = (data as { detail?: unknown }).detail;
+  if (typeof detail === "string") return detail.trim() || null;
+  return null;
+}
+
+export function getSourceUploadError(
+  error: unknown,
+  messages: { fallback: string; requestTooLarge: string }
+): string {
+  const response =
+    error && typeof error === "object"
+      ? (error as UploadErrorEnvelope).response
+      : undefined;
+
+  if (response?.status === 413) return messages.requestTooLarge;
+
+  const detail = responseDetail(response?.data);
+  if (detail) return detail;
+  if (error instanceof Error && error.message.trim()) return error.message.trim();
+  if (typeof error === "string" && error.trim()) return error.trim();
+  return messages.fallback;
+}
+
+export function listFailedSources(
+  files: PendingFile[],
+  urls: PendingUrl[],
+  fallback: string
+): FailedSourceSummary[] {
+  return [
+    ...files
+      .filter((file) => file.status === "error")
+      .map((file) => ({
+        key: `file:${file.id}`,
+        name: file.name,
+        error: file.error || fallback,
+      })),
+    ...urls
+      .filter((url) => url.status === "error")
+      .map((url) => ({
+        key: `url:${url.id}`,
+        name: url.title || url.url,
+        error: url.error || fallback,
+      })),
+  ];
+}

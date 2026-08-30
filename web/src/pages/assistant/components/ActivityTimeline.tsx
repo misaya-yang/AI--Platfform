@@ -3,8 +3,8 @@
  *
  * Ported from chat.jsx `ActivityBody`: a continuous 1px rail on the
  * left, with absolute-positioned 11px circle markers at each step.
- * The running step (last step while `running`) is accented; completed
- * steps carry a small check glyph.
+ * Each row derives its state from its own lifecycle. This keeps tool markers
+ * correct when the separately-streaming reasoning row is rendered last.
  *
  * Step rendering delegates to `TimelineStep`.
  */
@@ -48,8 +48,6 @@ export function ActivityTimeline({
     );
   }
 
-  const lastIndex = steps.length - 1;
-
   return (
     <div
       className={className}
@@ -66,14 +64,17 @@ export function ActivityTimeline({
           background: T.border,
         }}
       />
-      {steps.map((step, idx) => {
+      {steps.map((step) => {
         const stepStatus =
-          step.kind === "tool" ? step.status : "completed";
-        const isLast = idx === lastIndex;
-        const isRunning = !!running && isLast && stepStatus !== "error";
+          step.kind === "tool"
+            ? step.status
+            : step.streaming
+              ? "running"
+              : "completed";
+        const isRunning = !!running && stepStatus === "running";
         const isCompleted =
           stepStatus === "completed" ||
-          (stepStatus === "running" && !isRunning); // earlier running becomes done when new step arrives
+          (stepStatus === "running" && !isRunning);
         const isError = stepStatus === "error";
 
         return (

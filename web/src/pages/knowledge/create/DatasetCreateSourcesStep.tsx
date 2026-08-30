@@ -96,14 +96,16 @@ export function DatasetCreateSourcesStep({
           {pendingFiles.map((pendingFile) => (
             <div
               key={pendingFile.id}
-              className="flex items-center justify-between p-3 bg-card rounded-lg border"
+              className="flex items-start justify-between gap-3 p-3 bg-card rounded-lg border"
             >
-              <div className="flex items-center gap-3">
+              <div className="flex min-w-0 items-center gap-3">
                 <div className="p-2 bg-red-500/10 dark:bg-red-500/15 rounded">
                   <FileText className="h-5 w-5 text-red-500" />
                 </div>
                 <div>
-                  <p className="text-sm font-medium text-foreground">{pendingFile.name}</p>
+                  <p className="break-words text-sm font-medium text-foreground">
+                    {pendingFile.name}
+                  </p>
                   <p className="text-xs text-muted-foreground">
                     {(pendingFile.size / 1024).toFixed(1)} KB
                   </p>
@@ -117,7 +119,9 @@ export function DatasetCreateSourcesStep({
                   <Check className="h-4 w-4 text-green-500" />
                 )}
                 {pendingFile.status === "error" && (
-                  <span className="text-xs text-red-500">{pendingFile.error}</span>
+                  <span className="max-w-xs break-words text-right text-xs text-red-500">
+                    {pendingFile.error}
+                  </span>
                 )}
                 {pendingFile.status === "pending" && (
                   <button
@@ -165,7 +169,7 @@ export function DatasetCreateSourcesStep({
           {pendingUrls.map((pendingUrl) => (
             <div
               key={pendingUrl.id}
-              className="flex items-center justify-between p-3 bg-card rounded-lg border"
+              className="flex items-start justify-between gap-3 p-3 bg-card rounded-lg border"
             >
               <div className="flex items-center gap-3">
                 <div className="p-2 bg-primary/5 rounded">
@@ -186,7 +190,9 @@ export function DatasetCreateSourcesStep({
                   <Check className="h-4 w-4 text-green-500" />
                 )}
                 {pendingUrl.status === "error" && (
-                  <span className="text-xs text-red-500">{pendingUrl.error}</span>
+                  <span className="max-w-xs break-words text-right text-xs text-red-500">
+                    {pendingUrl.error}
+                  </span>
                 )}
                 {pendingUrl.status === "pending" && (
                   <button

@@ -14,6 +14,7 @@ import type {
   WebSearchResult,
 } from "../types";
 import { safeSubAgentText } from "../subagentSafety";
+import { appendReasoningAfterActivity } from "./activityTimelineOrder";
 import type {
   TimelineIcon,
   TimelineSource,
@@ -428,27 +429,28 @@ export function buildTimeline(
   const steps: TimelineStepData[] = [];
   const processSummary = message.processSummary;
 
-  // 1. Thinking (single blob)
+  // Keep reasoning as one stable row below execution activity. Streaming
+  // tokens then grow only this row instead of pushing every tool card down.
   const thinkingBody =
     (message.streamingThinkingContent && message.streamingThinkingContent.trim()) ||
     (message.thinkingContent && message.thinkingContent.trim()) ||
     "";
-
-  if (thinkingBody) {
-    const isStreamingThinking =
-      !!message.isThinkingStreaming ||
-      (!!message.streamingThinkingContent && !message.thinkingContent);
-    steps.push({
+  const isStreamingThinking =
+    !!message.isThinkingStreaming ||
+    (!!message.streamingThinkingContent && !message.thinkingContent);
+  const thinkingStep: TimelineStepData | undefined = thinkingBody
+    ? {
       kind: "thinking",
       id: `thinking-${message.id}`,
       title: isStreamingThinking
         ? t("playground.activity.thinking", { defaultValue: "Thinking" })
         : t("playground.activity.thought", { defaultValue: "Thought process" }),
       body: thinkingBody,
-    });
-  }
+      streaming: isStreamingThinking,
+    }
+    : undefined;
 
-  // 2. Process-summary steps from AG-UI / working-memory events.
+  // 1. Process-summary steps from AG-UI / working-memory events.
   for (const step of processSummary?.steps ?? []) {
     const title = step.title?.trim() || step.id;
     if (!title) continue;
@@ -463,7 +465,7 @@ export function buildTimeline(
     });
   }
 
-  // 3. Map tool_call_id → result
+  // 2. Map tool_call_id → result
   const resultMap = new Map<string, ToolResult>();
   for (const r of message.toolResults ?? []) {
     if (r?.tool_call_id) resultMap.set(r.tool_call_id, r);
@@ -473,7 +475,7 @@ export function buildTimeline(
     processToolMap.set(tool.id, tool);
   }
 
-  // 4. Tool steps
+  // 3. Tool steps
   const toolCalls = message.toolCalls ?? [];
   const renderedToolIds = new Set<string>();
   let totalToolMs = 0;
@@ -583,7 +585,7 @@ export function buildTimeline(
     });
   }
 
-  // 5. Context/memory state, including context compaction.
+  // 4. Context/memory state, including context compaction.
   const contextBody = processSummary ? buildContextStateBody(t, processSummary) : "";
   if (contextBody) {
     steps.push({
@@ -633,7 +635,7 @@ export function buildTimeline(
     }
   }
 
-  // 6. Historical fallback: no toolCalls but we have searchStatus
+  // 5. Historical fallback: no toolCalls but we have searchStatus
   if (toolCalls.length === 0 && (processSummary?.tools.length ?? 0) === 0 && message.searchStatus && message.searchStatus.length > 0) {
     for (const [idx, s] of message.searchStatus.entries()) {
       const item = s as SearchStatusItem;
@@ -703,6 +705,10 @@ export function buildTimeline(
       });
     }
   }
+
+  // 6. Reasoning is deliberately last. Its stable ID lets React update the
+  // same row as tokens arrive without remounting or reordering tool activity.
+  appendReasoningAfterActivity(steps, thinkingStep);
 
   const thinkingMs = asNumber(message.processSummary?.thinkingDurationMs) ?? 0;
   const totalDurationMs =

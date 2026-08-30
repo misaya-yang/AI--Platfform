@@ -44,6 +44,7 @@ export type TimelineStepData =
       id: string;
       title: string;
       body: string;
+      streaming?: boolean;
       startedAt?: number;
     }
   | {

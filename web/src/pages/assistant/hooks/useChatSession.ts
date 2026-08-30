@@ -51,6 +51,7 @@ import {
   shouldBlockDuringRunRestore,
 } from "@/features/chat/sessionRestoreWindow";
 import { isExpectedApprovalRejection } from "@/features/chat/runtimeV2State";
+import { mergeKnowledgeContexts } from "@/features/chat/knowledgeContexts";
 import { resolveArtifactIdsByMessageIndex } from "@/features/chat/sessionArtifactHydration";
 import {
   createStreamTerminalLatch,
@@ -1484,7 +1485,10 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     let content = "";
     let accumulatedThinkingContent = "";
     let thinkingActivityStarted = false;
-    const contexts: RetrievedContext[] = [];
+    let contexts: RetrievedContext[] = [];
+    const datasetNames = Object.fromEntries(
+      datasets.map((dataset) => [dataset.dataset_id, dataset.name]),
+    );
     let webSearchResults: WebSearchResult[] = [];
     let usage: any = {};
     let durationMs: number | undefined;
@@ -1979,13 +1983,14 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
           }
           
           case "context_retrieved":
-            // KB 检索完成不计入 TTFT - 这是后台预处理阶段
-            const ctxData = event.data as RetrievedContext;
-            // Ensure chunks array exists to prevent undefined access
-            if (ctxData && !ctxData.chunks) {
-              ctxData.chunks = [];
-            }
-            contexts.push(ctxData);
+            // Runtime emits one event per search call. Aggregate by the
+            // selected dataset identity instead of counting calls as KBs.
+            contexts = mergeKnowledgeContexts(
+              contexts,
+              event.data,
+              selectedDatasets,
+              datasetNames,
+            );
             const totalResults = contexts.reduce((sum, c) => sum + (c.chunks?.length || 0), 0);
             const totalDuration = contexts.reduce((sum, c) => sum + (c.took_ms || 0), 0);
             updateSearchStatus("kb", { state: "completed", resultCount: totalResults, durationMs: totalDuration });

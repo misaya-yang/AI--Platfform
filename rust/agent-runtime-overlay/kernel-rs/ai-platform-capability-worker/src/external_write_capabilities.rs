@@ -616,7 +616,8 @@ impl QuizArguments {
                     }
                 }
                 "true_false" => {
-                    if !question.options.is_empty()
+                    if !(question.options.is_empty()
+                        || is_true_false_option_pair(&question.options))
                         || question.correct_answer.len() != 1
                         || !matches!(question.correct_answer[0].as_str(), "true" | "false")
                     {
@@ -628,6 +629,16 @@ impl QuizArguments {
         }
         Ok(())
     }
+}
+
+fn is_true_false_option_pair(options: &[QuizOption]) -> bool {
+    if options.len() != 2 || options[0].label != "A" || options[1].label != "B" {
+        return false;
+    }
+    let truthy = options[0].text.trim().to_ascii_lowercase();
+    let falsy = options[1].text.trim().to_ascii_lowercase();
+    matches!(truthy.as_str(), "true" | "correct" | "正确" | "对" | "是")
+        && matches!(falsy.as_str(), "false" | "incorrect" | "错误" | "错" | "否")
 }
 
 #[cfg(test)]
@@ -859,6 +870,15 @@ mod tests {
             }]
         });
         assert!(validate_arguments("generate_quiz", &quiz).is_ok());
+        let true_false = serde_json::json!({
+            "title":"Basics",
+            "questions":[{
+                "question_num":1,"question_type":"true_false","question_text":"Agents use tools.",
+                "options":[{"label":"A","text":"正确"},{"label":"B","text":"错误"}],
+                "correct_answer":["true"]
+            }]
+        });
+        assert!(validate_arguments("generate_quiz", &true_false).is_ok());
         assert!(
             validate_arguments(
                 "generate_quiz",
