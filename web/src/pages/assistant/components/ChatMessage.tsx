@@ -535,7 +535,6 @@ export const ChatMessage = memo(function ChatMessage({
                 <StreamOutput
                   text={message.content}
                   isStreaming={!!message.isStreaming}
-                  id={`msg-${message.id}`}
                 />
               </Suspense>
             </div>

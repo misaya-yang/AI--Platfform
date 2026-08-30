@@ -75,7 +75,8 @@ async function bootstrap() {
     <StrictMode>
       <RootErrorBoundary>
         <QueryClientProvider client={queryClient}>
-          <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+          {/* v7: the old v7_startTransition / v7_relativeSplatPath future flags are now default behavior. */}
+          <BrowserRouter>
             <App />
           </BrowserRouter>
         </QueryClientProvider>

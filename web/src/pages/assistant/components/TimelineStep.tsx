@@ -280,7 +280,7 @@ export function TimelineStep({
                       style={{
                         fontFamily: ui.mono,
                         fontSize: "0.9em",
-                        background: T.surfaceSoft,
+                        background: T.bgSoft,
                         padding: "1px 4px",
                         borderRadius: 3,
                       }}

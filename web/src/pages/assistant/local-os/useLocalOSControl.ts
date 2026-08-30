@@ -223,7 +223,7 @@ function activeAt(expiresAt: string | undefined, now: number): boolean {
 
 function sessionGrantMatches(
   grantSessionId: string | undefined,
-  activeSessionId: string | null,
+  activeSessionId: string | null | undefined,
 ): boolean {
   return !grantSessionId || grantSessionId === activeSessionId;
 }
@@ -231,7 +231,7 @@ function sessionGrantMatches(
 export function evaluateLocalOSEligibility(
   model: LocalOSControlSurfaceModel,
   loadState: LocalOSLoadState,
-  activeSessionId: string | null,
+  activeSessionId: string | null | undefined,
   binding?: LocalOSSessionBinding,
   now = Date.now(),
 ): LocalOSEligibility {
@@ -347,7 +347,7 @@ export function useLocalOSControl(): LocalOSControlState {
   const [pairingExpiresAt, setPairingExpiresAt] = useState<string>();
   const [sessionOptInRequested, setSessionOptInRequested] = useState(false);
   const [sessionBinding, setSessionBinding] = useState<LocalOSSessionBinding>();
-  const selectedDeviceRef = useRef<string>();
+  const selectedDeviceRef = useRef<string | undefined>(undefined);
   const requestSequenceRef = useRef(0);
   const modelRef = useRef(model);
   const loadStateRef = useRef(loadState);

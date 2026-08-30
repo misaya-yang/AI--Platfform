@@ -219,7 +219,7 @@ export function TraceExplorerShell({
           ]}
         />
         <Tag className="eval-retention-tag" icon={<TimerReset size={13} />}>
-          {dashboard?.latest_gate_status?.status || t("eval.workbench.context.last7Days")}
+          {String(dashboard?.latest_gate_status?.status || "") || t("eval.workbench.context.last7Days")}
         </Tag>
       </div>
 

@@ -127,11 +127,13 @@ export function initInteractionTelemetry() {
     }
   });
 
+  // `durationThreshold` is part of the Event Timing API observe() options but is
+  // missing from TypeScript's PerformanceObserverInit, hence the assertion.
   observer.observe({
     type: "event",
     buffered: true,
     durationThreshold: 16,
-  });
+  } as PerformanceObserverInit);
 }
 
 export function trackChatShortcut(

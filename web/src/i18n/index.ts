@@ -84,7 +84,6 @@ export function initializeI18n(): Promise<typeof i18n> {
         fallbackLng: DEFAULT_LOCALE,
         supportedLngs: [...APP_LOCALES],
         debug: false,
-        showSupportNotice: false,
         nonExplicitSupportedLngs: false,
         load: "currentOnly",
         cleanCode: true,

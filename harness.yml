@@ -142,73 +142,359 @@ commands:
   sdk_sse_contract:
     make: sdk-sse-contract
     purpose: Verify the shared Python, CLI, Java, and Dart SSE envelope contract.
+  affected_gates:
+    make: affected-gates
+    purpose: Map a BASE_SHA diff onto required gates; unmatched changed paths fail closed.
+  architecture_boundary_gate:
+    make: architecture-boundary-gate
+    purpose: Static import boundary between gateway/apps/core/contracts zones.
+  verify_openapi_contract:
+    make: verify-openapi-contract
+    purpose: Offline in-process OpenAPI contract gate — no live stack, never skips.
+  live_openapi_contract_gate:
+    make: live-openapi-contract-gate
+    purpose: Live-tier OpenAPI contract check; a skip is reported SKIPPED, never PASS.
+  rag_eval_fixture_contract:
+    make: rag-eval-fixture-contract
+    purpose: Offline dual-track RAG eval fixture replay (no provider, no stack).
+  rag_live_quality_gate:
+    make: rag-live-quality-gate
+    purpose: Live-tier RAG quality gate — golden replay against the running Knowledge Service.
+  kb_unit_gate:
+    make: kb-unit-gate
+    purpose: Real Knowledge unit gate — imports knowledge_service, runs offline.
+  web_quality_gate:
+    make: web-quality-gate
+    purpose: Web type-check, lint, node unit tests, and i18n check.
+  hygiene_check:
+    make: hygiene-check
+    purpose: Test hygiene — empty/self-proving bodies, .only/.fixme scan.
+  loc_no_growth_gate:
+    make: loc-no-growth-gate
+    purpose: Oversized files never grow; new files stay under the LOC thresholds.
+  gateway_unit_gate:
+    make: gateway-unit-gate
+    purpose: Offline Gateway unit suites.
+  rust_changed_crate_gate:
+    make: rust-changed-crate-gate
+    purpose: Test only the Rust crates hit by the diff.
 
 # -- Gates: what to run for what you changed ----------------------------------
+# Gate schema (enforced by scripts/harness/check_harness.py):
+#   make | shell   : exactly one entrypoint
+#   triggers       : path globs; `make affected-gates BASE_SHA=<sha>` maps every
+#                    changed path to its gates and FAILS CLOSED on unmatched paths
+#   tier           : L0 structural/offline | L1 domain offline/unit
+#                    L2 hosted integration (CI services) | L3 live release/singleton
+#   required_on    : subset of [change, release, manual]
+#                    change  = mandatory when a trigger path is in the diff
+#                    release = mandatory evidence before a release
+#   resource       : offline | hosted-service | live-stack | provider | docker
+#   skip           : never | live-stack | toolchain   (see docs/harness/repository-quality.md)
+#   timeout        : minutes; CI kills the job after this
+#   evidence       : artifact path pattern the gate must leave behind
+#   ci_job         : CI job name that produces the evidence (checked by the
+#                    final gate-enforcement job; absent = not CI-wired)
 gates:
   harness:
     make: harness-check
-    triggers: [AGENTS.md, CLAUDE.md, harness.yml, docs/harness/**]
+    triggers: [AGENTS.md, CLAUDE.md, harness.yml, Makefile, "docs/**", "deploy/runbooks/**", "reports/**", ".gitignore", ".editorconfig", ".gitattributes", ".pre-commit-config.yaml", ".claude/**", ".agents/**", README.md, CHANGELOG.md, CONTRIBUTING.md, SECURITY.md, DEPLOY.md, CODE_OF_CONDUCT.md, RELEASE.md, SUPPORT.md, LICENSE]
+    tier: L0
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 5
+    evidence: tmp/gate-evidence/harness-check.json
+    ci_job: compose-and-harness
+  affected_gates:
+    make: affected-gates
+    purpose: Map the diff onto required gates; unmatched paths fail closed.
+    triggers: [harness.yml, scripts/harness/affected_gates.py, .github/workflows/**]
+    tier: L0
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 5
+    evidence: tmp/gate-evidence/affected-gates.json
+    ci_job: gate-enforcement
+  architecture_boundary:
+    make: architecture-boundary-gate
+    purpose: Static import boundary between gateway/apps/core/contracts zones (negative self-test included).
+    triggers: ["src/**", "apps/**", "packages/**", scripts/harness/import_boundary_gate.py, scripts/harness/import_boundary_allowlist.json]
+    tier: L0
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 5
+    evidence: tmp/gate-evidence/architecture-boundary-gate.json
+    ci_job: gate-enforcement
+  openapi_offline:
+    make: verify-openapi-contract
+    purpose: In-process offline OpenAPI contract gate; exports from the FastAPI app object, never skips.
+    triggers: ["src/**", sdk/openapi.json, scripts/harness/openapi_contract_gate.py, tests/contract/test_openapi_schema_compat.py]
+    tier: L1
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 10
+    evidence: tmp/gate-evidence/verify-openapi-contract.json
+    ci_job: gate-enforcement
+  openapi_live:
+    make: live-openapi-contract-gate
+    purpose: Live OpenAPI contract check against the running stack; skip means SKIPPED, never PASS.
+    triggers: ["src/**", sdk/openapi.json, tests/integration/test_gateway_openapi_contract.py]
+    tier: L3
+    required_on: [release, manual]
+    resource: live-stack
+    skip: live-stack
+    timeout: 10
+    evidence: tmp/gate-evidence/live-openapi-contract-gate.xml
+  gateway_units:
+    make: gateway-unit-gate
+    purpose: Offline Gateway unit suites (integration-marked and KB/DB suites excluded).
+    triggers: ["src/**", "tests/unit/**", "tests/api/**", "tests/core/**", "tests/contract/**", "tests/harness/**", "tests/services/eval/**", "tests/services/agent_runtime/**", "tests/services/assistant/**"]
+    tier: L1
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 30
+    evidence: tmp/gate-evidence/gateway-unit-gate.xml
+    ci_job: gateway-units
   agent_runtime_source:
     make: agent-runtime-source-contract
     triggers: [deploy/agent-runtime-source/**, docs/architecture/ADR-006*, docs/architecture/ADR-007*, scripts/harness/agent_runtime_supply_chain.py]
+    tier: L1
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 15
+    evidence: tmp/gate-evidence/agent-runtime-source-contract.xml
   agent_runtime_image:
     make: agent-runtime-contract
     triggers: [deploy/agent-runtime-source/Dockerfile.runtime, scripts/harness/build_agent_runtime_image.sh, scripts/harness/smoke_agent_runtime_image.sh]
+    tier: L2
+    required_on: [change, release]
+    resource: docker
+    skip: never
+    timeout: 30
   agent_runtime_readonly:
     make: agent-runtime-readonly-gate
     triggers: [src/services/agent_runtime/readonly_capabilities.py, tests/services/agent_runtime/test_readonly_capabilities.py, scripts/harness/agent_runtime_readonly_gate.py, tests/harness/test_agent_runtime_readonly_gate.py]
+    tier: L1
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 15
   agent_thread_store:
     make: agent-thread-store-contract
     triggers: [database/migrations/089*, database/migrations/090*, database/migrations/092*, database/migrations/093*, database/migrations/094*, database/migrations/095*, tests/database/test_agent_runtime_thread_store_migration.py, scripts/harness/agent_thread_store_contract.sh]
+    tier: L2
+    required_on: [change, release]
+    resource: hosted-service
+    skip: never
+    timeout: 30
   agent_runtime_single_kernel:
     make: agent-runtime-single-kernel-gate
     triggers: [src/api/v1/assistant.py, src/api/v2/agent.py, src/services/assistant_runtime_assignment.py, database/migrations/095*, docker-compose.yml]
+    tier: L1
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 30
   service_boundaries:
     make: test-isolation
     triggers: ["src/**", "apps/**", "packages/ai-gateway-core/**"]
+    tier: L2
+    required_on: [change]
+    resource: live-stack
+    skip: live-stack
+    timeout: 20
   assistant_runtime:
     make: runtime-dependency-gate
     triggers: ["scripts/harness/runtime_dependency_gate.py", "scripts/eval_general_agent_failure_recovery.py", "tests/services/eval/**"]
+    tier: L1
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 10
   agent_core:
     make: runtime-dependency-gate
-    triggers: ["scripts/**", "tests/**", "pyproject.toml"]
+    triggers: ["scripts/**", "tests/**", pyproject.toml, uv.lock, "agent-plugins/**", "skills/**", skills-lock.json]
+    tier: L1
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 10
   eval_contract:
     make: eval-e1-gate
     triggers: ["src/services/eval/**", "packages/ai-gateway-core/src/ai_gateway_core/eval/**", "tests/fixtures/eval/**"]
+    tier: L1
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 40
   eval_branch:
     make: verify-eval-dev
     triggers: ["src/api/v1/eval.py", "src/api/eval_export.py"]
+    tier: L1
+    required_on: [change]
+    resource: offline
+    skip: never
+    timeout: 40
   kb:
     make: kb-unit-gate
-    triggers: ["apps/knowledge-service/**"]
+    purpose: Real Knowledge unit gate — imports knowledge_service, runs offline.
+    triggers: ["apps/knowledge-service/**", "tests/services/knowledge/**", "tests/knowledge/**"]
+    tier: L1
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 40
+    evidence: tmp/gate-evidence/kb-unit-gate.xml
+    ci_job: eval-regression-gate
+  kb_integration_smoke:
+    make: kb-integration-smoke
+    purpose: Qdrant integration smoke; needs the kbms stack, self-skips when it is down.
+    triggers: ["apps/knowledge-service/src/knowledge_service/services/knowledge/vector_store.py", "tests/knowledge/test_qdrant_integration_smoke.py"]
+    tier: L2
+    required_on: [manual]
+    resource: live-stack
+    skip: live-stack
+    timeout: 20
   gateway_kb_boundary:
     make: gateway-kb-boundary-gate
     triggers: ["packages/ai-gateway-core/src/ai_gateway_core/persistence/**", "src/api/schemas/**", "src/api/v1/knowledge.py", "src/api/v1/kb_tools.py", "src/api/v1/_proxy_utils.py", "src/api/v1/presign.py", "src/services/knowledge_authz.py", "scripts/harness/gateway_kb_boundary_gate.py", "tests/harness/test_gateway_kb_boundary_gate.py"]
+    tier: L0
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 10
+    ci_job: eval-regression-gate
   kb_migrations:
     make: kb-migration-gate
-    triggers: ["database/cli.py", "database/migrate_per_service.py", "database/run_migration.py", "database/migrations/*kb*.sql", "database/migrations/097_image_task_runtime_scope.sql", "database/migrations/per_service/assistant/004_image_task_runtime_scope.sql", "scripts/new/common.sh", "scripts/new/migrate.sh", "tests/database/test_run_migration.py", "tests/database/test_migration_runner_contract.py", "tests/database/test_migration_runner_concurrency.py", "tests/database/test_image_task_runtime_scope_migration.py", "tests/database/test_kb_migration_full_chain.py", "tests/database/test_kb_migration_101_restore.py", "tests/database/test_kb_*migration*.py", "tests/database/test_bm25_v2_lifecycle_tierb.py", "apps/knowledge-service/src/knowledge_service/persistence/kb_eval_golden_store.py"]
+    purpose: DB migration gate against a real PostgreSQL service (CI-hosted).
+    triggers: ["database/**", "database/cli.py", "database/migrate_per_service.py", "database/run_migration.py", "database/migrations/*kb*.sql", "database/migrations/097_image_task_runtime_scope.sql", "database/migrations/per_service/assistant/004_image_task_runtime_scope.sql", "scripts/new/common.sh", "scripts/new/migrate.sh", "tests/database/test_run_migration.py", "tests/database/test_migration_runner_contract.py", "tests/database/test_migration_runner_concurrency.py", "tests/database/test_image_task_runtime_scope_migration.py", "tests/database/test_kb_migration_full_chain.py", "tests/database/test_kb_migration_101_restore.py", "tests/database/test_kb_*migration*.py", "tests/database/test_bm25_v2_lifecycle_tierb.py", "apps/knowledge-service/src/knowledge_service/persistence/kb_eval_golden_store.py"]
+    tier: L2
+    required_on: [change, release]
+    resource: hosted-service
+    skip: never
+    timeout: 45
+    evidence: tmp/gate-evidence/kb-migration-gate.xml
+    ci_job: kb-migration-gate
   kb_golden:
     make: kb-golden-gate
     triggers: ["tests/fixtures/eval/rag/golden/**", "scripts/seed_kb_golden_set.py", "scripts/regen_rag_observations.py", "scripts/import_kb_eval_golden.py", "tests/scripts/test_kb_golden_set.py", "tests/scripts/test_regen_rag_observations.py", "tests/scripts/test_import_kb_eval_golden.py"]
+    tier: L1
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 15
+    ci_job: eval-regression-gate
   kb_release_evidence:
     make: kb-release-evidence-gate
     purpose: Fail-closed T0 release evidence; distinct from the development golden fixture gate.
     triggers: ["tests/fixtures/eval/rag/golden/**", "reports/kb-eval-baseline/**", "scripts/harness/kb_release_evidence_gate.py", "tests/harness/test_kb_release_evidence_gate.py"]
-  rag:
-    make: rag-eval-regression-gate
+    tier: L1
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 10
+  rag_fixture:
+    make: rag-eval-fixture-contract
+    purpose: L1 offline fixture replay — no provider, no live stack.
     triggers: ["scripts/eval_rag.py", "tests/fixtures/eval/rag/**"]
+    tier: L1
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 15
+    ci_job: eval-regression-gate
+  rag_live_quality:
+    make: rag-live-quality-gate
+    purpose: L3 live quality gate — golden set replayed against the running Knowledge Service.
+    triggers: ["scripts/regen_rag_observations.py", "tests/fixtures/eval/rag/golden/**"]
+    tier: L3
+    required_on: [release, manual]
+    resource: live-stack
+    skip: live-stack
+    timeout: 45
+    evidence: reports/rag-live-quality/latest.json
   agent_studio:
     make: verify-agent-studio
     triggers: ["web/src/pages/agents/**", "src/api/v1/agents.py", "src/api/v1/agent_runtime.py"]
+    tier: L2
+    required_on: [change]
+    resource: live-stack
+    skip: live-stack
+    timeout: 60
   deployment:
     make: validate-example-config
-    triggers: ["docker-compose*.yml", ".env.example", "scripts/new/**", Dockerfile]
+    triggers: ["docker-compose*", ".env.example", "scripts/new/**", Dockerfile, ".dockerignore", "deploy/**", "docker/**", "config/**", "data/**", "examples/**"]
+    tier: L1
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 10
   frontend:
-    shell: "pnpm -C web type-check && pnpm -C web lint && pnpm -C web build"
+    shell: "pnpm -C web type-check && pnpm -C web lint && pnpm -C web test && pnpm -C web build"
     triggers: ["web/**"]
+    tier: L1
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 30
+    ci_job: frontend
+  web_quality:
+    make: web-quality-gate
+    purpose: Web gate without the production build — type-check, lint, node units, i18n.
+    triggers: ["web/**"]
+    tier: L1
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 20
+    ci_job: frontend
+  rust_changed_crate:
+    make: rust-changed-crate-gate
+    purpose: Test only the Rust crates touched by the diff; no Rust changes = not applicable.
+    triggers: ["rust/**"]
+    tier: L1
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 60
+    evidence: tmp/gate-evidence/rust-changed-crate-gate.json
+    ci_job: rust-changed-crate
   sdk_sse:
     make: sdk-sse-contract
     triggers: ["sdk/**", "tests/contract/test_sdk_sse_fixture_contract.py"]
+    tier: L1
+    required_on: [change, release]
+    resource: offline
+    skip: toolchain
+    timeout: 30
+  hygiene:
+    make: hygiene-check
+    purpose: Empty/self-proving tests, .only/.fixme scan (negative self-test included).
+    triggers: ["tests/**", "web/src/**", "web/e2e/**", "sdk/**", scripts/harness/hygiene_check.py]
+    tier: L0
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 5
+    evidence: tmp/gate-evidence/hygiene-check.json
+    ci_job: gate-enforcement
+  loc_no_growth:
+    make: loc-no-growth-gate
+    purpose: Oversized files never grow; new files stay under threshold; bound to the checked-in ledger.
+    triggers: ["src/**", "apps/**", "packages/**", "web/src/**", "scripts/**", "tests/**", scripts/harness/loc_no_growth_gate.py]
+    tier: L0
+    required_on: [change, release]
+    resource: offline
+    skip: never
+    timeout: 5
+    evidence: tmp/gate-evidence/loc-no-growth.json
+    ci_job: gate-enforcement
 
 # -- Workspace hygiene --------------------------------------------------------
 # Agents drop test files and screenshots wherever they happen to be standing.

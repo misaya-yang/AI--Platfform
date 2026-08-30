@@ -63,7 +63,7 @@ function DashboardContent() {
 
   const { serviceOptions, userOptions } = useDashboardEntityLabels();
 
-  const resizeTimeout = useRef<ReturnType<typeof setTimeout>>();
+  const resizeTimeout = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const handleResize = useCallback(() => {
     clearTimeout(resizeTimeout.current);
     resizeTimeout.current = setTimeout(() => {

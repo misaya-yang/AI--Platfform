@@ -1,8 +1,10 @@
 import type { ReactNode } from "react";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform, type Options as MarkdownOptions } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-const REMARK_PLUGINS = [remarkGfm] as const;
+// Mutable PluggableList (react-markdown's remarkPlugins type); `as const` would
+// make it readonly and no longer assignable.
+const REMARK_PLUGINS: NonNullable<MarkdownOptions["remarkPlugins"]> = [remarkGfm];
 
 function allowDataUrlTransform(url: string): string {
   return url.startsWith("data:image/") ? url : defaultUrlTransform(url);

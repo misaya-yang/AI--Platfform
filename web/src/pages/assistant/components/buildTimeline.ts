@@ -108,7 +108,7 @@ function asNumber(value: unknown): number | undefined {
   return undefined;
 }
 
-function subAgentTimelineStatus(status: SubAgentState["status"]): TimelineStepData["status"] {
+function subAgentTimelineStatus(status: SubAgentState["status"]): "running" | "completed" | "error" {
   if (status === "running") return "running";
   if (status === "completed") return "completed";
   return "error";
@@ -677,11 +677,10 @@ export function buildTimeline(
       if (item.type === "web" && message.webSearchResults) {
         sources = (message.webSearchResults as WebSearchResult[])
           .slice(0, 8)
-          .map((r) => {
+          .flatMap((r): TimelineSource[] => {
             const domain = domainFromUrl(r.url);
-            return domain ? { domain, url: r.url, title: r.title } : null;
-          })
-          .filter((x): x is TimelineSource => x !== null);
+            return domain ? [{ domain, url: r.url, title: r.title }] : [];
+          });
         if (sources.length === 0) sources = undefined;
       }
 

@@ -78,6 +78,8 @@ export interface SessionMessageMetadata {
     url: string;
     filename: string;
   }>;
+  // Image-generation artifacts referenced by the assistant message
+  artifact_ids?: string[];
 }
 
 export interface SessionMessage {

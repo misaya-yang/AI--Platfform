@@ -102,7 +102,7 @@ function draftFromExample(example: EvalExample): ContractDraft {
   const tools = Array.isArray(trajectory.tools) ? trajectory.tools.map(record) : [];
   const draftedTools: ToolDraft[] = tools.map((tool) => ({
     name: String(tool.name || ""),
-    mode: tool.forbidden === true ? "forbidden" : "required",
+    mode: (tool.forbidden === true ? "forbidden" : "required") as "forbidden" | "required",
     argumentsText: Object.keys(record(tool.arguments_subset)).length ? JSON.stringify(tool.arguments_subset, null, 2) : "",
     maxCalls: typeof tool.max_calls === "number" ? tool.max_calls : undefined,
     status: String(tool.status || ""),

@@ -784,7 +784,7 @@ export function ServiceConfigDialog({
       session_enabled: basicForm.session_enabled,
     };
 
-    if (isLangGraphService) {
+    if (isLangGraphService && serviceDetail) {
       const graphId = String(basicForm.graph_id || "").trim();
       if (!graphId) {
         setBasicError(t("services.configDialog.basic.graphIdRequired"));
@@ -1629,7 +1629,7 @@ export function ServiceConfigDialog({
                             {["user", "developer", "admin"].map((role) => (
                               <Badge
                                 key={role}
-                                variant={authForm.allowed_roles.includes(role) ? "default" : "outline-solid"}
+                                variant={authForm.allowed_roles.includes(role) ? "default" : "outline"}
                                 className="cursor-pointer"
                                 onClick={() => {
                                   const roles = authForm.allowed_roles.includes(role)

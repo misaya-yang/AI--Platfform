@@ -6,8 +6,9 @@ import { cn } from "@/lib/utils";
 interface PopoverContextValue {
   open: boolean;
   setOpen: (open: boolean) => void;
-  triggerRef: React.RefObject<HTMLButtonElement>;
-  contentRef: React.RefObject<HTMLDivElement>;
+  // React 19: useRef<T>(null) yields RefObject<T | null>.
+  triggerRef: React.RefObject<HTMLButtonElement | null>;
+  contentRef: React.RefObject<HTMLDivElement | null>;
 }
 
 const PopoverContext = React.createContext<PopoverContextValue | null>(null);
@@ -98,6 +99,7 @@ const PopoverTrigger = React.forwardRef<HTMLButtonElement, PopoverTriggerProps>(
     if (asChild && React.isValidElement(children)) {
       const childProps = children.props as {
         onClick?: (event: React.MouseEvent) => void;
+        ref?: React.Ref<HTMLButtonElement>;
       };
       return React.cloneElement(children as React.ReactElement<typeof childProps>, {
         ref: setTriggerNode,

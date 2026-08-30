@@ -1,0 +1,20 @@
+{
+  "schema": "ai-gateway/harness/hygiene-allowlist/v1",
+  "policy": "Every entry needs owner + reason + expires (YYYY-MM-DD) and must name the exact test function. hygiene-check fails when an entry is expired or no longer matches a live finding. Entries are for pre-existing backlog only; new code must be clean. ARC-07 clears this backlog.",
+  "entries": [
+    {
+      "file": "tests/proxy/test_streaming.py",
+      "test": "test_streaming_timeout_handling",
+      "owner": "ARC-07 hygiene backlog",
+      "reason": "Pre-existing empty placeholder (needs a live/mock upstream timeout scenario); replace with a real streaming-timeout contract test.",
+      "expires": "2026-10-31"
+    },
+    {
+      "file": "tests/proxy/test_streaming.py",
+      "test": "test_connection_error_handling",
+      "owner": "ARC-07 hygiene backlog",
+      "reason": "Pre-existing empty placeholder (needs a connection-failure error-response scenario); replace with a real proxy connection-error test.",
+      "expires": "2026-10-31"
+    }
+  ]
+}

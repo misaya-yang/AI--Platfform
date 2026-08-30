@@ -304,6 +304,7 @@ export interface EvalExperimentRunProgress {
   completed_cases?: number;
   failed_cases?: number;
   total_cases?: number;
+  attempted_trials?: number;
   completed_trials?: number;
   failed_trials?: number;
   total_trials?: number;

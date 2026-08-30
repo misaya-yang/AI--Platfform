@@ -106,7 +106,8 @@ export function KbRagasPanel({
   const scoredTraceCount = traces.filter((trace) => trace.scores_count > 0).length;
   const onlineEnabledCount = ragasEvaluators.filter((evaluator) => {
     const online = evaluator.sampling_config?.online;
-    return online && typeof online === "object" && !Array.isArray(online) && online.enabled === true;
+    return online && typeof online === "object" && !Array.isArray(online) &&
+      (online as Record<string, unknown>).enabled === true;
   }).length;
 
   const kbSummaryQuery = useQuery({

@@ -82,7 +82,7 @@ function mapStepType(type: string): StepType {
   const typeMap: Record<string, StepType> = {
     planning: "planning",
     analysis: "analysis",
-    outline: "outline-solid",
+    outline: "outline",
     generating: "generating",
     validating: "validating",
     repairing: "repairing",

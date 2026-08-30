@@ -1,14 +1,19 @@
 import type { ReactNode } from "react";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform, type Options as MarkdownOptions } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import "katex/dist/katex.min.css";
 
-const REMARK_PLUGINS = [remarkGfm, [remarkMath, { singleDollarTextMath: true }]] as const;
-const REHYPE_PLUGINS = [
+// Mutable PluggableList (react-markdown's plugin prop types); `as const` would
+// make them readonly and no longer assignable.
+const REMARK_PLUGINS: NonNullable<MarkdownOptions["remarkPlugins"]> = [
+  remarkGfm,
+  [remarkMath, { singleDollarTextMath: true }],
+];
+const REHYPE_PLUGINS: NonNullable<MarkdownOptions["rehypePlugins"]> = [
   [rehypeKatex, { throwOnError: false, strict: false, output: "htmlAndMathml" }],
-] as const;
+];
 
 function allowDataUrlTransform(url: string): string {
   return url.startsWith("data:image/") ? url : defaultUrlTransform(url);

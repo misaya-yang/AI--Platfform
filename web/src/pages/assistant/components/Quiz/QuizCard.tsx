@@ -22,6 +22,7 @@ import {
   useState,
 } from "react";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   AlertTriangle,
@@ -901,7 +902,9 @@ type StateChipProps = {
   totalQuestions: number;
   scorePct?: number;
   reviewFilter?: "all" | "wrong" | "unanswered";
-  t: (key: string, fallback?: string | Record<string, unknown>) => string;
+  // Accept the real i18next TFunction; a hand-written (key, fallback) => string
+  // signature is not assignable from it.
+  t: TFunction<"translation", undefined>;
 };
 
 function StateChip({

@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
-"""Harness contract lint.
+"""Harness contract check: structural lint + semantic validation.
 
-Verifies that `harness.yml` still describes the repository it claims to describe:
+Two families of checks, reported separately:
 
-1. every canonical command declared in harness.yml resolves to a real Make target;
-2. every required document exists and is non-empty;
-3. the agent instruction files stay within their line budgets;
-4. relative links in the instruction and harness docs resolve;
-5. multi-session programs under deploy/runbooks/ carry their required files (warning only).
+STRUCTURAL lint (shapes, existence, budgets):
+  1. every required document exists and is non-empty;
+  2. the agent instruction files stay within their line budgets;
+  3. relative links in the instruction and harness docs resolve;
+  4. workspace hygiene — specs/configs/screenshots live where they belong.
+
+SEMANTIC validation (the contract matches real behaviour):
+  5. every canonical command in harness.yml resolves to a real Make target;
+  6. every gate entry carries a valid tier/trigger/required_on/resource/skip/
+     timeout/evidence schema, its entrypoint exists, and its ci_job exists in
+     .github/workflows/ci.yml;
+  7. multi-session programs under deploy/runbooks/ carry their required files
+     (warning only).
 
 Dependency-free on purpose: this runs in CI before any package is installed.
+Evidence: tmp/gate-evidence/harness-check.json
 
 Usage:  make harness-check
    or:  python3 scripts/harness/check_harness.py
@@ -25,6 +34,18 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HARNESS_FILE = REPO_ROOT / "harness.yml"
 MAKEFILE = REPO_ROOT / "Makefile"
+CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+EVIDENCE_OUT = REPO_ROOT / "tmp" / "gate-evidence" / "harness-check.json"
+
+# Gate schema vocabulary (documented in the harness.yml gates header).
+GATE_TIERS = {"L0", "L1", "L2", "L3"}
+GATE_REQUIRED_ON = {"change", "release", "manual"}
+GATE_RESOURCES = {"offline", "hosted-service", "live-stack", "provider", "docker"}
+GATE_SKIP_POLICIES = {"never", "live-stack", "toolchain"}
+GATE_FIELDS = {
+    "make", "shell", "purpose", "triggers", "tier", "required_on",
+    "resource", "skip", "timeout", "evidence", "ci_job",
+}
 
 # Docs whose relative links are checked. These are the files agents actually follow.
 LINK_CHECKED = (
@@ -289,6 +310,99 @@ def check_programs(lines: list[str]) -> int:
     return seen
 
 
+def gate_blocks(lines: list[str]) -> dict[str, dict[str, str]]:
+    """Return {gate_name: {field: raw value}} for the gates block."""
+    gates: dict[str, dict[str, str]] = {}
+    current: str | None = None
+    name_indent: int | None = None
+    for line in _block_body(lines, "gates"):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if name_indent is None:
+            name_indent = indent
+        if indent <= name_indent:
+            match = re.match(r"^([^:\s]+):\s*$", stripped)
+            if not match:
+                fail(f"harness.yml gates: unparseable gate header: {line!r}")
+                continue
+            current = match.group(1)
+            gates[current] = {}
+            continue
+        if current is None:
+            fail(f"harness.yml gates: field outside a gate block: {line!r}")
+            continue
+        match = re.match(r"^([^:]+):\s*(.+?)\s*$", stripped)
+        if match:
+            gates[current][match.group(1).strip()] = match.group(2).strip()
+    return gates
+
+
+def _inline_list(value: str) -> list[str]:
+    value = value.strip()
+    if not (value.startswith("[") and value.endswith("]")):
+        return []
+    return [item.strip().strip("\"'") for item in value[1:-1].split(",") if item.strip()]
+
+
+def ci_job_ids() -> set[str]:
+    """Job ids declared in .github/workflows/ci.yml (keys at 2-space indent)."""
+    if not CI_WORKFLOW.is_file():
+        return set()
+    ids: set[str] = set()
+    for line in _block_body(CI_WORKFLOW.read_text(encoding="utf-8").splitlines(), "jobs"):
+        match = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+        if match:
+            ids.add(match.group(1))
+    return ids
+
+
+def check_gate_schema(lines: list[str], targets: set[str]) -> int:
+    """Validate every gate entry against the schema documented in harness.yml."""
+    gates = gate_blocks(lines)
+    if not gates:
+        fail("harness.yml has no gates block")
+        return 0
+    jobs = ci_job_ids()
+    for name, fields in gates.items():
+        where = f"gate '{name}'"
+        unknown = set(fields) - GATE_FIELDS
+        if unknown:
+            fail(f"{where}: unknown field(s) {sorted(unknown)}")
+        entrypoints = [key for key in ("make", "shell") if key in fields]
+        if len(entrypoints) != 1:
+            fail(f"{where}: needs exactly one of make/shell, found {entrypoints or 'none'}")
+        elif entrypoints[0] == "make" and fields["make"].strip("\"'") not in targets:
+            fail(f"{where}: make target '{fields['make']}' does not exist in the Makefile")
+        triggers = _inline_list(fields.get("triggers", ""))
+        if not triggers:
+            fail(f"{where}: triggers must be a non-empty inline list")
+        tier = fields.get("tier", "").strip("\"'")
+        if tier not in GATE_TIERS:
+            fail(f"{where}: tier must be one of {sorted(GATE_TIERS)}, found {tier or '(missing)'}")
+        required_on = _inline_list(fields.get("required_on", ""))
+        if not required_on:
+            fail(f"{where}: required_on must be a non-empty subset of {sorted(GATE_REQUIRED_ON)}")
+        else:
+            bad = set(required_on) - GATE_REQUIRED_ON
+            if bad:
+                fail(f"{where}: required_on has invalid value(s) {sorted(bad)}")
+        resource = fields.get("resource", "").strip("\"'")
+        if resource not in GATE_RESOURCES:
+            fail(f"{where}: resource must be one of {sorted(GATE_RESOURCES)}, found {resource or '(missing)'}")
+        skip = fields.get("skip", "").strip("\"'")
+        if skip not in GATE_SKIP_POLICIES:
+            fail(f"{where}: skip must be one of {sorted(GATE_SKIP_POLICIES)}, found {skip or '(missing)'}")
+        timeout = fields.get("timeout", "").strip("\"'")
+        if not (timeout.isdigit() and int(timeout) > 0):
+            fail(f"{where}: timeout must be a positive integer (minutes), found {timeout or '(missing)'}")
+        ci_job = fields.get("ci_job", "").strip("\"'")
+        if ci_job and jobs and ci_job not in jobs:
+            fail(f"{where}: ci_job '{ci_job}' is not a job in .github/workflows/ci.yml")
+    return len(gates)
+
+
 def main() -> int:
     if not HARNESS_FILE.is_file():
         print("FAIL: harness.yml not found at repository root", file=sys.stderr)
@@ -297,34 +411,83 @@ def main() -> int:
     lines = HARNESS_FILE.read_text(encoding="utf-8").splitlines()
     targets = make_targets()
 
-    n_commands = check_commands(lines, targets)
+    # Structural lint
     n_docs = check_required_docs(lines)
     n_budgets = check_budgets(lines)
     n_links = check_links()
     n_files = check_workspace(lines)
+
+    structural_errors = len(errors)
+    structural_warnings = len(warnings)
+
+    # Semantic validation
+    n_commands = check_commands(lines, targets)
+    n_gates = check_gate_schema(lines, targets)
     n_programs = check_programs(lines)
 
     print("Harness contract check")
-    print(f"  make targets referenced : {n_commands}")
+    print("-- structural lint --")
     print(f"  required docs           : {n_docs}")
     print(f"  budgeted files          : {n_budgets}")
     print(f"  relative links resolved : {n_links}")
     print(f"  workspace files scanned : {n_files}")
+    print("-- semantic validation --")
+    print(f"  make targets referenced : {n_commands}")
+    print(f"  gate schemas validated  : {n_gates}")
     print(f"  programs inspected      : {n_programs}")
 
-    for message in warnings:
+    for message in warnings[:structural_warnings]:
+        print(f"  WARN  {message}")
+    for message in warnings[structural_warnings:]:
         print(f"  WARN  {message}")
 
     if errors:
         print("")
-        for message in errors:
-            print(f"  FAIL  {message}")
+        for message in errors[:structural_errors]:
+            print(f"  FAIL  [structural] {message}")
+        for message in errors[structural_errors:]:
+            print(f"  FAIL  [semantic]   {message}")
         print(f"\n{len(errors)} harness contract violation(s).")
-        sys.stdout.flush()
-        return 1
+        result = "fail"
+    else:
+        print("\nHarness contract OK.")
+        result = "pass"
 
-    print("\nHarness contract OK.")
-    return 0
+    try:
+        EVIDENCE_OUT.parent.mkdir(parents=True, exist_ok=True)
+        EVIDENCE_OUT.write_text(
+            json.dumps(
+                {
+                    "gate": "harness-check",
+                    "tier": "L0",
+                    "result": result,
+                    "structural": {
+                        "required_docs": n_docs,
+                        "budgeted_files": n_budgets,
+                        "links_resolved": n_links,
+                        "workspace_files_scanned": n_files,
+                        "errors": structural_errors,
+                    },
+                    "semantic": {
+                        "make_targets_referenced": n_commands,
+                        "gate_schemas_validated": n_gates,
+                        "programs_inspected": n_programs,
+                        "errors": len(errors) - structural_errors,
+                    },
+                    "errors": errors,
+                    "warnings": warnings,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass  # evidence writing must never mask the check result
+
+    sys.stdout.flush()
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":

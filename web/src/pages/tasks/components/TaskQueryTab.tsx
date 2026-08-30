@@ -28,7 +28,7 @@ const STATUS_CONFIG: Record<
   string,
   {
     labelKey: string;
-    variant: "default" | "secondary" | "destructive" | "outline-solid";
+    variant: "default" | "secondary" | "destructive" | "outline";
     icon: React.ReactNode;
     color: string;
   }

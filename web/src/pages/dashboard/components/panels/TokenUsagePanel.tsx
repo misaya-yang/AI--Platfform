@@ -283,7 +283,7 @@ export function TokenUsagePanel() {
           <YAxis hide />
           <Tooltip
             formatter={(value) => [formatTokens(Number(value ?? 0)), t("metrics.totalTokens")]}
-            labelFormatter={(label: string) => dayjs(label).format("MM-DD")}
+            labelFormatter={(label) => dayjs(String(label)).format("MM-DD")}
           />
           <Line
             type="monotone"

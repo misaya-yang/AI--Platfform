@@ -221,7 +221,6 @@ export const ChatMessageItem = memo(
                       <StreamOutput
                         text={assistantDisplayContent}
                         isStreaming={isStreaming}
-                        id={message.id || `msg-${index}`}
                       />
                     </Suspense>
                   )}

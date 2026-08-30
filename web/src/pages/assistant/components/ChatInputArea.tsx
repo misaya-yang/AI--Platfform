@@ -36,7 +36,7 @@ interface ChatInputAreaProps {
   onSend: () => void;
   onStop: () => void;
   handlePaste: (e: React.ClipboardEvent) => void;
-  fileInputRef: React.RefObject<HTMLInputElement>;
+  fileInputRef: React.RefObject<HTMLInputElement | null>;
   config: AssistantConfig | null;
   datasets: DatasetInfo[];
   selectedDatasets: string[];

@@ -1477,7 +1477,9 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       if (firstTokenMs === undefined) {
         streamTurnState = markStreamFirstToken(streamTurnState, timestampMs);
         firstTokenMs = streamTurnState.firstTokenMs;
-        markChatStreamFirstToken(streamTrace, firstTokenMs);
+        if (firstTokenMs !== undefined) {
+          markChatStreamFirstToken(streamTrace, firstTokenMs);
+        }
       }
     };
     const markFirstTextResponse = (timestampMs: number) => {
@@ -3635,6 +3637,12 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         if (deadApprovalMessageIdsRef.current.delete(messageId)) {
           void reconcileDeadApprovalRun(runId, activeSessionIdRef.current);
         }
+        return;
+      }
+
+      // The early guard above guarantees runId when no live runtime thread exists;
+      // restate it so the narrowing survives the closure boundary.
+      if (!runId) {
         return;
       }
 

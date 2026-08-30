@@ -709,7 +709,8 @@ export function EvalPage() {
 
   const createRagasEvaluatorMutation = useMutation({
     mutationFn: () => {
-      const preset = evaluatorPresetForType("ragas", "rag", (key, fallback) => t(key, fallback));
+      const preset = evaluatorPresetForType("ragas", "rag", (key, fallback) =>
+        fallback === undefined ? t(key) : t(key, fallback));
       return createEvalEvaluator({
         name: "kb-ragas",
         evaluator_type: "ragas",
@@ -1107,8 +1108,8 @@ export function EvalPage() {
     handleWorkbenchTabChange("traces");
   };
 
-  const dashboardMetrics = dashboardQuery.data?.metrics || {};
-  const runtimeHealth = dashboardQuery.data?.runtime_health || {};
+  const dashboardMetrics = (dashboardQuery.data?.metrics || {}) as Record<string, number | undefined>;
+  const runtimeHealth = (dashboardQuery.data?.runtime_health || {}) as Record<string, number | undefined>;
   const overviewTab = (
     <>
       {summaryQuery.error || dashboardQuery.error ? (
@@ -1173,7 +1174,7 @@ export function EvalPage() {
             <div className="eval-metric-item">
               <span className="eval-summary-label">{t("eval.workbench.outboxFailures", "Outbox")}</span>
               <strong className="eval-summary-value tabular-nums">
-                {dashboardQuery.data?.queue_health?.failed_jobs ?? 0}
+                {Number(dashboardQuery.data?.queue_health?.failed_jobs ?? 0)}
               </strong>
             </div>
             <div className="eval-metric-item">
@@ -1645,7 +1646,8 @@ export function EvalPage() {
           aria-label={t("eval.workbench.evaluatorType")}
           options={evaluatorTypeOptions}
           onChange={(value: EvalEvaluator["evaluator_type"]) => {
-            const preset = evaluatorPresetForType(value, activeTraceFamily, (key, fallback) => t(key, fallback));
+            const preset = evaluatorPresetForType(value, activeTraceFamily, (key, fallback) =>
+              fallback === undefined ? t(key) : t(key, fallback));
             setEvaluatorDraft((draft) => ({
               ...draft,
               evaluator_type: value,

@@ -186,7 +186,8 @@ export function AgentPreviewPanel({
       }
       const userMessage: PreviewMessage = { id: crypto.randomUUID(), role: "user", content: text };
       assistantId = crypto.randomUUID();
-      setMessages((current) => [...current, userMessage, { id: assistantId, role: "assistant", content: "" }]);
+      const assistantMessageId = assistantId;
+      setMessages((current) => [...current, userMessage, { id: assistantMessageId, role: "assistant", content: "" }]);
       setInput("");
       const controller = new AbortController();
       abortRef.current = controller;

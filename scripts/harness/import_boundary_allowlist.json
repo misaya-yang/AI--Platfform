@@ -1,0 +1,34 @@
+{
+  "schema": "ai-gateway/harness/import-boundary-allowlist/v1",
+  "policy": "Every entry needs owner + reason + expires (YYYY-MM-DD). architecture-boundary-gate fails when an entry is expired or no longer matches a live violation. Add entries only for legacy coupling with a scheduled cleanup; never for new code.",
+  "entries": [
+    {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/comm/client.py",
+      "imports": ["src.core.observability.metrics"],
+      "owner": "ARC-04 core-boundary",
+      "reason": "Runtime metrics bridge reads gateway's collector until core owns a metrics seam (reports/inventory/core-import-inventory.json tracks the cleanup).",
+      "expires": "2026-09-30"
+    },
+    {
+      "file": "packages/ai-gateway-core/src/ai_gateway_core/storage/artifact_storage.py",
+      "imports": ["src.persistence.database"],
+      "owner": "ARC-04 core-boundary",
+      "reason": "TYPE_CHECKING-only hint for DatabaseStorage; Phase 5f Batch C moves it into ai_gateway_core.",
+      "expires": "2026-09-30"
+    },
+    {
+      "file": "src/services/eval/rerank_bakeoff.py",
+      "imports": ["knowledge_service.services.knowledge.text_reranker"],
+      "owner": "ARC-00B gate-split",
+      "reason": "Gateway eval bakeoff reuses the KB reranker factory until rerank scoring moves behind a contract/HTTP seam.",
+      "expires": "2026-09-30"
+    },
+    {
+      "file": "src/services/eval/rag_regression.py",
+      "imports": ["knowledge_service.services.eval.retrieval_metrics"],
+      "owner": "ARC-00B gate-split",
+      "reason": "RAG fixture gate shares retrieval metric implementations with the KB app until they move to ai-gateway-contracts/core.",
+      "expires": "2026-09-30"
+    }
+  ]
+}

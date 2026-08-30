@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from "react";
+import { useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { Share2, Copy, Check, X, ExternalLink } from "lucide-react";
 import { createConversationShare, type ShareInfo } from "@/api/assistant";

@@ -1,3 +1,5 @@
+import type { SessionConfig } from "@/api/sessions";
+
 export const streamStartMetrics = {
   starts: 0,
   awaitedSessionCreate: 0,
@@ -29,13 +31,13 @@ export function persistNewChatSession(
     session_id: string;
     service_id?: string;
     metadata?: Record<string, unknown>;
-    config?: unknown;
+    config?: SessionConfig;
   }) => Promise<{ session_id: string }>,
   updateSession: (
     sessionId: string,
-    body: { metadata?: Record<string, unknown>; config?: unknown },
+    body: { metadata?: Record<string, unknown>; config?: SessionConfig },
   ) => Promise<unknown>,
-  input: { sessionId: string; title: string; config?: unknown },
+  input: { sessionId: string; title: string; config?: SessionConfig },
 ): Promise<{ session_id: string }> {
   const body = {
     session_id: input.sessionId,

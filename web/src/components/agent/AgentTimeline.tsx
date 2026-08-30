@@ -45,7 +45,7 @@ export type StepStatus = "pending" | "running" | "completed" | "error";
 export type StepType =
   | "planning"
   | "analysis"
-  | "outline-solid"
+  | "outline"
   | "generating"
   | "validating"
   | "repairing"

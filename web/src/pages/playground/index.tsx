@@ -533,7 +533,7 @@ export function PlaygroundPage() {
               // Find last user message and resend via existing handleSend
               const lastUserMsg = [...messages].reverse().find(m => m.role === "user");
               if (lastUserMsg) {
-                handleSend(lastUserMsg.content);
+                handleSend([{ type: "text", data: lastUserMsg.content }]);
               }
             }}
           />

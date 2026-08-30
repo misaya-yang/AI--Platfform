@@ -187,7 +187,7 @@ function groupSessions(sessions: SessionSummary[]): GroupedSessions {
       (groups.folders[folder] ??= []).push(session);
       continue;
     }
-    const d = new Date(session.created_at || session.updated_at);
+    const d = new Date(session.created_at || session.updated_at || 0);
     if (d >= today) groups.today.push(session);
     else if (d >= yesterday) groups.yesterday.push(session);
     else if (d >= lastWeek) groups.lastWeek.push(session);
@@ -195,7 +195,7 @@ function groupSessions(sessions: SessionSummary[]): GroupedSessions {
   }
 
   const byDate = (a: SessionSummary, b: SessionSummary) =>
-    new Date(b.created_at || b.updated_at).getTime() - new Date(a.created_at || a.updated_at).getTime();
+    new Date(b.created_at || b.updated_at || 0).getTime() - new Date(a.created_at || a.updated_at || 0).getTime();
   groups.today.sort(byDate);
   groups.yesterday.sort(byDate);
   groups.lastWeek.sort(byDate);

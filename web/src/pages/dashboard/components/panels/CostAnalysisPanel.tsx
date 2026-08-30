@@ -317,7 +317,7 @@ export function CostAnalysisPanel() {
               <YAxis tick={{ fontSize: 10 }} width={35} />
               <Tooltip
                 formatter={(value) => [formatCost(Number(value || 0)), t("analytics.cost")]}
-                labelFormatter={(label: string) => dayjs(label).format("YYYY-MM-DD")}
+                labelFormatter={(label) => dayjs(String(label)).format("YYYY-MM-DD")}
               />
               <Area
                 type="monotone"
