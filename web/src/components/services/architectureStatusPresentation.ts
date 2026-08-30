@@ -4,8 +4,20 @@ export function canViewArchitectureStatus(
   roles: readonly string[],
   permissions: readonly string[],
 ): boolean {
-  const subjects = new Set([...roles, ...permissions]);
+  const subjects = new Set(
+    [...roles, ...permissions].map((value) => value.trim().toLowerCase()),
+  );
   return ["platform_admin", "superadmin", "super_admin"].some((role) => subjects.has(role));
+}
+
+const REASON_LABELS: Record<string, string> = {
+  health_contract_degraded: "Health check unavailable",
+  optional_dependency_degraded: "Optional dependency degraded",
+  required_dependency_unavailable: "Required dependency unavailable",
+};
+
+export function architectureReasonLabel(reason: string): string {
+  return REASON_LABELS[reason] ?? "Status unavailable";
 }
 
 export function architectureStatusTone(status: string): ArchitectureTone {

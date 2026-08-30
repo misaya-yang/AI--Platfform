@@ -19,7 +19,19 @@ from .health import _gateway_dependency_snapshot
 
 router = APIRouter(prefix="/admin/architecture-status", tags=["administration"])
 TOPOLOGY_PATH = Path(__file__).resolve().parents[2] / "core/data/service_topology.json"
-SAFE_STATUS = {"healthy", "ready", "degraded", "unavailable", "not_ready", "unknown"}
+HEALTHY_STATUS = {"healthy", "ready", "ok"}
+DEGRADED_STATUS = {
+    "degraded",
+    "disabled",
+    "draining",
+    "error",
+    "misconfigured",
+    "not_configured",
+    "not_ready",
+    "schema_mismatch",
+    "unavailable",
+    "unhealthy",
+}
 
 
 class ArchitectureDependency(BaseModel):
@@ -86,10 +98,12 @@ def _version(service: dict[str, Any]) -> str:
 
 
 def _normalized_status(value: Any) -> str:
-    status = str(value or "unknown").lower()
-    if status == "ok":
+    status = str(value or "unknown").strip().lower()
+    if status in HEALTHY_STATUS:
         return "healthy"
-    return status if status in SAFE_STATUS else "unknown"
+    if status in DEGRADED_STATUS or status.startswith(("error:", "status_")):
+        return "unavailable"
+    return "unknown"
 
 
 def _timestamp(value: Any) -> str | None:
@@ -199,7 +213,11 @@ async def architecture_status(
                         if required
                         else "optional_dependency_degraded"
                     )
-        if row.active_in_mode and row.status in {"degraded", "unavailable", "not_ready"}:
+        if (
+            row.active_in_mode
+            and row.lifecycle == "long-running"
+            and row.status != "healthy"
+        ):
             reasons.add("health_contract_degraded")
         row.dependencies = dependencies
         row.degraded_reasons = sorted(reasons)

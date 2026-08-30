@@ -12,6 +12,10 @@ load_env
 COMPOSE_CMD=$(get_compose_cmd)
 TOPOLOGY_MODE="${AI_PLATFORM_TOPOLOGY_MODE:-full}"
 cd "$PROJECT_ROOT"
+if ! python3 "$PROJECT_ROOT/scripts/deploy/topology_modes.py" --mode "$TOPOLOGY_MODE" >/dev/null; then
+    log_error "Invalid AI_PLATFORM_TOPOLOGY_MODE=$TOPOLOGY_MODE"
+    exit 2
+fi
 
 echo ""
 echo "=== Docker Compose Services ==="
@@ -68,6 +72,7 @@ check_and_report "Gateway metrics" check_gateway_metrics
 check_and_report "Frontend" check_frontend_health
 check_and_report "Agent Runtime" check_agent_runtime_health
 check_and_report "Capability worker" check_agent_capability_worker_health
+check_and_report "Topology replicas" check_topology_cardinality
 
 echo ""
 

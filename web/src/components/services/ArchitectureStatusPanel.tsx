@@ -2,7 +2,10 @@ import { Boxes, Clock3, LockKeyhole, RefreshCw } from "lucide-react";
 
 import type { ArchitectureStatus } from "@/api/architecture";
 import { Button } from "@/components/ui/button";
-import { architectureStatusClass } from "./architectureStatusPresentation";
+import {
+  architectureReasonLabel,
+  architectureStatusClass,
+} from "./architectureStatusPresentation";
 
 interface ArchitectureStatusPanelProps {
   data?: ArchitectureStatus;
@@ -52,8 +55,12 @@ export function ArchitectureStatusPanel({
           </h2>
           <p className="mt-1 text-xs text-muted-foreground">
             Mode {data.mode} · topology {data.topology_revision}
-            {!data.mode_configuration_valid ? " · invalid mode configuration fell back to full" : ""}
           </p>
+          {!data.mode_configuration_valid ? (
+            <p role="alert" className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+              Invalid mode configuration; safely using full mode.
+            </p>
+          ) : null}
         </div>
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <Clock3 className="h-3.5 w-3.5" />
@@ -88,7 +95,7 @@ export function ArchitectureStatusPanel({
                     </div>
                     <div className="text-right text-[11px] text-muted-foreground">
                       <div>v{service.version}</div>
-                      <div>{service.replicas} replica{service.replicas === 1 ? "" : "s"} · {service.scale_support}</div>
+                      <div>Configured: {service.replicas} replica{service.replicas === 1 ? "" : "s"} · {service.scale_support}</div>
                     </div>
                   </div>
                   <div className="mt-2 flex flex-wrap gap-1.5">
@@ -100,7 +107,7 @@ export function ArchitectureStatusPanel({
                   </div>
                   {service.degraded_reasons.length > 0 ? (
                     <p className="mt-2 text-[11px] text-amber-700 dark:text-amber-300">
-                      {service.degraded_reasons.join(" · ")}
+                      {service.degraded_reasons.map(architectureReasonLabel).join(" · ")}
                     </p>
                   ) : null}
                   <p className="mt-2 truncate text-[10px] text-muted-foreground">

@@ -46,6 +46,7 @@ def _write_fake_runtime_commands(tmp_path: Path) -> Path:
     fake_docker.write_text(
         "#!/bin/sh\n"
         'if [ "$1" = "compose" ]; then\n'
+        '  case "$*" in *" config"*) exit 0 ;; esac\n'
         '  case "$2" in\n'
         "    version) exit 0 ;;\n"
         "    --env-file) exit 0 ;;\n"
@@ -893,22 +894,13 @@ def test_frontend_builder_matches_ci_toolchain() -> None:
 
 def test_deploy_app_includes_application_microservices() -> None:
     script = Path("scripts/new/deploy.sh").read_text()
-    match = re.search(
-        r'^FULL_APP_SERVICES="([^"]+)"',
-        script,
-        re.MULTILINE,
-    )
-    assert match, "deploy.sh missing full application service selection"
+    common = Path("scripts/new/common.sh").read_text()
 
-    services = set(match.group(1).split())
-    assert {
-        "gateway",
-        "frontend",
-        "knowledge-service",
-        "knowledge-worker",
-        "agent-runtime",
-        "agent-capability-worker",
-    }.issubset(services)
+    assert 'FULL_APP_SERVICES="$(topology_service_ids app)"' in script
+    assert 'INFRA_SERVICES="$(topology_service_ids infrastructure)"' in script
+    assert '--service-ids "$scope"' in common
+    assert "if topology_service_present knowledge-worker; then" in script
+    assert 'wait_for_healthy "Capability worker"' in script
 
 
 def test_deploy_pull_uses_selected_service_scope() -> None:

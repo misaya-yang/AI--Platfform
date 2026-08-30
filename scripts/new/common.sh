@@ -115,6 +115,10 @@ compose_service_containers() {
         --filter "label=com.docker.compose.service=$service" \
         --format '{{.Names}}' 2>/dev/null
 }
+compose_running_service_containers() {
+    local service="$1"
+    docker ps +        --filter "label=com.docker.compose.project=$(compose_project_name)" +        --filter "label=com.docker.compose.service=$service" +        --format '{{.Names}}' 2>/dev/null
+}
 compose_service_container() {
     local service="$1"
     local fallback="$2"
@@ -124,15 +128,32 @@ compose_service_container() {
 }
 topology_service_present() {
     local service="$1"
+    [ "$(topology_service_replicas "$service")" -gt 0 ]
+}
+topology_service_replicas() {
+    local service="$1"
     local mode="${AI_PLATFORM_TOPOLOGY_MODE:-full}"
-    python3 - "$PROJECT_ROOT/src/core/data/service_topology.json" "$service" "$mode" <<'PY'
-import json
-import sys
-
-payload = json.load(open(sys.argv[1], encoding="utf-8"))
-service = next((row for row in payload["services"] if row["service_id"] == sys.argv[2]), None)
-raise SystemExit(0 if service and service["modes"][sys.argv[3]]["present"] else 1)
-PY
+    python3 "$PROJECT_ROOT/scripts/deploy/topology_modes.py" +        --mode "$mode" --service-replicas "$service"
+}
+topology_service_ids() {
+    local scope="$1"
+    local mode="${AI_PLATFORM_TOPOLOGY_MODE:-full}"
+    python3 "$PROJECT_ROOT/scripts/deploy/topology_modes.py" +        --mode "$mode" --service-ids "$scope"
+}
+running_service_replica_count() {
+    local service="$1"
+    compose_running_service_containers "$service" | awk 'NF { count += 1 } END { print count + 0 }'
+}
+check_topology_cardinality() {
+    local service expected actual
+    for service in gateway agent-runtime knowledge-worker agent-capability-worker; do
+        expected="$(topology_service_replicas "$service")"
+        actual="$(running_service_replica_count "$service")"
+        if [ "$actual" -ne "$expected" ]; then
+            log_error "$service running replicas $actual do not match topology $expected"
+            return 1
+        fi
+    done
 }
 pg_container()     { echo "${POSTGRES_CONTAINER:-ai-gateway-pg}"; }
 redis_container()  { echo "${REDIS_CONTAINER:-ai-gateway-redis}"; }
@@ -487,9 +508,11 @@ check_knowledge_health() {
 }
 
 check_knowledge_worker_health() {
-    local containers container
-    containers="$(compose_service_containers knowledge-worker)"
-    [ -n "$containers" ] || return 1
+    local containers container expected actual
+    expected="$(topology_service_replicas knowledge-worker)"
+    containers="$(compose_running_service_containers knowledge-worker)"
+    actual="$(printf '%s\n' "$containers" | awk 'NF { count += 1 } END { print count + 0 }')"
+    [ "$expected" -gt 0 ] && [ "$actual" -eq "$expected" ] || return 1
     while IFS= read -r container; do
         docker exec "$container" curl -sf "http://127.0.0.1:8092/health/ready" &>/dev/null \
             || return 1
@@ -501,9 +524,11 @@ check_agent_runtime_health() {
 }
 
 check_agent_capability_worker_health() {
-    local containers container
-    containers="$(compose_service_containers agent-capability-worker)"
-    [ -n "$containers" ] || return 1
+    local containers container expected actual
+    expected="$(topology_service_replicas agent-capability-worker)"
+    containers="$(compose_running_service_containers agent-capability-worker)"
+    actual="$(printf '%s\n' "$containers" | awk 'NF { count += 1 } END { print count + 0 }')"
+    [ "$expected" -gt 0 ] && [ "$actual" -eq "$expected" ] || return 1
     while IFS= read -r container; do
         docker exec "$container" ai-platform-capability-worker-health &>/dev/null || return 1
     done <<< "$containers"

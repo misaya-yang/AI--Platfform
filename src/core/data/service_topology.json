@@ -85,7 +85,7 @@
       "optional_deps": ["knowledge-service", "gateway"],
       "state_owner": "capability execution and event ledger",
       "scale_support": "worker",
-      "health_contract": {"kind": "gateway-dependency", "source_key": "agent_capability_worker"},
+      "health_contract": {"kind": "gateway-dependency", "source_key": "capability_worker"},
       "image_artifact": {"version_env": "AGENT_CAPABILITY_WORKER_IMAGE", "default_version": "candidate"},
       "modes": {"compact": {"present": true, "replicas": 1}, "full": {"present": true, "replicas": 1}, "scale": {"present": true, "replicas": 2}}
     },

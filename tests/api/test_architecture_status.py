@@ -40,7 +40,10 @@ async def _snapshot() -> dict:
             "redis": "healthy",
             "agent_runtime": "healthy",
         },
-        "capabilities": {"knowledge_service": "degraded"},
+        "capabilities": {
+            "knowledge_service": "degraded",
+            "capability_worker": "healthy",
+        },
     }
 
 
@@ -68,6 +71,24 @@ def test_architecture_status_is_grouped_sanitized_and_marks_jobs() -> None:
     assert services["migrate"]["status"] == "one-shot"
     assert services["gateway-init"]["lifecycle"] == "one-shot"
     assert services["knowledge-service"]["degraded_reasons"]
+    assert services["agent-capability-worker"]["status"] == "healthy"
+    assert services["qdrant"]["status"] == "unavailable"
+    assert services["qdrant"]["degraded_reasons"] == ["health_contract_degraded"]
     rendered = response.text.lower()
     for forbidden in ("postgresql://", "redis://", "http://", "/users/", "traceback"):
         assert forbidden not in rendered
+
+
+def test_architecture_status_falls_back_safely_for_invalid_mode(monkeypatch) -> None:
+    monkeypatch.setenv("AI_PLATFORM_TOPOLOGY_MODE", "invalid")
+
+    body = _client(platform_admin=True).get("/admin/architecture-status").json()
+
+    assert body["mode"] == "full"
+    assert body["mode_configuration_valid"] is False
+    services = {
+        service["service_id"]: service
+        for group in body["groups"]
+        for service in group["services"]
+    }
+    assert services["knowledge-worker"]["active_in_mode"] is True

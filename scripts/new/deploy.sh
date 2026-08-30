@@ -106,11 +106,8 @@ if [ -z "${AI_PLATFORM_AGENT_RUNTIME_IMAGE:-}" ]; then
     export AI_PLATFORM_AGENT_RUNTIME_IMAGE="$(agent_runtime_image_tag)"
 fi
 
-INFRA_SERVICES="postgres redis qdrant"
-FULL_APP_SERVICES="migrate gateway frontend knowledge-service knowledge-worker agent-runtime agent-capability-worker"
-if [ "$TOPOLOGY_MODE" = "compact" ]; then
-    FULL_APP_SERVICES="migrate gateway frontend knowledge-service agent-runtime agent-capability-worker"
-fi
+INFRA_SERVICES="$(topology_service_ids infrastructure)"
+FULL_APP_SERVICES="$(topology_service_ids app)"
 
 assert_compose_owner
 
@@ -232,10 +229,14 @@ fi
 # -- Wait for application health ---------------------------------------------
 if [ "$INFRA_ONLY" != true ]; then
     wait_for_healthy "Knowledge service" "check_knowledge_health" 60 || log_warn "Knowledge service may still be starting"
-    wait_for_healthy "Knowledge worker" "check_knowledge_worker_health" 60 || log_warn "Knowledge worker may still be starting"
+    if topology_service_present knowledge-worker; then
+        wait_for_healthy "Knowledge worker" "check_knowledge_worker_health" 60 || log_warn "Knowledge worker may still be starting"
+    fi
+    wait_for_healthy "Capability worker" "check_agent_capability_worker_health" 60 || log_warn "Capability worker may still be starting"
     wait_for_healthy "Gateway" "check_gateway_health" 60 || log_warn "Gateway may still be starting"
     wait_for_healthy "Frontend" "check_frontend_health" 30 || log_warn "Frontend may still be starting"
     wait_for_healthy "Agent Runtime" "check_agent_runtime_health" 60 || log_warn "Agent Runtime may still be starting"
+    check_topology_cardinality
 fi
 
 if [ "$INFRA_ONLY" = true ]; then
