@@ -28,6 +28,7 @@ interface ChatInputAreaProps {
   files: UploadedFile[];
   isUploading: boolean;
   isStreaming: boolean;
+  isComposerBlocked: boolean;
   isGeneratingImage: boolean;
   isImageMode: boolean;
   hasAvailableModel: boolean;
@@ -60,6 +61,7 @@ export function ChatInputArea({
   files,
   isUploading,
   isStreaming,
+  isComposerBlocked,
   isGeneratingImage,
   isImageMode,
   hasAvailableModel,
@@ -90,7 +92,7 @@ export function ChatInputArea({
 
   const hasUploadedFiles = files.some((f) => f.status === "success" && f.response);
   const canSend =
-    !isStreaming &&
+    !isComposerBlocked &&
     !isUploading &&
     !isGeneratingImage &&
     hasAvailableModel &&
@@ -219,7 +221,7 @@ export function ChatInputArea({
                   type="button"
                   variant="ghost"
                   aria-label={t("assistant.thinkingLevel", "Thinking")}
-                  disabled={isStreaming || isGeneratingImage}
+                  disabled={isComposerBlocked || isGeneratingImage}
                   className="h-9 min-w-[108px] max-w-[148px] shrink-0 justify-between gap-1.5 rounded-md border border-transparent bg-[hsl(var(--assistant-surface-soft))] px-2.5 text-[12px] font-medium text-[hsl(var(--assistant-text-secondary))] shadow-none hover:border-[hsl(var(--assistant-border))] hover:bg-[hsl(var(--assistant-chip-bg))] hover:text-[hsl(var(--assistant-text-primary))] focus-visible:border-[hsl(var(--assistant-accent))]/45 focus-visible:ring-[3px] focus-visible:ring-[hsl(var(--assistant-accent))]/15"
                 >
                   <span className="truncate">{selectedReasoningLabel}</span>
@@ -252,7 +254,7 @@ export function ChatInputArea({
               webSearchEnabled={webSearchEnabled}
               kbAvailable={config?.kb_enabled ?? false}
               webSearchAvailable={config?.web_search_enabled ?? false}
-              disabled={isStreaming || isGeneratingImage}
+              disabled={isComposerBlocked || isGeneratingImage}
               connectorCount={connectorCount}
               datasets={datasets}
               selectedDatasets={selectedDatasets}
@@ -266,7 +268,7 @@ export function ChatInputArea({
               multiple
               accept=".pdf,.docx,.doc,.md,.txt,.csv,.xlsx,.png,.jpg,.jpeg,.gif,.webp"
               className="hidden"
-              disabled={isStreaming || isUploading}
+              disabled={isComposerBlocked || isUploading}
               onChange={(e) => {
                 handleFileSelect(e.target.files);
                 e.target.value = "";
@@ -303,7 +305,7 @@ export function ChatInputArea({
                   ? "placeholder:text-[hsl(var(--assistant-accent))]"
                   : "placeholder:text-[hsl(var(--assistant-text-tertiary))]"
               )}
-              disabled={isStreaming || isGeneratingImage || !hasAvailableModel}
+              disabled={isComposerBlocked || isGeneratingImage || !hasAvailableModel}
               rows={1}
             />
 
@@ -352,7 +354,7 @@ export function ChatInputArea({
               <StyleSelector
                 selectedStyle={selectedStyle}
                 onSelect={setSelectedStyle}
-                disabled={isStreaming}
+                disabled={isComposerBlocked}
               />
             </div>
             <span className="text-[11px] text-[hsl(var(--assistant-text-tertiary))]">

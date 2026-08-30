@@ -3,6 +3,7 @@
 
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::Path;
 use axum::extract::Query;
@@ -75,18 +76,42 @@ pub(super) async fn events(
                 yield Ok::<Event, Infallible>(sse);
             }
         }
+        // Broadcast is a latency optimization; the append-only store remains
+        // authoritative. Periodic replay closes the gap when a notification is
+        // committed while the subscriber is being attached or a sender has no
+        // active receiver. Without this, an approval can exist durably while
+        // the UI waits forever with no actionable card.
+        let mut durable_poll = tokio::time::interval(Duration::from_millis(500));
+        durable_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        durable_poll.tick().await;
         loop {
-            match receiver.recv().await {
-                Ok(message) if message.root_thread_id == root_thread_id => {
-                    if message.event.sequence > cursor {
-                        cursor = message.event.sequence;
-                        if let Some(sse) = sse_event(&message.event) {
-                            yield Ok(sse);
+            tokio::select! {
+                message = receiver.recv() => match message {
+                    Ok(message) if message.root_thread_id == root_thread_id => {
+                        if message.event.sequence > cursor {
+                            cursor = message.event.sequence;
+                            if let Some(sse) = sse_event(&message.event) {
+                                yield Ok(sse);
+                            }
                         }
                     }
-                }
-                Ok(_) => {}
-                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        match store.read_v1_events_after(root_thread_id, cursor, 1_000).await {
+                            Ok(backlog) => {
+                                for event in backlog {
+                                    cursor = event.sequence;
+                                    if let Some(sse) = sse_event(&event) {
+                                        yield Ok(sse);
+                                    }
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
+                _ = durable_poll.tick() => {
                     match store.read_v1_events_after(root_thread_id, cursor, 1_000).await {
                         Ok(backlog) => {
                             for event in backlog {
@@ -99,7 +124,6 @@ pub(super) async fn events(
                         Err(_) => break,
                     }
                 }
-                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     };

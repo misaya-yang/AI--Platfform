@@ -435,7 +435,7 @@ async fn handle_dynamic_tool_call(
     }
     let internal_token = std::env::var("AI_PLATFORM_INTERNAL_TOKEN").unwrap_or_default();
     let approval_id_string = approval_id.map(|id| id.to_string());
-    let result: Result<CapabilityExecutionOutcome, String> = if worker_enabled {
+    let mut result: Result<CapabilityExecutionOutcome, String> = if worker_enabled {
         let worker_url = worker_url
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| "capability_worker_url_missing".to_string());
@@ -498,10 +498,21 @@ async fn handle_dynamic_tool_call(
                 CapabilityExecutionStatus::Failed
             },
             response,
+            raw_result: None,
         })
     } else {
         Err("capability_worker_required_for_write".to_string())
     };
+    if let Ok(outcome) = &result
+        && outcome.status == CapabilityExecutionStatus::Succeeded
+        && let Some(event) =
+            capability_projection_event(params, &identity, outcome.raw_result.as_ref())
+        && persist_capability_projection(params, thread_id, event, store, events)
+            .await
+            .is_err()
+    {
+        result = Err("capability_projection_failed".to_string());
+    }
     let (status, detail) = match &result {
         Ok(outcome) => (
             capability_status_name(outcome.status),
@@ -531,6 +542,113 @@ async fn handle_dynamic_tool_call(
         return Err("dynamic_tool_result_receipt_failed".to_string());
     }
     result.map(|outcome| outcome.response)
+}
+
+fn capability_projection_event(
+    params: &codex_app_server_protocol::DynamicToolCallParams,
+    identity: &PlatformThreadIdentity,
+    raw_result: Option<&serde_json::Value>,
+) -> Option<crate::AssistantTurnEventV1> {
+    let result = raw_result?.as_object()?;
+    if params.tool == "search_knowledge_base" {
+        let fallback_dataset = result
+            .get("dataset_ids")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|items| (items.len() == 1).then(|| items[0].as_str()).flatten());
+        let chunks = result
+            .get("results")
+            .and_then(serde_json::Value::as_array)?
+            .iter()
+            .filter_map(|item| {
+                let item = item.as_object()?;
+                let metadata = item.get("metadata").and_then(serde_json::Value::as_object);
+                let dataset_id = metadata
+                    .and_then(|value| value.get("dataset_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .or(fallback_dataset)?;
+                let content = item.get("text").and_then(serde_json::Value::as_str)?;
+                Some(serde_json::json!({
+                    "dataset_id": dataset_id,
+                    "document_id": item.get("document_id"),
+                    "segment_id": item.get("segment_id"),
+                    "content": content,
+                    "score": item.get("score"),
+                    "metadata": item.get("metadata"),
+                    "source_type": item.get("source_type"),
+                    "citation_text": item.get("citation_text"),
+                    "source_reference": item.get("source_reference"),
+                }))
+            })
+            .collect::<Vec<_>>();
+        if chunks.is_empty() {
+            return None;
+        }
+        return Some(crate::AssistantTurnEventV1::new(
+            "context_retrieved",
+            serde_json::json!({
+                "run_id": params.turn_id,
+                "session_id": identity.session_id,
+                "thread_id": identity.runtime_thread_id.to_string(),
+                "tool_call_id": params.call_id,
+                "chunks": chunks,
+            }),
+        ));
+    }
+    let artifact_id = result
+        .get("artifact_id")
+        .and_then(serde_json::Value::as_str)?;
+    let filename = result
+        .get("filename")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(artifact_id);
+    let format = filename
+        .rsplit_once('.')
+        .map_or("file", |(_, suffix)| suffix);
+    Some(crate::AssistantTurnEventV1::new(
+        "artifact_created",
+        serde_json::json!({
+            "run_id": params.turn_id,
+            "session_id": identity.session_id,
+            "thread_id": identity.runtime_thread_id.to_string(),
+            "tool_call_id": params.call_id,
+            "artifact_id": artifact_id,
+            "type": "file",
+            "format": format,
+            "title": filename,
+            "filename": filename,
+            "mime_type": result.get("mime_type"),
+            "size_bytes": result.get("size_bytes"),
+            "download_url": result.get("download_url"),
+            "source": params.tool,
+        }),
+    ))
+}
+
+async fn persist_capability_projection(
+    params: &codex_app_server_protocol::DynamicToolCallParams,
+    thread_id: ThreadId,
+    event: crate::AssistantTurnEventV1,
+    store: &PostgresThreadStore,
+    events: &broadcast::Sender<RuntimeBroadcastEvent>,
+) -> Result<(), String> {
+    let event_key = format!(
+        "compat/capability/{}/{}/{}",
+        params.turn_id, params.call_id, event.event_type
+    );
+    let mut digest = Sha256::new();
+    digest.update(event_key.as_bytes());
+    let digest = digest.finalize();
+    let mut event_id = [0_u8; 16];
+    event_id.copy_from_slice(&digest[..16]);
+    let sequence = store
+        .append_v1_event(thread_id, Uuid::from_bytes(event_id), &event_key, &event)
+        .await
+        .map_err(|_| "capability_projection_failed".to_string())?;
+    let _ = events.send(RuntimeBroadcastEvent {
+        root_thread_id: thread_id,
+        event: SequencedAssistantTurnEventV1 { sequence, event },
+    });
+    Ok(())
 }
 
 pub(super) fn capability_worker_enabled(value: Option<&str>) -> bool {
@@ -768,4 +886,72 @@ async fn persist_dynamic_terminal_receipt(
         .await
         .map(|_| ())
         .map_err(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(tool: &str) -> (
+        codex_app_server_protocol::DynamicToolCallParams,
+        PlatformThreadIdentity,
+    ) {
+        let thread_id = ThreadId::new();
+        (
+            codex_app_server_protocol::DynamicToolCallParams {
+                thread_id: thread_id.to_string(),
+                turn_id: "00000000-0000-4000-8000-000000000001".to_string(),
+                call_id: "call-a".to_string(),
+                namespace: None,
+                tool: tool.to_string(),
+                arguments: serde_json::json!({}),
+            },
+            PlatformThreadIdentity::new(thread_id, "tenant-a", "user-a", "session-a"),
+        )
+    }
+
+    #[test]
+    fn knowledge_result_projects_citation_identity() {
+        let (params, identity) = request("search_knowledge_base");
+        let event = capability_projection_event(
+            &params,
+            &identity,
+            Some(&serde_json::json!({
+                "dataset_ids": ["dataset-a"],
+                "results": [{
+                    "text": "grounded",
+                    "document_id": "document-a",
+                    "segment_id": "segment-a",
+                    "score": 0.9,
+                    "metadata": {"dataset_id": "dataset-a"}
+                }]
+            })),
+        )
+        .expect("knowledge result should project");
+        assert_eq!(event.event_type, "context_retrieved");
+        assert_eq!(event.data["chunks"][0]["dataset_id"], "dataset-a");
+        assert_eq!(event.data["chunks"][0]["document_id"], "document-a");
+        assert_eq!(event.data["chunks"][0]["segment_id"], "segment-a");
+        assert_eq!(event.data["chunks"][0]["content"], "grounded");
+    }
+
+    #[test]
+    fn document_result_projects_downloadable_artifact() {
+        let (params, identity) = request("mcp_docgen__generate_document");
+        let event = capability_projection_event(
+            &params,
+            &identity,
+            Some(&serde_json::json!({
+                "artifact_id": "art_12345678",
+                "filename": "report.docx",
+                "size_bytes": 1024,
+                "download_url": "/api/v1/assistant/artifacts/art_12345678/download"
+            })),
+        )
+        .expect("artifact result should project");
+        assert_eq!(event.event_type, "artifact_created");
+        assert_eq!(event.data["artifact_id"], "art_12345678");
+        assert_eq!(event.data["format"], "docx");
+        assert_eq!(event.data["filename"], "report.docx");
+    }
 }

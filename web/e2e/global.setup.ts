@@ -125,6 +125,26 @@ function buildNextPassword(): string {
   return `Agw!${Date.now().toString(36)}Z9`;
 }
 
+async function readPersistedE2ECredentials(): Promise<{
+  email: string;
+  password: string;
+} | null> {
+  try {
+    const raw = JSON.parse(await fs.readFile(USER_FILE, "utf-8")) as {
+      email?: unknown;
+      password?: unknown;
+    };
+    if (typeof raw.email === "string" && typeof raw.password === "string") {
+      if (raw.email.trim() && raw.password) {
+        return { email: raw.email.trim(), password: raw.password };
+      }
+    }
+  } catch {
+    // A fresh checkout has no local credential file yet.
+  }
+  return null;
+}
+
 async function login(apiURL: string, email: string, password: string) {
   const response = await fetch(`${apiURL}/api/v1/auth/login`, {
     method: "POST",
@@ -336,13 +356,19 @@ export default async function globalSetup(config: FullConfig) {
   const defaultPassword = await detectDefaultPassword();
   const providedEmail = process.env.E2E_USER_EMAIL;
   const providedPassword = process.env.E2E_USER_PASSWORD;
+  if ((providedEmail && !providedPassword) || (!providedEmail && providedPassword)) {
+    throw new Error("E2E_USER_EMAIL and E2E_USER_PASSWORD must be provided together.");
+  }
+  const persistedCredentials =
+    providedEmail && providedPassword ? null : await readPersistedE2ECredentials();
   const authEmailDomain = process.env.E2E_AUTH_EMAIL_DOMAIN || "example.com";
-  const email = providedEmail || `assistant.e2e.${Date.now()}@${authEmailDomain}`;
-  let password = providedPassword || defaultPassword;
+  const email =
+    providedEmail || persistedCredentials?.email || `assistant.e2e.${Date.now()}@${authEmailDomain}`;
+  let password = providedPassword || persistedCredentials?.password || defaultPassword;
   let loginPayload: Record<string, unknown>;
   let provisioningToken: string | null = null;
 
-  if (providedEmail && providedPassword) {
+  if ((providedEmail && providedPassword) || persistedCredentials) {
     loginPayload = await login(apiURL, email, password);
   } else {
     const bootstrapEmail = process.env.E2E_BOOTSTRAP_EMAIL || `admin@${authEmailDomain}`;

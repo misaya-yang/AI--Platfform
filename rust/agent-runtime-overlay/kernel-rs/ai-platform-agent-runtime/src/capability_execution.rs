@@ -60,6 +60,9 @@ pub enum CapabilityExecutionError {
 pub struct CapabilityExecutionOutcome {
     pub response: Value,
     pub status: CapabilityExecutionStatus,
+    /// Original Worker terminal result retained for platform event projection.
+    /// It never crosses the Codex dynamic-tool response boundary directly.
+    pub raw_result: Option<Value>,
 }
 
 impl CapabilityExecutionError {
@@ -397,6 +400,7 @@ fn project_terminal(
     Ok(CapabilityExecutionOutcome {
         response: project_terminal_response(event)?,
         status: event.status,
+        raw_result: event.payload.get("result").cloned(),
     })
 }
 

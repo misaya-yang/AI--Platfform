@@ -363,6 +363,7 @@ mod turn_request_tests {
                 "success": false
             }),
             status: CapabilityExecutionStatus::Failed,
+            raw_result: None,
         };
         assert_eq!(capability_status_name(failed.status), "failed");
         assert_eq!(

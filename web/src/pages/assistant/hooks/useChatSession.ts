@@ -50,6 +50,8 @@ import {
   ACTIVE_RUN_METADATA_KEY,
   shouldBlockDuringRunRestore,
 } from "@/features/chat/sessionRestoreWindow";
+import { isExpectedApprovalRejection } from "@/features/chat/runtimeV2State";
+import { resolveArtifactIdsByMessageIndex } from "@/features/chat/sessionArtifactHydration";
 import {
   createStreamTerminalLatch,
   type StreamTerminalOutcome,
@@ -254,12 +256,34 @@ async function restoreLatestRun(
       throw new Error("run_scope_mismatch");
     }
     const checkpoint = asRecord(run.checkpoint);
-    const status = nonEmptyString(run.status) || "unknown";
+    let status = nonEmptyString(run.status) || "unknown";
     const phase = nonEmptyString(checkpoint?.phase);
-    const approvalId = nonEmptyString(checkpoint?.approval_id);
+    const runtimeThreadId = nonEmptyString(run.harness_thread_id);
+    let durableApproval: {
+      approvalId: string;
+      toolId: string;
+      toolName: string;
+      reason?: string;
+      runId?: string;
+      threadId?: string;
+    } | undefined;
+    if (
+      runtimeThreadId &&
+      ["running", "queued", "awaiting_approval"].includes(status)
+    ) {
+      try {
+        const { getAgentRuntimeV2RunSnapshot } = await import("@/api/agentThreads");
+        const snapshot = await getAgentRuntimeV2RunSnapshot(runtimeThreadId, runId);
+        durableApproval = snapshot.pendingApproval;
+        status = snapshot.terminalStatus ?? status;
+      } catch {
+        console.warn("Assistant durable run replay failed");
+      }
+    }
+    const approvalId = nonEmptyString(checkpoint?.approval_id) ?? durableApproval?.approvalId;
     const current = next[targetIndex];
     const base = current.processSummary!;
-    if (phase === "approval_pending" && approvalId) {
+    if ((phase === "approval_pending" || durableApproval) && approvalId) {
       const pendingTool = asRecord(checkpoint?.pending_tool);
       next[targetIndex] = {
         ...current,
@@ -275,18 +299,19 @@ async function restoreLatestRun(
           // live ``approval_required`` event reports as ``thread_id``), so
           // recover it here instead of falling through to the legacy
           // ``approveToolCall`` + resume path that cannot drive a V2 thread.
-          runtimeThreadId: nonEmptyString(run.harness_thread_id) ?? base.runtimeThreadId,
+          runtimeThreadId: durableApproval?.threadId ?? runtimeThreadId ?? base.runtimeThreadId,
           tools: [{
-            id: nonEmptyString(pendingTool?.tool_id) ?? `approval-${approvalId}`,
-            name: nonEmptyString(pendingTool?.tool_name) ?? "Pending tool",
+            id: durableApproval?.toolId ?? nonEmptyString(pendingTool?.tool_id) ?? `approval-${approvalId}`,
+            name: durableApproval?.toolName ?? nonEmptyString(pendingTool?.tool_name) ?? "Pending tool",
             status: "approval_required",
             approvalId,
+            summary: durableApproval?.reason,
           }],
         },
       };
     } else {
       const succeeded = status === "succeeded";
-      const active = status === "running" || status === "queued";
+      const active = status === "running" || status === "queued" || status === "awaiting_approval";
       next[targetIndex] = {
         ...current,
         isStreaming: false,
@@ -307,9 +332,10 @@ async function restoreLatestRun(
       };
     }
     const blocksComposer =
-      (phase === "approval_pending" && Boolean(approvalId)) ||
+      ((phase === "approval_pending" || Boolean(durableApproval)) && Boolean(approvalId)) ||
       status === "running" ||
-      status === "queued";
+      status === "queued" ||
+      status === "awaiting_approval";
     return { messages: next, blocksComposer };
   } catch {
     console.warn("Assistant run status reconciliation failed");
@@ -539,14 +565,17 @@ function hydrateMessageArtifacts(
   for (const a of artifacts) {
     artifactMap.set(a.artifact_id, a);
   }
-  return messages.map((m) => {
-    const ids = m._artifactIds;
+  const idsByMessageIndex = resolveArtifactIdsByMessageIndex(messages, artifacts);
+  return messages.map((m, messageIndex) => {
+    const ids = idsByMessageIndex.get(messageIndex);
     if (!ids || ids.length === 0) return m;
-    const generatedArtifacts: GeneratedArtifact[] = [];
+    const generatedArtifacts = new Map<string, GeneratedArtifact>(
+      (m.generatedArtifacts ?? []).map((artifact) => [artifact.id, artifact]),
+    );
     for (const id of ids) {
       const a = artifactMap.get(id);
       if (a) {
-        generatedArtifacts.push({
+        generatedArtifacts.set(id, {
           id: a.artifact_id,
           type: (a.type || "file") as GeneratedArtifact["type"],
           format: a.format || "",
@@ -558,8 +587,8 @@ function hydrateMessageArtifacts(
         });
       }
     }
-    if (generatedArtifacts.length > 0) {
-      return { ...m, generatedArtifacts };
+    if (generatedArtifacts.size > 0) {
+      return { ...m, _artifactIds: ids, generatedArtifacts: [...generatedArtifacts.values()] };
     }
     return m;
   });
@@ -1448,6 +1477,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     };
     let streamTurnState = createStreamTurnState(startTime);
     let approvalHoldOpen = false;
+    let approvalRejected = false;
     const streamReducerContext = createStreamReducerContext();
     let firstTokenMs: number | undefined;
     let firstTextTokenMs: number | undefined;
@@ -2084,6 +2114,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                 ? approvalData.tool_name
                 : approvalToolId;
             approvalHoldOpen = true;
+            approvalRejected = false;
             updateAssistantMessage((m) => {
               const prev = m.processSummary ?? initProcessSummary(undefined, now);
               if (!approvalToolId) return m;
@@ -2179,6 +2210,9 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
 
           case SSEEventType.APPROVAL_RESULT:
             approvalHoldOpen = false;
+            approvalRejected =
+              (event.data as { approved?: unknown; status?: unknown } | null)?.approved === false ||
+              String((event.data as { status?: unknown } | null)?.status ?? "").toLowerCase() === "rejected";
             updateAssistantMessage((m) => {
               const prev = m.processSummary ?? initProcessSummary(undefined, now);
               const approvalResultData = (event.data || {}) as Record<string, unknown>;
@@ -2323,6 +2357,14 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                 runErrorData.message ||
                 (runWasCancelled ? "cancelled" : "assistant_run_failed"),
               runId: runErrorData.run_id,
+              showInterruptionNotice:
+                runWasCancelled ||
+                isExpectedApprovalRejection(
+                  runErrorData as unknown as Record<string, unknown>,
+                  approvalRejected,
+                )
+                  ? false
+                  : undefined,
             });
             await persistAssistantRunId(runErrorData.run_id);
             if (!isCurrentStream()) return;
@@ -3089,17 +3131,34 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
             if (event.data) {
               const artifactData = event.data as {
                 artifact_id: string;
-                type: string;
-                format: string;
-                title: string;
+                type?: string;
+                artifact_type?: string;
+                format?: string;
+                title?: string;
                 filename?: string;
                 mime_type?: string;
                 size_bytes?: number;
                 source?: string;
                 download_url?: string;
+                download_path?: string;
               };
+              if (!artifactData.artifact_id) break;
+              const format =
+                artifactData.format ||
+                artifactData.filename?.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase() ||
+                (artifactData.mime_type?.includes("wordprocessingml") ? "docx" : "file");
+              const artifactType =
+                artifactData.type ||
+                artifactData.artifact_type ||
+                (["doc", "docx", "md", "pdf", "ppt", "pptx", "txt", "xlsx"].includes(format)
+                  ? "document"
+                  : "file");
+              const artifactTitle = artifactData.title || artifactData.filename || "Artifact";
               // Prefer presigned download_url (no auth required)
-              const downloadUrl = artifactData.download_url || getArtifactDownloadUrl(artifactData.artifact_id);
+              const downloadUrl =
+                artifactData.download_url ||
+                artifactData.download_path ||
+                getArtifactDownloadUrl(artifactData.artifact_id);
 
               // Add to artifacts panel
               setArtifacts((prev) => {
@@ -3110,9 +3169,9 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                   ...prev,
                   {
                     id: artifactData.artifact_id,
-                    type: artifactData.type as any,
-                    format: artifactData.format,
-                    title: artifactData.title,
+                    type: artifactType as any,
+                    format,
+                    title: artifactTitle,
                     url: downloadUrl,
                     filename: artifactData.filename,
                     mimeType: artifactData.mime_type,
@@ -3123,7 +3182,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                 ];
               });
               if (
-                artifactData.type === "image" ||
+                artifactType === "image" ||
                 artifactData.mime_type?.startsWith("image/")
               ) {
                 setShowArtifacts(true);
@@ -3132,9 +3191,9 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
               // Also add to current message's generatedArtifacts for inline display
               const generatedArtifact: GeneratedArtifact = {
                 id: artifactData.artifact_id,
-                type: artifactData.type as GeneratedArtifact["type"],
-                format: artifactData.format,
-                title: artifactData.title,
+                type: artifactType as GeneratedArtifact["type"],
+                format,
+                title: artifactTitle,
                 url: downloadUrl,
                 filename: artifactData.filename,
                 mimeType: artifactData.mime_type,
@@ -3147,7 +3206,13 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                   if (!nextGeneratedArtifacts.some((artifact) => artifact.id === generatedArtifact.id)) {
                     nextGeneratedArtifacts.push(generatedArtifact);
                   }
-                  return { ...m, generatedArtifacts: nextGeneratedArtifacts };
+                  const artifactIds = new Set(m._artifactIds ?? []);
+                  artifactIds.add(generatedArtifact.id);
+                  return {
+                    ...m,
+                    _artifactIds: [...artifactIds],
+                    generatedArtifacts: nextGeneratedArtifacts,
+                  };
                 })
               );
             }
@@ -3288,21 +3353,15 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
           const restoredAssistant = [...restoredMessages]
             .reverse()
             .find((message) => message.role === "assistant");
+          const hydrationBase =
+            restoredAssistant ??
+            messagesRef.current.find((message) => message.id === assistantMessage.id) ??
+            assistantMessage;
           if (restoredAssistant?.content.trim()) {
             streamTurnState = {
               ...streamTurnState,
               content: restoredAssistant.content,
             };
-            const hydrated = hydrateMessageArtifacts(
-              [restoredAssistant],
-              sessionArtifacts,
-            )[0];
-            updateAssistantMessage((message) => ({
-              ...message,
-              generatedArtifacts:
-                hydrated?.generatedArtifacts ?? message.generatedArtifacts,
-              _artifactIds: hydrated?._artifactIds ?? message._artifactIds,
-            }));
             // The quiz capability moved into the Rust worker, whose compat
             // `tool_call_result` carries only the arguments and which emits no
             // `quiz:ready` event, so the card has no live source. The
@@ -3318,8 +3377,22 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
                 .catch(() => undefined);
             }
           }
+          const hydrated = hydrateMessageArtifacts([hydrationBase], sessionArtifacts)[0];
+          updateAssistantMessage((message) => ({
+            ...message,
+            generatedArtifacts:
+              hydrated?.generatedArtifacts ?? message.generatedArtifacts,
+            _artifactIds: hydrated?._artifactIds ?? message._artifactIds,
+          }));
           if (artifactFetch.ok) {
             setArtifacts(sessionArtifacts.map(toArtifact));
+            setCodeExecution((previous) => ({
+              ...previous,
+              outputFiles: buildLatestRunOutputFilesFromArtifacts(
+                hydrated ? [hydrated] : [hydrationBase],
+                sessionArtifacts,
+              ),
+            }));
           }
         } catch {
           console.warn("Assistant terminal history reconciliation failed");
@@ -3537,13 +3610,20 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
           }
         }
         if (!sessionId) return;
-        const history = await getAssistantSessionHistory(sessionId, 200);
+        const [history, sessionArtifacts] = await Promise.all([
+          getAssistantSessionHistory(sessionId, 200),
+          getSessionArtifacts(sessionId).catch(() => []),
+        ]);
         if (activeSessionIdRef.current !== sessionId) return;
         const targetSession = sessionId;
-        const restored = history.messages.map((message, index) =>
-          restoreMessageMetadata(message, index, targetSession),
+        const restored = hydrateMessageArtifacts(
+          history.messages.map((message, index) =>
+            restoreMessageMetadata(message, index, targetSession),
+          ),
+          sessionArtifacts,
         );
         setMessages(restored);
+        setArtifacts(sessionArtifacts.map(toArtifact));
         void hydrateQuizData(restored, setMessages);
       } catch {
         console.warn("Reconcile after dead-stream approval decision failed");
@@ -3596,6 +3676,11 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         console.warn("Assistant tool approval submission failed");
         return;
       }
+      const runtimeNeedsReconciliation = Boolean(
+        runtimeThreadId &&
+        (!abortControllerRef.current || deadApprovalMessageIdsRef.current.delete(messageId)),
+      );
+      setServerRunBlocking(false);
 
       setMessages((prev) => {
         return prev.map((message) => {
@@ -3624,7 +3709,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
       if (!approved) {
         // A rejected approval ends the turn; reconcile the dead-stream case so
         // the rejection is reflected instead of leaving a parked "blocked" card.
-        if (runtimeThreadId && deadApprovalMessageIdsRef.current.delete(messageId)) {
+        if (runtimeNeedsReconciliation) {
           void reconcileDeadApprovalRun(runId, activeSessionIdRef.current);
         }
         return;
@@ -3634,7 +3719,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
         // A live V2 stream keeps consuming after the decision and renders the
         // continued turn itself. Only the dead-stream case — flagged by the
         // consumer's ``finally`` — needs a client-side reconcile.
-        if (deadApprovalMessageIdsRef.current.delete(messageId)) {
+        if (runtimeNeedsReconciliation) {
           void reconcileDeadApprovalRun(runId, activeSessionIdRef.current);
         }
         return;
@@ -3750,7 +3835,8 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
     activeSessionId,
     messages,
     setMessages,
-    isStreaming: isStreaming || serverRunBlocking,
+    isStreaming,
+    isComposerBlocked: isStreaming || serverRunBlocking,
     sessionsLoading,
     historyRestoreState,
     historyRestoreError,

@@ -310,6 +310,7 @@ export function AssistantPage() {
     messages,
     setMessages,
     isStreaming,
+    isComposerBlocked,
     sessionsLoading,
     historyRestoreState,
     historyRestoreError,
@@ -720,7 +721,7 @@ export function AssistantPage() {
 
     const successfulUploads = files.filter((f) => f.status === "success" && f.response);
     if (
-      isStreaming ||
+      isComposerBlocked ||
       isUploading ||
       isGeneratingImage ||
       (!input.trim() && successfulUploads.length === 0)
@@ -769,7 +770,7 @@ export function AssistantPage() {
     
     setInput("");
     clearFiles();
-  }, [input, files, selectedModel, selectedDatasets, webSearchEnabled, thinkingLevel, temperature, selectedStyle, models, modelsLoaded, datasets, isStreaming, isUploading, isGeneratingImage, sendMessage, clearFiles, t, toast, isSessionOptInEffectiveNow]);
+  }, [input, files, selectedModel, selectedDatasets, webSearchEnabled, thinkingLevel, temperature, selectedStyle, models, modelsLoaded, datasets, isComposerBlocked, isUploading, isGeneratingImage, sendMessage, clearFiles, t, toast, isSessionOptInEffectiveNow]);
 
   // Handle Image Send
   const handleImageSend = useCallback(() => {
@@ -1189,6 +1190,7 @@ export function AssistantPage() {
               files={files}
               isUploading={isUploading}
               isStreaming={isStreaming}
+              isComposerBlocked={isComposerBlocked}
               isGeneratingImage={isGeneratingImage}
               isImageMode={isImageMode}
               // Mirror of the `handleSend` guard: block only when nothing is

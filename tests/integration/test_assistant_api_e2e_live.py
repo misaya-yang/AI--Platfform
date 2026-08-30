@@ -144,10 +144,9 @@ def _stream_chat(
     execution_profile: str = "safe",
     memory_mode: str = "auto",
     os_agent_enabled: bool = False,
-    resume_run_id: str | None = None,
-    resume_approval_id: str | None = None,
 ) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
+    decided_approval_ids: set[str] = set()
     with client.stream(
         "POST",
         f"{API_PREFIX}/assistant/chat/stream",
@@ -159,8 +158,6 @@ def _stream_chat(
             "execution_profile": execution_profile,
             "memory_mode": memory_mode,
             "os_agent_enabled": os_agent_enabled,
-            "resume_run_id": resume_run_id,
-            "resume_approval_id": resume_approval_id,
         },
         timeout=240.0,
     ) as resp:
@@ -174,12 +171,60 @@ def _stream_chat(
             with contextlib.suppress(json.JSONDecodeError):
                 evt = json.loads(raw)
                 events.append(evt)
+                if evt.get("event_type") == "approval_required":
+                    approval_data = evt.get("data")
+                    assert isinstance(approval_data, dict), evt
+                    approval_id = str(approval_data.get("approval_id") or "")
+                    run_id = str(approval_data.get("run_id") or "")
+                    assert approval_id and run_id, approval_data
+                    if approval_id not in decided_approval_ids:
+                        if len(decided_approval_ids) >= MAX_APPROVAL_ROUNDS:
+                            raise AssertionError(
+                                "approval rounds exceeded "
+                                "ASSISTANT_E2E_MAX_APPROVAL_ROUNDS="
+                                f"{MAX_APPROVAL_ROUNDS}"
+                            )
+                        _approve_runtime_event(client, token, evt)
+                        decided_approval_ids.add(approval_id)
                 # ``done`` closes model transport output, but the canonical
                 # run still has persistence/finalization work to perform.  Do
                 # not disconnect until the authoritative run terminal arrives.
                 if evt.get("event_type") in {"run_finished", "run_error"}:
                     break
     return events
+
+
+def _approve_runtime_event(
+    client: httpx.Client,
+    token: str,
+    event: dict[str, Any],
+) -> None:
+    """Decide an approval immediately so the active Runtime stream can continue."""
+
+    approval_data = event.get("data")
+    assert isinstance(approval_data, dict), event
+    approval_id = str(approval_data.get("approval_id") or "")
+    run_id = str(approval_data.get("run_id") or "")
+    thread_id = str(approval_data.get("thread_id") or "")
+    assert approval_id and run_id, approval_data
+
+    if thread_id:
+        decision_url = (
+            f"{API_BASE_URL}/api/v2/agent/threads/{thread_id}/approvals/{approval_id}/decision"
+        )
+    else:
+        decision_url = f"{API_PREFIX}/assistant/approvals/{approval_id}"
+    approval_response = client.post(
+        decision_url,
+        headers=_headers(token),
+        json={"approved": True, "reason": "result-level live capability check"},
+    )
+    assert approval_response.status_code == 200, approval_response.text
+    approval = approval_response.json().get("approval")
+    assert isinstance(approval, dict), approval_response.json()
+    assert str(approval.get("approval_id") or approval_id) == approval_id, approval
+    assert approval.get("approved") is True, approval
+    assert approval.get("status") in {"approved", "consumed"}, approval
 
 
 def _extract_run_id(events: list[dict[str, Any]]) -> str | None:
@@ -350,53 +395,10 @@ def _stream_chat_until_success(
             memory_mode=memory_mode,
             os_agent_enabled=os_agent_enabled,
         )
-        current_events = last_events
-        for _approval_round in range(MAX_APPROVAL_ROUNDS):
-            approval_event = next(
-                (
-                    event
-                    for event in current_events
-                    if event.get("event_type") == "approval_required"
-                ),
-                None,
-            )
-            if approval_event is None:
-                break
-            approval_data = approval_event.get("data")
-            assert isinstance(approval_data, dict), approval_event
-            approval_id = str(approval_data.get("approval_id") or "")
-            run_id = str(approval_data.get("run_id") or "")
-            assert approval_id and run_id, approval_data
-            approval_response = client.post(
-                f"{API_PREFIX}/assistant/approvals/{approval_id}",
-                headers=_headers(token),
-                json={"approved": True, "reason": "result-level live capability check"},
-            )
-            assert approval_response.status_code == 200, approval_response.text
-            assert approval_response.json().get("approval", {}).get("status") == "approved"
-            resumed = _stream_chat(
-                client=client,
-                token=token,
-                session_id=session_id,
-                message="Continue the exact approved tool call.",
-                execution_profile=execution_profile,
-                memory_mode=memory_mode,
-                os_agent_enabled=os_agent_enabled,
-                resume_run_id=run_id,
-                resume_approval_id=approval_id,
-            )
-            last_events.extend(resumed)
-            current_events = resumed
-        else:
-            if _has_any_event(current_events, "approval_required"):
-                raise AssertionError(
-                    f"approval rounds exceeded ASSISTANT_E2E_MAX_APPROVAL_ROUNDS="
-                    f"{MAX_APPROVAL_ROUNDS}"
-                )
         has_content_or_tool = _has_any_event(last_events, "text_delta", "tool_call_result")
-        has_run_error = _has_any_event(current_events, "run_error")
-        has_pending_approval = _has_any_event(current_events, "approval_required")
-        if has_content_or_tool and not has_run_error and not has_pending_approval:
+        has_run_error = _has_any_event(last_events, "run_error")
+        has_run_finished = _has_any_event(last_events, "run_finished")
+        if has_content_or_tool and has_run_finished and not has_run_error:
             return last_events
         if attempt < max_attempts:
             time.sleep(1.5 * attempt)

@@ -71,6 +71,17 @@ async def test_route_calls_authoritative_retrieval_and_preserves_shape(monkeypat
     monkeypatch.setenv("AI_PLATFORM_CAPABILITY_PROOF_SECRET", PROOF_SECRET)
     payload = CapabilityRetrieveRequest(query="hello", top_k=3, threshold=0.4)
     svc = SimpleNamespace(
+        db=SimpleNamespace(
+            get_user=AsyncMock(
+                return_value={
+                    "user_id": "user-a",
+                    "tenant_id": "tenant-a",
+                    "tier": "admin",
+                    "roles": ["admin", "platform_admin"],
+                    "status": "active",
+                }
+            )
+        ),
         require_dataset_access=AsyncMock(return_value={"dataset_id": "ds-a"}),
         retrieve=AsyncMock(
             return_value=(
@@ -92,6 +103,10 @@ async def test_route_calls_authoritative_retrieval_and_preserves_shape(monkeypat
     assert result["results"][0]["text"] == "answer"
     assert result["metadata"] == {"retrieved_count": 1}
     svc.require_dataset_access.assert_awaited_once()
+    resolved_user = svc.require_dataset_access.await_args.args[0]
+    assert resolved_user.tier == "admin"
+    assert resolved_user.roles == ["admin", "platform_admin"]
+    svc.db.get_user.assert_awaited_once_with("user-a")
     svc.retrieve.assert_awaited_once_with(
         user=svc.require_dataset_access.await_args.args[0],
         dataset_id="ds-a",
