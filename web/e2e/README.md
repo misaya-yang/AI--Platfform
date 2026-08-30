@@ -56,6 +56,19 @@ cd web && E2E_BASE_URL=http://localhost:8081 E2E_API_URL=http://localhost:8080 \
   pnpm exec playwright test -c playwright.live.config.ts --workers=1
 ```
 
+The platform-convergence release flow is separately opt-in because it spends
+provider quota and mutates only the authenticated E2E user's session state:
+
+```bash
+cd web && RUN_PLATFORM_CONVERGENCE_LIVE=1 \
+  E2E_BASE_URL=http://localhost:8081 E2E_API_URL=http://localhost:8080 \
+  pnpm exec playwright test -c playwright.live.config.ts \
+    e2e/platform-convergence-live.spec.ts --workers=1
+```
+
+Without `RUN_PLATFORM_CONVERGENCE_LIVE=1` the spec is intentionally skipped.
+A listed or skipped test is not release evidence and must not be recorded as PASS.
+
 ## Writing a spec
 
 1. One spec file per user-visible flow; name it after the flow (`agent-publish.spec.ts`), not
