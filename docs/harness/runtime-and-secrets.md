@@ -53,6 +53,27 @@ Keep `COMPOSE_PARALLEL_LIMIT=1` (the Makefile exports it), start and build servi
 and watch `docker stats`. Stop rather than continue if the stack approaches the operator's
 memory ceiling. The complete low-memory profile needs roughly 4 GiB available to Docker.
 
+### 4.1 Rust compilation boundary
+
+Do not run `cargo`, `rustc`, `rustfmt`, `clippy`, Rust `check/test/build`, or
+`rust-changed-crate-gate` directly on the host. Host Rust builds create large repository/toolchain
+artifacts and are not an accepted verification path on this machine.
+
+Rust work is split deliberately:
+
+- hosted CI runs fmt/check/changed-crate tests and publishes their evidence;
+- local candidate binaries are compiled only inside the existing Docker multi-stage BuildKit
+  builders (`agent-runtime-*-build-local` / `scripts/rust/build-update.sh`);
+- `CARGO_BUILD_JOBS=1` is a container-builder/CI resource limit, not permission to invoke host Cargo;
+- builder `target` directories stay in Docker cache mounts and must never be bind-mounted into the
+  repository;
+- local product acceptance runs the resulting Runtime/Worker images through API, UI, provider and
+  rollback journeys.
+
+Docker Rust builds remain serialized and resource-guarded. Do not automatically prune Docker or
+Cargo caches after a build. If disk cleanup is later requested, remove only identified obsolete
+Runtime/Worker builder cache or candidate images; never use broad prune commands implicitly.
+
 ## 5. Image and Compose distribution rules
 
 - The default open-source quickstart uses the **versioned multi-architecture images** declared in

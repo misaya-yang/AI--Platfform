@@ -193,7 +193,8 @@ governed by [`ADR-008`](../architecture/ADR-008-bounded-contexts-no-new-services
 - the program executes in the main working directory with mutually exclusive
   owned paths per package;
 - read-only specialists may review architecture, database, security, tests, and runtime evidence;
-- Docker, Rust builds, migrations, E2E, and provider calls remain globally serialized;
+- Docker, Docker-contained Rust image builds, migrations, E2E, and provider calls remain globally
+  serialized; Rust fmt/check/test runs in hosted CI, never through host Cargo;
 - no package is called complete until the primary session has integrated it with everything before
   it.
 

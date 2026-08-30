@@ -126,13 +126,13 @@ commands:
     purpose: Verify pre-authorized Agent thread creation and durable PostgreSQL history against an isolated schema.
   agent_capability_worker_build_local:
     make: agent-capability-worker-build-local
-    purpose: Build the pinned Rust capability worker with one Cargo job and resource guards.
+    purpose: Build the pinned Rust capability worker inside Docker with one Cargo job and resource guards; never invoke host Cargo.
   agent_capability_worker_smoke:
     make: agent-capability-worker-smoke
     purpose: Verify signed leases, idempotency, scoped events, cancellation, and restart recovery.
   agent_runtime_source_build_local:
     make: agent-runtime-source-build-local
-    purpose: Build the pinned App Server locally and verify source/schema labels plus initialize.
+    purpose: Build the pinned App Server inside Docker and verify source/schema labels plus initialize; never invoke host Cargo.
   agent_runtime_release_gate:
     make: agent-runtime-release-gate
     purpose: Serial single-kernel release contract without image builds or provider calls.
@@ -530,11 +530,11 @@ gates:
     ci_job: frontend
   rust_changed_crate:
     make: rust-changed-crate-gate
-    purpose: Compose the lock-pinned upstream Git object with the current overlay, then test only changed Rust crates with the exact locked toolchain.
+    purpose: In hosted CI, compose the lock-pinned upstream Git object with the current overlay, then test only changed Rust crates with the exact locked toolchain.
     triggers: ["rust/**", deploy/agent-runtime-source/lock.json, scripts/harness/rust_changed_crate_gate.py, tests/harness/test_rust_changed_crate_gate.py, tests/scripts/test_rust_build_tooling.py]
     tier: L1
     required_on: [change, release]
-    resource: offline
+    resource: hosted-service
     skip: never
     timeout: 60
     evidence: tmp/gate-evidence/rust-changed-crate-gate.json

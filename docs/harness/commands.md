@@ -30,8 +30,8 @@ Never mix package managers: **pnpm for `web/`, uv for Python.** No `npm install`
 | Verify the Agent PostgreSQL ThreadStore | `AI_PLATFORM_AGENT_RUNTIME_SOURCE=/path/to/fork make agent-thread-store-contract` |
 | Serial single-kernel release contract | `make agent-runtime-release-gate` |
 | Digest-pinned current→frozen→current rollback rehearsal | `make agent-runtime-rollback-rehearsal` |
-| Build the pinned local Agent image and probe initialize | `AI_PLATFORM_AGENT_RUNTIME_SOURCE=/absolute/fork make agent-runtime-source-build-local` |
-| Build the pinned Rust Agent Runtime image | `AI_PLATFORM_AGENT_RUNTIME_SOURCE=/absolute/fork make agent-runtime-build-local` |
+| Build the pinned App Server image inside Docker and probe initialize | `AI_PLATFORM_AGENT_RUNTIME_SOURCE=/absolute/fork make agent-runtime-source-build-local` |
+| Build the pinned Rust Agent Runtime image inside Docker | `AI_PLATFORM_AGENT_RUNTIME_SOURCE=/absolute/fork make agent-runtime-build-local` |
 | Smoke-test the Rust Runtime in an isolated Docker network | `AI_PLATFORM_AGENT_RUNTIME_IMAGE=... make agent-runtime-smoke` |
 | Run real Qwen Responses simple/long/resumed text gate | `ENV_FILE=/path/to/.env AI_PLATFORM_AGENT_RUNTIME_IMAGE=... make agent-runtime-text-gate` |
 | Verify CHR-03 tenant/revision-bound read-only capability bridge | `make agent-runtime-readonly-gate` |
@@ -46,6 +46,10 @@ Never mix package managers: **pnpm for `web/`, uv for Python.** No `npm install`
 | Stop / restart without deleting data | `make stop` / `make restart` |
 | Apply changed Python source without rebuilding | `make hot-update` |
 | Preview / load local demo data | `make seed-demo` / `make seed-demo-apply` |
+
+`*-build-local` means the Docker daemon is local; Cargo runs only in the multi-stage Docker builder.
+Do not run host Cargo/Rust commands. `make rust-changed-crate-gate` is a hosted-CI entrypoint on this
+machine, not a local acceptance command.
 
 Every target above accepts `ENV_FILE=/path/to/.env` when the real env file lives outside the repo.
 
@@ -192,12 +196,14 @@ until then report which exact checks actually ran rather than claiming “same a
 3. **Frontend** — type-check, lint, build, open-source route smoke.
 4. **Eval Contract Gates** — `make eval-e1-gate`, `make agent-eval-core-gate`, `make kb-unit-gate`, the KB development-fixture `make kb-golden-gate`, and supporting units. `make kb-release-evidence-gate` stays blocked until reviewed release evidence exists and is an explicit release gate, not a CI structure check.
 5. **KB Migration Gate** — `make kb-migration-gate` against a CI Postgres service.
-6. **Release Readiness** — public docs present, demo seed dry run.
+6. **Rust Changed Crate** — locked-toolchain fmt/check/changed-crate tests on the hosted runner.
+7. **Release Readiness** — public docs present, demo seed dry run.
 
-A change that cannot pass these locally will not pass in CI. Run the matching gate before saying done.
+Run locally supported gates before saying done. Rust fmt/check/test evidence comes from the hosted CI
+job; local acceptance consumes a Docker-built or pulled Runtime/Worker image instead of host Cargo.
 
-This is not yet a complete product release gate: normal Gateway/Knowledge/DB/Rust suites and Web
-Node units are not comprehensively wired, the RAG gate is fixture replay rather than live execution,
+This is not yet a complete product release gate: normal Gateway/Knowledge/DB suites and Web Node
+units are not comprehensively wired, the RAG gate is fixture replay rather than live execution,
 and the current OpenAPI isolation check can skip when Gateway is unavailable. Run the direct gate,
 state its evidence tier and skip count, and do not infer unexecuted coverage from CI green.
 

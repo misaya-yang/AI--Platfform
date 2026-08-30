@@ -80,8 +80,9 @@ Rules:
 - Two writers never share a worktree.
 - A product-scale architecture change uses one owning worktree; packages are review boundaries,
   not concurrent branches.
-- Docker, Rust builds, migrations, local browser state and provider quota are machine-global
-  resources. They are serialized under the integration owner.
+- Docker, Docker-contained Rust image builds, migrations, local browser state and provider quota
+  are machine-global resources. They are serialized under the integration owner; Rust fmt/check/test
+  runs in hosted CI, never through host Cargo.
 - A worktree that does not own the running Compose project may inspect but may not mutate it.
 - Shared integration paths listed in [`work-packages.md`](work-packages.md) are changed only after
   their implementation packages are stable.

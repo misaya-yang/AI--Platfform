@@ -151,7 +151,7 @@ Frontend 是产品 Surface，PostgreSQL、Redis、Qdrant 和对象存储是基�
 | AC-M16 | 门禁可信 | TypeScript app/node 检查非零文件；离线 OpenAPI 不依赖活栈；每个变更路径映射真实 CI 结果；发布 gate 零意外 skip |
 | AC-M17 | 统一启动合同 | Assistant、Responses、Studio Preview、Published Agent 都先解析为 `ResolvedAgentLaunchV1`；ControlPlane 不再为某入口临时发明 AgentSpec |
 | AC-M18 | 长任务耐久 | 既有 durable queue API保持兼容并 additive 暴露 execution/job；新 backfill/gate/rebuild 使用 versioned `202 + job_id`；断连可续、可查、可取消、幂等重试 |
-| AC-M19 | 构建经济性 | Runtime/Worker 独立 artifact identity、同 revision 多架构镜像、单命令更新；本机默认 1 Cargo job，记录冷/暖构建时间与峰值内存 |
+| AC-M19 | 构建经济性 | Runtime/Worker 独立 artifact identity、同 revision 多架构镜像、单命令 Docker 更新；Cargo 只在 Docker/CI 内以 1 job 运行，记录冷/暖构建时间与峰值内存 |
 | AC-M20 | 仓库质量 | post-RAG manifest 中 `confirmed_dead` 全处置；changed paths 不新增空/自证测试、无主依赖或死文档；动态候选具名 owner/backlog |
 | AC-M21 | 证据治理 | scratch、durable、restricted raw 三类分流；所有永久截图/receipt 可由 manifest 定位并校验，不再被 ignore 后虚称永久 |
 | AC-M22 | 大文件治理 | post-RAG LOC baseline 建立；超阈值文件 no-growth；例外具名 owner/原因/过期；拆分后 owner/import graph 而非只看行数 |
@@ -284,19 +284,21 @@ Agent 数据治理拥有 memory-vector namespace。目标态必须为 collection
    Execution release unit 构建、发布、验证。
 2. 运行镜像使用最小受支持 base；默认 quickstart 拉取真实 versioned multi-arch 镜像，不依赖开发机
    `local-*` tag。
-3. 托管 CI/远端 builder 是 multi-arch 候选制品 authority；低内存本机默认只 pull、核对 identity 并 smoke。
-   本地 source build 是可选 build-economics 证据，不阻塞产品架构升级。
-4. 提供一条资源受限更新命令：若本机明确执行，默认 Cargo jobs=1，构建前检查内存/磁盘；需要时先停
-   应用服务降低峰值，保留基础设施和可回滚镜像。
+3. 托管 CI 是 Rust fmt/check/changed-crate 测试 authority；宿主机禁止直接运行 Cargo/rustc/rustfmt。
+   本机候选制品只能由 Docker 多阶段 BuildKit builder 编译，或从远端 builder 拉取；随后核对 identity
+   并 smoke。
+4. 资源受限更新命令只调用 Docker builder：Cargo jobs=1 仅作为容器 build arg，构建前检查内存/磁盘；
+   需要时先停应用服务降低峰值，保留基础设施、BuildKit cache 和可回滚镜像。
 5. 在 Git common dir 实现 `integration-runtime` 与 `rust-build` 两类共享 lock；前者统一覆盖 Docker/DB/
    E2E/browser/provider，低内存机上二者互斥。原子获取、heartbeat、signal cleanup、stale/force-release
    规则遵循 harness integration contract。
 6. 明确继承 PPR-01 数字门：Runtime image `≤150 MB`、warm one-line edit→healthy `≤15 min`；Worker
-   image size 与峰值内存先冻结基线再预声明门槛。所有构建要求 jobs=1、无失控 swap/guard abort、
-   Runtime/Worker identity 不串扰，并记录冷/暖时间、cache、SBOM/许可证。
+   image size 与峰值内存先冻结基线再预声明门槛。Docker/CI 内构建要求 jobs=1、无失控 swap/guard
+   abort、Runtime/Worker identity 不串扰，并记录冷/暖时间、cache、SBOM/许可证。
 
 **验收：** ADR approved；事实/合同基线可机器读取；假绿探针会失败；所有 changed paths 有真实 gate；
-托管 builder 产出同 revision multi-arch候选，本机可 pull/identity/smoke；可选本地 proof build 遵守资源门；
+托管 builder 产出同 revision multi-arch 候选；本机 Docker builder 可产出单机候选并完成 identity/smoke；
+宿主机无 Cargo/target 产物；
 不存在两个 active 架构计划。
 
 **禁止：** ARC-00A/B 不改业务语义或数据库；ARC-00C 只允许构建/分发/资源锁相关文件，不改变 Runtime/
@@ -412,11 +414,11 @@ domain/service 模块；不得改变 lease、snapshot、timing、计费和 provi
 
 在跨语言 fixture 稳定后，按 protocol/use case 拆分 Runtime `http_service.rs` 与 Worker `http_service.rs`、
 `read_capabilities.rs` 中的路由/解析/状态机适配；上游 kernel 大文件不因本地 LOC 目标做无收益 churn。
-仅拆 launch/V2 变更实际触及的模块，其他大文件进入 no-growth ledger。拆分前后必须运行 changed-crate、
-跨语言 contract、restart/cancel/recovery 和 side-effect-unknown 门禁。
+仅拆 launch/V2 变更实际触及的模块，其他大文件进入 no-growth ledger。拆分前后必须由托管 CI 运行
+changed-crate，并运行跨语言 contract、restart/cancel/recovery 和 side-effect-unknown 门禁。
 
-**直接门禁：** control/model/launch/capability catalog、timing/accounting、SDK SSE、Runtime/Worker changed-crate、
-release/restart/recovery gate；重型 Docker/Rust gate在最终串行窗口运行。
+**直接门禁：** control/model/launch/capability catalog、timing/accounting、SDK SSE、托管 CI 的
+Runtime/Worker changed-crate、release/restart/recovery gate；Docker 内 Rust 镜像构建在最终串行窗口运行。
 
 **采用门：** Rust Model Plane 不在本包实现。只有后续独立实验同时证明正确性收益或显著资源收益时才能新立项。
 
@@ -908,7 +910,8 @@ Forbidden paths：不得修改的共享/其他工作包路径。
 - `src/main.py`、`src/api/router.py`、`docker-compose*.yml`、`Makefile`、`harness.yml`、`.env.example`、
   `.github/workflows/**`、`docs/README.md`、`database/schema.sql` 仅在各 ARC 的 integration commit 修改。
 - ARC-04 在 ARC-01/02 facade/launch 稳定后执行；data-access inventory 先于 DB grants 收紧。
-- ARC-05/06 在接口与角色稳定后进行；Docker、Rust build、migration、E2E/provider 全局串行。
+- ARC-05/06 在接口与角色稳定后进行；Docker 内 Rust 镜像构建、migration、E2E/provider 全局串行；
+  Rust fmt/check/test 只在托管 CI 运行。
 - 每个提交只对应一个可 review 主题；禁止把格式化、API 拆分、DB grants 和 Compose 混进同一提交。
 
 ### 7.4 Review 规则

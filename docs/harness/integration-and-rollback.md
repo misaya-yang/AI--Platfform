@@ -30,8 +30,9 @@ layout is:
 ```
 
 `integration-runtime` exclusively covers Docker mutation/hot-update, DB migration, live E2E,
-browser auth state and paid-provider execution. `rust-build` covers local source/image builds. On a
-low-memory host the two locks are mutually exclusive; a remote builder is a different host/resource.
+browser auth state and paid-provider execution. `rust-build` covers Docker-contained Runtime/Worker
+image builds only; direct host Cargo/Rust execution is prohibited. On a low-memory host the two
+locks are mutually exclusive; hosted Rust CI is a different host/resource.
 
 The owner receipt contains:
 
@@ -72,7 +73,7 @@ Run the cheapest trustworthy layer first. A higher layer never repairs a lower-l
 | Layer | Environment | Required evidence | Skip rule |
 | --- | --- | --- | --- |
 | L0 static | No services | format/lint, real TypeScript file count, import boundaries, migration/checksum lint, Compose render | No skip for changed language |
-| L1 domain | Local process | changed-domain unit/contract tests, in-process OpenAPI, Rust changed-crate tests, Web Node tests | Only declared platform-specific tests |
+| L1 domain | Local process except Rust in hosted CI | changed-domain unit/contract tests, in-process OpenAPI, hosted Rust changed-crate tests, Web Node tests | Only declared platform-specific tests |
 | L2 isolated integration | Prefer hosted CI disposable PG/Redis/Qdrant; local containers require `integration-runtime` lease | fresh/upgrade DB, service contracts, concurrency, restart and failure paths | Required package scenarios may not skip |
 | L3 release runtime | Singleton Docker + browser + configured provider | actual source/image SHA, UI journeys, paid-provider path, degraded states, current→frozen→current | Zero unexpected skips |
 
@@ -85,8 +86,10 @@ The default development machine is low-memory. Integration must optimize for com
 parallelism:
 
 - prefer prebuilt, revision-pinned Runtime and Capability Worker images;
-- run heavy **local** Rust/Docker work once in the final integration window, not in every package;
-- default local Cargo builds to one job and a measured memory ceiling;
+- never run Cargo/rustc/rustfmt/clippy or Rust check/test/build directly on the host;
+- run Docker-contained Runtime/Worker image builds once in the final integration window, not in
+  every package;
+- keep Cargo jobs at one inside the Docker builder and hosted CI, with a measured resource ceiling;
 - stop application containers before a heavy build when that reduces peak memory and rollback is
   already prepared;
 - build Runtime and Capability Worker as one Agent Execution release unit even if their artifacts
