@@ -14,7 +14,20 @@ from __future__ import annotations
 
 import importlib
 
+import ai_gateway_core.agents.runtime as runtime_shim
+import ai_gateway_core.agents.runtime_lease as runtime_lease_shim
+import ai_gateway_core.auth.capability_proof as capability_proof_shim
+import ai_gateway_core.events.envelope as event_envelope_shim
+import ai_gateway_core.events.errors as event_errors_shim
 import pytest
+
+STATIC_SHIMS = {
+    "ai_gateway_core.agents.runtime": runtime_shim,
+    "ai_gateway_core.agents.runtime_lease": runtime_lease_shim,
+    "ai_gateway_core.auth.capability_proof": capability_proof_shim,
+    "ai_gateway_core.events.envelope": event_envelope_shim,
+    "ai_gateway_core.events.errors": event_errors_shim,
+}
 
 # (core shim module, contracts module, public names that must be identical)
 SHIM_PAIRS: list[tuple[str, str, tuple[str, ...]]] = [
@@ -89,7 +102,7 @@ SHIM_PAIRS: list[tuple[str, str, tuple[str, ...]]] = [
 def test_shim_reexports_same_objects(
     shim_path: str, contracts_path: str, names: tuple[str, ...]
 ) -> None:
-    shim = importlib.import_module(shim_path)
+    shim = STATIC_SHIMS[shim_path]
     contracts = importlib.import_module(contracts_path)
     for name in names:
         assert getattr(shim, name) is getattr(contracts, name), f"{shim_path}.{name}"
@@ -103,7 +116,7 @@ def test_shim_reexports_same_objects(
 def test_shim_all_matches_public_surface(
     shim_path: str, contracts_path: str, names: tuple[str, ...]
 ) -> None:
-    shim = importlib.import_module(shim_path)
+    shim = STATIC_SHIMS[shim_path]
     contracts = importlib.import_module(contracts_path)
     assert sorted(shim.__all__) == sorted(names)
     # Every public contracts name must be reachable through the shim so a
@@ -167,12 +180,25 @@ def test_agents_package_facade_uses_contract_classes() -> None:
     assert RUNTIME_MODEL_LEASE_SCHEMA_VERSION == CONTRACT_LEASE_VERSION
 
 
+def test_auth_package_facade_uses_contract_classes() -> None:
+    from ai_gateway_contracts.capability_proof import (
+        CapabilityProof as ContractCapabilityProof,
+    )
+    from ai_gateway_contracts.capability_proof import (
+        sign_capability_proof as contract_sign,
+    )
+    from ai_gateway_core.auth import CapabilityProof, sign_capability_proof
+
+    assert CapabilityProof is ContractCapabilityProof
+    assert sign_capability_proof is contract_sign
+
+
 def test_gateway_secret_replay_store_is_contract_protocol() -> None:
     from ai_gateway_contracts.replay import (
         InMemoryReplayStore as ContractInMemory,
     )
     from ai_gateway_contracts.replay import ReplayStore as ContractReplayStore
-    from ai_gateway_core.auth.gateway_secret import (
+    from ai_gateway_core.auth import (
         InMemoryReplayStore,
         ReplayStore,
     )

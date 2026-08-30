@@ -9,16 +9,13 @@ working.
 Consumers still importing through this path
 (reports/inventory/core-import-inventory.json, ``shim_consumers``):
 
-- core-internal: ``ai_gateway_core.events.{__init__,bus,consumer,envelope}``
-- tests: ``tests/events/test_bus_publish.py`` (direct
-  ``ai_gateway_core.events.errors`` import)
+- compatibility facade: ``ai_gateway_core.events``;
+- identity contract: ``packages/ai-gateway-contracts/tests/test_shim_identity.py``.
 
-Removal conditions (PRD §ARC-04 goal 5): delete this shim once every
-consumer imports ``ai_gateway_contracts.event_errors`` directly and
-``scripts/core_boundary/check_core_boundary.py`` reports zero shim consumers
-for it.  The shim identity test
-``packages/ai-gateway-contracts/tests/test_shim_identity.py`` must be removed
-together with it.
+Removal conditions (PRD §ARC-04 goal 5): after the ARC-08 external
+compatibility window, require the generated inventory to show no repository
+consumers other than the facade and identity contract above; then remove the
+shim, its facade exports, and its identity-test row in one change.
 """
 
 from __future__ import annotations

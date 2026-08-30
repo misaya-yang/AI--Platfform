@@ -72,12 +72,10 @@ class InvalidGatewaySecret(Exception):
 # ``ai_gateway_contracts.replay`` (ARC-04 first batch, 2026-08-29) and are
 # re-imported above; the public names stay available from this module.
 # Removal conditions match the other ARC-04 shims: delete the re-export once
-# every consumer imports ``ai_gateway_contracts.replay`` directly and
-# ``scripts/core_boundary/check_core_boundary.py`` reports zero shim
-# consumers.  Consumers today: ``ai_gateway_core.agents`` re-export,
-# ``apps/knowledge-service/src/knowledge_service/main.py``,
-# ``tests/contract/test_gateway_secret.py``, ``tests/api/
-# test_agent_runtime_envelope.py``.
+# the ARC-08 external compatibility window closes and the generated inventory
+# shows no repository consumers other than ``ai_gateway_core.auth`` and the
+# shim identity contract. Remove both facade exports and the identity-test row
+# in the same change; ``GatewaySecret`` and ``RedisReplayStore`` remain here.
 
 
 class RedisReplayStore:

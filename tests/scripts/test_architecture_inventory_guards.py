@@ -212,6 +212,17 @@ def test_facade_consumers_are_attributed_to_the_runtime_shim(tmp_path: Path) -> 
     assert any(consumer in violation for violation in violations)
 
 
+def test_every_shim_identity_contract_is_machine_visible() -> None:
+    inventory = build_inventory(ROOT)
+    identity_test = "packages/ai-gateway-contracts/tests/test_shim_identity.py"
+
+    assert set(inventory["shim_consumers"]) == set(core_inventory.CORE_TO_CONTRACTS)
+    for module, consumers in inventory["shim_consumers"].items():
+        assert identity_test in consumers["files"], (
+            f"{module} identity coverage is invisible to the consumer ledger"
+        )
+
+
 def test_contracts_stdlib_is_a_pure_computation_allowlist(tmp_path: Path) -> None:
     root = tmp_path / "fixture"
     module = root / CONTRACTS_PKG_DIR / "capability_proof.py"

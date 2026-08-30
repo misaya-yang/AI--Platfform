@@ -8,20 +8,13 @@ import paths keep working.
 Consumers still importing through this path
 (reports/inventory/core-import-inventory.json, ``shim_consumers``):
 
-- gateway: ``src/services/agent_runtime/{control_plane,model_plane,
-  runtime_configuration}.py``, ``src/api/v1/{agent_public,agent_runtime,
-  agents}.py``, ``src/services/agent_runtime_cleanup.py``, ``src/main.py``
-  — all via the ``ai_gateway_core.agents`` package re-export
-- tests: ``tests/api/test_agent_runtime_envelope.py``,
-  ``tests/services/agent_runtime/*``, ``tests/api/test_agent_publish_api.py``
-  and the other ``ai_gateway_core.agents`` test consumers
+- compatibility facade: ``ai_gateway_core.agents``;
+- identity contract: ``packages/ai-gateway-contracts/tests/test_shim_identity.py``.
 
-Removal conditions (PRD §ARC-04 goal 5): delete this shim once every
-consumer imports ``ai_gateway_contracts.agent_runtime`` directly and
-``scripts/core_boundary/check_core_boundary.py`` reports zero shim consumers
-for it.  The shim identity test
-``packages/ai-gateway-contracts/tests/test_shim_identity.py`` must be removed
-together with it.
+Removal conditions (PRD §ARC-04 goal 5): after the ARC-08 external
+compatibility window, require the generated inventory to show no repository
+consumers other than the facade and identity contract above; then remove the
+shim, its facade exports, and its identity-test row in one change.
 """
 
 from __future__ import annotations
