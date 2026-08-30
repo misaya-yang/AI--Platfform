@@ -22,6 +22,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
@@ -273,9 +274,72 @@ LEDGER_NAMES = (
 )
 
 
-def _dump_schema(dsn: str, pg_dump: str) -> str:
+_PG_QUERY_ENV = {
+    "application_name": "PGAPPNAME",
+    "channel_binding": "PGCHANNELBINDING",
+    "connect_timeout": "PGCONNECT_TIMEOUT",
+    "gssencmode": "PGGSSENCMODE",
+    "options": "PGOPTIONS",
+    "sslcert": "PGSSLCERT",
+    "sslcrl": "PGSSLCRL",
+    "sslkey": "PGSSLKEY",
+    "sslmode": "PGSSLMODE",
+    "sslrootcert": "PGSSLROOTCERT",
+    "target_session_attrs": "PGTARGETSESSIONATTRS",
+}
+
+
+def _pg_dump_environment(dsn: str) -> dict[str, str]:
+    """Translate a PostgreSQL URI into libpq variables without exposing it in argv."""
+    try:
+        parsed = urlsplit(dsn)
+        port = parsed.port
+    except ValueError as exc:
+        raise FreezeError("source DSN is not a valid PostgreSQL URI") from exc
+    if parsed.scheme not in {"postgres", "postgresql"}:
+        raise FreezeError("source DSN must be a postgres:// or postgresql:// URI")
+    database = unquote(parsed.path.removeprefix("/"))
+    if not database:
+        raise FreezeError("source DSN must name a database")
+
     environment = os.environ.copy()
-    environment["PGDATABASE"] = dsn
+    for name in {
+        "PGAPPNAME",
+        "PGCHANNELBINDING",
+        "PGCONNECT_TIMEOUT",
+        "PGDATABASE",
+        "PGGSSENCMODE",
+        "PGHOST",
+        "PGOPTIONS",
+        "PGPASSWORD",
+        "PGPORT",
+        "PGSSLCERT",
+        "PGSSLCRL",
+        "PGSSLKEY",
+        "PGSSLMODE",
+        "PGSSLROOTCERT",
+        "PGTARGETSESSIONATTRS",
+        "PGUSER",
+    }:
+        environment.pop(name, None)
+    environment["PGDATABASE"] = database
+    if parsed.hostname is not None:
+        environment["PGHOST"] = unquote(parsed.hostname)
+    if port is not None:
+        environment["PGPORT"] = str(port)
+    if parsed.username is not None:
+        environment["PGUSER"] = unquote(parsed.username)
+    if parsed.password is not None:
+        environment["PGPASSWORD"] = unquote(parsed.password)
+    for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+        env_name = _PG_QUERY_ENV.get(key)
+        if env_name is not None:
+            environment[env_name] = value
+    return environment
+
+
+def _dump_schema(dsn: str, pg_dump: str) -> str:
+    environment = _pg_dump_environment(dsn)
     args = [
         pg_dump,
         "--schema-only",

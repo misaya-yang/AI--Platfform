@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -136,6 +137,45 @@ def test_pg_dump_normalization_rejects_acl_and_ledger_bypass() -> None:
     ):
         with pytest.raises(freeze_baseline.FreezeError, match="forbidden"):
             freeze_baseline.normalize_pg_dump(forbidden)
+
+
+def test_pg_dump_uses_secret_free_argv_and_libpq_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["args"] = args
+        captured["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout="CREATE TABLE public.widgets (id integer);\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(freeze_baseline.subprocess, "run", fake_run)
+
+    result = freeze_baseline._dump_schema(
+        "postgresql://alice:s3cret@db.example:5544/sample?sslmode=require",
+        "/usr/bin/pg_dump",
+    )
+
+    args = captured["args"]
+    environment = captured["env"]
+    assert isinstance(args, list)
+    assert isinstance(environment, dict)
+    assert not any("s3cret" in argument for argument in args)
+    assert environment["PGHOST"] == "db.example"
+    assert environment["PGPORT"] == "5544"
+    assert environment["PGDATABASE"] == "sample"
+    assert environment["PGUSER"] == "alice"
+    assert environment["PGPASSWORD"] == "s3cret"
+    assert environment["PGSSLMODE"] == "require"
+    assert "CREATE TABLE public.widgets" in result
+
+
+def test_pg_dump_rejects_non_uri_source_dsn() -> None:
+    with pytest.raises(freeze_baseline.FreezeError, match="postgres://"):
+        freeze_baseline._pg_dump_environment("dbname=sample host=localhost")
 
 
 def test_reference_policy_excludes_admin_editable_catalogs() -> None:
