@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from .constants import CATALOG_SCHEMAS, EXTENSION_ALLOWLIST
+from .constants import EXTENSION_ALLOWLIST, PLATFORM_SCHEMAS
 
 _SCHEMA_FILTER = """
-    AND n.nspname <> ALL($1)
+    AND n.nspname = ANY($1)
     AND n.nspname NOT LIKE 'pg_temp_%'
     AND n.nspname NOT LIKE 'pg_toast_temp_%'
 """
@@ -65,7 +65,7 @@ async def structural_catalog_detail_lines(conn: Any) -> list[str]:
         {_EXTENSION_RELATION_FILTER}
         ORDER BY n.nspname, c.relname
         """,
-        list(CATALOG_SCHEMAS),
+        list(PLATFORM_SCHEMAS),
     )
     lines.extend(
         f"view:{row['schema']}.{row['name']}:{row['kind']}:{row['definition']}" for row in views
@@ -91,7 +91,7 @@ async def structural_catalog_detail_lines(conn: Any) -> list[str]:
           )
         ORDER BY n.nspname, c.relname, trigger.tgname
         """,
-        list(CATALOG_SCHEMAS),
+        list(PLATFORM_SCHEMAS),
     )
     lines.extend(
         f"trigger:{row['schema']}.{row['relation']}.{row['name']}:"
@@ -130,7 +130,7 @@ async def structural_catalog_detail_lines(conn: Any) -> list[str]:
         {_EXTENSION_FUNCTION_FILTER}
         ORDER BY n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)
         """,
-        list(CATALOG_SCHEMAS),
+        list(PLATFORM_SCHEMAS),
     )
     for row in aggregates:
         functions = ",".join(
@@ -189,7 +189,7 @@ async def policy_acl_lines(conn: Any, principal_map: dict[str, str]) -> list[str
           )
         ORDER BY n.nspname, c.relname, policy.polname
         """,
-        list(CATALOG_SCHEMAS),
+        list(PLATFORM_SCHEMAS),
     )
     lines: list[str] = []
     for row in rows:
@@ -263,7 +263,7 @@ async def column_acl_lines(conn: Any, principal_map: dict[str, str]) -> list[str
         ORDER BY n.nspname, c.relname, attribute.attname, grantee,
                  privilege.is_grantable
         """,
-        list(CATALOG_SCHEMAS),
+        list(PLATFORM_SCHEMAS),
     )
     lines: list[str] = []
     for row in rows:

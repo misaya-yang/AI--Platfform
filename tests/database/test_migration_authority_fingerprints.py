@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from database.authority import commands
+from database.authority.constants import PLATFORM_SCHEMAS
 from database.authority.fingerprint import (
     FingerprintError,
     _canonical_row,
@@ -200,8 +201,12 @@ async def test_structural_queries_filter_temporary_schemas() -> None:
     schema_query = next(query for query, _ in conn.queries if "FROM pg_namespace AS n" in query)
     sequence_query = next(query for query, _ in conn.queries if "FROM pg_sequence AS s" in query)
     for query in (schema_query, sequence_query):
+        assert "n.nspname = ANY($1)" in query
+        assert "n.nspname <> ALL($1)" not in query
         assert "NOT LIKE 'pg_temp_%'" in query
         assert "NOT LIKE 'pg_toast_temp_%'" in query
+    for _query, args in conn.queries:
+        assert args == (list(PLATFORM_SCHEMAS),)
     assert any("JOIN pg_aggregate AS a" in query for query, _args in conn.queries)
     assert any("pg_get_viewdef" in query for query, _args in conn.queries)
     assert any("pg_get_triggerdef" in query for query, _args in conn.queries)
@@ -270,6 +275,7 @@ async def test_acl_covers_all_owner_acl_classes_and_default_privileges() -> None
     )
     assert "GROUP BY d.defaclrole, d.defaclobjtype, n.nspname" in default_query
     assert "a.grantee, a.is_grantable" in default_query
+    assert default_args[0] == list(PLATFORM_SCHEMAS)
     assert "NOT LIKE 'pg_temp_%'" in default_query
     assert "ESCAPE E'\\\\'" in default_query
     assert default_args[1] == r"ai\_platform\_%"

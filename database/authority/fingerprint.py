@@ -21,7 +21,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from .constants import (
-    CATALOG_SCHEMAS,
+    PLATFORM_SCHEMAS,
 )
 from .fingerprint_catalog import (
     CatalogFingerprintError,
@@ -66,7 +66,7 @@ _EXCLUDED_RELATION_FILTER = """
 """
 
 _SCHEMA_FILTER = """
-    AND n.nspname <> ALL($1)
+    AND n.nspname = ANY($1)
     AND n.nspname NOT LIKE 'pg_temp_%'
     AND n.nspname NOT LIKE 'pg_toast_temp_%'
 """
@@ -143,12 +143,12 @@ async def structural_lines(conn: Any) -> list[str]:
         """
         SELECT n.nspname
         FROM pg_namespace AS n
-        WHERE n.nspname <> ALL($1)
+        WHERE n.nspname = ANY($1)
           AND n.nspname NOT LIKE 'pg_temp_%'
           AND n.nspname NOT LIKE 'pg_toast_temp_%'
         ORDER BY 1
         """,
-        list(CATALOG_SCHEMAS),
+        list(PLATFORM_SCHEMAS),
     )
     lines.extend(f"schema:{row['nspname']}" for row in schemas)
 
@@ -178,7 +178,7 @@ async def structural_lines(conn: Any) -> list[str]:
         {_EXTENSION_RELATION_FILTER}
         ORDER BY n.nspname, c.relname
         """,
-        list(CATALOG_SCHEMAS),
+        list(PLATFORM_SCHEMAS),
     )
     for row in relations:
         kind = _RELKIND_NAMES.get(row["kind"], row["kind"])
@@ -215,7 +215,7 @@ async def structural_lines(conn: Any) -> list[str]:
         {_EXTENSION_RELATION_FILTER}
         ORDER BY n.nspname, c.relname, a.attnum
         """,
-        list(CATALOG_SCHEMAS),
+        list(PLATFORM_SCHEMAS),
     )
     for row in columns:
         lines.append(
@@ -252,7 +252,7 @@ async def structural_lines(conn: Any) -> list[str]:
         {_EXTENSION_RELATION_FILTER}
         ORDER BY n.nspname, c.relname, con.conname
         """,
-        list(CATALOG_SCHEMAS),
+        list(PLATFORM_SCHEMAS),
     )
     for row in constraints:
         lines.append(
@@ -285,7 +285,7 @@ async def structural_lines(conn: Any) -> list[str]:
         ))
         ORDER BY n.nspname, c.relname
         """,
-        list(CATALOG_SCHEMAS),
+        list(PLATFORM_SCHEMAS),
     )
     for row in indexes:
         flags = "u" if row["is_unique"] else ""
@@ -312,7 +312,7 @@ async def structural_lines(conn: Any) -> list[str]:
         {_EXTENSION_RELATION_FILTER}
         ORDER BY n.nspname, c.relname
         """,
-        list(CATALOG_SCHEMAS),
+        list(PLATFORM_SCHEMAS),
     )
     for row in sequences:
         lines.append(
@@ -344,7 +344,7 @@ async def structural_lines(conn: Any) -> list[str]:
           AND p.prokind IN ('f', 'p', 'w')
         ORDER BY n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)
         """,
-        list(CATALOG_SCHEMAS),
+        list(PLATFORM_SCHEMAS),
     )
     for row in functions:
         security = "definer" if row["security_definer"] else "invoker"
@@ -383,7 +383,7 @@ async def structural_lines(conn: Any) -> list[str]:
         {_EXTENSION_TYPE_FILTER}
         ORDER BY n.nspname, t.typname
         """,
-        list(CATALOG_SCHEMAS),
+        list(PLATFORM_SCHEMAS),
     )
     for row in types:
         lines.append(
@@ -462,7 +462,7 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
         {_EXTENSION_RELATION_FILTER}
         ORDER BY n.nspname, c.relname
         """,
-        list(CATALOG_SCHEMAS),
+        list(PLATFORM_SCHEMAS),
     )
     for row in owners:
         lines.append(
@@ -473,12 +473,12 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
         """
         SELECT n.nspname AS schema, pg_get_userbyid(n.nspowner) AS owner
         FROM pg_namespace AS n
-        WHERE n.nspname <> ALL($1)
+        WHERE n.nspname = ANY($1)
           AND n.nspname NOT LIKE 'pg_temp_%'
           AND n.nspname NOT LIKE 'pg_toast_temp_%'
         ORDER BY n.nspname
         """,
-        list(CATALOG_SCHEMAS),
+        list(PLATFORM_SCHEMAS),
     )
     for row in schema_owners:
         lines.append(
@@ -497,7 +497,7 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
         {_EXTENSION_FUNCTION_FILTER}
         ORDER BY n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)
         """,
-        list(CATALOG_SCHEMAS),
+        list(PLATFORM_SCHEMAS),
     )
     for row in function_owners:
         lines.append(
@@ -518,7 +518,7 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
         {_EXTENSION_TYPE_FILTER}
         ORDER BY n.nspname, t.typname
         """,
-        list(CATALOG_SCHEMAS),
+        list(PLATFORM_SCHEMAS),
     )
     for row in type_owners:
         lines.append(
@@ -544,7 +544,7 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
         GROUP BY n.nspname, c.relname, a.grantee, a.is_grantable, c.relowner
         ORDER BY n.nspname, c.relname, grantee, a.is_grantable
         """,
-        list(CATALOG_SCHEMAS),
+        list(PLATFORM_SCHEMAS),
     )
     for row in acls:
         grantee = _normalized_owner(row["grantee"], principal_map)
@@ -571,7 +571,7 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
         GROUP BY n.nspname, p.proname, p.oid, a.grantee, a.is_grantable
         ORDER BY n.nspname, p.proname, identity_args, grantee
         """,
-        list(CATALOG_SCHEMAS),
+        list(PLATFORM_SCHEMAS),
     )
     for row in function_acls:
         grantee = _normalized_owner(row["grantee"], principal_map)
@@ -588,13 +588,13 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
                string_agg(a.privilege_type, ',' ORDER BY a.privilege_type) AS privileges
         FROM pg_namespace AS n
         CROSS JOIN LATERAL aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) AS a
-        WHERE n.nspname <> ALL($1)
+        WHERE n.nspname = ANY($1)
           AND n.nspname NOT LIKE 'pg_temp_%'
           AND n.nspname NOT LIKE 'pg_toast_temp_%'
         GROUP BY n.nspname, a.grantee, a.is_grantable
         ORDER BY n.nspname, grantee
         """,
-        list(CATALOG_SCHEMAS),
+        list(PLATFORM_SCHEMAS),
     )
     for row in schema_acls:
         grantee = _normalized_owner(row["grantee"], principal_map)
@@ -628,7 +628,7 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
         GROUP BY n.nspname, t.typname, t.typtype, a.grantee, a.is_grantable
         ORDER BY n.nspname, t.typname, grantee, a.is_grantable
         """,
-        list(CATALOG_SCHEMAS),
+        list(PLATFORM_SCHEMAS),
     )
     for row in type_acls:
         grantee = _normalized_owner(row["grantee"], principal_map)
@@ -656,7 +656,7 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
           AND (
               d.defaclnamespace = 0
               OR (
-                  n.nspname <> ALL($1)
+                  n.nspname = ANY($1)
                   AND n.nspname NOT LIKE 'pg_temp_%'
                   AND n.nspname NOT LIKE 'pg_toast_temp_%'
               )
@@ -665,7 +665,7 @@ async def acl_lines(conn: Any, *, role_prefix: str) -> list[str]:
                  a.grantee, a.is_grantable
         ORDER BY grantor, object_type, schema, grantee
         """,
-        list(CATALOG_SCHEMAS),
+        list(PLATFORM_SCHEMAS),
         _like_prefix_pattern(role_prefix),
     )
     for row in default_privileges:
