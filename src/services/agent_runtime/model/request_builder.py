@@ -129,12 +129,14 @@ def _is_replayable_unsupported_tool_result(name: Any, namespace: Any, output: An
     accepting any other output would weaken the dynamic tool allowlist.
     """
 
-    if namespace not in {None, ""} or not isinstance(name, str) or not isinstance(output, str):
+    if not isinstance(name, str) or not isinstance(output, str):
         return False
-    return output in {
+    if namespace not in (None, ""):
+        return False
+    return output in (
         f"unsupported call: {name}",
         f"unsupported custom tool call: {name}",
-    }
+    )
 
 
 def _validate_tool_transcript(

@@ -715,7 +715,9 @@ async def test_control_plane_pins_qwen_responses_profile_into_turn_snapshot() ->
     base_instructions = captured["requests"][0][1]["baseInstructions"]
     assert "Use only tools exposed for the turn" in base_instructions
     assert "Keep retrieval bounded" in base_instructions
+    assert "When tool_search and tool_call are exposed" in base_instructions
     assert "Discover tools that are not listed" not in base_instructions
+    assert "use tool_search then tool_call" not in base_instructions
     assert captured["requests"][0][1]["developerInstructions"]
     assert database.issued_snapshot is not None
     assert [
