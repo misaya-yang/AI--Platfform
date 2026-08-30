@@ -1,25 +1,28 @@
 {
-  "acl_sha256": "9f2400d21e7b14617186428ccd65586efa541001d0b2eccba094b4ddc1186674",
+  "acl_sha256": null,
   "baseline_id": "2026_08_post_kb_v1",
-  "extensions_sha256": "fa377cfe2398572eae2671196acec5bd65b812ad55a5848099ca1fb3b9d9cc5c",
+  "extensions_sha256": null,
   "files_sha256": {
-    "cutover_convergence.sql": "430185b4337b5dfe5484fe39e5634401582b5711e629f54016bce9c090eb5b4b",
+    "cutover_convergence.sql": "878512b97b6012216cdc96c64ac731da5eeeb2d46bb4628bd84aa2725f937216",
     "grants.sql": "2c0cdedc2bb6cc210631f2a0b077144ee38889c782a0a75d953ca69ed6a87457",
     "init.sql": "750094aecc48514ab33284f6e72f62f4f7f7191d5f2d4ac594ee805e45d05a6a",
     "reference_data.sql": "d2ff4d253115e9a4aeaca8ce78bfcbbc34e10e554bd4368ef4d5201fa5a0a9f3",
     "verify.sql": "19e806da96353774c5fe9cc0f1ecba06a334412d3757d51173eca0cb6688431b"
   },
-  "generated_at": "2026-08-30T06:54:32-04:00",
+  "generated_at": null,
   "generator": "scripts/database/freeze_baseline.py",
-  "generator_sha256": "52e71b2fa15e2c32a10de55fd1fde989289fefb5b012783565744e4a7086ba79",
   "last_legacy_change": "112_kb_document_progress_retention.sql",
-  "pg_dump_version": "16.15",
+  "live_evidence": {
+    "fresh_reproduction": "NOT_RUN",
+    "role_connection_matrix": "NOT_RUN",
+    "source_fingerprints": "NOT_RUN"
+  },
   "policy_files_sha256": {
     "data-access-inventory.json": "d1fe866e7c12230075a1a5520c847caeae754b1421f58960d4d39392505d59bf",
     "grants-policy.json": "e161f4325565ed970278c820212e4f09f8d510ef540c88e90e6bda62da9c3b0f",
     "ownership-policy.json": "b508f16367a6b586cadde6483f21eef65a24e1c0a8e17b3f1792a8bde1a5af23"
   },
-  "postgres_version": "16.15",
+  "postgres_version": null,
   "reference_data": [
     {
       "immutable_columns": [
@@ -61,10 +64,11 @@
       "where": "role_name IN (SELECT role_name FROM gateway.rbac_roles WHERE is_system IS TRUE)"
     }
   ],
-  "reference_data_sha256": "c71c1fd656e4e2559f4c6b09f8cbd1d0b2d57de6e5991bcd2c10d1b068c02318",
+  "reference_data_sha256": null,
+  "required_live_command": "uv run --all-packages --extra test python scripts/database/freeze_baseline.py --source-database arc03_<source> --verify-database arc03_<empty_verify> --write",
   "schema": "migration-authority/baseline-manifest/v1",
   "schema_revision": "112",
-  "source_git_sha": "a3c9dd56b1bdfc74eba00fa69b18d17b2187e5a7",
-  "state": "frozen",
-  "structural_sha256": "1cb97bebe4aef680d61f88b46321ddf097a0404afc906be4f36b846e40140d39"
+  "source_git_sha": null,
+  "state": "pending-live-freeze",
+  "structural_sha256": null
 }
